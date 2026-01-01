@@ -19,3 +19,4 @@ manual_files[]:
   skills/codex/ProjectAtlas.md,Codex skill instructions for ProjectAtlas
   skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas
   templates/AGENTS.md,Agent startup snippet for ProjectAtlas
+  scripts/check_docstrings.py,Docstring enforcement for ProjectAtlas code
