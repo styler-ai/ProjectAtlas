@@ -134,6 +134,7 @@ def run_lint(
     manual_records, manual_missing, manual_invalid, manual_errors = (
         read_manual_file_entries(config)
     )
+    manual_paths = {record.path for record in manual_records}
     if manual_records:
         from projectatlas.atlas import merge_manual_file_records
 
@@ -168,6 +169,8 @@ def run_lint(
         errors.append(format_list(missing_folders))
 
     enforce_untracked = strict_untracked
+    if report_untracked and not enforce_untracked:
+        enforce_untracked = not is_truthy_env(os.getenv("CI"))
     if is_truthy_env(os.getenv("PROJECTATLAS_ALLOW_UNTRACKED")):
         enforce_untracked = False
 
@@ -185,6 +188,9 @@ def run_lint(
         for path in untracked_files:
             rel = path.relative_to(config.root)
             rel_posix = rel.as_posix()
+            if rel_posix in manual_paths:
+                allowed_untracked.append(path)
+                continue
             if is_asset_file(path, config) and not is_under_prefix(
                 rel_posix, config.asset_allowed_prefixes
             ):
@@ -295,6 +301,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Write JSON output alongside the TOON map",
     )
+    map_cmd.add_argument(
+        "--force",
+        action="store_true",
+        help="Run map generation even when CI is detected",
+    )
 
     lint_cmd = subparsers.add_parser("lint")
     lint_cmd.add_argument("--strict-folders", action="store_true")
@@ -319,6 +330,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "seed-purpose":
         return seed_purpose_files(config)
     if args.command == "map":
+        if (
+            not args.force
+            and (is_truthy_env(os.getenv("CI")) or is_truthy_env(os.getenv("GITHUB_ACTIONS")))
+        ):
+            sys.stderr.write("Skipping ProjectAtlas map update in CI.\n")
+            return 0
         return run_map(config, write_json_output=args.json)
     if args.command == "lint":
         return run_lint(
