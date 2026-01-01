@@ -11,6 +11,12 @@ ProjectAtlas is designed to run locally and produce a deterministic map.
 5. Run `projectatlas lint --strict-folders --report-untracked`.
 6. Commit map updates and any Purpose changes.
 
+## Branching
+
+- `dev` for active development.
+- `main` for stable releases only.
+- Merge `dev` -> `main` via pull request after CI is green.
+
 ## CI behavior
 
 - `projectatlas map` skips in CI unless you pass `--force`.

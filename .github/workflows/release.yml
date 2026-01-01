@@ -34,6 +34,11 @@ jobs:
       - name: Docstring check
         run: python scripts/check_docstrings.py
 
+      - name: API docs
+        run: |
+          python scripts/generate_api_docs.py
+          git diff --exit-code docs/api.md
+
       - name: Unit tests
         run: python -m unittest discover -s tests
 

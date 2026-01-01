@@ -1,9 +1,9 @@
 version: 1
-generated_at: 2026-01-01T16:05:04Z
-file_hash: "01657f6ee7b709b3661a5998b719f8a59e438d5a51ba0a0a986ca815c602497f"
+generated_at: 2026-01-01T16:23:15Z
+file_hash: "b4e5cbbfec080e1042c44cf9345479248fe1659c229ec1cf01e9b442cd6e97e8"
 folder_hash: "001959defd4312e2fdf710531dbe5007e1d10467919d12b3662e92259777fbf2"
 root: .
-overview: tracked_files=11 tracked_folders=13 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
+overview: tracked_files=12 tracked_folders=13 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
 source_extensions[]:
   - .cjs
   - .css
@@ -39,21 +39,25 @@ folders[13]{path,summary,source}:
   src/projectatlas,Core ProjectAtlas package implementation.,purpose
   templates,Reusable agent templates and snippets.,purpose
   tests,Unit tests for ProjectAtlas.,purpose
-files[27]{path,summary,source}:
+files[31]{path,summary,source}:
+  .github/pull_request_template.md,Pull request checklist for ProjectAtlas,manual
   .github/workflows/ci.yml,ProjectAtlas CI workflow,manual
   .github/workflows/release.yml,ProjectAtlas release workflow,manual
   .gitignore,Ignored files for ProjectAtlas repository,manual
+  CODE_OF_CONDUCT.md,Community conduct expectations for ProjectAtlas,manual
   CONTRIBUTING.md,Contribution policy for ProjectAtlas,manual
   LICENSE,ProjectAtlas MIT license,manual
   README.md,ProjectAtlas overview and usage guide,manual
   SECURITY.md,Security contact information for ProjectAtlas,manual
   docs/agent-integration.md,Agent integration instructions for ProjectAtlas,manual
+  docs/api.md,Generated ProjectAtlas API documentation,manual
   docs/concepts.md,Core concepts for ProjectAtlas usage,manual
   docs/configuration.md,Configuration reference for ProjectAtlas,manual
   docs/format.md,ProjectAtlas TOON schema reference,manual
   docs/workflow.md,ProjectAtlas workflow and troubleshooting guide,manual
   pyproject.toml,ProjectAtlas packaging and CLI metadata,manual
   scripts/check_docstrings.py,Enforce module and public symbol docstrings for ProjectAtlas code.,header
+  scripts/generate_api_docs.py,Generate Markdown API docs for ProjectAtlas modules.,header
   scripts/verify_version.py,Validate that ProjectAtlas versions match the requested tag.,header
   skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas,manual
   skills/codex/ProjectAtlas.md,Codex skill instructions for ProjectAtlas,manual
