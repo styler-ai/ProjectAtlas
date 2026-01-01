@@ -11,6 +11,12 @@ ProjectAtlas is designed to run locally and produce a deterministic map.
 5. Run `projectatlas lint --strict-folders --report-untracked`.
 6. Open a PR that references the GitHub issue (CI requires `#NNN` in title or body).
 7. Commit map updates and any Purpose changes.
+8. Install git hooks with `python scripts/install_hooks.py` to enforce issue references in commit messages.
+
+## Issue hygiene
+
+- Every issue should carry a `type:*` label plus a `priority:*` and `status:*` label.
+- Use `status:backlog` for unscheduled work.
 
 ## Branching
 
@@ -25,6 +31,7 @@ ProjectAtlas is designed to run locally and produce a deterministic map.
 - `projectatlas map` skips in CI unless you pass `--force`.
 - `projectatlas lint` validates that the map is current.
 - PRs must reference a GitHub issue (`scripts/check_pr_issue_reference.py`).
+- CI can be run manually via `workflow_dispatch` when checks do not auto-trigger.
 
 Environment toggles:
 

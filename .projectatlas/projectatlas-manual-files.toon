@@ -14,6 +14,7 @@ manual_files[]:
   .github/workflows/release.yml,ProjectAtlas release workflow
   .github/workflows/03-auto-release.yml,ProjectAtlas auto release workflow
   .github/pull_request_template.md,Pull request checklist for ProjectAtlas
+  .githooks/commit-msg,Git hook to enforce issue references in commits
   .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas
   docs/agent-integration.md,Agent integration instructions for ProjectAtlas
   docs/concepts.md,Core concepts for ProjectAtlas usage
@@ -24,5 +25,7 @@ manual_files[]:
   skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas
   templates/AGENTS.md,Agent startup snippet for ProjectAtlas
   scripts/check_docstrings.py,Docstring enforcement for ProjectAtlas code
+  scripts/check_commit_issue.py,Commit message issue reference enforcement
   scripts/generate_api_docs.py,Generate API documentation for ProjectAtlas
+  scripts/install_hooks.py,Install git hook configuration for ProjectAtlas
   docs/api.md,Generated ProjectAtlas API documentation

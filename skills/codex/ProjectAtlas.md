@@ -20,6 +20,7 @@ map layer above code-index tools so the agent knows where to look and where to p
 5. Add non-source files to `.projectatlas/projectatlas-manual-files.toon` with summaries.
 6. Run `projectatlas map` to generate `.projectatlas/projectatlas.toon`.
 7. Run `projectatlas lint --strict-folders --report-untracked` and fix any errors.
+8. Install git hooks: `python scripts/install_hooks.py` to enforce issue references in commits.
 
 ## Startup workflow (every session)
 

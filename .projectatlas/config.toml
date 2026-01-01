@@ -22,7 +22,7 @@ max_length = 140
 
 [untracked]
 allowed_filenames = [".purpose"]
-allowlist_dir_prefixes = []
+allowlist_dir_prefixes = [".githooks"]
 allowlist_files = []
 asset_allowed_prefixes = []
 asset_extensions = [".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".ico", ".pdf"]
