@@ -21,6 +21,7 @@ def make_config(root: Path) -> AtlasConfig:
         purpose_filename=".purpose",
         source_extensions={".py"},
         exclude_dir_names=set(),
+        exclude_dir_suffixes=set(),
         exclude_path_prefixes=set(),
         non_source_path_prefixes=set(),
         allowed_untracked_filenames={".purpose"},
