@@ -13,6 +13,7 @@ manual_files[]:
   .github/workflows/ci.yml,ProjectAtlas CI workflow
   .github/workflows/release.yml,ProjectAtlas release workflow
   .github/pull_request_template.md,Pull request checklist for ProjectAtlas
+  .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas
   docs/agent-integration.md,Agent integration instructions for ProjectAtlas
   docs/concepts.md,Core concepts for ProjectAtlas usage
   docs/configuration.md,Configuration reference for ProjectAtlas

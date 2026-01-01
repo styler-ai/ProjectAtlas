@@ -72,6 +72,12 @@ Release flow:
 ProjectAtlas follows PEP 440 for Python packaging. Pre-release versions use `.devN` (for example `0.1.0.dev0`).
 Release tags should match the package version (for example `v0.1.0.dev0`).
 
+Helper:
+
+```bash
+python scripts/next_version.py --bump patch --apply
+```
+
 ## Output files
 
 Default outputs:
@@ -105,6 +111,8 @@ See `docs/configuration.md` for all available settings. Most teams only need to 
 ## Agent integration
 
 Use `docs/agent-integration.md` for a ready-to-copy snippet for AGENTS.md, plus suggested startup steps.
+ProjectAtlas includes a Codex skill at `.codex/skills/ProjectAtlas.md` and a Claude skill in
+`skills/claude/ProjectAtlas.md`.
 
 ## License
 

@@ -9,3 +9,4 @@ If you spot a bug or have a suggestion, please open an issue with clear reproduc
 - Feature work lands on `dev`.
 - Releases are merged from `dev` into `main` via PR.
 - CI checks must pass before merge.
+- PR titles or bodies must reference a GitHub issue (for example `#123`).
