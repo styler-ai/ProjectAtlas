@@ -54,6 +54,16 @@ Local (editable) install:
 pip install -e .
 ```
 
+Agent-assisted install:
+
+Give your agent the repo URL (https://github.com/styler-ai/ProjectAtlas) and ask it to:
+
+1. Install ProjectAtlas (`pip install -e .`).
+2. Run `projectatlas init --seed-purpose`.
+3. Update or add `.purpose` files and Purpose headers.
+4. Wire `projectatlas map` and `projectatlas lint` into local build steps.
+5. Paste the startup snippet into your `AGENTS.md`.
+
 ## Quickstart
 
 ```bash
@@ -119,6 +129,30 @@ Default outputs:
 - `.projectatlas/config.toml`
 - `.projectatlas/projectatlas-manual-files.toon`
 - `.projectatlas/projectatlas.toon`
+
+## Folder structure (after setup)
+
+```
+.
+├─ .projectatlas/
+│  ├─ config.toml
+│  ├─ projectatlas-manual-files.toon
+│  └─ projectatlas.toon
+├─ .purpose
+├─ .codex/
+│  └─ skills/
+│     └─ ProjectAtlas.md
+├─ skills/
+│  ├─ codex/ProjectAtlas.md
+│  └─ claude/ProjectAtlas.md
+├─ scripts/
+│  ├─ install_hooks.py
+│  └─ check_commit_issue.py
+└─ templates/
+   └─ AGENTS.md
+```
+
+Use this tree as a guide for where to place summaries, skills, and hook scripts.
 
 ## Purpose headers
 
