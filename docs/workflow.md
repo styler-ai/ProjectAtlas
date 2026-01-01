@@ -31,6 +31,7 @@ ProjectAtlas is designed to run locally and produce a deterministic map.
 - `projectatlas map` skips in CI unless you pass `--force`.
 - `projectatlas lint` validates that the map is current.
 - PRs must reference a GitHub issue (`scripts/check_pr_issue_reference.py`).
+- CI can be run manually via `workflow_dispatch` when checks do not auto-trigger.
 
 Environment toggles:
 
