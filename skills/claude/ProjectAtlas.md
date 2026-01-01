@@ -4,15 +4,20 @@
 
 ProjectAtlas generates a concise project map so Claude can reason about repo structure before editing.
 
-## How to use
+## Quick use
 
-1. Run `projectatlas map` at session start.
-2. Open `.projectatlas/atlas.toon` and scan the folder tree + summaries.
-3. Use `projectatlas lint --strict-folders` to enforce missing `.purpose` files.
-4. Refresh the map after structural changes.
+1. Run `projectatlas init --seed-purpose` once.
+2. Run `projectatlas map` at session start.
+3. Open `.projectatlas/projectatlas.toon` and scan the folder tree + summaries.
+4. Use `projectatlas lint --strict-folders --report-untracked` to surface issues.
 
 ## Notes
 
-- Purpose headers should be one-line summaries starting with `Purpose:`.
-- Folder summaries come from `.purpose` files at each directory level.
-- Update the config file to tune exclusions or asset roots.
+- Purpose headers must start with `Purpose:` and remain one line.
+- Folder summaries live in `.purpose` files at each directory level.
+- Use `projectatlas map --force` to run in CI if needed.
+- Set `PROJECTATLAS_ALLOW_UNTRACKED=1` to allow local builds while still reporting.
+
+## References
+
+- See `docs/workflow.md` for schema and troubleshooting details.

@@ -1,6 +1,6 @@
 version: 1
-generated_at: 2026-01-01T15:34:23Z
-file_hash: "9dfbc82f0d3fd9e0ea9f431c483519de3780f71f691cbc1a16c8713ce4252b29"
+generated_at: 2026-01-01T15:47:43Z
+file_hash: "502490c327fb2ded263071755221fc4b5327306d622993090c1913074dcde8c6"
 folder_hash: "001959defd4312e2fdf710531dbe5007e1d10467919d12b3662e92259777fbf2"
 root: .
 overview: tracked_files=9 tracked_folders=13 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
@@ -39,7 +39,7 @@ folders[13]{path,summary,source}:
   src/projectatlas,Core ProjectAtlas package implementation.,purpose
   templates,Reusable agent templates and snippets.,purpose
   tests,Unit tests for ProjectAtlas.,purpose
-files[17]{path,summary,source}:
+files[25]{path,summary,source}:
   .github/workflows/ci.yml,ProjectAtlas CI workflow,manual
   .github/workflows/release.yml,ProjectAtlas release workflow,manual
   .gitignore,Ignored files for ProjectAtlas repository,manual
@@ -47,8 +47,15 @@ files[17]{path,summary,source}:
   LICENSE,ProjectAtlas MIT license,manual
   README.md,ProjectAtlas overview and usage guide,manual
   SECURITY.md,Security contact information for ProjectAtlas,manual
+  docs/agent-integration.md,Agent integration instructions for ProjectAtlas,manual
+  docs/concepts.md,Core concepts for ProjectAtlas usage,manual
+  docs/configuration.md,Configuration reference for ProjectAtlas,manual
+  docs/format.md,ProjectAtlas TOON schema reference,manual
+  docs/workflow.md,ProjectAtlas workflow and troubleshooting guide,manual
   pyproject.toml,ProjectAtlas packaging and CLI metadata,manual
   scripts/verify_version.py,Validate that ProjectAtlas versions match the requested tag.,header
+  skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas,manual
+  skills/codex/ProjectAtlas.md,Codex skill instructions for ProjectAtlas,manual
   src/projectatlas/__init__.py,Define the ProjectAtlas package metadata.,header
   src/projectatlas/__main__.py,Allow `python -m projectatlas` to run the CLI.,header
   src/projectatlas/atlas.py,Scan repositories and build ProjectAtlas record entries.,header
@@ -56,6 +63,7 @@ files[17]{path,summary,source}:
   src/projectatlas/config.py,Load and normalize ProjectAtlas configuration from TOML.,header
   src/projectatlas/models.py,Define data models used across ProjectAtlas.,header
   src/projectatlas/output.py,Write ProjectAtlas snapshots to TOON or JSON outputs.,header
+  templates/AGENTS.md,Agent startup snippet for ProjectAtlas,manual
   tests/test_atlas.py,Validate basic ProjectAtlas scanning behavior.,header
 folder_summary_duplicates[]:
 file_summary_duplicates[]:

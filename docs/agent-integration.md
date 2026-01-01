@@ -22,4 +22,4 @@ Drop the `skills/claude/ProjectAtlas.md` into your Claude skills folder and refe
 ## Lint and CI
 
 ProjectAtlas `lint` is meant for local workflows. Many teams skip map generation in CI, but still run
-lint on PRs to surface missing headers.
+lint on PRs to surface missing headers. Use `projectatlas map --force` if CI must regenerate the map.

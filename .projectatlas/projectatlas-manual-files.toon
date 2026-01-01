@@ -11,3 +11,11 @@ manual_files[]:
   SECURITY.md,Security contact information for ProjectAtlas
   .github/workflows/ci.yml,ProjectAtlas CI workflow
   .github/workflows/release.yml,ProjectAtlas release workflow
+  docs/agent-integration.md,Agent integration instructions for ProjectAtlas
+  docs/concepts.md,Core concepts for ProjectAtlas usage
+  docs/configuration.md,Configuration reference for ProjectAtlas
+  docs/format.md,ProjectAtlas TOON schema reference
+  docs/workflow.md,ProjectAtlas workflow and troubleshooting guide
+  skills/codex/ProjectAtlas.md,Codex skill instructions for ProjectAtlas
+  skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas
+  templates/AGENTS.md,Agent startup snippet for ProjectAtlas
