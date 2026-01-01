@@ -35,6 +35,12 @@ def is_excluded_rel_path(rel_path: Path, config: AtlasConfig) -> bool:
         return False
     if any(part in config.exclude_dir_names for part in rel_path.parts):
         return True
+    if any(
+        part.endswith(suffix)
+        for part in rel_path.parts
+        for suffix in config.exclude_dir_suffixes
+    ):
+        return True
     rel_posix = rel_path.as_posix()
     return any(
         rel_posix == prefix or rel_posix.startswith(f"{prefix}/")
