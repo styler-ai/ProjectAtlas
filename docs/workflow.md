@@ -9,18 +9,21 @@ ProjectAtlas is designed to run locally and produce a deterministic map.
 3. Add or update `.purpose` summaries for new folders.
 4. Run `projectatlas map`.
 5. Run `projectatlas lint --strict-folders --report-untracked`.
-6. Commit map updates and any Purpose changes.
+6. Open a PR that references the GitHub issue (CI requires `#NNN` in title or body).
+7. Commit map updates and any Purpose changes.
 
 ## Branching
 
 - `dev` for active development.
 - `main` for stable releases only.
 - Merge `dev` -> `main` via pull request after CI is green.
+- Use `python scripts/next_version.py --bump patch --apply` to update versions before tagging.
 
 ## CI behavior
 
 - `projectatlas map` skips in CI unless you pass `--force`.
 - `projectatlas lint` validates that the map is current.
+- PRs must reference a GitHub issue (`scripts/check_pr_issue_reference.py`).
 
 Environment toggles:
 
