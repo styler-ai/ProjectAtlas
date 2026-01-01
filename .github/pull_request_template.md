@@ -2,6 +2,10 @@
 
 Describe what this change does and why.
 
+## Issue
+
+Closes #NNN
+
 ## Checklist
 
 - [ ] `projectatlas map` updated (map is current).

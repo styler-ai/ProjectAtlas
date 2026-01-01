@@ -17,6 +17,7 @@ ProjectAtlas generates a concise project map so Claude can reason about repo str
 - Folder summaries live in `.purpose` files at each directory level.
 - Use `projectatlas map --force` to run in CI if needed.
 - Set `PROJECTATLAS_ALLOW_UNTRACKED=1` to allow local builds while still reporting.
+- PR titles or bodies must reference a GitHub issue (`#NNN`) for CI to pass.
 
 ## References
 
