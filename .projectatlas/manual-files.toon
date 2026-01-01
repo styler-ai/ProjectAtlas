@@ -1,0 +1,6 @@
+manual_files[]:
+  # path,summary
+  README.md,ProjectAtlas overview and usage guide
+  LICENSE,ProjectAtlas MIT license
+  pyproject.toml,ProjectAtlas packaging and CLI metadata
+  .gitignore,Ignored files for ProjectAtlas repository

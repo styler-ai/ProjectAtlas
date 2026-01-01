@@ -1,0 +1,64 @@
+version: 1
+generated_at: 2026-01-01T14:55:25Z
+file_hash: "9771dc16b4462cf40e7edce145a902380c026fdf556698bcfc992d7f8d0db88d"
+folder_hash: "0f5443068481983c1508088baec425be8fa58ababb8e5b711b097e1d4388137e"
+root: .
+overview: tracked_files=8 tracked_folders=10 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
+source_extensions[]:
+  - .cjs
+  - .css
+  - .d.ts
+  - .js
+  - .jsx
+  - .mjs
+  - .py
+  - .ts
+  - .tsx
+  - .vue
+exclude_dir_names[]:
+  - .egg-info
+  - .git
+  - .projectatlas
+  - .venv
+  - __pycache__
+  - build
+  - dist
+  - node_modules
+exclude_path_prefixes[]:
+folders[10]{path,summary,source}:
+  .,ProjectAtlas repository root.,purpose
+  docs,ProjectAtlas documentation and guides.,purpose
+  examples,Example assets for ProjectAtlas.,purpose
+  skills,Agent skill files for ProjectAtlas.,purpose
+  skills/claude,Claude guidance for ProjectAtlas usage.,purpose
+  skills/codex,Codex guidance for ProjectAtlas usage.,purpose
+  src,Python source tree for ProjectAtlas.,purpose
+  src/projectatlas,Core ProjectAtlas package implementation.,purpose
+  templates,Reusable agent templates and snippets.,purpose
+  tests,Unit tests for ProjectAtlas.,purpose
+files[12]{path,summary,source}:
+  .gitignore,Ignored files for ProjectAtlas repository,manual
+  LICENSE,ProjectAtlas MIT license,manual
+  README.md,ProjectAtlas overview and usage guide,manual
+  pyproject.toml,ProjectAtlas packaging and CLI metadata,manual
+  src/projectatlas/__init__.py,Define the ProjectAtlas package metadata.,header
+  src/projectatlas/__main__.py,Allow `python -m projectatlas` to run the CLI.,header
+  src/projectatlas/atlas.py,Scan repositories and build ProjectAtlas record entries.,header
+  src/projectatlas/cli.py,Provide the ProjectAtlas command-line entry points.,header
+  src/projectatlas/config.py,Load and normalize ProjectAtlas configuration from TOML.,header
+  src/projectatlas/models.py,Define data models used across ProjectAtlas.,header
+  src/projectatlas/output.py,Write ProjectAtlas snapshots to TOON or JSON outputs.,header
+  tests/test_atlas.py,Validate basic ProjectAtlas scanning behavior.,header
+folder_summary_duplicates[]:
+file_summary_duplicates[]:
+folder_tree[]:
+  - . - ProjectAtlas repository root.
+  - docs/ - ProjectAtlas documentation and guides.
+  - examples/ - Example assets for ProjectAtlas.
+  - skills/ - Agent skill files for ProjectAtlas.
+  -   claude/ - Claude guidance for ProjectAtlas usage.
+  -   codex/ - Codex guidance for ProjectAtlas usage.
+  - src/ - Python source tree for ProjectAtlas.
+  -   projectatlas/ - Core ProjectAtlas package implementation.
+  - templates/ - Reusable agent templates and snippets.
+  - tests/ - Unit tests for ProjectAtlas.
