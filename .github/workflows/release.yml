@@ -1,5 +1,9 @@
 name: Release
 
+# /**
+#  * Purpose: Tag and validate ProjectAtlas releases.
+#  */
+
 on:
   workflow_dispatch:
     inputs:
@@ -32,6 +36,11 @@ jobs:
 
       - name: Verify version
         run: python scripts/verify_version.py "${{ inputs.version }}"
+
+      - name: Build package
+        run: |
+          python -m pip install build
+          python -m build --sdist --wheel
 
       - name: Create tag
         run: |

@@ -1,4 +1,7 @@
 [project]
+# /**
+#  * Purpose: ProjectAtlas configuration defaults.
+#  */
 root = "."
 map_path = ".projectatlas/projectatlas.toon"
 manual_files_path = ".projectatlas/projectatlas-manual-files.toon"

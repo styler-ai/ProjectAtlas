@@ -22,6 +22,14 @@ projectatlas map
 projectatlas lint --strict-folders --report-untracked
 ```
 
+Run tests and build artifacts locally:
+
+```bash
+python -m unittest discover -s tests
+python -m pip install build
+python -m build --sdist --wheel
+```
+
 Default outputs:
 
 - `.projectatlas/config.toml`
