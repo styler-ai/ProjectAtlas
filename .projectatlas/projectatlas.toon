@@ -1,6 +1,6 @@
 version: 1
-generated_at: 2026-01-01T17:30:16Z
-file_hash: "520e671f743cf8f8abfc61aac4bc07b8c3ce9550d87ec33bc045853d46211231"
+generated_at: 2026-01-01T20:40:38Z
+file_hash: "b590dbee8da041b449df52ea878f3ec83013d9e4d92fdbdc42e0d629a22fd8b2"
 folder_hash: "2a7eb6ac7983405124327ba36a8b45b11297b335d2ba098f1869803fb464c800"
 root: .
 overview: tracked_files=16 tracked_folders=15 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
@@ -41,9 +41,10 @@ folders[15]{path,summary,source}:
   src/projectatlas,Core ProjectAtlas package implementation.,purpose
   templates,Reusable agent templates and snippets.,purpose
   tests,Unit tests for ProjectAtlas.,purpose
-files[36]{path,summary,source}:
+files[37]{path,summary,source}:
   .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas,manual
   .github/pull_request_template.md,Pull request checklist for ProjectAtlas,manual
+  .github/workflows/03-auto-release.yml,ProjectAtlas auto release workflow,manual
   .github/workflows/ci.yml,ProjectAtlas CI workflow,manual
   .github/workflows/release.yml,ProjectAtlas release workflow,manual
   .gitignore,Ignored files for ProjectAtlas repository,manual

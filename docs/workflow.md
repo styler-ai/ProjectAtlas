@@ -18,6 +18,7 @@ ProjectAtlas is designed to run locally and produce a deterministic map.
 - `main` for stable releases only.
 - Merge `dev` -> `main` via pull request after CI is green.
 - Use `python scripts/next_version.py --bump patch --apply` to update versions before tagging.
+ - Pushes to `main` create a GitHub release when the version is not a `.dev` build.
 
 ## CI behavior
 

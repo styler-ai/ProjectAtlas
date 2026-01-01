@@ -1,0 +1,64 @@
+name: 03-Auto-Release
+
+# /**
+#  * Purpose: Create a GitHub release when a new version lands on main.
+#  */
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: auto-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          payload = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          version = payload["project"]["version"]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"version={version}\n")
+          PY
+
+      - name: Check release eligibility
+        id: release
+        run: |
+          if [[ "${{ steps.version.outputs.version }}" == *".dev"* ]]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "eligible=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch tags
+        run: git fetch --tags
+
+      - name: Check tag
+        id: tag
+        run: |
+          if git tag -l "v${{ steps.version.outputs.version }}" | grep -q .; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create release
+        if: steps.release.outputs.eligible == 'true' && steps.tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.version.outputs.version }}" \
+            --title "v${{ steps.version.outputs.version }}" \
+            --notes "ProjectAtlas v${{ steps.version.outputs.version }}"

@@ -12,6 +12,7 @@ manual_files[]:
   CODE_OF_CONDUCT.md,Community conduct expectations for ProjectAtlas
   .github/workflows/ci.yml,ProjectAtlas CI workflow
   .github/workflows/release.yml,ProjectAtlas release workflow
+  .github/workflows/03-auto-release.yml,ProjectAtlas auto release workflow
   .github/pull_request_template.md,Pull request checklist for ProjectAtlas
   .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas
   docs/agent-integration.md,Agent integration instructions for ProjectAtlas
