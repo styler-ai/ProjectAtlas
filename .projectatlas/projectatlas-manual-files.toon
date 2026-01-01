@@ -4,3 +4,7 @@ manual_files[]:
   LICENSE,ProjectAtlas MIT license
   pyproject.toml,ProjectAtlas packaging and CLI metadata
   .gitignore,Ignored files for ProjectAtlas repository
+  CONTRIBUTING.md,Contribution policy for ProjectAtlas
+  SECURITY.md,Security contact information for ProjectAtlas
+  .github/workflows/ci.yml,ProjectAtlas CI workflow
+  .github/workflows/release.yml,ProjectAtlas release workflow
