@@ -63,6 +63,14 @@ projectatlas map
 projectatlas lint --strict-folders --report-untracked
 ```
 
+Install git hooks (enforces issue references in commit messages):
+
+```bash
+python scripts/install_hooks.py
+```
+
+Issue hygiene: label every issue with `type:*`, `priority:*`, and `status:*`.
+
 Run tests, docs, and build artifacts locally:
 
 ```bash

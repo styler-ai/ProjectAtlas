@@ -1,9 +1,9 @@
 version: 1
-generated_at: 2026-01-01T20:40:38Z
-file_hash: "b590dbee8da041b449df52ea878f3ec83013d9e4d92fdbdc42e0d629a22fd8b2"
-folder_hash: "2a7eb6ac7983405124327ba36a8b45b11297b335d2ba098f1869803fb464c800"
+generated_at: 2026-01-01T21:14:16Z
+file_hash: "84d552d5bbda53d7480b7027902db57736f84ac012c288af5167ffef80af705e"
+folder_hash: "15ed59bb790e2c49f129e710d3cbf644bf18813fdf12d7b56f272e63aa017639"
 root: .
-overview: tracked_files=16 tracked_folders=15 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
+overview: tracked_files=19 tracked_folders=16 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
 source_extensions[]:
   - .cjs
   - .css
@@ -25,10 +25,11 @@ exclude_dir_names[]:
   - dist
   - node_modules
 exclude_path_prefixes[]:
-folders[15]{path,summary,source}:
+folders[16]{path,summary,source}:
   .,ProjectAtlas repository root.,purpose
   .codex,Codex configuration and skills for ProjectAtlas.,purpose
   .codex/skills,Codex skill copies for ProjectAtlas adoption.,purpose
+  .githooks,Git hook scripts for ProjectAtlas commits.,purpose
   .github,ProjectAtlas GitHub metadata and workflows.,purpose
   .github/workflows,ProjectAtlas CI and release workflows.,purpose
   docs,ProjectAtlas documentation and guides.,purpose
@@ -41,8 +42,9 @@ folders[15]{path,summary,source}:
   src/projectatlas,Core ProjectAtlas package implementation.,purpose
   templates,Reusable agent templates and snippets.,purpose
   tests,Unit tests for ProjectAtlas.,purpose
-files[37]{path,summary,source}:
+files[41]{path,summary,source}:
   .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas,manual
+  .githooks/commit-msg,Git hook to enforce issue references in commits,manual
   .github/pull_request_template.md,Pull request checklist for ProjectAtlas,manual
   .github/workflows/03-auto-release.yml,ProjectAtlas auto release workflow,manual
   .github/workflows/ci.yml,ProjectAtlas CI workflow,manual
@@ -60,9 +62,11 @@ files[37]{path,summary,source}:
   docs/format.md,ProjectAtlas TOON schema reference,manual
   docs/workflow.md,ProjectAtlas workflow and troubleshooting guide,manual
   pyproject.toml,ProjectAtlas packaging and CLI metadata,manual
+  scripts/check_commit_issue.py,Enforce GitHub issue references in commit messages.,header
   scripts/check_docstrings.py,Enforce module and public symbol docstrings for ProjectAtlas code.,header
   scripts/check_pr_issue_reference.py,Enforce issue references in pull request titles or bodies.,header
   scripts/generate_api_docs.py,Generate Markdown API docs for ProjectAtlas modules.,header
+  scripts/install_hooks.py,Install ProjectAtlas git hooks by setting core.hooksPath.,header
   scripts/next_version.py,Compute the next ProjectAtlas version and optionally update files.,header
   scripts/verify_version.py,Validate that ProjectAtlas versions match the requested tag.,header
   skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas,manual
@@ -76,6 +80,7 @@ files[37]{path,summary,source}:
   src/projectatlas/output.py,Write ProjectAtlas snapshots to TOON or JSON outputs.,header
   templates/AGENTS.md,Agent startup snippet for ProjectAtlas,manual
   tests/test_atlas.py,Validate basic ProjectAtlas scanning behavior.,header
+  tests/test_commit_issue.py,Validate commit message issue reference checks.,header
   tests/test_docstrings.py,Validate the ProjectAtlas docstring enforcement script.,header
   tests/test_next_version.py,Validate ProjectAtlas version helper utilities.,header
   tests/test_pr_issue_reference.py,Validate pull request issue reference enforcement.,header
@@ -86,6 +91,7 @@ folder_tree[]:
   - . - ProjectAtlas repository root.
   - .codex/ - Codex configuration and skills for ProjectAtlas.
   -   skills/ - Codex skill copies for ProjectAtlas adoption.
+  - .githooks/ - Git hook scripts for ProjectAtlas commits.
   - .github/ - ProjectAtlas GitHub metadata and workflows.
   -   workflows/ - ProjectAtlas CI and release workflows.
   - docs/ - ProjectAtlas documentation and guides.

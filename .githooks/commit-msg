@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+# /**
+#  * Purpose: Block commits without a GitHub issue reference.
+#  */
+
+python scripts/check_commit_issue.py "$1"
