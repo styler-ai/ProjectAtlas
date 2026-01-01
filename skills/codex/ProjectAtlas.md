@@ -2,62 +2,72 @@
 
 ## Purpose
 
-Maintain and evolve ProjectAtlas maps (Purpose headers, folder summaries, generated map files).
+Give a Codex agent a fast, structured project overview before deep indexing. ProjectAtlas is the
+map layer above code-index tools so the agent knows where to look and where to place new files.
 
-## Quick start
+## When to use
 
-1. Run `projectatlas init --seed-purpose` once.
-2. Regenerate the map with `projectatlas map` (output: `.projectatlas/projectatlas.toon`).
-3. Validate locally with `projectatlas lint --strict-folders --report-untracked`.
-4. Commit the updated map and any Purpose header or folder summary changes.
+- At the start of every session (before running deep indexing).
+- After creating/moving folders or adding new source files.
+- When lint reports missing Purpose headers or missing `.purpose` files.
+
+## First-time setup (repo adoption)
+
+1. Install locally: `pip install -e .`
+2. Initialize: `projectatlas init --seed-purpose`
+3. Fill each `.purpose` file with a one-line summary (use `Purpose:` if you want).
+4. Add Purpose headers to every tracked source file.
+5. Add non-source files to `.projectatlas/projectatlas-manual-files.toon` with summaries.
+6. Run `projectatlas map` to generate `.projectatlas/projectatlas.toon`.
+7. Run `projectatlas lint --strict-folders --report-untracked` and fix any errors.
+8. Install git hooks: `python scripts/install_hooks.py` to enforce issue references in commits.
+
+## Startup workflow (every session)
+
+1. Run `projectatlas map` (unless `PROJECTATLAS_SKIP_UPDATE=1` is set).
+2. Read `.projectatlas/projectatlas.toon`.
+3. Use `folder_tree[]` and `folders[]` to decide which files to open or index.
+4. If `folder_summary_duplicates[]` is non-empty, flag it as a structure health issue.
+5. Only then use code-index tools for deeper file detail.
 
 ## Purpose headers
 
-- Ensure each source file has the required Purpose header format (Javadoc-style block with a `Purpose:` line).
-- Update headers before re-running the map so the generator captures intent.
+- Javadoc-style block with a single `Purpose:` line for JS/TS/CSS/etc.
+- Python modules use a module docstring with `Purpose:` on the first lines.
+- Vue SFCs place the Javadoc block at the top of the first `<script>` or `<style>` block.
 
-## Documentation accuracy
+## Folder summaries (.purpose)
 
-- Document generator changes using the repo's preferred style (Javadoc-style headers or Python docstrings).
-- Keep map-related rules, skills, and Memory Bank notes aligned with generator behavior.
+- Every folder must have a `.purpose` file with a one-line summary.
+- Use `projectatlas seed-purpose` to scaffold missing `.purpose` files.
+- Keep summaries short, ASCII, and single-line.
 
-## Folder summaries
+## Map interpretation
 
-- Add or update `.purpose` summaries for new folders as required by the schema or lint rules.
+- `overview:` shows tracked counts so you can spot drift quickly.
+- `folder_tree[]` is the tree with summaries for fast navigation.
+- `folders[]` and `files[]` are the definitive summaries the agent should trust.
+- `folder_summary_duplicates[]` highlights likely structural duplicates.
 
-## Build and CI integration
+## Untracked handling
 
-- If the map must stay current, wire `projectatlas map` into a local build step.
-- Keep updates deterministic so builds remain reproducible.
+- `projectatlas lint --report-untracked` lists non-source files.
+- Add required non-source files to `.projectatlas/projectatlas-manual-files.toon`.
+- Exclude unwanted paths via config, or move assets into approved roots.
 
-## Health check intent
+## Build and CI behavior
 
-- Treat the map and untracked report as a structure health check.
-- Every local build forces a decision to document, exclude, or reorganize files and folders.
+- `projectatlas map` skips in CI by default; use `--force` if CI should regenerate.
+- CI enforces lint and docstring checks; PRs must reference `#NNN`.
+- Local builds should run map + lint so the agent gets current structure.
 
-## Startup navigation
+## Env toggles
 
-- Use map summaries to prioritize which source files to inspect with code indexing at startup.
-- Follow repo rules for markdown and non-source files; the map is for source intent, not content.
-
-## Overview line
-
-- The map includes an overview line with tracked counts; it is emitted by the generator and validated by lint.
-- Do not edit the overview line manually; regenerate the map instead.
-
-## Untracked report
-
-- Use `--report-untracked` to list non-source files and excluded paths.
-- Use `--strict-untracked` only when you want untracked files to fail the build.
-- The report distinguishes allowed vs disallowed untracked files and flags asset files outside approved roots.
-
-## CI behavior
-
-- Map generation skips when `CI` or `GITHUB_ACTIONS` is truthy (use `projectatlas map --force` to override).
-- Set `PROJECTATLAS_SKIP_UPDATE=1` to skip updates locally.
-- Set `PROJECTATLAS_ALLOW_UNTRACKED=1` to allow local builds to pass while still reporting untracked files.
-- PR titles or bodies must reference a GitHub issue (`#NNN`) for CI to pass.
+- `PROJECTATLAS_SKIP_UPDATE=1` skips map generation locally.
+- `PROJECTATLAS_ALLOW_UNTRACKED=1` allows local builds to pass while still reporting.
 
 ## References
 
-- See `docs/workflow.md` for schema and troubleshooting details.
+- `docs/workflow.md` for workflow and troubleshooting.
+- `docs/format.md` for TOON schema.
+- `docs/configuration.md` for config options.
