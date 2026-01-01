@@ -9,8 +9,10 @@ manual_files[]:
   .gitignore,Ignored files for ProjectAtlas repository
   CONTRIBUTING.md,Contribution policy for ProjectAtlas
   SECURITY.md,Security contact information for ProjectAtlas
+  CODE_OF_CONDUCT.md,Community conduct expectations for ProjectAtlas
   .github/workflows/ci.yml,ProjectAtlas CI workflow
   .github/workflows/release.yml,ProjectAtlas release workflow
+  .github/pull_request_template.md,Pull request checklist for ProjectAtlas
   docs/agent-integration.md,Agent integration instructions for ProjectAtlas
   docs/concepts.md,Core concepts for ProjectAtlas usage
   docs/configuration.md,Configuration reference for ProjectAtlas
@@ -20,3 +22,5 @@ manual_files[]:
   skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas
   templates/AGENTS.md,Agent startup snippet for ProjectAtlas
   scripts/check_docstrings.py,Docstring enforcement for ProjectAtlas code
+  scripts/generate_api_docs.py,Generate API documentation for ProjectAtlas
+  docs/api.md,Generated ProjectAtlas API documentation
