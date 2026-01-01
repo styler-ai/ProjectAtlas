@@ -1,4 +1,7 @@
 manual_files[]:
+  # /**
+  #  * Purpose: Manual file summaries for non-source files.
+  #  */
   # path,summary
   README.md,ProjectAtlas overview and usage guide
   LICENSE,ProjectAtlas MIT license
