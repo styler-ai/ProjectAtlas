@@ -2,10 +2,22 @@
 
 ![CI](https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml/badge.svg)
 
-Agent-first project map + health index — give coding agents a one-line purpose for every file and folder.
+Agent-first project map + health index - give coding agents a one-line purpose for every file and folder.
 
 ProjectAtlas scans a repo, reads per-file Purpose headers and per-folder `.purpose` files, and emits a TOON
 snapshot you can read at startup to understand structure, spot duplicates, and keep the tree healthy.
+
+## Problem it solves
+
+Agents and humans struggle with the same problem on growing repos: you start a new session without a structural
+overview. Without a fast map:
+
+- Agents over-read code or index the wrong files, wasting context budget.
+- Duplicate folders and files appear because intent is not visible.
+- A clean folder structure slowly drifts into a mess.
+
+ProjectAtlas fixes this by creating a lightweight, human- and agent-readable map that sits above deep code search.
+It answers "where should I look?" and "where should I put this?" before running heavy indexing tools.
 
 ## Features
 
@@ -21,6 +33,18 @@ snapshot you can read at startup to understand structure, spot duplicates, and k
 2. Each tracked source file starts with a `Purpose:` header or module docstring.
 3. `projectatlas map` builds a TOON snapshot with folder tree + file summaries.
 4. `projectatlas lint` validates that the snapshot is current and complete.
+
+## Workflow (agent-focused)
+
+1. Run `projectatlas init --seed-purpose` once to scaffold missing `.purpose` files.
+2. For every new folder, write a one-line purpose in its `.purpose` file.
+3. For every new source file, add a `Purpose:` header or module docstring.
+4. Regenerate the map with `projectatlas map`.
+5. Use the map to decide which files to inspect with heavier tools (code-index, language servers, etc.).
+6. Run `projectatlas lint --strict-folders --report-untracked` to surface drift and missing summaries.
+
+Agent integrations (Codex, Claude, etc.) should read the map at startup and treat it as the authoritative
+structural overview before doing deeper indexing.
 
 ## Install
 
