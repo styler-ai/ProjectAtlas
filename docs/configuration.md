@@ -5,8 +5,8 @@ ProjectAtlas reads `projectatlas.toml` or `.projectatlas/config.toml`. All paths
 ```toml
 [project]
 root = "."
-map_path = ".projectatlas/atlas.toon"
-manual_files_path = ".projectatlas/manual-files.toon"
+map_path = ".projectatlas/projectatlas.toon"
+manual_files_path = ".projectatlas/projectatlas-manual-files.toon"
 purpose_filename = ".purpose"
 
 [scan]

@@ -11,7 +11,7 @@ ProjectAtlas is designed to be read at agent startup so you can:
 ```
 ## Startup
 1. Run `projectatlas map` (or ensure your build does).
-2. Read `.projectatlas/atlas.toon`.
+2. Read `.projectatlas/projectatlas.toon`.
 3. Use the folder tree + purpose summaries to pick files before deep indexing.
 ```
 

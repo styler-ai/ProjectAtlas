@@ -25,8 +25,8 @@ projectatlas lint --strict-folders --report-untracked
 Default outputs:
 
 - `.projectatlas/config.toml`
-- `.projectatlas/manual-files.toon`
-- `.projectatlas/atlas.toon`
+- `.projectatlas/projectatlas-manual-files.toon`
+- `.projectatlas/projectatlas.toon`
 
 ## Purpose headers
 

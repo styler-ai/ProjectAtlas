@@ -97,7 +97,7 @@ def write_default_files(config_root: Path) -> None:
     config_path = project_dir / "config.toml"
     if not config_path.exists():
         config_path.write_text(default_config_text(), encoding="utf-8")
-    manual_path = project_dir / "manual-files.toon"
+    manual_path = project_dir / "projectatlas-manual-files.toon"
     if not manual_path.exists():
         manual_path.write_text(
             "manual_files[]:\n"

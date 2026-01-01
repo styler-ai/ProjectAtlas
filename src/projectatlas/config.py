@@ -12,8 +12,8 @@ import tomllib
 
 
 DEFAULT_PURPOSE_FILENAME = ".purpose"
-DEFAULT_MAP_PATH = Path(".projectatlas/atlas.toon")
-DEFAULT_MANUAL_FILES_PATH = Path(".projectatlas/manual-files.toon")
+DEFAULT_MAP_PATH = Path(".projectatlas/projectatlas.toon")
+DEFAULT_MANUAL_FILES_PATH = Path(".projectatlas/projectatlas-manual-files.toon")
 DEFAULT_SOURCE_EXTENSIONS = {
     ".ts",
     ".tsx",
@@ -266,8 +266,8 @@ def default_config_text() -> str:
         [
             "[project]",
             'root = "."',
-            'map_path = ".projectatlas/atlas.toon"',
-            'manual_files_path = ".projectatlas/manual-files.toon"',
+            'map_path = ".projectatlas/projectatlas.toon"',
+            'manual_files_path = ".projectatlas/projectatlas-manual-files.toon"',
             'purpose_filename = ".purpose"',
             "",
             "[scan]",
