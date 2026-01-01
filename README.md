@@ -89,7 +89,9 @@ Release flow:
 
 1. Merge feature branches into `dev`.
 2. Open a PR from `dev` to `main`.
-3. Run the Release workflow with the matching version tag.
+3. Merge to `main` after CI is green.
+4. Auto-release runs on `main` pushes and creates a GitHub release if the version is not a `.dev` build.
+5. Use the manual Release workflow if you need to re-run tagging.
 
 ## Versioning
 
