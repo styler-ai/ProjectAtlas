@@ -57,3 +57,7 @@ Use `docs/agent-integration.md` for a ready-to-copy snippet for AGENTS.md, plus 
 ## License
 
 MIT. See `LICENSE`.
+
+## Contribution policy
+
+External code contributions are not accepted at this time. See `CONTRIBUTING.md`.

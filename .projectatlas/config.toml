@@ -7,6 +7,7 @@ purpose_filename = ".purpose"
 [scan]
 source_extensions = [".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".css", ".mjs", ".cjs", ".d.ts"]
 exclude_dir_names = [".git", ".projectatlas", ".venv", "__pycache__", ".egg-info", "node_modules", "dist", "build"]
+exclude_dir_suffixes = [".egg-info"]
 exclude_path_prefixes = []
 non_source_path_prefixes = []
 max_scan_lines = 80

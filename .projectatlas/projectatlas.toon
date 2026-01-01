@@ -1,9 +1,9 @@
 version: 1
-generated_at: 2026-01-01T15:01:31Z
-file_hash: "9771dc16b4462cf40e7edce145a902380c026fdf556698bcfc992d7f8d0db88d"
-folder_hash: "0f5443068481983c1508088baec425be8fa58ababb8e5b711b097e1d4388137e"
+generated_at: 2026-01-01T15:16:39Z
+file_hash: "9dfbc82f0d3fd9e0ea9f431c483519de3780f71f691cbc1a16c8713ce4252b29"
+folder_hash: "001959defd4312e2fdf710531dbe5007e1d10467919d12b3662e92259777fbf2"
 root: .
-overview: tracked_files=8 tracked_folders=10 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
+overview: tracked_files=9 tracked_folders=13 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
 source_extensions[]:
   - .cjs
   - .css
@@ -25,10 +25,13 @@ exclude_dir_names[]:
   - dist
   - node_modules
 exclude_path_prefixes[]:
-folders[10]{path,summary,source}:
+folders[13]{path,summary,source}:
   .,ProjectAtlas repository root.,purpose
+  .github,ProjectAtlas GitHub metadata and workflows.,purpose
+  .github/workflows,ProjectAtlas CI and release workflows.,purpose
   docs,ProjectAtlas documentation and guides.,purpose
   examples,Example assets for ProjectAtlas.,purpose
+  scripts,Release and maintenance scripts for ProjectAtlas.,purpose
   skills,Agent skill files for ProjectAtlas.,purpose
   skills/claude,Claude guidance for ProjectAtlas usage.,purpose
   skills/codex,Codex guidance for ProjectAtlas usage.,purpose
@@ -36,11 +39,16 @@ folders[10]{path,summary,source}:
   src/projectatlas,Core ProjectAtlas package implementation.,purpose
   templates,Reusable agent templates and snippets.,purpose
   tests,Unit tests for ProjectAtlas.,purpose
-files[12]{path,summary,source}:
+files[17]{path,summary,source}:
+  .github/workflows/ci.yml,ProjectAtlas CI workflow,manual
+  .github/workflows/release.yml,ProjectAtlas release workflow,manual
   .gitignore,Ignored files for ProjectAtlas repository,manual
+  CONTRIBUTING.md,Contribution policy for ProjectAtlas,manual
   LICENSE,ProjectAtlas MIT license,manual
   README.md,ProjectAtlas overview and usage guide,manual
+  SECURITY.md,Security contact information for ProjectAtlas,manual
   pyproject.toml,ProjectAtlas packaging and CLI metadata,manual
+  scripts/verify_version.py,Validate that ProjectAtlas versions match the requested tag.,header
   src/projectatlas/__init__.py,Define the ProjectAtlas package metadata.,header
   src/projectatlas/__main__.py,Allow `python -m projectatlas` to run the CLI.,header
   src/projectatlas/atlas.py,Scan repositories and build ProjectAtlas record entries.,header
@@ -53,8 +61,11 @@ folder_summary_duplicates[]:
 file_summary_duplicates[]:
 folder_tree[]:
   - . - ProjectAtlas repository root.
+  - .github/ - ProjectAtlas GitHub metadata and workflows.
+  -   workflows/ - ProjectAtlas CI and release workflows.
   - docs/ - ProjectAtlas documentation and guides.
   - examples/ - Example assets for ProjectAtlas.
+  - scripts/ - Release and maintenance scripts for ProjectAtlas.
   - skills/ - Agent skill files for ProjectAtlas.
   -   claude/ - Claude guidance for ProjectAtlas usage.
   -   codex/ - Codex guidance for ProjectAtlas usage.

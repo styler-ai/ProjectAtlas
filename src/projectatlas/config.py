@@ -47,6 +47,7 @@ DEFAULT_EXCLUDE_DIR_NAMES = {
     "test-results",
     "tmp",
 }
+DEFAULT_EXCLUDE_DIR_SUFFIXES = {".egg-info"}
 DEFAULT_EXCLUDE_PATH_PREFIXES: set[str] = set()
 DEFAULT_NON_SOURCE_PATH_PREFIXES: set[str] = set()
 DEFAULT_ALLOWED_UNTRACKED_FILENAMES = {DEFAULT_PURPOSE_FILENAME}
@@ -87,6 +88,7 @@ class AtlasConfig:
     purpose_filename: str
     source_extensions: set[str]
     exclude_dir_names: set[str]
+    exclude_dir_suffixes: set[str]
     exclude_path_prefixes: set[str]
     non_source_path_prefixes: set[str]
     allowed_untracked_filenames: set[str]
@@ -184,6 +186,12 @@ def load_config(config_path: Path | None, root: Path | None = None) -> AtlasConf
     if not exclude_dir_names:
         exclude_dir_names = set(DEFAULT_EXCLUDE_DIR_NAMES)
 
+    exclude_dir_suffixes = _as_set(
+        scan.get("exclude_dir_suffixes"), "scan.exclude_dir_suffixes"
+    )
+    if not exclude_dir_suffixes:
+        exclude_dir_suffixes = set(DEFAULT_EXCLUDE_DIR_SUFFIXES)
+
     exclude_path_prefixes = _as_set(
         scan.get("exclude_path_prefixes"), "scan.exclude_path_prefixes"
     )
@@ -246,6 +254,7 @@ def load_config(config_path: Path | None, root: Path | None = None) -> AtlasConf
         purpose_filename=purpose_filename,
         source_extensions=source_extensions,
         exclude_dir_names=exclude_dir_names,
+        exclude_dir_suffixes=exclude_dir_suffixes,
         exclude_path_prefixes=exclude_path_prefixes,
         non_source_path_prefixes=non_source_path_prefixes,
         allowed_untracked_filenames=allowed_untracked_filenames,
@@ -273,6 +282,7 @@ def default_config_text() -> str:
             "[scan]",
             'source_extensions = [".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".css", ".mjs", ".cjs", ".d.ts"]',
             "exclude_dir_names = [\".git\", \".projectatlas\", \".venv\", \"__pycache__\", \".egg-info\", \"node_modules\", \"dist\", \"build\"]",
+            "exclude_dir_suffixes = [\".egg-info\"]",
             "exclude_path_prefixes = []",
             "non_source_path_prefixes = []",
             "max_scan_lines = 80",
