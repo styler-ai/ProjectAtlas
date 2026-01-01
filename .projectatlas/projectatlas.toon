@@ -1,9 +1,9 @@
 version: 1
-generated_at: 2026-01-01T15:47:43Z
-file_hash: "502490c327fb2ded263071755221fc4b5327306d622993090c1913074dcde8c6"
+generated_at: 2026-01-01T16:05:04Z
+file_hash: "01657f6ee7b709b3661a5998b719f8a59e438d5a51ba0a0a986ca815c602497f"
 folder_hash: "001959defd4312e2fdf710531dbe5007e1d10467919d12b3662e92259777fbf2"
 root: .
-overview: tracked_files=9 tracked_folders=13 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
+overview: tracked_files=11 tracked_folders=13 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
 source_extensions[]:
   - .cjs
   - .css
@@ -39,7 +39,7 @@ folders[13]{path,summary,source}:
   src/projectatlas,Core ProjectAtlas package implementation.,purpose
   templates,Reusable agent templates and snippets.,purpose
   tests,Unit tests for ProjectAtlas.,purpose
-files[25]{path,summary,source}:
+files[27]{path,summary,source}:
   .github/workflows/ci.yml,ProjectAtlas CI workflow,manual
   .github/workflows/release.yml,ProjectAtlas release workflow,manual
   .gitignore,Ignored files for ProjectAtlas repository,manual
@@ -53,6 +53,7 @@ files[25]{path,summary,source}:
   docs/format.md,ProjectAtlas TOON schema reference,manual
   docs/workflow.md,ProjectAtlas workflow and troubleshooting guide,manual
   pyproject.toml,ProjectAtlas packaging and CLI metadata,manual
+  scripts/check_docstrings.py,Enforce module and public symbol docstrings for ProjectAtlas code.,header
   scripts/verify_version.py,Validate that ProjectAtlas versions match the requested tag.,header
   skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas,manual
   skills/codex/ProjectAtlas.md,Codex skill instructions for ProjectAtlas,manual
@@ -65,6 +66,7 @@ files[25]{path,summary,source}:
   src/projectatlas/output.py,Write ProjectAtlas snapshots to TOON or JSON outputs.,header
   templates/AGENTS.md,Agent startup snippet for ProjectAtlas,manual
   tests/test_atlas.py,Validate basic ProjectAtlas scanning behavior.,header
+  tests/test_docstrings.py,Validate the ProjectAtlas docstring enforcement script.,header
 folder_summary_duplicates[]:
 file_summary_duplicates[]:
 folder_tree[]:

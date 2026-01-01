@@ -26,6 +26,7 @@ Run tests and build artifacts locally:
 
 ```bash
 python -m unittest discover -s tests
+python scripts/check_docstrings.py
 python -m pip install build
 python -m build --sdist --wheel
 ```
