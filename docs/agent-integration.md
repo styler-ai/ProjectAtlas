@@ -15,6 +15,11 @@ ProjectAtlas is designed to be read at agent startup so you can:
 3. Use the folder tree + purpose summaries to pick files before deep indexing.
 ```
 
+## Codex skills
+
+ProjectAtlas ships a Codex skill at `.codex/skills/ProjectAtlas.md`. Copy that file into your
+Codex workspace or keep it in place so Codex can load the ProjectAtlas workflow.
+
 ## Claude / skills
 
 Drop the `skills/claude/ProjectAtlas.md` into your Claude skills folder and reference it in your agent setup.

@@ -1,9 +1,9 @@
 version: 1
-generated_at: 2026-01-01T16:56:14Z
-file_hash: "b4e5cbbfec080e1042c44cf9345479248fe1659c229ec1cf01e9b442cd6e97e8"
-folder_hash: "001959defd4312e2fdf710531dbe5007e1d10467919d12b3662e92259777fbf2"
+generated_at: 2026-01-01T17:24:51Z
+file_hash: "520e671f743cf8f8abfc61aac4bc07b8c3ce9550d87ec33bc045853d46211231"
+folder_hash: "2a7eb6ac7983405124327ba36a8b45b11297b335d2ba098f1869803fb464c800"
 root: .
-overview: tracked_files=12 tracked_folders=13 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
+overview: tracked_files=16 tracked_folders=15 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
 source_extensions[]:
   - .cjs
   - .css
@@ -25,8 +25,10 @@ exclude_dir_names[]:
   - dist
   - node_modules
 exclude_path_prefixes[]:
-folders[13]{path,summary,source}:
+folders[15]{path,summary,source}:
   .,ProjectAtlas repository root.,purpose
+  .codex,Codex configuration and skills for ProjectAtlas.,purpose
+  .codex/skills,Codex skill copies for ProjectAtlas adoption.,purpose
   .github,ProjectAtlas GitHub metadata and workflows.,purpose
   .github/workflows,ProjectAtlas CI and release workflows.,purpose
   docs,ProjectAtlas documentation and guides.,purpose
@@ -39,7 +41,8 @@ folders[13]{path,summary,source}:
   src/projectatlas,Core ProjectAtlas package implementation.,purpose
   templates,Reusable agent templates and snippets.,purpose
   tests,Unit tests for ProjectAtlas.,purpose
-files[31]{path,summary,source}:
+files[36]{path,summary,source}:
+  .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas,manual
   .github/pull_request_template.md,Pull request checklist for ProjectAtlas,manual
   .github/workflows/ci.yml,ProjectAtlas CI workflow,manual
   .github/workflows/release.yml,ProjectAtlas release workflow,manual
@@ -57,7 +60,9 @@ files[31]{path,summary,source}:
   docs/workflow.md,ProjectAtlas workflow and troubleshooting guide,manual
   pyproject.toml,ProjectAtlas packaging and CLI metadata,manual
   scripts/check_docstrings.py,Enforce module and public symbol docstrings for ProjectAtlas code.,header
+  scripts/check_pr_issue_reference.py,Enforce issue references in pull request titles or bodies.,header
   scripts/generate_api_docs.py,Generate Markdown API docs for ProjectAtlas modules.,header
+  scripts/next_version.py,Compute the next ProjectAtlas version and optionally update files.,header
   scripts/verify_version.py,Validate that ProjectAtlas versions match the requested tag.,header
   skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas,manual
   skills/codex/ProjectAtlas.md,Codex skill instructions for ProjectAtlas,manual
@@ -71,10 +76,15 @@ files[31]{path,summary,source}:
   templates/AGENTS.md,Agent startup snippet for ProjectAtlas,manual
   tests/test_atlas.py,Validate basic ProjectAtlas scanning behavior.,header
   tests/test_docstrings.py,Validate the ProjectAtlas docstring enforcement script.,header
+  tests/test_next_version.py,Validate ProjectAtlas version helper utilities.,header
+  tests/test_pr_issue_reference.py,Validate pull request issue reference enforcement.,header
 folder_summary_duplicates[]:
 file_summary_duplicates[]:
+  - Codex skill instructions for ProjectAtlas :: .codex/skills/ProjectAtlas.md | skills/codex/ProjectAtlas.md
 folder_tree[]:
   - . - ProjectAtlas repository root.
+  - .codex/ - Codex configuration and skills for ProjectAtlas.
+  -   skills/ - Codex skill copies for ProjectAtlas adoption.
   - .github/ - ProjectAtlas GitHub metadata and workflows.
   -   workflows/ - ProjectAtlas CI and release workflows.
   - docs/ - ProjectAtlas documentation and guides.
