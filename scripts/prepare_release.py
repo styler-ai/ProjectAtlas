@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.next_version import (  # noqa: E402
     bump_base_version,
+    build_version,
     read_pyproject_version,
     update_version_files,
 )
@@ -48,6 +49,12 @@ def compute_release_version(current_version: str, bump: str) -> str:
     if ".dev" in current_version:
         return current_version.split(".dev", maxsplit=1)[0]
     return bump_base_version(current_version, bump)
+
+
+def compute_post_release_version(release_version: str, bump: str) -> str:
+    """Return the next dev version after a release."""
+    next_base = bump_base_version(release_version, bump)
+    return build_version(next_base, dev=True)
 
 
 def build_release_plan(
@@ -148,6 +155,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Print commands without running them.",
     )
+    parser.add_argument(
+        "--post-release",
+        action="store_true",
+        help="Also open a dev PR that bumps to the next .dev version.",
+    )
     return parser.parse_args(argv)
 
 
@@ -196,6 +208,47 @@ def main(argv: list[str]) -> int:
         ],
         args.dry_run,
     )
+    if args.post_release:
+        post_version = compute_post_release_version(plan.version, args.bump)
+        post_branch = f"post-release/v{post_version}"
+        run_command(["git", "checkout", args.source], args.dry_run)
+        run_command(["git", "checkout", "-b", post_branch], args.dry_run)
+        if not args.dry_run:
+            update_version_files(ROOT, post_version)
+        run_command(
+            ["git", "add", "pyproject.toml", "src/projectatlas/__init__.py"],
+            args.dry_run,
+        )
+        run_command(
+            ["git", "commit", "-m", f"chore(release): start v{post_version} ({plan.issue})"],
+            args.dry_run,
+        )
+        run_command(["git", "push", "origin", post_branch], args.dry_run)
+        run_command(
+            [
+                "gh",
+                "pr",
+                "create",
+                "--base",
+                args.source,
+                "--head",
+                post_branch,
+                "--title",
+                f"chore(release): start v{post_version} ({plan.issue})",
+                "--body",
+                "\n".join(
+                    [
+                        "## Summary",
+                        f"- Bump dev to v{post_version} after release prep.",
+                        "",
+                        "## Checklist",
+                        "- [ ] CI green",
+                        "- [ ] Ready to merge to dev",
+                    ]
+                ),
+            ],
+            args.dry_run,
+        )
     print(f"Release PR created for v{plan.version}.")
     return 0
 

@@ -9,6 +9,7 @@ If you spot a bug or have a suggestion, please open an issue with clear reproduc
 - Feature work lands on `dev`.
 - Releases are merged from `dev` into `main` via PR.
 - Use `python scripts/prepare_release.py --issue <NNN> --bump patch` to create the release branch and PR.
+- Add `--post-release` if you want the next `.dev` bump PR on `dev`.
 - CI checks must pass before merge.
 - PR titles or bodies must reference a GitHub issue (for example `#123`).
 - Install git hooks with `python scripts/install_hooks.py` so commits require issue references.
