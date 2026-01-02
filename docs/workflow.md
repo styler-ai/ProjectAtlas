@@ -39,6 +39,7 @@ ProjectAtlas is designed to run locally and produce a deterministic map.
 - If `dev` is behind `main`, the script will stop unless you pass `--allow-base-divergence`.
 - Add `--post-release` to open a dev PR that bumps to the next `.dev` version.
 - Pushes to `main` create a GitHub release when the version is not a `.dev` build.
+- The auto-release workflow generates GitHub release notes from merged PRs.
 
 ## CI behavior
 
