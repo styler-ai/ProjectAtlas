@@ -22,7 +22,7 @@ files. ProjectAtlas is the layer above code-index tools.
 
 - `.projectatlas/projectatlas.toon` (the atlas snapshot).
 - `.projectatlas/config.toml` (scan rules).
-- `.projectatlas/projectatlas-manual-files.toon` (summaries for non-source files).
+- `.projectatlas/projectatlas-nonsource-files.toon` (agent-maintained summaries for non-source files).
 
 ## First-time setup (repo adoption)
 
@@ -30,7 +30,7 @@ files. ProjectAtlas is the layer above code-index tools.
 2. Initialize: `projectatlas init --seed-purpose`
 3. Fill each `.purpose` file with a one-line summary (ASCII, no commas).
 4. Add Purpose headers to every tracked source file.
-5. Add non-source files to `.projectatlas/projectatlas-manual-files.toon`.
+5. Add non-source files to `.projectatlas/projectatlas-nonsource-files.toon`.
 6. Run `projectatlas map` to generate `.projectatlas/projectatlas.toon`.
 7. Run `projectatlas lint --strict-folders --report-untracked` and fix issues.
 8. (Optional) Install git hooks: `python scripts/install_hooks.py` to enforce issue references in commits.

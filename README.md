@@ -53,15 +53,26 @@ Why this matters:
 - The lint gate keeps structure healthy over time by preventing silent drift.
 
 ProjectAtlas also supports non-source files (README, workflows, configs) via
-`.projectatlas/projectatlas-manual-files.toon` so the snapshot stays complete even for files without headers.
+`.projectatlas/projectatlas-nonsource-files.toon` so the snapshot stays complete even for files without headers.
+
+### Why there are two TOON files
+
+- `.projectatlas/projectatlas.toon` is **generated output**. It is safe to rebuild on every run.
+- `.projectatlas/projectatlas-nonsource-files.toon` is **agent-maintained input** for non-source files that cannot
+  carry a `Purpose:` header (for example YAML, TOML, images, or configs you do not want to edit).
+
+ProjectAtlas merges the non-source entries into the generated atlas, so **agents only read the generated atlas**.
+The input file exists only to preserve those non-source summaries across regenerations. Agents update it when
+`projectatlas lint` reports missing non-source entries or when new config/doc files are added.
 
 ## Workflow (agent-focused)
 
 1. Run `projectatlas init --seed-purpose` once to scaffold missing `.purpose` files.
 2. For every new folder, write a one-line purpose in its `.purpose` file (this is your folder contract).
 3. For every new source file, add a `Purpose:` header or module docstring (this is your file contract).
-4. Regenerate the map with `projectatlas map`.
-5. Read `.projectatlas/projectatlas.toon` at startup and look for:
+4. Add non-source summaries to `.projectatlas/projectatlas-nonsource-files.toon`.
+5. Regenerate the map with `projectatlas map`.
+6. Read `.projectatlas/projectatlas.toon` at startup and look for:
    - the folder tree to locate the right area of the repo
    - duplicate summaries to spot drift or overlap
    - file summaries to pick targets for deeper inspection
@@ -127,7 +138,7 @@ python -m build --sdist --wheel
 
 ## Related projects
 
-- TOON format: `docs/format.md` (link the TOON GitHub spec here if you have one).
+- TOON format: https://github.com/toon-format/toon
 - code-index (deep code summaries / symbol extraction): https://github.com/johnhuang316/code-index-mcp
 
 If you do not use a deep indexing tool, ProjectAtlas still provides the atlas and lint gate, but you will need to
@@ -165,7 +176,7 @@ python scripts/prepare_release.py --issue <NNN> --bump patch
 Default outputs:
 
 - `.projectatlas/config.toml`
-- `.projectatlas/projectatlas-manual-files.toon`
+- `.projectatlas/projectatlas-nonsource-files.toon`
 - `.projectatlas/projectatlas.toon`
 
 ## Folder structure (ProjectAtlas repo)
@@ -174,7 +185,7 @@ Default outputs:
 .
 |-- .projectatlas/
 |   |-- config.toml
-|   |-- projectatlas-manual-files.toon
+|   |-- projectatlas-nonsource-files.toon
 |   `-- projectatlas.toon
 |-- .codex/
 |   `-- skills/
@@ -197,7 +208,7 @@ Use this tree when contributing to ProjectAtlas itself.
 your-repo/
 |-- .projectatlas/
 |   |-- config.toml
-|   |-- projectatlas-manual-files.toon
+|   |-- projectatlas-nonsource-files.toon
 |   `-- projectatlas.toon
 |-- .purpose
 `-- (your source and docs)

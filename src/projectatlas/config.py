@@ -13,7 +13,7 @@ import tomllib
 
 DEFAULT_PURPOSE_FILENAME = ".purpose"
 DEFAULT_MAP_PATH = Path(".projectatlas/projectatlas.toon")
-DEFAULT_MANUAL_FILES_PATH = Path(".projectatlas/projectatlas-manual-files.toon")
+DEFAULT_NONSOURCE_FILES_PATH = Path(".projectatlas/projectatlas-nonsource-files.toon")
 DEFAULT_SOURCE_EXTENSIONS = {
     ".ts",
     ".tsx",
@@ -84,7 +84,7 @@ class AtlasConfig:
 
     root: Path
     map_path: Path
-    manual_files_path: Path | None
+    nonsource_files_path: Path | None
     purpose_filename: str
     source_extensions: set[str]
     exclude_dir_names: set[str]
@@ -168,12 +168,16 @@ def load_config(config_path: Path | None, root: Path | None = None) -> AtlasConf
     map_path = project.get("map_path", DEFAULT_MAP_PATH)
     map_path = _as_path(map_path, "project.map_path", root_path)
 
-    manual_files_path = project.get("manual_files_path")
-    if manual_files_path is None:
-        manual_path = None
+    nonsource_files_path = project.get("nonsource_files_path")
+    if nonsource_files_path is None:
+        nonsource_files_path = project.get("manual_files_path")
+    if nonsource_files_path is None:
+        nonsource_path = None
     else:
-        manual_path = _as_path(
-            manual_files_path, "project.manual_files_path", root_path
+        nonsource_path = _as_path(
+            nonsource_files_path,
+            "project.nonsource_files_path",
+            root_path,
         )
 
     purpose_filename = str(project.get("purpose_filename", DEFAULT_PURPOSE_FILENAME))
@@ -250,7 +254,7 @@ def load_config(config_path: Path | None, root: Path | None = None) -> AtlasConf
     return AtlasConfig(
         root=root_path,
         map_path=map_path,
-        manual_files_path=manual_path,
+        nonsource_files_path=nonsource_path,
         purpose_filename=purpose_filename,
         source_extensions=source_extensions,
         exclude_dir_names=exclude_dir_names,
@@ -276,7 +280,7 @@ def default_config_text() -> str:
             "[project]",
             'root = "."',
             'map_path = ".projectatlas/projectatlas.toon"',
-            'manual_files_path = ".projectatlas/projectatlas-manual-files.toon"',
+            'nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"',
             'purpose_filename = ".purpose"',
             "",
             "[scan]",

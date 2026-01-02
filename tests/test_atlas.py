@@ -17,7 +17,7 @@ def make_config(root: Path) -> AtlasConfig:
     return AtlasConfig(
         root=root,
         map_path=root / ".projectatlas" / "atlas.toon",
-        manual_files_path=None,
+        nonsource_files_path=None,
         purpose_filename=".purpose",
         source_extensions={".py"},
         exclude_dir_names=set(),
