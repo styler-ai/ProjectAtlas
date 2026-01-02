@@ -22,7 +22,7 @@ Give Claude a fast structure map before deep indexing so it can pick the right f
 2. Initialize: `projectatlas init --seed-purpose`
 3. Fill each `.purpose` file with a one-line summary (ASCII, no commas).
 4. Add Purpose headers to every tracked source file.
-5. Add non-source files to `.projectatlas/projectatlas-manual-files.toon`.
+5. Add non-source files to `.projectatlas/projectatlas-nonsource-files.toon`.
 6. Run `projectatlas map`.
 7. Run `projectatlas lint --strict-folders --report-untracked` and fix issues.
 

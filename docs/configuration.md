@@ -6,7 +6,7 @@ ProjectAtlas reads `projectatlas.toml` or `.projectatlas/config.toml`. All paths
 [project]
 root = "."
 map_path = ".projectatlas/projectatlas.toon"
-manual_files_path = ".projectatlas/projectatlas-manual-files.toon"
+nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
 purpose_filename = ".purpose"
 
 [scan]
@@ -30,13 +30,14 @@ asset_allowed_prefixes = []
 asset_extensions = [".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".ico", ".pdf"]
 ```
 
-### Manual files
+### Non-source file list
 
-If you set `project.manual_files_path`, ProjectAtlas reads a TOON file with a `manual_files[]:` section. This file
-is treated as input for non-source summaries and is merged into the generated atlas:
+If you set `project.nonsource_files_path`, ProjectAtlas reads a TOON file with a `nonsource_files[]:` section. This
+file is agent-maintained input for non-source summaries (configs, docs, assets) and is merged into the generated
+atlas. The legacy `project.manual_files_path` key is still accepted for backward compatibility.
 
 ```
-manual_files[]:
+nonsource_files[]:
   path/to/file.txt,One line purpose summary
 ```
 

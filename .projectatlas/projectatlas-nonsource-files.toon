@@ -1,6 +1,6 @@
-manual_files[]:
+nonsource_files[]:
   # /**
-  #  * Purpose: Manual file summaries for non-source files.
+  #  * Purpose: Non-source file summaries for ProjectAtlas input.
   #  */
   # path,summary
   README.md,ProjectAtlas overview and usage guide
