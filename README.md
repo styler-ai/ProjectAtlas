@@ -7,6 +7,8 @@ Agent-first project map + health index - give coding agents a one-line purpose f
 ProjectAtlas scans a repo, reads per-file Purpose headers and per-folder `.purpose` files, and emits a TOON
 snapshot you can read at startup to understand structure, spot duplicates, and keep the tree healthy.
 
+Live docs: https://styler-ai.github.io/ProjectAtlas/
+
 ## Problem it solves
 
 Agents and humans struggle with the same problem on growing repos: you start a new session without a structural
@@ -29,19 +31,42 @@ It answers "where should I look?" and "where should I put this?" before running 
 
 ## How it works
 
-1. Each folder carries a `.purpose` file with a one-line summary.
-2. Each tracked source file starts with a `Purpose:` header or module docstring.
-3. `projectatlas map` builds a TOON snapshot with folder tree + file summaries.
-4. `projectatlas lint` validates that the snapshot is current and complete.
+ProjectAtlas is designed for the first 60 seconds of an agent session.
+
+1. Each folder carries a `.purpose` file with a one-line summary so folder intent is explicit (no guesswork).
+2. Each tracked source file starts with a `Purpose:` header or module docstring so file intent is visible without
+   a deep read.
+3. `projectatlas map` builds a TOON snapshot (`.projectatlas/projectatlas.toon`) that contains:
+   - a folder tree with inline purpose summaries
+   - file summaries for targeted code reads
+   - duplicate-summary warnings to spot drift
+   - overview stats that show scope and coverage
+4. `projectatlas lint` fails when Purpose headers or `.purpose` files are missing. The goal is to force a decision
+   before you proceed: add the missing summary, or remove/relocate the folder/file if it no longer belongs.
+
+Why this matters:
+
+- Agents read the atlas at startup (via AGENTS.md) to decide where to look next.
+- The atlas tells you *which* files to open with deep-indexing tools (for example code-index MCP or language
+  servers) so you only deep-index what you actually need. Deep indexing here means full-file or symbol-level
+  analysis that can consume a lot of context if you run it blindly.
+- The lint gate keeps structure healthy over time by preventing silent drift.
+
+ProjectAtlas also supports non-source files (README, workflows, configs) via
+`.projectatlas/projectatlas-manual-files.toon` so the snapshot stays complete even for files without headers.
 
 ## Workflow (agent-focused)
 
 1. Run `projectatlas init --seed-purpose` once to scaffold missing `.purpose` files.
-2. For every new folder, write a one-line purpose in its `.purpose` file.
-3. For every new source file, add a `Purpose:` header or module docstring.
+2. For every new folder, write a one-line purpose in its `.purpose` file (this is your folder contract).
+3. For every new source file, add a `Purpose:` header or module docstring (this is your file contract).
 4. Regenerate the map with `projectatlas map`.
-5. Use the map to decide which files to inspect with heavier tools (code-index, language servers, etc.).
-6. Run `projectatlas lint --strict-folders --report-untracked` to surface drift and missing summaries.
+5. Read `.projectatlas/projectatlas.toon` at startup and look for:
+   - the folder tree to locate the right area of the repo
+   - duplicate summaries to spot drift or overlap
+   - file summaries to pick targets for deeper inspection
+6. Use code-index or other deep tools *only* on the files you selected from the atlas.
+7. Run `projectatlas lint --strict-folders --report-untracked` and fix any missing Purpose entries before you move on.
 
 Agent integrations (Codex, Claude, etc.) should read the map at startup and treat it as the authoritative
 structural overview before doing deeper indexing.
@@ -100,6 +125,14 @@ python -m build --sdist --wheel
 - `docs/workflow.md`: workflow + troubleshooting
 - `docs/api.md`: generated API documentation
 
+## Related projects
+
+- TOON format: `docs/format.md` (link the TOON GitHub spec here if you have one).
+- code-index (deep code summaries / symbol extraction): https://github.com/johnhuang316/code-index-mcp
+
+If you do not use a deep indexing tool, ProjectAtlas still provides the atlas and lint gate, but you will need to
+open source files manually for deeper context.
+
 ## Branches and releases
 
 - `dev`: active development branch.
@@ -109,9 +142,10 @@ Release flow:
 
 1. Merge feature branches into `dev`.
 2. Run `python scripts/prepare_release.py --issue <NNN> --bump patch` to create a release branch and PR.
-3. Merge to `main` after CI is green.
-4. Auto-release runs on `main` pushes and creates a GitHub release if the version is not a `.dev` build.
-5. Use the manual Release workflow if you need to re-run tagging.
+3. Optional: add `--post-release` to open a dev PR that bumps to the next `.dev` version.
+4. Merge to `main` after CI is green.
+5. Auto-release runs on `main` pushes and creates a GitHub release if the version is not a `.dev` build.
+6. Use the manual Release workflow if you need to re-run tagging.
 
 ## Versioning
 

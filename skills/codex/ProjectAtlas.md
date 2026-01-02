@@ -1,73 +1,77 @@
 # ProjectAtlas (Codex skill)
 
-## Purpose
+## Goal
 
-Give a Codex agent a fast, structured project overview before deep indexing. ProjectAtlas is the
-map layer above code-index tools so the agent knows where to look and where to place new files.
+Give Codex a fast, accurate structure map before deep indexing so it knows where to look and where to place new
+files. ProjectAtlas is the layer above code-index tools.
 
 ## When to use
 
-- At the start of every session (before running deep indexing).
-- After creating/moving folders or adding new source files.
-- When lint reports missing Purpose headers or missing `.purpose` files.
+- At the start of every session (before deep indexing).
+- After creating or moving folders.
+- After adding new source files.
+- When `projectatlas lint` reports missing Purpose headers or missing `.purpose` files.
+- Before large refactors or cleanup decisions.
+
+## Definitions
+
+- Deep indexing = full-file or symbol-level analysis via tools like code-index MCP or language servers. This is
+  powerful but expensive in context budget if you run it blindly.
+
+## Required files
+
+- `.projectatlas/projectatlas.toon` (the atlas snapshot).
+- `.projectatlas/config.toml` (scan rules).
+- `.projectatlas/projectatlas-manual-files.toon` (summaries for non-source files).
 
 ## First-time setup (repo adoption)
 
 1. Install locally: `pip install -e .`
 2. Initialize: `projectatlas init --seed-purpose`
-3. Fill each `.purpose` file with a one-line summary (use `Purpose:` if you want).
+3. Fill each `.purpose` file with a one-line summary (ASCII, no commas).
 4. Add Purpose headers to every tracked source file.
-5. Add non-source files to `.projectatlas/projectatlas-manual-files.toon` with summaries.
+5. Add non-source files to `.projectatlas/projectatlas-manual-files.toon`.
 6. Run `projectatlas map` to generate `.projectatlas/projectatlas.toon`.
-7. Run `projectatlas lint --strict-folders --report-untracked` and fix any errors.
-8. Install git hooks: `python scripts/install_hooks.py` to enforce issue references in commits.
+7. Run `projectatlas lint --strict-folders --report-untracked` and fix issues.
+8. (Optional) Install git hooks: `python scripts/install_hooks.py` to enforce issue references in commits.
 
 ## Startup workflow (every session)
 
 1. Run `projectatlas map` (unless `PROJECTATLAS_SKIP_UPDATE=1` is set).
 2. Read `.projectatlas/projectatlas.toon`.
-3. Use `folder_tree[]` and `folders[]` to decide which files to open or index.
-4. If `folder_summary_duplicates[]` is non-empty, flag it as a structure health issue.
-5. Only then use code-index tools for deeper file detail.
+3. Scan `folder_tree[]` to pick the correct area of the repo.
+4. Check `folder_summary_duplicates[]` / `file_summary_duplicates[]` for drift.
+5. Use `folders[]` / `files[]` to pick targets.
+6. Only then use deep-index tools (code-index, LSPs) on those targets.
+7. If lint errors appear, fix them immediately (add Purpose headers or `.purpose` files) or remove the stale file.
 
-## Purpose headers
-
-- Javadoc-style block with a single `Purpose:` line for JS/TS/CSS/etc.
-- Python modules use a module docstring with `Purpose:` on the first lines.
-- Vue SFCs place the Javadoc block at the top of the first `<script>` or `<style>` block.
-
-## Folder summaries (.purpose)
-
-- Every folder must have a `.purpose` file with a one-line summary.
-- Use `projectatlas seed-purpose` to scaffold missing `.purpose` files.
-- Keep summaries short, ASCII, and single-line.
-
-## Map interpretation
+## How to interpret the map
 
 - `overview:` shows tracked counts so you can spot drift quickly.
-- `folder_tree[]` is the tree with summaries for fast navigation.
-- `folders[]` and `files[]` are the definitive summaries the agent should trust.
-- `folder_summary_duplicates[]` highlights likely structural duplicates.
+- `folder_tree[]` provides a tree with summaries for fast navigation.
+- `folders[]` and `files[]` are the authoritative summaries for lookup.
+- `*_summary_duplicates[]` highlight likely overlap to clean up.
 
-## Untracked handling
+## AGENTS.md integration
 
-- `projectatlas lint --report-untracked` lists non-source files.
-- Add required non-source files to `.projectatlas/projectatlas-manual-files.toon`.
-- Exclude unwanted paths via config, or move assets into approved roots.
+Add a startup snippet so the atlas is always read:
 
-## Build and CI behavior
+```
+## Startup
+1. Run `projectatlas map`.
+2. Read `.projectatlas/projectatlas.toon`.
+3. Use the atlas to select files before deep indexing.
+4. Fix missing Purpose headers or `.purpose` files if lint fails.
+```
 
-- `projectatlas map` skips in CI by default; use `--force` if CI should regenerate.
-- CI enforces lint and docstring checks; PRs must reference `#NNN`.
-- Local builds should run map + lint so the agent gets current structure.
+## Companion tools
 
-## Env toggles
-
-- `PROJECTATLAS_SKIP_UPDATE=1` skips map generation locally.
-- `PROJECTATLAS_ALLOW_UNTRACKED=1` allows local builds to pass while still reporting.
+- code-index (deep code summaries): https://github.com/johnhuang316/code-index-mcp
+- If you do not use deep indexing, rely on the atlas and open files directly as needed.
 
 ## References
 
-- `docs/workflow.md` for workflow and troubleshooting.
+- ProjectAtlas repo: https://github.com/styler-ai/ProjectAtlas
+- `docs/agent-integration.md` for the AGENTS.md snippet.
 - `docs/format.md` for TOON schema.
-- `docs/configuration.md` for config options.
+- `docs/workflow.md` for troubleshooting.
