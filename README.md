@@ -56,13 +56,13 @@ pip install -e .
 
 Agent-assisted install:
 
-Give your agent the ProjectAtlas repo URL and ask it to:
+Give your agent the repo URL (https://github.com/styler-ai/ProjectAtlas) and ask it to:
 
 1. Install ProjectAtlas (`pip install -e .`).
 2. Run `projectatlas init --seed-purpose`.
-3. Add `.purpose` files and Purpose headers.
+3. Add or update `.purpose` files and Purpose headers.
 4. Wire `projectatlas map` + `projectatlas lint` into local build steps.
-5. Add the startup snippet to your `AGENTS.md`.
+5. Paste the startup snippet into your `AGENTS.md`.
 
 ## Quickstart
 
@@ -134,21 +134,21 @@ Default outputs:
 
 ```
 .
-├─ .projectatlas/
-│  ├─ config.toml
-│  ├─ projectatlas-manual-files.toon
-│  └─ projectatlas.toon
-├─ .codex/
-│  └─ skills/
-│     └─ ProjectAtlas.md
-├─ skills/
-│  ├─ codex/ProjectAtlas.md
-│  └─ claude/ProjectAtlas.md
-├─ scripts/
-│  ├─ install_hooks.py
-│  └─ check_commit_issue.py
-└─ templates/
-   └─ AGENTS.md
+|-- .projectatlas/
+|   |-- config.toml
+|   |-- projectatlas-manual-files.toon
+|   `-- projectatlas.toon
+|-- .codex/
+|   `-- skills/
+|       `-- ProjectAtlas.md
+|-- skills/
+|   |-- codex/ProjectAtlas.md
+|   `-- claude/ProjectAtlas.md
+|-- scripts/
+|   |-- install_hooks.py
+|   `-- check_commit_issue.py
+`-- templates/
+    `-- AGENTS.md
 ```
 
 Use this tree when contributing to ProjectAtlas itself.
@@ -157,12 +157,12 @@ Use this tree when contributing to ProjectAtlas itself.
 
 ```
 your-repo/
-├─ .projectatlas/
-│  ├─ config.toml
-│  ├─ projectatlas-manual-files.toon
-│  └─ projectatlas.toon
-├─ .purpose
-└─ (your source and docs)
+|-- .projectatlas/
+|   |-- config.toml
+|   |-- projectatlas-manual-files.toon
+|   `-- projectatlas.toon
+|-- .purpose
+`-- (your source and docs)
 ```
 
 For Codex, copy `.codex/skills/ProjectAtlas.md` into your local Codex skills folder
