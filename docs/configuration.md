@@ -32,7 +32,8 @@ asset_extensions = [".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".ico", ".
 
 ### Manual files
 
-If you set `project.manual_files_path`, ProjectAtlas reads a TOON file with a `manual_files[]:` section:
+If you set `project.manual_files_path`, ProjectAtlas reads a TOON file with a `manual_files[]:` section. This file
+is treated as input for non-source summaries and is merged into the generated atlas:
 
 ```
 manual_files[]:

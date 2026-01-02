@@ -17,6 +17,9 @@ ProjectAtlas is designed to be read at agent startup so you can:
 5. Run `projectatlas lint --strict-folders --report-untracked`.
 6. If lint fails, add missing Purpose headers or `.purpose` files (or remove stale items) before continuing.
 7. Only then run deep indexing (code-index, LSPs) on the files you selected from the atlas.
+
+Note: the manual file list (`.projectatlas/projectatlas-manual-files.toon`) is input for non-source summaries and
+is merged into the atlas. Agents still read only the generated atlas.
 ```
 
 ## Codex skills
