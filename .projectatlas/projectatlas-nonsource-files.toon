@@ -17,6 +17,13 @@ nonsource_files[]:
   .github/pull_request_template.md,Pull request checklist for ProjectAtlas
   .githooks/commit-msg,Git hook to enforce issue references in commits
   .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas
+  .codex/rules/memory/projectbrief.md,ProjectAtlas project brief
+  .codex/rules/memory/productContext.md,ProjectAtlas product context
+  .codex/rules/memory/activeContext.md,ProjectAtlas active context
+  .codex/rules/memory/systemPatterns.md,ProjectAtlas system patterns
+  .codex/rules/memory/techContext.md,ProjectAtlas tech context
+  .codex/rules/memory/progress.md,ProjectAtlas progress log
+  .codex/rules/memory/ruleIndex.md,ProjectAtlas memory bank index
   docs/agent-integration.md,Agent integration instructions for ProjectAtlas
   docs/adoption.md,Adoption checklist for ProjectAtlas
   docs/index.md,Documentation landing page for ProjectAtlas
