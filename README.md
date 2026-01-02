@@ -116,6 +116,7 @@ python scripts/install_hooks.py
 ```
 
 Issue hygiene: label every issue with `type:*`, `priority:*`, and `status:*`.
+Assign issues you are actively working on to the target release milestone; CI enforces that referenced issues have a milestone.
 
 Run tests, docs, and build artifacts locally:
 
