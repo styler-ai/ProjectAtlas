@@ -10,7 +10,12 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from scripts.next_version import (
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.next_version import (  # noqa: E402
     bump_base_version,
     read_pyproject_version,
     update_version_files,
@@ -130,8 +135,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str]) -> int:
     """Execute the release preparation flow."""
     args = parse_args(argv)
-    root = Path(__file__).resolve().parents[1]
-    current_version = read_pyproject_version(root / "pyproject.toml")
+    current_version = read_pyproject_version(ROOT / "pyproject.toml")
     plan = build_release_plan(
         current_version=current_version,
         bump=args.bump,
@@ -140,8 +144,8 @@ def main(argv: list[str]) -> int:
         head_branch=args.head,
     )
     if not args.dry_run:
-        ensure_clean_git(root)
-        update_version_files(root, plan.version)
+        ensure_clean_git(ROOT)
+        update_version_files(ROOT, plan.version)
     run_command(
         ["git", "add", "pyproject.toml", "src/projectatlas/__init__.py"],
         args.dry_run,
