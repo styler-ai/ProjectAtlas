@@ -34,7 +34,9 @@ ProjectAtlas is designed to run locally and produce a deterministic map.
 - `dev` for active development.
 - `main` for stable releases only.
 - Merge `dev` -> `main` via pull request after CI is green.
+- Ensure `dev` includes the latest `main` changes before releasing.
 - Use `python scripts/prepare_release.py --issue <NNN> --bump patch` to create a release branch and PR.
+- If `dev` is behind `main`, the script will stop unless you pass `--allow-base-divergence`.
 - Add `--post-release` to open a dev PR that bumps to the next `.dev` version.
 - Pushes to `main` create a GitHub release when the version is not a `.dev` build.
 

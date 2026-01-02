@@ -141,11 +141,13 @@ open source files manually for deeper context.
 Release flow:
 
 1. Merge feature branches into `dev`.
-2. Run `python scripts/prepare_release.py --issue <NNN> --bump patch` to create a release branch and PR.
-3. Optional: add `--post-release` to open a dev PR that bumps to the next `.dev` version.
-4. Merge to `main` after CI is green.
-5. Auto-release runs on `main` pushes and creates a GitHub release if the version is not a `.dev` build.
-6. Use the manual Release workflow if you need to re-run tagging.
+2. Ensure `dev` includes the latest `main` changes (sync if needed).
+3. Run `python scripts/prepare_release.py --issue <NNN> --bump patch` to create a release branch and PR.
+4. If `dev` is behind `main`, the script will stop unless you pass `--allow-base-divergence`.
+5. Optional: add `--post-release` to open a dev PR that bumps to the next `.dev` version.
+6. Merge to `main` after CI is green.
+7. Auto-release runs on `main` pushes and creates a GitHub release if the version is not a `.dev` build.
+8. Use the manual Release workflow if you need to re-run tagging.
 
 ## Versioning
 
