@@ -1,6 +1,6 @@
 version: 1
-generated_at: 2026-01-01T21:14:16Z
-file_hash: "84d552d5bbda53d7480b7027902db57736f84ac012c288af5167ffef80af705e"
+generated_at: 2026-01-02T08:53:03Z
+file_hash: "a4f53d4dbeb78dffb3a4a20829a32f5eeb6ab4fa72a4e3bbd6bb67b9d4b09759"
 folder_hash: "15ed59bb790e2c49f129e710d3cbf644bf18813fdf12d7b56f272e63aa017639"
 root: .
 overview: tracked_files=19 tracked_folders=16 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
@@ -42,11 +42,12 @@ folders[16]{path,summary,source}:
   src/projectatlas,Core ProjectAtlas package implementation.,purpose
   templates,Reusable agent templates and snippets.,purpose
   tests,Unit tests for ProjectAtlas.,purpose
-files[41]{path,summary,source}:
+files[45]{path,summary,source}:
   .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas,manual
   .githooks/commit-msg,Git hook to enforce issue references in commits,manual
   .github/pull_request_template.md,Pull request checklist for ProjectAtlas,manual
   .github/workflows/03-auto-release.yml,ProjectAtlas auto release workflow,manual
+  .github/workflows/04-docs.yml,ProjectAtlas docs site workflow,manual
   .github/workflows/ci.yml,ProjectAtlas CI workflow,manual
   .github/workflows/release.yml,ProjectAtlas release workflow,manual
   .gitignore,Ignored files for ProjectAtlas repository,manual
@@ -55,12 +56,15 @@ files[41]{path,summary,source}:
   LICENSE,ProjectAtlas MIT license,manual
   README.md,ProjectAtlas overview and usage guide,manual
   SECURITY.md,Security contact information for ProjectAtlas,manual
+  docs/adoption.md,Adoption checklist for ProjectAtlas,manual
   docs/agent-integration.md,Agent integration instructions for ProjectAtlas,manual
   docs/api.md,Generated ProjectAtlas API documentation,manual
   docs/concepts.md,Core concepts for ProjectAtlas usage,manual
   docs/configuration.md,Configuration reference for ProjectAtlas,manual
   docs/format.md,ProjectAtlas TOON schema reference,manual
+  docs/index.md,Documentation landing page for ProjectAtlas,manual
   docs/workflow.md,ProjectAtlas workflow and troubleshooting guide,manual
+  mkdocs.yml,MkDocs site configuration for ProjectAtlas,manual
   pyproject.toml,ProjectAtlas packaging and CLI metadata,manual
   scripts/check_commit_issue.py,Enforce GitHub issue references in commit messages.,header
   scripts/check_docstrings.py,Enforce module and public symbol docstrings for ProjectAtlas code.,header
