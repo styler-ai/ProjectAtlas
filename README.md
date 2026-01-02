@@ -55,6 +55,15 @@ Why this matters:
 ProjectAtlas also supports non-source files (README, workflows, configs) via
 `.projectatlas/projectatlas-manual-files.toon` so the snapshot stays complete even for files without headers.
 
+### Why there are two TOON files
+
+- `.projectatlas/projectatlas.toon` is **generated output**. It is safe to rebuild on every run.
+- `.projectatlas/projectatlas-manual-files.toon` is **input** for non-source files that cannot carry a `Purpose:`
+  header (for example YAML, TOML, images, or configs you do not want to edit).
+
+ProjectAtlas merges the manual entries into the generated atlas, so **agents only read the generated atlas**. The
+manual file exists only to preserve those non-source summaries across regenerations.
+
 ## Workflow (agent-focused)
 
 1. Run `projectatlas init --seed-purpose` once to scaffold missing `.purpose` files.
