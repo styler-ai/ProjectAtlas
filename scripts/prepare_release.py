@@ -43,25 +43,27 @@ def normalize_issue(issue: str) -> str:
     return f"#{trimmed}"
 
 
+def compute_release_version(current_version: str, bump: str) -> str:
+    """Return the release version derived from the current version."""
+    if ".dev" in current_version:
+        return current_version.split(".dev", maxsplit=1)[0]
+    return bump_base_version(current_version, bump)
+
+
 def build_release_plan(
-    current_version: str,
-    bump: str,
+    release_version: str,
     issue: str,
     base_branch: str,
     head_branch: str,
 ) -> ReleasePlan:
     """Construct the release plan metadata for the given version bump."""
-    if ".dev" in current_version:
-        next_version = current_version.split(".dev", maxsplit=1)[0]
-    else:
-        next_version = bump_base_version(current_version, bump)
     issue_ref = normalize_issue(issue)
-    commit_message = f"chore(release): prepare v{next_version} ({issue_ref})"
-    pr_title = f"release: v{next_version} ({issue_ref})"
+    commit_message = f"chore(release): prepare v{release_version} ({issue_ref})"
+    pr_title = f"release: v{release_version} ({issue_ref})"
     pr_body = "\n".join(
         [
             f"## Summary",
-            f"- Prepare v{next_version} release.",
+            f"- Prepare v{release_version} release.",
             "",
             "## Checklist",
             "- [ ] CI green",
@@ -69,7 +71,7 @@ def build_release_plan(
         ]
     )
     return ReleasePlan(
-        version=next_version,
+        version=release_version,
         issue=issue_ref,
         base_branch=base_branch,
         head_branch=head_branch,
@@ -84,7 +86,7 @@ def run_command(command: list[str], dry_run: bool) -> None:
     if dry_run:
         print("DRY-RUN:", " ".join(command))
         return
-    subprocess.run(command, check=True)
+    subprocess.run(command, check=True, cwd=ROOT)
 
 
 def ensure_clean_git(root: Path) -> None:
@@ -98,6 +100,18 @@ def ensure_clean_git(root: Path) -> None:
     )
     if result.stdout.strip():
         raise RuntimeError("Git worktree is not clean; commit or stash changes.")
+
+
+def current_branch() -> str:
+    """Return the current git branch name."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -121,8 +135,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--head",
+        default=None,
+        help="Head branch for the release PR (defaults to release/v<version>).",
+    )
+    parser.add_argument(
+        "--source",
         default="dev",
-        help="Head branch for the release PR.",
+        help="Source branch to release from (expected current branch).",
     )
     parser.add_argument(
         "--dry-run",
@@ -135,16 +154,25 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str]) -> int:
     """Execute the release preparation flow."""
     args = parse_args(argv)
+    active_branch = current_branch()
+    if active_branch != args.source and not args.dry_run:
+        raise RuntimeError(
+            f"Expected to run on {args.source}, found {active_branch}."
+        )
     current_version = read_pyproject_version(ROOT / "pyproject.toml")
+    release_version = compute_release_version(current_version, args.bump)
+    head_branch = args.head or f"release/v{release_version}"
     plan = build_release_plan(
-        current_version=current_version,
-        bump=args.bump,
+        release_version=release_version,
         issue=args.issue,
         base_branch=args.base,
-        head_branch=args.head,
+        head_branch=head_branch,
     )
     if not args.dry_run:
         ensure_clean_git(ROOT)
+    if plan.head_branch != active_branch:
+        run_command(["git", "checkout", "-b", plan.head_branch], args.dry_run)
+    if not args.dry_run:
         update_version_files(ROOT, plan.version)
     run_command(
         ["git", "add", "pyproject.toml", "src/projectatlas/__init__.py"],
