@@ -47,8 +47,9 @@ ProjectAtlas is designed for the first 60 seconds of an agent session.
 Why this matters:
 
 - Agents read the atlas at startup (via AGENTS.md) to decide where to look next.
-- The atlas tells you *which* files to open with code-index or language servers, so you only deep-index what you
-  actually need (lower context usage, faster navigation).
+- The atlas tells you *which* files to open with deep-indexing tools (for example code-index MCP or language
+  servers) so you only deep-index what you actually need. Deep indexing here means full-file or symbol-level
+  analysis that can consume a lot of context if you run it blindly.
 - The lint gate keeps structure healthy over time by preventing silent drift.
 
 ProjectAtlas also supports non-source files (README, workflows, configs) via
@@ -127,7 +128,10 @@ python -m build --sdist --wheel
 ## Related projects
 
 - TOON format: `docs/format.md` (link the TOON GitHub spec here if you have one).
-- code-index (deep code summaries): https://github.com/johnhuang316/code-index-mcp
+- code-index (deep code summaries / symbol extraction): https://github.com/johnhuang316/code-index-mcp
+
+If you do not use a deep indexing tool, ProjectAtlas still provides the atlas and lint gate, but you will need to
+open source files manually for deeper context.
 
 ## Branches and releases
 
