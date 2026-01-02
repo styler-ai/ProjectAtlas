@@ -93,7 +93,9 @@ python -m build --sdist --wheel
 
 ## Documentation
 
+- Live docs: https://styler-ai.github.io/ProjectAtlas/
 - `docs/configuration.md`: configuration reference
+- `docs/adoption.md`: adoption checklist for new repos
 - `docs/format.md`: TOON schema
 - `docs/workflow.md`: workflow + troubleshooting
 - `docs/api.md`: generated API documentation
