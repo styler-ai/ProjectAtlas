@@ -96,6 +96,18 @@ def run_command(command: list[str], dry_run: bool) -> None:
     subprocess.run(command, check=True, cwd=ROOT)
 
 
+def run_capture(command: list[str]) -> str:
+    """Run a command and return stdout."""
+    result = subprocess.run(
+        command,
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
 def ensure_clean_git(root: Path) -> None:
     """Abort if the git worktree is not clean."""
     result = subprocess.run(
@@ -111,14 +123,34 @@ def ensure_clean_git(root: Path) -> None:
 
 def current_branch() -> str:
     """Return the current git branch name."""
-    result = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
+    return run_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+
+
+def ensure_branch_available(branch: str) -> None:
+    """Fail if a local or remote branch already exists."""
+    local = run_capture(["git", "branch", "--list", branch])
+    remote = run_capture(["git", "branch", "-r", "--list", f"origin/{branch}"])
+    if local or remote:
+        raise RuntimeError(f"Branch already exists: {branch}")
+
+
+def ensure_source_contains_base(source: str, base: str, allow_divergence: bool) -> None:
+    """Ensure source branch contains the base branch history."""
+    run_command(["git", "fetch", "origin", "--prune"], dry_run=False)
+    counts = run_capture(
+        [
+            "git",
+            "rev-list",
+            "--left-right",
+            "--count",
+            f"origin/{base}...origin/{source}",
+        ]
     )
-    return result.stdout.strip()
+    base_ahead, _ = [int(value) for value in counts.split()]
+    if base_ahead > 0 and not allow_divergence:
+        raise RuntimeError(
+            f"{source} is behind {base}. Sync {base} into {source} before releasing."
+        )
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -160,6 +192,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Also open a dev PR that bumps to the next .dev version.",
     )
+    parser.add_argument(
+        "--allow-base-divergence",
+        action="store_true",
+        help="Skip the base sync check when the source is behind base.",
+    )
     return parser.parse_args(argv)
 
 
@@ -171,9 +208,17 @@ def main(argv: list[str]) -> int:
         raise RuntimeError(
             f"Expected to run on {args.source}, found {active_branch}."
         )
+    if not args.dry_run:
+        ensure_source_contains_base(
+            source=args.source,
+            base=args.base,
+            allow_divergence=args.allow_base_divergence,
+        )
     current_version = read_pyproject_version(ROOT / "pyproject.toml")
     release_version = compute_release_version(current_version, args.bump)
     head_branch = args.head or f"release/v{release_version}"
+    if not args.dry_run:
+        ensure_branch_available(head_branch)
     plan = build_release_plan(
         release_version=release_version,
         issue=args.issue,
@@ -211,8 +256,11 @@ def main(argv: list[str]) -> int:
     if args.post_release:
         post_version = compute_post_release_version(plan.version, args.bump)
         post_branch = f"post-release/v{post_version}"
+        if not args.dry_run:
+            ensure_branch_available(post_branch)
         run_command(["git", "checkout", args.source], args.dry_run)
         run_command(["git", "checkout", "-b", post_branch], args.dry_run)
+        run_command(["git", "merge", f"origin/{args.base}"], args.dry_run)
         if not args.dry_run:
             update_version_files(ROOT, post_version)
         run_command(
