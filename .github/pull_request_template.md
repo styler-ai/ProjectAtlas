@@ -13,3 +13,4 @@ Closes #NNN
 - [ ] `python scripts/check_docstrings.py` clean.
 - [ ] `python scripts/generate_api_docs.py` clean and committed.
 - [ ] Tests updated or added.
+- [ ] PR text contains no private or internal-only details (release notes are generated from PR text).
