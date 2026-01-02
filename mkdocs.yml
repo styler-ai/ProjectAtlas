@@ -1,0 +1,13 @@
+site_name: ProjectAtlas
+site_url: https://styler-ai.github.io/ProjectAtlas/
+docs_dir: docs
+site_dir: site
+nav:
+  - Overview: index.md
+  - Adoption: adoption.md
+  - Agent Integration: agent-integration.md
+  - Configuration: configuration.md
+  - Format: format.md
+  - Workflow: workflow.md
+  - Concepts: concepts.md
+  - API: api.md

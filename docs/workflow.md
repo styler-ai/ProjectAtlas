@@ -18,6 +18,12 @@ ProjectAtlas is designed to run locally and produce a deterministic map.
 - Every issue should carry a `type:*` label plus a `priority:*` and `status:*` label.
 - Use `status:backlog` for unscheduled work.
 
+## Review expectations
+
+- At least one approval is required before merging.
+- Automated reviews (Codex/Copilot) should be checked via `gh pr view <PR> --comments`
+  or `gh pr view <PR> --json reviews`.
+
 ## Branching
 
 - `dev` for active development.
