@@ -86,13 +86,13 @@ Validate a Purpose summary against map rules.
 
 Build file records and error lists for Purpose headers.
 
-### Function `read_manual_file_entries`
+### Function `read_nonsource_file_entries`
 
-Read manual file entries for non-source config files.
+Read non-source file list entries for files without headers.
 
-### Function `merge_manual_file_records`
+### Function `merge_nonsource_file_records`
 
-Merge manual file records into the auto-discovered list.
+Merge non-source file records into the auto-discovered list.
 
 ### Function `read_folder_purpose`
 
@@ -156,7 +156,7 @@ Create missing .purpose files for tracked folders.
 
 ### Function `write_default_files`
 
-Write default configuration and manual file template.
+Write default configuration and non-source file template.
 
 ### Function `run_map`
 

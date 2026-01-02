@@ -26,7 +26,7 @@ module docstring with `Purpose:`.
 
 ## 5. Track non-source files
 
-Add summaries for non-source files in `.projectatlas/projectatlas-manual-files.toon`.
+Add summaries for non-source files in `.projectatlas/projectatlas-nonsource-files.toon` (agent-maintained input).
 
 ## 6. Generate the map
 

@@ -1,5 +1,5 @@
 version: 1
-generated_at: 2026-01-02T14:48:05Z
+generated_at: 2026-01-02T15:20:54Z
 file_hash: "03dc9c35a7aa6c15e985e682bbc7b0bcc2c912e90ebfa435947f46b512e94d51"
 folder_hash: "15ed59bb790e2c49f129e710d3cbf644bf18813fdf12d7b56f272e63aa017639"
 root: .
@@ -43,29 +43,29 @@ folders[16]{path,summary,source}:
   templates,Reusable agent templates and snippets.,purpose
   tests,Unit tests for ProjectAtlas.,purpose
 files[47]{path,summary,source}:
-  .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas,manual
-  .githooks/commit-msg,Git hook to enforce issue references in commits,manual
-  .github/pull_request_template.md,Pull request checklist for ProjectAtlas,manual
-  .github/workflows/03-auto-release.yml,ProjectAtlas auto release workflow,manual
-  .github/workflows/04-docs.yml,ProjectAtlas docs site workflow,manual
-  .github/workflows/ci.yml,ProjectAtlas CI workflow,manual
-  .github/workflows/release.yml,ProjectAtlas release workflow,manual
-  .gitignore,Ignored files for ProjectAtlas repository,manual
-  CODE_OF_CONDUCT.md,Community conduct expectations for ProjectAtlas,manual
-  CONTRIBUTING.md,Contribution policy for ProjectAtlas,manual
-  LICENSE,ProjectAtlas MIT license,manual
-  README.md,ProjectAtlas overview and usage guide,manual
-  SECURITY.md,Security contact information for ProjectAtlas,manual
-  docs/adoption.md,Adoption checklist for ProjectAtlas,manual
-  docs/agent-integration.md,Agent integration instructions for ProjectAtlas,manual
-  docs/api.md,Generated ProjectAtlas API documentation,manual
-  docs/concepts.md,Core concepts for ProjectAtlas usage,manual
-  docs/configuration.md,Configuration reference for ProjectAtlas,manual
-  docs/format.md,ProjectAtlas TOON schema reference,manual
-  docs/index.md,Documentation landing page for ProjectAtlas,manual
-  docs/workflow.md,ProjectAtlas workflow and troubleshooting guide,manual
-  mkdocs.yml,MkDocs site configuration for ProjectAtlas,manual
-  pyproject.toml,ProjectAtlas packaging and CLI metadata,manual
+  .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas,nonsource
+  .githooks/commit-msg,Git hook to enforce issue references in commits,nonsource
+  .github/pull_request_template.md,Pull request checklist for ProjectAtlas,nonsource
+  .github/workflows/03-auto-release.yml,ProjectAtlas auto release workflow,nonsource
+  .github/workflows/04-docs.yml,ProjectAtlas docs site workflow,nonsource
+  .github/workflows/ci.yml,ProjectAtlas CI workflow,nonsource
+  .github/workflows/release.yml,ProjectAtlas release workflow,nonsource
+  .gitignore,Ignored files for ProjectAtlas repository,nonsource
+  CODE_OF_CONDUCT.md,Community conduct expectations for ProjectAtlas,nonsource
+  CONTRIBUTING.md,Contribution policy for ProjectAtlas,nonsource
+  LICENSE,ProjectAtlas MIT license,nonsource
+  README.md,ProjectAtlas overview and usage guide,nonsource
+  SECURITY.md,Security contact information for ProjectAtlas,nonsource
+  docs/adoption.md,Adoption checklist for ProjectAtlas,nonsource
+  docs/agent-integration.md,Agent integration instructions for ProjectAtlas,nonsource
+  docs/api.md,Generated ProjectAtlas API documentation,nonsource
+  docs/concepts.md,Core concepts for ProjectAtlas usage,nonsource
+  docs/configuration.md,Configuration reference for ProjectAtlas,nonsource
+  docs/format.md,ProjectAtlas TOON schema reference,nonsource
+  docs/index.md,Documentation landing page for ProjectAtlas,nonsource
+  docs/workflow.md,ProjectAtlas workflow and troubleshooting guide,nonsource
+  mkdocs.yml,MkDocs site configuration for ProjectAtlas,nonsource
+  pyproject.toml,ProjectAtlas packaging and CLI metadata,nonsource
   scripts/check_commit_issue.py,Enforce GitHub issue references in commit messages.,header
   scripts/check_docstrings.py,Enforce module and public symbol docstrings for ProjectAtlas code.,header
   scripts/check_pr_issue_reference.py,Enforce issue references in pull request titles or bodies.,header
@@ -74,8 +74,8 @@ files[47]{path,summary,source}:
   scripts/next_version.py,Compute the next ProjectAtlas version and optionally update files.,header
   scripts/prepare_release.py,Bump the ProjectAtlas version and open a release PR.,header
   scripts/verify_version.py,Validate that ProjectAtlas versions match the requested tag.,header
-  skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas,manual
-  skills/codex/ProjectAtlas.md,Codex skill instructions for ProjectAtlas,manual
+  skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas,nonsource
+  skills/codex/ProjectAtlas.md,Codex skill instructions for ProjectAtlas,nonsource
   src/projectatlas/__init__.py,Define the ProjectAtlas package metadata.,header
   src/projectatlas/__main__.py,Allow `python -m projectatlas` to run the CLI.,header
   src/projectatlas/atlas.py,Scan repositories and build ProjectAtlas record entries.,header
@@ -83,7 +83,7 @@ files[47]{path,summary,source}:
   src/projectatlas/config.py,Load and normalize ProjectAtlas configuration from TOML.,header
   src/projectatlas/models.py,Define data models used across ProjectAtlas.,header
   src/projectatlas/output.py,Write ProjectAtlas snapshots to TOON or JSON outputs.,header
-  templates/AGENTS.md,Agent startup snippet for ProjectAtlas,manual
+  templates/AGENTS.md,Agent startup snippet for ProjectAtlas,nonsource
   tests/test_atlas.py,Validate basic ProjectAtlas scanning behavior.,header
   tests/test_commit_issue.py,Validate commit message issue reference checks.,header
   tests/test_docstrings.py,Validate the ProjectAtlas docstring enforcement script.,header

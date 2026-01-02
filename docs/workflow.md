@@ -78,7 +78,8 @@ projectatlas seed-purpose
 
 Use `--report-untracked` to list non-source files. Either:
 
-- add to the manual file list
+- add to the non-source file list (`.projectatlas/projectatlas-nonsource-files.toon`)
+  (agent-maintained input for non-source summaries)
 - add to allowlists/exclusions
 - move into an approved asset root
 

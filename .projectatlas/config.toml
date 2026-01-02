@@ -4,7 +4,7 @@
 #  */
 root = "."
 map_path = ".projectatlas/projectatlas.toon"
-manual_files_path = ".projectatlas/projectatlas-manual-files.toon"
+nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
 purpose_filename = ".purpose"
 
 [scan]

@@ -336,33 +336,33 @@ def build_file_records(
     return records, missing, invalid
 
 
-def read_manual_file_entries(
+def read_nonsource_file_entries(
     config: AtlasConfig,
 ) -> tuple[list[Record], list[str], dict[str, list[str]], list[str]]:
-    """Read manual file entries for non-source config files."""
-    if config.manual_files_path is None:
+    """Read non-source file list entries for files without headers."""
+    if config.nonsource_files_path is None:
         return [], [], {}, []
-    if not config.manual_files_path.exists():
+    if not config.nonsource_files_path.exists():
         return [], [], {}, [
-            f"manual file list missing: {config.manual_files_path}"
+            f"non-source file list missing: {config.nonsource_files_path}"
         ]
     entries: list[Record] = []
     missing: list[str] = []
     invalid: dict[str, list[str]] = {}
-    in_manual = False
-    for raw in config.manual_files_path.read_text(encoding="utf-8").splitlines():
+    in_nonsource = False
+    for raw in config.nonsource_files_path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line:
             continue
         if line.startswith("#") or line.startswith("//"):
             continue
-        if line.startswith("manual_files["):
-            in_manual = True
+        if line.startswith(("nonsource_files[", "manual_files[")):
+            in_nonsource = True
             continue
         if line.startswith("folders[") or line.startswith("files["):
-            in_manual = False
+            in_nonsource = False
             continue
-        if not in_manual or line.startswith("-") or ":" in line:
+        if not in_nonsource or line.startswith("-") or ":" in line:
             continue
         parts = [part.strip() for part in line.split(",", 1)]
         if len(parts) != 2:
@@ -379,16 +379,16 @@ def read_manual_file_entries(
             invalid[rel_posix] = issues
             entries.append(Record(rel_posix, "INVALID", "invalid"))
             continue
-        entries.append(Record(rel_posix, summary, "manual"))
+        entries.append(Record(rel_posix, summary, "nonsource"))
     return entries, missing, invalid, []
 
 
-def merge_manual_file_records(
-    records: Sequence[Record], manual: Sequence[Record]
+def merge_nonsource_file_records(
+    records: Sequence[Record], nonsource: Sequence[Record]
 ) -> list[Record]:
-    """Merge manual file records into the auto-discovered list."""
+    """Merge non-source file records into the auto-discovered list."""
     merged: dict[str, Record] = {record.path: record for record in records}
-    for record in manual:
+    for record in nonsource:
         if record.path not in merged:
             merged[record.path] = record
     return sorted(merged.values(), key=lambda entry: entry.path)

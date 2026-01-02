@@ -23,7 +23,7 @@ from projectatlas.atlas import (
     iter_repo_paths_with_untracked,
     list_existing_asset_roots,
     read_map_hashes,
-    read_manual_file_entries,
+    read_nonsource_file_entries,
     read_overview,
     summarize_extensions,
 )
@@ -46,11 +46,11 @@ def build_snapshot(config: AtlasConfig) -> AtlasSnapshot:
     """Build an AtlasSnapshot for the current repository."""
     folders, files = iter_repo_paths(config)
     file_records, _, _ = build_file_records(files, config)
-    manual_records, _, _, _ = read_manual_file_entries(config)
-    if manual_records:
-        from projectatlas.atlas import merge_manual_file_records
+    nonsource_records, _, _, _ = read_nonsource_file_entries(config)
+    if nonsource_records:
+        from projectatlas.atlas import merge_nonsource_file_records
 
-        file_records = merge_manual_file_records(file_records, manual_records)
+        file_records = merge_nonsource_file_records(file_records, nonsource_records)
     folder_records, _, _ = build_folder_records(folders, config)
     folder_summary_map = {record.path: record.summary for record in folder_records}
     folder_tree = build_folder_tree_with_summaries(
@@ -91,16 +91,16 @@ def seed_purpose_files(config: AtlasConfig) -> int:
 
 
 def write_default_files(config_root: Path) -> None:
-    """Write default configuration and manual file template."""
+    """Write default configuration and non-source file template."""
     project_dir = config_root / ".projectatlas"
     project_dir.mkdir(parents=True, exist_ok=True)
     config_path = project_dir / "config.toml"
     if not config_path.exists():
         config_path.write_text(default_config_text(), encoding="utf-8")
-    manual_path = project_dir / "projectatlas-manual-files.toon"
-    if not manual_path.exists():
-        manual_path.write_text(
-            "manual_files[]:\n"
+    nonsource_path = project_dir / "projectatlas-nonsource-files.toon"
+    if not nonsource_path.exists():
+        nonsource_path.write_text(
+            "nonsource_files[]:\n"
             "  # path,summary\n",
             encoding="utf-8",
         )
@@ -131,28 +131,28 @@ def run_lint(
     file_records, missing_headers, invalid_headers = build_file_records(
         files, config
     )
-    manual_records, manual_missing, manual_invalid, manual_errors = (
-        read_manual_file_entries(config)
+    nonsource_records, nonsource_missing, nonsource_invalid, nonsource_errors = (
+        read_nonsource_file_entries(config)
     )
-    manual_paths = {record.path for record in manual_records}
-    if manual_records:
-        from projectatlas.atlas import merge_manual_file_records
+    nonsource_paths = {record.path for record in nonsource_records}
+    if nonsource_records:
+        from projectatlas.atlas import merge_nonsource_file_records
 
-        file_records = merge_manual_file_records(file_records, manual_records)
+        file_records = merge_nonsource_file_records(file_records, nonsource_records)
     folder_records, missing_folders, invalid_folders = build_folder_records(
         folders, config
     )
 
     errors: list[str] = []
-    if manual_errors:
-        errors.append("Manual file list errors:")
-        errors.append(format_list(manual_errors))
-    if manual_missing:
-        errors.append("Missing manual file entries:")
-        errors.append(format_list(manual_missing))
-    if manual_invalid:
-        errors.append("Invalid manual file summaries:")
-        errors.append(format_list(manual_invalid))
+    if nonsource_errors:
+        errors.append("Non-source file list errors:")
+        errors.append(format_list(nonsource_errors))
+    if nonsource_missing:
+        errors.append("Missing non-source file entries:")
+        errors.append(format_list(nonsource_missing))
+    if nonsource_invalid:
+        errors.append("Invalid non-source file summaries:")
+        errors.append(format_list(nonsource_invalid))
     if missing_headers:
         errors.append("Missing Purpose headers:")
         errors.append(format_list(missing_headers))
@@ -188,7 +188,7 @@ def run_lint(
         for path in untracked_files:
             rel = path.relative_to(config.root)
             rel_posix = rel.as_posix()
-            if rel_posix in manual_paths:
+            if rel_posix in nonsource_paths:
                 allowed_untracked.append(path)
                 continue
             if is_asset_file(path, config) and not is_under_prefix(
