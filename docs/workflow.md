@@ -17,6 +17,7 @@ ProjectAtlas is designed to run locally and produce a deterministic map.
 
 - Every issue should carry a `type:*` label plus a `priority:*` and `status:*` label.
 - Use `status:backlog` for unscheduled work.
+- Any issue referenced by a PR must be assigned to the target release milestone (CI enforces this).
 
 ## Review expectations
 
