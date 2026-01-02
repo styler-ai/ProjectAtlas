@@ -127,7 +127,7 @@ python -m build --sdist --wheel
 
 ## Related projects
 
-- TOON format: `docs/format.md` (link the TOON GitHub spec here if you have one).
+- TOON format: https://github.com/toon-format/toon
 - code-index (deep code summaries / symbol extraction): https://github.com/johnhuang316/code-index-mcp
 
 If you do not use a deep indexing tool, ProjectAtlas still provides the atlas and lint gate, but you will need to
