@@ -1,9 +1,9 @@
 version: 1
-generated_at: 2026-01-02T08:53:03Z
-file_hash: "a4f53d4dbeb78dffb3a4a20829a32f5eeb6ab4fa72a4e3bbd6bb67b9d4b09759"
+generated_at: 2026-01-02T09:31:43Z
+file_hash: "03dc9c35a7aa6c15e985e682bbc7b0bcc2c912e90ebfa435947f46b512e94d51"
 folder_hash: "15ed59bb790e2c49f129e710d3cbf644bf18813fdf12d7b56f272e63aa017639"
 root: .
-overview: tracked_files=19 tracked_folders=16 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
+overview: tracked_files=21 tracked_folders=16 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
 source_extensions[]:
   - .cjs
   - .css
@@ -42,7 +42,7 @@ folders[16]{path,summary,source}:
   src/projectatlas,Core ProjectAtlas package implementation.,purpose
   templates,Reusable agent templates and snippets.,purpose
   tests,Unit tests for ProjectAtlas.,purpose
-files[45]{path,summary,source}:
+files[47]{path,summary,source}:
   .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas,manual
   .githooks/commit-msg,Git hook to enforce issue references in commits,manual
   .github/pull_request_template.md,Pull request checklist for ProjectAtlas,manual
@@ -72,6 +72,7 @@ files[45]{path,summary,source}:
   scripts/generate_api_docs.py,Generate Markdown API docs for ProjectAtlas modules.,header
   scripts/install_hooks.py,Install ProjectAtlas git hooks by setting core.hooksPath.,header
   scripts/next_version.py,Compute the next ProjectAtlas version and optionally update files.,header
+  scripts/prepare_release.py,Bump the ProjectAtlas version and open a release PR.,header
   scripts/verify_version.py,Validate that ProjectAtlas versions match the requested tag.,header
   skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas,manual
   skills/codex/ProjectAtlas.md,Codex skill instructions for ProjectAtlas,manual
@@ -88,6 +89,7 @@ files[45]{path,summary,source}:
   tests/test_docstrings.py,Validate the ProjectAtlas docstring enforcement script.,header
   tests/test_next_version.py,Validate ProjectAtlas version helper utilities.,header
   tests/test_pr_issue_reference.py,Validate pull request issue reference enforcement.,header
+  tests/test_prepare_release.py,Validate the release preparation helper.,header
 folder_summary_duplicates[]:
 file_summary_duplicates[]:
   - Codex skill instructions for ProjectAtlas :: .codex/skills/ProjectAtlas.md | skills/codex/ProjectAtlas.md
