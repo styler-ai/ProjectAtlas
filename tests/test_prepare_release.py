@@ -6,7 +6,11 @@ from __future__ import annotations
 
 import unittest
 
-from scripts.prepare_release import build_release_plan, normalize_issue
+from scripts.prepare_release import (
+    build_release_plan,
+    compute_release_version,
+    normalize_issue,
+)
 
 
 class PrepareReleaseTests(unittest.TestCase):
@@ -17,12 +21,12 @@ class PrepareReleaseTests(unittest.TestCase):
         self.assertEqual(normalize_issue("#42"), "#42")
 
     def test_build_release_plan(self) -> None:
+        release_version = compute_release_version("0.1.0.dev0", "patch")
         plan = build_release_plan(
-            current_version="0.1.0.dev0",
-            bump="patch",
+            release_version=release_version,
             issue="23",
             base_branch="main",
-            head_branch="dev",
+            head_branch="release/v0.1.0",
         )
         self.assertEqual(plan.version, "0.1.0")
         self.assertEqual(plan.issue, "#23")
@@ -30,14 +34,9 @@ class PrepareReleaseTests(unittest.TestCase):
         self.assertIn("v0.1.0", plan.pr_title)
         self.assertIn("Prepare v0.1.0", plan.pr_body)
 
-        plan_release = build_release_plan(
-            current_version="0.1.0",
-            bump="patch",
-            issue="23",
-            base_branch="main",
-            head_branch="dev",
-        )
-        self.assertEqual(plan_release.version, "0.1.1")
+    def test_compute_release_version(self) -> None:
+        self.assertEqual(compute_release_version("0.1.0.dev0", "patch"), "0.1.0")
+        self.assertEqual(compute_release_version("0.1.0", "patch"), "0.1.1")
 
 
 if __name__ == "__main__":
