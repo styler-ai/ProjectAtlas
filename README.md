@@ -108,7 +108,7 @@ python -m build --sdist --wheel
 Release flow:
 
 1. Merge feature branches into `dev`.
-2. Open a PR from `dev` to `main`.
+2. Run `python scripts/prepare_release.py --issue <NNN> --bump patch` to create a release branch and PR.
 3. Merge to `main` after CI is green.
 4. Auto-release runs on `main` pushes and creates a GitHub release if the version is not a `.dev` build.
 5. Use the manual Release workflow if you need to re-run tagging.
@@ -121,7 +121,7 @@ Release tags should match the package version (for example `v0.1.0.dev0`).
 Helper:
 
 ```bash
-python scripts/next_version.py --bump patch --apply
+python scripts/prepare_release.py --issue <NNN> --bump patch
 ```
 
 ## Output files
