@@ -60,8 +60,8 @@ Give your agent the repo URL (https://github.com/styler-ai/ProjectAtlas) and ask
 
 1. Install ProjectAtlas (`pip install -e .`).
 2. Run `projectatlas init --seed-purpose`.
-3. Update or add `.purpose` files and Purpose headers.
-4. Wire `projectatlas map` and `projectatlas lint` into local build steps.
+3. Add or update `.purpose` files and Purpose headers.
+4. Wire `projectatlas map` + `projectatlas lint` into local build steps.
 5. Paste the startup snippet into your `AGENTS.md`.
 
 ## Quickstart
@@ -130,29 +130,44 @@ Default outputs:
 - `.projectatlas/projectatlas-manual-files.toon`
 - `.projectatlas/projectatlas.toon`
 
-## Folder structure (after setup)
+## Folder structure (ProjectAtlas repo)
 
 ```
 .
-├─ .projectatlas/
-│  ├─ config.toml
-│  ├─ projectatlas-manual-files.toon
-│  └─ projectatlas.toon
-├─ .purpose
-├─ .codex/
-│  └─ skills/
-│     └─ ProjectAtlas.md
-├─ skills/
-│  ├─ codex/ProjectAtlas.md
-│  └─ claude/ProjectAtlas.md
-├─ scripts/
-│  ├─ install_hooks.py
-│  └─ check_commit_issue.py
-└─ templates/
-   └─ AGENTS.md
+|-- .projectatlas/
+|   |-- config.toml
+|   |-- projectatlas-manual-files.toon
+|   `-- projectatlas.toon
+|-- .codex/
+|   `-- skills/
+|       `-- ProjectAtlas.md
+|-- skills/
+|   |-- codex/ProjectAtlas.md
+|   `-- claude/ProjectAtlas.md
+|-- scripts/
+|   |-- install_hooks.py
+|   `-- check_commit_issue.py
+`-- templates/
+    `-- AGENTS.md
 ```
 
-Use this tree as a guide for where to place summaries, skills, and hook scripts.
+Use this tree when contributing to ProjectAtlas itself.
+
+## Folder structure (your repo after install)
+
+```
+your-repo/
+|-- .projectatlas/
+|   |-- config.toml
+|   |-- projectatlas-manual-files.toon
+|   `-- projectatlas.toon
+|-- .purpose
+`-- (your source and docs)
+```
+
+For Codex, copy `.codex/skills/ProjectAtlas.md` into your local Codex skills folder
+(for example `~/.codex/skills/ProjectAtlas.md`). For Claude, copy
+`skills/claude/ProjectAtlas.md` into your Claude skills location.
 
 ## Purpose headers
 
