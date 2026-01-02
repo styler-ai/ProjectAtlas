@@ -8,6 +8,7 @@ import unittest
 
 from scripts.prepare_release import (
     build_release_plan,
+    compute_post_release_version,
     compute_release_version,
     normalize_issue,
 )
@@ -37,6 +38,10 @@ class PrepareReleaseTests(unittest.TestCase):
     def test_compute_release_version(self) -> None:
         self.assertEqual(compute_release_version("0.1.0.dev0", "patch"), "0.1.0")
         self.assertEqual(compute_release_version("0.1.0", "patch"), "0.1.1")
+
+    def test_compute_post_release_version(self) -> None:
+        self.assertEqual(compute_post_release_version("0.1.0", "patch"), "0.1.1.dev0")
+        self.assertEqual(compute_post_release_version("1.2.0", "minor"), "1.3.0.dev0")
 
 
 if __name__ == "__main__":

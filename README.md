@@ -109,9 +109,10 @@ Release flow:
 
 1. Merge feature branches into `dev`.
 2. Run `python scripts/prepare_release.py --issue <NNN> --bump patch` to create a release branch and PR.
-3. Merge to `main` after CI is green.
-4. Auto-release runs on `main` pushes and creates a GitHub release if the version is not a `.dev` build.
-5. Use the manual Release workflow if you need to re-run tagging.
+3. Optional: add `--post-release` to open a dev PR that bumps to the next `.dev` version.
+4. Merge to `main` after CI is green.
+5. Auto-release runs on `main` pushes and creates a GitHub release if the version is not a `.dev` build.
+6. Use the manual Release workflow if you need to re-run tagging.
 
 ## Versioning
 
