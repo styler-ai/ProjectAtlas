@@ -11,4 +11,5 @@
 - 2026-01-03: Released v0.1.7 with language-agnostic Purpose header support (line/block comment styles), expanded default language coverage, updated docs/skills/config, and added unit tests (issue #101).
 
 ## Pending Work
+- Update GitHub rules to require Highlights in release notes (issue #108).
 
