@@ -8,12 +8,16 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
 purpose_filename = ".purpose"
 
 [scan]
-source_extensions = [".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".css", ".mjs", ".cjs", ".d.ts"]
+source_extensions = [".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".css", ".mjs", ".cjs", ".d.ts", ".java", ".kt", ".scala", ".cs", ".go", ".rs", ".rb", ".php", ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".swift", ".lua", ".sh", ".bash", ".zsh", ".ps1", ".psm1", ".psd1", ".sql"]
 exclude_dir_names = [".git", ".projectatlas", ".venv", "__pycache__", ".egg-info", "node_modules", "dist", "build"]
 exclude_dir_suffixes = [".egg-info"]
 exclude_path_prefixes = []
 non_source_path_prefixes = []
 max_scan_lines = 80
+
+[purpose]
+default_style = "javadoc"
+line_comment_prefixes = ["//", "#", "--", ";"]
 
 [summary_rules]
 ascii_only = true

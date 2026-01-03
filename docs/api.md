@@ -58,6 +58,10 @@ Check whether a file is considered an asset.
 
 List asset root prefixes that exist in the repo.
 
+### Function `strip_line_comment_prefix`
+
+Remove the first matching line-comment prefix and trim whitespace.
+
 ### Function `extract_purpose_from_lines`
 
 Extract the Purpose summary from a sequence of lines.
@@ -66,6 +70,10 @@ Extract the Purpose summary from a sequence of lines.
 
 Extract Purpose from a Javadoc-style header block.
 
+### Function `extract_block_comment_purpose`
+
+Extract Purpose from a block comment header.
+
 ### Function `extract_python_docstring_purpose`
 
 Extract Purpose from a Python module docstring.
@@ -73,6 +81,14 @@ Extract Purpose from a Python module docstring.
 ### Function `extract_vue_purpose`
 
 Extract Purpose from the first Vue <script> or <style> block.
+
+### Function `extract_line_comment_purpose`
+
+Extract Purpose from a line-comment header block.
+
+### Function `resolve_purpose_style`
+
+Resolve the Purpose style for a file extension.
 
 ### Function `extract_purpose_header`
 
@@ -191,6 +207,14 @@ Define the normalized configuration for ProjectAtlas.
 Locate the first ProjectAtlas config file under the root.
 
 ### Function `_as_set`
+
+_No docstring provided._
+
+### Function `_as_list`
+
+_No docstring provided._
+
+### Function `_as_map`
 
 _No docstring provided._
 
