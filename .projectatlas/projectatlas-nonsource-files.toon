@@ -16,6 +16,7 @@ nonsource_files[]:
   .github/workflows/04-docs.yml,ProjectAtlas docs site workflow
   .github/pull_request_template.md,Pull request checklist for ProjectAtlas
   .githooks/commit-msg,Git hook to enforce issue references in commits
+  .githooks/pre-push,Git hook to run full local checks before push
   .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas
   .codex/rules/memory/projectbrief.md,ProjectAtlas project brief
   .codex/rules/memory/productContext.md,ProjectAtlas product context

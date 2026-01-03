@@ -1,6 +1,6 @@
 version: 1
-generated_at: 2026-01-03T10:41:15Z
-file_hash: "8a40a3b91d6ae0b5455d8f10245aca044bf6c8ef91292d042e0f143c683204aa"
+generated_at: 2026-01-03T11:10:07Z
+file_hash: "c8af21a026e213ea58e58a1aad005d23f3179416eba9dd6b5731240f535a2ff8"
 folder_hash: "d8e554805feb298a8977e058a017b09ad7ddf7972e3155af1a8977070ac49d1f"
 root: .
 overview: tracked_files=22 tracked_folders=18 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
@@ -44,7 +44,7 @@ folders[18]{path,summary,source}:
   src/projectatlas,Core ProjectAtlas package implementation.,purpose
   templates,Reusable agent templates and snippets.,purpose
   tests,Unit tests for ProjectAtlas.,purpose
-files[55]{path,summary,source}:
+files[56]{path,summary,source}:
   .codex/rules/memory/activeContext.md,ProjectAtlas active context,nonsource
   .codex/rules/memory/productContext.md,ProjectAtlas product context,nonsource
   .codex/rules/memory/progress.md,ProjectAtlas progress log,nonsource
@@ -54,6 +54,7 @@ files[55]{path,summary,source}:
   .codex/rules/memory/techContext.md,ProjectAtlas tech context,nonsource
   .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas,nonsource
   .githooks/commit-msg,Git hook to enforce issue references in commits,nonsource
+  .githooks/pre-push,Git hook to run full local checks before push,nonsource
   .github/pull_request_template.md,Pull request checklist for ProjectAtlas,nonsource
   .github/workflows/03-auto-release.yml,ProjectAtlas auto release workflow,nonsource
   .github/workflows/04-docs.yml,ProjectAtlas docs site workflow,nonsource

@@ -12,6 +12,7 @@ ProjectAtlas is designed to run locally and produce a deterministic map.
 6. Open a PR that references the GitHub issue (CI requires `#NNN` in title or body).
 7. Commit map updates and any Purpose changes.
 8. Install git hooks with `python scripts/install_hooks.py` to enforce issue references in commit messages.
+   - The pre-push hook runs `python scripts/check_all.py` to validate map/lint/tests/build.
 
 ## One-command local verification
 

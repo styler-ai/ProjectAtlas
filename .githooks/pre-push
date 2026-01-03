@@ -1,0 +1,6 @@
+#!/bin/sh
+# Purpose: Run the full local ProjectAtlas check suite before pushing.
+
+set -e
+
+python scripts/check_all.py
