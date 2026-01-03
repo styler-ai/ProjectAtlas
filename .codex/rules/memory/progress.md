@@ -2,6 +2,7 @@
 
 ## Completed
 - 2026-01-03: Added auto-detect language extensions for `projectatlas init`, updated docs/skills/tests, and removed dead config text from `detect_purpose_styles` (issue #111).
+- 2026-01-03: Released v0.1.8 and published Highlights in the GitHub Release; merged post-release bump to v0.1.9.dev0 (issue #114).
 - 2026-01-02: Added ProjectAtlas Memory Bank files under `.codex/rules/memory` and tracked them in the non-source list.
 - 2026-01-02: Switched auto-release to `--generate-notes` and enforced issue milestones in PR checks (CI).
 - 2026-01-02: Released v0.1.4 with updated release notes linking PRs/issues.
@@ -13,5 +14,5 @@
 - 2026-01-03: Required Highlights in release notes via GitHub rules updates (issue #108).
 
 ## Pending Work
-- Release v0.1.8 after confirming CI on the auto-detect changes (issue #111).
+- Evaluate and implement the config-inspection CLI enhancement (issue #109).
 
