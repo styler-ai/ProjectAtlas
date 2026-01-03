@@ -301,6 +301,6 @@ def default_config_text() -> str:
             "allowlist_dir_prefixes = []",
             "allowlist_files = []",
             "asset_allowed_prefixes = []",
-            "asset_extensions = [\".png\", \".jpg\", \".jpeg\", \".svg\", \".gif\", \".webp\", \".ico\", \".pdf\"]",
+            "asset_extensions = [\".png\", \".jpg\", \".jpeg\", \".svg\", \".gif\", \".webp\", \".ico\", \".pdf\", \".ttf\", \".woff\", \".woff2\"]",
         ]
     ) + "\n"
