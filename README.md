@@ -121,6 +121,12 @@ Assign issues you are actively working on to the target release milestone; CI en
 Run tests, docs, and build artifacts locally:
 
 ```bash
+python scripts/check_all.py
+```
+
+Or run the steps individually:
+
+```bash
 python -m unittest discover -s tests
 python scripts/check_docstrings.py
 python scripts/generate_api_docs.py
