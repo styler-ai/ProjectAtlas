@@ -16,6 +16,7 @@ Purpose: Document the ProjectAtlas GitHub workflow so agents follow the same rel
 - Use `python scripts/prepare_release.py --issue <NNN> --bump patch` to prepare a release from `dev`.
 - Merge the release PR into `main` after CI is green; auto-release publishes the tag with generated notes.
 - The post-release PR bumps `dev` to the next `.dev` version.
+- Ensure the GitHub Release notes include a **Highlights** section; edit the release if the auto-generated notes omit it.
 
 ## Local verification
 - Run `python scripts/check_all.py` before pushing (pre-push hook enforces this).
