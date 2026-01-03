@@ -8,7 +8,7 @@
 - 2026-01-03: Added pre-push hook to run the full check suite before pushes and documented it.
 - 2026-01-03: Released v0.1.5 (milestone closed, tag published, dev bumped to v0.1.6.dev0).
 - 2026-01-03: Aligned config template and configuration docs with the default asset extensions list (fonts included); full check suite passed.
+- 2026-01-03: Released v0.1.7 with language-agnostic Purpose header support (line/block comment styles), expanded default language coverage, updated docs/skills/config, and added unit tests (issue #101).
 
 ## Pending Work
-- Deliver language-agnostic Purpose header support and release v0.1.7-00 (issue #101).
 
