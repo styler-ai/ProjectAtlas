@@ -35,6 +35,7 @@ nonsource_files[]:
   skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas
   templates/AGENTS.md,Agent startup snippet for ProjectAtlas
   mkdocs.yml,MkDocs site configuration for ProjectAtlas
+  scripts/check_all.py,Run the full local ProjectAtlas verification suite
   scripts/check_docstrings.py,Docstring enforcement for ProjectAtlas code
   scripts/check_commit_issue.py,Commit message issue reference enforcement
   scripts/generate_api_docs.py,Generate API documentation for ProjectAtlas

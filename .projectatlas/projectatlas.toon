@@ -1,9 +1,9 @@
 version: 1
-generated_at: 2026-01-02T20:05:05Z
-file_hash: "9f0bec1fb84ca90c6259672f425602c9e93e07b5c4d6d3ab301a22033e1ea444"
+generated_at: 2026-01-03T10:41:15Z
+file_hash: "8a40a3b91d6ae0b5455d8f10245aca044bf6c8ef91292d042e0f143c683204aa"
 folder_hash: "d8e554805feb298a8977e058a017b09ad7ddf7972e3155af1a8977070ac49d1f"
 root: .
-overview: tracked_files=21 tracked_folders=18 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
+overview: tracked_files=22 tracked_folders=18 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
 source_extensions[]:
   - .cjs
   - .css
@@ -44,7 +44,7 @@ folders[18]{path,summary,source}:
   src/projectatlas,Core ProjectAtlas package implementation.,purpose
   templates,Reusable agent templates and snippets.,purpose
   tests,Unit tests for ProjectAtlas.,purpose
-files[54]{path,summary,source}:
+files[55]{path,summary,source}:
   .codex/rules/memory/activeContext.md,ProjectAtlas active context,nonsource
   .codex/rules/memory/productContext.md,ProjectAtlas product context,nonsource
   .codex/rules/memory/progress.md,ProjectAtlas progress log,nonsource
@@ -75,6 +75,7 @@ files[54]{path,summary,source}:
   docs/workflow.md,ProjectAtlas workflow and troubleshooting guide,nonsource
   mkdocs.yml,MkDocs site configuration for ProjectAtlas,nonsource
   pyproject.toml,ProjectAtlas packaging and CLI metadata,nonsource
+  scripts/check_all.py,Run the full local ProjectAtlas verification workflow in one command.,header
   scripts/check_commit_issue.py,Enforce GitHub issue references in commit messages.,header
   scripts/check_docstrings.py,Enforce module and public symbol docstrings for ProjectAtlas code.,header
   scripts/check_pr_issue_reference.py,Enforce issue references in pull request titles or bodies.,header
