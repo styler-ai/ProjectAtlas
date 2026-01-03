@@ -2,4 +2,4 @@
 
 Purpose: Capture current focus areas and any in-flight tasks for ProjectAtlas.
 
-- Keep empty unless actively working on a specific change.
+- Align configuration docs and templates with the default asset extensions list (issue #98).

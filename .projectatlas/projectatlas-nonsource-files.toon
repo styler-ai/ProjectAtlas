@@ -23,6 +23,8 @@ nonsource_files[]:
   .codex/rules/memory/activeContext.md,ProjectAtlas active context
   .codex/rules/memory/systemPatterns.md,ProjectAtlas system patterns
   .codex/rules/memory/techContext.md,ProjectAtlas tech context
+  .codex/rules/projectatlas/.purpose,ProjectAtlas rule folder purpose
+  .codex/rules/projectatlas/github-rules.md,ProjectAtlas GitHub workflow rules
   .codex/rules/memory/progress.md,ProjectAtlas progress log
   .codex/rules/memory/ruleIndex.md,ProjectAtlas memory bank index
   docs/agent-integration.md,Agent integration instructions for ProjectAtlas
