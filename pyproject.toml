@@ -1,6 +1,6 @@
 [project]
 name = "projectatlas"
-version = "0.1.4"
+version = "0.1.5"
 description = "Agent-first project map + health index — one-line purpose for every file and folder."
 readme = "README.md"
 requires-python = ">=3.11"

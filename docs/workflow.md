@@ -12,11 +12,22 @@ ProjectAtlas is designed to run locally and produce a deterministic map.
 6. Open a PR that references the GitHub issue (CI requires `#NNN` in title or body).
 7. Commit map updates and any Purpose changes.
 8. Install git hooks with `python scripts/install_hooks.py` to enforce issue references in commit messages.
+   - The pre-push hook runs `python scripts/check_all.py` to validate map/lint/tests/build.
+
+## One-command local verification
+
+Run the full local check suite with:
+
+```bash
+python scripts/check_all.py
+```
 
 ## Issue hygiene
 
 - Every issue should carry a `type:*` label plus a `priority:*` and `status:*` label.
 - Use `status:backlog` for unscheduled work.
+- Any issue referenced by a PR must be assigned to the target release milestone (CI enforces this).
+- Keep public issues/PRs/release notes free of private or internal-only details (release notes are generated from PR text).
 
 ## Review expectations
 
@@ -39,6 +50,7 @@ ProjectAtlas is designed to run locally and produce a deterministic map.
 - If `dev` is behind `main`, the script will stop unless you pass `--allow-base-divergence`.
 - Add `--post-release` to open a dev PR that bumps to the next `.dev` version.
 - Pushes to `main` create a GitHub release when the version is not a `.dev` build.
+- The auto-release workflow generates GitHub release notes from merged PRs.
 
 ## CI behavior
 

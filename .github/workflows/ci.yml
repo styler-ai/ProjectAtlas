@@ -29,6 +29,9 @@ jobs:
 
       - name: Issue reference check
         if: github.event_name == 'pull_request'
+        env:
+          PROJECTATLAS_REQUIRE_ISSUE_MILESTONE: "1"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python scripts/check_pr_issue_reference.py
 
       - name: Lint atlas

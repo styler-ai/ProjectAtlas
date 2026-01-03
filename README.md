@@ -116,8 +116,16 @@ python scripts/install_hooks.py
 ```
 
 Issue hygiene: label every issue with `type:*`, `priority:*`, and `status:*`.
+The pre-push hook runs `python scripts/check_all.py` to validate the full local suite before pushes.
+Assign issues you are actively working on to the target release milestone; CI enforces that referenced issues have a milestone.
 
 Run tests, docs, and build artifacts locally:
+
+```bash
+python scripts/check_all.py
+```
+
+Or run the steps individually:
 
 ```bash
 python -m unittest discover -s tests

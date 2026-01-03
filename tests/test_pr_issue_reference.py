@@ -12,7 +12,9 @@ from pathlib import Path
 
 from scripts.check_pr_issue_reference import (
     extract_pr_text,
+    extract_issue_numbers,
     has_issue_reference,
+    issue_has_milestone,
     main,
 )
 
@@ -30,6 +32,18 @@ class PullRequestIssueReferenceTests(unittest.TestCase):
     def test_has_issue_reference(self) -> None:
         self.assertTrue(has_issue_reference("Handles #9."))
         self.assertFalse(has_issue_reference("No issue here."))
+
+    def test_extract_issue_numbers(self) -> None:
+        self.assertEqual(
+            extract_issue_numbers("Fixes #12 and refs #7."),
+            ["12", "7"],
+        )
+        self.assertEqual(extract_issue_numbers("No refs."), [])
+
+    def test_issue_has_milestone(self) -> None:
+        self.assertFalse(issue_has_milestone({"milestone": None}))
+        self.assertFalse(issue_has_milestone({}))
+        self.assertTrue(issue_has_milestone({"milestone": {"title": "v0.1.5"}}))
 
     def test_main_requires_issue_reference(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

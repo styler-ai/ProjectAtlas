@@ -16,7 +16,15 @@ nonsource_files[]:
   .github/workflows/04-docs.yml,ProjectAtlas docs site workflow
   .github/pull_request_template.md,Pull request checklist for ProjectAtlas
   .githooks/commit-msg,Git hook to enforce issue references in commits
+  .githooks/pre-push,Git hook to run full local checks before push
   .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas
+  .codex/rules/memory/projectbrief.md,ProjectAtlas project brief
+  .codex/rules/memory/productContext.md,ProjectAtlas product context
+  .codex/rules/memory/activeContext.md,ProjectAtlas active context
+  .codex/rules/memory/systemPatterns.md,ProjectAtlas system patterns
+  .codex/rules/memory/techContext.md,ProjectAtlas tech context
+  .codex/rules/memory/progress.md,ProjectAtlas progress log
+  .codex/rules/memory/ruleIndex.md,ProjectAtlas memory bank index
   docs/agent-integration.md,Agent integration instructions for ProjectAtlas
   docs/adoption.md,Adoption checklist for ProjectAtlas
   docs/index.md,Documentation landing page for ProjectAtlas
@@ -28,6 +36,7 @@ nonsource_files[]:
   skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas
   templates/AGENTS.md,Agent startup snippet for ProjectAtlas
   mkdocs.yml,MkDocs site configuration for ProjectAtlas
+  scripts/check_all.py,Run the full local ProjectAtlas verification suite
   scripts/check_docstrings.py,Docstring enforcement for ProjectAtlas code
   scripts/check_commit_issue.py,Commit message issue reference enforcement
   scripts/generate_api_docs.py,Generate API documentation for ProjectAtlas

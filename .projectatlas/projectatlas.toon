@@ -1,9 +1,9 @@
 version: 1
-generated_at: 2026-01-02T18:25:09Z
-file_hash: "03dc9c35a7aa6c15e985e682bbc7b0bcc2c912e90ebfa435947f46b512e94d51"
-folder_hash: "15ed59bb790e2c49f129e710d3cbf644bf18813fdf12d7b56f272e63aa017639"
+generated_at: 2026-01-03T11:10:07Z
+file_hash: "c8af21a026e213ea58e58a1aad005d23f3179416eba9dd6b5731240f535a2ff8"
+folder_hash: "d8e554805feb298a8977e058a017b09ad7ddf7972e3155af1a8977070ac49d1f"
 root: .
-overview: tracked_files=21 tracked_folders=16 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
+overview: tracked_files=22 tracked_folders=18 source_extensions=10 exclude_dir_names=8 exclude_path_prefixes=0
 source_extensions[]:
   - .cjs
   - .css
@@ -25,9 +25,11 @@ exclude_dir_names[]:
   - dist
   - node_modules
 exclude_path_prefixes[]:
-folders[16]{path,summary,source}:
+folders[18]{path,summary,source}:
   .,ProjectAtlas repository root.,purpose
   .codex,Codex configuration and skills for ProjectAtlas.,purpose
+  .codex/rules,ProjectAtlas rules for Codex usage.,purpose
+  .codex/rules/memory,ProjectAtlas Memory Bank files.,purpose
   .codex/skills,Codex skill copies for ProjectAtlas adoption.,purpose
   .githooks,Git hook scripts for ProjectAtlas commits.,purpose
   .github,ProjectAtlas GitHub metadata and workflows.,purpose
@@ -42,9 +44,17 @@ folders[16]{path,summary,source}:
   src/projectatlas,Core ProjectAtlas package implementation.,purpose
   templates,Reusable agent templates and snippets.,purpose
   tests,Unit tests for ProjectAtlas.,purpose
-files[47]{path,summary,source}:
+files[56]{path,summary,source}:
+  .codex/rules/memory/activeContext.md,ProjectAtlas active context,nonsource
+  .codex/rules/memory/productContext.md,ProjectAtlas product context,nonsource
+  .codex/rules/memory/progress.md,ProjectAtlas progress log,nonsource
+  .codex/rules/memory/projectbrief.md,ProjectAtlas project brief,nonsource
+  .codex/rules/memory/ruleIndex.md,ProjectAtlas memory bank index,nonsource
+  .codex/rules/memory/systemPatterns.md,ProjectAtlas system patterns,nonsource
+  .codex/rules/memory/techContext.md,ProjectAtlas tech context,nonsource
   .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas,nonsource
   .githooks/commit-msg,Git hook to enforce issue references in commits,nonsource
+  .githooks/pre-push,Git hook to run full local checks before push,nonsource
   .github/pull_request_template.md,Pull request checklist for ProjectAtlas,nonsource
   .github/workflows/03-auto-release.yml,ProjectAtlas auto release workflow,nonsource
   .github/workflows/04-docs.yml,ProjectAtlas docs site workflow,nonsource
@@ -66,6 +76,7 @@ files[47]{path,summary,source}:
   docs/workflow.md,ProjectAtlas workflow and troubleshooting guide,nonsource
   mkdocs.yml,MkDocs site configuration for ProjectAtlas,nonsource
   pyproject.toml,ProjectAtlas packaging and CLI metadata,nonsource
+  scripts/check_all.py,Run the full local ProjectAtlas verification workflow in one command.,header
   scripts/check_commit_issue.py,Enforce GitHub issue references in commit messages.,header
   scripts/check_docstrings.py,Enforce module and public symbol docstrings for ProjectAtlas code.,header
   scripts/check_pr_issue_reference.py,Enforce issue references in pull request titles or bodies.,header
@@ -96,6 +107,8 @@ file_summary_duplicates[]:
 folder_tree[]:
   - . - ProjectAtlas repository root.
   - .codex/ - Codex configuration and skills for ProjectAtlas.
+  -   rules/ - ProjectAtlas rules for Codex usage.
+  -     memory/ - ProjectAtlas Memory Bank files.
   -   skills/ - Codex skill copies for ProjectAtlas adoption.
   - .githooks/ - Git hook scripts for ProjectAtlas commits.
   - .github/ - ProjectAtlas GitHub metadata and workflows.
