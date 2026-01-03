@@ -6,7 +6,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
+
+import os
 
 import tomllib
 
@@ -365,7 +367,99 @@ def load_config(config_path: Path | None, root: Path | None = None) -> AtlasConf
 
 
 def default_config_text() -> str:
-    """Return a default config.toml payload."""
+    """Return a config.toml payload for the provided settings."""
+    return build_config_text()
+
+
+def build_config_text(
+    source_extensions: Iterable[str] | None = None,
+    purpose_styles: dict[str, str] | None = None,
+    default_style: str | None = None,
+    line_comment_prefixes: Iterable[str] | None = None,
+) -> str:
+    """Build a config.toml payload from the supplied settings."""
+    extensions = sorted(source_extensions or DEFAULT_SOURCE_EXTENSIONS)
+    style_map = purpose_styles or {}
+    default_style = default_style or DEFAULT_PURPOSE_DEFAULT_STYLE
+    prefixes = list(line_comment_prefixes or DEFAULT_LINE_COMMENT_PREFIXES)
+
+    def format_list(values: Iterable[str]) -> str:
+        return "[" + ", ".join(f"\"{value}\"" for value in values) + "]"
+
+    lines = [
+        "[project]",
+        'root = "."',
+        'map_path = ".projectatlas/projectatlas.toon"',
+        'nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"',
+        'purpose_filename = ".purpose"',
+        "",
+        "[scan]",
+        f"source_extensions = {format_list(extensions)}",
+        "exclude_dir_names = [\".git\", \".projectatlas\", \".venv\", \"__pycache__\", \".egg-info\", \"node_modules\", \"dist\", \"build\"]",
+        "exclude_dir_suffixes = [\".egg-info\"]",
+        "exclude_path_prefixes = []",
+        "non_source_path_prefixes = []",
+        "max_scan_lines = 80",
+        "",
+        "[purpose]",
+        f"default_style = \"{default_style}\"",
+        f"line_comment_prefixes = {format_list(prefixes)}",
+    ]
+    if style_map:
+        lines.append("")
+        lines.append("[purpose.styles_by_extension]")
+        for ext, style in sorted(style_map.items()):
+            lines.append(f"\"{ext}\" = \"{style}\"")
+    else:
+        lines.append("# styles_by_extension = { \".go\" = \"line-comment\" }")
+    lines.extend(
+        [
+            "",
+            "[summary_rules]",
+            "ascii_only = true",
+            "no_commas = true",
+            "max_length = 140",
+            "",
+            "[untracked]",
+            "allowed_filenames = [\".purpose\"]",
+            "allowlist_dir_prefixes = []",
+            "allowlist_files = []",
+            "asset_allowed_prefixes = []",
+            f"asset_extensions = {format_list(sorted(DEFAULT_ASSET_EXTENSIONS))}",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def detect_language_extensions(root: Path) -> set[str]:
+    """Detect source extensions in a repo using the default language list."""
+    detected: set[str] = set()
+    for root_dir, dirnames, filenames in os.walk(root):
+        root_dir_path = Path(root_dir)
+        rel_root = root_dir_path.relative_to(root)
+        if rel_root != Path(".") and any(
+            part in DEFAULT_EXCLUDE_DIR_NAMES for part in rel_root.parts
+        ):
+            dirnames[:] = []
+            continue
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name not in DEFAULT_EXCLUDE_DIR_NAMES
+            and not any(name.endswith(suffix) for suffix in DEFAULT_EXCLUDE_DIR_SUFFIXES)
+        ]
+        for name in filenames:
+            ext = ".d.ts" if name.endswith(".d.ts") else Path(name).suffix.lower()
+            if not ext:
+                continue
+            if ext in DEFAULT_SOURCE_EXTENSIONS:
+                detected.add(ext)
+    return detected
+
+
+def detect_purpose_styles(extensions: Iterable[str]) -> dict[str, str]:
+    """Return a Purpose style map for detected extensions."""
+    return {ext: DEFAULT_PURPOSE_STYLES[ext] for ext in extensions if ext in DEFAULT_PURPOSE_STYLES}
     return "\n".join(
         [
             "[project]",

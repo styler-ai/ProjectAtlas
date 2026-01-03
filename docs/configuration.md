@@ -35,6 +35,9 @@ asset_allowed_prefixes = []
 asset_extensions = [".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".ico", ".pdf", ".ttf", ".woff", ".woff2"]
 ```
 
+`projectatlas init` auto-detects repo languages and writes the config with the detected extensions by default.
+Pass `--no-detect-languages` to keep the static template.
+
 ### Purpose styles
 
 - `purpose.default_style` controls the fallback header style (`javadoc`, `block-comment`, or `line-comment`).
