@@ -27,7 +27,15 @@ from projectatlas.atlas import (
     read_overview,
     summarize_extensions,
 )
-from projectatlas.config import AtlasConfig, default_config_text, load_config
+from projectatlas.config import (
+    AtlasConfig,
+    build_config_text,
+    detect_language_extensions,
+    detect_purpose_styles,
+    default_config_text,
+    load_config,
+    DEFAULT_SOURCE_EXTENSIONS,
+)
 from projectatlas.models import AtlasSnapshot
 from projectatlas.output import write_json, write_toon
 
@@ -90,13 +98,23 @@ def seed_purpose_files(config: AtlasConfig) -> int:
     return 0
 
 
-def write_default_files(config_root: Path) -> None:
+def write_default_files(config_root: Path, detect_languages: bool) -> None:
     """Write default configuration and non-source file template."""
     project_dir = config_root / ".projectatlas"
     project_dir.mkdir(parents=True, exist_ok=True)
     config_path = project_dir / "config.toml"
     if not config_path.exists():
-        config_path.write_text(default_config_text(), encoding="utf-8")
+        if detect_languages:
+            detected = detect_language_extensions(config_root)
+            extensions = sorted(detected or DEFAULT_SOURCE_EXTENSIONS)
+            purpose_styles = detect_purpose_styles(extensions)
+            config_text = build_config_text(
+                source_extensions=extensions,
+                purpose_styles=purpose_styles,
+            )
+        else:
+            config_text = default_config_text()
+        config_path.write_text(config_text, encoding="utf-8")
     nonsource_path = project_dir / "projectatlas-nonsource-files.toon"
     if not nonsource_path.exists():
         nonsource_path.write_text(
@@ -294,6 +312,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Create missing .purpose files after init",
     )
+    init_cmd.add_argument(
+        "--detect-languages",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Detect repo languages and seed config source extensions + purpose styles",
+    )
 
     map_cmd = subparsers.add_parser("map")
     map_cmd.add_argument(
@@ -323,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(args.config)
 
     if args.command == "init":
-        write_default_files(config.root)
+        write_default_files(config.root, detect_languages=args.detect_languages)
         if args.seed_purpose:
             return seed_purpose_files(config)
         return 0

@@ -1,9 +1,9 @@
 version: 1
-generated_at: 2026-01-03T20:27:54Z
-file_hash: "185b949899e28526aff43bbf4e152332f30426d621fd1e9e2163b8a7417ff0a5"
+generated_at: 2026-01-03T22:09:55Z
+file_hash: "455f4a857c2ed8f563252d606b94d412823d7f62cb934f50f963621a87c8d7fd"
 folder_hash: "103200be353e1ea8bf0e41456d3c8bb3727a67ea7a32a7b621a9f63a427bd6a7"
 root: .
-overview: tracked_files=22 tracked_folders=19 source_extensions=33 exclude_dir_names=8 exclude_path_prefixes=0
+overview: tracked_files=23 tracked_folders=19 source_extensions=33 exclude_dir_names=8 exclude_path_prefixes=0
 source_extensions[]:
   - .bash
   - .c
@@ -68,7 +68,7 @@ folders[19]{path,summary,source}:
   src/projectatlas,Core ProjectAtlas package implementation.,purpose
   templates,Reusable agent templates and snippets.,purpose
   tests,Unit tests for ProjectAtlas.,purpose
-files[58]{path,summary,source}:
+files[59]{path,summary,source}:
   .codex/rules/memory/activeContext.md,ProjectAtlas active context,nonsource
   .codex/rules/memory/productContext.md,ProjectAtlas product context,nonsource
   .codex/rules/memory/progress.md,ProjectAtlas progress log,nonsource
@@ -124,6 +124,7 @@ files[58]{path,summary,source}:
   tests/test_atlas.py,Validate basic ProjectAtlas scanning behavior.,header
   tests/test_commit_issue.py,Validate commit message issue reference checks.,header
   tests/test_docstrings.py,Validate the ProjectAtlas docstring enforcement script.,header
+  tests/test_language_detection.py,Validate automatic language detection for config generation.,header
   tests/test_next_version.py,Validate ProjectAtlas version helper utilities.,header
   tests/test_pr_issue_reference.py,Validate pull request issue reference enforcement.,header
   tests/test_prepare_release.py,Validate the release preparation helper.,header

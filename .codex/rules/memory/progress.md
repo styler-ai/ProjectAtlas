@@ -1,6 +1,7 @@
 # Progress Log
 
 ## Completed
+- 2026-01-03: Added auto-detect language extensions for `projectatlas init`, updated docs/skills/tests, and removed dead config text from `detect_purpose_styles` (issue #111).
 - 2026-01-02: Added ProjectAtlas Memory Bank files under `.codex/rules/memory` and tracked them in the non-source list.
 - 2026-01-02: Switched auto-release to `--generate-notes` and enforced issue milestones in PR checks (CI).
 - 2026-01-02: Released v0.1.4 with updated release notes linking PRs/issues.
@@ -8,7 +9,9 @@
 - 2026-01-03: Added pre-push hook to run the full check suite before pushes and documented it.
 - 2026-01-03: Released v0.1.5 (milestone closed, tag published, dev bumped to v0.1.6.dev0).
 - 2026-01-03: Aligned config template and configuration docs with the default asset extensions list (fonts included); full check suite passed.
+- 2026-01-03: Released v0.1.7 with language-agnostic Purpose header support (line/block comment styles), expanded default language coverage, updated docs/skills/config, and added unit tests (issue #101).
+- 2026-01-03: Required Highlights in release notes via GitHub rules updates (issue #108).
 
 ## Pending Work
-- Deliver language-agnostic Purpose header support and release v0.1.7-00 (issue #101).
+- Release v0.1.8 after confirming CI on the auto-detect changes (issue #111).
 

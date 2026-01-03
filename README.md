@@ -110,6 +110,9 @@ projectatlas map
 projectatlas lint --strict-folders --report-untracked
 ```
 
+`projectatlas init` auto-detects repo languages and seeds the config with the detected extensions.
+Use `--no-detect-languages` if you want the static template instead.
+
 Install git hooks (enforces issue references in commit messages):
 
 ```bash
