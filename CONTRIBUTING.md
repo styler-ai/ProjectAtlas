@@ -16,3 +16,4 @@ If you spot a bug or have a suggestion, please open an issue with clear reproduc
 - Install git hooks with `python scripts/install_hooks.py` so commits require issue references.
 - Apply `type:*`, `priority:*`, and `status:*` labels to every issue.
 - Keep public issues/PRs/release notes free of private or internal-only details.
+- The pre-push hook runs `python scripts/check_all.py`; install the `build` module first.
