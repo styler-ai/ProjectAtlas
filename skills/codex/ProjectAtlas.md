@@ -29,7 +29,7 @@ files. ProjectAtlas is the layer above code-index tools.
 1. Install locally: `pip install -e .`
 2. Initialize: `projectatlas init --seed-purpose`
 3. Fill each `.purpose` file with a one-line summary (ASCII, no commas).
-4. Add Purpose headers to every tracked source file.
+4. Add Purpose headers to every tracked source file (comment style per extension; see `purpose.styles_by_extension`).
 5. Add non-source files to `.projectatlas/projectatlas-nonsource-files.toon`.
 6. Run `projectatlas map` to generate `.projectatlas/projectatlas.toon`.
 7. Run `projectatlas lint --strict-folders --report-untracked` and fix issues.

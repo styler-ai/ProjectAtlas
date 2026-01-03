@@ -25,6 +25,29 @@ DEFAULT_SOURCE_EXTENSIONS = {
     ".cjs",
     ".d.ts",
     ".py",
+    ".java",
+    ".kt",
+    ".scala",
+    ".cs",
+    ".go",
+    ".rs",
+    ".rb",
+    ".php",
+    ".c",
+    ".h",
+    ".cpp",
+    ".hpp",
+    ".cc",
+    ".cxx",
+    ".swift",
+    ".lua",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".ps1",
+    ".psm1",
+    ".psd1",
+    ".sql",
 }
 DEFAULT_EXCLUDE_DIR_NAMES = {
     ".cache",
@@ -72,6 +95,35 @@ DEFAULT_MAX_SCAN_LINES = 80
 DEFAULT_SUMMARY_MAX_LENGTH = 140
 DEFAULT_SUMMARY_ASCII_ONLY = True
 DEFAULT_SUMMARY_NO_COMMAS = True
+DEFAULT_PURPOSE_DEFAULT_STYLE = "javadoc"
+DEFAULT_LINE_COMMENT_PREFIXES = ("//", "#", "--", ";")
+DEFAULT_PURPOSE_STYLES = {
+    ".py": "python-docstring",
+    ".vue": "vue-block",
+    ".go": "line-comment",
+    ".rs": "line-comment",
+    ".rb": "line-comment",
+    ".sh": "line-comment",
+    ".bash": "line-comment",
+    ".zsh": "line-comment",
+    ".ps1": "line-comment",
+    ".psm1": "line-comment",
+    ".psd1": "line-comment",
+    ".lua": "line-comment",
+    ".sql": "line-comment",
+    ".cs": "line-comment",
+    ".swift": "line-comment",
+    ".c": "block-comment",
+    ".h": "block-comment",
+    ".cpp": "block-comment",
+    ".hpp": "block-comment",
+    ".cc": "block-comment",
+    ".cxx": "block-comment",
+    ".php": "block-comment",
+    ".java": "javadoc",
+    ".kt": "javadoc",
+    ".scala": "javadoc",
+}
 
 
 class ConfigError(ValueError):
@@ -100,6 +152,9 @@ class AtlasConfig:
     summary_max_length: int
     summary_ascii_only: bool
     summary_no_commas: bool
+    purpose_styles: dict[str, str]
+    purpose_default_style: str
+    line_comment_prefixes: tuple[str, ...]
 
 
 def find_config_path(root: Path) -> Path | None:
@@ -120,6 +175,22 @@ def _as_set(raw: Any, field: str) -> set[str]:
     if not isinstance(raw, list):
         raise ConfigError(f"{field} must be a list")
     return {str(item) for item in raw}
+
+
+def _as_list(raw: Any, field: str) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ConfigError(f"{field} must be a list")
+    return [str(item) for item in raw]
+
+
+def _as_map(raw: Any, field: str) -> dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{field} must be a table")
+    return {str(key): str(value) for key, value in raw.items()}
 
 
 def _as_path(raw: Any, field: str, base: Path) -> Path:
@@ -146,6 +217,7 @@ def load_config(config_path: Path | None, root: Path | None = None) -> AtlasConf
     scan = data.get("scan", {})
     summary = data.get("summary_rules", {})
     untracked = data.get("untracked", {})
+    purpose = data.get("purpose", {})
 
     root_path = project.get("root")
     if root_path is None:
@@ -207,6 +279,22 @@ def load_config(config_path: Path | None, root: Path | None = None) -> AtlasConf
     )
     if not non_source_path_prefixes:
         non_source_path_prefixes = set(DEFAULT_NON_SOURCE_PATH_PREFIXES)
+
+    purpose_styles = _as_map(
+        purpose.get("styles_by_extension"), "purpose.styles_by_extension"
+    )
+    if not purpose_styles:
+        purpose_styles = dict(DEFAULT_PURPOSE_STYLES)
+
+    purpose_default_style = str(
+        purpose.get("default_style", DEFAULT_PURPOSE_DEFAULT_STYLE)
+    )
+
+    line_comment_prefixes = _as_list(
+        purpose.get("line_comment_prefixes"), "purpose.line_comment_prefixes"
+    )
+    if not line_comment_prefixes:
+        line_comment_prefixes = list(DEFAULT_LINE_COMMENT_PREFIXES)
 
     allowed_untracked_filenames = _as_set(
         untracked.get("allowed_filenames"), "untracked.allowed_filenames"
@@ -270,6 +358,9 @@ def load_config(config_path: Path | None, root: Path | None = None) -> AtlasConf
         summary_max_length=summary_max_length,
         summary_ascii_only=summary_ascii_only,
         summary_no_commas=summary_no_commas,
+        purpose_styles=purpose_styles,
+        purpose_default_style=purpose_default_style,
+        line_comment_prefixes=tuple(line_comment_prefixes),
     )
 
 
@@ -284,12 +375,17 @@ def default_config_text() -> str:
             'purpose_filename = ".purpose"',
             "",
             "[scan]",
-            'source_extensions = [".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".css", ".mjs", ".cjs", ".d.ts"]',
+            'source_extensions = [".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".css", ".mjs", ".cjs", ".d.ts", ".java", ".kt", ".scala", ".cs", ".go", ".rs", ".rb", ".php", ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".swift", ".lua", ".sh", ".bash", ".zsh", ".ps1", ".psm1", ".psd1", ".sql"]',
             "exclude_dir_names = [\".git\", \".projectatlas\", \".venv\", \"__pycache__\", \".egg-info\", \"node_modules\", \"dist\", \"build\"]",
             "exclude_dir_suffixes = [\".egg-info\"]",
             "exclude_path_prefixes = []",
             "non_source_path_prefixes = []",
             "max_scan_lines = 80",
+            "",
+            "[purpose]",
+            "default_style = \"javadoc\"",
+            "line_comment_prefixes = [\"//\", \"#\", \"--\", \";\"]",
+            "# styles_by_extension = { \".go\" = \"line-comment\" }",
             "",
             "[summary_rules]",
             "ascii_only = true",

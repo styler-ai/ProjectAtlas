@@ -76,7 +76,9 @@ projectatlas map
 
 ### Missing Purpose headers
 
-Add a Javadoc-style header with `Purpose:` to the file. For Python, use a module docstring.
+Add a `Purpose:` header using the comment style configured for that file extension
+(Javadoc block, block comment, or line comment). For Python, use a module docstring.
+If the file uses a different style, update `purpose.styles_by_extension` in the config.
 
 ### Missing .purpose files
 

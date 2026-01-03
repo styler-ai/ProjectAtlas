@@ -27,6 +27,7 @@ It answers "where should I look?" and "where should I put this?" before running 
 - TOON output for fast agent consumption.
 - Duplicate summary detection for early structure drift.
 - Lint mode that fails when headers or `.purpose` files are missing.
+- Language-aware Purpose styles for common languages (line, block, or Javadoc).
 - Configurable exclusions, asset roots, and allowlists.
 
 ## How it works
@@ -228,7 +229,8 @@ For Codex, copy `.codex/skills/ProjectAtlas.md` into your local Codex skills fol
 
 ## Purpose headers
 
-ProjectAtlas expects a one-line `Purpose:` entry at the top of each tracked file:
+ProjectAtlas expects a one-line `Purpose:` entry near the top of each tracked file.
+The comment style is configurable per extension.
 
 ```txt
 /**
@@ -236,8 +238,17 @@ ProjectAtlas expects a one-line `Purpose:` entry at the top of each tracked file
  */
 ```
 
-Python files should use a module docstring with `Purpose:` on the first lines. Vue files should place the
-Javadoc-style block at the top of the first `<script>` or `<style>` block.
+Line-comment and block-comment styles are also supported when configured:
+
+```txt
+// Purpose: Describe the file in one sentence.
+# Purpose: Describe the file in one sentence.
+/* Purpose: Describe the file in one sentence. */
+```
+
+Python files use a module docstring with `Purpose:` on the first lines. Vue files place a Javadoc-style
+block at the top of the first `<script>` or `<style>` block. The default mapping already covers major
+languages; override it in `purpose.styles_by_extension` if needed.
 
 ## Configuration
 
@@ -247,6 +258,9 @@ See `docs/configuration.md` for all available settings. Most teams only need to 
 - `scan.exclude_dir_names`
 - `untracked.asset_allowed_prefixes`
 - `project.map_path`
+- `purpose.default_style`
+- `purpose.styles_by_extension`
+- `purpose.line_comment_prefixes`
 
 ## Agent integration
 

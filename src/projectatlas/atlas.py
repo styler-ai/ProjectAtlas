@@ -18,6 +18,8 @@ PURPOSE_COMMENT_PREFIXES = ("#", "//")
 PURPOSE_RE = re.compile(r"Purpose:\s*(.+)$")
 JAVADOC_START_RE = re.compile(r"^\s*/\*\*")
 JAVADOC_END_RE = re.compile(r"\*/")
+BLOCK_START_RE = re.compile(r"^\s*/\*")
+BLOCK_END_RE = re.compile(r"\*/")
 PY_DOCSTRING_START_RE = re.compile(r'^[rubfRUBF]*("""|\'\'\')')
 PY_CODING_RE = re.compile(r"^#.*coding[:=]")
 OVERVIEW_KEY_ORDER = (
@@ -159,10 +161,28 @@ def list_existing_asset_roots(config: AtlasConfig) -> list[str]:
     return roots
 
 
-def extract_purpose_from_lines(lines: Sequence[str]) -> str | None:
+def strip_line_comment_prefix(line: str, prefixes: Sequence[str]) -> str:
+    """Remove the first matching line-comment prefix and trim whitespace."""
+    for prefix in prefixes:
+        if line.startswith(prefix):
+            remainder = line[len(prefix) :]
+            while remainder.startswith(prefix[-1]):
+                remainder = remainder[1:]
+            if remainder.startswith("!"):
+                remainder = remainder[1:]
+            return remainder.lstrip()
+    return line
+
+
+def extract_purpose_from_lines(
+    lines: Sequence[str],
+    comment_prefixes: Sequence[str] | None = None,
+) -> str | None:
     """Extract the Purpose summary from a sequence of lines."""
     for raw in lines:
         cleaned = raw.strip()
+        if comment_prefixes:
+            cleaned = strip_line_comment_prefix(cleaned, comment_prefixes)
         cleaned = re.sub(r"^/\*\*+", "", cleaned)
         cleaned = re.sub(r"\*/$", "", cleaned)
         cleaned = re.sub(r"^\*+", "", cleaned).strip()
@@ -197,6 +217,39 @@ def extract_javadoc_purpose(
     summary = extract_purpose_from_lines(block_lines)
     if not summary:
         return None, ["missing Purpose line in Javadoc-style header"]
+    return summary, []
+
+
+def extract_block_comment_purpose(
+    lines: list[str], max_scan_lines: int
+) -> tuple[str | None, list[str]]:
+    """Extract Purpose from a block comment header."""
+    idx = 0
+    if lines and lines[0].startswith("#!"):
+        idx += 1
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+    if idx >= len(lines) or not BLOCK_START_RE.match(lines[idx]):
+        return None, ["missing block comment Purpose header"]
+    block_lines: list[str] = []
+    block_lines.append(lines[idx])
+    if BLOCK_END_RE.search(lines[idx]):
+        summary = extract_purpose_from_lines(block_lines)
+        if not summary:
+            return None, ["missing Purpose line in block comment header"]
+        return summary, []
+    idx += 1
+    while idx < len(lines) and idx < max_scan_lines:
+        line = lines[idx]
+        block_lines.append(line)
+        if BLOCK_END_RE.search(line):
+            break
+        idx += 1
+    else:
+        return None, ["unterminated block comment header"]
+    summary = extract_purpose_from_lines(block_lines)
+    if not summary:
+        return None, ["missing Purpose line in block comment header"]
     return summary, []
 
 
@@ -274,6 +327,48 @@ def extract_vue_purpose(
     return None, ["missing Javadoc-style Purpose header in <script> or <style> block"]
 
 
+def extract_line_comment_purpose(
+    lines: list[str], max_scan_lines: int, prefixes: Sequence[str]
+) -> tuple[str | None, list[str]]:
+    """Extract Purpose from a line-comment header block."""
+    idx = 0
+    comment_lines: list[str] = []
+    while idx < len(lines) and idx < max_scan_lines:
+        raw = lines[idx]
+        stripped = raw.strip()
+        if not stripped:
+            if comment_lines:
+                break
+            idx += 1
+            continue
+        if stripped.startswith("#!") and not comment_lines:
+            idx += 1
+            continue
+        if stripped.startswith(tuple(prefixes)):
+            comment_lines.append(stripped)
+            idx += 1
+            continue
+        break
+    if not comment_lines:
+        return None, ["missing line-comment Purpose header"]
+    summary = extract_purpose_from_lines(comment_lines, prefixes)
+    if not summary:
+        return None, ["missing Purpose line in line-comment header"]
+    return summary, []
+
+
+def resolve_purpose_style(ext: str, config: AtlasConfig) -> str:
+    """Resolve the Purpose style for a file extension."""
+    style = config.purpose_styles.get(ext)
+    if style:
+        return style
+    if ext == ".py":
+        return "python-docstring"
+    if ext == ".vue":
+        return "vue-block"
+    return config.purpose_default_style
+
+
 def extract_purpose_header(
     path: Path, config: AtlasConfig
 ) -> tuple[str | None, list[str]]:
@@ -284,11 +379,20 @@ def extract_purpose_header(
         text = path.read_text(encoding="utf-8", errors="replace")
     lines = text.splitlines()
     ext = file_extension(path)
-    if ext == ".py":
+    style = resolve_purpose_style(ext, config)
+    if style == "python-docstring":
         return extract_python_docstring_purpose(lines, config.max_scan_lines)
-    if ext == ".vue":
+    if style == "vue-block":
         return extract_vue_purpose(lines, config.max_scan_lines)
-    return extract_javadoc_purpose(lines, config.max_scan_lines)
+    if style == "javadoc":
+        return extract_javadoc_purpose(lines, config.max_scan_lines)
+    if style == "block-comment":
+        return extract_block_comment_purpose(lines, config.max_scan_lines)
+    if style == "line-comment":
+        return extract_line_comment_purpose(
+            lines, config.max_scan_lines, config.line_comment_prefixes
+        )
+    return None, [f"unsupported Purpose style: {style}"]
 
 
 def validate_summary(summary: str, config: AtlasConfig) -> list[str]:
@@ -317,11 +421,7 @@ def build_file_records(
         rel = path.relative_to(config.root).as_posix()
         summary, header_issues = extract_purpose_header(path, config)
         if not summary:
-            if any(
-                issue.startswith("missing Javadoc-style")
-                or issue.startswith("missing module docstring")
-                for issue in header_issues
-            ):
+            if any(issue.startswith("missing ") for issue in header_issues):
                 missing.append(rel)
             else:
                 invalid[rel] = header_issues

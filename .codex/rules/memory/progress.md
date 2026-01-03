@@ -10,4 +10,5 @@
 - 2026-01-03: Aligned config template and configuration docs with the default asset extensions list (fonts included); full check suite passed.
 
 ## Pending Work
+- Deliver language-agnostic Purpose header support and release v0.1.7-00 (issue #101).
 
