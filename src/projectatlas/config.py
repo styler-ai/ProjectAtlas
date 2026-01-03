@@ -460,37 +460,3 @@ def detect_language_extensions(root: Path) -> set[str]:
 def detect_purpose_styles(extensions: Iterable[str]) -> dict[str, str]:
     """Return a Purpose style map for detected extensions."""
     return {ext: DEFAULT_PURPOSE_STYLES[ext] for ext in extensions if ext in DEFAULT_PURPOSE_STYLES}
-    return "\n".join(
-        [
-            "[project]",
-            'root = "."',
-            'map_path = ".projectatlas/projectatlas.toon"',
-            'nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"',
-            'purpose_filename = ".purpose"',
-            "",
-            "[scan]",
-            'source_extensions = [".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".css", ".mjs", ".cjs", ".d.ts", ".java", ".kt", ".scala", ".cs", ".go", ".rs", ".rb", ".php", ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".swift", ".lua", ".sh", ".bash", ".zsh", ".ps1", ".psm1", ".psd1", ".sql"]',
-            "exclude_dir_names = [\".git\", \".projectatlas\", \".venv\", \"__pycache__\", \".egg-info\", \"node_modules\", \"dist\", \"build\"]",
-            "exclude_dir_suffixes = [\".egg-info\"]",
-            "exclude_path_prefixes = []",
-            "non_source_path_prefixes = []",
-            "max_scan_lines = 80",
-            "",
-            "[purpose]",
-            "default_style = \"javadoc\"",
-            "line_comment_prefixes = [\"//\", \"#\", \"--\", \";\"]",
-            "# styles_by_extension = { \".go\" = \"line-comment\" }",
-            "",
-            "[summary_rules]",
-            "ascii_only = true",
-            "no_commas = true",
-            "max_length = 140",
-            "",
-            "[untracked]",
-            "allowed_filenames = [\".purpose\"]",
-            "allowlist_dir_prefixes = []",
-            "allowlist_files = []",
-            "asset_allowed_prefixes = []",
-            "asset_extensions = [\".png\", \".jpg\", \".jpeg\", \".svg\", \".gif\", \".webp\", \".ico\", \".pdf\", \".ttf\", \".woff\", \".woff2\"]",
-        ]
-    ) + "\n"
