@@ -228,7 +228,19 @@ Load ProjectAtlas configuration from TOML (or defaults).
 
 ### Function `default_config_text`
 
-Return a default config.toml payload.
+Return a config.toml payload for the provided settings.
+
+### Function `build_config_text`
+
+Build a config.toml payload from the supplied settings.
+
+### Function `detect_language_extensions`
+
+Detect source extensions in a repo using the default language list.
+
+### Function `detect_purpose_styles`
+
+Return a Purpose style map for detected extensions.
 
 ## `models.py`
 

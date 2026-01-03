@@ -14,6 +14,9 @@ pip install -e .
 projectatlas init --seed-purpose
 ```
 
+`projectatlas init` auto-detects repo languages to seed `scan.source_extensions` and `purpose.styles_by_extension`.
+Use `--no-detect-languages` to keep the static template.
+
 ## 3. Fill folder summaries
 
 - Add a one-line summary to every `.purpose` file.
