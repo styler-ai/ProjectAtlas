@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from projectatlas.atlas import build_file_records, build_folder_records
@@ -33,6 +34,9 @@ def make_config(root: Path) -> AtlasConfig:
         summary_max_length=140,
         summary_ascii_only=True,
         summary_no_commas=True,
+        purpose_styles={},
+        purpose_default_style="javadoc",
+        line_comment_prefixes=("//", "#"),
     )
 
 
@@ -62,6 +66,37 @@ class AtlasScanTests(unittest.TestCase):
             self.assertEqual(missing, [])
             self.assertEqual(invalid, {})
             self.assertEqual(records[0].summary, "Root folder.")
+
+    def test_line_comment_purpose(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            path = root / "sample.go"
+            path.write_text("/// Purpose: Line comment header.\n", encoding="utf-8")
+            config = replace(
+                make_config(root),
+                source_extensions={".go"},
+                purpose_styles={".go": "line-comment"},
+                line_comment_prefixes=("//",),
+            )
+            records, missing, invalid = build_file_records([path], config)
+            self.assertEqual(missing, [])
+            self.assertEqual(invalid, {})
+            self.assertEqual(records[0].summary, "Line comment header.")
+
+    def test_block_comment_purpose(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            path = root / "sample.c"
+            path.write_text("/* Purpose: Block comment header. */\n", encoding="utf-8")
+            config = replace(
+                make_config(root),
+                source_extensions={".c"},
+                purpose_styles={".c": "block-comment"},
+            )
+            records, missing, invalid = build_file_records([path], config)
+            self.assertEqual(missing, [])
+            self.assertEqual(invalid, {})
+            self.assertEqual(records[0].summary, "Block comment header.")
 
 
 if __name__ == "__main__":

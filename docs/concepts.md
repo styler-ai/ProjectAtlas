@@ -9,7 +9,10 @@ ProjectAtlas treats missing `.purpose` files as a lint error when `--strict-fold
 
 ## File Purpose headers
 
-Each tracked source file carries a one-line `Purpose:` header at the top of the file. This allows:
+Each tracked source file carries a one-line `Purpose:` header near the top of the file. The comment
+style is configurable per extension (Javadoc blocks, block comments, or line comments).
+
+This allows:
 
 - quick file selection before deep indexing
 - early detection of duplicate responsibilities

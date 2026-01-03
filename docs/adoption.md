@@ -21,8 +21,8 @@ projectatlas init --seed-purpose
 
 ## 4. Add Purpose headers
 
-Add a Javadoc-style `Purpose:` header to every tracked source file. Python modules should use a
-module docstring with `Purpose:`.
+Add a `Purpose:` header to every tracked source file using the configured comment style.
+Python modules should use a module docstring with `Purpose:`.
 
 ## 5. Track non-source files
 
