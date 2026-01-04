@@ -23,7 +23,9 @@ BLOCK_END_RE = re.compile(r"\*/")
 PY_DOCSTRING_START_RE = re.compile(r'^[rubfRUBF]*("""|\'\'\')')
 PY_CODING_RE = re.compile(r"^#.*coding[:=]")
 OVERVIEW_KEY_ORDER = (
-    "tracked_files",
+    "tracked_source_files",
+    "tracked_nonsource_files",
+    "tracked_files_total",
     "tracked_folders",
     "source_extensions",
     "exclude_dir_names",
@@ -592,11 +594,18 @@ def compute_folder_hash(paths: Sequence[Path], config: AtlasConfig) -> str:
 
 
 def compute_overview(
-    folders: Sequence[Path], files: Sequence[Path], config: AtlasConfig
+    folders: Sequence[Path],
+    files: Sequence[Path],
+    config: AtlasConfig,
+    nonsource_count: int = 0,
 ) -> dict[str, int]:
     """Compute overview counts for the map header."""
+    source_count = len(files)
+    total_count = source_count + nonsource_count
     return {
-        "tracked_files": len(files),
+        "tracked_source_files": source_count,
+        "tracked_nonsource_files": nonsource_count,
+        "tracked_files_total": total_count,
         "tracked_folders": len(folders),
         "source_extensions": len(config.source_extensions),
         "exclude_dir_names": len(config.exclude_dir_names),

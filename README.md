@@ -66,6 +66,10 @@ ProjectAtlas merges the non-source entries into the generated atlas, so **agents
 The input file exists only to preserve those non-source summaries across regenerations. Agents update it when
 `projectatlas lint` reports missing non-source entries or when new config/doc files are added.
 
+The atlas header makes the split explicit: `tracked_source_files` counts files scanned for Purpose headers,
+`tracked_nonsource_files` counts the manual entries, and `tracked_files_total` is the combined list shown in
+`files[]`.
+
 ## Workflow (agent-focused)
 
 1. Run `projectatlas init --seed-purpose` once to scaffold missing `.purpose` files.
