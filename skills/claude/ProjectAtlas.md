@@ -35,6 +35,20 @@ Give Claude a fast structure map before deep indexing so it can pick the right f
 5. Use deep indexing tools only for the specific files you chose from the atlas.
 6. Fix missing Purpose headers or `.purpose` files before continuing.
 
+## How to interpret the map
+
+- `overview:` shows tracked counts so you can spot drift quickly. It reports
+  `tracked_source_files`, `tracked_nonsource_files`, and `tracked_files_total`.
+- `folder_tree[]` gives a tree with summaries for navigation.
+- `folders[]` and `files[]` are the authoritative summaries for lookup.
+- `*_summary_duplicates[]` highlight likely overlap to clean up.
+
+## Why non-source files are tracked separately
+
+- Some files cannot safely carry inline `Purpose:` headers (JSON, lockfiles, images, generated outputs).
+- Those entries live in `.projectatlas/projectatlas-nonsource-files.toon` and are merged into the atlas.
+- Agents read only the generated atlas; the nonsource file is the durable input list.
+
 ## AGENTS.md integration
 
 Add a startup snippet so the atlas is always read:
