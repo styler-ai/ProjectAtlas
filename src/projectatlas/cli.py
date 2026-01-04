@@ -68,7 +68,7 @@ def build_snapshot(config: AtlasConfig) -> AtlasSnapshot:
     file_duplicates = build_summary_duplicates(file_records)
     file_hash = compute_file_hash(file_records)
     folder_hash = compute_folder_hash(folders, config)
-    overview = compute_overview(folders, files, config)
+    overview = compute_overview(folders, files, config, len(nonsource_records))
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return AtlasSnapshot(
         folder_records=folder_records,
@@ -271,7 +271,9 @@ def run_lint(
             errors.append("Untracked files detected.")
 
     map_overview, overview_issues = read_overview(config.map_path)
-    expected_overview = compute_overview(folders, files, config)
+    expected_overview = compute_overview(
+        folders, files, config, len(nonsource_records)
+    )
     if map_overview is None:
         errors.append("Atlas map missing overview. Run: projectatlas map")
     elif overview_issues:

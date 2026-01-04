@@ -48,9 +48,17 @@ files. ProjectAtlas is the layer above code-index tools.
 ## How to interpret the map
 
 - `overview:` shows tracked counts so you can spot drift quickly.
+- `overview` now distinguishes source vs non-source (`tracked_source_files`,
+  `tracked_nonsource_files`, `tracked_files_total`) so the totals match the merged list.
 - `folder_tree[]` provides a tree with summaries for fast navigation.
 - `folders[]` and `files[]` are the authoritative summaries for lookup.
 - `*_summary_duplicates[]` highlight likely overlap to clean up.
+
+## Why non-source files live in a separate TOON file
+
+- Some files cannot safely carry inline `Purpose:` headers (JSON, lockfiles, images, generated outputs).
+- Those entries live in `.projectatlas/projectatlas-nonsource-files.toon` and are merged into the atlas at map time.
+- Agents read only the generated atlas; the nonsource list is the durable input so the merged snapshot stays complete.
 
 ## AGENTS.md integration
 

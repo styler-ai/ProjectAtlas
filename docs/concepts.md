@@ -18,6 +18,13 @@ This allows:
 - early detection of duplicate responsibilities
 - consistent, low-overhead documentation
 
+## Non-source summaries
+
+Some files cannot safely carry inline Purpose headers (JSON, lockfiles, images, generated outputs). Those live in
+`.projectatlas/projectatlas-nonsource-files.toon`, which is merged into the atlas at map time. The generated
+`projectatlas.toon` still shows a single `files[]` list, but the header distinguishes
+`tracked_source_files`, `tracked_nonsource_files`, and the combined `tracked_files_total`.
+
 ## Health signals
 
 ProjectAtlas surfaces:

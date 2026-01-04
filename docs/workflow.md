@@ -74,6 +74,9 @@ If lint reports stale hashes or an overview mismatch, re-run:
 projectatlas map
 ```
 
+The `overview:` line in the atlas now reports `tracked_source_files`,
+`tracked_nonsource_files`, and `tracked_files_total` so you can see the split at a glance.
+
 ### Missing Purpose headers
 
 Add a `Purpose:` header using the comment style configured for that file extension
