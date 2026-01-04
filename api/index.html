@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="light">
+    <head>
+        <meta charset="utf-8">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        
+        
+        <link rel="canonical" href="https://styler-ai.github.io/ProjectAtlas/api/">
+        <link rel="shortcut icon" href="../img/favicon.ico">
+        <title>API - ProjectAtlas</title>
+        <link href="../css/bootstrap.min.css" rel="stylesheet">
+        <link href="../css/fontawesome.min.css" rel="stylesheet">
+        <link href="../css/brands.min.css" rel="stylesheet">
+        <link href="../css/solid.min.css" rel="stylesheet">
+        <link href="../css/v4-font-face.min.css" rel="stylesheet">
+        <link href="../css/base.css" rel="stylesheet">
+        <link id="hljs-light" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" >
+        <link id="hljs-dark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github-dark.min.css" disabled>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+        <script>hljs.highlightAll();</script> 
+    </head>
+
+    <body>
+        <div class="navbar fixed-top navbar-expand-lg navbar-dark bg-primary">
+            <div class="container">
+                <a class="navbar-brand" href="..">ProjectAtlas</a>
+                <!-- Expander button -->
+                <button type="button" class="navbar-toggler" data-bs-toggle="collapse" data-bs-target="#navbar-collapse" aria-controls="navbar-collapse" aria-expanded="false" aria-label="Toggle navigation">
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+
+                <!-- Expanded navigation -->
+                <div id="navbar-collapse" class="navbar-collapse collapse">
+                        <!-- Main navigation -->
+                        <ul class="nav navbar-nav">
+                            <li class="nav-item">
+                                <a href=".." class="nav-link">Overview</a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="../adoption/" class="nav-link">Adoption</a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="../agent-integration/" class="nav-link">Agent Integration</a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="../configuration/" class="nav-link">Configuration</a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="../format/" class="nav-link">Format</a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="../workflow/" class="nav-link">Workflow</a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="../concepts/" class="nav-link">Concepts</a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="./" class="nav-link active" aria-current="page">API</a>
+                            </li>
+                        </ul>
+
+                    <ul class="nav navbar-nav ms-md-auto">
+                        <li class="nav-item">
+                            <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#mkdocs_search_modal">
+                                <i class="fa fa-search"></i> Search
+                            </a>
+                        </li>
+                            <li class="nav-item">
+                                <a rel="prev" href="../concepts/" class="nav-link">
+                                    <i class="fa fa-arrow-left"></i> Previous
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a rel="next" class="nav-link disabled">
+                                    Next <i class="fa fa-arrow-right"></i>
+                                </a>
+                            </li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="container">
+            <div class="row">
+                    <div class="col-md-3"><div class="navbar-expand-md bs-sidebar hidden-print affix" role="complementary">
+    <div class="navbar-header">
+        <button type="button" class="navbar-toggler collapsed" data-bs-toggle="collapse" data-bs-target="#toc-collapse" title="Table of Contents">
+            <span class="fa fa-angle-down"></span>
+        </button>
+    </div>
+
+    
+    <div id="toc-collapse" class="navbar-collapse collapse card bg-body-tertiary">
+        <ul class="nav flex-column">
+            
+            <li class="nav-item" data-bs-level="1"><a href="#projectatlas-api" class="nav-link">ProjectAtlas API</a>
+              <ul class="nav flex-column">
+            <li class="nav-item" data-bs-level="2"><a href="#__init__py" class="nav-link">__init__.py</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#__main__py" class="nav-link">__main__.py</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#atlaspy" class="nav-link">atlas.py</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#clipy" class="nav-link">cli.py</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#configpy" class="nav-link">config.py</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#modelspy" class="nav-link">models.py</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#outputpy" class="nav-link">output.py</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+              </ul>
+            </li>
+        </ul>
+    </div>
+</div></div>
+                    <div class="col-md-9" role="main">
+
+<h1 id="projectatlas-api">ProjectAtlas API</h1>
+<p>This document is generated by <code>scripts/generate_api_docs.py</code>.</p>
+<h2 id="__init__py"><code>__init__.py</code></h2>
+<p>Purpose: Define the ProjectAtlas package metadata.</p>
+<h2 id="__main__py"><code>__main__.py</code></h2>
+<p>Purpose: Allow <code>python -m projectatlas</code> to run the CLI.</p>
+<h2 id="atlaspy"><code>atlas.py</code></h2>
+<p>Purpose: Scan repositories and build ProjectAtlas record entries.</p>
+<h3 id="function-is_excluded_rel_path">Function <code>is_excluded_rel_path</code></h3>
+<p>Check whether a relative path should be excluded.</p>
+<h3 id="function-file_extension">Function <code>file_extension</code></h3>
+<p>Return a normalized file extension, handling .d.ts specially.</p>
+<h3 id="function-is_source_file">Function <code>is_source_file</code></h3>
+<p>Check whether a file should be scanned for Purpose headers.</p>
+<h3 id="function-iter_repo_paths">Function <code>iter_repo_paths</code></h3>
+<p>Walk the repo and return tracked folders and source files.</p>
+<h3 id="function-iter_repo_paths_with_untracked">Function <code>iter_repo_paths_with_untracked</code></h3>
+<p>Walk the repo and return tracked and untracked paths.</p>
+<h3 id="function-normalize_summary">Function <code>normalize_summary</code></h3>
+<p>Normalize a Purpose summary to a single spaced line.</p>
+<h3 id="function-summarize_extensions">Function <code>summarize_extensions</code></h3>
+<p>Summarize extensions for a sequence of file paths.</p>
+<h3 id="function-is_under_prefix">Function <code>is_under_prefix</code></h3>
+<p>Check whether a path is under any of the provided prefixes.</p>
+<h3 id="function-is_allowed_untracked">Function <code>is_allowed_untracked</code></h3>
+<p>Check whether an untracked path is allowed by policy.</p>
+<h3 id="function-is_asset_file">Function <code>is_asset_file</code></h3>
+<p>Check whether a file is considered an asset.</p>
+<h3 id="function-list_existing_asset_roots">Function <code>list_existing_asset_roots</code></h3>
+<p>List asset root prefixes that exist in the repo.</p>
+<h3 id="function-strip_line_comment_prefix">Function <code>strip_line_comment_prefix</code></h3>
+<p>Remove the first matching line-comment prefix and trim whitespace.</p>
+<h3 id="function-extract_purpose_from_lines">Function <code>extract_purpose_from_lines</code></h3>
+<p>Extract the Purpose summary from a sequence of lines.</p>
+<h3 id="function-extract_javadoc_purpose">Function <code>extract_javadoc_purpose</code></h3>
+<p>Extract Purpose from a Javadoc-style header block.</p>
+<h3 id="function-extract_block_comment_purpose">Function <code>extract_block_comment_purpose</code></h3>
+<p>Extract Purpose from a block comment header.</p>
+<h3 id="function-extract_python_docstring_purpose">Function <code>extract_python_docstring_purpose</code></h3>
+<p>Extract Purpose from a Python module docstring.</p>
+<h3 id="function-extract_vue_purpose">Function <code>extract_vue_purpose</code></h3>
+<p>Extract Purpose from the first Vue <script> or <style> block.</p>
+<h3 id="function-extract_line_comment_purpose">Function <code>extract_line_comment_purpose</code></h3>
+<p>Extract Purpose from a line-comment header block.</p>
+<h3 id="function-resolve_purpose_style">Function <code>resolve_purpose_style</code></h3>
+<p>Resolve the Purpose style for a file extension.</p>
+<h3 id="function-extract_purpose_header">Function <code>extract_purpose_header</code></h3>
+<p>Extract the Purpose summary for a file by type.</p>
+<h3 id="function-validate_summary">Function <code>validate_summary</code></h3>
+<p>Validate a Purpose summary against map rules.</p>
+<h3 id="function-build_file_records">Function <code>build_file_records</code></h3>
+<p>Build file records and error lists for Purpose headers.</p>
+<h3 id="function-read_nonsource_file_entries">Function <code>read_nonsource_file_entries</code></h3>
+<p>Read non-source file list entries for files without headers.</p>
+<h3 id="function-merge_nonsource_file_records">Function <code>merge_nonsource_file_records</code></h3>
+<p>Merge non-source file records into the auto-discovered list.</p>
+<h3 id="function-read_folder_purpose">Function <code>read_folder_purpose</code></h3>
+<p>Read a folder Purpose summary from a .purpose file.</p>
+<h3 id="function-build_folder_records">Function <code>build_folder_records</code></h3>
+<p>Build folder records from per-folder .purpose files.</p>
+<h3 id="function-build_folder_tree_with_summaries">Function <code>build_folder_tree_with_summaries</code></h3>
+<p>Build a stable tree snapshot with folder summaries.</p>
+<h3 id="function-build_summary_duplicates">Function <code>build_summary_duplicates</code></h3>
+<p>Find duplicate summaries across records.</p>
+<h3 id="function-compute_file_hash">Function <code>compute_file_hash</code></h3>
+<p>Compute the file list hash for the map output.</p>
+<h3 id="function-compute_folder_hash">Function <code>compute_folder_hash</code></h3>
+<p>Compute the folder list hash for the map output.</p>
+<h3 id="function-compute_overview">Function <code>compute_overview</code></h3>
+<p>Compute overview counts for the map header.</p>
+<h3 id="function-format_overview">Function <code>format_overview</code></h3>
+<p>Format the overview mapping for the map header.</p>
+<h3 id="function-read_overview">Function <code>read_overview</code></h3>
+<p>Read the overview line from the map file.</p>
+<h3 id="function-read_map_hashes">Function <code>read_map_hashes</code></h3>
+<p>Read file and folder hashes from the current map file.</p>
+<h3 id="function-format_list">Function <code>format_list</code></h3>
+<p>Format items as a newline-separated bullet list.</p>
+<h2 id="clipy"><code>cli.py</code></h2>
+<p>Purpose: Provide the ProjectAtlas command-line entry points.</p>
+<h3 id="function-is_truthy_env">Function <code>is_truthy_env</code></h3>
+<p>Check whether an environment value is truthy.</p>
+<h3 id="function-build_snapshot">Function <code>build_snapshot</code></h3>
+<p>Build an AtlasSnapshot for the current repository.</p>
+<h3 id="function-seed_purpose_files">Function <code>seed_purpose_files</code></h3>
+<p>Create missing .purpose files for tracked folders.</p>
+<h3 id="function-write_default_files">Function <code>write_default_files</code></h3>
+<p>Write default configuration and non-source file template.</p>
+<h3 id="function-run_map">Function <code>run_map</code></h3>
+<p>Generate and write the ProjectAtlas map.</p>
+<h3 id="function-run_lint">Function <code>run_lint</code></h3>
+<p>Validate the ProjectAtlas map against current repo state.</p>
+<h3 id="function-parse_args">Function <code>parse_args</code></h3>
+<p>Parse CLI arguments.</p>
+<h3 id="function-main">Function <code>main</code></h3>
+<p>Run the ProjectAtlas CLI.</p>
+<h2 id="configpy"><code>config.py</code></h2>
+<p>Purpose: Load and normalize ProjectAtlas configuration from TOML.</p>
+<h3 id="class-configerror">Class <code>ConfigError</code></h3>
+<p>Signal an invalid ProjectAtlas configuration.</p>
+<h3 id="class-atlasconfig">Class <code>AtlasConfig</code></h3>
+<p>Define the normalized configuration for ProjectAtlas.</p>
+<h3 id="function-find_config_path">Function <code>find_config_path</code></h3>
+<p>Locate the first ProjectAtlas config file under the root.</p>
+<h3 id="function-_as_set">Function <code>_as_set</code></h3>
+<p><em>No docstring provided.</em></p>
+<h3 id="function-_as_list">Function <code>_as_list</code></h3>
+<p><em>No docstring provided.</em></p>
+<h3 id="function-_as_map">Function <code>_as_map</code></h3>
+<p><em>No docstring provided.</em></p>
+<h3 id="function-_as_path">Function <code>_as_path</code></h3>
+<p><em>No docstring provided.</em></p>
+<h3 id="function-load_config">Function <code>load_config</code></h3>
+<p>Load ProjectAtlas configuration from TOML (or defaults).</p>
+<h3 id="function-default_config_text">Function <code>default_config_text</code></h3>
+<p>Return a config.toml payload for the provided settings.</p>
+<h3 id="function-build_config_text">Function <code>build_config_text</code></h3>
+<p>Build a config.toml payload from the supplied settings.</p>
+<h3 id="function-detect_language_extensions">Function <code>detect_language_extensions</code></h3>
+<p>Detect source extensions in a repo using the default language list.</p>
+<h3 id="function-detect_purpose_styles">Function <code>detect_purpose_styles</code></h3>
+<p>Return a Purpose style map for detected extensions.</p>
+<h2 id="modelspy"><code>models.py</code></h2>
+<p>Purpose: Define data models used across ProjectAtlas.</p>
+<h3 id="class-record">Class <code>Record</code></h3>
+<p>Represent a ProjectAtlas record entry.</p>
+<h3 id="class-atlassnapshot">Class <code>AtlasSnapshot</code></h3>
+<p>Capture the full ProjectAtlas snapshot to write.</p>
+<h2 id="outputpy"><code>output.py</code></h2>
+<p>Purpose: Write ProjectAtlas snapshots to TOON or JSON outputs.</p>
+<h3 id="function-to_toon">Function <code>to_toon</code></h3>
+<p>Serialize the snapshot to TOON.</p>
+<h3 id="function-write_toon">Function <code>write_toon</code></h3>
+<p>Write the snapshot to the configured TOON path.</p>
+<h3 id="function-write_json">Function <code>write_json</code></h3>
+<p>Write the snapshot to a JSON file next to the TOON output.</p></div>
+            </div>
+        </div>
+
+        <footer class="col-md-12">
+            <hr>
+            <p>Documentation built with <a href="https://www.mkdocs.org/">MkDocs</a>.</p>
+        </footer>
+        <script src="../js/bootstrap.bundle.min.js"></script>
+        <script>
+            var base_url = "..",
+                shortcuts = {"help": 191, "next": 78, "previous": 80, "search": 83};
+        </script>
+        <script src="../js/base.js"></script>
+        <script src="../search/main.js"></script>
+
+        <div class="modal" id="mkdocs_search_modal" tabindex="-1" role="dialog" aria-labelledby="searchModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4 class="modal-title" id="searchModalLabel">Search</h4>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p>From here you can search these documents. Enter your search terms below.</p>
+                <form>
+                    <div class="form-group">
+                        <input type="search" class="form-control" placeholder="Search..." id="mkdocs-search-query" title="Type search term here">
+                    </div>
+                </form>
+                <div id="mkdocs-search-results" data-no-results-text="No results found"></div>
+            </div>
+            <div class="modal-footer">
+            </div>
+        </div>
+    </div>
+</div><div class="modal" id="mkdocs_keyboard_modal" tabindex="-1" role="dialog" aria-labelledby="keyboardModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4 class="modal-title" id="keyboardModalLabel">Keyboard Shortcuts</h4>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th style="width: 20%;">Keys</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td class="help shortcut"><kbd>?</kbd></td>
+                    <td>Open this help</td>
+                  </tr>
+                  <tr>
+                    <td class="next shortcut"><kbd>n</kbd></td>
+                    <td>Next page</td>
+                  </tr>
+                  <tr>
+                    <td class="prev shortcut"><kbd>p</kbd></td>
+                    <td>Previous page</td>
+                  </tr>
+                  <tr>
+                    <td class="search shortcut"><kbd>s</kbd></td>
+                    <td>Search</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="modal-footer">
+            </div>
+        </div>
+    </div>
+</div>
+
+    </body>
+</html>
