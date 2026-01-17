@@ -9,6 +9,9 @@ snapshot you can read at startup to understand structure, spot duplicates, and k
 
 Live docs: https://styler-ai.github.io/ProjectAtlas/
 
+<img width="800" height="1200" alt="image" src="https://github.com/user-attachments/assets/adcd906a-c86a-4548-92bd-c6a5878365fd" />
+
+
 ## Problem it solves
 
 Agents and humans struggle with the same problem on growing repos: you start a new session without a structural
