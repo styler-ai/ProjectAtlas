@@ -4,8 +4,10 @@ Use this checklist when adding ProjectAtlas to an existing repo.
 
 ## 1. Install
 
+Run this from an activated virtual environment.
+
 ```bash
-pip install -e .
+python -m pip install -e .
 ```
 
 ## 2. Initialize
