@@ -91,15 +91,17 @@ structural overview before doing deeper indexing.
 
 Local (editable) install:
 
+Run this from an activated virtual environment.
+
 ```bash
-pip install -e .
+python -m pip install -e .
 ```
 
 Agent-assisted install:
 
 Give your agent the repo URL (https://github.com/styler-ai/ProjectAtlas) and ask it to:
 
-1. Install ProjectAtlas (`pip install -e .`).
+1. Install ProjectAtlas (`python -m pip install -e .`).
 2. Run `projectatlas init --seed-purpose`.
 3. Add or update `.purpose` files and Purpose headers.
 4. Wire `projectatlas map` + `projectatlas lint` into local build steps.
@@ -108,7 +110,7 @@ Give your agent the repo URL (https://github.com/styler-ai/ProjectAtlas) and ask
 ## Quickstart
 
 ```bash
-pip install -e .
+python -m pip install -e .
 projectatlas init --seed-purpose
 projectatlas map
 projectatlas lint --strict-folders --report-untracked
