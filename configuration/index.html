@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="light">
+    <head>
+        <meta charset="utf-8">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        
+        
+        <link rel="canonical" href="https://styler-ai.github.io/ProjectAtlas/configuration/">
+        <link rel="shortcut icon" href="../img/favicon.ico">
+        <title>Configuration - ProjectAtlas</title>
+        <link href="../css/bootstrap.min.css" rel="stylesheet">
+        <link href="../css/fontawesome.min.css" rel="stylesheet">
+        <link href="../css/brands.min.css" rel="stylesheet">
+        <link href="../css/solid.min.css" rel="stylesheet">
+        <link href="../css/v4-font-face.min.css" rel="stylesheet">
+        <link href="../css/base.css" rel="stylesheet">
+        <link id="hljs-light" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" >
+        <link id="hljs-dark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github-dark.min.css" disabled>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+        <script>hljs.highlightAll();</script> 
+    </head>
+
+    <body>
+        <div class="navbar fixed-top navbar-expand-lg navbar-dark bg-primary">
+            <div class="container">
+                <a class="navbar-brand" href="..">ProjectAtlas</a>
+                <!-- Expander button -->
+                <button type="button" class="navbar-toggler" data-bs-toggle="collapse" data-bs-target="#navbar-collapse" aria-controls="navbar-collapse" aria-expanded="false" aria-label="Toggle navigation">
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+
+                <!-- Expanded navigation -->
+                <div id="navbar-collapse" class="navbar-collapse collapse">
+                        <!-- Main navigation -->
+                        <ul class="nav navbar-nav">
+                            <li class="nav-item">
+                                <a href=".." class="nav-link">Overview</a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="../adoption/" class="nav-link">Adoption</a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="../agent-integration/" class="nav-link">Agent Integration</a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="./" class="nav-link active" aria-current="page">Configuration</a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="../format/" class="nav-link">Format</a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="../workflow/" class="nav-link">Workflow</a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="../concepts/" class="nav-link">Concepts</a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="../api/" class="nav-link">API</a>
+                            </li>
+                        </ul>
+
+                    <ul class="nav navbar-nav ms-md-auto">
+                        <li class="nav-item">
+                            <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#mkdocs_search_modal">
+                                <i class="fa fa-search"></i> Search
+                            </a>
+                        </li>
+                            <li class="nav-item">
+                                <a rel="prev" href="../agent-integration/" class="nav-link">
+                                    <i class="fa fa-arrow-left"></i> Previous
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a rel="next" href="../format/" class="nav-link">
+                                    Next <i class="fa fa-arrow-right"></i>
+                                </a>
+                            </li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="container">
+            <div class="row">
+                    <div class="col-md-3"><div class="navbar-expand-md bs-sidebar hidden-print affix" role="complementary">
+    <div class="navbar-header">
+        <button type="button" class="navbar-toggler collapsed" data-bs-toggle="collapse" data-bs-target="#toc-collapse" title="Table of Contents">
+            <span class="fa fa-angle-down"></span>
+        </button>
+    </div>
+
+    
+    <div id="toc-collapse" class="navbar-collapse collapse card bg-body-tertiary">
+        <ul class="nav flex-column">
+            
+            <li class="nav-item" data-bs-level="1"><a href="#projectatlas-configuration" class="nav-link">ProjectAtlas Configuration</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+        </ul>
+    </div>
+</div></div>
+                    <div class="col-md-9" role="main">
+
+<h1 id="projectatlas-configuration">ProjectAtlas Configuration</h1>
+<p>ProjectAtlas reads <code>projectatlas.toml</code> or <code>.projectatlas/config.toml</code>. All paths are relative to the config file.</p>
+<pre><code class="language-toml">[project]
+root = &quot;.&quot;
+map_path = &quot;.projectatlas/projectatlas.toon&quot;
+nonsource_files_path = &quot;.projectatlas/projectatlas-nonsource-files.toon&quot;
+purpose_filename = &quot;.purpose&quot;
+
+[scan]
+source_extensions = [&quot;.py&quot;, &quot;.js&quot;, &quot;.ts&quot;, &quot;.tsx&quot;, &quot;.jsx&quot;, &quot;.vue&quot;, &quot;.css&quot;, &quot;.mjs&quot;, &quot;.cjs&quot;, &quot;.d.ts&quot;, &quot;.java&quot;, &quot;.kt&quot;, &quot;.scala&quot;, &quot;.cs&quot;, &quot;.go&quot;, &quot;.rs&quot;, &quot;.rb&quot;, &quot;.php&quot;, &quot;.c&quot;, &quot;.h&quot;, &quot;.cpp&quot;, &quot;.hpp&quot;, &quot;.cc&quot;, &quot;.cxx&quot;, &quot;.swift&quot;, &quot;.lua&quot;, &quot;.sh&quot;, &quot;.bash&quot;, &quot;.zsh&quot;, &quot;.ps1&quot;, &quot;.psm1&quot;, &quot;.psd1&quot;, &quot;.sql&quot;]
+exclude_dir_names = [&quot;.git&quot;, &quot;.projectatlas&quot;, &quot;.venv&quot;, &quot;__pycache__&quot;, &quot;node_modules&quot;, &quot;dist&quot;, &quot;build&quot;]
+exclude_dir_suffixes = [&quot;.egg-info&quot;]
+exclude_path_prefixes = []
+non_source_path_prefixes = []
+max_scan_lines = 80
+
+[purpose]
+default_style = &quot;javadoc&quot;
+line_comment_prefixes = [&quot;//&quot;, &quot;#&quot;, &quot;--&quot;, &quot;;&quot;]
+# styles_by_extension = { &quot;.go&quot; = &quot;line-comment&quot;, &quot;.c&quot; = &quot;block-comment&quot; }
+
+[summary_rules]
+ascii_only = true
+no_commas = true
+max_length = 140
+
+[untracked]
+allowed_filenames = [&quot;.purpose&quot;]
+allowlist_dir_prefixes = []
+allowlist_files = []
+asset_allowed_prefixes = []
+asset_extensions = [&quot;.png&quot;, &quot;.jpg&quot;, &quot;.jpeg&quot;, &quot;.svg&quot;, &quot;.gif&quot;, &quot;.webp&quot;, &quot;.ico&quot;, &quot;.pdf&quot;, &quot;.ttf&quot;, &quot;.woff&quot;, &quot;.woff2&quot;]
+</code></pre>
+<p><code>projectatlas init</code> auto-detects repo languages and writes the config with the detected extensions by default.
+Pass <code>--no-detect-languages</code> to keep the static template.</p>
+<h3 id="purpose-styles">Purpose styles</h3>
+<ul>
+<li><code>purpose.default_style</code> controls the fallback header style (<code>javadoc</code>, <code>block-comment</code>, or <code>line-comment</code>).</li>
+<li><code>purpose.styles_by_extension</code> maps specific extensions to a style.</li>
+<li><code>purpose.line_comment_prefixes</code> controls which line-comment prefixes are recognized.</li>
+</ul>
+<p>Example:</p>
+<pre><code class="language-toml">[purpose]
+default_style = &quot;javadoc&quot;
+line_comment_prefixes = [&quot;//&quot;, &quot;#&quot;, &quot;--&quot;, &quot;;&quot;]
+
+[purpose.styles_by_extension]
+&quot;.go&quot; = &quot;line-comment&quot;
+&quot;.rs&quot; = &quot;line-comment&quot;
+&quot;.c&quot; = &quot;block-comment&quot;
+</code></pre>
+<h3 id="non-source-file-list">Non-source file list</h3>
+<p>If you set <code>project.nonsource_files_path</code>, ProjectAtlas reads a TOON file with a <code>nonsource_files[]:</code> section. This
+file is agent-maintained input for non-source summaries (configs, docs, assets) and is merged into the generated
+atlas. The legacy <code>project.manual_files_path</code> key is still accepted for backward compatibility.</p>
+<pre><code>nonsource_files[]:
+  path/to/file.txt,One line purpose summary
+</code></pre>
+<p>These entries are merged into the file list for non-source or config files that cannot carry headers.</p></div>
+            </div>
+        </div>
+
+        <footer class="col-md-12">
+            <hr>
+            <p>Documentation built with <a href="https://www.mkdocs.org/">MkDocs</a>.</p>
+        </footer>
+        <script src="../js/bootstrap.bundle.min.js"></script>
+        <script>
+            var base_url = "..",
+                shortcuts = {"help": 191, "next": 78, "previous": 80, "search": 83};
+        </script>
+        <script src="../js/base.js"></script>
+        <script src="../search/main.js"></script>
+
+        <div class="modal" id="mkdocs_search_modal" tabindex="-1" role="dialog" aria-labelledby="searchModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4 class="modal-title" id="searchModalLabel">Search</h4>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p>From here you can search these documents. Enter your search terms below.</p>
+                <form>
+                    <div class="form-group">
+                        <input type="search" class="form-control" placeholder="Search..." id="mkdocs-search-query" title="Type search term here">
+                    </div>
+                </form>
+                <div id="mkdocs-search-results" data-no-results-text="No results found"></div>
+            </div>
+            <div class="modal-footer">
+            </div>
+        </div>
+    </div>
+</div><div class="modal" id="mkdocs_keyboard_modal" tabindex="-1" role="dialog" aria-labelledby="keyboardModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4 class="modal-title" id="keyboardModalLabel">Keyboard Shortcuts</h4>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th style="width: 20%;">Keys</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td class="help shortcut"><kbd>?</kbd></td>
+                    <td>Open this help</td>
+                  </tr>
+                  <tr>
+                    <td class="next shortcut"><kbd>n</kbd></td>
+                    <td>Next page</td>
+                  </tr>
+                  <tr>
+                    <td class="prev shortcut"><kbd>p</kbd></td>
+                    <td>Previous page</td>
+                  </tr>
+                  <tr>
+                    <td class="search shortcut"><kbd>s</kbd></td>
+                    <td>Search</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="modal-footer">
+            </div>
+        </div>
+    </div>
+</div>
+
+    </body>
+</html>
