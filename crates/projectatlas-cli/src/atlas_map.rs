@@ -399,7 +399,7 @@ pub(crate) fn seed_purpose_files(config: &AtlasMapConfig) -> AtlasMapResult<usiz
         if purpose_path.exists() {
             continue;
         }
-        let payload = format!("# path: {folder}\n");
+        let payload = format!("Purpose: {}\n", seeded_folder_summary(&folder));
         fs::write(&purpose_path, payload).map_err(|source| AtlasMapError::Io {
             path: purpose_path,
             source,
@@ -407,6 +407,28 @@ pub(crate) fn seed_purpose_files(config: &AtlasMapConfig) -> AtlasMapResult<usiz
         created += 1;
     }
     Ok(created)
+}
+
+/// Build a deterministic placeholder summary for seeded folder purposes.
+fn seeded_folder_summary(folder: &str) -> String {
+    if folder == "." {
+        return "Project repository root.".to_string();
+    }
+    let label = folder
+        .rsplit('/')
+        .next()
+        .map(sanitize_folder_label)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "folder".to_string());
+    format!("{label} project folder.")
+}
+
+/// Keep generated seed summaries within the ASCII lint policy.
+fn sanitize_folder_label(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+        .collect()
 }
 
 /// Generate and write the atlas map.
@@ -2112,7 +2134,8 @@ impl From<serde_json::Error> for AtlasMapError {
 mod tests {
     use super::{
         AtlasMapConfig, MapRecord, append_existing_map_purpose_records, append_record_rows,
-        normalize_repo_string, split_record_cells, stable_generated_at, toon_cell,
+        normalize_repo_string, seed_purpose_files, split_record_cells, stable_generated_at,
+        toon_cell,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -2261,6 +2284,36 @@ mod tests {
         }
         if imported.get("docs/a,b.md").map(String::as_str) != Some("Quoted, summary") {
             return Err(std::io::Error::other("quoted file purpose was not imported").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn seed_purpose_files_write_valid_purpose_summaries() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        std::fs::create_dir_all(temp.path().join("src"))?;
+        let config = test_config(temp.path().join("projectatlas.toon"));
+
+        let created = seed_purpose_files(&config)?;
+
+        if created != 2 {
+            return Err(
+                std::io::Error::other(format!("expected 2 seed files, got {created}")).into(),
+            );
+        }
+        let root_purpose = std::fs::read_to_string(temp.path().join(".purpose"))?;
+        if root_purpose != "Purpose: Project repository root.\n" {
+            return Err(std::io::Error::other(format!(
+                "unexpected root purpose: {root_purpose:?}"
+            ))
+            .into());
+        }
+        let src_purpose = std::fs::read_to_string(temp.path().join("src").join(".purpose"))?;
+        if src_purpose != "Purpose: src project folder.\n" {
+            return Err(
+                std::io::Error::other(format!("unexpected src purpose: {src_purpose:?}")).into(),
+            );
         }
         Ok(())
     }

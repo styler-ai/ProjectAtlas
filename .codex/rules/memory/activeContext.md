@@ -55,4 +55,5 @@ Purpose: Capture current focus areas and any in-flight tasks for ProjectAtlas.
 - Post-push CI fixes were needed before publication: CI now reads live PR milestone metadata with `gh api`, and the Pages docs workflow keeps `environment` under the deploy job so workflow validation succeeds.
 - GitHub CI/release must bootstrap the ignored SQLite index on clean runners by running `projectatlas scan .` before DB-backed lint/parity/map drift checks.
 - Clean checkouts depend on committed `.projectatlas/projectatlas.toon` as the portable purpose seed; the Rust scan path imports map folder/file rows when the ignored SQLite DB is absent.
+- `projectatlas init --seed-purpose` now writes lint-valid `Purpose:` lines so install-smoke and legacy bootstrap flows do not create invalid `.purpose` files.
 - Current self-scan state after final release hardening before push: 64 indexed files, 36 folders, 0 missing purposes, 0 stale purposes, 100 approved purposes, 64 persisted SQLite text rows, 26 parsed source files, 1680 symbols, 8260 relations, 26 source summaries, 0 health findings, passing repository-intelligence parity, and no legacy `.purpose` files on disk.

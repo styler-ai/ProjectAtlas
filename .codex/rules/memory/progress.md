@@ -43,6 +43,7 @@
 - 2026-06-27: Fixed post-push GitHub workflow blockers: CI now queries live pull request metadata with `gh api` for milestone enforcement instead of relying on stale pull_request event payloads, and the docs Pages workflow moved `environment` under the deploy job.
 - 2026-06-27: Fixed clean-checkout CI lint bootstrap: CI/release now run `projectatlas scan .` and repository-intelligence parity before DB-backed ProjectAtlas lint so the ignored SQLite index is created from committed atlas metadata.
 - 2026-06-27: Fixed the clean-checkout import gap in Rust: `scan` now seeds approved purposes from the committed `.projectatlas/projectatlas.toon` rows when `.projectatlas/projectatlas.db` is absent, with unit coverage and a local no-DB workspace-binary simulation.
+- 2026-06-27: Fixed install-smoke seed behavior: `projectatlas init --seed-purpose` now writes valid `Purpose:` summaries instead of comment-only `.purpose` files, and local init/map/lint smoke passes.
 - 2026-01-03: Added auto-detect language extensions for `projectatlas init`, updated docs/skills/tests, and removed dead config text from `detect_purpose_styles` (issue #111).
 - 2026-01-03: Released v0.1.8 and published Highlights in the GitHub Release; merged post-release bump to v0.1.9.dev0 (issue #114).
 - 2026-01-03: Clarified atlas overview counts (source/nonsource/total) and documented the nonsource tracking model in docs/skills (issue #118).
