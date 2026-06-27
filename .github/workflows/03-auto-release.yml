@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   release:
@@ -22,16 +23,16 @@ jobs:
       - name: Read version
         id: version
         run: |
-          python - <<'PY'
-          import os
-          import tomllib
-          from pathlib import Path
-
-          payload = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-          version = payload["project"]["version"]
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-              handle.write(f"version={version}\n")
-          PY
+          version="$(awk -F'"' '
+            /^\[workspace.package\]/ { in_workspace_package = 1; next }
+            /^\[/ { if (in_workspace_package) exit }
+            in_workspace_package && /^version = / { print $2; exit }
+          ' Cargo.toml)"
+          if [[ -z "$version" ]]; then
+            echo "Could not read workspace package version from Cargo.toml" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Check release eligibility
         id: release
@@ -54,11 +55,11 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create release
+      - name: Dispatch release workflow
         if: steps.release.outputs.eligible == 'true' && steps.tag.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "v${{ steps.version.outputs.version }}" \
-            --title "v${{ steps.version.outputs.version }}" \
-            --generate-notes
+          gh workflow run release.yml \
+            --ref main \
+            --field version="v${{ steps.version.outputs.version }}"

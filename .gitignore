@@ -8,3 +8,7 @@ coverage/
 htmlcov/
 .pytest_cache/
 .DS_Store
+target/
+.projectatlas/*.db
+.projectatlas/*.db-*
+.projectatlas/projectatlas.mcp.json

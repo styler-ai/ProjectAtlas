@@ -1,0 +1,105 @@
+[workspace]
+members = [
+    "crates/projectatlas-cli",
+    "crates/projectatlas-core",
+    "crates/projectatlas-db",
+    "crates/projectatlas-fs",
+    "crates/projectatlas-service",
+    "crates/projectatlas-symbols",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.3.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/styler-ai/ProjectAtlas"
+homepage = "https://styler-ai.github.io/ProjectAtlas/"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[workspace.lints.rustdoc]
+all = { level = "deny", priority = -1 }
+# rustdoc::missing_doc_code_examples is still unstable in this toolchain and
+# produces unknown-lint warnings during doctests, so do not enable it in the
+# stable workspace profile.
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+map_err_ignore = "deny"
+let_underscore_must_use = "deny"
+result_unit_err = "deny"
+panic_in_result_fn = "deny"
+missing_errors_doc = "deny"
+missing_docs_in_private_items = "deny"
+large_stack_arrays = "deny"
+large_types_passed_by_value = "deny"
+large_enum_variant = "deny"
+needless_collect = "deny"
+redundant_clone = "deny"
+clone_on_ref_ptr = "deny"
+inefficient_to_string = "deny"
+unnecessary_to_owned = "deny"
+module_name_repetitions = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+many_single_char_names = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+match_bool = "allow"
+missing_const_for_fn = "allow"
+must_use_candidate = "allow"
+missing_inline_in_public_items = "allow"
+
+[workspace.dependencies]
+projectatlas-core = { path = "crates/projectatlas-core", version = "0.3.0" }
+projectatlas-db = { path = "crates/projectatlas-db", version = "0.3.0" }
+projectatlas-fs = { path = "crates/projectatlas-fs", version = "0.3.0" }
+projectatlas-service = { path = "crates/projectatlas-service", version = "0.3.0" }
+projectatlas-symbols = { path = "crates/projectatlas-symbols", version = "0.3.0" }
+blake3 = "1.5"
+clap = { version = "4.5", features = ["derive"] }
+globset = "0.4"
+ignore = "0.4"
+regex = "1.11"
+rayon = "1.10"
+rmcp = { version = "1.8.0", default-features = false, features = ["server", "transport-io", "macros"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.14"
+thiserror = "2.0"
+tokio = { version = "1.48", features = ["io-std", "macros", "rt-multi-thread", "time"] }
+toml = "0.8"
+toon-format = { version = "0.5.0", default-features = false }
+notify = "8.2"
+tree-sitter = "0.26.9"
+tree-sitter-c = "0.24.2"
+tree-sitter-c-sharp = "0.23.5"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-go = "0.25.0"
+tree-sitter-java = "0.23.5"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-kotlin-ng = "1.1.0"
+tree-sitter-objc = "3.0.2"
+tree-sitter-python = "0.25.0"
+tree-sitter-rust = "0.24.2"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-zig = "1.1.2"
+walkdir = "2.5"

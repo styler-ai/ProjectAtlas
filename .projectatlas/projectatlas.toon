@@ -1,42 +1,130 @@
 version: 1
-generated_at: 2026-01-04T11:55:06Z
-file_hash: "455f4a857c2ed8f563252d606b94d412823d7f62cb934f50f963621a87c8d7fd"
-folder_hash: "103200be353e1ea8bf0e41456d3c8bb3727a67ea7a32a7b621a9f63a427bd6a7"
+generated_at: unix:1782603069
+file_hash: "60355d16edf097e1ffe1c4f3eff2e764296dc92fd8eea9dccb027fd4301bc393"
+folder_hash: "4c8f50579814810aa9fbe5b6eb19617979fe46fd802e42b713ad302cdece2e37"
 root: .
-overview: tracked_source_files=23 tracked_nonsource_files=41 tracked_files_total=64 tracked_folders=19 source_extensions=33 exclude_dir_names=8 exclude_path_prefixes=0
+overview: tracked_source_files=60 tracked_nonsource_files=42 tracked_files_total=102 tracked_folders=36 source_extensions=121 exclude_dir_names=9 exclude_path_prefixes=0
 source_extensions[]:
+  - .astro
   - .bash
+  - .bat
   - .c
   - .cc
+  - .cfg
   - .cjs
+  - .clj
+  - .cljs
+  - .cmd
+  - .conf
   - .cpp
+  - .cql
   - .cs
   - .css
   - .cxx
+  - .cypher
   - .d.ts
+  - .dart
+  - .db2
+  - .ddl
+  - .dml
+  - .ejs
+  - .erb
+  - .fixture
+  - .flyway
+  - .fs
+  - .fsx
+  - .ftl
+  - .func
+  - .function
   - .go
+  - .gql
+  - .gradle
+  - .groovy
+  - .gsp
   - .h
+  - .handlebars
+  - .hbs
+  - .hh
   - .hpp
+  - .hs
+  - .htm
+  - .html
+  - .hxx
+  - .index
+  - .ini
   - .java
   - .js
+  - .json
+  - .jsonc
+  - .jsp
+  - .jspf
+  - .jspx
   - .jsx
   - .kt
+  - .kts
+  - .less
+  - .liquibase
+  - .liquid
   - .lua
+  - .m
+  - .md
+  - .mdx
+  - .migration
   - .mjs
+  - .ml
+  - .mli
+  - .mm
+  - .mssql
+  - .mustache
+  - .mysql
+  - .ora
+  - .oracle
   - .php
+  - .pl
+  - .pm
+  - .postgresql
+  - .proc
+  - .procedure
+  - .properties
+  - .proto
   - .ps1
   - .psd1
   - .psm1
+  - .psql
+  - .pug
   - .py
+  - .pyw
+  - .r
   - .rb
   - .rs
+  - .sass
   - .scala
+  - .schema
+  - .scss
+  - .seed
   - .sh
+  - .sparql
   - .sql
+  - .sqlite
+  - .styl
+  - .stylus
+  - .svelte
   - .swift
+  - .tag
+  - .tagx
+  - .toml
+  - .trigger
   - .ts
   - .tsx
+  - .txt
+  - .view
+  - .vim
   - .vue
+  - .xml
+  - .yaml
+  - .yml
+  - .zig
+  - .zon
   - .zsh
 exclude_dir_names[]:
   - .egg-info
@@ -47,107 +135,146 @@ exclude_dir_names[]:
   - build
   - dist
   - node_modules
+  - target
 exclude_path_prefixes[]:
-folders[19]{path,summary,source}:
-  .,ProjectAtlas repository root.,purpose
-  .codex,Codex configuration and skills for ProjectAtlas.,purpose
-  .codex/rules,ProjectAtlas rules for Codex usage.,purpose
-  .codex/rules/memory,ProjectAtlas Memory Bank files.,purpose
-  .codex/rules/projectatlas,ProjectAtlas-specific rule files and practices.,purpose
-  .codex/skills,Codex skill copies for ProjectAtlas adoption.,purpose
-  .githooks,Git hook scripts for ProjectAtlas commits.,purpose
-  .github,ProjectAtlas GitHub metadata and workflows.,purpose
-  .github/workflows,ProjectAtlas CI and release workflows.,purpose
-  docs,ProjectAtlas documentation and guides.,purpose
-  examples,Example assets for ProjectAtlas.,purpose
-  scripts,Release and maintenance scripts for ProjectAtlas.,purpose
-  skills,Agent skill files for ProjectAtlas.,purpose
-  skills/claude,Claude guidance for ProjectAtlas usage.,purpose
-  skills/codex,Codex guidance for ProjectAtlas usage.,purpose
-  src,Python source tree for ProjectAtlas.,purpose
-  src/projectatlas,Core ProjectAtlas package implementation.,purpose
-  templates,Reusable agent templates and snippets.,purpose
-  tests,Unit tests for ProjectAtlas.,purpose
-files[59]{path,summary,source}:
-  .codex/rules/memory/activeContext.md,ProjectAtlas active context,nonsource
-  .codex/rules/memory/productContext.md,ProjectAtlas product context,nonsource
-  .codex/rules/memory/progress.md,ProjectAtlas progress log,nonsource
-  .codex/rules/memory/projectbrief.md,ProjectAtlas project brief,nonsource
-  .codex/rules/memory/ruleIndex.md,ProjectAtlas memory bank index,nonsource
-  .codex/rules/memory/systemPatterns.md,ProjectAtlas system patterns,nonsource
-  .codex/rules/memory/techContext.md,ProjectAtlas tech context,nonsource
-  .codex/rules/projectatlas/.purpose,ProjectAtlas rule folder purpose,nonsource
-  .codex/rules/projectatlas/github-rules.md,ProjectAtlas GitHub workflow rules,nonsource
-  .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas,nonsource
+folders[36]{path,summary,source}:
+  .,ProjectAtlas repository root.,database
+  .agents,Agent marketplace metadata for ProjectAtlas.,database
+  .agents/plugins,Codex plugin marketplace catalog for ProjectAtlas.,database
+  .codex,Codex configuration and skills for ProjectAtlas.,database
+  .codex/rules,ProjectAtlas rules for Codex usage.,database
+  .codex/rules/memory,ProjectAtlas Memory Bank files.,database
+  .codex/rules/projectatlas,ProjectAtlas-specific rule files and practices.,database
+  .codex/skills,Codex skill copies for ProjectAtlas adoption.,database
+  .githooks,Git hook scripts for ProjectAtlas commits.,database
+  .github,ProjectAtlas GitHub metadata and workflows.,database
+  .github/workflows,ProjectAtlas CI and release workflows.,database
+  crates,Rust workspace crates for ProjectAtlas 3.,database
+  crates/projectatlas-cli,Command-line adapter for ProjectAtlas 3.,database
+  crates/projectatlas-cli/src,CLI command implementation for ProjectAtlas 3 Rust binary.,database
+  crates/projectatlas-cli/tests,End-to-end CLI tests for ProjectAtlas 3.,database
+  crates/projectatlas-core,Core ProjectAtlas 3 domain models and analysis logic.,database
+  crates/projectatlas-core/src,Core domain modules for ProjectAtlas 3.,database
+  crates/projectatlas-db,SQLite persistence for ProjectAtlas 3 indexes.,database
+  crates/projectatlas-db/src,SQLite storage modules for ProjectAtlas 3.,database
+  crates/projectatlas-fs,Filesystem scanner for ProjectAtlas 3.,database
+  crates/projectatlas-fs/src,Filesystem scanner modules for ProjectAtlas 3.,database
+  crates/projectatlas-service,Provide shared ProjectAtlas query services for CLI and MCP adapters,database
+  crates/projectatlas-service/src,Contain shared service-layer Rust source for ProjectAtlas query behavior,database
+  crates/projectatlas-symbols,Rust crate for ProjectAtlas source symbol and relation extraction.,database
+  crates/projectatlas-symbols/src,Source folder for symbol graph extraction implementation.,database
+  docs,ProjectAtlas documentation and guides.,database
+  plugins,Installable Codex plugins for ProjectAtlas.,database
+  plugins/projectatlas,ProjectAtlas Codex plugin package.,database
+  plugins/projectatlas/.codex-plugin,ProjectAtlas plugin manifest metadata.,database
+  plugins/projectatlas/scripts,Runtime installer scripts for the ProjectAtlas plugin.,database
+  plugins/projectatlas/skills,ProjectAtlas plugin skills.,database
+  plugins/projectatlas/skills/projectatlas,Codex skill for ProjectAtlas workflows.,database
+  skills,Agent skill files for ProjectAtlas.,database
+  skills/claude,Claude guidance for ProjectAtlas usage.,database
+  skills/codex,Codex guidance for ProjectAtlas usage.,database
+  templates,Reusable agent templates and snippets.,database
+files[64]{path,summary,source}:
+  .agents/plugins/marketplace.json,Codex plugin marketplace catalog for ProjectAtlas,database
+  .codex/rules/memory/activeContext.md,ProjectAtlas active context,database
+  .codex/rules/memory/productContext.md,ProjectAtlas product context,database
+  .codex/rules/memory/progress.md,ProjectAtlas progress log,database
+  .codex/rules/memory/projectbrief.md,ProjectAtlas project brief,database
+  .codex/rules/memory/ruleIndex.md,ProjectAtlas memory bank index,database
+  .codex/rules/memory/systemPatterns.md,ProjectAtlas system patterns,database
+  .codex/rules/memory/techContext.md,ProjectAtlas tech context,database
+  .codex/rules/projectatlas/github-rules.md,ProjectAtlas GitHub workflow rules,database
+  .codex/skills/ProjectAtlas.md,Repo-local Codex skill instructions for ProjectAtlas,database
   .githooks/commit-msg,Git hook to enforce issue references in commits,nonsource
   .githooks/pre-push,Git hook to run full local checks before push,nonsource
-  .github/pull_request_template.md,Pull request checklist for ProjectAtlas,nonsource
-  .github/workflows/03-auto-release.yml,ProjectAtlas auto release workflow,nonsource
-  .github/workflows/04-docs.yml,ProjectAtlas docs site workflow,nonsource
-  .github/workflows/ci.yml,ProjectAtlas CI workflow,nonsource
-  .github/workflows/release.yml,ProjectAtlas release workflow,nonsource
+  .github/pull_request_template.md,Pull request checklist for ProjectAtlas,database
+  .github/workflows/03-auto-release.yml,ProjectAtlas auto release workflow,database
+  .github/workflows/04-docs.yml,ProjectAtlas docs site workflow,database
+  .github/workflows/ci.yml,ProjectAtlas CI workflow,database
+  .github/workflows/release.yml,ProjectAtlas release workflow,database
   .gitignore,Ignored files for ProjectAtlas repository,nonsource
-  CODE_OF_CONDUCT.md,Community conduct expectations for ProjectAtlas,nonsource
-  CONTRIBUTING.md,Contribution policy for ProjectAtlas,nonsource
+  AGENTS.md,Project agent operating instructions for ProjectAtlas workflows.,database
+  CODE_OF_CONDUCT.md,Community conduct expectations for ProjectAtlas,database
+  CONTRIBUTING.md,Contribution policy for ProjectAtlas,database
+  Cargo.lock,Locked Rust dependency versions for ProjectAtlas 3,database
+  Cargo.toml,Rust workspace manifest for ProjectAtlas 3,database
   LICENSE,ProjectAtlas MIT license,nonsource
-  README.md,ProjectAtlas overview and usage guide,nonsource
-  SECURITY.md,Security contact information for ProjectAtlas,nonsource
-  docs/adoption.md,Adoption checklist for ProjectAtlas,nonsource
-  docs/agent-integration.md,Agent integration instructions for ProjectAtlas,nonsource
-  docs/api.md,Generated ProjectAtlas API documentation,nonsource
-  docs/concepts.md,Core concepts for ProjectAtlas usage,nonsource
-  docs/configuration.md,Configuration reference for ProjectAtlas,nonsource
-  docs/format.md,ProjectAtlas TOON schema reference,nonsource
-  docs/index.md,Documentation landing page for ProjectAtlas,nonsource
-  docs/workflow.md,ProjectAtlas workflow and troubleshooting guide,nonsource
-  mkdocs.yml,MkDocs site configuration for ProjectAtlas,nonsource
-  pyproject.toml,ProjectAtlas packaging and CLI metadata,nonsource
-  scripts/check_all.py,Run the full local ProjectAtlas verification workflow in one command.,header
-  scripts/check_commit_issue.py,Enforce GitHub issue references in commit messages.,header
-  scripts/check_docstrings.py,Enforce module and public symbol docstrings for ProjectAtlas code.,header
-  scripts/check_pr_issue_reference.py,Enforce issue references in pull request titles or bodies.,header
-  scripts/generate_api_docs.py,Generate Markdown API docs for ProjectAtlas modules.,header
-  scripts/install_hooks.py,Install ProjectAtlas git hooks by setting core.hooksPath.,header
-  scripts/next_version.py,Compute the next ProjectAtlas version and optionally update files.,header
-  scripts/prepare_release.py,Bump the ProjectAtlas version and open a release PR.,header
-  scripts/verify_version.py,Validate that ProjectAtlas versions match the requested tag.,header
-  skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas,nonsource
-  skills/codex/ProjectAtlas.md,Codex skill instructions for ProjectAtlas,nonsource
-  src/projectatlas/__init__.py,Define the ProjectAtlas package metadata.,header
-  src/projectatlas/__main__.py,Allow `python -m projectatlas` to run the CLI.,header
-  src/projectatlas/atlas.py,Scan repositories and build ProjectAtlas record entries.,header
-  src/projectatlas/cli.py,Provide the ProjectAtlas command-line entry points.,header
-  src/projectatlas/config.py,Load and normalize ProjectAtlas configuration from TOML.,header
-  src/projectatlas/models.py,Define data models used across ProjectAtlas.,header
-  src/projectatlas/output.py,Write ProjectAtlas snapshots to TOON or JSON outputs.,header
-  templates/AGENTS.md,Agent startup snippet for ProjectAtlas,nonsource
-  tests/test_atlas.py,Validate basic ProjectAtlas scanning behavior.,header
-  tests/test_commit_issue.py,Validate commit message issue reference checks.,header
-  tests/test_docstrings.py,Validate the ProjectAtlas docstring enforcement script.,header
-  tests/test_language_detection.py,Validate automatic language detection for config generation.,header
-  tests/test_next_version.py,Validate ProjectAtlas version helper utilities.,header
-  tests/test_pr_issue_reference.py,Validate pull request issue reference enforcement.,header
-  tests/test_prepare_release.py,Validate the release preparation helper.,header
+  README.md,ProjectAtlas overview and usage guide,database
+  SECURITY.md,Security contact information for ProjectAtlas,database
+  crates/projectatlas-cli/Cargo.toml,CLI Rust crate manifest for ProjectAtlas 3,database
+  crates/projectatlas-cli/src/atlas_map.rs,Generate and lint `ProjectAtlas` structure maps from Rust.,database
+  crates/projectatlas-cli/src/main.rs,Provide the `ProjectAtlas` 3 command-line adapter.,database
+  crates/projectatlas-cli/tests/e2e.rs,Validate `ProjectAtlas` 3 CLI end-to-end behavior.,database
+  crates/projectatlas-core/Cargo.toml,Core Rust crate manifest for ProjectAtlas 3,database
+  crates/projectatlas-core/src/health.rs,Detect structural health issues in `ProjectAtlas` indexes.,database
+  crates/projectatlas-core/src/language.rs,Detect file language families from extensions.,database
+  crates/projectatlas-core/src/lib.rs,Define `ProjectAtlas` 3 core domain models and query logic.,database
+  crates/projectatlas-core/src/outline.rs,Build compressed file outlines for agent context.,database
+  crates/projectatlas-core/src/query.rs,Rank `ProjectAtlas` index nodes for progressive context queries.,database
+  crates/projectatlas-core/src/symbols.rs,Define `ProjectAtlas` symbol graph domain types.,database
+  crates/projectatlas-core/src/telemetry.rs,Track `ProjectAtlas` token savings telemetry.,database
+  crates/projectatlas-core/src/toon.rs,Render `ProjectAtlas` responses with the TOON standard encoder.,database
+  crates/projectatlas-db/Cargo.toml,SQLite Rust crate manifest for ProjectAtlas 3,database
+  crates/projectatlas-db/src/lib.rs,Persist `ProjectAtlas` 3 indexes in `SQLite`.,database
+  crates/projectatlas-fs/Cargo.toml,Filesystem scanner Rust crate manifest for ProjectAtlas 3,database
+  crates/projectatlas-fs/src/lib.rs,Scan repository files and folders for `ProjectAtlas` 3.,database
+  crates/projectatlas-service/Cargo.toml,Declare the ProjectAtlas service crate package and dependencies,database
+  crates/projectatlas-service/src/lib.rs,Provide shared `ProjectAtlas` query services for CLI and MCP adapters.,database
+  crates/projectatlas-symbols/Cargo.toml,Symbol extraction crate manifest and tree-sitter dependencies,database
+  crates/projectatlas-symbols/src/lib.rs,Extract tree-sitter-backed `ProjectAtlas` symbol graphs.,database
+  deny.toml,Cargo dependency and license policy for ProjectAtlas,database
+  docs/adoption.md,Adoption checklist for ProjectAtlas,database
+  docs/agent-integration.md,Agent integration instructions for ProjectAtlas,database
+  docs/concepts.md,Core concepts for ProjectAtlas usage,database
+  docs/configuration.md,Configuration reference for ProjectAtlas,database
+  docs/format.md,ProjectAtlas TOON schema reference,database
+  docs/index.md,Documentation landing page for ProjectAtlas,database
+  docs/projectatlas-3-architecture.md,ProjectAtlas 3 Rust architecture plan,database
+  docs/workflow.md,ProjectAtlas workflow and troubleshooting guide,database
+  plugins/projectatlas/.codex-plugin/plugin.json,ProjectAtlas Codex plugin manifest,database
+  plugins/projectatlas/.mcp.json,Fallback MCP server configuration for the ProjectAtlas Codex plugin.,database
+  plugins/projectatlas/scripts/install-runtime.ps1,Install and verify the ProjectAtlas native runtime on Windows.,database
+  plugins/projectatlas/scripts/install-runtime.sh,POSIX installer for the native ProjectAtlas runtime.,database
+  plugins/projectatlas/skills/projectatlas/SKILL.md,ProjectAtlas installable Codex skill,database
+  skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas,database
+  skills/codex/ProjectAtlas.md,Packaged Codex skill instructions for ProjectAtlas,database
+  templates/AGENTS.md,Agent startup snippet for ProjectAtlas,database
 folder_summary_duplicates[]:
 file_summary_duplicates[]:
-  - Codex skill instructions for ProjectAtlas :: .codex/skills/ProjectAtlas.md | skills/codex/ProjectAtlas.md
 folder_tree[]:
   - . - ProjectAtlas repository root.
+  - .agents/ - Agent marketplace metadata for ProjectAtlas.
+  - "  plugins/ - Codex plugin marketplace catalog for ProjectAtlas."
   - .codex/ - Codex configuration and skills for ProjectAtlas.
-  -   rules/ - ProjectAtlas rules for Codex usage.
-  -     memory/ - ProjectAtlas Memory Bank files.
-  -     projectatlas/ - ProjectAtlas-specific rule files and practices.
-  -   skills/ - Codex skill copies for ProjectAtlas adoption.
+  - "  rules/ - ProjectAtlas rules for Codex usage."
+  - "    memory/ - ProjectAtlas Memory Bank files."
+  - "    projectatlas/ - ProjectAtlas-specific rule files and practices."
+  - "  skills/ - Codex skill copies for ProjectAtlas adoption."
   - .githooks/ - Git hook scripts for ProjectAtlas commits.
   - .github/ - ProjectAtlas GitHub metadata and workflows.
-  -   workflows/ - ProjectAtlas CI and release workflows.
+  - "  workflows/ - ProjectAtlas CI and release workflows."
+  - crates/ - Rust workspace crates for ProjectAtlas 3.
+  - "  projectatlas-cli/ - Command-line adapter for ProjectAtlas 3."
+  - "    src/ - CLI command implementation for ProjectAtlas 3 Rust binary."
+  - "    tests/ - End-to-end CLI tests for ProjectAtlas 3."
+  - "  projectatlas-core/ - Core ProjectAtlas 3 domain models and analysis logic."
+  - "    src/ - Core domain modules for ProjectAtlas 3."
+  - "  projectatlas-db/ - SQLite persistence for ProjectAtlas 3 indexes."
+  - "    src/ - SQLite storage modules for ProjectAtlas 3."
+  - "  projectatlas-fs/ - Filesystem scanner for ProjectAtlas 3."
+  - "    src/ - Filesystem scanner modules for ProjectAtlas 3."
+  - "  projectatlas-service/ - Provide shared ProjectAtlas query services for CLI and MCP adapters"
+  - "    src/ - Contain shared service-layer Rust source for ProjectAtlas query behavior"
+  - "  projectatlas-symbols/ - Rust crate for ProjectAtlas source symbol and relation extraction."
+  - "    src/ - Source folder for symbol graph extraction implementation."
   - docs/ - ProjectAtlas documentation and guides.
-  - examples/ - Example assets for ProjectAtlas.
-  - scripts/ - Release and maintenance scripts for ProjectAtlas.
+  - plugins/ - Installable Codex plugins for ProjectAtlas.
+  - "  projectatlas/ - ProjectAtlas Codex plugin package."
+  - "    .codex-plugin/ - ProjectAtlas plugin manifest metadata."
+  - "    scripts/ - Runtime installer scripts for the ProjectAtlas plugin."
+  - "    skills/ - ProjectAtlas plugin skills."
+  - "      projectatlas/ - Codex skill for ProjectAtlas workflows."
   - skills/ - Agent skill files for ProjectAtlas.
-  -   claude/ - Claude guidance for ProjectAtlas usage.
-  -   codex/ - Codex guidance for ProjectAtlas usage.
-  - src/ - Python source tree for ProjectAtlas.
-  -   projectatlas/ - Core ProjectAtlas package implementation.
+  - "  claude/ - Claude guidance for ProjectAtlas usage."
+  - "  codex/ - Codex guidance for ProjectAtlas usage."
   - templates/ - Reusable agent templates and snippets.
-  - tests/ - Unit tests for ProjectAtlas.

@@ -5,7 +5,6 @@ nonsource_files[]:
   # path,summary
   README.md,ProjectAtlas overview and usage guide
   LICENSE,ProjectAtlas MIT license
-  pyproject.toml,ProjectAtlas packaging and CLI metadata
   .gitignore,Ignored files for ProjectAtlas repository
   CONTRIBUTING.md,Contribution policy for ProjectAtlas
   SECURITY.md,Security contact information for ProjectAtlas
@@ -15,6 +14,13 @@ nonsource_files[]:
   .github/workflows/03-auto-release.yml,ProjectAtlas auto release workflow
   .github/workflows/04-docs.yml,ProjectAtlas docs site workflow
   .github/pull_request_template.md,Pull request checklist for ProjectAtlas
+  .agents/plugins/marketplace.json,Codex plugin marketplace catalog for ProjectAtlas
+  Cargo.toml,Rust workspace manifest for ProjectAtlas 3
+  Cargo.lock,Locked Rust dependency versions for ProjectAtlas 3
+  crates/projectatlas-core/Cargo.toml,Core Rust crate manifest for ProjectAtlas 3
+  crates/projectatlas-db/Cargo.toml,SQLite Rust crate manifest for ProjectAtlas 3
+  crates/projectatlas-fs/Cargo.toml,Filesystem scanner Rust crate manifest for ProjectAtlas 3
+  crates/projectatlas-cli/Cargo.toml,CLI Rust crate manifest for ProjectAtlas 3
   .githooks/commit-msg,Git hook to enforce issue references in commits
   .githooks/pre-push,Git hook to run full local checks before push
   .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas
@@ -23,7 +29,6 @@ nonsource_files[]:
   .codex/rules/memory/activeContext.md,ProjectAtlas active context
   .codex/rules/memory/systemPatterns.md,ProjectAtlas system patterns
   .codex/rules/memory/techContext.md,ProjectAtlas tech context
-  .codex/rules/projectatlas/.purpose,ProjectAtlas rule folder purpose
   .codex/rules/projectatlas/github-rules.md,ProjectAtlas GitHub workflow rules
   .codex/rules/memory/progress.md,ProjectAtlas progress log
   .codex/rules/memory/ruleIndex.md,ProjectAtlas memory bank index
@@ -34,13 +39,9 @@ nonsource_files[]:
   docs/configuration.md,Configuration reference for ProjectAtlas
   docs/format.md,ProjectAtlas TOON schema reference
   docs/workflow.md,ProjectAtlas workflow and troubleshooting guide
+  docs/projectatlas-3-architecture.md,ProjectAtlas 3 Rust architecture plan
   skills/codex/ProjectAtlas.md,Codex skill instructions for ProjectAtlas
   skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas
+  plugins/projectatlas/.codex-plugin/plugin.json,ProjectAtlas Codex plugin manifest
+  plugins/projectatlas/skills/projectatlas/SKILL.md,ProjectAtlas installable Codex skill
   templates/AGENTS.md,Agent startup snippet for ProjectAtlas
-  mkdocs.yml,MkDocs site configuration for ProjectAtlas
-  scripts/check_all.py,Run the full local ProjectAtlas verification suite
-  scripts/check_docstrings.py,Docstring enforcement for ProjectAtlas code
-  scripts/check_commit_issue.py,Commit message issue reference enforcement
-  scripts/generate_api_docs.py,Generate API documentation for ProjectAtlas
-  scripts/install_hooks.py,Install git hook configuration for ProjectAtlas
-  docs/api.md,Generated ProjectAtlas API documentation

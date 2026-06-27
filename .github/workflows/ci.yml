@@ -19,39 +19,62 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      - name: Setup Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
 
-      - name: Install
-        run: python -m pip install -e .
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
 
       - name: Issue reference check
         if: github.event_name == 'pull_request'
         env:
-          PROJECTATLAS_REQUIRE_ISSUE_MILESTONE: "1"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python scripts/check_pr_issue_reference.py
-
-      - name: Lint atlas
-        run: projectatlas lint --strict-folders --report-untracked
-
-      - name: Docstring check
-        run: python scripts/check_docstrings.py
-
-      - name: API docs
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_MILESTONE: ${{ github.event.pull_request.milestone.number }}
         run: |
-          python scripts/generate_api_docs.py
-          git diff --exit-code docs/api.md
+          text="$PR_TITLE $PR_BODY"
+          if ! [[ "$text" =~ (#[0-9]+|GH-[0-9]+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+) ]]; then
+            echo "Pull request title or body must reference a GitHub issue." >&2
+            exit 1
+          fi
+          if [[ -z "$PR_MILESTONE" ]]; then
+            echo "Pull request must be assigned to a milestone." >&2
+            exit 1
+          fi
 
-      - name: Unit tests
-        run: python -m unittest discover -s tests
+      - name: Format
+        run: cargo fmt --check
 
-      - name: Build package
-        run: |
-          python -m pip install build
-          python -m build --sdist --wheel
+      - name: Check
+        run: cargo check --workspace --all-targets --all-features --locked
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Dependency policy
+        run: cargo deny check
+
+      - name: Tests
+        run: cargo test --workspace --all-features --locked
+
+      - name: Doc tests
+        run: cargo test --doc --all-features --locked
+
+      - name: Rustdoc
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+
+      - name: ProjectAtlas lint
+        run: cargo run --locked -p projectatlas-cli -- lint --strict-folders --report-untracked
+
+      - name: ProjectAtlas map
+        run: cargo run --locked -p projectatlas-cli -- map --force
+
+      - name: ProjectAtlas map diff
+        run: git diff --exit-code -- .projectatlas/projectatlas.toon .projectatlas/projectatlas-nonsource-files.toon
 
   install-smoke:
     name: install-smoke
@@ -61,19 +84,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Build package
+      - name: Setup Rust
         run: |
-          python -m pip install build
-          python -m build --sdist --wheel
+          rustup toolchain install stable --profile minimal
+          rustup default stable
 
-      - name: Install wheel
+      - name: Install binary
         run: |
-          python -m pip install dist/*.whl
+          cargo install --path crates/projectatlas-cli --locked
           projectatlas --help
 
       - name: Smoke map
@@ -82,3 +100,4 @@ jobs:
           cd smoke
           projectatlas init --seed-purpose
           projectatlas map --force
+          projectatlas lint --strict-folders --report-untracked

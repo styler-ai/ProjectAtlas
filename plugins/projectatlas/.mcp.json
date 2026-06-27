@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "projectatlas": {
+      "command": "projectatlas",
+      "args": [
+        "--db",
+        ".projectatlas/projectatlas.db",
+        "mcp"
+      ]
+    }
+  }
+}

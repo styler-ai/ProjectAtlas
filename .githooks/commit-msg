@@ -4,4 +4,9 @@
 #  * Purpose: Block commits without a GitHub issue reference.
 #  */
 
-python scripts/check_commit_issue.py "$1"
+message_file="$1"
+
+if ! grep -Eiq '(#[0-9]+|GH-[0-9]+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+)' "$message_file"; then
+  echo "Commit message must reference a GitHub issue, for example #123 or GH-123." >&2
+  exit 1
+fi

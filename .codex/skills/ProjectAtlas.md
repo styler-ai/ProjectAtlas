@@ -2,84 +2,81 @@
 
 ## Goal
 
-Give Codex a fast, accurate structure map before deep indexing so it knows where to look and where to place new
-files. ProjectAtlas is the layer above code-index tools.
+Use ProjectAtlas as the atlas-first orientation layer before broad search, full-file reads, or symbol-level
+inspection. The desired workflow is folder first, then file, then compressed details, then exact source.
 
-## When to use
+## When To Use
 
-- At the start of every session (before deep indexing).
-- After creating or moving folders.
+- At the start of work in a repo that has `.projectatlas/config.toml`.
+- When adopting ProjectAtlas in a new repository.
+- After creating, moving, or deleting folders.
 - After adding new source files.
-- When `projectatlas lint` reports missing Purpose headers or missing `.purpose` files.
-- Before large refactors or cleanup decisions.
+- Before large refactors or cleanup decisions where folder/file intent matters.
+- When the user asks how many tokens ProjectAtlas saved.
 
-## Definitions
+## First-Time Setup
 
-- Deep indexing = full-file or symbol-level analysis via tools like code-index MCP or language servers. This is
-  powerful but expensive in context budget if you run it blindly.
+1. Establish the project root first. ProjectAtlas stores one project-local index at `.projectatlas/projectatlas.db`.
+2. Install the Rust binary if it is missing: `cargo install --path crates/projectatlas-cli --locked`.
+3. Initialize the target repo with `projectatlas init --seed-purpose`.
+4. Run `projectatlas scan`.
+5. Add or import one-line purpose records for important folders and files.
+6. Add summaries for non-source files to `.projectatlas/projectatlas-nonsource-files.toon` when needed.
+7. Run `projectatlas map --force`.
+8. Run `projectatlas lint --strict-folders --report-untracked` and fix every reported issue.
 
-## Required files
+## Startup Workflow
 
-- `.projectatlas/projectatlas.toon` (the atlas snapshot).
-- `.projectatlas/config.toml` (scan rules).
-- `.projectatlas/projectatlas-nonsource-files.toon` (agent-maintained summaries for non-source files).
+1. Run ProjectAtlas from the established project root.
+2. Run `projectatlas scan` or `projectatlas map --force` when the index may be stale.
+3. Run `projectatlas overview`.
+4. Run `projectatlas folders <query>` to choose the correct part of the repository.
+5. Run `projectatlas files <query> --folder <path>` to choose target files; use `projectatlas files --file-pattern <glob>` when the file/path pattern is already known.
+6. Run `projectatlas summary <file> --limit 25` before opening full source.
+7. Run `projectatlas outline <file>` if the structured summary is not enough.
+8. Run `projectatlas search <pattern> --file-pattern <glob>` for filtered text matches.
+9. Run `projectatlas slice <file> --start-line <n> --end-line <m>` for exact source slices.
+10. Run `projectatlas health-check` before cleanup/refactor decisions.
+11. Escalate to broad source reads only after the selected files or slices are known.
+12. Run `projectatlas token` when token-savings reporting is requested; use `projectatlas token --view tui` only for a human terminal dashboard.
+13. Run `projectatlas lint --strict-folders --report-untracked` before finishing structural changes.
 
-## First-time setup (repo adoption)
+Token savings estimate avoided wrong-folder exploration, wrong-file opens, and unnecessary full-code reads caused by the atlas-first workflow. Agent and MCP surfaces should stay structured by default; the TUI dashboard is explicit terminal UI.
 
-1. Install locally: `pip install -e .`
-2. Initialize: `projectatlas init --seed-purpose`
-3. Fill each `.purpose` file with a one-line summary (ASCII, no commas).
-4. Add Purpose headers to every tracked source file.
-5. Add non-source files to `.projectatlas/projectatlas-nonsource-files.toon`.
-6. Run `projectatlas map` to generate `.projectatlas/projectatlas.toon`.
-7. Run `projectatlas lint --strict-folders --report-untracked` and fix issues.
-8. (Optional) Install git hooks: `python scripts/install_hooks.py` to enforce issue references in commits.
+## Map Interpretation
 
-## Startup workflow (every session)
+- `overview` gives repository scale and purpose coverage.
+- `folders` helps choose the working area by path and purpose.
+- `files` narrows the file set within a folder and can use `--file-pattern` for direct glob discovery.
+- `summary` gives structured deterministic file facts and purpose state.
+- `outline` gives compressed source context and a token estimate.
+- `search` finds literal, regex, or fuzzy text matches inside indexed files with optional path filters; it is case-insensitive by default for agent discovery.
+- `slice` returns exact line ranges after a file is selected.
+- `health-check` reports missing purposes, duplicate purposes, repeated temp/generated folders, and cleanup signals.
+- `settings` and `watch-status` report local index/config/cache state; `reset-index --dry-run` previews local index/cache cleanup before `reset-index --apply`.
+- `token` reports structured saved-token telemetry; `token --view tui` renders the human dashboard.
+- Set `PROJECTATLAS_NO_TELEMETRY=1` for read-only review or CI smoke runs that must not write usage rows into `.projectatlas/projectatlas.db`.
+- Generated compatibility output lives at `.projectatlas/projectatlas.toon`; durable non-source input lives at `.projectatlas/projectatlas-nonsource-files.toon`.
 
-1. Run `projectatlas map` (unless `PROJECTATLAS_SKIP_UPDATE=1` is set).
-2. Read `.projectatlas/projectatlas.toon`.
-3. Scan `folder_tree[]` to pick the correct area of the repo.
-4. Check `folder_summary_duplicates[]` / `file_summary_duplicates[]` for drift.
-5. Use `folders[]` / `files[]` to pick targets.
-6. Only then use deep-index tools (code-index, LSPs) on those targets.
-7. If lint errors appear, fix them immediately (add Purpose headers or `.purpose` files) or remove the stale file.
+## Local Gates
 
-## How to interpret the map
+For ProjectAtlas itself, run:
 
-- `overview:` shows tracked counts so you can spot drift quickly.
-- `overview` now distinguishes source vs non-source (`tracked_source_files`,
-  `tracked_nonsource_files`, `tracked_files_total`) so the totals match the merged list.
-- `folder_tree[]` provides a tree with summaries for fast navigation.
-- `folders[]` and `files[]` are the authoritative summaries for lookup.
-- `*_summary_duplicates[]` highlight likely overlap to clean up.
-
-## Why non-source files live in a separate TOON file
-
-- Some files cannot safely carry inline `Purpose:` headers (JSON, lockfiles, images, generated outputs).
-- Those entries live in `.projectatlas/projectatlas-nonsource-files.toon` and are merged into the atlas at map time.
-- Agents read only the generated atlas; the nonsource list is the durable input so the merged snapshot stays complete.
-
-## AGENTS.md integration
-
-Add a startup snippet so the atlas is always read:
-
+```bash
+cargo fmt --check
+cargo check --workspace --all-targets --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+cargo test --doc --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
+cargo run -p projectatlas-cli -- map --force
+cargo run -p projectatlas-cli -- lint --strict-folders --report-untracked
 ```
-## Startup
-1. Run `projectatlas map`.
-2. Read `.projectatlas/projectatlas.toon`.
-3. Use the atlas to select files before deep indexing.
-4. Fix missing Purpose headers or `.purpose` files if lint fails.
-```
-
-## Companion tools
-
-- code-index (deep code summaries): https://github.com/johnhuang316/code-index-mcp
-- If you do not use deep indexing, rely on the atlas and open files directly as needed.
 
 ## References
 
-- ProjectAtlas repo: https://github.com/styler-ai/ProjectAtlas
-- `docs/agent-integration.md` for the AGENTS.md snippet.
+- ProjectAtlas repository: https://github.com/styler-ai/ProjectAtlas
+- `docs/projectatlas-3-architecture.md` for the target architecture.
+- `docs/agent-integration.md` for AGENTS.md startup snippets.
 - `docs/format.md` for TOON schema.
 - `docs/workflow.md` for troubleshooting.

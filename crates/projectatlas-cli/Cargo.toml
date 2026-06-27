@@ -1,0 +1,39 @@
+[package]
+name = "projectatlas-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "projectatlas"
+path = "src/main.rs"
+
+[dependencies]
+projectatlas-core.workspace = true
+projectatlas-db.workspace = true
+projectatlas-fs.workspace = true
+projectatlas-service.workspace = true
+projectatlas-symbols.workspace = true
+blake3.workspace = true
+clap.workspace = true
+notify.workspace = true
+rayon.workspace = true
+regex.workspace = true
+rmcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.1"
+rmcp = { workspace = true, features = ["client"] }
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
