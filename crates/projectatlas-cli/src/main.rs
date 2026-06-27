@@ -1098,14 +1098,12 @@ fn run_mcp_server(cli: &Cli) -> Result<(), CliError> {
 
 /// Return whether an environment variable is set to a truthy value.
 fn truthy_env(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    std::env::var(name).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 /// Create the parent directory for a path when it has one.
