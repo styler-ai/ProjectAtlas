@@ -41,6 +41,7 @@
 - 2026-06-27: Hardened `02-Release` against workflow-dispatch script injection by passing the requested tag through `RELEASE_VERSION`, validating it as `vMAJOR.MINOR.PATCH` before use, and removing direct `inputs.version` interpolation from shell and PowerShell scripts.
 - 2026-06-27: Fixed `projectatlas map --force` release-drift behavior by preserving the existing `generated_at` value when generated file/folder hashes are unchanged; consecutive workspace-binary map runs now produce identical map file hashes.
 - 2026-06-27: Fixed post-push GitHub workflow blockers: CI now queries live pull request metadata with `gh api` for milestone enforcement instead of relying on stale pull_request event payloads, and the docs Pages workflow moved `environment` under the deploy job.
+- 2026-06-27: Fixed clean-checkout CI lint bootstrap: CI/release now run `projectatlas scan .` and repository-intelligence parity before DB-backed ProjectAtlas lint so the ignored SQLite index is created from committed atlas metadata.
 - 2026-01-03: Added auto-detect language extensions for `projectatlas init`, updated docs/skills/tests, and removed dead config text from `detect_purpose_styles` (issue #111).
 - 2026-01-03: Released v0.1.8 and published Highlights in the GitHub Release; merged post-release bump to v0.1.9.dev0 (issue #114).
 - 2026-01-03: Clarified atlas overview counts (source/nonsource/total) and documented the nonsource tracking model in docs/skills (issue #118).

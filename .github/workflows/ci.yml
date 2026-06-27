@@ -73,6 +73,12 @@ jobs:
       - name: Rustdoc
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 
+      - name: ProjectAtlas scan
+        run: cargo run --locked -p projectatlas-cli -- --format json scan .
+
+      - name: ProjectAtlas parity
+        run: cargo run --locked -p projectatlas-cli -- parity report --profile repository-intelligence
+
       - name: ProjectAtlas lint
         run: cargo run --locked -p projectatlas-cli -- lint --strict-folders --report-untracked
 
