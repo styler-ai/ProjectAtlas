@@ -427,24 +427,64 @@ pub(crate) fn write_map(config: &AtlasMapConfig, write_json: bool) -> AtlasMapRe
 pub(crate) fn imported_purpose_records(
     config: &AtlasMapConfig,
 ) -> AtlasMapResult<Vec<ImportedPurposeRecord>> {
+    let mut imported = BTreeMap::new();
+    append_existing_map_purpose_records(config, &mut imported)?;
     let snapshot = build_snapshot(config)?;
-    let mut imported = Vec::new();
     append_imported_records(&mut imported, &snapshot.folder_records);
     append_imported_records(&mut imported, &snapshot.file_records);
-    Ok(imported)
+    Ok(imported
+        .into_iter()
+        .map(|(path, summary)| ImportedPurposeRecord { path, summary })
+        .collect())
 }
 
 /// Append valid imported records from map records.
-fn append_imported_records(imported: &mut Vec<ImportedPurposeRecord>, records: &[MapRecord]) {
+fn append_imported_records(imported: &mut BTreeMap<String, String>, records: &[MapRecord]) {
     for record in records {
         if record.summary == "MISSING" || record.summary == "INVALID" {
             continue;
         }
-        imported.push(ImportedPurposeRecord {
-            path: record.path.clone(),
-            summary: record.summary.clone(),
-        });
+        imported.insert(record.path.clone(), record.summary.clone());
     }
+}
+
+/// Append approved records from an existing committed atlas map.
+fn append_existing_map_purpose_records(
+    config: &AtlasMapConfig,
+    imported: &mut BTreeMap<String, String>,
+) -> AtlasMapResult<()> {
+    if !config.map_path.exists() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(&config.map_path).map_err(|source| AtlasMapError::Io {
+        path: config.map_path.clone(),
+        source,
+    })?;
+    let mut in_record_rows = false;
+    for line in content.lines().map(str::trim) {
+        if line.starts_with("folders[") || line.starts_with("files[") {
+            in_record_rows = true;
+            continue;
+        }
+        if line.ends_with(':') {
+            in_record_rows = false;
+            continue;
+        }
+        if !in_record_rows || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let cells = split_record_cells(line);
+        if cells.len() < 2 {
+            continue;
+        }
+        let summary = cells[1].trim();
+        if summary.is_empty() || summary == "MISSING" || summary == "INVALID" {
+            continue;
+        }
+        let path = normalize_repo_string(&cells[0])?;
+        imported.insert(path, summary.to_string());
+    }
+    Ok(())
 }
 
 /// Load approved purpose records from the durable `SQLite` index.
@@ -2071,8 +2111,8 @@ impl From<serde_json::Error> for AtlasMapError {
 #[cfg(test)]
 mod tests {
     use super::{
-        AtlasMapConfig, MapRecord, append_record_rows, normalize_repo_string, split_record_cells,
-        stable_generated_at, toon_cell,
+        AtlasMapConfig, MapRecord, append_existing_map_purpose_records, append_record_rows,
+        normalize_repo_string, split_record_cells, stable_generated_at, toon_cell,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -2187,6 +2227,40 @@ mod tests {
         let changed_generated_at = stable_generated_at(&config, "changed", "folders");
         if changed_generated_at == "unix:123" {
             return Err(std::io::Error::other("stale timestamp survived hash change").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn existing_map_rows_seed_imported_purposes() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let map_path = temp.path().join("projectatlas.toon");
+        std::fs::write(
+            &map_path,
+            [
+                "version: 1",
+                "folders[1]{path,summary,source}:",
+                "  .,Repository root,database",
+                "files[2]{path,summary,source}:",
+                "  Cargo.toml,Rust workspace manifest,database",
+                "  \"docs/a,b.md\",\"Quoted, summary\",database",
+                "folder_summary_duplicates[]:",
+            ]
+            .join("\n"),
+        )?;
+        let config = test_config(map_path);
+        let mut imported = BTreeMap::new();
+
+        append_existing_map_purpose_records(&config, &mut imported)?;
+
+        if imported.get(".").map(String::as_str) != Some("Repository root") {
+            return Err(std::io::Error::other("root purpose was not imported").into());
+        }
+        if imported.get("Cargo.toml").map(String::as_str) != Some("Rust workspace manifest") {
+            return Err(std::io::Error::other("Cargo purpose was not imported").into());
+        }
+        if imported.get("docs/a,b.md").map(String::as_str) != Some("Quoted, summary") {
+            return Err(std::io::Error::other("quoted file purpose was not imported").into());
         }
         Ok(())
     }
