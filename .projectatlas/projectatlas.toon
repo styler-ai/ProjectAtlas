@@ -1,9 +1,9 @@
 version: 1
-generated_at: unix:1782676748
-file_hash: "2d29b1755323da9a73c46d8d98ccb1baaef64c0e515d5d21f5af4db2b5053830"
+generated_at: unix:1782677236
+file_hash: "9d4d5199b9466ac3eb9af45e46fa7ddad9a37290a9e0d147bf7464571c60661d"
 folder_hash: "f5ec84a38eaa8b9ee18c1d22563973db7217f346e2815ff1fa6abb9273e95036"
 root: .
-overview: tracked_source_files=96 tracked_nonsource_files=35 tracked_files_total=131 tracked_folders=58 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
+overview: tracked_source_files=96 tracked_nonsource_files=37 tracked_files_total=133 tracked_folders=58 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
 source_extensions[]:
   - .astro
   - .bash
@@ -197,7 +197,7 @@ folders[58]{path,summary,source}:
   skills/claude,Claude guidance for ProjectAtlas usage.,database
   skills/codex,Codex guidance for ProjectAtlas usage.,database
   templates,Reusable agent templates and snippets.,database
-files[102]{path,summary,source}:
+files[104]{path,summary,source}:
   .agents/plugins/marketplace.json,Codex plugin marketplace catalog for ProjectAtlas,database
   .gitattributes,Line-ending policy for ProjectAtlas repository fixtures,nonsource
   .githooks/commit-msg,Git hook to enforce issue references in commits,nonsource
@@ -252,7 +252,9 @@ files[102]{path,summary,source}:
   deny.toml,Cargo dependency and license policy for ProjectAtlas,database
   docs/adoption.md,Adoption checklist for ProjectAtlas,database
   docs/agent-integration.md,Agent integration instructions for ProjectAtlas,database
+  docs/assets/agent-harness-funnel.svg,README diagram explaining the ProjectAtlas agent harness workflow from folder purpose to exact source slice,nonsource
   docs/assets/projectatlas-brand.png,ProjectAtlas README brand image,nonsource
+  docs/assets/token-savings-bar.svg,README bar chart visualizing ProjectAtlas token savings benchmark results,nonsource
   docs/benchmarks/large-application-token-savings.md,Document large-application benchmark evidence for token savings and responsiveness checks.,database
   docs/concepts.md,Core concepts for ProjectAtlas usage,database
   docs/configuration.md,Configuration reference for ProjectAtlas,database

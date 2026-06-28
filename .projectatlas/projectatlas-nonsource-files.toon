@@ -11,6 +11,8 @@ nonsource_files[]:
   SECURITY.md,Security contact information for ProjectAtlas
   CODE_OF_CONDUCT.md,Community conduct expectations for ProjectAtlas
   docs/assets/projectatlas-brand.png,ProjectAtlas README brand image
+  docs/assets/agent-harness-funnel.svg,README diagram explaining the ProjectAtlas agent harness workflow from folder purpose to exact source slice
+  docs/assets/token-savings-bar.svg,README bar chart visualizing ProjectAtlas token savings benchmark results
   .github/workflows/ci.yml,ProjectAtlas CI workflow
   .github/workflows/release.yml,ProjectAtlas release workflow
   .github/workflows/03-auto-release.yml,ProjectAtlas auto release workflow
