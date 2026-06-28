@@ -1,6 +1,6 @@
 version: 1
-generated_at: unix:1782677236
-file_hash: "9d4d5199b9466ac3eb9af45e46fa7ddad9a37290a9e0d147bf7464571c60661d"
+generated_at: unix:1782678970
+file_hash: "f745e5399abeb204de4845a5cf03c50715920e70234938ecc3585285b82c5b3b"
 folder_hash: "f5ec84a38eaa8b9ee18c1d22563973db7217f346e2815ff1fa6abb9273e95036"
 root: .
 overview: tracked_source_files=96 tracked_nonsource_files=37 tracked_files_total=133 tracked_folders=58 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
@@ -213,7 +213,7 @@ files[104]{path,summary,source}:
   .gitignore,Ignored files for ProjectAtlas repository,nonsource
   AGENTS.md,Project agent operating instructions for ProjectAtlas workflows.,database
   CODE_OF_CONDUCT.md,Community conduct expectations for ProjectAtlas,database
-  CONTRIBUTING.md,Contribution policy for ProjectAtlas,database
+  CONTRIBUTING.md,Contribution policy for ProjectAtlas.,database
   Cargo.lock,Locked Rust dependency versions for ProjectAtlas 3,database
   Cargo.toml,Rust workspace manifest for ProjectAtlas 3,database
   LICENSE,ProjectAtlas MIT license,nonsource
@@ -253,7 +253,7 @@ files[104]{path,summary,source}:
   docs/adoption.md,Adoption checklist for ProjectAtlas,database
   docs/agent-integration.md,Agent integration instructions for ProjectAtlas,database
   docs/assets/agent-harness-funnel.svg,README diagram explaining the ProjectAtlas agent harness workflow from folder purpose to exact source slice,nonsource
-  docs/assets/projectatlas-brand.png,ProjectAtlas README brand image,nonsource
+  docs/assets/projectatlas-mascot.png,ProjectAtlas README mascot image,nonsource
   docs/assets/token-savings-bar.svg,README bar chart visualizing ProjectAtlas token savings benchmark results,nonsource
   docs/benchmarks/large-application-token-savings.md,Document large-application benchmark evidence for token savings and responsiveness checks.,database
   docs/concepts.md,Core concepts for ProjectAtlas usage,database
