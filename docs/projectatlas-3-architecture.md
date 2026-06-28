@@ -441,6 +441,14 @@ arrive incrementally, but ProjectAtlas 3.0 stable requires all specialized and
 fallback families in this section to be implemented and tested through the
 ProjectAtlas-native parser registry.
 
+The v0.3.2 hardening boundary keeps the public `projectatlas-symbols` API
+stable while splitting language-specific augmentation behind private strategy
+modules. The first split moves Kotlin, Objective-C, Zig, and the C-family
+augmentation boundary out of the generic tree-sitter traversal file. The generic
+parser spine stays stable until language-specific behavior is green, which keeps
+line ranges, signatures, imports, calls, and broad parser behavior from drifting
+while future per-language modules are added.
+
 No source language should become invisible just because a specialized parser is
 not ready. The fallback tier must still provide file discovery, purpose
 association, text search, line counts, rough token estimates, and compact
@@ -491,7 +499,10 @@ repositories, so they must stay bounded by design:
   materialization
 - caller lookup uses batched exact target matching, never suffix scans on the
   hot path
-- `called_by` is conservative and may be empty when a name is ambiguous
+- `called_by` is conservative and may be empty when a name is ambiguous; v0.3.2
+  also resolves deterministic Rust, TypeScript/JavaScript, and Python import
+  aliases from persisted import/call relations without reparsing live source
+  during summary requests
 - indexed search lives in the shared service layer, uses `globset` path
   matching, supports literal/regex/fuzzy line matching, stops once the requested
   page is satisfied, and reports searched file/byte counts plus truncation state
@@ -505,6 +516,12 @@ repositories, so they must stay bounded by design:
   metadata through `source_status` and `source_error`
 - token telemetry baselines are derived from the shared service payload, not a
   duplicate adapter-side model
+
+Native path display is a core contract. `projectatlas-core` owns the canonical
+helper that converts native paths to slash-normalized metadata/diagnostic text
+and strips Windows extended path prefixes. DB metadata, CLI settings, and MCP
+configuration diagnostics should call that helper instead of carrying their own
+`\\?\` or UNC normalization logic.
 
 ## MCP Contract
 
@@ -754,6 +771,14 @@ where large-repo evidence shows a bottleneck.
 Loop 11: large-codebase hardening: incremental refresh, parallel indexing,
 bounded memory behavior, pagination, stable ordering, and token-budgeted
 responses for very large repositories.
+
+Loop 12: v0.3.2 architecture hardening. This loop closes post-release quality
+follow-ups without changing the agent workflow: centralize native display path
+normalization in `projectatlas-core`, split the `projectatlas-symbols` language
+augmentation layer into private modules, replace Objective-C duplicate
+normalization with keyed lookups, and use persisted import/call relations for
+deterministic import-alias `called_by` summaries while preserving ambiguity
+rejection.
 
 ## Quality Gates
 

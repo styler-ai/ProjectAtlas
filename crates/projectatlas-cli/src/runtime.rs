@@ -11,8 +11,9 @@ use projectatlas_core::outline::estimate_tokens;
 use projectatlas_core::symbols::{RelationKind, SymbolGraph, SymbolKind};
 use projectatlas_core::telemetry::{usage_from_estimates, usage_from_text};
 use projectatlas_core::{
-    Node, NodeKind, Overview, PurposeSource, PurposeStatus, normalize_repo_path,
-    repo_path_to_native, validated_repo_file_key,
+    Node, NodeKind, Overview, PurposeSource, PurposeStatus, normalize_native_path_display,
+    normalize_native_path_display_str, normalize_repo_path, repo_path_to_native,
+    validated_repo_file_key,
 };
 use projectatlas_db::{AtlasStore, IndexedFileText};
 use projectatlas_fs::{ScanOptions, scan_path, scan_repo};
@@ -679,7 +680,7 @@ pub(crate) fn settings_index_stats(store: &AtlasStore) -> Result<SettingsIndexSt
     Ok(SettingsIndexStats {
         project_root: store
             .project_root()?
-            .map(|path| normalize_display_path_string(&path)),
+            .map(|path| normalize_native_path_display_str(&path)),
         files: overview.files,
         folders: overview.folders,
         missing_purposes: overview.missing_purposes,
@@ -815,36 +816,7 @@ pub(crate) fn mcp_config_path_for_db(db: &Path) -> PathBuf {
 
 /// Normalize a path for JSON/TOON diagnostics.
 pub(crate) fn normalize_display_path(path: &Path) -> String {
-    normalize_display_path_string(&path.to_string_lossy())
-}
-
-/// Normalize a native path string for JSON/TOON diagnostics.
-fn normalize_display_path_string(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
-        format!("//{rest}")
-    } else if let Some(rest) = normalized.strip_prefix("//?/") {
-        rest.to_string()
-    } else {
-        normalized
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::normalize_display_path_string;
-
-    #[test]
-    fn display_paths_remove_windows_extended_prefixes() {
-        assert_eq!(
-            normalize_display_path_string(r"\\?\C:\repo\.projectatlas\projectatlas.db"),
-            "C:/repo/.projectatlas/projectatlas.db"
-        );
-        assert_eq!(
-            normalize_display_path_string(r"\\?\UNC\server\share\repo"),
-            "//server/share/repo"
-        );
-    }
+    normalize_native_path_display(path)
 }
 
 /// Build a watcher status report from a lightweight runtime probe.

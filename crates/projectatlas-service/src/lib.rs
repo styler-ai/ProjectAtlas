@@ -1,6 +1,9 @@
 //! Purpose: Provide shared `ProjectAtlas` query services for CLI and MCP adapters.
 
+mod import_aliases;
+
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use import_aliases::{ImportAliasMap, load_import_alias_map};
 use projectatlas_core::outline::estimate_tokens;
 use projectatlas_core::symbols::{CodeSymbol, RelationKind, SymbolKind, SymbolRelation};
 use projectatlas_core::{IndexedNode, NodeKind, repo_path_to_native, validated_repo_file_key};
@@ -287,7 +290,8 @@ pub fn build_file_summary(
     let symbol_name_counts = store.symbol_name_counts(&summarized_names)?;
     let alias_scope_symbols = store.load_symbols_by_names(&summarized_names)?;
     let alias_counts = symbol_alias_counts(&alias_scope_symbols);
-    let caller_targets = caller_target_names(&summarized_symbols);
+    let import_aliases = load_import_alias_map(store, &summarized_symbols, &alias_counts)?;
+    let caller_targets = caller_target_names(&summarized_symbols, &import_aliases);
     let caller_relations =
         store.load_call_relations_to_targets(&caller_targets, CALLER_RELATION_LIMIT_PER_TARGET)?;
     let called_by = called_by_map(
@@ -295,6 +299,7 @@ pub fn build_file_summary(
         &caller_relations,
         &symbol_name_counts,
         &alias_counts,
+        &import_aliases,
     );
     let functions = summarize_symbols(&function_symbols, &called_by);
     let methods = summarize_symbols(&method_symbols, &called_by);
@@ -942,13 +947,16 @@ fn summarized_symbol_set(
 }
 
 /// Return exact call target names that can safely resolve to displayed symbols.
-fn caller_target_names(symbols: &[CodeSymbol]) -> Vec<String> {
+fn caller_target_names(symbols: &[CodeSymbol], import_aliases: &ImportAliasMap) -> Vec<String> {
     let mut targets = HashSet::new();
     for symbol in symbols {
         targets.insert(symbol.name.clone());
         for alias in symbol_target_aliases(symbol) {
             targets.insert(alias);
         }
+    }
+    for alias in import_aliases.values().flatten() {
+        targets.insert(alias.target_name.clone());
     }
     let mut values = targets.into_iter().collect::<Vec<_>>();
     values.sort();
@@ -961,14 +969,14 @@ fn called_by_map(
     relations: &[SymbolRelation],
     name_counts: &HashMap<String, usize>,
     alias_counts: &HashMap<String, usize>,
+    import_aliases: &ImportAliasMap,
 ) -> HashMap<String, Vec<String>> {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     for symbol in symbols {
         let symbol_key = symbol_summary_key(symbol);
-        for relation in relations
-            .iter()
-            .filter(|relation| relation_matches_symbol(relation, symbol, name_counts, alias_counts))
-        {
+        for relation in relations.iter().filter(|relation| {
+            relation_matches_symbol(relation, symbol, name_counts, alias_counts, import_aliases)
+        }) {
             let caller = caller_reference(relation);
             let callers = map.entry(symbol_key.clone()).or_default();
             if !callers.iter().any(|existing| existing == &caller) {
@@ -989,18 +997,31 @@ fn relation_matches_symbol(
     symbol: &CodeSymbol,
     name_counts: &HashMap<String, usize>,
     alias_counts: &HashMap<String, usize>,
+    import_aliases: &ImportAliasMap,
 ) -> bool {
     if relation.kind != RelationKind::Calls {
         return false;
     }
     let target = relation.target_name.trim();
-    if target == symbol.name {
-        return relation.path == symbol.path
-            || name_counts.get(&symbol.name).copied().unwrap_or(0) <= 1;
+    if target == symbol.name
+        && (relation.path == symbol.path
+            || name_counts.get(&symbol.name).copied().unwrap_or(0) <= 1)
+    {
+        return true;
     }
-    symbol_target_aliases(symbol)
+    if symbol_target_aliases(symbol)
         .iter()
         .any(|alias| alias == target && alias_counts.get(alias).copied().unwrap_or(0) <= 1)
+    {
+        return true;
+    }
+    import_aliases
+        .get(&symbol_summary_key(symbol))
+        .is_some_and(|aliases| {
+            aliases.iter().any(|alias| {
+                alias.caller_path == relation.path && alias.target_name == relation.target_name
+            })
+        })
 }
 
 /// Count target aliases across displayed symbols.
@@ -1033,32 +1054,62 @@ fn symbol_target_aliases(symbol: &CodeSymbol) -> Vec<String> {
 
 /// Return module aliases inferred from a normalized repository path.
 fn module_aliases_for_path(path: &str) -> Vec<String> {
-    let without_extension = path
-        .rsplit_once('.')
-        .map_or(path, |(stem, _extension)| stem);
-    let mut components = without_extension
-        .split('/')
-        .filter(|component| !component.is_empty())
-        .collect::<Vec<_>>();
-    if components
-        .first()
-        .is_some_and(|component| *component == "src")
+    let mut aliases = HashSet::new();
+    for stem in source_stems_for_path(path) {
+        let mut components = stem
+            .split('/')
+            .filter(|component| !component.is_empty())
+            .collect::<Vec<_>>();
+        if components
+            .first()
+            .is_some_and(|component| *component == "src")
+        {
+            components.remove(0);
+        }
+        if components.last().is_some_and(|component| {
+            matches!(*component, "lib" | "main" | "mod" | "index" | "__init__")
+        }) {
+            components.pop();
+        }
+        if components.is_empty() {
+            continue;
+        }
+        aliases.insert(components.join("::"));
+        aliases.insert(components.join("."));
+        if let Some(last) = components.last() {
+            aliases.insert((*last).to_string());
+        }
+    }
+    let mut values = aliases.into_iter().collect::<Vec<_>>();
+    values.sort();
+    values
+}
+
+/// Return source path stems, including package-entry aliases.
+fn source_stems_for_path(path: &str) -> Vec<String> {
+    let stem = strip_known_source_extension(path);
+    let mut stems = vec![stem.clone()];
+    if let Some((parent, entry_name)) = stem.rsplit_once('/')
+        && matches!(entry_name, "index" | "__init__" | "mod")
     {
-        components.remove(0);
+        stems.push(parent.to_string());
     }
-    if matches!(components.last(), Some(&"lib" | &"main" | &"mod")) {
-        components.pop();
+    stems.sort();
+    stems.dedup();
+    stems
+}
+
+/// Strip common source extensions while preserving dotted directory names.
+fn strip_known_source_extension(path: &str) -> String {
+    for extension in [
+        ".d.ts", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs",
+    ] {
+        if let Some(stem) = path.strip_suffix(extension) {
+            return stem.to_string();
+        }
     }
-    if components.is_empty() {
-        return Vec::new();
-    }
-    let mut aliases = vec![components.join("::"), components.join(".")];
-    if let Some(last) = components.last() {
-        aliases.push((*last).to_string());
-    }
-    aliases.sort();
-    aliases.dedup();
-    aliases
+    path.rsplit_once('.')
+        .map_or_else(|| path.to_string(), |(stem, _extension)| stem.to_string())
 }
 
 /// Build a stable identity key for a summarized symbol row.
@@ -1293,6 +1344,39 @@ mod tests {
     }
 
     #[test]
+    fn module_aliases_include_package_entries_and_compound_extensions() -> Result<(), Box<dyn Error>>
+    {
+        require_eq(
+            &module_aliases_for_path("src/packages/foo/index.ts"),
+            &vec![
+                "foo".to_string(),
+                "packages.foo".to_string(),
+                "packages::foo".to_string(),
+            ],
+            "typescript package entry aliases",
+        )?;
+        require_eq(
+            &module_aliases_for_path("src/types/api.d.ts"),
+            &vec![
+                "api".to_string(),
+                "types.api".to_string(),
+                "types::api".to_string(),
+            ],
+            "typescript definition aliases",
+        )?;
+        require_eq(
+            &module_aliases_for_path("src/package/__init__.py"),
+            &vec!["package".to_string()],
+            "python package entry aliases",
+        )?;
+        require_eq(
+            &module_aliases_for_path("src/lib.rs"),
+            &Vec::<String>::new(),
+            "rust root lib aliases",
+        )
+    }
+
+    #[test]
     fn file_summary_includes_cross_file_called_by() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
@@ -1496,6 +1580,331 @@ mod tests {
                 &run.called_by,
                 &Vec::<String>::new(),
                 "ambiguous module alias called-by",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn file_summary_resolves_rust_import_alias_called_by() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src/foo"))?;
+        fs::write(root.join("src/foo/service.rs"), "pub fn run() {}\n")?;
+        fs::write(
+            root.join("src/main.rs"),
+            "use crate::foo::service as foo_service;\nfn main() { foo_service::run(); }\n",
+        )?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        store.replace_scan(&[
+            test_node("src/foo/service.rs", "hash-service"),
+            test_node("src/main.rs", "hash-main"),
+        ])?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/foo/service.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![test_symbol(
+                "src/foo/service.rs",
+                SymbolKind::Function,
+                "run",
+            )],
+            relations: Vec::new(),
+        })?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/main.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![test_symbol("src/main.rs", SymbolKind::Function, "main")],
+            relations: vec![
+                SymbolRelation {
+                    path: "src/main.rs".to_string(),
+                    source_name: "<module>".to_string(),
+                    target_name: "use crate::foo::service as foo_service;".to_string(),
+                    kind: RelationKind::Imports,
+                    line: 1,
+                    context: "use crate::foo::service as foo_service;".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+                SymbolRelation {
+                    path: "src/main.rs".to_string(),
+                    source_name: "main".to_string(),
+                    target_name: "foo_service::run".to_string(),
+                    kind: RelationKind::Calls,
+                    line: 2,
+                    context: "foo_service::run();".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+            ],
+        })?;
+
+        assert_single_called_by(
+            &build_file_summary(&store, Path::new("src/foo/service.rs"), 10)?,
+            "run",
+            "src/main.rs::main",
+        )
+    }
+
+    #[test]
+    fn file_summary_resolves_typescript_named_import_alias_called_by() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(root.join("src/service.ts"), "export function run() {}\n")?;
+        fs::write(
+            root.join("src/main.ts"),
+            "import { run as serviceRun } from \"./service\";\nserviceRun();\n",
+        )?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        store.replace_scan(&[
+            test_node("src/service.ts", "hash-service"),
+            test_node("src/main.ts", "hash-main"),
+        ])?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/service.ts".to_string(),
+            language: Some("typescript".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![test_symbol("src/service.ts", SymbolKind::Function, "run")],
+            relations: Vec::new(),
+        })?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/main.ts".to_string(),
+            language: Some("typescript".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![test_symbol("src/main.ts", SymbolKind::Function, "main")],
+            relations: vec![
+                SymbolRelation {
+                    path: "src/main.ts".to_string(),
+                    source_name: "<module>".to_string(),
+                    target_name: "import { run as serviceRun } from \"./service\";".to_string(),
+                    kind: RelationKind::Imports,
+                    line: 1,
+                    context: "import { run as serviceRun } from \"./service\";".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+                SymbolRelation {
+                    path: "src/main.ts".to_string(),
+                    source_name: "main".to_string(),
+                    target_name: "serviceRun".to_string(),
+                    kind: RelationKind::Calls,
+                    line: 2,
+                    context: "serviceRun();".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+            ],
+        })?;
+
+        assert_single_called_by(
+            &build_file_summary(&store, Path::new("src/service.ts"), 10)?,
+            "run",
+            "src/main.ts::main",
+        )
+    }
+
+    #[test]
+    fn file_summary_resolves_python_import_alias_called_by() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src/package"))?;
+        fs::write(root.join("src/package/module.py"), "def run():\n    pass\n")?;
+        fs::write(
+            root.join("src/main.py"),
+            "import package.module as service\nservice.run()\n",
+        )?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        store.replace_scan(&[
+            test_node("src/package/module.py", "hash-module"),
+            test_node("src/main.py", "hash-main"),
+        ])?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/package/module.py".to_string(),
+            language: Some("python".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![test_symbol(
+                "src/package/module.py",
+                SymbolKind::Function,
+                "run",
+            )],
+            relations: Vec::new(),
+        })?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/main.py".to_string(),
+            language: Some("python".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![test_symbol("src/main.py", SymbolKind::Function, "main")],
+            relations: vec![
+                SymbolRelation {
+                    path: "src/main.py".to_string(),
+                    source_name: "<module>".to_string(),
+                    target_name: "import package.module as service".to_string(),
+                    kind: RelationKind::Imports,
+                    line: 1,
+                    context: "import package.module as service".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+                SymbolRelation {
+                    path: "src/main.py".to_string(),
+                    source_name: "main".to_string(),
+                    target_name: "service.run".to_string(),
+                    kind: RelationKind::Calls,
+                    line: 2,
+                    context: "service.run()".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+            ],
+        })?;
+
+        assert_single_called_by(
+            &build_file_summary(&store, Path::new("src/package/module.py"), 10)?,
+            "run",
+            "src/main.py::main",
+        )
+    }
+
+    #[test]
+    fn file_summary_resolves_python_no_alias_import_when_name_is_ambiguous()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src/package"))?;
+        fs::write(root.join("src/package/module.py"), "def run():\n    pass\n")?;
+        fs::write(
+            root.join("src/main.py"),
+            "from package.module import run\nrun()\n",
+        )?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        store.replace_scan(&[
+            test_node("src/package/module.py", "hash-module"),
+            test_node("src/main.py", "hash-main"),
+        ])?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/package/module.py".to_string(),
+            language: Some("python".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![test_symbol(
+                "src/package/module.py",
+                SymbolKind::Function,
+                "run",
+            )],
+            relations: Vec::new(),
+        })?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/main.py".to_string(),
+            language: Some("python".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![
+                test_symbol("src/main.py", SymbolKind::Function, "main"),
+                test_symbol("src/main.py", SymbolKind::Import, "run"),
+            ],
+            relations: vec![
+                SymbolRelation {
+                    path: "src/main.py".to_string(),
+                    source_name: "<module>".to_string(),
+                    target_name: "from package.module import run".to_string(),
+                    kind: RelationKind::Imports,
+                    line: 1,
+                    context: "from package.module import run".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+                SymbolRelation {
+                    path: "src/main.py".to_string(),
+                    source_name: "main".to_string(),
+                    target_name: "run".to_string(),
+                    kind: RelationKind::Calls,
+                    line: 2,
+                    context: "run()".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+            ],
+        })?;
+
+        assert_single_called_by(
+            &build_file_summary(&store, Path::new("src/package/module.py"), 10)?,
+            "run",
+            "src/main.py::main",
+        )
+    }
+
+    #[test]
+    fn file_summary_rejects_ambiguous_import_alias_called_by() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src/foo"))?;
+        fs::create_dir_all(root.join("src/bar"))?;
+        fs::write(root.join("src/foo/service.py"), "def run():\n    pass\n")?;
+        fs::write(root.join("src/bar/service.py"), "def run():\n    pass\n")?;
+        fs::write(
+            root.join("src/main.py"),
+            "from foo.service import run as call_service\nfrom bar.service import run as call_service\ncall_service()\n",
+        )?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        store.replace_scan(&[
+            test_node("src/foo/service.py", "hash-foo"),
+            test_node("src/bar/service.py", "hash-bar"),
+            test_node("src/main.py", "hash-main"),
+        ])?;
+        for path in ["src/foo/service.py", "src/bar/service.py"] {
+            store.replace_symbol_graph(&SymbolGraph {
+                path: path.to_string(),
+                language: Some("python".to_string()),
+                parser: ParserKind::TreeSitter,
+                symbols: vec![test_symbol(path, SymbolKind::Function, "run")],
+                relations: Vec::new(),
+            })?;
+        }
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/main.py".to_string(),
+            language: Some("python".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![test_symbol("src/main.py", SymbolKind::Function, "main")],
+            relations: vec![
+                SymbolRelation {
+                    path: "src/main.py".to_string(),
+                    source_name: "<module>".to_string(),
+                    target_name: "from foo.service import run as call_service".to_string(),
+                    kind: RelationKind::Imports,
+                    line: 1,
+                    context: "from foo.service import run as call_service".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+                SymbolRelation {
+                    path: "src/main.py".to_string(),
+                    source_name: "<module>".to_string(),
+                    target_name: "from bar.service import run as call_service".to_string(),
+                    kind: RelationKind::Imports,
+                    line: 2,
+                    context: "from bar.service import run as call_service".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+                SymbolRelation {
+                    path: "src/main.py".to_string(),
+                    source_name: "main".to_string(),
+                    target_name: "call_service".to_string(),
+                    kind: RelationKind::Calls,
+                    line: 3,
+                    context: "call_service()".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+            ],
+        })?;
+
+        for path in ["src/foo/service.py", "src/bar/service.py"] {
+            let report = build_file_summary(&store, Path::new(path), 10)?;
+            let run = report
+                .functions
+                .iter()
+                .find(|symbol| symbol.name == "run")
+                .ok_or_else(|| io::Error::other("run summary missing"))?;
+            require_eq(
+                &run.called_by,
+                &Vec::<String>::new(),
+                "ambiguous import alias called-by",
             )?;
         }
         Ok(())
@@ -1793,6 +2202,23 @@ mod tests {
             parser: ParserKind::TreeSitter,
             detail: None,
         }
+    }
+
+    fn assert_single_called_by(
+        report: &FileSummaryReport,
+        symbol_name: &str,
+        caller: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let symbol = report
+            .functions
+            .iter()
+            .find(|symbol| symbol.name == symbol_name)
+            .ok_or_else(|| io::Error::other(format!("{symbol_name} summary missing")))?;
+        require_eq(
+            &symbol.called_by,
+            &vec![caller.to_string()],
+            "import alias called-by",
+        )
     }
 
     /// Require two test values to be equal without panicking.

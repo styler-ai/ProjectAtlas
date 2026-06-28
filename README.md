@@ -253,7 +253,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 
 - `dev`: active development branch
 - `main`: stable releases only
-- release tags match the Cargo workspace version, for example `v0.3.1`
+- release tags match the Cargo workspace version, for example `v0.3.2`
 
 Before a release, run the full local verification stack, merge `dev` into `main` through a PR, and use the manual
 Release workflow if a tag needs to be created explicitly.

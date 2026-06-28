@@ -14,7 +14,7 @@ use projectatlas_core::toon::{
     encode_agent_payload, render_health, render_nodes, render_outline, render_overview,
     render_symbol_relations, render_symbols, render_token_overview,
 };
-use projectatlas_core::{NodeKind, PurposeSource};
+use projectatlas_core::{NodeKind, PurposeSource, normalize_native_path_display};
 use projectatlas_db::{AtlasStore, DbError, HealthResolution};
 use projectatlas_service::{
     CodeSlice, FileSummaryReport, SearchReport, SymbolSliceSelector, build_file_summary,
@@ -1015,34 +1015,23 @@ fn build_mcp_config_report(
 
 /// Render a native path for MCP launch config without Windows extended prefixes.
 fn mcp_launch_path(path: &Path) -> String {
-    normalize_windows_launch_path(path.display().to_string())
+    native_launch_path(&normalize_native_path_display(path))
 }
 
-/// Normalize Windows extended path prefixes for external MCP launchers.
+/// Render a normalized diagnostic path as a Windows-native launcher path.
 #[cfg(windows)]
-fn normalize_windows_launch_path(path: String) -> String {
-    const DEVICE_PREFIX: &str = r"\\?\";
-    const DEVICE_PREFIX_ALT: &str = "//?/";
-    const UNC_DEVICE_PREFIX: &str = r"\\?\UNC\";
-    const UNC_DEVICE_PREFIX_ALT: &str = "//?/UNC/";
-    let normalized = if let Some(rest) = path.strip_prefix(UNC_DEVICE_PREFIX) {
-        format!(r"\\{rest}")
-    } else if let Some(rest) = path.strip_prefix(UNC_DEVICE_PREFIX_ALT) {
-        format!("//{rest}")
-    } else if let Some(rest) = path.strip_prefix(DEVICE_PREFIX) {
-        rest.to_string()
-    } else if let Some(rest) = path.strip_prefix(DEVICE_PREFIX_ALT) {
-        rest.to_string()
+fn native_launch_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("//") {
+        format!(r"\\{}", rest.replace('/', "\\"))
     } else {
-        path
-    };
-    normalized.replace('/', "\\")
+        path.replace('/', "\\")
+    }
 }
 
 /// Return non-Windows paths unchanged.
 #[cfg(not(windows))]
-fn normalize_windows_launch_path(path: String) -> String {
-    path
+fn native_launch_path(path: &str) -> String {
+    path.to_string()
 }
 
 /// Render MCP configuration as TOON for agents.

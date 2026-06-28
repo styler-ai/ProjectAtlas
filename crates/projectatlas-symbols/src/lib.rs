@@ -1,5 +1,7 @@
 //! Purpose: Extract tree-sitter-backed `ProjectAtlas` symbol graphs.
 
+mod languages;
+
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
 };
@@ -301,7 +303,7 @@ fn extract_tree_sitter_graph(
     let tree = parser.parse(content, None)?;
     let mut graph = empty_graph(path, language, ParserKind::TreeSitter);
     visit_node(tree.root_node(), content, &mut graph);
-    augment_language_graph(&mut graph, content);
+    languages::augment_language_graph(&mut graph, content);
     if graph.symbols.is_empty() && graph.relations.is_empty() {
         None
     } else {
@@ -347,326 +349,6 @@ fn visit_node(node: Node<'_>, content: &str, graph: &mut SymbolGraph) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         visit_node(child, content, graph);
-    }
-}
-
-/// Add language-specific facts that are not exposed by the generic node pass.
-fn augment_language_graph(graph: &mut SymbolGraph, content: &str) {
-    match graph.language.as_deref() {
-        Some("kotlin") => augment_kotlin_graph(graph, content),
-        Some("objective-c") => {
-            augment_objective_c_graph(graph, content);
-            normalize_objective_c_duplicates(graph);
-        }
-        Some("zig") => augment_zig_graph(graph, content),
-        _ => {}
-    }
-}
-
-/// Add Kotlin package, type, and method facts missing from generic traversal.
-fn augment_kotlin_graph(graph: &mut SymbolGraph, content: &str) {
-    let (Ok(package_regex), Ok(type_regex), Ok(function_regex)) = (
-        Regex::new(r"^\s*package\s+([A-Za-z_][A-Za-z0-9_.]*)"),
-        Regex::new(r"\b(?:class|interface|object)\s+([A-Za-z_][A-Za-z0-9_]*)"),
-        Regex::new(r"\bfun\s+([A-Za-z_][A-Za-z0-9_]*)\s*\("),
-    ) else {
-        return;
-    };
-    let mut current_type: Option<String> = None;
-    for (line_index, line) in content.lines().enumerate() {
-        let line_number = line_index + 1;
-        let trimmed = line.trim();
-        if let Some(capture) = package_regex.captures(trimmed)
-            && let Some(package_name) = capture.get(1).map(|value| value.as_str())
-            && !symbol_exists(graph, SymbolKind::Module, package_name)
-        {
-            push_symbol(
-                graph,
-                package_name,
-                SymbolKind::Module,
-                line_number,
-                line_number,
-                None,
-                Some("package_header"),
-                trimmed,
-            );
-        }
-        if let Some(capture) = type_regex.captures(trimmed)
-            && let Some(type_name) = capture.get(1).map(|value| value.as_str())
-        {
-            if !symbol_exists(graph, SymbolKind::Class, type_name) {
-                push_symbol(
-                    graph,
-                    type_name,
-                    SymbolKind::Class,
-                    line_number,
-                    line_number,
-                    None,
-                    Some("kotlin-type"),
-                    trimmed,
-                );
-            }
-            current_type = Some(type_name.to_string());
-        }
-        if let Some(capture) = function_regex.captures(trimmed)
-            && let Some(function_name) = capture.get(1).map(|value| value.as_str())
-            && let Some(parent) = current_type.as_deref()
-        {
-            upsert_method_parent(graph, line_number, function_name, parent);
-            push_relation(
-                graph,
-                parent,
-                function_name,
-                RelationKind::Contains,
-                line_number,
-                "kotlin-method",
-            );
-        }
-        if trimmed.contains('}') {
-            current_type = None;
-        }
-    }
-}
-
-/// Add Objective-C class ownership around interface/implementation blocks.
-fn augment_objective_c_graph(graph: &mut SymbolGraph, content: &str) {
-    let mut current_class: Option<String> = None;
-    for (line_index, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if let Some(class_name) = objc_block_name(trimmed, "@interface") {
-            if !symbol_exists(graph, SymbolKind::Class, &class_name) {
-                push_symbol(
-                    graph,
-                    &class_name,
-                    SymbolKind::Class,
-                    line_index + 1,
-                    line_index + 1,
-                    None,
-                    Some("objective-c-interface"),
-                    trimmed,
-                );
-            }
-            current_class = Some(class_name);
-            continue;
-        }
-        if let Some(class_name) = objc_block_name(trimmed, "@implementation") {
-            if !symbol_exists(graph, SymbolKind::Class, &class_name) {
-                push_symbol(
-                    graph,
-                    &class_name,
-                    SymbolKind::Class,
-                    line_index + 1,
-                    line_index + 1,
-                    None,
-                    Some("objective-c-implementation"),
-                    trimmed,
-                );
-            }
-            current_class = Some(class_name);
-            continue;
-        }
-        if trimmed == "@end" {
-            current_class = None;
-            continue;
-        }
-        if let Some(class_name) = current_class.as_deref()
-            && let Some(method_name) = objc_method_name(trimmed)
-        {
-            set_method_parent(graph, line_index + 1, class_name);
-            push_relation(
-                graph,
-                class_name,
-                &method_name,
-                RelationKind::Contains,
-                line_index + 1,
-                "objective-c-method",
-            );
-        }
-    }
-}
-
-/// Collapse Objective-C interface and implementation duplicates in summaries.
-fn normalize_objective_c_duplicates(graph: &mut SymbolGraph) {
-    let mut normalized = Vec::with_capacity(graph.symbols.len());
-    for symbol in graph.symbols.drain(..) {
-        match symbol.kind {
-            SymbolKind::Class => upsert_objective_c_class(&mut normalized, symbol),
-            SymbolKind::Method => upsert_objective_c_method(&mut normalized, symbol),
-            _ => normalized.push(symbol),
-        }
-    }
-    graph.symbols = normalized;
-}
-
-/// Insert a class symbol while preferring implementation entries.
-fn upsert_objective_c_class(symbols: &mut Vec<CodeSymbol>, symbol: CodeSymbol) {
-    let Some(existing) = symbols
-        .iter_mut()
-        .find(|existing| existing.kind == SymbolKind::Class && existing.name == symbol.name)
-    else {
-        symbols.push(symbol);
-        return;
-    };
-    if objective_c_class_is_implementation(&symbol)
-        && !objective_c_class_is_implementation(existing)
-    {
-        *existing = symbol;
-    }
-}
-
-/// Insert a method symbol while preferring implementation bodies.
-fn upsert_objective_c_method(symbols: &mut Vec<CodeSymbol>, symbol: CodeSymbol) {
-    let key = (
-        symbol.parent.clone().unwrap_or_default(),
-        symbol.name.clone(),
-    );
-    let Some(existing) = symbols.iter_mut().find(|existing| {
-        existing.kind == SymbolKind::Method
-            && (
-                existing.parent.clone().unwrap_or_default(),
-                existing.name.clone(),
-            ) == key
-    }) else {
-        symbols.push(symbol);
-        return;
-    };
-    if objective_c_method_has_body(&symbol) && !objective_c_method_has_body(existing) {
-        *existing = symbol;
-    }
-}
-
-/// Return whether an Objective-C class symbol points at implementation syntax.
-fn objective_c_class_is_implementation(symbol: &CodeSymbol) -> bool {
-    symbol.detail.as_deref() == Some("objective-c-implementation")
-        || symbol.signature.trim_start().starts_with("@implementation")
-}
-
-/// Return whether an Objective-C method symbol points at an implementation body.
-fn objective_c_method_has_body(symbol: &CodeSymbol) -> bool {
-    symbol.signature.contains('{') || symbol.line_end > symbol.line_start
-}
-
-/// Add Zig binding names around anonymous struct declarations.
-fn augment_zig_graph(graph: &mut SymbolGraph, content: &str) {
-    let Ok(struct_binding_regex) =
-        Regex::new(r"\b(?:pub\s+)?const\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*struct\b")
-    else {
-        return;
-    };
-    for (line_index, line) in content.lines().enumerate() {
-        let line_number = line_index + 1;
-        let trimmed = line.trim();
-        let Some(capture) = struct_binding_regex.captures(trimmed) else {
-            continue;
-        };
-        let Some(type_name) = capture.get(1).map(|value| value.as_str()) else {
-            continue;
-        };
-        rename_struct_symbol_on_line(graph, line_number, type_name);
-        mark_zig_methods_on_line(graph, line_number, type_name);
-    }
-}
-
-/// Return the class name from an Objective-C block declaration line.
-fn objc_block_name(line: &str, keyword: &str) -> Option<String> {
-    let rest = line.strip_prefix(keyword)?.trim();
-    rest.split([' ', ':', '('])
-        .next()
-        .map(ToString::to_string)
-        .filter(|name| !name.is_empty())
-}
-
-/// Return the method selector head from an Objective-C method declaration line.
-fn objc_method_name(line: &str) -> Option<String> {
-    if !(line.starts_with("- (") || line.starts_with("+ (")) {
-        return None;
-    }
-    let after_return = line.split_once(')')?.1.trim();
-    after_return
-        .split([':', ' ', '{', ';'])
-        .next()
-        .map(ToString::to_string)
-        .filter(|name| !name.is_empty())
-}
-
-/// Return whether a graph already has a symbol with this exact kind and name.
-fn symbol_exists(graph: &SymbolGraph, kind: SymbolKind, name: &str) -> bool {
-    graph
-        .symbols
-        .iter()
-        .any(|symbol| symbol.kind == kind && symbol.name == name)
-}
-
-/// Attach a parent to a method already emitted by tree-sitter on the same line.
-fn set_method_parent(graph: &mut SymbolGraph, line: usize, parent: &str) {
-    if let Some(symbol) = graph
-        .symbols
-        .iter_mut()
-        .find(|symbol| symbol.kind == SymbolKind::Method && symbol.line_start == line)
-    {
-        symbol.parent = Some(parent.to_string());
-    }
-}
-
-/// Convert or insert a method symbol for a known parent type.
-fn upsert_method_parent(graph: &mut SymbolGraph, line: usize, name: &str, parent: &str) {
-    if let Some(symbol) = graph.symbols.iter_mut().find(|symbol| {
-        matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method)
-            && symbol.line_start == line
-            && symbol.name == name
-    }) {
-        symbol.kind = SymbolKind::Method;
-        symbol.parent = Some(parent.to_string());
-        return;
-    }
-    if !symbol_exists(graph, SymbolKind::Method, name) {
-        push_symbol(
-            graph,
-            name,
-            SymbolKind::Method,
-            line,
-            line,
-            Some(parent.to_string()),
-            Some("language-augment-method"),
-            name,
-        );
-    }
-}
-
-/// Rename an anonymous Zig struct symbol to the binding that owns it.
-fn rename_struct_symbol_on_line(graph: &mut SymbolGraph, line: usize, name: &str) {
-    if let Some(symbol) = graph
-        .symbols
-        .iter_mut()
-        .find(|symbol| symbol.kind == SymbolKind::Struct && symbol.line_start == line)
-    {
-        symbol.name = name.to_string();
-        symbol.detail = Some("zig-struct-binding".to_string());
-        return;
-    }
-    if !symbol_exists(graph, SymbolKind::Struct, name) {
-        push_symbol(
-            graph,
-            name,
-            SymbolKind::Struct,
-            line,
-            line,
-            None,
-            Some("zig-struct-binding"),
-            name,
-        );
-    }
-}
-
-/// Mark Zig functions inside a struct binding as methods of that binding.
-fn mark_zig_methods_on_line(graph: &mut SymbolGraph, line: usize, parent: &str) {
-    for symbol in graph.symbols.iter_mut().filter(|symbol| {
-        symbol.kind == SymbolKind::Function
-            && symbol.line_start == line
-            && symbol.signature.contains("self")
-    }) {
-        symbol.kind = SymbolKind::Method;
-        symbol.parent = Some(parent.to_string());
     }
 }
 
@@ -1938,6 +1620,12 @@ class KotlinRunner { fun run() { helper() } private fun helper() {} }
                 .filter(|symbol| symbol.kind == SymbolKind::Method && symbol.name == "run")
                 .count(),
             1
+        );
+        assert!(
+            !objc_graph
+                .symbols
+                .iter()
+                .any(|symbol| symbol.kind == SymbolKind::Function && symbol.name == "run")
         );
         assert!(objc_graph.symbols.iter().any(|symbol| {
             symbol.kind == SymbolKind::Method
