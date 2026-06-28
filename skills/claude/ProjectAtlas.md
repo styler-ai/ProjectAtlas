@@ -41,6 +41,8 @@ repository overview to folder, file, compressed outline, and exact source only w
 
 Token savings estimate avoided wrong-folder exploration, wrong-file opens, and unnecessary full-code reads caused by the atlas-first workflow. Agent and MCP surfaces should stay structured by default; the TUI dashboard is explicit terminal UI with "Without PA", "With PA", and "Saved" comparison bars.
 
+Token reports are offline by default. The heuristic is `ceil(chars / 4)` for emitted ProjectAtlas text and `ceil(bytes / 4)` for file-size baselines, labeled as `heuristic_estimate`, not model billing tokens. Check bucket metadata before making claims: `full_file_compression` with `observed` confidence is stronger than modeled `navigation_avoidance` with `inferred` or `policy_estimate` confidence.
+
 ## MCP Config
 
 Prefer installer-generated project-local config:

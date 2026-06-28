@@ -17,4 +17,5 @@ If you spot a bug or have a suggestion, please open an issue with clear reproduc
 - Install git hooks by copying or linking files from `.githooks/` into `.git/hooks/`.
 - Apply `type:*`, `priority:*`, and `status:*` labels to every issue.
 - Keep public issues/PRs/release notes free of private or internal-only details.
+- Anonymize benchmark corpora, fixtures, reproduction paths, and public issue examples before committing or referencing them publicly.
 - The pre-push hook runs the Rust verification stack: format, check, clippy, tests, rustdoc, map, and lint.

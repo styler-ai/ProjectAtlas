@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.3.5"><img alt="release" src="https://img.shields.io/badge/release-v0.3.5-blue"></a>
+  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.3.6"><img alt="release" src="https://img.shields.io/badge/release-v0.3.6-blue"></a>
   <img alt="rust" src="https://img.shields.io/badge/Rust-2024-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
@@ -49,7 +49,7 @@ Warm CLI reads from that audit stayed interactive:
 | `token` | ~161 ms |
 | `overview` | ~166 ms |
 
-Token numbers are workflow estimates, not billing-grade provider counts. The default estimator is the offline `chars/bytes / 4` heuristic. That is deliberate: normal agent orientation stays local, fast, and credential-free.
+Token numbers are workflow estimates, not billing-grade provider counts. The default estimator is the offline `chars/bytes / 4` heuristic, reported with bucket, baseline, and confidence metadata so observed full-file compression is not silently mixed with modeled navigation savings. That is deliberate: normal agent orientation stays local, fast, and credential-free.
 
 ## The Funnel
 
@@ -81,7 +81,7 @@ Most agent waste happens before code is edited: broad search, wrong folder, wron
 ## Quickstart
 
 ```bash
-codex plugin marketplace add styler-ai/ProjectAtlas --ref main
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.6
 codex plugin add projectatlas --marketplace projectatlas
 ```
 
@@ -94,7 +94,7 @@ That is the intended path. The plugin gives the agent the workflow skill, runtim
 Only need the CLI yourself? Install it from the released tag:
 
 ```bash
-cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.5 --package projectatlas-cli --locked
+cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.6 --package projectatlas-cli --locked
 ```
 
 From this checkout:
@@ -184,7 +184,7 @@ ProjectAtlas scans with `.gitignore` awareness, hashes files with BLAKE3, stores
 
 ## Release Quality
 
-`v0.3.5` shipped through the full release matrix:
+`v0.3.6` ships through the full release matrix:
 
 - Rust format, check, clippy, dependency policy, tests, doctests, and rustdoc.
 - ProjectAtlas scan, parity, lint, and map drift checks.

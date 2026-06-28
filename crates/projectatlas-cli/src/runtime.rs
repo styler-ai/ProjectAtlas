@@ -10,9 +10,14 @@ use crate::{
     CliError, OutputFormat, WATCH_MODE_NOTIFY, WATCH_MODE_ONCE, WATCH_MODE_POLLING, truthy_env,
 };
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use projectatlas_core::language::{LanguageParserSupport, language_spec};
 use projectatlas_core::outline::estimate_tokens;
 use projectatlas_core::symbols::{RelationKind, SymbolGraph, SymbolKind};
-use projectatlas_core::telemetry::{usage_from_estimates, usage_from_text};
+use projectatlas_core::telemetry::{
+    TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_BASELINE_SELECTED_CANDIDATES,
+    TOKEN_BUCKET_NAVIGATION_AVOIDANCE, TOKEN_CONFIDENCE_INFERRED, TOKEN_CONFIDENCE_POLICY_ESTIMATE,
+    usage_from_estimates_with_context, usage_from_text,
+};
 use projectatlas_core::{
     Node, NodeKind, Overview, PurposeSource, PurposeStatus, normalize_native_path_display,
     normalize_native_path_display_str, normalize_repo_path, repo_path_to_native,
@@ -287,18 +292,73 @@ pub(crate) fn record_usage_estimate(
     estimated_without_projectatlas: usize,
     projectatlas_text: &str,
 ) -> Result<(), CliError> {
+    record_usage_estimate_with_context(
+        store,
+        session,
+        command,
+        path,
+        query,
+        estimated_without_projectatlas,
+        projectatlas_text,
+        TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
+        TOKEN_BASELINE_SELECTED_CANDIDATES,
+        TOKEN_CONFIDENCE_INFERRED,
+    )
+}
+
+/// Record a usage event from a fast baseline estimate and explicit baseline semantics.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_usage_estimate_with_context(
+    store: &AtlasStore,
+    session: &str,
+    command: &str,
+    path: Option<String>,
+    query: Option<String>,
+    estimated_without_projectatlas: usize,
+    projectatlas_text: &str,
+    token_savings_bucket: &str,
+    baseline_kind: &str,
+    confidence: &str,
+) -> Result<(), CliError> {
     if telemetry_disabled() {
         return Ok(());
     }
-    store.record_usage(&usage_from_estimates(
+    store.record_usage(&usage_from_estimates_with_context(
         session,
         command,
         path,
         query,
         estimated_without_projectatlas,
         estimate_tokens(projectatlas_text),
+        token_savings_bucket,
+        baseline_kind,
+        confidence,
     ))?;
     Ok(())
+}
+
+/// Record a broad directory-walk avoidance estimate.
+pub(crate) fn record_directory_walk_usage_estimate(
+    store: &AtlasStore,
+    session: &str,
+    command: &str,
+    path: Option<String>,
+    query: Option<String>,
+    estimated_without_projectatlas: usize,
+    projectatlas_text: &str,
+) -> Result<(), CliError> {
+    record_usage_estimate_with_context(
+        store,
+        session,
+        command,
+        path,
+        query,
+        estimated_without_projectatlas,
+        projectatlas_text,
+        TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
+        TOKEN_BASELINE_DIRECTORY_WALK,
+        TOKEN_CONFIDENCE_POLICY_ESTIMATE,
+    )
 }
 
 /// Record a usage event from baseline and emitted text unless telemetry is disabled.
@@ -1115,13 +1175,15 @@ pub(crate) fn build_symbols_for_paths(
             continue;
         }
         let symbol_count = store.symbol_count_for_path(&node.node.path)?;
-        if symbol_count > 0
-            && node.node.content_hash.as_ref().is_some_and(|hash| {
-                previous_hashes.and_then(|hashes| hashes.get(&node.node.path)) == Some(hash)
-            })
-        {
-            report.unchanged += 1;
-            continue;
+        if node.node.content_hash.as_ref().is_some_and(|hash| {
+            previous_hashes.and_then(|hashes| hashes.get(&node.node.path)) == Some(hash)
+        }) {
+            let has_source_index =
+                symbol_count > 0 || store.load_source_parse_metadata(&node.node.path)?.is_some();
+            if has_source_index {
+                report.unchanged += 1;
+                continue;
+            }
         }
         jobs.push(SymbolParseJob {
             path: node.node.path.clone(),
@@ -1482,19 +1544,13 @@ pub(crate) fn is_symbol_candidate(path: &str, language: Option<&str>) -> bool {
     {
         return true;
     }
+    if matches!(language, Some("vue")) {
+        return true;
+    }
     language.is_some_and(|language| {
         !matches!(
-            language,
-            "text"
-                | "json"
-                | "yaml"
-                | "xml"
-                | "config"
-                | "markdown"
-                | "css"
-                | "html"
-                | "toml"
-                | "toon"
+            language_spec(language).map(|spec| spec.parser_support),
+            Some(LanguageParserSupport::Structural)
         )
     })
 }

@@ -84,7 +84,7 @@ fails closed instead of starting an older MCP server:
   "mcpServers": {
     "projectatlas": {
       "command": "projectatlas",
-      "args": ["--require-version", "0.3.5", "--db", ".projectatlas/projectatlas.db", "mcp"]
+      "args": ["--require-version", "0.3.6", "--db", ".projectatlas/projectatlas.db", "mcp"]
     }
   }
 }
@@ -205,6 +205,12 @@ Token savings estimate context that ProjectAtlas prevented the agent from wastin
 wrong-file opens, and unnecessary full-code reads avoided by the overview -> folders -> files -> summary/outline
 -> exact-slice funnel. Agent and MCP surfaces stay structured TOON; terminal decoration belongs only to the
 explicit `projectatlas token --view tui` view.
+
+The default token report is a fast offline heuristic, not provider billing telemetry. It estimates emitted
+ProjectAtlas payload text with `ceil(chars / 4)` and file-size baselines with `ceil(bytes / 4)`. Reports expose
+bucket, baseline kind, confidence, provider, model, tokenizer backend, and accuracy labels so agents can separate
+observed full-file compression from modeled navigation savings. Provider/model-aware counting belongs behind an
+explicit calibration command or config; normal orientation and `atlas_token_report` must stay local and fast.
 
 For freshness, treat `projectatlas watch` as the steady-state updater for local editing sessions. Line slices
 validate against SQLite and then read the current file from disk. Symbol slices also read current disk content,

@@ -26,9 +26,11 @@ The adapters are intentionally bounded and deterministic. They do not approve pu
 `projectatlas summary <file>` exposes:
 
 - `parser_kind`: `tree-sitter-symbol-graph`, `manifest-symbol-graph`,
-  `structural-symbol-graph`, `fallback-symbol-graph`, `mixed-symbol-graph`, `symbol-graph`,
+  `structural-symbol-graph`, `fallback-symbol-graph`, `mixed-symbol-graph`,
   `structural`, `scanner-metadata`, or `missing`.
 - `summary_status`: `ok`, `fallback`, or `missing`.
+
+ProjectAtlas persists file-level parser metadata separately from emitted symbols, so an empty native parse still reports its native parser and an empty fallback parse still reports `fallback-symbol-graph`.
 
 Agent integrations should treat `summary_status: fallback` as a reason to escalate into deeper inspection or parser improvement. Normal supported files should not rely on summaries like `<language> file, N bytes`.
 

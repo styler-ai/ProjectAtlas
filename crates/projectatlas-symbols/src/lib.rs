@@ -31,6 +31,13 @@ pub fn extract_symbol_graph(path: &str, language: Option<&str>, content: &str) -
         return extract_vue_sfc_graph(path, language, parse_content.as_ref());
     }
     if let Some(graph) = extract_tree_sitter_graph(path, language, parse_content.as_ref()) {
+        if !graph.symbols.is_empty() || !graph.relations.is_empty() {
+            return graph;
+        }
+        let fallback = extract_fallback_graph(path, language, parse_content.as_ref());
+        if !fallback.symbols.is_empty() || !fallback.relations.is_empty() {
+            return fallback;
+        }
         return graph;
     }
     extract_fallback_graph(path, language, parse_content.as_ref())
@@ -473,11 +480,7 @@ fn extract_tree_sitter_graph(
     let mut graph = empty_graph(path, language, ParserKind::TreeSitter);
     visit_node(tree.root_node(), content, &mut graph);
     languages::augment_language_graph(&mut graph, content);
-    if graph.symbols.is_empty() && graph.relations.is_empty() {
-        None
-    } else {
-        Some(graph)
-    }
+    Some(graph)
 }
 
 /// Return a tree-sitter language for supported source families.
@@ -1690,6 +1693,29 @@ fn helper() {}
         }));
         assert!(graph.relations.iter().any(|relation| {
             relation.kind == RelationKind::Calls && relation.target_name.contains("helper")
+        }));
+    }
+
+    #[test]
+    fn native_parser_graph_survives_when_empty() {
+        let graph = extract_symbol_graph("src/empty.rs", Some("rust"), "// comment only\n");
+        assert_eq!(graph.parser, ParserKind::TreeSitter);
+        assert!(graph.symbols.is_empty());
+        assert!(graph.relations.is_empty());
+    }
+
+    #[test]
+    fn native_empty_graph_keeps_fallback_rescue() {
+        let graph = extract_symbol_graph(
+            "src/misdetected.rs",
+            Some("rust"),
+            "def rescued():\n    return 1\n",
+        );
+        assert_eq!(graph.parser, ParserKind::Fallback);
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.name == "rescued"
+                && symbol.kind == SymbolKind::Function
+                && symbol.detail.as_deref() == Some("fallback-python-function")
         }));
     }
 
