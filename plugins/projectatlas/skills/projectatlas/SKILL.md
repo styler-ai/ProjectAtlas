@@ -55,7 +55,8 @@ projectatlas health resolve <finding-id> <category> <path> --related-path <path>
 
 Do not resolve missing-purpose findings; fill the purpose instead.
 
-ProjectAtlas MCP uses the standard MCP JSON-RPC envelope. Tool result text is TOON by default.
+ProjectAtlas MCP uses the standard MCP stdio JSON-RPC transport. Stdio messages are newline-delimited JSON-RPC
+messages, not LSP-style `Content-Length` framed messages. Tool result text is TOON by default.
 
 This skill is part of the ProjectAtlas plugin on purpose. Installing the plugin should give the agent:
 
@@ -84,6 +85,7 @@ This skill is part of the ProjectAtlas plugin on purpose. Installing the plugin 
    - Windows: `plugins/projectatlas/scripts/install-runtime.ps1`
    - Linux/macOS: `plugins/projectatlas/scripts/install-runtime.sh`
 5. Confirm MCP registration uses the generated `.projectatlas/projectatlas.mcp.json` whenever possible. It contains absolute runtime, DB, and config paths plus a `cwd` project-root hint. `mcp-config` discovers `.projectatlas/config.toml` and flat `projectatlas.toml` from the selected DB/project root. The MCP server also resolves path-less root-sensitive tools from config, indexed DB metadata, or the default `.projectatlas/projectatlas.db` parent, so hosts that ignore `cwd` still use the intended project. The fallback plugin `.mcp.json` starts `projectatlas --db .projectatlas/projectatlas.db mcp` from PATH and should only be used from the project root when PATH resolves to the verified ProjectAtlas 3 binary.
+   MCP root-changing arguments such as `atlas_scan.path` and `atlas_watch_once.path` must resolve to this same project root. If you need a different repository, start or install a separate project-local ProjectAtlas MCP server for that repository.
 6. Initialize the target repo with `projectatlas init --seed-purpose`.
 7. Check `.projectatlas/config.toml` before large-repo indexing. Add broad generated/vendor/build directory names to `[scan].exclude_dir_names`, and add exact generated or published subtrees to `[scan].exclude_path_prefixes`.
 8. Run `projectatlas scan`.
@@ -221,6 +223,7 @@ cargo run -p projectatlas-cli -- lint --strict-folders --report-untracked
 
 - ProjectAtlas repository: https://github.com/styler-ai/ProjectAtlas
 - Live documentation: https://styler-ai.github.io/ProjectAtlas/
+- MCP stdio transport spec: https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#stdio
 - `docs/projectatlas-3-architecture.md` for the target architecture.
 - `docs/agent-integration.md` for AGENTS.md startup snippets.
 - `docs/format.md` for TOON schema.

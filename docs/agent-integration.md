@@ -29,7 +29,9 @@ Purpose completion loop:
 
 If a duplicate-purpose, repeated temporary folder, or similar deterministic finding is intentional after inspection, resolve that exact finding with `atlas_health_resolve` or `projectatlas health resolve <finding-id> <category> <path> --related-path <path> --rationale "<why>"`. Do not resolve missing-purpose findings; fill the purpose instead.
 
-ProjectAtlas MCP uses the standard MCP JSON-RPC transport. Tool result text is TOON by default, so agents get compact structured payloads without changing the MCP envelope.
+ProjectAtlas MCP uses the standard MCP stdio JSON-RPC transport. Per the MCP transport spec, stdio messages are
+newline-delimited JSON-RPC messages; ProjectAtlas does not use LSP-style `Content-Length` framing on stdio. Tool
+result text is TOON by default, so agents get compact structured payloads without changing the MCP envelope.
 
 ## Codex / AGENTS.md snippet
 
@@ -64,6 +66,10 @@ an old PATH wrapper or the wrong current working directory. `mcp-config` discove
 also resolves path-less root-sensitive tools from config, indexed DB metadata, or the default
 `.projectatlas/projectatlas.db` location so clients that ignore `cwd` still use the intended project
 root.
+
+MCP root-changing tool arguments such as `atlas_scan.path` and `atlas_watch_once.path` are constrained
+to that bound project root. Start a separate project-local MCP server instead of pointing one
+project's DB/config at another repository.
 
 The plugin-provided `plugins/projectatlas/.mcp.json` is only a fallback for harnesses that register
 the plugin file directly from the project root after `projectatlas --format json runtime-info` has

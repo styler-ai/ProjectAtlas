@@ -2,12 +2,12 @@
 
 use crate::runtime::{
     MAX_SYMBOL_FILE_BYTES, ScanRuntimePlan, SymbolBuildOptions, build_settings_report,
-    build_symbols_for_index, byte_count_to_tokens, default_mcp_project_root,
-    estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
-    file_summary_usage_baseline, normalized_folder_filter, open_atlas_store, ranked_file_nodes,
-    read_indexed_file_content, record_usage_estimate, record_usage_text, reset_index_files,
-    run_scan_pipeline, run_watch_loop, strip_legacy_purpose, validated_indexed_file_key,
-    watcher_status_report,
+    build_symbols_for_index, byte_count_to_tokens, canonical_project_root,
+    default_mcp_project_root, estimated_source_tokens_for_indexed_files,
+    estimated_source_tokens_for_paths, file_summary_usage_baseline, normalized_folder_filter,
+    open_atlas_store, ranked_file_nodes, read_indexed_file_content, record_usage_estimate,
+    record_usage_text, reset_index_files, run_scan_pipeline, run_watch_loop, strip_legacy_purpose,
+    validated_indexed_file_key, watcher_status_report,
 };
 use crate::{
     CliError, DEFAULT_FILE_SUMMARY_LIMIT, OutputFormat, build_parity_report, render_code_slice,
@@ -307,11 +307,22 @@ impl ProjectAtlasMcpServer {
         if value.is_empty() || value == "." {
             return Ok(project_root);
         }
+        let original = value.clone();
         let candidate = PathBuf::from(value);
-        if candidate.is_absolute() {
-            Ok(candidate)
+        let resolved = if candidate.is_absolute() {
+            candidate
         } else {
-            Ok(project_root.join(candidate))
+            project_root.join(candidate)
+        };
+        let resolved = canonical_project_root(&resolved)?;
+        if resolved == project_root {
+            Ok(resolved)
+        } else {
+            let resolved_display = resolved.display();
+            let project_root_display = project_root.display();
+            Err(CliError::InvalidInput(format!(
+                "MCP path '{original}' resolves to '{resolved_display}', outside the MCP-bound project root '{project_root_display}'; start a project-local ProjectAtlas MCP server for that repository"
+            )))
         }
     }
 
