@@ -7,6 +7,7 @@ use projectatlas_core::symbols::{
 use projectatlas_core::telemetry::{TokenOverview, UsageEvent};
 use projectatlas_core::{
     IndexedNode, Node, NodeKind, Overview, Purpose, PurposeSource, PurposeStatus,
+    normalize_native_path_display,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
@@ -1231,6 +1232,53 @@ impl AtlasStore {
         Ok(relations)
     }
 
+    /// Load import relations whose persisted target text mentions any term.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading fails.
+    pub fn load_import_relations_matching_targets(
+        &self,
+        terms: &[String],
+        limit_per_term: usize,
+    ) -> DbResult<Vec<SymbolRelation>> {
+        let mut unique_terms = terms.to_vec();
+        unique_terms.sort();
+        unique_terms.dedup();
+        let mut relations = Vec::new();
+        for term in unique_terms.iter().filter(|term| !term.trim().is_empty()) {
+            let mut term_relations = self.query_relations(
+                "
+                SELECT path, source_name, target_name, kind, line, context, parser
+                FROM symbol_relations
+                WHERE kind = 'imports' AND target_name LIKE ?1 ESCAPE '\\'
+                ORDER BY path, line, source_name, target_name
+                LIMIT ?2
+                ",
+                params![
+                    sqlite_like_pattern(term),
+                    usize_to_i64(limit_per_term.max(1))
+                ],
+            )?;
+            relations.append(&mut term_relations);
+        }
+        relations.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then_with(|| left.line.cmp(&right.line))
+                .then_with(|| left.source_name.cmp(&right.source_name))
+                .then_with(|| left.target_name.cmp(&right.target_name))
+        });
+        relations.dedup_by(|left, right| {
+            left.path == right.path
+                && left.source_name == right.source_name
+                && left.target_name == right.target_name
+                && left.kind == right.kind
+                && left.line == right.line
+        });
+        Ok(relations)
+    }
+
     /// Count persisted symbols.
     ///
     /// # Errors
@@ -2044,19 +2092,7 @@ impl AtlasStore {
 
 /// Normalize a filesystem path stored in `SQLite` metadata.
 fn normalize_metadata_path(path: &Path) -> String {
-    normalize_metadata_path_string(&path.to_string_lossy())
-}
-
-/// Normalize a native path string stored in `SQLite` metadata.
-fn normalize_metadata_path_string(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
-        format!("//{rest}")
-    } else if let Some(rest) = normalized.strip_prefix("//?/") {
-        rest.to_string()
-    } else {
-        normalized
-    }
+    normalize_native_path_display(path)
 }
 
 /// Upsert one scanned node into an existing transaction.

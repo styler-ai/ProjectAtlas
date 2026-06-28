@@ -85,7 +85,7 @@ This skill is part of the ProjectAtlas plugin on purpose. Installing the plugin 
    - Linux/macOS: `plugins/projectatlas/scripts/install-runtime.sh`
 5. Confirm MCP registration uses the generated `.projectatlas/projectatlas.mcp.json` whenever possible. It contains absolute runtime, DB, and config paths plus a `cwd` project-root hint. `mcp-config` discovers `.projectatlas/config.toml` and flat `projectatlas.toml` from the selected DB/project root. The MCP server also resolves path-less root-sensitive tools from config, indexed DB metadata, or the default `.projectatlas/projectatlas.db` parent, so hosts that ignore `cwd` still use the intended project. The fallback plugin `.mcp.json` starts `projectatlas --db .projectatlas/projectatlas.db mcp` from PATH and should only be used from the project root when PATH resolves to the verified ProjectAtlas 3 binary.
 6. Initialize the target repo with `projectatlas init --seed-purpose`.
-7. Check `.projectatlas/config.toml` and add generated/vendor/build-heavy directories to `[scan].exclude_dir_names` before large-repo indexing.
+7. Check `.projectatlas/config.toml` before large-repo indexing. Add broad generated/vendor/build directory names to `[scan].exclude_dir_names`, and add exact generated or published subtrees to `[scan].exclude_path_prefixes`.
 8. Run `projectatlas scan`.
 9. Add or import one-line purpose records for important folders and files.
 10. Add summaries for non-source files to `.projectatlas/projectatlas-nonsource-files.toon` when needed.
@@ -134,6 +134,7 @@ Use the MCP tools when the harness exposes them. They are preferred over shell c
 - Local index/cache is corrupt or intentionally discarded: call `atlas_reset_index` dry-run first; apply only when rebuilding from source is acceptable.
 - Read-only review or CI smoke must not mutate telemetry: set `PROJECTATLAS_NO_TELEMETRY=1` before running ProjectAtlas CLI commands or launching the MCP server.
 - Migrating old metadata: call `atlas_scan` first, then `atlas_strip_legacy_purpose` with dry-run; apply only on explicit user request.
+- If scan reports skipped stale purpose imports, treat them as legacy TOON rows for paths that are deleted or excluded by current scan policy. Confirm the current index is correct with `atlas_overview`, `atlas_files`, and `atlas_health`; do not recreate stale paths just to preserve old map rows.
 
 When MCP registration files are needed from the CLI, generate them with:
 

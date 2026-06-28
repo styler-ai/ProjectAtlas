@@ -54,9 +54,15 @@ asset_extensions = [".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".ico", ".
 
 `projectatlas init` writes the Rust configuration template. Adjust `scan.source_extensions` only when a project needs a narrower or broader compatibility-map surface.
 
-`scan.exclude_dir_names` is used by `projectatlas scan`, `atlas_scan`, watcher refresh, and
-`strip-legacy-purpose`, so generated/vendor/build-heavy directories should be listed here before large-repo
-indexing. Search then operates over the indexed file set and can use literal, regex, or fuzzy matching.
+`scan.exclude_dir_names` and `scan.exclude_path_prefixes` are used by `projectatlas scan`, `projectatlas map`,
+`projectatlas lint`, MCP `atlas_scan`, watcher refresh, and `strip-legacy-purpose`. Use directory-name excludes for
+broad generated/vendor/build folders such as `node_modules` or `target`; use path-prefix excludes for exact
+repository subtrees such as `docs/api` or `app/public/generated`. Search then operates over the indexed file set
+and can use literal, regex, or fuzzy matching.
+
+During migration from legacy TOON maps, `projectatlas scan` imports purpose records only for paths still present in
+the freshly indexed file set. Stale or newly excluded map rows are counted as skipped stale imports instead of
+failing the first scan with a low-level SQLite no-row error.
 
 `scan.text_index_max_bytes` caps the size of each UTF-8 file stored in SQLite for indexed text search. Oversized
 files remain indexed as repository nodes, but their full text is skipped for search to keep large repositories fast

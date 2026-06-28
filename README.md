@@ -149,7 +149,10 @@ satisfied, and reports how much indexed source was scanned. Symbol slices reject
 the agent supplies `--symbol-parent`, `--symbol-kind`, or `--symbol-line`, which keeps exact-source reads tied to
 the symbol selected during orientation.
 
-`scan`, MCP `atlas_scan`, watcher refresh, and legacy purpose cleanup honor configured `[scan].exclude_dir_names`.
+`scan`, MCP `atlas_scan`, watcher refresh, map/lint, and legacy purpose cleanup honor configured
+`[scan].exclude_dir_names` and `[scan].exclude_path_prefixes`.
+Initial scans that import legacy TOON map purposes skip stale or newly excluded map rows and report the skipped
+count instead of failing with a raw SQLite no-row error.
 Deep symbol builds support `--max-workers` and `--timeout-seconds` so large repositories can trade throughput,
 CPU pressure, and bounded agent wait time.
 
@@ -253,7 +256,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 
 - `dev`: active development branch
 - `main`: stable releases only
-- release tags match the Cargo workspace version, for example `v0.3.1`
+- release tags match the Cargo workspace version, for example `v0.3.2`
 
 Before a release, run the full local verification stack, merge `dev` into `main` through a PR, and use the manual
 Release workflow if a tag needs to be created explicitly.
@@ -289,7 +292,8 @@ Release workflow if a tag needs to be created explicitly.
 See `docs/configuration.md` for all settings. Most projects only need to adjust:
 
 - `scan.source_extensions`
-- `scan.exclude_dir_names`, honored by scan, MCP scan, watcher refresh, and legacy purpose cleanup
+- `scan.exclude_dir_names`, honored by scan, MCP scan, watcher refresh, map/lint, and legacy purpose cleanup
+- `scan.exclude_path_prefixes`, exact repository subtrees to omit from scan, map, lint, watch, search, and imports
 - `scan.text_index_max_bytes`, the per-file UTF-8 text-index cap for large repositories
 - `untracked.asset_allowed_prefixes`
 - `project.map_path`

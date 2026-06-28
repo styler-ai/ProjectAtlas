@@ -224,6 +224,33 @@ pub fn normalize_repo_path(root: &Path, path: &Path) -> CoreResult<String> {
     Ok(as_str.replace('\\', "/"))
 }
 
+/// Normalize a native filesystem path for stable diagnostics and metadata.
+///
+/// The returned path uses forward slashes, strips Windows extended path
+/// prefixes such as `\\?\`, and converts extended UNC paths to `//server/share`
+/// form. This helper is for persisted metadata and agent-facing output; use
+/// `Path`/`PathBuf` for host filesystem access.
+#[must_use]
+pub fn normalize_native_path_display(path: impl AsRef<Path>) -> String {
+    normalize_native_path_display_str(&path.as_ref().to_string_lossy())
+}
+
+/// Normalize a native filesystem path string for stable diagnostics and metadata.
+///
+/// This string-oriented variant exists for values read from metadata or tests
+/// before they are converted back into a platform `Path`.
+#[must_use]
+pub fn normalize_native_path_display_str(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
+        format!("//{rest}")
+    } else if let Some(rest) = normalized.strip_prefix("//?/") {
+        rest.to_string()
+    } else {
+        normalized
+    }
+}
+
 /// Normalize and validate a user-supplied path as a repository-relative file key.
 ///
 /// # Errors
@@ -307,7 +334,7 @@ pub fn normalized_extension(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{repo_path_to_native, validated_repo_file_key};
+    use super::{normalize_native_path_display_str, repo_path_to_native, validated_repo_file_key};
     use std::io;
     use std::path::Path;
 
@@ -337,6 +364,26 @@ mod tests {
         assert_eq!(
             repo_path_to_native("src/main.rs"),
             Path::new("src").join("main.rs")
+        );
+    }
+
+    #[test]
+    fn native_path_display_removes_windows_extended_prefixes() {
+        assert_eq!(
+            normalize_native_path_display_str(r"\\?\C:\repo\.projectatlas\projectatlas.db"),
+            "C:/repo/.projectatlas/projectatlas.db"
+        );
+        assert_eq!(
+            normalize_native_path_display_str(r"\\?\UNC\server\share\repo"),
+            "//server/share/repo"
+        );
+        assert_eq!(
+            normalize_native_path_display_str("/home/user/repo"),
+            "/home/user/repo"
+        );
+        assert_eq!(
+            normalize_native_path_display_str("src\\main.rs"),
+            "src/main.rs"
         );
     }
 

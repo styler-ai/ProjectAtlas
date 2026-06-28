@@ -11,8 +11,9 @@ use projectatlas_core::outline::estimate_tokens;
 use projectatlas_core::symbols::{RelationKind, SymbolGraph, SymbolKind};
 use projectatlas_core::telemetry::{usage_from_estimates, usage_from_text};
 use projectatlas_core::{
-    Node, NodeKind, Overview, PurposeSource, PurposeStatus, normalize_repo_path,
-    repo_path_to_native, validated_repo_file_key,
+    Node, NodeKind, Overview, PurposeSource, PurposeStatus, normalize_native_path_display,
+    normalize_native_path_display_str, normalize_repo_path, repo_path_to_native,
+    validated_repo_file_key,
 };
 use projectatlas_db::{AtlasStore, IndexedFileText};
 use projectatlas_fs::{ScanOptions, scan_path, scan_repo};
@@ -27,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -75,10 +76,21 @@ impl ScanRuntimePlan {
 pub(crate) struct ScanReport {
     /// Repository overview after scan.
     pub(crate) overview: Overview,
+    /// Legacy purpose records imported into the current index.
+    pub(crate) purpose_import: PurposeImportReport,
     /// Persisted text search index report.
     pub(crate) text_index: TextIndexReport,
     /// Symbol graph build report.
     pub(crate) symbols: SymbolBuildReport,
+}
+
+/// Legacy purpose import counts from a scan.
+#[derive(Debug, Default, Serialize)]
+pub(crate) struct PurposeImportReport {
+    /// Purpose records imported into indexed nodes.
+    pub(crate) imported: usize,
+    /// Legacy purpose records skipped because the path is no longer indexed.
+    pub(crate) skipped_stale: usize,
 }
 
 /// Return a canonical absolute project root.
@@ -213,15 +225,26 @@ pub(crate) fn run_scan_pipeline(
     store.set_project_root(&plan.root)?;
     store.replace_scan(&nodes)?;
     let text_index = refresh_text_index_for_nodes(store, &plan.root, &nodes, plan.text_options)?;
+    let indexed_paths = nodes
+        .iter()
+        .map(|node| node.path.as_str())
+        .collect::<HashSet<_>>();
+    let mut purpose_import = PurposeImportReport::default();
     if let Some(config) = plan.config.as_ref() {
         for record in imported_purpose_records(config)? {
+            if !indexed_paths.contains(record.path.as_str()) {
+                purpose_import.skipped_stale += 1;
+                continue;
+            }
             store.set_purpose(&record.path, &record.summary, PurposeSource::Imported)?;
+            purpose_import.imported += 1;
         }
     }
     let symbols = build_symbols_for_index(store, &plan.root, symbol_options, None)?;
     let overview = store.overview()?;
     Ok(ScanReport {
         overview,
+        purpose_import,
         text_index,
         symbols,
     })
@@ -679,7 +702,7 @@ pub(crate) fn settings_index_stats(store: &AtlasStore) -> Result<SettingsIndexSt
     Ok(SettingsIndexStats {
         project_root: store
             .project_root()?
-            .map(|path| normalize_display_path_string(&path)),
+            .map(|path| normalize_native_path_display_str(&path)),
         files: overview.files,
         folders: overview.folders,
         missing_purposes: overview.missing_purposes,
@@ -815,36 +838,7 @@ pub(crate) fn mcp_config_path_for_db(db: &Path) -> PathBuf {
 
 /// Normalize a path for JSON/TOON diagnostics.
 pub(crate) fn normalize_display_path(path: &Path) -> String {
-    normalize_display_path_string(&path.to_string_lossy())
-}
-
-/// Normalize a native path string for JSON/TOON diagnostics.
-fn normalize_display_path_string(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
-        format!("//{rest}")
-    } else if let Some(rest) = normalized.strip_prefix("//?/") {
-        rest.to_string()
-    } else {
-        normalized
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::normalize_display_path_string;
-
-    #[test]
-    fn display_paths_remove_windows_extended_prefixes() {
-        assert_eq!(
-            normalize_display_path_string(r"\\?\C:\repo\.projectatlas\projectatlas.db"),
-            "C:/repo/.projectatlas/projectatlas.db"
-        );
-        assert_eq!(
-            normalize_display_path_string(r"\\?\UNC\server\share\repo"),
-            "//server/share/repo"
-        );
-    }
+    normalize_native_path_display(path)
 }
 
 /// Build a watcher status report from a lightweight runtime probe.
@@ -1595,28 +1589,29 @@ pub(crate) fn watch_path_affects_index(
     scan_options: &ScanOptions,
 ) -> bool {
     let candidate = absolute_watch_path(root, path);
-    let relative = candidate.strip_prefix(root).unwrap_or(path);
-    if relative.as_os_str().is_empty() {
+    let Some(relative) = safe_watch_relative_path(root, &candidate) else {
+        return false;
+    };
+    if relative == "." {
         return true;
     }
-    for component in relative.components() {
-        match component {
-            Component::Normal(name) => {
-                let name = name.to_string_lossy();
-                if name == ".purpose"
-                    || scan_options
-                        .exclude_dir_names
-                        .iter()
-                        .any(|excluded| excluded == name.as_ref())
-                {
-                    return false;
-                }
-            }
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
-        }
+    !relative.split('/').any(|component| component == ".purpose")
+        && !scan_options.excludes_relative_path(&relative)
+}
+
+/// Return a safe normalized repository path for a watcher event.
+fn safe_watch_relative_path(root: &Path, candidate: &Path) -> Option<String> {
+    let relative = normalize_repo_path(root, candidate).ok()?;
+    if relative == "." {
+        return Some(relative);
     }
-    true
+    if relative
+        .split('/')
+        .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return None;
+    }
+    Some(relative)
 }
 
 /// Return an absolute path for a watcher event path.

@@ -43,6 +43,8 @@ pub type FsResult<T> = Result<T, FsError>;
 pub struct ScanOptions {
     /// Additional directory names to exclude.
     pub exclude_dir_names: Vec<String>,
+    /// Repository-relative path prefixes to exclude.
+    pub exclude_path_prefixes: Vec<String>,
 }
 
 impl Default for ScanOptions {
@@ -58,7 +60,17 @@ impl Default for ScanOptions {
                 "build".to_string(),
                 "target".to_string(),
             ],
+            exclude_path_prefixes: Vec::new(),
         }
+    }
+}
+
+impl ScanOptions {
+    /// Return whether a repository-relative slash path is excluded.
+    #[must_use]
+    pub fn excludes_relative_path(&self, relative_path: &str) -> bool {
+        has_excluded_directory_component(relative_path, self)
+            || has_excluded_path_prefix(relative_path, self)
     }
 }
 
@@ -222,8 +234,7 @@ fn should_skip_path(root: &Path, path: &Path, options: &ScanOptions) -> bool {
     match normalize_repo_path(root, path) {
         Ok(relative) => {
             relative != "."
-                && (has_excluded_directory_component(&relative, options)
-                    || is_reserved_metadata_file(path))
+                && (options.excludes_relative_path(&relative) || is_reserved_metadata_file(path))
         }
         Err(_) => true,
     }
@@ -236,6 +247,19 @@ fn has_excluded_directory_component(relative_path: &str, options: &ScanOptions) 
             .exclude_dir_names
             .iter()
             .any(|excluded| excluded == name)
+    })
+}
+
+/// Return whether a repository-relative slash path starts with an excluded prefix.
+fn has_excluded_path_prefix(relative_path: &str, options: &ScanOptions) -> bool {
+    options.exclude_path_prefixes.iter().any(|prefix| {
+        let prefix = prefix.replace('\\', "/");
+        let prefix = prefix.trim_matches('/');
+        !prefix.is_empty()
+            && (relative_path == prefix
+                || relative_path
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.starts_with('/')))
     })
 }
 
@@ -349,6 +373,35 @@ mod tests {
         require_path(&nodes, ".")?;
         require_path(&nodes, "src")?;
         require_path(&nodes, "src/main.rs")?;
+        Ok(())
+    }
+
+    #[test]
+    fn excludes_configured_path_prefix_without_hiding_same_named_source()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join("docs").join("api"))?;
+        fs::create_dir_all(repo.join("src").join("api"))?;
+        fs::write(
+            repo.join("docs").join("api").join("generated.rs"),
+            "fn generated() {}\n",
+        )?;
+        fs::write(
+            repo.join("src").join("api").join("live.rs"),
+            "fn live() {}\n",
+        )?;
+        let options = ScanOptions {
+            exclude_path_prefixes: vec!["docs\\api".to_string()],
+            ..ScanOptions::default()
+        };
+
+        let nodes = scan_repo(&repo, &options)?;
+        reject_path(&nodes, "docs/api")?;
+        reject_path(&nodes, "docs/api/generated.rs")?;
+        require_path(&nodes, "docs")?;
+        require_path(&nodes, "src/api")?;
+        require_path(&nodes, "src/api/live.rs")?;
         Ok(())
     }
 

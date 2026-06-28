@@ -664,6 +664,219 @@ fn symbols_watch_and_legacy_cleanup_flow() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn real_scan_resolves_import_alias_called_by_across_core_languages() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir_all(repo.join("src").join("rust").join("no_alias"))?;
+    fs::create_dir_all(repo.join("src").join("rust").join("module_alias"))?;
+    fs::create_dir_all(repo.join("src").join("rust").join("function_alias"))?;
+    fs::create_dir_all(repo.join("src").join("ts").join("no_alias"))?;
+    fs::create_dir_all(repo.join("src").join("ts").join("named_alias"))?;
+    fs::create_dir_all(repo.join("src").join("ts").join("api"))?;
+    fs::create_dir_all(repo.join("src").join("py").join("package"))?;
+    fs::create_dir_all(repo.join("src").join("py").join("package_entry"))?;
+    fs::write(
+        repo.join("src")
+            .join("rust")
+            .join("no_alias")
+            .join("service.rs"),
+        "pub fn run_no_alias() -> &'static str {\n    \"rust-no-alias\"\n}\n",
+    )?;
+    fs::write(
+        repo.join("src")
+            .join("rust")
+            .join("no_alias")
+            .join("main.rs"),
+        "use crate::rust::no_alias::service;\n\nfn start_rust_no_alias() {\n    service::run_no_alias();\n}\n",
+    )?;
+    fs::write(
+        repo.join("src")
+            .join("rust")
+            .join("module_alias")
+            .join("service.rs"),
+        "pub fn run_module_alias() -> &'static str {\n    \"rust-module-alias\"\n}\n",
+    )?;
+    fs::write(
+        repo.join("src")
+            .join("rust")
+            .join("module_alias")
+            .join("main.rs"),
+        "use crate::rust::module_alias::service as rust_service;\n\nfn start_rust_module_alias() {\n    rust_service::run_module_alias();\n}\n",
+    )?;
+    fs::write(
+        repo.join("src")
+            .join("rust")
+            .join("function_alias")
+            .join("service.rs"),
+        "pub fn run_function_alias() -> &'static str {\n    \"rust-function-alias\"\n}\n",
+    )?;
+    fs::write(
+        repo.join("src")
+            .join("rust")
+            .join("function_alias")
+            .join("main.rs"),
+        "use crate::rust::function_alias::service::run_function_alias as run_rust_function;\n\nfn start_rust_function_alias() {\n    run_rust_function();\n}\n",
+    )?;
+    fs::write(
+        repo.join("src")
+            .join("ts")
+            .join("no_alias")
+            .join("service.ts"),
+        "export function runTsNoAlias(): string {\n  return \"typescript-no-alias\";\n}\n",
+    )?;
+    fs::write(
+        repo.join("src").join("ts").join("no_alias_main.ts"),
+        "import { runTsNoAlias } from \"./no_alias/service\";\n\nexport function startTsNoAlias(): string {\n  return runTsNoAlias();\n}\n",
+    )?;
+    fs::write(
+        repo.join("src")
+            .join("ts")
+            .join("named_alias")
+            .join("service.ts"),
+        "export function runTsNamedAlias(): string {\n  return \"typescript-named-alias\";\n}\n",
+    )?;
+    fs::write(
+        repo.join("src").join("ts").join("named_alias_main.ts"),
+        "import { runTsNamedAlias as runAlias } from \"./named_alias/service\";\n\nexport function startTsNamedAlias(): string {\n  return runAlias();\n}\n",
+    )?;
+    fs::write(
+        repo.join("src").join("ts").join("api").join("index.ts"),
+        "export function runTsNamespace(): string {\n  return \"typescript-namespace\";\n}\n",
+    )?;
+    fs::write(
+        repo.join("src").join("ts").join("namespace_main.ts"),
+        "import * as api from \"./api\";\n\nexport function startTsNamespace(): string {\n  return api.runTsNamespace();\n}\n",
+    )?;
+    fs::write(
+        repo.join("src")
+            .join("py")
+            .join("package")
+            .join("no_alias.py"),
+        "def run_py_no_alias():\n    return \"python-no-alias\"\n",
+    )?;
+    fs::write(
+        repo.join("src").join("py").join("no_alias_main.py"),
+        "from py.package.no_alias import run_py_no_alias\n\n\ndef start_py_no_alias():\n    return run_py_no_alias()\n",
+    )?;
+    fs::write(
+        repo.join("src")
+            .join("py")
+            .join("package")
+            .join("named_alias.py"),
+        "def run_py_named_alias():\n    return \"python-named-alias\"\n",
+    )?;
+    fs::write(
+        repo.join("src").join("py").join("named_alias_main.py"),
+        "from py.package.named_alias import run_py_named_alias as run_alias\n\n\ndef start_py_named_alias():\n    return run_alias()\n",
+    )?;
+    fs::write(
+        repo.join("src")
+            .join("py")
+            .join("package")
+            .join("module_alias.py"),
+        "def run_py_module_alias():\n    return \"python-module-alias\"\n",
+    )?;
+    fs::write(
+        repo.join("src").join("py").join("module_alias_main.py"),
+        "import py.package.module_alias as py_service\n\n\ndef start_py_module_alias():\n    return py_service.run_py_module_alias()\n",
+    )?;
+    fs::write(
+        repo.join("src")
+            .join("py")
+            .join("package_entry")
+            .join("__init__.py"),
+        "def run_py_entry():\n    return \"python-entry\"\n",
+    )?;
+    fs::write(
+        repo.join("src").join("py").join("entry_main.py"),
+        "import py.package_entry as package_entry\n\n\ndef start_py_entry():\n    return package_entry.run_py_entry()\n",
+    )?;
+    let db = temp.path().join("projectatlas.db");
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    assert_summary_called_by(
+        &repo,
+        &db,
+        "src/rust/no_alias/service.rs",
+        "run_no_alias",
+        "src/rust/no_alias/main.rs::start_rust_no_alias",
+    )?;
+    assert_summary_called_by(
+        &repo,
+        &db,
+        "src/rust/module_alias/service.rs",
+        "run_module_alias",
+        "src/rust/module_alias/main.rs::start_rust_module_alias",
+    )?;
+    assert_summary_called_by(
+        &repo,
+        &db,
+        "src/rust/function_alias/service.rs",
+        "run_function_alias",
+        "src/rust/function_alias/main.rs::start_rust_function_alias",
+    )?;
+    assert_summary_called_by(
+        &repo,
+        &db,
+        "src/ts/no_alias/service.ts",
+        "runTsNoAlias",
+        "src/ts/no_alias_main.ts::startTsNoAlias",
+    )?;
+    assert_summary_called_by(
+        &repo,
+        &db,
+        "src/ts/named_alias/service.ts",
+        "runTsNamedAlias",
+        "src/ts/named_alias_main.ts::startTsNamedAlias",
+    )?;
+    assert_summary_called_by(
+        &repo,
+        &db,
+        "src/ts/api/index.ts",
+        "runTsNamespace",
+        "src/ts/namespace_main.ts::startTsNamespace",
+    )?;
+    assert_summary_called_by(
+        &repo,
+        &db,
+        "src/py/package/no_alias.py",
+        "run_py_no_alias",
+        "src/py/no_alias_main.py::start_py_no_alias",
+    )?;
+    assert_summary_called_by(
+        &repo,
+        &db,
+        "src/py/package/named_alias.py",
+        "run_py_named_alias",
+        "src/py/named_alias_main.py::start_py_named_alias",
+    )?;
+    assert_summary_called_by(
+        &repo,
+        &db,
+        "src/py/package/module_alias.py",
+        "run_py_module_alias",
+        "src/py/module_alias_main.py::start_py_module_alias",
+    )?;
+    assert_summary_called_by(
+        &repo,
+        &db,
+        "src/py/package_entry/__init__.py",
+        "run_py_entry",
+        "src/py/entry_main.py::start_py_entry",
+    )?;
+
+    Ok(())
+}
+
+#[test]
 fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("repo");
@@ -848,14 +1061,24 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
     fs::create_dir(&repo)?;
     fs::create_dir_all(repo.join(".projectatlas"))?;
     fs::create_dir(repo.join("src"))?;
+    fs::create_dir_all(repo.join("src").join("api"))?;
+    fs::create_dir_all(repo.join("docs").join("api"))?;
     fs::create_dir_all(repo.join("generated"))?;
     fs::write(
         repo.join(".projectatlas").join("config.toml"),
-        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\", \"generated\"]\n",
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\", \"generated\"]\nexclude_path_prefixes = [\"docs/api\"]\n",
     )?;
     fs::write(
         repo.join("src").join("engine.rs"),
         "pub fn build_project_atlas() {}\n",
+    )?;
+    fs::write(
+        repo.join("src").join("api").join("live.rs"),
+        "pub fn live_api() {}\n",
+    )?;
+    fs::write(
+        repo.join("docs").join("api").join("noise.rs"),
+        "pub fn generated_doc_noise() {}\n",
     )?;
     fs::write(
         repo.join("generated").join("noise.rs"),
@@ -875,7 +1098,7 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
         return Err(io::Error::other("configured scan command failed").into());
     }
     let scan_json: Value = serde_json::from_slice(&raw_scan.stdout)?;
-    require_json_usize(&scan_json, &["overview", "files"], 1)?;
+    require_json_usize(&scan_json, &["overview", "files"], 2)?;
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -884,17 +1107,44 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
         .args(["files", "noise"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("generated/noise.rs").not());
+        .stdout(predicate::str::contains("generated/noise.rs").not())
+        .stdout(predicate::str::contains("docs/api/noise.rs").not());
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
-        .args(["files", "--file-pattern", "src\\*.rs"])
+        .args(["files", "api"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("src/api/live.rs"))
+        .stdout(predicate::str::contains("docs/api/noise.rs").not());
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["files", "--file-pattern", "*.rs"])
         .assert()
         .success()
         .stdout(predicate::str::contains("src/engine.rs"))
-        .stdout(predicate::str::contains("generated/noise.rs").not());
+        .stdout(predicate::str::contains("src/api/live.rs"))
+        .stdout(predicate::str::contains("generated/noise.rs").not())
+        .stdout(predicate::str::contains("docs/api/noise.rs").not());
+
+    let raw_excluded_search = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["search", "generated_doc_noise", "--file-pattern", "*.rs"])
+        .output()?;
+    if !raw_excluded_search.status.success() {
+        return Err(io::Error::other("excluded-prefix search command failed").into());
+    }
+    let excluded_search_json: Value = serde_json::from_slice(&raw_excluded_search.stdout)?;
+    require_json_usize(&excluded_search_json, &["returned"], 0)?;
 
     let raw_search = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -911,6 +1161,123 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
     require_json_string(&search_json, &["mode"], "fuzzy")?;
     require_json_usize(&search_json, &["returned"], 1)?;
     require_json_string(&search_json, &["results", "0", "path"], "src/engine.rs")?;
+    Ok(())
+}
+
+#[test]
+fn map_and_lint_honor_configured_exclude_path_prefixes() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir_all(repo.join(".projectatlas"))?;
+    fs::create_dir(repo.join("src"))?;
+    fs::create_dir_all(repo.join("docs").join("api"))?;
+    fs::write(
+        repo.join(".projectatlas").join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\"]\nexclude_path_prefixes = [\"docs/api\"]\n",
+    )?;
+    fs::write(
+        repo.join(".projectatlas")
+            .join("projectatlas-nonsource-files.toon"),
+        "nonsource_files[]:\n",
+    )?;
+    fs::write(
+        repo.join(".purpose"),
+        "Repository root for prefix map tests\n",
+    )?;
+    fs::write(
+        repo.join("src").join(".purpose"),
+        "Rust source folder for prefix map tests\n",
+    )?;
+    fs::write(
+        repo.join("docs").join(".purpose"),
+        "Documentation folder for prefix map tests\n",
+    )?;
+    fs::write(
+        repo.join("src").join("engine.rs"),
+        "// Purpose: Active Rust source for prefix map tests.\npub fn indexed_engine() {}\n",
+    )?;
+    fs::write(
+        repo.join("docs").join("api").join("noise.rs"),
+        "pub fn excluded_from_map_and_lint() {}\n",
+    )?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["map", "--force"])
+        .assert()
+        .success();
+
+    let map = fs::read_to_string(repo.join(".projectatlas").join("projectatlas.toon"))?;
+    if !map.contains("src/engine.rs") {
+        return Err(io::Error::other("map omitted indexed source file").into());
+    }
+    if map.contains("docs/api/noise.rs") || map.contains("excluded_from_map_and_lint") {
+        return Err(io::Error::other("map included excluded path-prefix source").into());
+    }
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["lint", "--strict-folders", "--report-untracked"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("docs/api/noise.rs").not());
+    Ok(())
+}
+
+#[test]
+fn first_default_scan_skips_stale_legacy_map_purposes() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir_all(repo.join(".projectatlas"))?;
+    fs::create_dir(repo.join("src"))?;
+    fs::write(
+        repo.join(".projectatlas").join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\"]\n",
+    )?;
+    fs::write(
+        repo.join(".projectatlas").join("projectatlas.toon"),
+        "version: 1\n\
+generated_at: 2026-06-28T00:00:00Z\n\
+root: .\n\
+folders[2]{path,summary,source}:\n\
+  .,Repository root,folder\n\
+  stale,Deleted legacy folder,folder\n\
+files[2]{path,summary,source}:\n\
+  src/main.rs,Rust entrypoint,file\n\
+  stale/deleted.rs,Deleted legacy file,file\n",
+    )?;
+    fs::write(repo.join("src").join("main.rs"), "fn main() {}\n")?;
+    let db = temp.path().join("projectatlas.db");
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .arg("scan")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("scan:"))
+        .stdout(predicate::str::contains("purpose_import:"))
+        .stdout(predicate::str::contains("imported: 2"))
+        .stdout(predicate::str::contains("skipped_stale: 2"))
+        .stderr(predicate::str::contains("Query returned no rows").not());
+
+    let raw_overview = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .arg("overview")
+        .output()?;
+    if !raw_overview.status.success() {
+        return Err(io::Error::other("overview after legacy import scan failed").into());
+    }
+    let overview_json: Value = serde_json::from_slice(&raw_overview.stdout)?;
+    require_json_usize(&overview_json, &["files"], 1)?;
+    require_json_usize(&overview_json, &["approved_purposes"], 2)?;
     Ok(())
 }
 
@@ -2033,6 +2400,54 @@ fn run_mcp_stdio(
         .into());
     }
     Ok(String::from_utf8(output.stdout)?)
+}
+
+/// Require that a real CLI summary reports a caller for a named function.
+fn assert_summary_called_by(
+    repo: &std::path::Path,
+    db: &std::path::Path,
+    file_path: &str,
+    function_name: &str,
+    expected_caller: &str,
+) -> Result<(), Box<dyn Error>> {
+    let raw_summary = Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(db)
+        .args(["summary", file_path, "--limit", "10"])
+        .output()?;
+    if !raw_summary.status.success() {
+        return Err(io::Error::other(format!(
+            "summary command failed for {file_path}: {}",
+            String::from_utf8_lossy(&raw_summary.stderr)
+        ))
+        .into());
+    }
+    let summary_json: Value = serde_json::from_slice(&raw_summary.stdout)?;
+    let function = summary_json["functions"]
+        .as_array()
+        .and_then(|functions| {
+            functions
+                .iter()
+                .find(|function| function["name"].as_str() == Some(function_name))
+        })
+        .ok_or_else(|| io::Error::other(format!("function {function_name} missing")))?;
+    let called_by = function["called_by"]
+        .as_array()
+        .ok_or_else(|| io::Error::other(format!("called_by missing for {function_name}")))?;
+    if called_by
+        .iter()
+        .any(|caller| caller.as_str() == Some(expected_caller))
+    {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "expected {function_name} in {file_path} to be called by {expected_caller}, found {called_by:?}"
+        ))
+        .into())
+    }
 }
 
 /// Require a nested JSON string value.

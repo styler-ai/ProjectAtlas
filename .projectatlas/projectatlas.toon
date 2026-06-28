@@ -1,9 +1,9 @@
 version: 1
-generated_at: unix:1782619039
-file_hash: "17bbb86444998e118e9acffa4a48456c5e2342e7234f1bf4866a49fc76781817"
-folder_hash: "4c8f50579814810aa9fbe5b6eb19617979fe46fd802e42b713ad302cdece2e37"
+generated_at: unix:1782631081
+file_hash: "8219de162872de2d1277673c575495c6e65d68967d2a2b5f7d3414352860214e"
+folder_hash: "00412e13569547fda627b63d020c6cc56a7bc359415e8bcf6e3aa10799b7d863"
 root: .
-overview: tracked_source_files=61 tracked_nonsource_files=42 tracked_files_total=103 tracked_folders=36 source_extensions=121 exclude_dir_names=9 exclude_path_prefixes=0
+overview: tracked_source_files=68 tracked_nonsource_files=42 tracked_files_total=110 tracked_folders=37 source_extensions=121 exclude_dir_names=9 exclude_path_prefixes=0
 source_extensions[]:
   - .astro
   - .bash
@@ -137,7 +137,7 @@ exclude_dir_names[]:
   - node_modules
   - target
 exclude_path_prefixes[]:
-folders[36]{path,summary,source}:
+folders[37]{path,summary,source}:
   .,ProjectAtlas repository root.,database
   .agents,Agent marketplace metadata for ProjectAtlas.,database
   .agents/plugins,Codex plugin marketplace catalog for ProjectAtlas.,database
@@ -163,6 +163,7 @@ folders[36]{path,summary,source}:
   crates/projectatlas-service/src,Contain shared service-layer Rust source for ProjectAtlas query behavior,database
   crates/projectatlas-symbols,Rust crate for ProjectAtlas source symbol and relation extraction.,database
   crates/projectatlas-symbols/src,Source folder for symbol graph extraction implementation.,database
+  crates/projectatlas-symbols/src/languages,Hosts private language-specific symbol augmentation strategies used after generic tree-sitter extraction.,database
   docs,ProjectAtlas documentation and guides.,database
   plugins,Installable Codex plugins for ProjectAtlas.,database
   plugins/projectatlas,ProjectAtlas Codex plugin package.,database
@@ -174,7 +175,7 @@ folders[36]{path,summary,source}:
   skills/claude,Claude guidance for ProjectAtlas usage.,database
   skills/codex,Codex guidance for ProjectAtlas usage.,database
   templates,Reusable agent templates and snippets.,database
-files[65]{path,summary,source}:
+files[72]{path,summary,source}:
   .agents/plugins/marketplace.json,Codex plugin marketplace catalog for ProjectAtlas,database
   .codex/rules/memory/activeContext.md,ProjectAtlas active context,database
   .codex/rules/memory/productContext.md,ProjectAtlas product context,database
@@ -220,8 +221,14 @@ files[65]{path,summary,source}:
   crates/projectatlas-fs/Cargo.toml,Filesystem scanner Rust crate manifest for ProjectAtlas 3,database
   crates/projectatlas-fs/src/lib.rs,Scan repository files and folders for `ProjectAtlas` 3.,database
   crates/projectatlas-service/Cargo.toml,Declare the ProjectAtlas service crate package and dependencies,database
+  crates/projectatlas-service/src/import_aliases.rs,Resolves deterministic import-alias caller targets from persisted import and call relations for file summaries.,database
   crates/projectatlas-service/src/lib.rs,Provide shared `ProjectAtlas` query services for CLI and MCP adapters.,database
   crates/projectatlas-symbols/Cargo.toml,Symbol extraction crate manifest and tree-sitter dependencies,database
+  crates/projectatlas-symbols/src/languages/c_family.rs,Reserves the C and C++ language augmentation boundary for parser-specific corrections.,database
+  crates/projectatlas-symbols/src/languages/kotlin.rs,"Adds Kotlin package, type, and method facts that the generic tree-sitter pass does not emit reliably.",database
+  crates/projectatlas-symbols/src/languages/mod.rs,Dispatches language-specific symbol graph augmentation and shared helper behavior for augmentation modules.,database
+  crates/projectatlas-symbols/src/languages/objective_c.rs,Adds Objective-C class ownership and de-duplicates interface versus implementation symbols for summaries.,database
+  crates/projectatlas-symbols/src/languages/zig.rs,Adds Zig struct binding names and method parents that are missing from generic parser output.,database
   crates/projectatlas-symbols/src/lib.rs,Extract tree-sitter-backed `ProjectAtlas` symbol graphs.,database
   deny.toml,Cargo dependency and license policy for ProjectAtlas,database
   docs/adoption.md,Adoption checklist for ProjectAtlas,database
@@ -231,6 +238,7 @@ files[65]{path,summary,source}:
   docs/format.md,ProjectAtlas TOON schema reference,database
   docs/index.md,Documentation landing page for ProjectAtlas,database
   docs/projectatlas-3-architecture.md,ProjectAtlas 3 Rust architecture plan,database
+  docs/projectatlas-3-v0.3.2-hardening-spec.md,"Specifies the v0.3.2 hardening plan for symbol modules, path normalization, and import-alias caller resolution.",database
   docs/workflow.md,ProjectAtlas workflow and troubleshooting guide,database
   plugins/projectatlas/.codex-plugin/plugin.json,ProjectAtlas Codex plugin manifest,database
   plugins/projectatlas/.mcp.json,Fallback MCP server configuration for the ProjectAtlas Codex plugin.,database
@@ -268,6 +276,7 @@ folder_tree[]:
   - "    src/ - Contain shared service-layer Rust source for ProjectAtlas query behavior"
   - "  projectatlas-symbols/ - Rust crate for ProjectAtlas source symbol and relation extraction."
   - "    src/ - Source folder for symbol graph extraction implementation."
+  - "      languages/ - Hosts private language-specific symbol augmentation strategies used after generic tree-sitter extraction."
   - docs/ - ProjectAtlas documentation and guides.
   - plugins/ - Installable Codex plugins for ProjectAtlas.
   - "  projectatlas/ - ProjectAtlas Codex plugin package."

@@ -14,7 +14,7 @@ use projectatlas_core::toon::{
     encode_agent_payload, render_health, render_nodes, render_outline, render_overview,
     render_symbol_relations, render_symbols, render_token_overview,
 };
-use projectatlas_core::{NodeKind, PurposeSource};
+use projectatlas_core::{NodeKind, PurposeSource, normalize_native_path_display};
 use projectatlas_db::{AtlasStore, DbError, HealthResolution};
 use projectatlas_service::{
     CodeSlice, FileSummaryReport, SearchReport, SymbolSliceSelector, build_file_summary,
@@ -1015,34 +1015,23 @@ fn build_mcp_config_report(
 
 /// Render a native path for MCP launch config without Windows extended prefixes.
 fn mcp_launch_path(path: &Path) -> String {
-    normalize_windows_launch_path(path.display().to_string())
+    native_launch_path(&normalize_native_path_display(path))
 }
 
-/// Normalize Windows extended path prefixes for external MCP launchers.
+/// Render a normalized diagnostic path as a Windows-native launcher path.
 #[cfg(windows)]
-fn normalize_windows_launch_path(path: String) -> String {
-    const DEVICE_PREFIX: &str = r"\\?\";
-    const DEVICE_PREFIX_ALT: &str = "//?/";
-    const UNC_DEVICE_PREFIX: &str = r"\\?\UNC\";
-    const UNC_DEVICE_PREFIX_ALT: &str = "//?/UNC/";
-    let normalized = if let Some(rest) = path.strip_prefix(UNC_DEVICE_PREFIX) {
-        format!(r"\\{rest}")
-    } else if let Some(rest) = path.strip_prefix(UNC_DEVICE_PREFIX_ALT) {
-        format!("//{rest}")
-    } else if let Some(rest) = path.strip_prefix(DEVICE_PREFIX) {
-        rest.to_string()
-    } else if let Some(rest) = path.strip_prefix(DEVICE_PREFIX_ALT) {
-        rest.to_string()
+fn native_launch_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("//") {
+        format!(r"\\{}", rest.replace('/', "\\"))
     } else {
-        path
-    };
-    normalized.replace('/', "\\")
+        path.replace('/', "\\")
+    }
 }
 
 /// Return non-Windows paths unchanged.
 #[cfg(not(windows))]
-fn normalize_windows_launch_path(path: String) -> String {
-    path
+fn native_launch_path(path: &str) -> String {
+    path.to_string()
 }
 
 /// Render MCP configuration as TOON for agents.
@@ -1515,6 +1504,7 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use std::io;
+    use std::path::Path;
 
     /// Minimal MCP client handler for in-process routing tests.
     #[derive(Clone, Default)]
@@ -1603,10 +1593,19 @@ mod tests {
                 "target".to_string(),
                 "generated".to_string(),
             ],
+            exclude_path_prefixes: vec!["docs/api".to_string()],
         };
         require_condition(
             watch_path_affects_index(root, &root.join("src/lib.rs"), &scan_options),
             "source file event should refresh the index",
+        )?;
+        require_condition(
+            !watch_path_affects_index(root, &root.join("../outside.rs"), &scan_options),
+            "absolute parent traversal events should be ignored",
+        )?;
+        require_condition(
+            !watch_path_affects_index(root, Path::new("../outside.rs"), &scan_options),
+            "relative parent traversal events should be ignored",
         )?;
         require_condition(
             !watch_path_requires_full_scan(root, &root.join("src/lib.rs")),
@@ -1644,6 +1643,14 @@ mod tests {
         require_condition(
             !watch_path_affects_index(root, &root.join("generated/out.rs"), &scan_options),
             "configured exclude directory events should be ignored",
+        )?;
+        require_condition(
+            !watch_path_affects_index(root, &root.join("docs/api/noise.rs"), &scan_options),
+            "configured exclude path-prefix events should be ignored",
+        )?;
+        require_condition(
+            watch_path_affects_index(root, &root.join("src/api/live.rs"), &scan_options),
+            "same directory name outside excluded prefix should be indexed",
         )?;
         require_condition(
             !event_kind_affects_index(EventKind::Access(notify::event::AccessKind::Any)),
