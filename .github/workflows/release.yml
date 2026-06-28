@@ -238,7 +238,7 @@ jobs:
         run: |
           project_root="$RUNNER_TEMP/projectatlas-installer-smoke"
           mkdir -p "$project_root"
-          PROJECTATLAS_VERSION="$RELEASE_VERSION" ./plugins/projectatlas/scripts/install-runtime.sh "$project_root"
+          PROJECTATLAS_VERSION="$RELEASE_VERSION" bash ./plugins/projectatlas/scripts/install-runtime.sh "$project_root"
           "$HOME/.local/bin/projectatlas" --format json runtime-info
           test -f "$project_root/.projectatlas/projectatlas.mcp.json"
 
