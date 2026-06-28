@@ -1,9 +1,9 @@
 version: 1
-generated_at: unix:1782662719
-file_hash: "e1f7b2cf1f927297ecc62f68a7b63559805a7a503c8e4d2bd1bcc2b9e10cb4fa"
-folder_hash: "f58d1066150efc05695c367c84afd774ddae91cab5781359a16993942b1b5e6f"
+generated_at: unix:1782671446
+file_hash: "2feb0aeef888a6f8e8b8f7ca505dfd2604bbb9f2548f7ab64e3ed5417a600d1c"
+folder_hash: "39e84b5b8f8717fb2b914e743cc0033600882dbeb89fdcd70b32270d29f43b3c"
 root: .
-overview: tracked_source_files=93 tracked_nonsource_files=34 tracked_files_total=127 tracked_folders=56 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
+overview: tracked_source_files=93 tracked_nonsource_files=35 tracked_files_total=128 tracked_folders=57 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
 source_extensions[]:
   - .astro
   - .bash
@@ -138,7 +138,7 @@ exclude_dir_names[]:
   - node_modules
   - target
 exclude_path_prefixes[]:
-folders[56]{path,summary,source}:
+folders[57]{path,summary,source}:
   .,ProjectAtlas repository root.,database
   .agents,Agent marketplace metadata for ProjectAtlas.,database
   .agents/plugins,Codex plugin marketplace catalog for ProjectAtlas.,database
@@ -161,6 +161,7 @@ folders[56]{path,summary,source}:
   crates/projectatlas-symbols/src,Source folder for symbol graph extraction implementation.,database
   crates/projectatlas-symbols/src/languages,Hosts private language-specific symbol augmentation strategies used after generic tree-sitter extraction.,database
   docs,ProjectAtlas documentation and guides.,database
+  docs/assets,README and documentation image assets.,database
   docs/benchmarks,Document measured repository token savings findings,database
   fixtures,Store ProjectAtlas regression fixtures,database
   fixtures/languages,Store language summary baseline fixtures,database
@@ -195,7 +196,7 @@ folders[56]{path,summary,source}:
   skills/claude,Claude guidance for ProjectAtlas usage.,database
   skills/codex,Codex guidance for ProjectAtlas usage.,database
   templates,Reusable agent templates and snippets.,database
-files[98]{path,summary,source}:
+files[99]{path,summary,source}:
   .agents/plugins/marketplace.json,Codex plugin marketplace catalog for ProjectAtlas,database
   .gitattributes,Line-ending policy for ProjectAtlas repository fixtures,nonsource
   .githooks/commit-msg,Git hook to enforce issue references in commits,nonsource
@@ -212,7 +213,7 @@ files[98]{path,summary,source}:
   Cargo.lock,Locked Rust dependency versions for ProjectAtlas 3,database
   Cargo.toml,Rust workspace manifest for ProjectAtlas 3,database
   LICENSE,ProjectAtlas MIT license,nonsource
-  README.md,ProjectAtlas overview and usage guide,database
+  README.md,ProjectAtlas product overview and plugin-first installation guide.,database
   SECURITY.md,Security contact information for ProjectAtlas,database
   crates/projectatlas-cli/Cargo.toml,CLI Rust crate manifest for ProjectAtlas 3,database
   crates/projectatlas-cli/src/atlas_map.rs,Generate and lint `ProjectAtlas` structure maps from Rust.,database
@@ -247,6 +248,7 @@ files[98]{path,summary,source}:
   deny.toml,Cargo dependency and license policy for ProjectAtlas,database
   docs/adoption.md,Adoption checklist for ProjectAtlas,database
   docs/agent-integration.md,Agent integration instructions for ProjectAtlas,database
+  docs/assets/projectatlas-brand.png,ProjectAtlas README brand image,nonsource
   docs/benchmarks/large-application-token-savings.md,Document large-application benchmark evidence for token-savings and responsiveness checks.,database
   docs/concepts.md,Core concepts for ProjectAtlas usage,database
   docs/configuration.md,Configuration reference for ProjectAtlas,database
@@ -319,6 +321,7 @@ folder_tree[]:
   - "    src/ - Source folder for symbol graph extraction implementation."
   - "      languages/ - Hosts private language-specific symbol augmentation strategies used after generic tree-sitter extraction."
   - docs/ - ProjectAtlas documentation and guides.
+  - "  assets/ - README and documentation image assets."
   - "  benchmarks/ - Document measured repository token savings findings"
   - fixtures/ - Store ProjectAtlas regression fixtures
   - "  languages/ - Store language summary baseline fixtures"
