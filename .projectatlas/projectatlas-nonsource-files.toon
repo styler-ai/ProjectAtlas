@@ -10,6 +10,7 @@ nonsource_files[]:
   CONTRIBUTING.md,Contribution policy for ProjectAtlas
   SECURITY.md,Security contact information for ProjectAtlas
   CODE_OF_CONDUCT.md,Community conduct expectations for ProjectAtlas
+  docs/assets/projectatlas-brand.png,ProjectAtlas README brand image
   .github/workflows/ci.yml,ProjectAtlas CI workflow
   .github/workflows/release.yml,ProjectAtlas release workflow
   .github/workflows/03-auto-release.yml,ProjectAtlas auto release workflow
