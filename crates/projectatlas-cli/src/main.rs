@@ -29,9 +29,10 @@ use runtime::{
     default_mcp_project_root, defaultable_cli_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     file_summary_usage_baseline, lint_database_if_present, normalized_folder_filter,
-    open_atlas_store, ranked_file_nodes, read_indexed_file_content, record_usage_estimate,
-    record_usage_text, reset_index_files, resolved_mcp_config_path, run_scan_pipeline,
-    run_watch_loop, strip_legacy_purpose, validated_indexed_file_key, watcher_status_report,
+    open_atlas_store, ranked_file_nodes, read_indexed_file_content,
+    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
+    reset_index_files, resolved_mcp_config_path, run_scan_pipeline, run_watch_loop,
+    strip_legacy_purpose, validated_indexed_file_key, watcher_status_report,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -608,7 +609,7 @@ fn run() -> Result<(), CliError> {
             let store = open_atlas_store(&cli.db)?;
             let overview = store.overview()?;
             let toon = render_overview(&overview);
-            print_tracked_output_estimate(
+            print_tracked_directory_output_estimate(
                 cli.format,
                 &store,
                 &cli.session,
@@ -625,7 +626,7 @@ fn run() -> Result<(), CliError> {
             let selected = store.load_ranked_nodes(query, NodeKind::Folder, None, *limit, 0)?;
             let toon = render_nodes("folders", &selected);
             let payload = render_node_rows("folders", &selected);
-            print_tracked_output_estimate(
+            print_tracked_directory_output_estimate(
                 cli.format,
                 &store,
                 &cli.session,
@@ -982,7 +983,7 @@ fn run() -> Result<(), CliError> {
             let store = open_atlas_store(&cli.db)?;
             let findings = store.unresolved_health_findings(&store.resolved_health_ids()?)?;
             let toon = render_health(&findings);
-            print_tracked_output_estimate(
+            print_tracked_directory_output_estimate(
                 cli.format,
                 &store,
                 &cli.session,
@@ -1317,6 +1318,31 @@ fn serialized_output<T: serde::Serialize>(
 }
 
 /// Record estimated-token telemetry for the exact emitted CLI payload.
+fn print_tracked_directory_output_estimate<T: serde::Serialize>(
+    format: OutputFormat,
+    store: &AtlasStore,
+    session: &str,
+    command: &str,
+    path: Option<String>,
+    query: Option<String>,
+    estimated_without_projectatlas: usize,
+    toon: &str,
+    payload: &T,
+) -> Result<(), CliError> {
+    let output = serialized_output(format, toon, payload)?;
+    record_directory_walk_usage_estimate(
+        store,
+        session,
+        command,
+        path,
+        query,
+        estimated_without_projectatlas,
+        &output,
+    )?;
+    write_stdout(&output)
+}
+
+/// Record candidate-set telemetry for the exact emitted CLI payload.
 fn print_tracked_output_estimate<T: serde::Serialize>(
     format: OutputFormat,
     store: &AtlasStore,
@@ -1517,6 +1543,7 @@ fn render_token_dashboard(overview: &TokenOverview, session: Option<&str>) -> St
     let without_bar = token_dashboard_bar(without, max_tokens);
     let with_bar = token_dashboard_bar(with, max_tokens);
     let saved_bar = token_dashboard_bar(saved, max_tokens);
+    let bucket_lines = token_dashboard_bucket_lines(overview);
     format!(
         "\
 +----------------------------------------------------------------+\n\
@@ -1531,6 +1558,7 @@ fn render_token_dashboard(overview: &TokenOverview, session: Option<&str>) -> St
 | With PA        [{with_bar}] {with_label:>14} tokens\n\
 | Saved          [{saved_bar}] {saved_label:>14} tokens\n\
 +----------------------------------------------------------------+\n\
+{bucket_lines}\
 | Funnel         overview > folders > files > summary > slice\n\
 | Avoided        wrong folders, wrong files, unnecessary full reads\n\
 +----------------------------------------------------------------+\n",
@@ -1538,6 +1566,41 @@ fn render_token_dashboard(overview: &TokenOverview, session: Option<&str>) -> St
         without_label = grouped_count(without),
         with_label = grouped_count(with),
     )
+}
+
+/// Render compact token bucket rows for the human dashboard.
+fn token_dashboard_bucket_lines(overview: &TokenOverview) -> String {
+    if overview.buckets.is_empty() {
+        return String::new();
+    }
+    let mut lines = String::from("| Buckets        kind / accuracy / confidence / saved tokens\n");
+    for bucket in &overview.buckets {
+        lines.push_str("| - ");
+        lines.push_str(&dashboard_fit(&format!(
+            "{} / {} / {} / {}",
+            bucket.token_savings_bucket,
+            bucket.accuracy,
+            bucket.confidence,
+            signed_count(bucket.estimated_saved)
+        )));
+        lines.push('\n');
+    }
+    lines.push_str("+----------------------------------------------------------------+\n");
+    lines
+}
+
+/// Fit one dashboard row to the fixed-width ASCII frame.
+fn dashboard_fit(value: &str) -> String {
+    const WIDTH: usize = 60;
+    if value.chars().count() <= WIDTH {
+        return value.to_string();
+    }
+    let mut fitted = value
+        .chars()
+        .take(WIDTH.saturating_sub(3))
+        .collect::<String>();
+    fitted.push_str("...");
+    fitted
 }
 
 /// Render one fixed-width token comparison bar.
@@ -2270,16 +2333,7 @@ mod tests {
     #[test]
     fn token_dashboard_is_human_readable_and_ascii() {
         let dashboard = render_token_dashboard(
-            &TokenOverview {
-                estimate_kind: "heuristic".to_string(),
-                estimator: "chars_or_bytes_div_ceil_4".to_string(),
-                estimate_scope: "workflow_payload_estimate_not_model_billing_tokens".to_string(),
-                calls: 3,
-                estimated_without_projectatlas: 12_000,
-                estimated_with_projectatlas: 3_000,
-                estimated_saved: 9_000,
-                savings_rate: Some(0.75),
-            },
+            &TokenOverview::from_estimated_totals(3, 12_000, 3_000),
             Some("session-a"),
         );
 
@@ -2291,6 +2345,8 @@ mod tests {
         assert!(dashboard.contains("| Without PA     [####################################]"));
         assert!(dashboard.contains("| With PA        [#########...........................]"));
         assert!(dashboard.contains("| Saved          [###########################.........]"));
+        assert!(dashboard.contains("| Buckets        kind / accuracy / confidence / saved tokens"));
+        assert!(dashboard.contains("navigation_avoidance / heuristic_estimate / inferred"));
         assert!(dashboard.contains("wrong folders, wrong files"));
         assert!(dashboard.contains("overview > folders > files > summary > slice"));
         assert!(dashboard.is_ascii());
@@ -2449,6 +2505,12 @@ mod tests {
         if !summary_text.contains("file_purpose_status: suggested") {
             return Err("atlas_file_summary result did not expose purpose status".into());
         }
+        if !summary_text.contains("parser_kind: \"tree-sitter-symbol-graph\"") {
+            return Err("atlas_file_summary result did not expose parser kind".into());
+        }
+        if !summary_text.contains("summary_status: ok") {
+            return Err("atlas_file_summary result did not expose summary status".into());
+        }
         if !summary_text.contains("helper") {
             return Err("atlas_file_summary result did not contain helper symbol".into());
         }
@@ -2492,8 +2554,15 @@ mod tests {
             if !token_text.contains("calls: 0") {
                 return Err("atlas_token_report recorded MCP usage in no-telemetry mode".into());
             }
-        } else if !token_text.contains("calls: 2") {
-            return Err("atlas_token_report did not count MCP usage events".into());
+        } else {
+            if !token_text.contains("calls: 2") {
+                return Err("atlas_token_report did not count MCP usage events".into());
+            }
+            if !token_text.contains("buckets[") || !token_text.contains("heuristic_estimate") {
+                return Err(
+                    "atlas_token_report result did not contain bucket accuracy labels".into(),
+                );
+            }
         }
 
         let parity_report = client

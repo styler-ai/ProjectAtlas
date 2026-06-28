@@ -5,8 +5,9 @@ use crate::runtime::{
     build_symbols_for_index, byte_count_to_tokens, canonical_project_root,
     default_mcp_project_root, estimated_source_tokens_for_indexed_files,
     estimated_source_tokens_for_paths, file_summary_usage_baseline, normalized_folder_filter,
-    open_atlas_store, ranked_file_nodes, read_indexed_file_content, record_usage_estimate,
-    record_usage_text, reset_index_files, run_scan_pipeline, run_watch_loop, strip_legacy_purpose,
+    open_atlas_store, ranked_file_nodes, read_indexed_file_content,
+    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
+    reset_index_files, run_scan_pipeline, run_watch_loop, strip_legacy_purpose,
     validated_indexed_file_key, watcher_status_report,
 };
 use crate::{
@@ -511,7 +512,7 @@ impl ProjectAtlasMcpServer {
             let store = self.open_store()?;
             let overview = store.overview()?;
             let toon = render_overview(&overview);
-            record_usage_estimate(
+            record_directory_walk_usage_estimate(
                 &store,
                 &self.session,
                 "mcp.atlas_overview",
@@ -541,7 +542,7 @@ impl ProjectAtlasMcpServer {
                 0,
             )?;
             let toon = render_nodes("folders", &selected);
-            record_usage_estimate(
+            record_directory_walk_usage_estimate(
                 &store,
                 &self.session,
                 "mcp.atlas_folders",
@@ -827,7 +828,7 @@ impl ProjectAtlasMcpServer {
             let page =
                 store.unresolved_health_findings_page(&store.resolved_health_ids()?, &query)?;
             let toon = render_health_page(&page, &query);
-            record_usage_estimate(
+            record_directory_walk_usage_estimate(
                 &store,
                 &self.session,
                 "mcp.atlas_health",

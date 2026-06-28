@@ -6,7 +6,7 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use import_aliases::{ImportAliasMap, load_import_alias_map};
 use projectatlas_core::outline::estimate_tokens;
 use projectatlas_core::symbols::{
-    CodeSymbol, ParserKind, RelationKind, SymbolKind, SymbolRelation,
+    CodeSymbol, ParserKind, RelationKind, SourceParseMetadata, SymbolKind, SymbolRelation,
 };
 use projectatlas_core::{IndexedNode, NodeKind, repo_path_to_native, validated_repo_file_key};
 use projectatlas_db::{AtlasStore, DbError, IndexedFileText};
@@ -339,6 +339,7 @@ pub fn build_file_summary(
     let total_exports = store.exported_symbol_count_for_path(&file_key)?;
     let symbol_count = store.symbol_count_for_path(&file_key)?;
     let symbol_parser_kinds = store.symbol_parser_kinds_for_path(&file_key)?;
+    let parse_metadata = store.load_source_parse_metadata(&file_key)?;
     let truncated = [
         total_functions,
         total_methods,
@@ -353,10 +354,20 @@ pub fn build_file_summary(
     .any(|total| *total > effective_limit);
 
     let content_summary = indexed.summary.unwrap_or_default();
-    let parser_kind =
-        summary_parser_kind(&content_summary, symbol_count, &symbol_parser_kinds).to_string();
-    let summary_status =
-        summary_status(&content_summary, symbol_count, &symbol_parser_kinds).to_string();
+    let parser_kind = summary_parser_kind(
+        &content_summary,
+        symbol_count,
+        &symbol_parser_kinds,
+        parse_metadata.as_ref(),
+    )
+    .to_string();
+    let summary_status = summary_status(
+        &content_summary,
+        symbol_count,
+        &symbol_parser_kinds,
+        parse_metadata.as_ref(),
+    )
+    .to_string();
 
     Ok(FileSummaryReport {
         file_path: file_key,
@@ -412,7 +423,11 @@ fn summary_parser_kind(
     summary: &str,
     symbol_count: usize,
     parser_kinds: &[ParserKind],
+    parse_metadata: Option<&SourceParseMetadata>,
 ) -> &'static str {
+    if let Some(metadata) = parse_metadata {
+        return parser_kind_label(metadata.parser);
+    }
     if symbol_count > 0 {
         return symbol_parser_kind(parser_kinds);
     }
@@ -428,15 +443,31 @@ fn summary_parser_kind(
 }
 
 /// Return a summary quality status for agent consumers.
-fn summary_status(summary: &str, symbol_count: usize, parser_kinds: &[ParserKind]) -> &'static str {
+fn summary_status(
+    summary: &str,
+    symbol_count: usize,
+    parser_kinds: &[ParserKind],
+    parse_metadata: Option<&SourceParseMetadata>,
+) -> &'static str {
     if summary.is_empty() {
         "missing"
     } else if is_scanner_fallback_summary(summary)
+        || parse_metadata.is_some_and(|metadata| metadata.parser == ParserKind::Fallback)
         || fallback_only_symbols(symbol_count, parser_kinds)
     {
         "fallback"
     } else {
         "ok"
+    }
+}
+
+/// Return the public parser label for one file-level parser strategy.
+fn parser_kind_label(parser: ParserKind) -> &'static str {
+    match parser {
+        ParserKind::TreeSitter => "tree-sitter-symbol-graph",
+        ParserKind::Manifest => "manifest-symbol-graph",
+        ParserKind::Structural => "structural-symbol-graph",
+        ParserKind::Fallback => "fallback-symbol-graph",
     }
 }
 
@@ -1512,6 +1543,40 @@ mod tests {
             &report.summary_status,
             &"fallback".to_string(),
             "fallback summary status",
+        )
+    }
+
+    #[test]
+    fn file_summary_marks_empty_fallback_graph_as_fallback() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir(root.join("scripts"))?;
+        fs::write(root.join("scripts").join("config.ps1"), "# comment only\n")?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        store.replace_scan(&[test_node("scripts/config.ps1", "hash-ps1")])?;
+        store.set_node_summary(
+            "scripts/config.ps1",
+            "powershell source file with no declarations found.",
+        )?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "scripts/config.ps1".to_string(),
+            language: Some("powershell".to_string()),
+            parser: ParserKind::Fallback,
+            symbols: Vec::new(),
+            relations: Vec::new(),
+        })?;
+
+        let report = build_file_summary(&store, Path::new("scripts/config.ps1"), 10)?;
+        require_eq(
+            &report.parser_kind,
+            &"fallback-symbol-graph".to_string(),
+            "empty fallback parser kind",
+        )?;
+        require_eq(
+            &report.summary_status,
+            &"fallback".to_string(),
+            "empty fallback summary status",
         )
     }
 

@@ -1,6 +1,6 @@
 {
   "name": "projectatlas",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "Agent-first Rust repository atlas, TOON output, and MCP workflows for coding agents.",
   "author": {
     "name": "ProjectAtlas Contributors",

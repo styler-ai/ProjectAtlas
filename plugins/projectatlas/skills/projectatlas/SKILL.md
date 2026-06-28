@@ -202,6 +202,8 @@ If MCP tools are unavailable, use the equivalent CLI sequence:
 
 Token savings estimate avoided wrong-folder exploration, wrong-file opens, and unnecessary full-code reads caused by the atlas-first workflow. Agent and MCP surfaces should remain structured TOON by default; the TUI view is explicit terminal UI with "Without PA", "With PA", and "Saved" comparison bars.
 
+Token reports are offline by default. The current heuristic is `ceil(chars / 4)` for emitted ProjectAtlas text and `ceil(bytes / 4)` for file-size baselines, labeled as `heuristic_estimate`, not model billing tokens. Inspect bucket metadata before making claims: `full_file_compression` with `observed` confidence is stronger than modeled `navigation_avoidance` with `inferred` or `policy_estimate` confidence. Provider/model-aware counting must be explicit calibration work; normal `projectatlas token` and `atlas_token_report` must not call network APIs.
+
 ## Local Gates
 
 For ProjectAtlas itself, run:
@@ -229,7 +231,7 @@ cargo run -p projectatlas-cli -- lint --strict-folders --report-untracked
 - `slice` returns exact source ranges after a file is selected.
 - `health-check` flags missing purposes, duplicate purposes, repeated temp/generated folders, and cleanup signals.
 - `settings` and `watch-status` report local index/config state.
-- `token` reports estimated ProjectAtlas token savings. The default report is a fast offline `chars/bytes / 4` workflow heuristic, not provider/model billing-token accounting.
+- `token` reports estimated ProjectAtlas token savings. The default report is a fast offline `chars/bytes / 4` workflow heuristic, not provider/model billing-token accounting. Token output includes bucket, baseline, confidence, provider/model/backend, and accuracy labels.
 - `mcp` starts the native MCP server. MCP tool text content is TOON.
 
 ## References

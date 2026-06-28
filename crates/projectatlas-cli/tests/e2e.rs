@@ -783,6 +783,33 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
     require_json_usize_greater_than(&token_json, &["estimated_without_projectatlas"], 0)?;
     require_json_usize_greater_than(&token_json, &["estimated_with_projectatlas"], 0)?;
     require_json_i64_greater_than(&token_json, &["estimated_saved"], 0)?;
+    let buckets = token_json["buckets"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("token buckets missing from json report"))?;
+    if !buckets.iter().any(|bucket| {
+        bucket["token_savings_bucket"] == "full_file_compression"
+            && bucket["accuracy"] == "heuristic_estimate"
+            && bucket["baseline_kind"] == "full_file"
+            && bucket["confidence"] == "observed"
+    }) {
+        return Err(io::Error::other("full-file compression token bucket missing").into());
+    }
+    if !buckets.iter().any(|bucket| {
+        bucket["token_savings_bucket"] == "navigation_avoidance"
+            && bucket["accuracy"] == "heuristic_estimate"
+            && bucket["baseline_kind"] == "directory_walk"
+            && bucket["confidence"] == "policy_estimate"
+    }) {
+        return Err(io::Error::other("directory-walk navigation token bucket missing").into());
+    }
+    if !buckets.iter().any(|bucket| {
+        bucket["token_savings_bucket"] == "navigation_avoidance"
+            && bucket["accuracy"] == "heuristic_estimate"
+            && bucket["baseline_kind"] == "selected_candidates"
+            && bucket["confidence"] == "inferred"
+    }) {
+        return Err(io::Error::other("selected-candidates navigation token bucket missing").into());
+    }
     let calls_before = token_json["calls"]
         .as_u64()
         .ok_or_else(|| io::Error::other("token calls missing before no-telemetry check"))?;
@@ -827,6 +854,8 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .stdout(predicate::str::contains("Without PA"))
         .stdout(predicate::str::contains("With PA"))
         .stdout(predicate::str::contains("Saved"))
+        .stdout(predicate::str::contains("Buckets"))
+        .stdout(predicate::str::contains("heuristic_estimate"))
         .stdout(predicate::str::contains("wrong folders, wrong files"))
         .stdout(predicate::str::contains("unnecessary full reads"));
     Ok(())
@@ -2524,7 +2553,7 @@ fn structural_summaries_cover_declarative_files_and_projectatlas_inputs()
         &["content_summary"],
         "rust source file with no declarations found.",
     )?;
-    require_json_string(&rust_summary, &["parser_kind"], "symbol-graph")?;
+    require_json_string(&rust_summary, &["parser_kind"], "tree-sitter-symbol-graph")?;
     require_json_string(&rust_summary, &["summary_status"], "ok")?;
 
     Ok(())
@@ -2640,6 +2669,12 @@ fn scan_indexes_every_supported_language_extension() -> Result<(), Box<dyn Error
             ))
             .into());
         }
+        if is_scanner_byte_summary(content_summary) {
+            return Err(io::Error::other(format!(
+                "byte-count scanner fallback summary for language fixture {relative_path}: {content_summary}"
+            ))
+            .into());
+        }
         let parser_kind = json_at(&summary, &["parser_kind"])?
             .as_str()
             .ok_or_else(|| {
@@ -2665,6 +2700,10 @@ fn scan_indexes_every_supported_language_extension() -> Result<(), Box<dyn Error
                 "missing summary status for language fixture {relative_path}"
             ))
             .into());
+        }
+        if expected_language == "ruby" {
+            require_json_string(&summary, &["parser_kind"], "fallback-symbol-graph")?;
+            require_json_string(&summary, &["summary_status"], "fallback")?;
         }
     }
 
@@ -3138,6 +3177,49 @@ fn watch_once_preserves_unchanged_deep_summary_and_text_index() -> Result<(), Bo
     let search_json: Value = serde_json::from_slice(&search.stdout)?;
     require_json_string(&search_json, &["source"], "sqlite-file-text")?;
     require_json_usize_at_least(&search_json, &["returned"], 1)?;
+    Ok(())
+}
+
+#[test]
+fn watch_once_skips_unchanged_empty_native_parse() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir(repo.join("src"))?;
+    fs::write(repo.join("src").join("empty.rs"), "// comment only\n")?;
+    let db = temp.path().join("projectatlas.db");
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("parsed: 1"));
+
+    let before = json_summary_command(&repo, &db, "src/empty.rs")?;
+    require_json_string(&before, &["parser_kind"], "tree-sitter-symbol-graph")?;
+    require_json_string(&before, &["summary_status"], "ok")?;
+    require_json_string(
+        &before,
+        &["content_summary"],
+        "rust source file with no declarations found.",
+    )?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["watch", ".", "--once"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("parsed: 0"))
+        .stdout(predicate::str::contains("unchanged: 1"));
+
+    let after = json_summary_command(&repo, &db, "src/empty.rs")?;
+    require_json_string(&after, &["parser_kind"], "tree-sitter-symbol-graph")?;
+    require_json_string(&after, &["summary_status"], "ok")?;
     Ok(())
 }
 
@@ -4178,6 +4260,18 @@ fn fixture_content_for_extension(extension: &str) -> &'static str {
         | ".cql" | ".cypher" | ".sparql" | ".gql" | ".liquibase" | ".flyway" => "SELECT 1;\n",
         _ => "fixture\n",
     }
+}
+
+/// Return whether a summary is only the scanner byte-count fallback.
+fn is_scanner_byte_summary(summary: &str) -> bool {
+    let trimmed = summary.trim_end_matches('.');
+    let Some((_, tail)) = trimmed.rsplit_once(", ") else {
+        return false;
+    };
+    let Some(number) = tail.strip_suffix(" bytes") else {
+        return false;
+    };
+    !number.is_empty() && number.chars().all(|character| character.is_ascii_digit())
 }
 
 /// Return the generated Python baseline source used only inside temporary repos.

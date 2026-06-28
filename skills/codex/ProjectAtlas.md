@@ -17,7 +17,7 @@ the folder, choose the file, inspect compressed context, and only then open exac
 ## First-Time Setup
 
 1. Establish the project root first. ProjectAtlas stores one project-local index at `.projectatlas/projectatlas.db`.
-2. Install the Rust binary if missing: `cargo install --path crates/projectatlas-cli --locked`.
+2. Install the ProjectAtlas plugin or run the plugin runtime installer from the target project root. Use `cargo install --path crates/projectatlas-cli --locked` only when developing ProjectAtlas from this source checkout.
 3. Initialize: `projectatlas init --seed-purpose`.
 4. Run `projectatlas scan`.
 5. Add or import purpose records for important folders and files.
@@ -41,6 +41,8 @@ the folder, choose the file, inspect compressed context, and only then open exac
 12. Run `projectatlas token` when token-savings reporting is requested; use `projectatlas token --view tui` only for a human terminal dashboard.
 
 Token savings estimate avoided wrong-folder exploration, wrong-file opens, and unnecessary full-code reads caused by the atlas-first workflow. Agent and MCP surfaces should stay structured by default; the TUI dashboard is explicit terminal UI with "Without PA", "With PA", and "Saved" comparison bars.
+
+Token reports are offline by default. The heuristic is `ceil(chars / 4)` for emitted ProjectAtlas text and `ceil(bytes / 4)` for file-size baselines, labeled as `heuristic_estimate`, not model billing tokens. Check bucket metadata before making claims: `full_file_compression` with `observed` confidence is stronger than modeled `navigation_avoidance` with `inferred` or `policy_estimate` confidence.
 
 ## MCP Config
 

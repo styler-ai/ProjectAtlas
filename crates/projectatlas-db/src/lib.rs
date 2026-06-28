@@ -2,9 +2,10 @@
 
 use projectatlas_core::health::{HealthFinding, Severity, finding_id};
 use projectatlas_core::symbols::{
-    CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
+    CodeSymbol, ParserKind, RelationKind, SourceParseMetadata, SymbolGraph, SymbolKind,
+    SymbolRelation,
 };
-use projectatlas_core::telemetry::{TokenOverview, UsageEvent};
+use projectatlas_core::telemetry::{TokenBucketOverview, TokenOverview, UsageEvent};
 use projectatlas_core::{
     IndexedNode, Node, NodeKind, Overview, Purpose, PurposeSource, PurposeStatus,
     normalize_native_path_display, normalize_repo_path_prefix,
@@ -18,7 +19,7 @@ use std::path::Path;
 use thiserror::Error;
 
 /// Current `SQLite` schema version supported by this crate.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 8;
 
 /// Database-layer error type.
 #[derive(Debug, Error)]
@@ -251,6 +252,14 @@ impl AtlasStore {
                 estimated_tokens_without_projectatlas INTEGER,
                 estimated_tokens_with_projectatlas INTEGER,
                 estimated_tokens_saved INTEGER,
+                token_savings_bucket TEXT NOT NULL DEFAULT 'navigation_avoidance',
+                provider TEXT NOT NULL DEFAULT 'heuristic',
+                model TEXT NOT NULL DEFAULT 'unknown',
+                tokenizer_backend TEXT NOT NULL DEFAULT 'chars_div_4',
+                accuracy TEXT NOT NULL DEFAULT 'heuristic_estimate',
+                baseline_kind TEXT NOT NULL DEFAULT 'selected_candidates',
+                confidence TEXT NOT NULL DEFAULT 'inferred',
+                calculation_trace TEXT NOT NULL DEFAULT 'heuristic=ceil(chars_or_bytes/4)',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -269,6 +278,15 @@ impl AtlasStore {
                 parser TEXT NOT NULL,
                 detail TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS source_parse_metadata (
+                path TEXT PRIMARY KEY,
+                language TEXT,
+                parser TEXT NOT NULL,
+                symbol_count INTEGER NOT NULL,
+                relation_count INTEGER NOT NULL,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -312,6 +330,7 @@ impl AtlasStore {
             CREATE INDEX IF NOT EXISTS idx_symbols_path ON symbols(path);
             CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
             CREATE INDEX IF NOT EXISTS idx_symbols_kind ON symbols(kind);
+            CREATE INDEX IF NOT EXISTS idx_source_parse_metadata_parser ON source_parse_metadata(parser);
             CREATE INDEX IF NOT EXISTS idx_symbol_relations_path ON symbol_relations(path);
             CREATE INDEX IF NOT EXISTS idx_symbol_relations_target ON symbol_relations(target_name);
             CREATE INDEX IF NOT EXISTS idx_health_resolutions_category ON health_resolutions(category);
@@ -319,6 +338,7 @@ impl AtlasStore {
             ",
         )?;
         self.ensure_symbol_metadata_columns()?;
+        self.ensure_usage_event_metadata_columns()?;
         let stored = self
             .connection
             .query_row(
@@ -349,6 +369,62 @@ impl AtlasStore {
                 )?;
             }
         }
+        Ok(())
+    }
+
+    /// Add usage telemetry metadata columns to older databases.
+    fn ensure_usage_event_metadata_columns(&self) -> DbResult<()> {
+        let mut statement = self.connection.prepare("PRAGMA table_info(usage_events)")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+        let mut columns = Vec::new();
+        for row in rows {
+            columns.push(row?);
+        }
+        self.ensure_usage_event_column(
+            &columns,
+            "token_savings_bucket",
+            "TEXT NOT NULL DEFAULT 'navigation_avoidance'",
+        )?;
+        self.ensure_usage_event_column(&columns, "provider", "TEXT NOT NULL DEFAULT 'heuristic'")?;
+        self.ensure_usage_event_column(&columns, "model", "TEXT NOT NULL DEFAULT 'unknown'")?;
+        self.ensure_usage_event_column(
+            &columns,
+            "tokenizer_backend",
+            "TEXT NOT NULL DEFAULT 'chars_div_4'",
+        )?;
+        self.ensure_usage_event_column(
+            &columns,
+            "accuracy",
+            "TEXT NOT NULL DEFAULT 'heuristic_estimate'",
+        )?;
+        self.ensure_usage_event_column(
+            &columns,
+            "baseline_kind",
+            "TEXT NOT NULL DEFAULT 'selected_candidates'",
+        )?;
+        self.ensure_usage_event_column(&columns, "confidence", "TEXT NOT NULL DEFAULT 'inferred'")?;
+        self.ensure_usage_event_column(
+            &columns,
+            "calculation_trace",
+            "TEXT NOT NULL DEFAULT 'heuristic=ceil(chars_or_bytes/4)'",
+        )?;
+        Ok(())
+    }
+
+    /// Add one usage event metadata column when it is absent.
+    fn ensure_usage_event_column(
+        &self,
+        columns: &[String],
+        name: &str,
+        definition: &str,
+    ) -> DbResult<()> {
+        if columns.iter().any(|column| column == name) {
+            return Ok(());
+        }
+        self.connection.execute(
+            &format!("ALTER TABLE usage_events ADD COLUMN {name} {definition}"),
+            [],
+        )?;
         Ok(())
     }
 
@@ -422,6 +498,10 @@ impl AtlasStore {
             [],
         )?;
         transaction.execute(
+            "DELETE FROM source_parse_metadata WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
+            [],
+        )?;
+        transaction.execute(
             "DELETE FROM file_texts WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
             [],
         )?;
@@ -465,6 +545,10 @@ impl AtlasStore {
             )?;
             transaction.execute(
                 "DELETE FROM symbols WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+                params![path, descendant_pattern],
+            )?;
+            transaction.execute(
+                "DELETE FROM source_parse_metadata WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
                 params![path, descendant_pattern],
             )?;
             transaction.execute(
@@ -679,11 +763,38 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn replace_symbol_graph(&mut self, graph: &SymbolGraph) -> DbResult<()> {
+        let metadata = SourceParseMetadata::from_graph(graph);
         let transaction = self.connection.transaction()?;
         transaction.execute("DELETE FROM symbols WHERE path = ?1", [&graph.path])?;
         transaction.execute(
             "DELETE FROM symbol_relations WHERE path = ?1",
             [&graph.path],
+        )?;
+        transaction.execute(
+            "
+            INSERT INTO source_parse_metadata(
+                path,
+                language,
+                parser,
+                symbol_count,
+                relation_count,
+                updated_at
+            )
+            VALUES(?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
+            ON CONFLICT(path) DO UPDATE SET
+                language = excluded.language,
+                parser = excluded.parser,
+                symbol_count = excluded.symbol_count,
+                relation_count = excluded.relation_count,
+                updated_at = CURRENT_TIMESTAMP
+            ",
+            params![
+                metadata.path,
+                metadata.language.as_deref(),
+                metadata.parser.to_string(),
+                usize_to_i64(metadata.symbol_count),
+                usize_to_i64(metadata.relation_count),
+            ],
         )?;
         for symbol in &graph.symbols {
             transaction.execute(
@@ -763,6 +874,8 @@ impl AtlasStore {
             .execute("DELETE FROM symbols WHERE path = ?1", [path])?;
         self.connection
             .execute("DELETE FROM symbol_relations WHERE path = ?1", [path])?;
+        self.connection
+            .execute("DELETE FROM source_parse_metadata WHERE path = ?1", [path])?;
         self.connection.execute(
             "
             DELETE FROM summaries
@@ -785,6 +898,8 @@ impl AtlasStore {
             .execute("DELETE FROM symbols WHERE path = ?1", [path])?;
         self.connection
             .execute("DELETE FROM symbol_relations WHERE path = ?1", [path])?;
+        self.connection
+            .execute("DELETE FROM source_parse_metadata WHERE path = ?1", [path])?;
         Ok(())
     }
 
@@ -1478,6 +1593,36 @@ impl AtlasStore {
             parsers.push(row?);
         }
         Ok(parsers)
+    }
+
+    /// Load file-level parser metadata for one path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading fails or stored counts are invalid.
+    pub fn load_source_parse_metadata(&self, path: &str) -> DbResult<Option<SourceParseMetadata>> {
+        self.connection
+            .query_row(
+                "
+                SELECT path, language, parser, symbol_count, relation_count
+                FROM source_parse_metadata
+                WHERE path = ?1
+                ",
+                [path],
+                |row| {
+                    let symbol_count = row.get::<_, i64>(3)?;
+                    let relation_count = row.get::<_, i64>(4)?;
+                    Ok(SourceParseMetadata {
+                        path: row.get(0)?,
+                        language: row.get(1)?,
+                        parser: ParserKind::from_db(&row.get::<_, String>(2)?),
+                        symbol_count: i64_to_usize(symbol_count),
+                        relation_count: i64_to_usize(relation_count),
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     /// Load the maximum indexed symbol end line for one file path.
@@ -2621,9 +2766,17 @@ impl AtlasStore {
                 query,
                 estimated_tokens_without_projectatlas,
                 estimated_tokens_with_projectatlas,
-                estimated_tokens_saved
+                estimated_tokens_saved,
+                token_savings_bucket,
+                provider,
+                model,
+                tokenizer_backend,
+                accuracy,
+                baseline_kind,
+                confidence,
+                calculation_trace
             )
-            VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             ",
             params![
                 event.session_id,
@@ -2632,7 +2785,15 @@ impl AtlasStore {
                 event.query,
                 event.estimated_tokens_without_projectatlas,
                 event.estimated_tokens_with_projectatlas,
-                event.estimated_tokens_saved
+                event.estimated_tokens_saved,
+                event.token_savings_bucket,
+                event.provider,
+                event.model,
+                event.tokenizer_backend,
+                event.accuracy,
+                event.baseline_kind,
+                event.confidence,
+                event.calculation_trace
             ],
         )?;
         Ok(())
@@ -2647,7 +2808,9 @@ impl AtlasStore {
         let sql = if session_id.is_some() {
             "
             SELECT session_id, command, path, query, estimated_tokens_without_projectatlas,
-                   estimated_tokens_with_projectatlas, estimated_tokens_saved
+                   estimated_tokens_with_projectatlas, estimated_tokens_saved,
+                   token_savings_bucket, provider, model, tokenizer_backend,
+                   accuracy, baseline_kind, confidence, calculation_trace
             FROM usage_events
             WHERE session_id = ?1
             ORDER BY id
@@ -2655,7 +2818,9 @@ impl AtlasStore {
         } else {
             "
             SELECT session_id, command, path, query, estimated_tokens_without_projectatlas,
-                   estimated_tokens_with_projectatlas, estimated_tokens_saved
+                   estimated_tokens_with_projectatlas, estimated_tokens_saved,
+                   token_savings_bucket, provider, model, tokenizer_backend,
+                   accuracy, baseline_kind, confidence, calculation_trace
             FROM usage_events
             ORDER BY id
             "
@@ -2670,6 +2835,14 @@ impl AtlasStore {
                 estimated_tokens_without_projectatlas: row.get(4)?,
                 estimated_tokens_with_projectatlas: row.get(5)?,
                 estimated_tokens_saved: row.get(6)?,
+                token_savings_bucket: row.get(7)?,
+                provider: row.get(8)?,
+                model: row.get(9)?,
+                tokenizer_backend: row.get(10)?,
+                accuracy: row.get(11)?,
+                baseline_kind: row.get(12)?,
+                confidence: row.get(13)?,
+                calculation_trace: row.get(14)?,
             })
         };
         let rows = if let Some(session) = session_id {
@@ -2693,6 +2866,13 @@ impl AtlasStore {
         let sql = if session_id.is_some() {
             "
             SELECT
+                token_savings_bucket,
+                provider,
+                model,
+                tokenizer_backend,
+                accuracy,
+                baseline_kind,
+                confidence,
                 COUNT(*),
                 TOTAL(estimated_tokens_without_projectatlas),
                 TOTAL(estimated_tokens_with_projectatlas)
@@ -2700,32 +2880,57 @@ impl AtlasStore {
             WHERE session_id = ?1
               AND estimated_tokens_without_projectatlas IS NOT NULL
               AND estimated_tokens_with_projectatlas IS NOT NULL
+            GROUP BY token_savings_bucket, provider, model, tokenizer_backend,
+                     accuracy, baseline_kind, confidence
+            ORDER BY token_savings_bucket, accuracy, baseline_kind, confidence
             "
         } else {
             "
             SELECT
+                token_savings_bucket,
+                provider,
+                model,
+                tokenizer_backend,
+                accuracy,
+                baseline_kind,
+                confidence,
                 COUNT(*),
                 TOTAL(estimated_tokens_without_projectatlas),
                 TOTAL(estimated_tokens_with_projectatlas)
             FROM usage_events
             WHERE estimated_tokens_without_projectatlas IS NOT NULL
               AND estimated_tokens_with_projectatlas IS NOT NULL
+            GROUP BY token_savings_bucket, provider, model, tokenizer_backend,
+                     accuracy, baseline_kind, confidence
+            ORDER BY token_savings_bucket, accuracy, baseline_kind, confidence
             "
         };
         let mapper = |row: &rusqlite::Row<'_>| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                token_total_from_sql("estimated_tokens_without_projectatlas", row.get(1)?),
-                token_total_from_sql("estimated_tokens_with_projectatlas", row.get(2)?),
+            let calls = row.get::<_, i64>(7)? as u128;
+            Ok(TokenBucketOverview::from_totals(
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                calls,
+                token_total_from_sql("estimated_tokens_without_projectatlas", row.get(8)?),
+                token_total_from_sql("estimated_tokens_with_projectatlas", row.get(9)?),
             ))
         };
-        let (calls, without, with) = if let Some(session) = session_id {
-            self.connection.query_row(sql, [session], mapper)?
+        let mut statement = self.connection.prepare(sql)?;
+        let rows = if let Some(session) = session_id {
+            statement.query_map([session], mapper)?
         } else {
-            self.connection.query_row(sql, [], mapper)?
+            statement.query_map([], mapper)?
         };
-        let calls = row_token_count("token_overview_calls", calls)?;
-        Ok(token_overview_from_totals(calls, without, with))
+        let mut buckets = Vec::new();
+        for row in rows {
+            buckets.push(row?);
+        }
+        Ok(token_overview_from_buckets(buckets))
     }
 
     /// Mark a deterministic health finding as agent-resolved.
@@ -3069,15 +3274,6 @@ fn count_to_usize(field: &'static str, value: i64) -> DbResult<usize> {
     })
 }
 
-/// Convert one telemetry row count into a non-negative wide integer.
-fn row_token_count(field: &'static str, value: i64) -> DbResult<u128> {
-    u128::try_from(value).map_err(|source| DbError::InvalidCount {
-        field,
-        value,
-        source,
-    })
-}
-
 /// Convert a `SQLite` REAL aggregate token total to a saturating wide integer.
 fn token_total_from_sql(_field: &'static str, value: f64) -> u128 {
     if !value.is_finite() || value <= 0.0 {
@@ -3089,9 +3285,9 @@ fn token_total_from_sql(_field: &'static str, value: f64) -> u128 {
     }
 }
 
-/// Build a token overview from Rust-side aggregate totals.
-fn token_overview_from_totals(calls: u128, without: u128, with: u128) -> TokenOverview {
-    TokenOverview::from_estimated_totals(calls, without, with)
+/// Build a token overview from Rust-side aggregate buckets.
+fn token_overview_from_buckets(buckets: Vec<TokenBucketOverview>) -> TokenOverview {
+    TokenOverview::from_buckets(buckets)
 }
 
 /// Convert a usize to i64 with saturation for database storage.
@@ -3287,6 +3483,10 @@ fn resolved_ids_for_category(resolved_ids: &[String], category: &str) -> Vec<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use projectatlas_core::telemetry::{
+        TOKEN_ACCURACY_HEURISTIC, TOKEN_BUCKET_FULL_FILE_COMPRESSION,
+        TOKEN_BUCKET_NAVIGATION_AVOIDANCE, usage_from_estimates, usage_from_text,
+    };
     use projectatlas_core::{NodeKind, normalized_parent};
     use std::error::Error;
     use std::fmt::Debug;
@@ -3339,36 +3539,38 @@ mod tests {
     #[test]
     fn records_token_overview() -> Result<(), Box<dyn Error>> {
         let store = AtlasStore::in_memory()?;
-        store.record_usage(&UsageEvent {
-            session_id: "session".to_string(),
-            command: "outline".to_string(),
-            path: Some("src/main.rs".to_string()),
-            query: None,
-            estimated_tokens_without_projectatlas: Some(100),
-            estimated_tokens_with_projectatlas: Some(20),
-            estimated_tokens_saved: Some(1),
-        })?;
-        store.record_usage(&UsageEvent {
-            session_id: "session".to_string(),
-            command: "unknown".to_string(),
-            path: None,
-            query: None,
-            estimated_tokens_without_projectatlas: None,
-            estimated_tokens_with_projectatlas: None,
-            estimated_tokens_saved: None,
-        })?;
-        store.record_usage(&UsageEvent {
-            session_id: "other-session".to_string(),
-            command: "outline".to_string(),
-            path: Some("src/lib.rs".to_string()),
-            query: None,
-            estimated_tokens_without_projectatlas: Some(200),
-            estimated_tokens_with_projectatlas: Some(50),
-            estimated_tokens_saved: Some(150),
-        })?;
+        let mut session_event = usage_from_estimates(
+            "session",
+            "outline",
+            Some("src/main.rs".to_string()),
+            None,
+            100,
+            20,
+        );
+        session_event.estimated_tokens_saved = Some(1);
+        store.record_usage(&session_event)?;
+        let mut unknown_event = usage_from_estimates("session", "unknown", None, None, 0, 0);
+        unknown_event.estimated_tokens_without_projectatlas = None;
+        unknown_event.estimated_tokens_with_projectatlas = None;
+        unknown_event.estimated_tokens_saved = None;
+        store.record_usage(&unknown_event)?;
+        store.record_usage(&usage_from_estimates(
+            "other-session",
+            "outline",
+            Some("src/lib.rs".to_string()),
+            None,
+            200,
+            50,
+        ))?;
         let overview = store.token_overview(Some("session"))?;
         require_eq(&overview.calls, &1, "usage call count")?;
         require_eq(&overview.estimated_saved, &80, "saved token count")?;
+        require_eq(&overview.buckets.len(), &1, "usage bucket count")?;
+        require_eq(
+            &overview.buckets[0].accuracy,
+            &TOKEN_ACCURACY_HEURISTIC.to_string(),
+            "usage bucket accuracy",
+        )?;
         let all_sessions = store.token_overview(None)?;
         require_eq(&all_sessions.calls, &2, "all-session usage call count")?;
         require_eq(
@@ -3387,15 +3589,33 @@ mod tests {
             "all-session saved tokens",
         )?;
 
-        store.record_usage(&UsageEvent {
-            session_id: "negative".to_string(),
-            command: "outline".to_string(),
-            path: None,
-            query: None,
-            estimated_tokens_without_projectatlas: Some(20),
-            estimated_tokens_with_projectatlas: Some(50),
-            estimated_tokens_saved: Some(999),
-        })?;
+        store.record_usage(&usage_from_text(
+            "bucketed",
+            "summary",
+            Some("src/main.rs".to_string()),
+            None,
+            "abcdefghijkl",
+            "abcd",
+        ))?;
+        store.record_usage(&usage_from_estimates(
+            "bucketed", "folders", None, None, 100, 20,
+        ))?;
+        let bucketed = store.token_overview(Some("bucketed"))?;
+        require_eq(&bucketed.buckets.len(), &2, "bucketed overview count")?;
+        require_eq(
+            &bucketed.buckets[0].token_savings_bucket,
+            &TOKEN_BUCKET_FULL_FILE_COMPRESSION.to_string(),
+            "source compression bucket",
+        )?;
+        require_eq(
+            &bucketed.buckets[1].token_savings_bucket,
+            &TOKEN_BUCKET_NAVIGATION_AVOIDANCE.to_string(),
+            "navigation bucket",
+        )?;
+
+        let mut negative_event = usage_from_estimates("negative", "outline", None, None, 20, 50);
+        negative_event.estimated_tokens_saved = Some(999);
+        store.record_usage(&negative_event)?;
         let negative = store.token_overview(Some("negative"))?;
         require_eq(&negative.calls, &1, "negative session call count")?;
         require_eq(
@@ -3409,15 +3629,9 @@ mod tests {
             "negative session savings rate",
         )?;
 
-        store.record_usage(&UsageEvent {
-            session_id: "zero-baseline".to_string(),
-            command: "outline".to_string(),
-            path: None,
-            query: None,
-            estimated_tokens_without_projectatlas: Some(0),
-            estimated_tokens_with_projectatlas: Some(12),
-            estimated_tokens_saved: Some(999),
-        })?;
+        let mut zero_event = usage_from_estimates("zero-baseline", "outline", None, None, 0, 12);
+        zero_event.estimated_tokens_saved = Some(999);
+        store.record_usage(&zero_event)?;
         let zero_baseline = store.token_overview(Some("zero-baseline"))?;
         require_eq(&zero_baseline.calls, &1, "zero baseline call count")?;
         require_eq(
@@ -4002,13 +4216,45 @@ mod tests {
         store.replace_symbol_graph(&graph)?;
         let symbols = store.load_symbols(Some("src/main.rs"), Some("main"), 10)?;
         let relations = store.load_symbol_relations(Some("src/main.rs"), Some("println"), 10)?;
+        let metadata = store
+            .load_source_parse_metadata("src/main.rs")?
+            .ok_or_else(|| io::Error::other("missing source parse metadata"))?;
         require_eq(&symbols.len(), &1, "symbol count after replace")?;
         require_eq(&relations.len(), &1, "relation count after replace")?;
+        require_eq(&metadata.parser, &ParserKind::TreeSitter, "metadata parser")?;
+        require_eq(&metadata.symbol_count, &1, "metadata symbol count")?;
+        require_eq(&metadata.relation_count, &1, "metadata relation count")?;
         require_eq(&symbols[0].exported, &true, "exported metadata")?;
         require_eq(
             &symbols[0].documentation,
             &Some("Run the application.".to_string()),
             "documentation metadata",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn full_scan_removal_clears_source_parse_metadata() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[test_file_node("src/a.rs", "hash-a")])?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/a.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: Vec::new(),
+            relations: Vec::new(),
+        })?;
+        require_eq(
+            &store.load_source_parse_metadata("src/a.rs")?.is_some(),
+            &true,
+            "metadata exists before removal",
+        )?;
+
+        store.replace_scan(&[test_file_node("src/b.rs", "hash-b")])?;
+        require_eq(
+            &store.load_source_parse_metadata("src/a.rs")?,
+            &None,
+            "metadata cleared after full scan removal",
         )?;
         Ok(())
     }

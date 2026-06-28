@@ -86,9 +86,27 @@ pub fn render_health(findings: &[HealthFinding]) -> String {
 /// Render token savings overview as standard TOON.
 #[must_use]
 pub fn render_token_overview(overview: &TokenOverview) -> String {
-    let savings_rate = overview
-        .savings_rate
-        .map(|rate| format!("{:.1}%", rate * 100.0));
+    let savings_rate = percentage_label(overview.savings_rate);
+    let buckets = overview
+        .buckets
+        .iter()
+        .map(|bucket| {
+            json!({
+                "token_savings_bucket": bucket.token_savings_bucket,
+                "provider": bucket.provider,
+                "model": bucket.model,
+                "tokenizer_backend": bucket.tokenizer_backend,
+                "accuracy": bucket.accuracy,
+                "baseline_kind": bucket.baseline_kind,
+                "confidence": bucket.confidence,
+                "calls": bucket.calls,
+                "baseline_tokens": bucket.estimated_without_projectatlas,
+                "emitted_tokens": bucket.estimated_with_projectatlas,
+                "saved_tokens": bucket.estimated_saved,
+                "savings_rate": percentage_label(bucket.savings_rate),
+            })
+        })
+        .collect::<Vec<_>>();
     encode_agent_payload(&json!({
         "token_savings": {
             "estimate_kind": overview.estimate_kind,
@@ -98,7 +116,14 @@ pub fn render_token_overview(overview: &TokenOverview) -> String {
             "estimated_without_projectatlas": overview.estimated_without_projectatlas,
             "estimated_with_projectatlas": overview.estimated_with_projectatlas,
             "estimated_saved": overview.estimated_saved,
-            "savings_rate": savings_rate.as_deref().unwrap_or("unknown"),
+            "savings_rate": savings_rate,
+            "totals": {
+                "baseline_tokens": overview.estimated_without_projectatlas,
+                "emitted_tokens": overview.estimated_with_projectatlas,
+                "saved_tokens": overview.estimated_saved,
+                "savings_rate": savings_rate,
+            },
+            "buckets": buckets,
         }
     }))
 }
@@ -179,6 +204,14 @@ fn render_severity(severity: Severity) -> &'static str {
         Severity::Warning => "warning",
         Severity::Error => "error",
     }
+}
+
+/// Format an optional savings rate as a stable display label.
+fn percentage_label(rate: Option<f64>) -> String {
+    rate.map_or_else(
+        || "unknown".to_string(),
+        |value| format!("{:.1}%", value * 100.0),
+    )
 }
 
 /// Return a conservative quoted fallback for rare encoder failures.

@@ -224,3 +224,32 @@ pub struct SymbolGraph {
     /// Extracted import, dependency, containment, and call relations.
     pub relations: Vec<SymbolRelation>,
 }
+
+/// File-level parser metadata persisted even when a graph has no symbols.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SourceParseMetadata {
+    /// Repository-relative file path.
+    pub path: String,
+    /// Detected language or file family.
+    pub language: Option<String>,
+    /// Primary parser strategy used for the file.
+    pub parser: ParserKind,
+    /// Number of declaration or manifest symbols emitted for this file.
+    pub symbol_count: usize,
+    /// Number of relations emitted for this file.
+    pub relation_count: usize,
+}
+
+impl SourceParseMetadata {
+    /// Build persisted parser metadata from a graph.
+    #[must_use]
+    pub fn from_graph(graph: &SymbolGraph) -> Self {
+        Self {
+            path: graph.path.clone(),
+            language: graph.language.clone(),
+            parser: graph.parser,
+            symbol_count: graph.symbols.len(),
+            relation_count: graph.relations.len(),
+        }
+    }
+}

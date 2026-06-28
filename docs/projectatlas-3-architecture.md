@@ -441,6 +441,12 @@ arrive incrementally, but ProjectAtlas 3.0 stable requires all specialized and
 fallback families in this section to be implemented and tested through the
 ProjectAtlas-native parser registry.
 
+The parser registry records the current coverage level for each detected
+language family: native Tree-sitter, manifest, deterministic structural, or
+fallback. The SQLite index also persists file-level parser metadata even when a
+parse emits zero symbols, so `summary` can distinguish an empty native parse from
+an empty fallback parse instead of inferring quality from the summary sentence.
+
 The v0.3.2 hardening boundary keeps the public `projectatlas-symbols` API
 stable while splitting language-specific augmentation behind private strategy
 modules. The first split moves Kotlin, Objective-C, Zig, and the C-family
@@ -620,7 +626,9 @@ Token accounting model:
   telemetry must measure TOON output for TOON commands and JSON output for
   `--format json`; MCP telemetry measures TOON tool text inside the JSON-RPC
   envelope.
-- Save the raw estimates and per-event delta in `usage_events`.
+- Save the raw estimates, per-event delta, bucket, provider, model, tokenizer
+  backend, accuracy, baseline kind, confidence, and calculation trace in
+  `usage_events`.
 - Compute aggregate `saved = estimated_tokens_without_projectatlas -
   estimated_tokens_with_projectatlas` from the stored raw estimates instead of
   trusting historical per-row saved values.
@@ -639,6 +647,30 @@ Token accounting model:
   model-aware calibration should be opt-in, label the provider/model/tokenizer,
   cache the calibration source, and never require network access for ordinary
   `projectatlas token` reports.
+- Report buckets separately:
+  - `full_file_compression`: observed comparison between selected full-file
+    text and emitted summary/outline/slice/search context.
+  - `navigation_avoidance`: inferred or policy-modeled comparison between
+    candidate source content and emitted overview/folder/file/symbol/search
+    context.
+  - `wrong_path_prevention` and `cache_reuse`: reserved until the runtime has a
+    concrete rejected path or reused-read event to count.
+- Report confidence separately from accuracy. `observed` means both sides of the
+  comparison are concrete local text/payloads; `inferred` means a selected
+  candidate set was used; `policy_estimate` means a broad directory-walk
+  baseline was modeled.
+
+Provider calibration design:
+
+- Normal `projectatlas token` and `atlas_token_report` never call provider APIs.
+- A future explicit calibration command may sample representative ProjectAtlas
+  payloads against provider count-token endpoints, for example OpenAI's
+  Responses input-token count API for OpenAI models or Anthropic's count-token
+  API for Claude models.
+- Any provider-backed result must label `provider`, `model`,
+  `tokenizer_backend`, and `accuracy` as `exact_provider` or
+  `calibrated_estimate`; local tokenizer adapters must use
+  `local_model_tokenizer` unless calibrated against provider output.
 
 Canonical commands:
 
@@ -677,6 +709,9 @@ token_savings:
   estimated_with_projectatlas: 9200
   estimated_saved: 108800
   savings_rate: 92.2%
+  buckets[2]{token_savings_bucket,accuracy,baseline_kind,confidence,saved_tokens}:
+    full_file_compression,heuristic_estimate,full_file,observed,42000
+    navigation_avoidance,heuristic_estimate,directory_walk,policy_estimate,66800
 ```
 
 Every funnel command should record telemetry when it can estimate a baseline.

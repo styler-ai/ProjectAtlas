@@ -30,6 +30,7 @@ pub(crate) fn structural_summary_for_path(
         "json" => json_summary(path, content),
         "yaml" => yaml_summary(path, content),
         "toml" | "cargo-manifest" => toml_summary(path, content),
+        "xml" => xml_summary(content),
         "css" => css_summary(content),
         "html" => html_summary(content),
         "config" | "text" => config_text_summary(path, content),
@@ -47,6 +48,7 @@ pub(crate) fn is_structural_summary_candidate(path: &str, language: Option<&str>
             | "yaml"
             | "toml"
             | "cargo-manifest"
+            | "xml"
             | "css"
             | "html"
             | "config"
@@ -665,6 +667,52 @@ fn toon_section_names(content: &str) -> Vec<&str> {
         .collect()
 }
 
+/// Summarize XML-like documents from their declared element names.
+fn xml_summary(content: &str) -> Option<String> {
+    let elements = content
+        .lines()
+        .flat_map(xml_element_names)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if elements.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "xml document with elements {}.",
+            join_limited(elements.iter().map(String::as_str).collect())
+        ))
+    }
+}
+
+/// Extract XML element names from one line with conservative string scanning.
+fn xml_element_names(line: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = line;
+    while let Some((_, after_open)) = rest.split_once('<') {
+        let trimmed = after_open.trim_start();
+        if trimmed.starts_with(['/', '!', '?']) {
+            rest = trimmed.get(1..).unwrap_or_default();
+            continue;
+        }
+        let name = trimmed
+            .split(|character: char| character.is_whitespace() || matches!(character, '/' | '>'))
+            .next()
+            .unwrap_or_default();
+        if !name.is_empty()
+            && name.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | ':' | '.')
+            })
+        {
+            names.push(name.to_string());
+        }
+        rest = trimmed
+            .split_once('>')
+            .map_or("", |(_element, remaining)| remaining);
+    }
+    names
+}
+
 /// Summarize simple config or text files from key-like lines.
 fn config_text_summary(path: &str, content: &str) -> Option<String> {
     let keys = content
@@ -844,6 +892,24 @@ mod tests {
         assert_eq!(
             summary.as_deref(),
             Some("ProjectAtlas config with tables project, scan and 2 scan excludes.")
+        );
+    }
+
+    #[test]
+    fn summarizes_xml_elements() {
+        let summary = structural_summary_for_path(
+            "config/routes.xml",
+            Some("xml"),
+            r#"<?xml version="1.0"?>
+<routes>
+  <route id="home" />
+  <route id="about"></route>
+</routes>
+"#,
+        );
+        assert_eq!(
+            summary.as_deref(),
+            Some("xml document with elements route, routes.")
         );
     }
 
