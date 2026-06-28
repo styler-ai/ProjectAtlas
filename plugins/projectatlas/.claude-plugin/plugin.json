@@ -1,0 +1,21 @@
+{
+  "name": "projectatlas",
+  "version": "0.3.5",
+  "description": "Agent-first Rust repository atlas, TOON output, and MCP workflows for Claude Code.",
+  "author": {
+    "name": "ProjectAtlas Contributors",
+    "url": "https://github.com/styler-ai/ProjectAtlas"
+  },
+  "homepage": "https://styler-ai.github.io/ProjectAtlas/",
+  "repository": "https://github.com/styler-ai/ProjectAtlas",
+  "license": "MIT",
+  "keywords": [
+    "agents",
+    "claude-code",
+    "codebase-map",
+    "mcp",
+    "project-structure",
+    "rust",
+    "toon"
+  ]
+}

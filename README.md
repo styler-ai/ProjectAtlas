@@ -125,7 +125,7 @@ Agents should use ProjectAtlas before broad source reads:
 3. Run `projectatlas overview` to understand repository shape.
 4. Run `projectatlas folders <query>` to choose the right area.
 5. Run `projectatlas files <query> --folder <path>` to pick targets; use `projectatlas files --file-pattern <glob>` when the filename or path pattern is already known.
-6. Run `projectatlas summary <file> --limit 25` for structured file facts and purpose state.
+6. Run `projectatlas summary <file> --limit 25` for detailed file intelligence: `file_purpose`, `content_summary`, parser status, symbols, imports, calls, and counts.
 7. Run `projectatlas outline <file>` if the summary is not enough.
 8. Run `projectatlas symbols list --file <file>` and `projectatlas symbols relations --file <file>` when symbol context matters.
 9. Run `projectatlas search <pattern> --file-pattern <glob>` when you need bounded text matches inside the chosen area; use `--fuzzy` when you only remember an approximate name, and inspect returned, searched file, searched byte, and truncated counters before widening the search.
@@ -138,7 +138,10 @@ Harness-specific slash commands can alias that surface.
 
 Token savings are an estimate of avoided wrong-place exploration, avoided wrong-file opens, and avoided
 unnecessary full-code reads. The default CLI and MCP reports stay structured for agents; the opt-in TUI view is a
-human-facing terminal dashboard and does not replace the TOON/MCP contract.
+human-facing terminal dashboard and does not replace the TOON/MCP contract. ProjectAtlas stores raw baseline and
+actual payload estimates, recomputes the aggregate saved-token delta from those raw values, and uses saturated
+Rust-side aggregation so long-lived repositories do not overflow SQLite aggregate math. The default estimate is an
+offline `chars/bytes / 4` workflow metric, not a billing-grade model tokenizer count.
 
 `summary` is designed for large repositories: repeated sections are bounded by `--limit`, totals come from SQLite
 count queries, `called_by` is conservative when symbol names are ambiguous, and `source_status` tells the agent
@@ -188,13 +191,16 @@ For an absolute, project-local registration document, run:
 
 ```bash
 projectatlas --format json --db .projectatlas/projectatlas.db mcp-config > .projectatlas/projectatlas.mcp.json
+projectatlas --format json --db .projectatlas/projectatlas.db mcp-config --harness claude-code > .projectatlas/projectatlas.claude.mcp.json
+projectatlas --format json --db .projectatlas/projectatlas.db mcp-config --harness opencode > .projectatlas/projectatlas.opencode.json
 ```
 
-The generated config contains the absolute binary path, absolute `--db` path, a `--config` path when
-available, and a `cwd` project-root hint. `mcp-config` discovers both `.projectatlas/config.toml`
-and `projectatlas.toml` from the selected DB/project root. The MCP server also resolves path-less
-root-sensitive tools from config, indexed DB metadata, or the default `.projectatlas/projectatlas.db`
-parent, so hosts that ignore `cwd` still scan the intended project.
+The generated configs contain the absolute binary path, absolute `--db` path, and a `--config` path when
+available. Codex-compatible and OpenCode configs include a `cwd` project-root hint where supported;
+Claude Code config binds the project through absolute DB/config arguments. `mcp-config` discovers both
+`.projectatlas/config.toml` and `projectatlas.toml` from the selected DB/project root. The MCP server
+also resolves path-less root-sensitive tools from config, indexed DB metadata, or the default
+`.projectatlas/projectatlas.db` parent, so hosts that ignore `cwd` still scan the intended project.
 
 Use MCP tools in the same funnel order: `atlas_scan`, `atlas_overview`, `atlas_folders`, `atlas_files`,
 `atlas_file_summary`, `atlas_outline`, `atlas_symbols`, `atlas_symbol_relations`, `atlas_search`, `atlas_slice`,
@@ -210,6 +216,10 @@ SQLite and symbol refresh; directory/root/ignore-rule events fall back to a full
 `projectatlas watch --once` are the bounded refresh surfaces agents should call after edits when no continuous
 watcher is running.
 
+Exact line slices validate the requested path against the indexed project and then read the current file from disk.
+Symbol slices use the deep symbol index for line ranges, then read the current file content for those ranges, so a
+long editing session should keep `projectatlas watch` running to keep symbol ranges fresh.
+
 ## Codex Plugin
 
 ProjectAtlas ships a plugin package from this repository:
@@ -219,23 +229,30 @@ codex plugin marketplace add styler-ai/ProjectAtlas --ref main
 codex plugin add projectatlas --marketplace projectatlas
 ```
 
-The plugin provides the ProjectAtlas workflow skill, a version-guarded fallback MCP server config at `plugins/projectatlas/.mcp.json`,
-runtime install scripts, and a generated project-local MCP config at `.projectatlas/projectatlas.mcp.json`:
+The plugin provides the ProjectAtlas workflow skill, Codex and Claude plugin metadata, an OpenCode config
+template, a version-guarded fallback MCP server config at `plugins/projectatlas/.mcp.json`, runtime install
+scripts, and generated project-local MCP configs for Codex-compatible hosts, Claude Code, and OpenCode:
 
 ```powershell
 plugins/projectatlas/scripts/install-runtime.ps1
 ```
 
 ```bash
-plugins/projectatlas/scripts/install-runtime.sh
+bash plugins/projectatlas/scripts/install-runtime.sh
 ```
 
 Run the installer from the target project root or pass the project root explicitly. The installer verifies
 `projectatlas --format json runtime-info`, including the runtime version when the plugin manifest or
 `PROJECTATLAS_VERSION` supplies a release tag. It prefers a local source checkout, otherwise downloads the release
-tag derived from the plugin manifest, and falls back to the same tagged Cargo Git install path. It then writes the
-absolute MCP registration file for that project. `runtime-info` is intentionally a read-only compatibility probe and
-does not create `.projectatlas` by itself.
+tag derived from the plugin manifest, and falls back to the same tagged Cargo Git install path. It then writes
+`.projectatlas/projectatlas.mcp.json`, `.projectatlas/projectatlas.claude.mcp.json`, and
+`.projectatlas/projectatlas.opencode.json` for that project. `runtime-info` is intentionally a read-only
+compatibility probe and does not create `.projectatlas` by itself.
+
+Release and installer tests can pass a known runtime without downloading or mutating PATH: use
+`-RuntimePath <path-to-projectatlas>` on PowerShell or `PROJECTATLAS_RUNTIME_PATH=<path-to-projectatlas>` for the
+POSIX installer. The override is still verified with the same `runtime-info` contract before any MCP config is
+written.
 
 Marketplace installation should run or point to the native runtime installer before registering `projectatlas mcp`,
 so Codex, OpenCode, Claude Code, and other MCP-capable harnesses can call the same `atlas_*` TOON tools.

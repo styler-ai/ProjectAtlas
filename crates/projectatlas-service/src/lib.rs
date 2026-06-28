@@ -66,18 +66,18 @@ pub struct FileSummaryReport {
     pub source_status: String,
     /// Error text when live source could not be read.
     pub source_error: String,
-    /// Parser family that produced the stored observed summary.
+    /// Parser family that produced the stored content summary.
     pub parser_kind: String,
     /// Summary quality status: `ok`, `fallback`, or `missing`.
     pub summary_status: String,
-    /// Current purpose one-liner, if approved or suggested.
-    pub purpose: String,
-    /// Purpose lifecycle status.
-    pub purpose_status: String,
-    /// Purpose source.
-    pub purpose_source: String,
-    /// Observed one-line summary from scan and deep index facts.
-    pub observed_summary: String,
+    /// Durable one-line reason this file exists, if approved or suggested.
+    pub file_purpose: String,
+    /// File-purpose lifecycle status.
+    pub file_purpose_status: String,
+    /// File-purpose source.
+    pub file_purpose_source: String,
+    /// Current one-line content summary from scan and deep index facts.
+    pub content_summary: String,
     /// Package, module, or manifest name when indexed.
     pub package: String,
     /// File or primary symbol documentation when indexed.
@@ -352,11 +352,11 @@ pub fn build_file_summary(
     .iter()
     .any(|total| *total > effective_limit);
 
-    let observed_summary = indexed.summary.unwrap_or_default();
+    let content_summary = indexed.summary.unwrap_or_default();
     let parser_kind =
-        summary_parser_kind(&observed_summary, symbol_count, &symbol_parser_kinds).to_string();
+        summary_parser_kind(&content_summary, symbol_count, &symbol_parser_kinds).to_string();
     let summary_status =
-        summary_status(&observed_summary, symbol_count, &symbol_parser_kinds).to_string();
+        summary_status(&content_summary, symbol_count, &symbol_parser_kinds).to_string();
 
     Ok(FileSummaryReport {
         file_path: file_key,
@@ -366,10 +366,10 @@ pub fn build_file_summary(
             .clone()
             .unwrap_or_else(|| "unknown".to_string()),
         line_count,
-        purpose: indexed.purpose.purpose.clone().unwrap_or_default(),
-        purpose_status: indexed.purpose.status.to_string(),
-        purpose_source: indexed.purpose.source.to_string(),
-        observed_summary,
+        file_purpose: indexed.purpose.purpose.clone().unwrap_or_default(),
+        file_purpose_status: indexed.purpose.status.to_string(),
+        file_purpose_source: indexed.purpose.source.to_string(),
+        content_summary,
         package: package_name(&metadata_symbols),
         docstring,
         symbol_count,
@@ -1635,7 +1635,7 @@ mod tests {
 
         let report = build_file_summary(&store, Path::new("src/lib.rs"), 10)?;
         require_eq(
-            &report.purpose_status,
+            &report.file_purpose_status,
             &PurposeStatus::Approved.to_string(),
             "purpose status",
         )?;
@@ -2348,6 +2348,29 @@ mod tests {
         if !slice.content.contains("b();") || slice.content.contains("a();") {
             return Err(io::Error::other("parent selector returned wrong symbol slice").into());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn line_slice_reads_current_disk_content_after_index_validation() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src"))?;
+        let file = root.join("src").join("lib.rs");
+        fs::write(&file, "pub fn old_name() {}\n")?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        store.replace_scan(&[test_node("src/lib.rs", "old-hash")])?;
+
+        fs::write(&file, "pub fn current_name() {}\n")?;
+        let slice = read_indexed_code_slice(&store, Path::new("src/lib.rs"), 1, Some(1))?;
+
+        require_eq(
+            &slice.content,
+            &"pub fn current_name() {}".to_string(),
+            "slice content",
+        )?;
         Ok(())
     }
 

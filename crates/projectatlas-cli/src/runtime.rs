@@ -1243,7 +1243,7 @@ pub(crate) fn empty_symbol_build_report() -> SymbolBuildReport {
     }
 }
 
-/// Create a deterministic one-line observed summary from extracted symbols.
+/// Create a deterministic one-line content summary from extracted symbols.
 pub(crate) fn summarize_symbol_graph(graph: &SymbolGraph, fallback: Option<&str>) -> String {
     if graph.symbols.is_empty() {
         if let Some(fallback) = fallback.filter(|summary| !is_scanner_fallback_summary(summary)) {
@@ -1280,7 +1280,7 @@ pub(crate) fn summarize_symbol_graph(graph: &SymbolGraph, fallback: Option<&str>
     )
 }
 
-/// Return a readable language label for agent-facing observed summaries.
+/// Return a readable language label for agent-facing content summaries.
 fn observed_language_label(language: Option<&str>) -> String {
     match language.unwrap_or("source") {
         "cargo-manifest" => "cargo manifest".to_string(),
@@ -1293,7 +1293,7 @@ fn observed_language_label(language: Option<&str>) -> String {
     }
 }
 
-/// Return the subject phrase for manifest-style observed summaries.
+/// Return the subject phrase for manifest-style content summaries.
 fn observed_manifest_subject(language: &str) -> String {
     if language.contains("manifest") {
         language.to_string()
@@ -1433,14 +1433,45 @@ pub(crate) fn relation_targets(
     targets
 }
 
-/// Create a generated file-purpose suggestion from an observed summary.
+/// Create a generated file-purpose suggestion from a path and content summary.
 pub(crate) fn suggest_file_purpose(path: &str, summary: &str) -> String {
     let name = path
         .rsplit('/')
         .next()
         .filter(|value| !value.is_empty())
         .unwrap_or(path);
-    format!("Provide {name} behavior: {}", summary.trim_end_matches('.'))
+    let stem = name.split_once('.').map_or(name, |(stem, _)| stem);
+    let subject = stem.replace(['-', '_'], " ");
+    if summary.contains("dataset manifest") {
+        if let Some(datasets) = summary_between(summary, " including ", " and keys") {
+            format!("Define the {subject} dataset manifest for {datasets}.")
+        } else {
+            format!("Define the {subject} dataset manifest.")
+        }
+    } else if let Some(workflow) = summary_between(summary, "yaml workflow ", " triggered") {
+        format!("Define the {workflow} workflow.")
+    } else if summary.contains("manifest") {
+        if let Some(package) = summary_between(summary, " manifest for ", " with ") {
+            format!("Define the {package} manifest.")
+        } else {
+            format!("Define the {subject} manifest.")
+        }
+    } else if let Some(title) = summary_between(summary, "document titled ", " with ") {
+        format!("Document {title}.")
+    } else if summary.contains("stylesheet") {
+        format!("Style the {subject} stylesheet.")
+    } else if summary.contains("config") {
+        format!("Configure {subject}.")
+    } else {
+        format!("Implement {subject}.")
+    }
+}
+
+/// Return a non-empty substring between two markers.
+fn summary_between<'a>(summary: &'a str, start: &str, end: &str) -> Option<&'a str> {
+    let after_start = summary.split_once(start)?.1;
+    let value = after_start.split_once(end)?.0.trim();
+    (!value.is_empty()).then_some(value)
 }
 
 /// Return whether a language should be parsed for symbols.

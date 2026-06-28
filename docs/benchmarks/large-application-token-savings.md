@@ -5,7 +5,7 @@ A large application audit that motivated the ProjectAtlas 3 hardening pass showe
 The positive finding recorded in issue #153 was a 99.8% token-savings observation on a representative application corpus. The exact percentage is workload-specific, but it validates the product target:
 
 - Start with repository overview and folder purpose.
-- Narrow to likely files with file purpose and observed summary.
+- Narrow to likely files with file purpose and content summary.
 - Escalate to symbol summaries and exact slices only after choosing the right target.
 - Track saved tokens as avoided broad source reads, avoided wrong-file reads, and avoided unnecessary full-file reads.
 
@@ -35,4 +35,4 @@ Representative warm CLI reads from the same audit stayed around 160-166 ms:
 - `projectatlas token`: approximately 161 ms.
 - `projectatlas overview`: approximately 166 ms.
 
-ProjectAtlas token telemetry reports this through `projectatlas token` and `projectatlas token --view tui`. The telemetry is estimate-based; it is designed for trend and workflow validation rather than billing reconciliation.
+ProjectAtlas token telemetry reports this through `projectatlas token` and `projectatlas token --view tui`. The telemetry is estimate-based; the default estimator is the offline `chars/bytes / 4` workflow heuristic, not provider or model billing-token accounting. It is designed for trend and workflow validation rather than billing reconciliation.

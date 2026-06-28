@@ -4,7 +4,7 @@
       "command": "projectatlas",
       "args": [
         "--require-version",
-        "0.3.4",
+        "0.3.5",
         "--db",
         ".projectatlas/projectatlas.db",
         "mcp"

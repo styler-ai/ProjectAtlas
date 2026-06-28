@@ -19,6 +19,8 @@ Use `projectatlas summary <file> --limit 25` or `atlas_file_summary` before open
 
 Generated file-purpose guesses may be stored as suggestions, but they remain review-required until an agent approves or corrects them.
 
+`stale` belongs to purpose metadata, not to the refreshed content summary. When an approved folder or file purpose becomes stale after a meaningful indexed change, agents should inspect the current `content_summary` and approve or correct the purpose. Scans and watch refreshes should update content summaries from the current file facts instead of preserving stale summary text.
+
 ## Legacy metadata
 
 Legacy `.purpose` files, source `Purpose:` headers, and `.projectatlas/projectatlas-nonsource-files.toon` remain import/migration sources. They are not the final ProjectAtlas 3 storage model.
@@ -33,6 +35,6 @@ ProjectAtlas surfaces:
 - duplicate or overlapping approved purposes across files or folders
 - untracked assets outside approved roots
 - repeated temporary/generated folder roles
-- stale index or structure drift signals
+- stale approved purposes, stale index, or structure drift signals
 
 These signals are meant to prompt cleanup before the structure drifts.

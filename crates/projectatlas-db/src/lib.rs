@@ -751,7 +751,7 @@ impl AtlasStore {
 
     /// Clear source-derived intelligence for one live file path.
     ///
-    /// This removes symbols, relations, and the node-level observed summary so
+    /// This removes symbols, relations, and the node-level content summary so
     /// skipped or failed parser work cannot leave stale source facts visible.
     ///
     /// # Errors
@@ -2694,35 +2694,38 @@ impl AtlasStore {
             "
             SELECT
                 COUNT(*),
-                COALESCE(SUM(estimated_tokens_without_projectatlas), 0),
-                COALESCE(SUM(estimated_tokens_with_projectatlas), 0),
-                COALESCE(SUM(estimated_tokens_saved), 0)
+                TOTAL(estimated_tokens_without_projectatlas),
+                TOTAL(estimated_tokens_with_projectatlas)
             FROM usage_events
             WHERE session_id = ?1
               AND estimated_tokens_without_projectatlas IS NOT NULL
               AND estimated_tokens_with_projectatlas IS NOT NULL
-              AND estimated_tokens_saved IS NOT NULL
             "
         } else {
             "
             SELECT
                 COUNT(*),
-                COALESCE(SUM(estimated_tokens_without_projectatlas), 0),
-                COALESCE(SUM(estimated_tokens_with_projectatlas), 0),
-                COALESCE(SUM(estimated_tokens_saved), 0)
+                TOTAL(estimated_tokens_without_projectatlas),
+                TOTAL(estimated_tokens_with_projectatlas)
             FROM usage_events
             WHERE estimated_tokens_without_projectatlas IS NOT NULL
               AND estimated_tokens_with_projectatlas IS NOT NULL
-              AND estimated_tokens_saved IS NOT NULL
             "
         };
-        let mut statement = self.connection.prepare(sql)?;
-        let counts = if let Some(session) = session_id {
-            statement.query_row([session], token_overview_counts_from_row)?
-        } else {
-            statement.query_row([], token_overview_counts_from_row)?
+        let mapper = |row: &rusqlite::Row<'_>| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                token_total_from_sql("estimated_tokens_without_projectatlas", row.get(1)?),
+                token_total_from_sql("estimated_tokens_with_projectatlas", row.get(2)?),
+            ))
         };
-        token_overview_from_counts(counts)
+        let (calls, without, with) = if let Some(session) = session_id {
+            self.connection.query_row(sql, [session], mapper)?
+        } else {
+            self.connection.query_row(sql, [], mapper)?
+        };
+        let calls = row_token_count("token_overview_calls", calls)?;
+        Ok(token_overview_from_totals(calls, without, with))
     }
 
     /// Mark a deterministic health finding as agent-resolved.
@@ -3066,45 +3069,29 @@ fn count_to_usize(field: &'static str, value: i64) -> DbResult<usize> {
     })
 }
 
-/// Convert an aggregate signed database total into a platform `isize`.
-fn count_to_isize(field: &'static str, value: i64) -> DbResult<isize> {
-    isize::try_from(value).map_err(|source| DbError::InvalidCount {
+/// Convert one telemetry row count into a non-negative wide integer.
+fn row_token_count(field: &'static str, value: i64) -> DbResult<u128> {
+    u128::try_from(value).map_err(|source| DbError::InvalidCount {
         field,
         value,
         source,
     })
 }
 
-/// Read token overview aggregate counts from a SQL row.
-fn token_overview_counts_from_row(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<(i64, i64, i64, i64)> {
-    Ok((
-        row.get::<_, i64>(0)?,
-        row.get::<_, i64>(1)?,
-        row.get::<_, i64>(2)?,
-        row.get::<_, i64>(3)?,
-    ))
+/// Convert a `SQLite` REAL aggregate token total to a saturating wide integer.
+fn token_total_from_sql(_field: &'static str, value: f64) -> u128 {
+    if !value.is_finite() || value <= 0.0 {
+        0
+    } else if value >= u128::MAX as f64 {
+        u128::MAX
+    } else {
+        value.round() as u128
+    }
 }
 
-/// Build a token overview from aggregate SQL counts.
-fn token_overview_from_counts(counts: (i64, i64, i64, i64)) -> DbResult<TokenOverview> {
-    let calls = count_to_usize("usage_calls", counts.0)?;
-    let without = count_to_usize("estimated_tokens_without_projectatlas", counts.1)?;
-    let with = count_to_usize("estimated_tokens_with_projectatlas", counts.2)?;
-    let saved = count_to_isize("estimated_tokens_saved", counts.3)?;
-    let savings_rate = if without == 0 {
-        None
-    } else {
-        Some(saved as f64 / without as f64)
-    };
-    Ok(TokenOverview {
-        calls,
-        estimated_without_projectatlas: without,
-        estimated_with_projectatlas: with,
-        estimated_saved: saved,
-        savings_rate,
-    })
+/// Build a token overview from Rust-side aggregate totals.
+fn token_overview_from_totals(calls: u128, without: u128, with: u128) -> TokenOverview {
+    TokenOverview::from_estimated_totals(calls, without, with)
 }
 
 /// Convert a usize to i64 with saturation for database storage.
@@ -3130,7 +3117,7 @@ fn numbered_placeholders(start: usize, count: usize) -> String {
         .join(", ")
 }
 
-/// Generate the durable node-level observed summary.
+/// Generate the durable node-level content summary.
 fn generate_node_summary(node: &Node) -> String {
     match node.kind {
         NodeKind::Folder => format!("Folder for {}", path_label(&node.path)),
@@ -3359,7 +3346,7 @@ mod tests {
             query: None,
             estimated_tokens_without_projectatlas: Some(100),
             estimated_tokens_with_projectatlas: Some(20),
-            estimated_tokens_saved: Some(80),
+            estimated_tokens_saved: Some(1),
         })?;
         store.record_usage(&UsageEvent {
             session_id: "session".to_string(),
@@ -3398,6 +3385,74 @@ mod tests {
             &all_sessions.estimated_saved,
             &230,
             "all-session saved tokens",
+        )?;
+
+        store.record_usage(&UsageEvent {
+            session_id: "negative".to_string(),
+            command: "outline".to_string(),
+            path: None,
+            query: None,
+            estimated_tokens_without_projectatlas: Some(20),
+            estimated_tokens_with_projectatlas: Some(50),
+            estimated_tokens_saved: Some(999),
+        })?;
+        let negative = store.token_overview(Some("negative"))?;
+        require_eq(&negative.calls, &1, "negative session call count")?;
+        require_eq(
+            &negative.estimated_saved,
+            &-30,
+            "negative session recomputed delta",
+        )?;
+        require_eq(
+            &negative.savings_rate,
+            &Some(-1.5),
+            "negative session savings rate",
+        )?;
+
+        store.record_usage(&UsageEvent {
+            session_id: "zero-baseline".to_string(),
+            command: "outline".to_string(),
+            path: None,
+            query: None,
+            estimated_tokens_without_projectatlas: Some(0),
+            estimated_tokens_with_projectatlas: Some(12),
+            estimated_tokens_saved: Some(999),
+        })?;
+        let zero_baseline = store.token_overview(Some("zero-baseline"))?;
+        require_eq(&zero_baseline.calls, &1, "zero baseline call count")?;
+        require_eq(
+            &zero_baseline.estimated_saved,
+            &-12,
+            "zero baseline recomputed delta",
+        )?;
+        require_eq(
+            &zero_baseline.savings_rate,
+            &None,
+            "zero baseline savings rate",
+        )?;
+
+        for index in 0..3 {
+            store.connection.execute(
+                "
+                INSERT INTO usage_events(
+                    session_id,
+                    command,
+                    path,
+                    query,
+                    estimated_tokens_without_projectatlas,
+                    estimated_tokens_with_projectatlas,
+                    estimated_tokens_saved
+                )
+                VALUES(?1, 'large', NULL, NULL, ?2, 0, ?2)
+                ",
+                params![format!("large-{index}"), i64::MAX,],
+            )?;
+        }
+        let large = store.token_overview(None)?;
+        require_eq(
+            &large.estimated_saved,
+            &isize::MAX,
+            "large aggregate saturates without sqlite SUM overflow",
         )?;
         Ok(())
     }
@@ -3880,7 +3935,7 @@ mod tests {
     }
 
     #[test]
-    fn updates_observed_node_summary_without_approving_purpose() -> Result<(), Box<dyn Error>> {
+    fn updates_content_summary_without_approving_purpose() -> Result<(), Box<dyn Error>> {
         let mut store = AtlasStore::in_memory()?;
         let node = Node {
             path: "src/lib.rs".to_string(),
@@ -3901,7 +3956,7 @@ mod tests {
         require_eq(
             &nodes[0].summary,
             &Some("rust source defining library entry functions.".to_string()),
-            "updated observed summary",
+            "updated content summary",
         )?;
         require_eq(
             &nodes[0].purpose.status,

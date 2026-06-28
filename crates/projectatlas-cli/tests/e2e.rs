@@ -84,13 +84,34 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             .join("projectatlas")
             .join(".mcp.json"),
     )?;
+    let claude_manifest = fs::read_to_string(
+        workspace_root
+            .join("plugins")
+            .join("projectatlas")
+            .join(".claude-plugin")
+            .join("plugin.json"),
+    )?;
+    let opencode_template = fs::read_to_string(
+        workspace_root
+            .join("plugins")
+            .join("projectatlas")
+            .join("opencode")
+            .join("opencode.json"),
+    )?;
 
     for required in [
         "Convert-ProjectAtlasVersionTag",
         "$runtime.version -eq $expectedRuntimeVersion",
         "Sync-ProjectAtlasRuntimeToLocalAppData",
+        "[string]$RuntimePath",
+        "PROJECTATLAS_RUNTIME_PATH",
         "Find-ProjectAtlas $ProjectAtlasVersion",
+        "System.Text.UTF8Encoding",
         r#"$installArgs += @("projectatlas-cli", "--locked", "--force")"#,
+        "projectatlas.claude.mcp.json",
+        "projectatlas.opencode.json",
+        r#"Write-ProjectAtlasMcpConfig $claudeMcpConfigPath "claude-code""#,
+        r#"Write-ProjectAtlasMcpConfig $opencodeConfigPath "opencode""#,
     ] {
         if !powershell_installer.contains(required) {
             return Err(io::Error::other(format!(
@@ -107,9 +128,14 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
     }
     for required in [
         "expected_runtime_version()",
+        "runtime_override=${PROJECTATLAS_RUNTIME_PATH:-}",
         "runtime_version=$(printf",
         "[ \"$runtime_version\" = \"$expected_version\" ]",
         "cargo install --git \"$repository\" --tag \"$projectatlas_version\" projectatlas-cli --locked --force",
+        "projectatlas.claude.mcp.json",
+        "projectatlas.opencode.json",
+        "write_mcp_config \"$claude_mcp_config_path\" claude-code",
+        "write_mcp_config \"$opencode_config_path\" opencode",
     ] {
         if !posix_installer.contains(required) {
             return Err(io::Error::other(format!(
@@ -135,6 +161,150 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         &["mcpServers", "projectatlas", "args", "1"],
         env!("CARGO_PKG_VERSION"),
     )?;
+    let claude_manifest_json: Value = serde_json::from_str(&claude_manifest)?;
+    require_json_string(&claude_manifest_json, &["name"], "projectatlas")?;
+    require_json_string(
+        &claude_manifest_json,
+        &["version"],
+        env!("CARGO_PKG_VERSION"),
+    )?;
+    let opencode_json: Value = serde_json::from_str(&opencode_template)?;
+    require_json_string(
+        &opencode_json,
+        &["$schema"],
+        "https://opencode.ai/config.json",
+    )?;
+    require_json_string(&opencode_json, &["mcp", "projectatlas", "type"], "local")?;
+    require_json_string(
+        &opencode_json,
+        &["mcp", "projectatlas", "command", "1"],
+        "--require-version",
+    )?;
+    require_json_string(
+        &opencode_json,
+        &["mcp", "projectatlas", "command", "2"],
+        env!("CARGO_PKG_VERSION"),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir_all(repo.join(".projectatlas"))?;
+    fs::write(
+        repo.join(".projectatlas").join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    let workspace_root = workspace_root()?;
+    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let output = if cfg!(windows) {
+        StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(
+                workspace_root
+                    .join("plugins")
+                    .join("projectatlas")
+                    .join("scripts")
+                    .join("install-runtime.ps1"),
+            )
+            .arg("-ProjectRoot")
+            .arg(&repo)
+            .arg("-RuntimePath")
+            .arg(&runtime)
+            .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
+            .output()?
+    } else {
+        StdCommand::new("bash")
+            .arg(
+                workspace_root
+                    .join("plugins")
+                    .join("projectatlas")
+                    .join("scripts")
+                    .join("install-runtime.sh"),
+            )
+            .arg(&repo)
+            .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
+            .env("PROJECTATLAS_RUNTIME_PATH", &runtime)
+            .output()?
+    };
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "plugin installer failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+
+    let atlas_dir = repo.join(".projectatlas");
+    let codex_config = read_json_file(&atlas_dir.join("projectatlas.mcp.json"))?;
+    let claude_config = read_json_file(&atlas_dir.join("projectatlas.claude.mcp.json"))?;
+    let opencode_config = read_json_file(&atlas_dir.join("projectatlas.opencode.json"))?;
+
+    require_same_executable(
+        json_string_at(&codex_config, &["mcpServers", "projectatlas", "command"])?,
+        &runtime,
+        "codex",
+    )?;
+    require_json_string(
+        &codex_config,
+        &["mcpServers", "projectatlas", "args", "0"],
+        "--require-version",
+    )?;
+    require_json_string(
+        &codex_config,
+        &["mcpServers", "projectatlas", "args", "6"],
+        "mcp",
+    )?;
+    let codex_cwd = json_string_at(&codex_config, &["mcpServers", "projectatlas", "cwd"])?;
+    require_same_directory(codex_cwd, &repo, "codex cwd")?;
+
+    require_same_executable(
+        json_string_at(&claude_config, &["mcpServers", "projectatlas", "command"])?,
+        &runtime,
+        "claude",
+    )?;
+    if claude_config["mcpServers"]["projectatlas"]
+        .get("cwd")
+        .is_some()
+    {
+        return Err(io::Error::other("Claude Code MCP config should not rely on cwd").into());
+    }
+    require_json_string(
+        &claude_config,
+        &["mcpServers", "projectatlas", "args", "6"],
+        "mcp",
+    )?;
+
+    require_json_string(
+        &opencode_config,
+        &["$schema"],
+        "https://opencode.ai/config.json",
+    )?;
+    require_json_string(&opencode_config, &["mcp", "projectatlas", "type"], "local")?;
+    require_json_bool(&opencode_config, &["mcp", "projectatlas", "enabled"], true)?;
+    require_same_executable(
+        json_string_at(&opencode_config, &["mcp", "projectatlas", "command", "0"])?,
+        &runtime,
+        "opencode",
+    )?;
+    require_json_string(
+        &opencode_config,
+        &["mcp", "projectatlas", "command", "7"],
+        "mcp",
+    )?;
+    require_same_directory(
+        json_string_at(&opencode_config, &["mcp", "projectatlas", "cwd"])?,
+        &repo,
+        "opencode cwd",
+    )?;
+
     Ok(())
 }
 
@@ -452,6 +622,58 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         ))
         .into());
     }
+    let claude_mcp_config = mcp_config_for_harness(&repo, &db, "claude-code")?;
+    let claude_server = &claude_mcp_config["mcpServers"]["projectatlas"];
+    let claude_command = claude_server["command"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("claude mcp command missing"))?;
+    if !std::path::Path::new(claude_command).is_absolute() {
+        return Err(io::Error::other("claude mcp command was not absolute").into());
+    }
+    if claude_server.get("cwd").is_some() {
+        return Err(io::Error::other("claude mcp config should not assume cwd support").into());
+    }
+    require_json_string(
+        &claude_mcp_config,
+        &["mcpServers", "projectatlas", "args", "0"],
+        "--require-version",
+    )?;
+    require_json_string(
+        &claude_mcp_config,
+        &["mcpServers", "projectatlas", "args", "6"],
+        "mcp",
+    )?;
+
+    let opencode_config = mcp_config_for_harness(&repo, &db, "opencode")?;
+    require_json_string(
+        &opencode_config,
+        &["$schema"],
+        "https://opencode.ai/config.json",
+    )?;
+    require_json_string(&opencode_config, &["mcp", "projectatlas", "type"], "local")?;
+    let opencode_command = opencode_config["mcp"]["projectatlas"]["command"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("opencode mcp command array missing"))?;
+    let Some(first_command) = opencode_command.first().and_then(Value::as_str) else {
+        return Err(io::Error::other("opencode command executable missing").into());
+    };
+    if !std::path::Path::new(first_command).is_absolute() {
+        return Err(io::Error::other("opencode command executable was not absolute").into());
+    }
+    if !opencode_command
+        .iter()
+        .any(|value| value.as_str() == Some("mcp"))
+    {
+        return Err(io::Error::other("opencode command array does not launch mcp").into());
+    }
+    require_json_string(
+        &opencode_config,
+        &["mcp", "projectatlas", "cwd"],
+        generated_cwd,
+    )?;
+    if opencode_config["mcp"]["projectatlas"]["enabled"] != Value::Bool(true) {
+        return Err(io::Error::other("opencode mcp server is not enabled").into());
+    }
     let mut settings_args = vec!["--format".to_string(), "json".to_string()];
     for value in &mcp_args[..mcp_args.len().saturating_sub(1)] {
         settings_args.push(
@@ -550,6 +772,13 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         return Err(io::Error::other("json token command failed").into());
     }
     let token_json: Value = serde_json::from_slice(&raw_token.stdout)?;
+    require_json_string(&token_json, &["estimate_kind"], "heuristic")?;
+    require_json_string(&token_json, &["estimator"], "chars_or_bytes_div_ceil_4")?;
+    require_json_string(
+        &token_json,
+        &["estimate_scope"],
+        "workflow_payload_estimate_not_model_billing_tokens",
+    )?;
     require_json_usize_at_least(&token_json, &["calls"], 7)?;
     require_json_usize_greater_than(&token_json, &["estimated_without_projectatlas"], 0)?;
     require_json_usize_greater_than(&token_json, &["estimated_with_projectatlas"], 0)?;
@@ -592,9 +821,112 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .args(["token", "--view", "tui"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("ProjectAtlas Token Savings"))
-        .stdout(predicate::str::contains("wrong-file opens"))
-        .stdout(predicate::str::contains("unnecessary full-code reads"));
+        .stdout(predicate::str::contains("ProjectAtlas Token Delta"))
+        .stdout(predicate::str::contains("heuristic chars/bytes / 4"))
+        .stdout(predicate::str::contains("not model billing tokens"))
+        .stdout(predicate::str::contains("Without PA"))
+        .stdout(predicate::str::contains("With PA"))
+        .stdout(predicate::str::contains("Saved"))
+        .stdout(predicate::str::contains("wrong folders, wrong files"))
+        .stdout(predicate::str::contains("unnecessary full reads"));
+    Ok(())
+}
+
+#[test]
+fn mcp_server_stays_bound_to_one_project_database() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo_a = temp.path().join("repo-a");
+    let repo_b = temp.path().join("repo-b");
+    let db_a = temp.path().join("repo-a.db");
+    let db_b = temp.path().join("repo-b.db");
+    for (repo, marker) in [(&repo_a, "alpha_marker"), (&repo_b, "beta_marker")] {
+        fs::create_dir_all(repo.join("src"))?;
+        fs::write(
+            repo.join("src").join("main.rs"),
+            format!("pub fn {marker}() -> &'static str {{\n    \"{marker}\"\n}}\n"),
+        )?;
+    }
+
+    for (repo, db) in [(&repo_a, &db_a), (&repo_b, &db_b)] {
+        Command::cargo_bin("projectatlas")?
+            .current_dir(repo)
+            .arg("--db")
+            .arg(db)
+            .args(["scan", "."])
+            .assert()
+            .success();
+    }
+
+    let config_a = mcp_config_for_harness(&repo_a, &db_a, "mcp-json")?;
+    let (command_a, args_a) = mcp_command_and_args(&config_a)?;
+    let outside_purpose = format!(
+        r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"atlas_purpose_set","arguments":{{"path":{},"purpose":"Wrong repository file."}}}}}}"#,
+        serde_json::to_string(&repo_b.join("src").join("main.rs").to_string_lossy())?
+    );
+    let messages_a = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_overview","arguments":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_files","arguments":{"file_pattern":"*.rs","limit":5}}}"#,
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_slice","arguments":{"file":"src/main.rs","start_line":1,"end_line":3}}}"#,
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"atlas_token_report","arguments":{}}}"#,
+        outside_purpose.as_str(),
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"atlas_purpose_set","arguments":{"path":".","purpose":"Repository root for repo A."}}}"#,
+        r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"atlas_purpose_set","arguments":{"path":"","purpose":"Empty path should fail."}}}"#,
+    ];
+    let output_a = run_mcp_stdio(&command_a, &repo_b, &args_a, &messages_a)?;
+    if !output_a.contains("alpha_marker") {
+        return Err(io::Error::other(format!(
+            "repo A MCP server did not return repo A marker when launched from repo B cwd: {output_a}"
+        ))
+        .into());
+    }
+    if output_a.contains("beta_marker") {
+        return Err(
+            io::Error::other(format!("repo A MCP server leaked repo B data: {output_a}")).into(),
+        );
+    }
+    if !output_a.contains("token_savings:") || !output_a.contains("estimate_kind: heuristic") {
+        return Err(io::Error::other(format!(
+            "repo A MCP token report did not include heuristic token telemetry: {output_a}"
+        ))
+        .into());
+    }
+    if !output_a.contains("absolute paths are not allowed") {
+        return Err(io::Error::other(format!(
+            "repo A MCP purpose_set did not reject an outside absolute path: {output_a}"
+        ))
+        .into());
+    }
+    if !output_a.contains("purpose_set:") || !output_a.contains("path: .") {
+        return Err(io::Error::other(format!(
+            "repo A MCP purpose_set did not accept explicit repository root: {output_a}"
+        ))
+        .into());
+    }
+    if !output_a.contains("a path is required") {
+        return Err(io::Error::other(format!(
+            "repo A MCP purpose_set did not reject an empty path: {output_a}"
+        ))
+        .into());
+    }
+
+    let config_b = mcp_config_for_harness(&repo_b, &db_b, "mcp-json")?;
+    let (command_b, args_b) = mcp_command_and_args(&config_b)?;
+    let messages_b = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_files","arguments":{"file_pattern":"*.rs","limit":5}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_slice","arguments":{"file":"src/main.rs","start_line":1,"end_line":3}}}"#,
+    ];
+    let output_b = run_mcp_stdio(&command_b, &repo_a, &args_b, &messages_b)?;
+    if !output_b.contains("beta_marker") || output_b.contains("alpha_marker") {
+        return Err(io::Error::other(format!(
+            "repo B MCP server did not stay bound to repo B when launched from repo A cwd: {output_b}"
+        ))
+        .into());
+    }
+
     Ok(())
 }
 
@@ -1963,7 +2295,7 @@ async function main() {
     let summary_json: Value = serde_json::from_slice(&raw_summary.stdout)?;
     require_json_string(
         &summary_json,
-        &["observed_summary"],
+        &["content_summary"],
         "javascript source defining functions main, readDatasetEntry, sha256 with imports import path from \"node:path\";, import { createHash } from \"node:crypto\";.",
     )?;
     require_json_usize(&summary_json, &["total_functions"], 3)?;
@@ -2123,40 +2455,40 @@ fn structural_summaries_cover_declarative_files_and_projectatlas_inputs()
     let readme_summary = json_summary_command(&repo, &db, "README.md")?;
     require_json_string(
         &readme_summary,
-        &["observed_summary"],
+        &["content_summary"],
         "markdown document titled ProjectAtlas Demo with sections Install, Usage.",
     )?;
     require_json_string(&readme_summary, &["parser_kind"], "structural")?;
     require_json_string(&readme_summary, &["summary_status"], "ok")?;
-    require_json_string(&readme_summary, &["purpose_status"], "suggested")?;
+    require_json_string(&readme_summary, &["file_purpose_status"], "suggested")?;
 
     let package_summary = json_summary_command(&repo, &db, "package.json")?;
     require_json_string(
         &package_summary,
-        &["observed_summary"],
+        &["content_summary"],
         "package manifest for demo with scripts test and 1 dependencies.",
     )?;
 
     let workflow_summary = json_summary_command(&repo, &db, ".github/workflows/ci.yml")?;
     require_json_string(
         &workflow_summary,
-        &["observed_summary"],
+        &["content_summary"],
         "yaml workflow CI triggered by pull_request, push with jobs test.",
     )?;
-    require_json_string(&workflow_summary, &["purpose_status"], "suggested")?;
+    require_json_string(&workflow_summary, &["file_purpose_status"], "suggested")?;
 
     let config_summary = json_summary_command(&repo, &db, ".projectatlas/config.toml")?;
     require_json_string(
         &config_summary,
-        &["observed_summary"],
+        &["content_summary"],
         "ProjectAtlas config with tables project, scan and 5 scan excludes.",
     )?;
-    require_json_string(&config_summary, &["purpose_status"], "approved")?;
+    require_json_string(&config_summary, &["file_purpose_status"], "approved")?;
 
     let css_summary = json_summary_command(&repo, &db, "app/styles/tokens.css")?;
     require_json_contains(
         &css_summary,
-        &["observed_summary"],
+        &["content_summary"],
         "css stylesheet with selectors .card, .panel, :root",
     )?;
 
@@ -2164,32 +2496,32 @@ fn structural_summaries_cover_declarative_files_and_projectatlas_inputs()
         json_summary_command(&repo, &db, "app/public/data/datasets.manifest.json")?;
     require_json_string(
         &manifest_summary,
-        &["observed_summary"],
+        &["content_summary"],
         "json dataset manifest with 3 datasets including catalog.archive, catalog.primary, catalog.secondary and keys datasets, generated_at, version.",
     )?;
-    require_json_string(&manifest_summary, &["purpose_status"], "suggested")?;
+    require_json_string(&manifest_summary, &["file_purpose_status"], "suggested")?;
     require_json_contains(
         &manifest_summary,
-        &["purpose"],
+        &["file_purpose"],
         "catalog.archive, catalog.primary, catalog.secondary",
     )?;
 
     let html_summary = json_summary_command(&repo, &db, "public/index.html")?;
     require_json_contains(
         &html_summary,
-        &["observed_summary"],
+        &["content_summary"],
         "html document with title Home, meta description Welcome page",
     )?;
     require_json_contains(
         &html_summary,
-        &["observed_summary"],
+        &["content_summary"],
         "link rels alternate, canonical, manifest",
     )?;
 
     let rust_summary = json_summary_command(&repo, &db, "src/empty.rs")?;
     require_json_string(
         &rust_summary,
-        &["observed_summary"],
+        &["content_summary"],
         "rust source file with no declarations found.",
     )?;
     require_json_string(&rust_summary, &["parser_kind"], "symbol-graph")?;
@@ -2273,7 +2605,7 @@ fn scan_indexes_every_supported_language_extension() -> Result<(), Box<dyn Error
     let indexed_by_path = file_entries
         .iter()
         .filter_map(|entry| {
-            let path = entry["node"]["path"].as_str()?;
+            let path = entry["path"].as_str()?;
             Some((path.to_string(), entry))
         })
         .collect::<BTreeMap<_, _>>();
@@ -2282,9 +2614,9 @@ fn scan_indexes_every_supported_language_extension() -> Result<(), Box<dyn Error
         let entry = indexed_by_path.get(relative_path.as_str()).ok_or_else(|| {
             io::Error::other(format!("missing indexed language fixture {relative_path}"))
         })?;
-        require_json_string(entry, &["node", "language"], expected_language)?;
+        require_json_string(entry, &["language"], expected_language)?;
         if entry
-            .get("summary")
+            .get("content_summary")
             .and_then(Value::as_str)
             .is_some_and(|summary| summary.trim().is_empty())
         {
@@ -2295,16 +2627,16 @@ fn scan_indexes_every_supported_language_extension() -> Result<(), Box<dyn Error
         }
         let summary = json_summary_command(&repo, &db, relative_path)?;
         require_json_string(&summary, &["language"], expected_language)?;
-        let observed_summary = json_at(&summary, &["observed_summary"])?
+        let content_summary = json_at(&summary, &["content_summary"])?
             .as_str()
             .ok_or_else(|| {
                 io::Error::other(format!(
-                    "observed summary for language fixture {relative_path} was not a string"
+                    "content summary for language fixture {relative_path} was not a string"
                 ))
             })?;
-        if observed_summary.trim().is_empty() {
+        if content_summary.trim().is_empty() {
             return Err(io::Error::other(format!(
-                "empty observed summary for language fixture {relative_path}"
+                "empty content summary for language fixture {relative_path}"
             ))
             .into());
         }
@@ -2380,7 +2712,7 @@ fn language_fixture_summaries_match_baselines() -> Result<(), Box<dyn Error>> {
         require_json_string(&summary, &["language"], &baseline.language)?;
         require_json_string(&summary, &["parser_kind"], &baseline.parser_kind)?;
         require_json_string(&summary, &["summary_status"], &baseline.status)?;
-        require_json_string(&summary, &["observed_summary"], &baseline.summary)?;
+        require_json_string(&summary, &["content_summary"], &baseline.summary)?;
         if baseline.minimum_symbol_count > 0 {
             require_json_usize_at_least(
                 &summary,
@@ -2761,9 +3093,9 @@ fn watch_once_preserves_unchanged_deep_summary_and_text_index() -> Result<(), Bo
         return Err(io::Error::other("summary before watch failed").into());
     }
     let before_json: Value = serde_json::from_slice(&before.stdout)?;
-    let before_summary = json_at(&before_json, &["observed_summary"])?
+    let before_summary = json_at(&before_json, &["content_summary"])?
         .as_str()
-        .ok_or_else(|| io::Error::other("observed summary before watch was not a string"))?
+        .ok_or_else(|| io::Error::other("content summary before watch was not a string"))?
         .to_string();
     if !before_summary.contains("helper") {
         return Err(io::Error::other("summary before watch did not include symbol facts").into());
@@ -2790,7 +3122,7 @@ fn watch_once_preserves_unchanged_deep_summary_and_text_index() -> Result<(), Bo
         return Err(io::Error::other("summary after watch failed").into());
     }
     let after_json: Value = serde_json::from_slice(&after.stdout)?;
-    require_json_string(&after_json, &["observed_summary"], &before_summary)?;
+    require_json_string(&after_json, &["content_summary"], &before_summary)?;
 
     let search = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -2831,7 +3163,7 @@ fn watch_once_preserves_manifest_symbol_summary() -> Result<(), Box<dyn Error>> 
     let before = json_summary_command(&repo, &db, "Cargo.toml")?;
     require_json_string(&before, &["parser_kind"], "manifest-symbol-graph")?;
     require_json_string(&before, &["summary_status"], "ok")?;
-    let before_summary = json_at(&before, &["observed_summary"])?
+    let before_summary = json_at(&before, &["content_summary"])?
         .as_str()
         .ok_or_else(|| io::Error::other("manifest summary before watch was not a string"))?
         .to_string();
@@ -2854,7 +3186,7 @@ fn watch_once_preserves_manifest_symbol_summary() -> Result<(), Box<dyn Error>> 
     let after = json_summary_command(&repo, &db, "Cargo.toml")?;
     require_json_string(&after, &["parser_kind"], "manifest-symbol-graph")?;
     require_json_string(&after, &["summary_status"], "ok")?;
-    require_json_string(&after, &["observed_summary"], &before_summary)?;
+    require_json_string(&after, &["content_summary"], &before_summary)?;
     Ok(())
 }
 
@@ -3378,20 +3710,16 @@ fn generated_file_purpose_suggestions_require_agent_approval() -> Result<(), Box
         .and_then(|entries| {
             entries
                 .iter()
-                .find(|entry| entry["node"]["path"] == "src/service.rs")
+                .find(|entry| entry["path"] == "src/service.rs")
         })
         .ok_or_else(|| io::Error::other("service file entry was missing"))?;
     require_json_string(
         file_entry,
-        &["summary"],
+        &["content_summary"],
         "rust source defining type and function Service, run.",
     )?;
-    require_json_string(file_entry, &["purpose", "status"], "suggested")?;
-    require_json_string(
-        file_entry,
-        &["purpose", "purpose"],
-        "Provide service.rs behavior: rust source defining type and function Service, run",
-    )?;
+    require_json_string(file_entry, &["status"], "suggested")?;
+    require_json_string(file_entry, &["file_purpose"], "Implement service.")?;
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -3401,8 +3729,8 @@ fn generated_file_purpose_suggestions_require_agent_approval() -> Result<(), Box
         .assert()
         .success()
         .stdout(predicate::str::contains("file_summary:"))
-        .stdout(predicate::str::contains("purpose_status: suggested"))
-        .stdout(predicate::str::contains("observed_summary:"))
+        .stdout(predicate::str::contains("file_purpose_status: suggested"))
+        .stdout(predicate::str::contains("content_summary:"))
         .stdout(predicate::str::contains(
             "rust source defining type and function Service, run.",
         ))
@@ -3425,15 +3753,15 @@ fn generated_file_purpose_suggestions_require_agent_approval() -> Result<(), Box
     require_json_string(&summary_json, &["language"], "rust")?;
     require_json_usize(&summary_json, &["line_count"], 8)?;
     require_json_usize(&summary_json, &["symbol_count"], 2)?;
-    require_json_string(&summary_json, &["purpose_status"], "suggested")?;
-    require_json_string(&summary_json, &["purpose_source"], "generated")?;
+    require_json_string(&summary_json, &["file_purpose_status"], "suggested")?;
+    require_json_string(&summary_json, &["file_purpose_source"], "generated")?;
     require_json_string(&summary_json, &["docstring"], "Service module docs.")?;
     require_json_usize(&summary_json, &["total_exports"], 2)?;
     require_json_string(&summary_json, &["exports", "0"], "Service")?;
     require_json_string(&summary_json, &["exports", "1"], "run")?;
     require_json_string(
         &summary_json,
-        &["observed_summary"],
+        &["content_summary"],
         "rust source defining type and function Service, run.",
     )?;
     require_json_string(&summary_json, &["methods", "0", "name"], "run")?;
@@ -3517,14 +3845,13 @@ fn generated_file_purpose_suggestions_require_agent_approval() -> Result<(), Box
         .and_then(|entries| {
             entries
                 .iter()
-                .find(|entry| entry["node"]["path"] == "src/service.rs")
+                .find(|entry| entry["path"] == "src/service.rs")
         })
         .ok_or_else(|| io::Error::other("approved service file entry was missing"))?;
-    require_json_string(file_entry, &["purpose", "status"], "approved")?;
-    require_json_string(file_entry, &["purpose", "source"], "agent")?;
+    require_json_string(file_entry, &["status"], "approved")?;
     require_json_string(
         file_entry,
-        &["purpose", "purpose"],
+        &["file_purpose"],
         "Service module defining the test service type and run method.",
     )?;
 
@@ -3540,11 +3867,11 @@ fn generated_file_purpose_suggestions_require_agent_approval() -> Result<(), Box
         return Err(io::Error::other("json summary command after approval failed").into());
     }
     let summary_json: Value = serde_json::from_slice(&raw_summary.stdout)?;
-    require_json_string(&summary_json, &["purpose_status"], "approved")?;
-    require_json_string(&summary_json, &["purpose_source"], "agent")?;
+    require_json_string(&summary_json, &["file_purpose_status"], "approved")?;
+    require_json_string(&summary_json, &["file_purpose_source"], "agent")?;
     require_json_string(
         &summary_json,
-        &["purpose"],
+        &["file_purpose"],
         "Service module defining the test service type and run method.",
     )?;
 
@@ -3662,7 +3989,7 @@ fn skipped_symbol_builds_invalidate_stale_symbols() -> Result<(), Box<dyn Error>
         .stdout(predicate::str::contains("too_large: 2"));
 
     let cargo_summary = json_summary_command(&repo, &db, "Cargo.toml")?;
-    require_json_contains(&cargo_summary, &["observed_summary"], "cargo manifest")?;
+    require_json_contains(&cargo_summary, &["content_summary"], "cargo manifest")?;
     require_json_string(&cargo_summary, &["summary_status"], "ok")?;
 
     Command::cargo_bin("projectatlas")?
@@ -3717,7 +4044,7 @@ struct LanguageSummaryBaseline {
     parser_kind: String,
     /// Expected quality status for agent consumers.
     status: String,
-    /// Expected deterministic observed summary.
+    /// Expected deterministic content summary.
     summary: String,
     /// Minimum expected symbol count.
     minimum_symbol_count: usize,
@@ -4000,6 +4327,113 @@ fn token_call_count(repo: &std::path::Path, db: &std::path::Path) -> Result<u64,
     token_json["calls"]
         .as_u64()
         .ok_or_else(|| io::Error::other("token call count missing").into())
+}
+
+/// Return the repository workspace root for fixture access.
+fn workspace_root() -> Result<std::path::PathBuf, Box<dyn Error>> {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| io::Error::other("workspace root not found").into())
+}
+
+/// Generate one harness-specific MCP config document.
+fn mcp_config_for_harness(repo: &Path, db: &Path, harness: &str) -> Result<Value, Box<dyn Error>> {
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(db)
+        .arg("mcp-config")
+        .arg("--harness")
+        .arg(harness)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "mcp-config --harness {harness} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+/// Extract a launchable MCP command and arguments from a generated config.
+fn mcp_command_and_args(
+    config: &Value,
+) -> Result<(std::path::PathBuf, Vec<String>), Box<dyn Error>> {
+    let command = json_string_at(config, &["mcpServers", "projectatlas", "command"])?;
+    let args = json_at(config, &["mcpServers", "projectatlas", "args"])?
+        .as_array()
+        .ok_or_else(|| io::Error::other("mcp args missing"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(ToString::to_string)
+                .ok_or_else(|| io::Error::other("mcp arg was not a string"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((std::path::PathBuf::from(command), args))
+}
+
+/// Read a `JSON` file from disk.
+fn read_json_file(path: &Path) -> Result<Value, Box<dyn Error>> {
+    let content = fs::read_to_string(path)?;
+    serde_json::from_str(&content).map_err(Into::into)
+}
+
+/// Return a nested `JSON` string.
+fn json_string_at<'a>(value: &'a Value, path: &[&str]) -> Result<&'a str, Box<dyn Error>> {
+    json_at(value, path)?
+        .as_str()
+        .ok_or_else(|| io::Error::other(format!("expected string at {path:?}")).into())
+}
+
+/// Require an emitted command to point at the expected runtime.
+fn require_same_executable(
+    actual: &str,
+    expected: &Path,
+    label: &str,
+) -> Result<(), Box<dyn Error>> {
+    let actual_path = Path::new(actual);
+    if !actual_path.is_absolute() {
+        return Err(io::Error::other(format!("{label} runtime path was not absolute")).into());
+    }
+    if actual_path.canonicalize()? == expected.canonicalize()? {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "{label} runtime path mismatch: expected {}, found {}",
+            expected.display(),
+            actual_path.display()
+        ))
+        .into())
+    }
+}
+
+/// Require an emitted working directory to point at the expected project root.
+fn require_same_directory(
+    actual: &str,
+    expected: &Path,
+    label: &str,
+) -> Result<(), Box<dyn Error>> {
+    let actual_path = Path::new(actual);
+    if !actual_path.is_absolute() {
+        return Err(io::Error::other(format!("{label} path was not absolute")).into());
+    }
+    if actual_path.canonicalize()? == expected.canonicalize()? {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "{label} path mismatch: expected {}, found {}",
+            expected.display(),
+            actual_path.display()
+        ))
+        .into())
+    }
 }
 
 /// Require a nested JSON string value.

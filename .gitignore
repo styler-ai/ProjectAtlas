@@ -5,6 +5,8 @@
 .projectatlas/*.db
 .projectatlas/*.db-*
 .projectatlas/projectatlas.mcp.json
+.projectatlas/projectatlas.claude.mcp.json
+.projectatlas/projectatlas.opencode.json
 
 # Rust/Cargo
 target/

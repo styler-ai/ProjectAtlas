@@ -190,14 +190,67 @@ pub fn scan_path(root: &Path, path: &Path, options: &ScanOptions) -> FsResult<Op
     if !absolute.exists() {
         return Ok(None);
     }
-    let absolute = absolute.canonicalize().map_err(|source| FsError::Io {
-        path: absolute.clone(),
-        source,
-    })?;
+    let symlink_checked_absolute = path_for_symlink_component_check(&absolute)?;
+    if path_has_symlink_component(&root, &symlink_checked_absolute)? {
+        return Ok(None);
+    }
+    let absolute = symlink_checked_absolute
+        .canonicalize()
+        .map_err(|source| FsError::Io {
+            path: symlink_checked_absolute.clone(),
+            source,
+        })?;
+    if !absolute.starts_with(&root) {
+        return Ok(None);
+    }
     if gitignore_excludes_path(&root, &absolute)? || should_skip_path(&root, &absolute, options) {
         return Ok(None);
     }
     scanned_node(&root, &absolute)
+}
+
+/// Return a path with a canonical parent but the leaf component preserved.
+fn path_for_symlink_component_check(absolute: &Path) -> FsResult<PathBuf> {
+    if absolute.is_dir() {
+        return absolute.canonicalize().map_err(|source| FsError::Io {
+            path: absolute.to_path_buf(),
+            source,
+        });
+    }
+    let Some(parent) = absolute.parent() else {
+        return Ok(absolute.to_path_buf());
+    };
+    let parent = parent.canonicalize().map_err(|source| FsError::Io {
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    if let Some(file_name) = absolute.file_name() {
+        Ok(parent.join(file_name))
+    } else {
+        Ok(parent)
+    }
+}
+
+/// Return whether any path component below root is a symlink.
+fn path_has_symlink_component(root: &Path, absolute: &Path) -> FsResult<bool> {
+    let Ok(relative) = absolute.strip_prefix(root) else {
+        return Ok(true);
+    };
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        if fs::symlink_metadata(&current)
+            .map_err(|source| FsError::Io {
+                path: current.clone(),
+                source,
+            })?
+            .file_type()
+            .is_symlink()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Return whether repository `.gitignore` rules exclude a path.
@@ -623,6 +676,47 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn scan_path_skips_symlinked_files_before_canonicalizing() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        fs::create_dir(&repo)?;
+        let outside = temp.path().join("outside.txt");
+        let link = repo.join("linked.txt");
+        fs::write(&outside, "outside secret\n")?;
+        if !create_file_symlink(&outside, &link)? {
+            return Ok(());
+        }
+
+        let indexed = scan_path(&repo, &link, &ScanOptions::default())?;
+        if indexed.is_some() {
+            return Err(io::Error::other("single-path refresh indexed a symlink").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scan_path_skips_symlinked_ancestor_before_canonicalizing() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&repo)?;
+        fs::create_dir(&outside)?;
+        fs::write(outside.join("secret.rs"), "fn secret() {}\n")?;
+        let link = repo.join("linked");
+        if !create_dir_symlink(&outside, &link)? {
+            return Ok(());
+        }
+
+        let indexed = scan_path(&repo, &link.join("secret.rs"), &ScanOptions::default())?;
+        if indexed.is_some() {
+            return Err(
+                io::Error::other("single-path refresh indexed through a symlinked folder").into(),
+            );
+        }
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn skips_symlinked_files() -> Result<(), Box<dyn Error>> {
@@ -638,6 +732,50 @@ mod tests {
         let nodes = scan_repo(&repo, &ScanOptions::default())?;
         reject_path(&nodes, "linked.txt")?;
         Ok(())
+    }
+
+    /// Create a file symlink for tests, returning false when the host forbids it.
+    #[cfg(unix)]
+    fn create_file_symlink(target: &Path, link: &Path) -> Result<bool, Box<dyn Error>> {
+        std::os::unix::fs::symlink(target, link)?;
+        Ok(true)
+    }
+
+    /// Create a file symlink for tests, returning false when the host forbids it.
+    #[cfg(windows)]
+    fn create_file_symlink(target: &Path, link: &Path) -> Result<bool, Box<dyn Error>> {
+        match std::os::windows::fs::symlink_file(target, link) {
+            Ok(()) => Ok(true),
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    || error.raw_os_error() == Some(1314) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Create a directory symlink for tests, returning false when the host forbids it.
+    #[cfg(unix)]
+    fn create_dir_symlink(target: &Path, link: &Path) -> Result<bool, Box<dyn Error>> {
+        std::os::unix::fs::symlink(target, link)?;
+        Ok(true)
+    }
+
+    /// Create a directory symlink for tests, returning false when the host forbids it.
+    #[cfg(windows)]
+    fn create_dir_symlink(target: &Path, link: &Path) -> Result<bool, Box<dyn Error>> {
+        match std::os::windows::fs::symlink_dir(target, link) {
+            Ok(()) => Ok(true),
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    || error.raw_os_error() == Some(1314) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Require a scanned node path to exist.

@@ -258,12 +258,38 @@ pub fn normalize_native_path_display_str(path: &str) -> String {
 /// Returns an error when `file` is absolute, uses a Windows drive prefix,
 /// contains parent traversal, is empty, or cannot be represented as UTF-8.
 pub fn validated_repo_file_key(file: &Path) -> CoreResult<String> {
+    let key = validated_repo_node_key(file)?;
+    if key == "." {
+        return Err(CoreError::InvalidRepositoryPath {
+            path: file.to_path_buf(),
+            reason: "a file path is required",
+        });
+    }
+    Ok(key)
+}
+
+/// Normalize and validate a user-supplied path as a repository-relative node key.
+///
+/// Unlike [`validated_repo_file_key`], this accepts `.` for the repository root
+/// folder so purpose metadata can be set on either folders or files.
+///
+/// # Errors
+///
+/// Returns an error when `file` is absolute, uses a Windows drive prefix,
+/// contains parent traversal, is empty, or cannot be represented as UTF-8.
+pub fn validated_repo_node_key(file: &Path) -> CoreResult<String> {
     let raw = file
         .to_str()
         .ok_or_else(|| CoreError::NonUtf8Path {
             path: file.to_path_buf(),
         })?
         .replace('\\', "/");
+    if raw.trim().is_empty() {
+        return Err(CoreError::InvalidRepositoryPath {
+            path: file.to_path_buf(),
+            reason: "a path is required",
+        });
+    }
     if raw.starts_with('/') || raw.starts_with("//") || has_windows_drive_prefix(&raw) {
         return Err(CoreError::InvalidRepositoryPath {
             path: file.to_path_buf(),
@@ -284,10 +310,7 @@ pub fn validated_repo_file_key(file: &Path) -> CoreResult<String> {
         }
     }
     if parts.is_empty() {
-        return Err(CoreError::InvalidRepositoryPath {
-            path: file.to_path_buf(),
-            reason: "a file path is required",
-        });
+        return Ok(".".to_string());
     }
     Ok(parts.join("/"))
 }
@@ -356,7 +379,7 @@ pub fn normalized_extension(path: &Path) -> Option<String> {
 mod tests {
     use super::{
         normalize_native_path_display_str, normalize_repo_path_prefix, repo_path_to_native,
-        validated_repo_file_key,
+        validated_repo_file_key, validated_repo_node_key,
     };
     use std::io;
     use std::path::Path;
@@ -380,6 +403,25 @@ mod tests {
         assert!(validated_repo_file_key(Path::new("../secret.rs")).is_err());
         assert!(validated_repo_file_key(Path::new("C:/secret.rs")).is_err());
         assert!(validated_repo_file_key(Path::new("/secret.rs")).is_err());
+        assert!(validated_repo_file_key(Path::new(".")).is_err());
+    }
+
+    #[test]
+    fn validated_repo_node_key_accepts_root_and_relative_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        require_eq(&validated_repo_node_key(Path::new("."))?, ".")?;
+        require_eq(&validated_repo_node_key(Path::new("./src"))?, "src")?;
+        require_eq(
+            &validated_repo_node_key(Path::new("src\\main.rs"))?,
+            "src/main.rs",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn validated_repo_node_key_rejects_empty_paths() {
+        assert!(validated_repo_node_key(Path::new("")).is_err());
+        assert!(validated_repo_node_key(Path::new("   ")).is_err());
     }
 
     #[test]

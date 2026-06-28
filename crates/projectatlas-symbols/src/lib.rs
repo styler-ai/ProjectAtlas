@@ -82,12 +82,14 @@ fn is_vue_sfc(path: &str, language: Option<&str>) -> bool {
 
 /// Extract Vue SFC Composition API bindings with a deterministic structural adapter.
 fn extract_vue_sfc_graph(path: &str, language: Option<&str>, content: &str) -> SymbolGraph {
-    let mut graph = empty_graph(path, language, ParserKind::Structural);
+    let mut graph = extract_fallback_graph(path, language, content);
+    graph.parser = ParserKind::Structural;
+    let mut structural = empty_graph(path, language, ParserKind::Structural);
     for (line_index, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         if let Some(name) = vue_composition_binding_name(trimmed) {
             push_symbol(
-                &mut graph,
+                &mut structural,
                 &name,
                 SymbolKind::Value,
                 line_index + 1,
@@ -99,7 +101,7 @@ fn extract_vue_sfc_graph(path: &str, language: Option<&str>, content: &str) -> S
         }
         if is_fallback_import(trimmed) {
             push_relation(
-                &mut graph,
+                &mut structural,
                 "<module>",
                 trimmed,
                 RelationKind::Imports,
@@ -108,7 +110,51 @@ fn extract_vue_sfc_graph(path: &str, language: Option<&str>, content: &str) -> S
             );
         }
     }
+    merge_preferred_graph_entries(&mut graph, structural);
     graph
+}
+
+/// Merge preferred graph entries, replacing duplicates and appending within bounds.
+fn merge_preferred_graph_entries(graph: &mut SymbolGraph, preferred: SymbolGraph) {
+    for symbol in preferred.symbols {
+        if let Some(existing) = graph
+            .symbols
+            .iter()
+            .position(|existing| same_symbol_identity(existing, &symbol))
+        {
+            graph.symbols[existing] = symbol;
+        } else if graph.symbols.len() < MAX_SYMBOLS_PER_FILE {
+            graph.symbols.push(symbol);
+        }
+    }
+    for relation in preferred.relations {
+        if let Some(existing) = graph
+            .relations
+            .iter()
+            .position(|existing| same_relation_identity(existing, &relation))
+        {
+            graph.relations[existing] = relation;
+        } else if graph.relations.len() < MAX_RELATIONS_PER_FILE {
+            graph.relations.push(relation);
+        }
+    }
+}
+
+/// Return whether two symbols represent the same declaration.
+fn same_symbol_identity(left: &CodeSymbol, right: &CodeSymbol) -> bool {
+    left.name == right.name
+        && left.kind == right.kind
+        && left.line_start == right.line_start
+        && left.line_end == right.line_end
+        && left.parent == right.parent
+}
+
+/// Return whether two relations represent the same source edge.
+fn same_relation_identity(left: &SymbolRelation, right: &SymbolRelation) -> bool {
+    left.source_name == right.source_name
+        && left.target_name == right.target_name
+        && left.kind == right.kind
+        && left.line == right.line
 }
 
 /// Extract a Composition API binding name from a script setup row.
@@ -1607,7 +1653,7 @@ fn is_snippet_boundary(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_symbol_graph, specialized_languages};
+    use super::{MAX_SYMBOLS_PER_FILE, extract_symbol_graph, specialized_languages};
     use projectatlas_core::symbols::{ParserKind, RelationKind, SymbolKind};
 
     #[test]
@@ -1974,6 +2020,84 @@ const retryCount = ref(0);
             relation.kind == RelationKind::Imports
                 && relation.target_name.contains("computed")
                 && relation.parser == ParserKind::Structural
+        }));
+    }
+
+    #[test]
+    fn vue_sfc_preserves_fallback_declarations() {
+        let source = r#"
+<script lang="ts">
+export function submitOrder() {
+  return true;
+}
+
+class Store {
+}
+</script>
+<script setup lang="ts">
+import { ref } from "vue";
+const selected = ref(false);
+</script>
+"#;
+        let graph = extract_symbol_graph("src/CheckoutPanel.vue", Some("vue"), source);
+
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Value
+                && symbol.name == "selected"
+                && symbol.detail.as_deref() == Some("vue-composition-binding")
+                && symbol.parser == ParserKind::Structural
+        }));
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Function
+                && symbol.name == "submitOrder"
+                && symbol.detail.as_deref() == Some("fallback-js-function")
+                && symbol.parser == ParserKind::Fallback
+        }));
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Class
+                && symbol.name == "Store"
+                && symbol.detail.as_deref() == Some("fallback-class")
+                && symbol.parser == ParserKind::Fallback
+        }));
+    }
+
+    #[test]
+    fn vue_sfc_preserves_fallback_declarations_when_bindings_exceed_cap() {
+        let mut source = String::from(
+            r#"
+<script setup lang="ts">
+export function submitOrder() {
+  return true;
+}
+
+class Store {
+}
+"#,
+        );
+        for index in 0..(MAX_SYMBOLS_PER_FILE + 50) {
+            source.push_str("const value");
+            source.push_str(&index.to_string());
+            source.push_str(" = ref(false);\n");
+        }
+        source.push_str("</script>\n");
+
+        let graph = extract_symbol_graph("src/LargePanel.vue", Some("vue"), &source);
+
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Function
+                && symbol.name == "submitOrder"
+                && symbol.detail.as_deref() == Some("fallback-js-function")
+        }));
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Class
+                && symbol.name == "Store"
+                && symbol.detail.as_deref() == Some("fallback-class")
+        }));
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Value
+                && symbol.name == "value0"
+                && symbol.detail.as_deref() == Some("vue-composition-binding")
+                && symbol.parser == ParserKind::Structural
         }));
     }
 

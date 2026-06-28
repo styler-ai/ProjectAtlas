@@ -20,7 +20,9 @@ use projectatlas_core::toon::{
     encode_agent_payload, render_nodes, render_outline, render_overview, render_symbol_relations,
     render_symbols, render_token_overview,
 };
-use projectatlas_core::{NodeKind, PurposeSource, normalize_repo_path_prefix};
+use projectatlas_core::{
+    NodeKind, PurposeSource, normalize_repo_path_prefix, validated_repo_node_key,
+};
 use projectatlas_db::{AtlasStore, HealthFindingsPage, HealthQuery, HealthResolution};
 use projectatlas_service::{
     SymbolSliceSelector, build_file_summary, read_indexed_code_slice, read_symbol_slice,
@@ -349,6 +351,18 @@ impl ProjectAtlasMcpServer {
         }
     }
 
+    /// Validate an MCP purpose path as an indexed folder or file key.
+    fn validated_indexed_node_key(store: &AtlasStore, path: &str) -> Result<String, CliError> {
+        let node_key = validated_repo_node_key(std::path::Path::new(path))
+            .map_err(|source| CliError::InvalidInput(source.to_string()))?;
+        if store.load_node_by_path(&node_key)?.is_none() {
+            return Err(CliError::InvalidInput(format!(
+                "path {node_key:?} is not indexed in the MCP-bound project"
+            )));
+        }
+        Ok(node_key)
+    }
+
     /// Return a query parameter with a stable default.
     fn query_or_empty(query: Option<String>) -> String {
         query.unwrap_or_default()
@@ -612,7 +626,7 @@ impl ProjectAtlasMcpServer {
     /// Return deterministic structured file intelligence from the deep index.
     #[tool(
         name = "atlas_file_summary",
-        description = "Return structured TOON file intelligence: purpose state, observed summary, imports, symbols, line ranges, and calls."
+        description = "Return structured TOON file intelligence: file purpose, content summary, imports, symbols, line ranges, and calls."
     )]
     fn atlas_file_summary(&self, Parameters(params): Parameters<AtlasFileSummaryParams>) -> String {
         Self::as_mcp_text((|| {
@@ -996,10 +1010,11 @@ impl ProjectAtlasMcpServer {
     fn atlas_purpose_set(&self, Parameters(params): Parameters<AtlasPurposeSetParams>) -> String {
         Self::as_mcp_text((|| {
             let store = self.open_store()?;
-            store.set_purpose(&params.path, &params.purpose, PurposeSource::Agent)?;
+            let node_key = Self::validated_indexed_node_key(&store, &params.path)?;
+            store.set_purpose(&node_key, &params.purpose, PurposeSource::Agent)?;
             Ok(encode_agent_payload(&json!({
                 "purpose_set": {
-                    "path": params.path,
+                    "path": node_key,
                     "status": "approved"
                 }
             })))

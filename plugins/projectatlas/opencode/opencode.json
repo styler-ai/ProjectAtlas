@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "projectatlas": {
+      "type": "local",
+      "command": [
+        "projectatlas",
+        "--require-version",
+        "0.3.5",
+        "--db",
+        ".projectatlas/projectatlas.db",
+        "mcp"
+      ],
+      "enabled": true
+    }
+  }
+}

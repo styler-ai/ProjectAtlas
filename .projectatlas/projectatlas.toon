@@ -1,9 +1,9 @@
 version: 1
-generated_at: unix:1782653930
-file_hash: "021f1ce56460f6b333de0b501d8e9cd2099a38a4c3bb723cd8339980a5dcd058"
-folder_hash: "faf52988def9313cf61d50295ffd2c927ba6cd42a668160012b6c9852c49db5f"
+generated_at: unix:1782662719
+file_hash: "e1f7b2cf1f927297ecc62f68a7b63559805a7a503c8e4d2bd1bcc2b9e10cb4fa"
+folder_hash: "f58d1066150efc05695c367c84afd774ddae91cab5781359a16993942b1b5e6f"
 root: .
-overview: tracked_source_files=91 tracked_nonsource_files=34 tracked_files_total=125 tracked_folders=54 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
+overview: tracked_source_files=93 tracked_nonsource_files=34 tracked_files_total=127 tracked_folders=56 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
 source_extensions[]:
   - .astro
   - .bash
@@ -138,7 +138,7 @@ exclude_dir_names[]:
   - node_modules
   - target
 exclude_path_prefixes[]:
-folders[54]{path,summary,source}:
+folders[56]{path,summary,source}:
   .,ProjectAtlas repository root.,database
   .agents,Agent marketplace metadata for ProjectAtlas.,database
   .agents/plugins,Codex plugin marketplace catalog for ProjectAtlas.,database
@@ -185,7 +185,9 @@ folders[54]{path,summary,source}:
   fixtures/languages/zig,Zig fixture folder for parser and summary baseline coverage.,database
   plugins,Installable Codex plugins for ProjectAtlas.,database
   plugins/projectatlas,ProjectAtlas Codex plugin package.,database
+  plugins/projectatlas/.claude-plugin,Claude Code plugin metadata folder for packaging ProjectAtlas harness integration.,database
   plugins/projectatlas/.codex-plugin,ProjectAtlas plugin manifest metadata.,database
+  plugins/projectatlas/opencode,OpenCode integration templates for registering ProjectAtlas as a local MCP server.,database
   plugins/projectatlas/scripts,Runtime installer scripts for the ProjectAtlas plugin.,database
   plugins/projectatlas/skills,ProjectAtlas plugin skills.,database
   plugins/projectatlas/skills/projectatlas,Codex skill for ProjectAtlas workflows.,database
@@ -193,7 +195,7 @@ folders[54]{path,summary,source}:
   skills/claude,Claude guidance for ProjectAtlas usage.,database
   skills/codex,Codex guidance for ProjectAtlas usage.,database
   templates,Reusable agent templates and snippets.,database
-files[96]{path,summary,source}:
+files[98]{path,summary,source}:
   .agents/plugins/marketplace.json,Codex plugin marketplace catalog for ProjectAtlas,database
   .gitattributes,Line-ending policy for ProjectAtlas repository fixtures,nonsource
   .githooks/commit-msg,Git hook to enforce issue references in commits,nonsource
@@ -282,8 +284,10 @@ files[96]{path,summary,source}:
   fixtures/languages/vue/ProductPanel.vue,Provide a Vue Composition API fixture for verifying binding and import summaries.,database
   fixtures/languages/yaml/workflow.yml,Exercise workflow trigger and job summaries,database
   fixtures/languages/zig/runner.zig,Exercise Zig type and function summary extraction.,database
+  plugins/projectatlas/.claude-plugin/plugin.json,Claude Code plugin manifest declaring ProjectAtlas metadata for Claude Code installation.,database
   plugins/projectatlas/.codex-plugin/plugin.json,ProjectAtlas Codex plugin manifest,database
   plugins/projectatlas/.mcp.json,Fallback MCP server configuration for the ProjectAtlas Codex plugin.,database
+  plugins/projectatlas/opencode/opencode.json,OpenCode config template registering ProjectAtlas as a local MCP server.,database
   plugins/projectatlas/scripts/install-runtime.ps1,Install and verify the ProjectAtlas native runtime on Windows.,database
   plugins/projectatlas/scripts/install-runtime.sh,POSIX installer for the native ProjectAtlas runtime.,database
   plugins/projectatlas/skills/projectatlas/SKILL.md,ProjectAtlas installable Codex skill,database
@@ -339,7 +343,9 @@ folder_tree[]:
   - "    zig/ - Zig fixture folder for parser and summary baseline coverage."
   - plugins/ - Installable Codex plugins for ProjectAtlas.
   - "  projectatlas/ - ProjectAtlas Codex plugin package."
+  - "    .claude-plugin/ - Claude Code plugin metadata folder for packaging ProjectAtlas harness integration."
   - "    .codex-plugin/ - ProjectAtlas plugin manifest metadata."
+  - "    opencode/ - OpenCode integration templates for registering ProjectAtlas as a local MCP server."
   - "    scripts/ - Runtime installer scripts for the ProjectAtlas plugin."
   - "    skills/ - ProjectAtlas plugin skills."
   - "      projectatlas/ - Codex skill for ProjectAtlas workflows."

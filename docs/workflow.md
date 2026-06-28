@@ -21,6 +21,10 @@ unavailable. Ordinary file edits use partial SQLite/symbol refresh; directory/ro
 full scan for correctness. For bounded agent refreshes after edits, use `projectatlas watch --once` or MCP
 `atlas_watch_once`.
 
+Exact line slices validate the file through the atlas database, then read the current file from disk. Symbol slices
+use the stored symbol ranges, then read current disk content, so keep the watcher running during active edits if
+symbol-level slices matter.
+
 ## One-command local verification
 
 Run the full local check suite with Cargo:
