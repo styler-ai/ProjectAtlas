@@ -1500,7 +1500,7 @@ mod tests {
     use projectatlas_fs::ScanOptions;
     use rmcp::model::{CallToolRequestParams, ClientInfo};
     use rmcp::{ClientHandler, ServiceExt};
-    use serde_json::{Map, Value, json};
+    use serde_json::{Map, json};
     use std::error::Error;
     use std::fs;
     use std::io;
@@ -1926,7 +1926,7 @@ mod tests {
             repo.join("src").join("main.rs"),
             "fn main() {\n    helper();\n}\n\nfn helper() {}\n",
         )?;
-        let db = temp.path().join("projectatlas.db");
+        let db = repo.join(".projectatlas").join("projectatlas.db");
         let server = ProjectAtlasMcpServer::new(db, None, "mcp-test".to_string());
         let (server_transport, client_transport) = tokio::io::duplex(16_384);
         let server_handle = tokio::spawn(async move {
@@ -1947,14 +1947,9 @@ mod tests {
             }
         }
 
-        let mut scan_args = Map::new();
-        scan_args.insert(
-            "path".to_string(),
-            Value::String(repo.to_string_lossy().to_string()),
-        );
         let scan = client
             .peer()
-            .call_tool(CallToolRequestParams::new("atlas_scan").with_arguments(scan_args))
+            .call_tool(CallToolRequestParams::new("atlas_scan").with_arguments(Map::new()))
             .await?;
         let scan_text = scan
             .content

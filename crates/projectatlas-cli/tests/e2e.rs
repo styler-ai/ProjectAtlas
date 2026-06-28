@@ -38,6 +38,88 @@ fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn E
 }
 
 #[test]
+fn bare_relative_projectatlas_config_path_drives_scan_map_and_lint() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir_all(repo.join(".projectatlas"))?;
+    fs::create_dir(repo.join("src"))?;
+    fs::write(
+        repo.join(".projectatlas").join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\"]\n",
+    )?;
+    fs::write(
+        repo.join(".projectatlas")
+            .join("projectatlas-nonsource-files.toon"),
+        "nonsource_files[]:\n",
+    )?;
+    fs::write(
+        repo.join(".purpose"),
+        "Repository root for bare config path regression tests\n",
+    )?;
+    fs::write(
+        repo.join("src").join(".purpose"),
+        "Rust source folder for bare config path regression tests\n",
+    )?;
+    fs::write(
+        repo.join("src").join("main.rs"),
+        "// Purpose: Rust entry point for bare config path regression tests.\nfn main() {}\n",
+    )?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args([
+            "--db",
+            ".projectatlas/projectatlas.db",
+            "--config",
+            ".projectatlas/config.toml",
+            "scan",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("files: 1"))
+        .stderr(predicate::str::contains("io error for \"\"").not());
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args([
+            "--format",
+            "json",
+            "--db",
+            ".projectatlas/projectatlas.db",
+            "overview",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"files\": 1"));
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--config", ".projectatlas/config.toml", "map", "--force"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("io error for \"\"").not());
+    let map = fs::read_to_string(repo.join(".projectatlas").join("projectatlas.toon"))?;
+    if !map.contains("src/main.rs") {
+        return Err(io::Error::other("bare-config map omitted src/main.rs").into());
+    }
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args([
+            "--config",
+            ".projectatlas/config.toml",
+            "lint",
+            "--strict-folders",
+            "--report-untracked",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("io error for \"\"").not());
+    Ok(())
+}
+
+#[test]
 fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("repo");
@@ -54,6 +136,10 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
     let db = temp.path().join("projectatlas.db");
     let outside_cwd = temp.path().join("outside-cwd");
     fs::create_dir(&outside_cwd)?;
+    let rogue_repo = temp.path().join("rogue-repo");
+    fs::create_dir(&rogue_repo)?;
+    fs::create_dir(rogue_repo.join("rogue"))?;
+    fs::write(rogue_repo.join("rogue").join("rogue.rs"), "fn rogue() {}\n")?;
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -292,18 +378,25 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
                 .map(ToString::to_string)
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let outside_scan_message = format!(
+        r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"atlas_scan","arguments":{{"path":{}}}}}}}"#,
+        serde_json::to_string(&rogue_repo.to_string_lossy())?
+    );
+    let messages = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_scan","arguments":{}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_scan","arguments":{"path":"."}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_watch_once","arguments":{"path":"."}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"atlas_files","arguments":{"file_pattern":"*.rs","limit":1}}}"#.to_string(),
+        outside_scan_message,
+    ];
+    let message_refs = messages.iter().map(String::as_str).collect::<Vec<_>>();
     let mcp_stdout = run_mcp_stdio(
         std::path::Path::new(command),
         &outside_cwd,
         &launch_args,
-        &[
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#,
-            r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_scan","arguments":{}}}"#,
-            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_scan","arguments":{"path":"."}}}"#,
-            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_watch_once","arguments":{"path":"."}}}"#,
-            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"atlas_files","arguments":{"file_pattern":"*.rs","limit":1}}}"#,
-        ],
+        &message_refs,
     )?;
     if !mcp_stdout.contains("scan:")
         || !mcp_stdout.contains("src/main.rs")
@@ -314,6 +407,19 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         ))
         .into());
     }
+    if !mcp_stdout.contains("outside the MCP-bound project root") {
+        return Err(io::Error::other(format!(
+            "generated mcp config allowed an outside repository path: {mcp_stdout}"
+        ))
+        .into());
+    }
+    Command::cargo_bin("projectatlas")?
+        .arg("--db")
+        .arg(&db)
+        .args(["files", "--file-pattern", "rogue/*.rs"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rogue/rogue.rs").not());
 
     Command::cargo_bin("projectatlas")?
         .arg("--db")

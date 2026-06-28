@@ -630,15 +630,13 @@ fn normalize_config(
 ) -> AtlasMapResult<AtlasMapConfig> {
     let project = raw.project.unwrap_or_default();
     let root = match project.root {
-        Some(root) if root.trim() == "." && config_path_is_projectatlas(config_path) => config_path
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .map_or_else(|| cwd.to_path_buf(), Path::to_path_buf),
+        Some(root) if root.trim() == "." && config_path_is_projectatlas(config_path) => {
+            project_root_for_projectatlas_config(config_path, cwd)
+        }
         Some(root) => absolutize(base_dir, &root),
-        None if config_path_is_projectatlas(config_path) => config_path
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .map_or_else(|| cwd.to_path_buf(), Path::to_path_buf),
+        None if config_path_is_projectatlas(config_path) => {
+            project_root_for_projectatlas_config(config_path, cwd)
+        }
         None => cwd.to_path_buf(),
     };
     let scan = raw.scan.unwrap_or_default();
@@ -713,6 +711,18 @@ fn config_path_is_projectatlas(config_path: Option<&Path>) -> bool {
         .and_then(Path::parent)
         .and_then(Path::file_name)
         .is_some_and(|name| name == ".projectatlas")
+}
+
+/// Return the project root implied by `.projectatlas/config.toml`.
+fn project_root_for_projectatlas_config(config_path: Option<&Path>, cwd: &Path) -> PathBuf {
+    let Some(root) = config_path
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .filter(|path| !path.as_os_str().is_empty() && *path != Path::new("."))
+    else {
+        return cwd.to_path_buf();
+    };
+    root.to_path_buf()
 }
 
 /// Convert a possibly relative path to an absolute path.
@@ -2158,7 +2168,8 @@ mod tests {
     use super::{
         AtlasMapConfig, DEFAULT_TEXT_INDEX_MAX_BYTES, MapRecord,
         append_existing_map_purpose_records, append_record_rows, normalize_repo_string,
-        seed_purpose_files, split_record_cells, stable_generated_at, toon_cell,
+        project_root_for_projectatlas_config, seed_purpose_files, split_record_cells,
+        stable_generated_at, toon_cell,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -2252,6 +2263,25 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn bare_projectatlas_config_path_resolves_root_to_cwd() {
+        let cwd = std::path::Path::new("repo");
+        assert_eq!(
+            project_root_for_projectatlas_config(
+                Some(std::path::Path::new(".projectatlas/config.toml")),
+                cwd,
+            ),
+            cwd
+        );
+        assert_eq!(
+            project_root_for_projectatlas_config(
+                Some(std::path::Path::new("./.projectatlas/config.toml")),
+                cwd,
+            ),
+            cwd
+        );
     }
 
     #[test]
