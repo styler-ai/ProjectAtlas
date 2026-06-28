@@ -63,10 +63,11 @@
   <text x="758" y="195" class="tiny">symbol slice</text>
   <text x="758" y="214" class="tiny">then edit/test</text>
 
-  <rect x="266" y="270" width="426" height="54" class="box gray" />
-  <text x="286" y="300" class="step">watch keeps the atlas current while files change</text>
-  <text x="286" y="318" class="small">watch / watch --once refreshes text, summaries, symbols, purposes, and health signals.</text>
+  <rect x="190" y="262" width="580" height="72" class="box gray" />
+  <text x="210" y="291" class="step">watch keeps the atlas current while files change</text>
+  <text x="210" y="312" class="small">watch / watch --once refreshes text, summaries, symbols,</text>
+  <text x="210" y="328" class="small">purposes, and health signals while you edit.</text>
 
-  <path d="M 822 236 C 822 306 724 330 694 302" class="loop" />
-  <path d="M 264 302 C 146 302 104 258 104 232" class="loop" />
+  <path d="M 822 236 C 822 292 796 306 778 306" class="loop" />
+  <path d="M 182 306 C 146 304 104 258 104 232" class="loop" />
 </svg>

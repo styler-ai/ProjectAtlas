@@ -1,7 +1,7 @@
 # ProjectAtlas
 
 <p align="center">
-  <img src="docs/assets/projectatlas-brand.png" alt="ProjectAtlas brand mark showing an atlas globe and navigation paths" width="420">
+  <img src="docs/assets/projectatlas-mascot.png" alt="ProjectAtlas mascot holding a repository map labeled src, docs, tests, and issues" width="720">
 </p>
 
 <p align="center">
