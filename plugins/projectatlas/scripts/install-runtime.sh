@@ -6,7 +6,7 @@ projectatlas_version=${PROJECTATLAS_VERSION:-v0.3.0}
 release_base_url=${PROJECTATLAS_RELEASE_BASE_URL:-https://github.com/styler-ai/ProjectAtlas/releases/download}
 
 if [ "${1:-}" ]; then
-  project_root=$1
+  project_root=$(cd "$1" && pwd -P)
 else
   project_root=$(pwd -P)
 fi
@@ -29,10 +29,11 @@ find_projectatlas() {
 
 is_projectatlas3() {
   candidate=$1
-  help_text=$("$candidate" --help 2>/dev/null || true)
-  case "$help_text" in
-    *"ProjectAtlas 3 repository intelligence engine"*"mcp-config"*)
-      return 0
+  runtime_info=$("$candidate" --format json runtime-info 2>/dev/null || true)
+  major_version=$(printf '%s\n' "$runtime_info" | sed -n 's/.*"major_version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+  case "$runtime_info" in
+    *'"project": "ProjectAtlas"'*'"mcp"'*'"text_format": "TOON"'*)
+      [ "${major_version:-0}" -ge 3 ] 2>/dev/null
       ;;
     *)
       return 1
@@ -109,13 +110,17 @@ if [ -z "$projectatlas_bin" ]; then
   exit 1
 fi
 
-"$projectatlas_bin" --help >/dev/null
+"$projectatlas_bin" --format json runtime-info >/dev/null
 
 atlas_dir="$project_root/.projectatlas"
 mkdir -p "$atlas_dir"
 mcp_config_path="$atlas_dir/projectatlas.mcp.json"
-if [ -f "$atlas_dir/config.toml" ]; then
-  "$projectatlas_bin" --format json --db "$atlas_dir/projectatlas.db" --config "$atlas_dir/config.toml" mcp-config > "$mcp_config_path"
+flat_config="$project_root/projectatlas.toml"
+project_config="$atlas_dir/config.toml"
+if [ -f "$project_config" ]; then
+  "$projectatlas_bin" --format json --db "$atlas_dir/projectatlas.db" --config "$project_config" mcp-config > "$mcp_config_path"
+elif [ -f "$flat_config" ]; then
+  "$projectatlas_bin" --format json --db "$atlas_dir/projectatlas.db" --config "$flat_config" mcp-config > "$mcp_config_path"
 else
   "$projectatlas_bin" --format json --db "$atlas_dir/projectatlas.db" mcp-config > "$mcp_config_path"
 fi

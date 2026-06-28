@@ -30,11 +30,21 @@ function Test-ProjectAtlasRuntime {
     if (-not $FilePath -or -not (Test-Path -LiteralPath $FilePath)) {
         return $false
     }
-    $help = & $FilePath --help 2>$null | Out-String
-    if ($LASTEXITCODE -ne 0) {
+    try {
+        $runtimeJson = & $FilePath --format json runtime-info 2>$null | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            return $false
+        }
+        $payload = $runtimeJson | ConvertFrom-Json
+        $runtime = if ($payload.runtime) { $payload.runtime } else { $payload }
+        return $runtime.project -eq "ProjectAtlas" `
+            -and [int]$runtime.major_version -ge 3 `
+            -and @($runtime.capabilities) -contains "mcp" `
+            -and $runtime.text_format -eq "TOON"
+    }
+    catch {
         return $false
     }
-    return $help.Contains("ProjectAtlas 3 repository intelligence engine") -and $help.Contains("mcp-config")
 }
 
 function Split-PathList {
@@ -177,16 +187,20 @@ if (-not $projectAtlas) {
 }
 
 Set-ProjectAtlasPathPrecedence $projectAtlas
-Invoke-Checked $projectAtlas @("--help") | Out-Null
+Invoke-Checked $projectAtlas @("--format", "json", "runtime-info") | Out-Null
 
 $atlasDir = Join-Path $ProjectRoot ".projectatlas"
 New-Item -ItemType Directory -Force -Path $atlasDir | Out-Null
 $dbPath = Join-Path $atlasDir "projectatlas.db"
-$configPath = Join-Path $atlasDir "config.toml"
+$projectConfigPath = Join-Path $atlasDir "config.toml"
+$flatConfigPath = Join-Path $ProjectRoot "projectatlas.toml"
 $mcpConfigPath = Join-Path $atlasDir "projectatlas.mcp.json"
 $mcpArgs = @("--format", "json", "--db", $dbPath)
-if (Test-Path -LiteralPath $configPath) {
-    $mcpArgs += @("--config", $configPath)
+if (Test-Path -LiteralPath $projectConfigPath) {
+    $mcpArgs += @("--config", $projectConfigPath)
+}
+elseif (Test-Path -LiteralPath $flatConfigPath) {
+    $mcpArgs += @("--config", $flatConfigPath)
 }
 $mcpArgs += @("mcp-config")
 $mcpConfig = & $projectAtlas @mcpArgs

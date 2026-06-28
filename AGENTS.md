@@ -25,7 +25,8 @@
 10. Run `projectatlas health-check` for cleanup/refactor work.
 11. Run `projectatlas lint --strict-folders --report-untracked`.
 12. Only then use language-server lookups or broad file reads on selected files.
-13. Run `projectatlas token` when asked for token savings.
+13. Run `projectatlas runtime-info` when installer/runtime identity is unclear.
+14. Run `projectatlas token` when asked for token savings.
 
 ## Rust/Dependency Discipline
 - Prefer official or canonical Rust crates and standard implementations for protocols, formats, parsers, storage, watchers, token tooling, and platform integration before writing custom code.
