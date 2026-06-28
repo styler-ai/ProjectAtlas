@@ -213,3 +213,52 @@ jobs:
           gh release create "$RELEASE_VERSION" release-assets/* \
             --title "$RELEASE_VERSION" \
             --generate-notes
+
+  installer-smoke-unix:
+    name: installer smoke ${{ matrix.suffix }}
+    needs: publish
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            suffix: x86_64-unknown-linux-gnu
+          - os: macos-15-intel
+            suffix: x86_64-apple-darwin
+          - os: macos-14
+            suffix: aarch64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install release runtime through plugin
+        env:
+          PROJECTATLAS_RELEASE_BINARY_ONLY: "1"
+        run: |
+          project_root="$RUNNER_TEMP/projectatlas-installer-smoke"
+          mkdir -p "$project_root"
+          PROJECTATLAS_VERSION="$RELEASE_VERSION" ./plugins/projectatlas/scripts/install-runtime.sh "$project_root"
+          "$HOME/.local/bin/projectatlas" --format json runtime-info
+          test -f "$project_root/.projectatlas/projectatlas.mcp.json"
+
+  installer-smoke-windows:
+    name: installer smoke x86_64-pc-windows-msvc
+    needs: publish
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install release runtime through plugin
+        shell: pwsh
+        run: |
+          $projectRoot = Join-Path $env:RUNNER_TEMP "projectatlas-installer-smoke"
+          New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
+          .\plugins\projectatlas\scripts\install-runtime.ps1 -ProjectRoot $projectRoot -ProjectAtlasVersion $env:RELEASE_VERSION -ReleaseBinaryOnly
+          $runtime = Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin\projectatlas.exe"
+          & $runtime --format json runtime-info
+          if (-not (Test-Path -LiteralPath (Join-Path $projectRoot ".projectatlas\projectatlas.mcp.json"))) {
+            Write-Error "Project-local MCP config was not generated."
+            exit 1
+          }

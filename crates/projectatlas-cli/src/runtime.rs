@@ -16,7 +16,9 @@ use projectatlas_core::{
 };
 use projectatlas_db::{AtlasStore, IndexedFileText};
 use projectatlas_fs::{ScanOptions, scan_path, scan_repo};
-use projectatlas_service::{FileSummaryReport, file_path_matches_glob, file_summary_baseline_text};
+use projectatlas_service::{
+    FileSummaryReport, file_path_matches_glob, file_summary_baseline_text, load_ranked_file_nodes,
+};
 use projectatlas_symbols::extract_symbol_graph;
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
@@ -334,30 +336,13 @@ pub(crate) fn ranked_file_nodes(
     file_pattern: Option<&str>,
     limit: usize,
 ) -> Result<Vec<projectatlas_core::IndexedNode>, CliError> {
-    validate_file_pattern(file_pattern)?;
-    if file_pattern.is_none_or(|pattern| pattern.trim().is_empty() || pattern.trim() == "*") {
-        return Ok(store.load_ranked_nodes(query, NodeKind::File, folder, limit.max(1), 0)?);
-    }
-    let target = limit.max(1);
-    let batch_size = target.saturating_mul(20).clamp(50, 500);
-    let mut offset = 0usize;
-    let mut selected = Vec::new();
-    loop {
-        let batch = store.load_ranked_nodes(query, NodeKind::File, folder, batch_size, offset)?;
-        if batch.is_empty() {
-            break;
-        }
-        offset = offset.saturating_add(batch.len());
-        for node in batch {
-            if file_path_matches_glob(&node.node.path, file_pattern)? {
-                selected.push(node);
-                if selected.len() >= target {
-                    return Ok(selected);
-                }
-            }
-        }
-    }
-    Ok(selected)
+    Ok(load_ranked_file_nodes(
+        store,
+        query,
+        folder,
+        file_pattern,
+        limit,
+    )?)
 }
 
 /// Estimate source tokens for repository paths referenced by symbols/relations.
@@ -692,7 +677,9 @@ pub(crate) fn settings_index_stats(store: &AtlasStore) -> Result<SettingsIndexSt
         .unresolved_health_findings(&store.resolved_health_ids()?)?
         .len();
     Ok(SettingsIndexStats {
-        project_root: store.project_root()?,
+        project_root: store
+            .project_root()?
+            .map(|path| normalize_display_path_string(&path)),
         files: overview.files,
         folders: overview.folders,
         missing_purposes: overview.missing_purposes,
@@ -828,7 +815,36 @@ pub(crate) fn mcp_config_path_for_db(db: &Path) -> PathBuf {
 
 /// Normalize a path for JSON/TOON diagnostics.
 pub(crate) fn normalize_display_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    normalize_display_path_string(&path.to_string_lossy())
+}
+
+/// Normalize a native path string for JSON/TOON diagnostics.
+fn normalize_display_path_string(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
+        format!("//{rest}")
+    } else if let Some(rest) = normalized.strip_prefix("//?/") {
+        rest.to_string()
+    } else {
+        normalized
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_display_path_string;
+
+    #[test]
+    fn display_paths_remove_windows_extended_prefixes() {
+        assert_eq!(
+            normalize_display_path_string(r"\\?\C:\repo\.projectatlas\projectatlas.db"),
+            "C:/repo/.projectatlas/projectatlas.db"
+        );
+        assert_eq!(
+            normalize_display_path_string(r"\\?\UNC\server\share\repo"),
+            "//server/share/repo"
+        );
+    }
 }
 
 /// Build a watcher status report from a lightweight runtime probe.
@@ -1262,7 +1278,10 @@ pub(crate) fn primary_symbol_names(graph: &SymbolGraph, limit: usize) -> Vec<Str
         .filter(|symbol| {
             !matches!(
                 symbol.kind,
-                SymbolKind::Import | SymbolKind::Dependency | SymbolKind::Unknown
+                SymbolKind::Import
+                    | SymbolKind::Dependency
+                    | SymbolKind::Module
+                    | SymbolKind::Unknown
             )
         })
         .map(|symbol| symbol.name.clone())

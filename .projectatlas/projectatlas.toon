@@ -1,9 +1,9 @@
 version: 1
-generated_at: unix:1782608863
-file_hash: "1b4513213ec2c5f3ff94261cf552a70bdaf63ecf487d622190f7ea2788e1d27f"
+generated_at: unix:1782619039
+file_hash: "17bbb86444998e118e9acffa4a48456c5e2342e7234f1bf4866a49fc76781817"
 folder_hash: "4c8f50579814810aa9fbe5b6eb19617979fe46fd802e42b713ad302cdece2e37"
 root: .
-overview: tracked_source_files=62 tracked_nonsource_files=42 tracked_files_total=104 tracked_folders=36 source_extensions=121 exclude_dir_names=9 exclude_path_prefixes=0
+overview: tracked_source_files=61 tracked_nonsource_files=42 tracked_files_total=103 tracked_folders=36 source_extensions=121 exclude_dir_names=9 exclude_path_prefixes=0
 source_extensions[]:
   - .astro
   - .bash
@@ -174,7 +174,7 @@ folders[36]{path,summary,source}:
   skills/claude,Claude guidance for ProjectAtlas usage.,database
   skills/codex,Codex guidance for ProjectAtlas usage.,database
   templates,Reusable agent templates and snippets.,database
-files[66]{path,summary,source}:
+files[65]{path,summary,source}:
   .agents/plugins/marketplace.json,Codex plugin marketplace catalog for ProjectAtlas,database
   .codex/rules/memory/activeContext.md,ProjectAtlas active context,database
   .codex/rules/memory/productContext.md,ProjectAtlas product context,database
@@ -210,9 +210,8 @@ files[66]{path,summary,source}:
   crates/projectatlas-core/Cargo.toml,Core Rust crate manifest for ProjectAtlas 3,database
   crates/projectatlas-core/src/health.rs,Detect structural health issues in `ProjectAtlas` indexes.,database
   crates/projectatlas-core/src/language.rs,Detect file language families from extensions.,database
-  crates/projectatlas-core/src/lib.rs,Define `ProjectAtlas` 3 core domain models and query logic.,database
+  crates/projectatlas-core/src/lib.rs,Define `ProjectAtlas` 3 core domain models and shared helpers.,database
   crates/projectatlas-core/src/outline.rs,Build compressed file outlines for agent context.,database
-  crates/projectatlas-core/src/query.rs,Rank `ProjectAtlas` index nodes for progressive context queries.,database
   crates/projectatlas-core/src/symbols.rs,Define `ProjectAtlas` symbol graph domain types.,database
   crates/projectatlas-core/src/telemetry.rs,Track `ProjectAtlas` token savings telemetry.,database
   crates/projectatlas-core/src/toon.rs,Render `ProjectAtlas` responses with the TOON standard encoder.,database

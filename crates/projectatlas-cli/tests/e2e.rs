@@ -382,6 +382,174 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn large_repository_agent_funnel_stays_bounded() -> Result<(), Box<dyn Error>> {
+    const MODULES: usize = 24;
+    const FILES_PER_MODULE: usize = 24;
+    const TOTAL_FILES: usize = MODULES * FILES_PER_MODULE;
+    const TARGET_MODULE: usize = 17;
+    const TARGET_FILE: usize = 13;
+    const TARGET_PATH: &str = "src/module_17/file_13.rs";
+    const SCAN_TIMEOUT_SECONDS: u64 = 60;
+
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("large-repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir(repo.join("src"))?;
+    for module in 0..MODULES {
+        let module_dir = repo.join("src").join(format!("module_{module:02}"));
+        fs::create_dir(&module_dir)?;
+        for file in 0..FILES_PER_MODULE {
+            let mut source = String::from("//! Generated large repository fixture.\n\n");
+            writeln!(&mut source, "pub struct Module{module:02}File{file:02};\n")?;
+            writeln!(&mut source, "impl Module{module:02}File{file:02} {{")?;
+            writeln!(
+                &mut source,
+                "    pub fn run(&self) -> usize {{ helper_{module:02}_{file:02}() }}"
+            )?;
+            writeln!(&mut source, "}}\n")?;
+            writeln!(
+                &mut source,
+                "pub fn helper_{module:02}_{file:02}() -> usize {{ {} }}",
+                module + file
+            )?;
+            if module == TARGET_MODULE && file == TARGET_FILE {
+                writeln!(
+                    &mut source,
+                    "pub fn target_large_repo_marker() -> usize {{ helper_{module:02}_{file:02}() }}"
+                )?;
+            }
+            fs::write(module_dir.join(format!("file_{file:02}.rs")), source)?;
+        }
+    }
+    let db = temp.path().join("large-projectatlas.db");
+
+    let scan_started = Instant::now();
+    let raw_scan = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .arg("scan")
+        .arg(&repo)
+        .output()?;
+    if !raw_scan.status.success() {
+        return Err(io::Error::other(format!(
+            "large repo scan failed: {}",
+            String::from_utf8_lossy(&raw_scan.stderr)
+        ))
+        .into());
+    }
+    if scan_started.elapsed() > Duration::from_secs(SCAN_TIMEOUT_SECONDS) {
+        return Err(io::Error::other(format!(
+            "large repo scan exceeded 60s: {:?}",
+            scan_started.elapsed()
+        ))
+        .into());
+    }
+    let scan_json: Value = serde_json::from_slice(&raw_scan.stdout)?;
+    require_json_usize_at_least(&scan_json, &["overview", "files"], TOTAL_FILES)?;
+    require_json_usize_at_least(&scan_json, &["symbols", "symbols"], TOTAL_FILES)?;
+    require_json_usize_at_least(&scan_json, &["symbols", "summaries"], TOTAL_FILES)?;
+
+    let files_started = Instant::now();
+    let raw_files = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "files",
+            "target_large_repo_marker",
+            "--file-pattern",
+            "*.rs",
+            "--limit",
+            "5",
+        ])
+        .output()?;
+    if !raw_files.status.success() {
+        return Err(io::Error::other("large repo files command failed").into());
+    }
+    if files_started.elapsed() > Duration::from_secs(15) {
+        return Err(io::Error::other(format!(
+            "large repo files query exceeded 15s: {:?}",
+            files_started.elapsed()
+        ))
+        .into());
+    }
+    let files_text = String::from_utf8(raw_files.stdout)?;
+    if !files_text.contains(TARGET_PATH) {
+        return Err(io::Error::other(format!(
+            "large repo files query did not find {TARGET_PATH}: {files_text}"
+        ))
+        .into());
+    }
+
+    let summary_started = Instant::now();
+    let raw_summary = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["summary", TARGET_PATH, "--limit", "10"])
+        .output()?;
+    if !raw_summary.status.success() {
+        return Err(io::Error::other("large repo summary command failed").into());
+    }
+    if summary_started.elapsed() > Duration::from_secs(15) {
+        return Err(io::Error::other(format!(
+            "large repo summary exceeded 15s: {:?}",
+            summary_started.elapsed()
+        ))
+        .into());
+    }
+    let summary_json: Value = serde_json::from_slice(&raw_summary.stdout)?;
+    require_json_string(&summary_json, &["file_path"], TARGET_PATH)?;
+    require_json_usize_at_least(&summary_json, &["symbol_count"], 4)?;
+    require_json_usize_at_least(&summary_json, &["total_methods"], 1)?;
+
+    let raw_search = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "search",
+            "target_large_repo_marker",
+            "--file-pattern",
+            "src/module_17/*.rs",
+            "--limit",
+            "5",
+        ])
+        .output()?;
+    if !raw_search.status.success() {
+        return Err(io::Error::other("large repo search command failed").into());
+    }
+    let search_json: Value = serde_json::from_slice(&raw_search.stdout)?;
+    require_json_usize(&search_json, &["returned"], 1)?;
+    require_json_string(&search_json, &["results", "0", "path"], TARGET_PATH)?;
+    require_json_bool(&search_json, &["total_is_complete"], true)?;
+
+    let raw_token = Command::cargo_bin("projectatlas")?
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .arg("token")
+        .output()?;
+    if !raw_token.status.success() {
+        return Err(io::Error::other("large repo token command failed").into());
+    }
+    let token_json: Value = serde_json::from_slice(&raw_token.stdout)?;
+    require_json_usize_at_least(&token_json, &["calls"], 3)?;
+    require_json_i64_greater_than(&token_json, &["estimated_saved"], 0)?;
+    Ok(())
+}
+
+#[test]
 fn symbols_watch_and_legacy_cleanup_flow() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("repo");

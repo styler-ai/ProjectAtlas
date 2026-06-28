@@ -1,9 +1,8 @@
-//! Purpose: Define `ProjectAtlas` 3 core domain models and query logic.
+//! Purpose: Define `ProjectAtlas` 3 core domain models and shared helpers.
 
 pub mod health;
 pub mod language;
 pub mod outline;
-pub mod query;
 pub mod symbols;
 pub mod telemetry;
 pub mod toon;

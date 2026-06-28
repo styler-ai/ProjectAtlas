@@ -130,6 +130,8 @@ Initial toolchain choices:
 - `tracing` later for structured diagnostics
 - `notify` for event-backed watcher mode, with portable polling as fallback
 - tree-sitter crates for specialized symbol parsing
+- the official `toml` crate for line-aware Cargo manifest indexing inside
+  the content-based symbol extractor
 
 Alternatives considered:
 
@@ -140,6 +142,12 @@ Alternatives considered:
 - Tantivy only: useful for search, but not a full relational metadata store.
 - External server database: too heavy for local agent tooling and CI.
 - In-memory only: fastest, but loses durable purpose and token-savings state.
+- `cargo_metadata` for manifest indexing: canonical for whole-workspace Cargo
+  graphs, but it shells through Cargo against filesystem manifests and does not
+  provide the content-mode, line-level dependency symbol rows ProjectAtlas needs
+  while scanning arbitrary indexed files. ProjectAtlas should keep using
+  canonical TOML parsing for file summaries and can add `cargo_metadata` later
+  only for an explicit workspace graph command.
 
 Decision: use SQLite as the durable default, keep a storage abstraction at the
 core boundary, use TOON as the default compact agent-facing output, keep JSON as
@@ -732,10 +740,16 @@ inspection, and file content access.
 Loop 10 progress: the Rust CLI and MCP now implement scan, overview, folders,
 files, structured file summary, outline, search, line/symbol slices, symbol
 graph listing, symbol relations, settings inspection, watcher-status reporting,
-portable watcher refresh, SQLite purpose import, and token telemetry. Remaining
-3.0-stable parity work is deeper per-language semantic extraction, remaining
-language-specific parser depth, packaged release-binary plugin install, and
-large-repo performance evidence.
+portable watcher refresh, SQLite purpose import, and token telemetry. The
+v0.3.1 hardening pass adds Kotlin/Zig/C/C++/Objective-C edge-summary
+regressions, service-owned glob-aware file ranking, manifest-derived installer
+release tags, post-publish release-asset installer smoke jobs for Linux,
+Windows, and macOS, release-binary-only installer validation, escaped SQLite
+LIKE path filters, removal of the stale in-memory query ranker, and an E2E
+large-repository funnel test. Remaining
+architecture-hardening work after 3.0 stable is deeper parser-specific
+cross-file import/call resolution and additional measured optimization only
+where large-repo evidence shows a bottleneck.
 
 Loop 11: large-codebase hardening: incremental refresh, parallel indexing,
 bounded memory behavior, pagination, stable ordering, and token-budgeted

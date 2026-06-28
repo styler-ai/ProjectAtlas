@@ -209,10 +209,10 @@ plugins/projectatlas/scripts/install-runtime.sh
 ```
 
 Run the installer from the target project root or pass the project root explicitly. The installer verifies
-`projectatlas --format json runtime-info`, prefers a local source checkout, otherwise downloads the pinned `v0.3.0`
-GitHub Release binary for the platform, and falls back to the pinned `v0.3.0` Cargo Git install path. It then writes
-the absolute MCP registration file for that project. `runtime-info` is intentionally a read-only compatibility
-probe and does not create `.projectatlas` by itself.
+`projectatlas --format json runtime-info`, prefers a local source checkout, otherwise downloads the release tag
+derived from the plugin manifest, and falls back to the same tagged Cargo Git install path. It then writes the
+absolute MCP registration file for that project. `runtime-info` is intentionally a read-only compatibility probe and
+does not create `.projectatlas` by itself.
 
 Marketplace installation should run or point to the native runtime installer before registering `projectatlas mcp`,
 so Codex, OpenCode, Claude Code, and other MCP-capable harnesses can call the same `atlas_*` TOON tools.
@@ -253,7 +253,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 
 - `dev`: active development branch
 - `main`: stable releases only
-- release tags match the Cargo workspace version, for example `v0.3.0`
+- release tags match the Cargo workspace version, for example `v0.3.1`
 
 Before a release, run the full local verification stack, merge `dev` into `main` through a PR, and use the manual
 Release workflow if a tag needs to be created explicitly.
