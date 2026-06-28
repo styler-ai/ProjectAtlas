@@ -87,9 +87,25 @@ codex plugin add projectatlas --marketplace projectatlas
 
 Then tell Codex: "Use ProjectAtlas for this repo."
 
-That is the intended path. The plugin gives the agent the workflow skill, runtime installer, and MCP config templates. The agent maps the repo, chooses the right folder, chooses the right file, and only then reads exact source.
+That is the intended path. The plugin gives the agent the workflow skill, native runtime installer, and MCP config templates. The agent does the rest: install or verify the runtime, map the repo, keep the atlas fresh, choose the right folder, choose the right file, and read exact source only after the target is known.
 
-## Manual CLI
+## What Happens Next
+
+ProjectAtlas is intentionally agent-first. In normal use you should not have to memorize command syntax.
+
+The agent follows this loop:
+
+1. Build or refresh the local atlas.
+2. Read folder purposes before opening source.
+3. Read file purposes and content summaries inside the likely folder.
+4. Use the detailed summary, outline, symbols, or search when compressed context is enough.
+5. Open exact slices only when real code is needed.
+
+For active sessions, the agent can run the watcher so file edits continuously refresh the database. For cleanup sessions, it can ask ProjectAtlas for missing purposes, stale metadata, duplicate folder roles, and structure drift.
+
+## CLI Reference
+
+Most users can stop at the plugin install. The CLI is here for local debugging, automation, and release verification.
 
 Only need the CLI yourself? Install it from the released tag:
 
@@ -111,9 +127,9 @@ projectatlas scan
 projectatlas overview
 ```
 
-## The Manual Funnel
+## Manual Funnel
 
-Most users should let the agent run this. It is shown here so the product is understandable:
+This is the workflow the agent runs for you:
 
 ```bash
 projectatlas overview
