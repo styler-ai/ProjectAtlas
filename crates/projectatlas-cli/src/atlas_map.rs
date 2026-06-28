@@ -251,6 +251,7 @@ impl AtlasMapConfig {
     pub(crate) fn scan_options(&self) -> ScanOptions {
         ScanOptions {
             exclude_dir_names: self.exclude_dir_names.iter().cloned().collect(),
+            exclude_path_prefixes: self.exclude_path_prefixes.iter().cloned().collect(),
         }
     }
 
@@ -778,9 +779,7 @@ fn normalize_style_map(values: Option<BTreeMap<String, String>>) -> BTreeMap<Str
 
 /// Collect repository folders, source files, and non-source files.
 fn collect_repo_paths(config: &AtlasMapConfig) -> AtlasMapResult<RepoPaths> {
-    let options = ScanOptions {
-        exclude_dir_names: config.exclude_dir_names.iter().cloned().collect(),
-    };
+    let options = config.scan_options();
     let nodes = scan_repo(&config.root, &options)?;
     let mut folders = Vec::new();
     let mut source_files = Vec::new();

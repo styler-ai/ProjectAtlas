@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -76,10 +76,21 @@ impl ScanRuntimePlan {
 pub(crate) struct ScanReport {
     /// Repository overview after scan.
     pub(crate) overview: Overview,
+    /// Legacy purpose records imported into the current index.
+    pub(crate) purpose_import: PurposeImportReport,
     /// Persisted text search index report.
     pub(crate) text_index: TextIndexReport,
     /// Symbol graph build report.
     pub(crate) symbols: SymbolBuildReport,
+}
+
+/// Legacy purpose import counts from a scan.
+#[derive(Debug, Default, Serialize)]
+pub(crate) struct PurposeImportReport {
+    /// Purpose records imported into indexed nodes.
+    pub(crate) imported: usize,
+    /// Legacy purpose records skipped because the path is no longer indexed.
+    pub(crate) skipped_stale: usize,
 }
 
 /// Return a canonical absolute project root.
@@ -214,15 +225,26 @@ pub(crate) fn run_scan_pipeline(
     store.set_project_root(&plan.root)?;
     store.replace_scan(&nodes)?;
     let text_index = refresh_text_index_for_nodes(store, &plan.root, &nodes, plan.text_options)?;
+    let indexed_paths = nodes
+        .iter()
+        .map(|node| node.path.as_str())
+        .collect::<HashSet<_>>();
+    let mut purpose_import = PurposeImportReport::default();
     if let Some(config) = plan.config.as_ref() {
         for record in imported_purpose_records(config)? {
+            if !indexed_paths.contains(record.path.as_str()) {
+                purpose_import.skipped_stale += 1;
+                continue;
+            }
             store.set_purpose(&record.path, &record.summary, PurposeSource::Imported)?;
+            purpose_import.imported += 1;
         }
     }
     let symbols = build_symbols_for_index(store, &plan.root, symbol_options, None)?;
     let overview = store.overview()?;
     Ok(ScanReport {
         overview,
+        purpose_import,
         text_index,
         symbols,
     })
@@ -1567,28 +1589,29 @@ pub(crate) fn watch_path_affects_index(
     scan_options: &ScanOptions,
 ) -> bool {
     let candidate = absolute_watch_path(root, path);
-    let relative = candidate.strip_prefix(root).unwrap_or(path);
-    if relative.as_os_str().is_empty() {
+    let Some(relative) = safe_watch_relative_path(root, &candidate) else {
+        return false;
+    };
+    if relative == "." {
         return true;
     }
-    for component in relative.components() {
-        match component {
-            Component::Normal(name) => {
-                let name = name.to_string_lossy();
-                if name == ".purpose"
-                    || scan_options
-                        .exclude_dir_names
-                        .iter()
-                        .any(|excluded| excluded == name.as_ref())
-                {
-                    return false;
-                }
-            }
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
-        }
+    !relative.split('/').any(|component| component == ".purpose")
+        && !scan_options.excludes_relative_path(&relative)
+}
+
+/// Return a safe normalized repository path for a watcher event.
+fn safe_watch_relative_path(root: &Path, candidate: &Path) -> Option<String> {
+    let relative = normalize_repo_path(root, candidate).ok()?;
+    if relative == "." {
+        return Some(relative);
     }
-    true
+    if relative
+        .split('/')
+        .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return None;
+    }
+    Some(relative)
 }
 
 /// Return an absolute path for a watcher event path.

@@ -1504,6 +1504,7 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use std::io;
+    use std::path::Path;
 
     /// Minimal MCP client handler for in-process routing tests.
     #[derive(Clone, Default)]
@@ -1592,10 +1593,19 @@ mod tests {
                 "target".to_string(),
                 "generated".to_string(),
             ],
+            exclude_path_prefixes: vec!["docs/api".to_string()],
         };
         require_condition(
             watch_path_affects_index(root, &root.join("src/lib.rs"), &scan_options),
             "source file event should refresh the index",
+        )?;
+        require_condition(
+            !watch_path_affects_index(root, &root.join("../outside.rs"), &scan_options),
+            "absolute parent traversal events should be ignored",
+        )?;
+        require_condition(
+            !watch_path_affects_index(root, Path::new("../outside.rs"), &scan_options),
+            "relative parent traversal events should be ignored",
         )?;
         require_condition(
             !watch_path_requires_full_scan(root, &root.join("src/lib.rs")),
@@ -1633,6 +1643,14 @@ mod tests {
         require_condition(
             !watch_path_affects_index(root, &root.join("generated/out.rs"), &scan_options),
             "configured exclude directory events should be ignored",
+        )?;
+        require_condition(
+            !watch_path_affects_index(root, &root.join("docs/api/noise.rs"), &scan_options),
+            "configured exclude path-prefix events should be ignored",
+        )?;
+        require_condition(
+            watch_path_affects_index(root, &root.join("src/api/live.rs"), &scan_options),
+            "same directory name outside excluded prefix should be indexed",
         )?;
         require_condition(
             !event_kind_affects_index(EventKind::Access(notify::event::AccessKind::Any)),

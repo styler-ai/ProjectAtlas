@@ -508,8 +508,11 @@ repositories, so they must stay bounded by design:
   page is satisfied, and reports searched file/byte counts plus truncation state
 - symbol slices live in the shared service layer and reject ambiguous duplicate
   symbol names until the caller supplies parent, kind, or line selectors
-- scan, MCP scan, watcher refresh, and legacy purpose cleanup honor configured
-  `[scan].exclude_dir_names`
+- scan, MCP scan, watcher refresh, map/lint, search-backed reads, and legacy
+  purpose cleanup honor configured `[scan].exclude_dir_names` and
+  `[scan].exclude_path_prefixes`; stale legacy map purposes for deleted or
+  excluded paths are skipped during scan migration and reported as skipped
+  imports instead of surfacing raw SQLite no-row errors
 - deep symbol builds support worker and timeout controls while keeping SQLite
   persistence sequential and deterministic
 - source-derived fields report whether they came from live source or indexed

@@ -1061,14 +1061,24 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
     fs::create_dir(&repo)?;
     fs::create_dir_all(repo.join(".projectatlas"))?;
     fs::create_dir(repo.join("src"))?;
+    fs::create_dir_all(repo.join("src").join("api"))?;
+    fs::create_dir_all(repo.join("docs").join("api"))?;
     fs::create_dir_all(repo.join("generated"))?;
     fs::write(
         repo.join(".projectatlas").join("config.toml"),
-        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\", \"generated\"]\n",
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\", \"generated\"]\nexclude_path_prefixes = [\"docs/api\"]\n",
     )?;
     fs::write(
         repo.join("src").join("engine.rs"),
         "pub fn build_project_atlas() {}\n",
+    )?;
+    fs::write(
+        repo.join("src").join("api").join("live.rs"),
+        "pub fn live_api() {}\n",
+    )?;
+    fs::write(
+        repo.join("docs").join("api").join("noise.rs"),
+        "pub fn generated_doc_noise() {}\n",
     )?;
     fs::write(
         repo.join("generated").join("noise.rs"),
@@ -1088,7 +1098,7 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
         return Err(io::Error::other("configured scan command failed").into());
     }
     let scan_json: Value = serde_json::from_slice(&raw_scan.stdout)?;
-    require_json_usize(&scan_json, &["overview", "files"], 1)?;
+    require_json_usize(&scan_json, &["overview", "files"], 2)?;
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -1097,17 +1107,44 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
         .args(["files", "noise"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("generated/noise.rs").not());
+        .stdout(predicate::str::contains("generated/noise.rs").not())
+        .stdout(predicate::str::contains("docs/api/noise.rs").not());
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
-        .args(["files", "--file-pattern", "src\\*.rs"])
+        .args(["files", "api"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("src/api/live.rs"))
+        .stdout(predicate::str::contains("docs/api/noise.rs").not());
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["files", "--file-pattern", "*.rs"])
         .assert()
         .success()
         .stdout(predicate::str::contains("src/engine.rs"))
-        .stdout(predicate::str::contains("generated/noise.rs").not());
+        .stdout(predicate::str::contains("src/api/live.rs"))
+        .stdout(predicate::str::contains("generated/noise.rs").not())
+        .stdout(predicate::str::contains("docs/api/noise.rs").not());
+
+    let raw_excluded_search = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["search", "generated_doc_noise", "--file-pattern", "*.rs"])
+        .output()?;
+    if !raw_excluded_search.status.success() {
+        return Err(io::Error::other("excluded-prefix search command failed").into());
+    }
+    let excluded_search_json: Value = serde_json::from_slice(&raw_excluded_search.stdout)?;
+    require_json_usize(&excluded_search_json, &["returned"], 0)?;
 
     let raw_search = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -1124,6 +1161,123 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
     require_json_string(&search_json, &["mode"], "fuzzy")?;
     require_json_usize(&search_json, &["returned"], 1)?;
     require_json_string(&search_json, &["results", "0", "path"], "src/engine.rs")?;
+    Ok(())
+}
+
+#[test]
+fn map_and_lint_honor_configured_exclude_path_prefixes() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir_all(repo.join(".projectatlas"))?;
+    fs::create_dir(repo.join("src"))?;
+    fs::create_dir_all(repo.join("docs").join("api"))?;
+    fs::write(
+        repo.join(".projectatlas").join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\"]\nexclude_path_prefixes = [\"docs/api\"]\n",
+    )?;
+    fs::write(
+        repo.join(".projectatlas")
+            .join("projectatlas-nonsource-files.toon"),
+        "nonsource_files[]:\n",
+    )?;
+    fs::write(
+        repo.join(".purpose"),
+        "Repository root for prefix map tests\n",
+    )?;
+    fs::write(
+        repo.join("src").join(".purpose"),
+        "Rust source folder for prefix map tests\n",
+    )?;
+    fs::write(
+        repo.join("docs").join(".purpose"),
+        "Documentation folder for prefix map tests\n",
+    )?;
+    fs::write(
+        repo.join("src").join("engine.rs"),
+        "// Purpose: Active Rust source for prefix map tests.\npub fn indexed_engine() {}\n",
+    )?;
+    fs::write(
+        repo.join("docs").join("api").join("noise.rs"),
+        "pub fn excluded_from_map_and_lint() {}\n",
+    )?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["map", "--force"])
+        .assert()
+        .success();
+
+    let map = fs::read_to_string(repo.join(".projectatlas").join("projectatlas.toon"))?;
+    if !map.contains("src/engine.rs") {
+        return Err(io::Error::other("map omitted indexed source file").into());
+    }
+    if map.contains("docs/api/noise.rs") || map.contains("excluded_from_map_and_lint") {
+        return Err(io::Error::other("map included excluded path-prefix source").into());
+    }
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["lint", "--strict-folders", "--report-untracked"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("docs/api/noise.rs").not());
+    Ok(())
+}
+
+#[test]
+fn first_default_scan_skips_stale_legacy_map_purposes() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir_all(repo.join(".projectatlas"))?;
+    fs::create_dir(repo.join("src"))?;
+    fs::write(
+        repo.join(".projectatlas").join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\"]\n",
+    )?;
+    fs::write(
+        repo.join(".projectatlas").join("projectatlas.toon"),
+        "version: 1\n\
+generated_at: 2026-06-28T00:00:00Z\n\
+root: .\n\
+folders[2]{path,summary,source}:\n\
+  .,Repository root,folder\n\
+  stale,Deleted legacy folder,folder\n\
+files[2]{path,summary,source}:\n\
+  src/main.rs,Rust entrypoint,file\n\
+  stale/deleted.rs,Deleted legacy file,file\n",
+    )?;
+    fs::write(repo.join("src").join("main.rs"), "fn main() {}\n")?;
+    let db = temp.path().join("projectatlas.db");
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .arg("scan")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("scan:"))
+        .stdout(predicate::str::contains("purpose_import:"))
+        .stdout(predicate::str::contains("imported: 2"))
+        .stdout(predicate::str::contains("skipped_stale: 2"))
+        .stderr(predicate::str::contains("Query returned no rows").not());
+
+    let raw_overview = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .arg("overview")
+        .output()?;
+    if !raw_overview.status.success() {
+        return Err(io::Error::other("overview after legacy import scan failed").into());
+    }
+    let overview_json: Value = serde_json::from_slice(&raw_overview.stdout)?;
+    require_json_usize(&overview_json, &["files"], 1)?;
+    require_json_usize(&overview_json, &["approved_purposes"], 2)?;
     Ok(())
 }
 
