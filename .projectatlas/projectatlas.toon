@@ -1,9 +1,9 @@
 version: 1
-generated_at: unix:1782603069
-file_hash: "60355d16edf097e1ffe1c4f3eff2e764296dc92fd8eea9dccb027fd4301bc393"
+generated_at: unix:1782608863
+file_hash: "1b4513213ec2c5f3ff94261cf552a70bdaf63ecf487d622190f7ea2788e1d27f"
 folder_hash: "4c8f50579814810aa9fbe5b6eb19617979fe46fd802e42b713ad302cdece2e37"
 root: .
-overview: tracked_source_files=60 tracked_nonsource_files=42 tracked_files_total=102 tracked_folders=36 source_extensions=121 exclude_dir_names=9 exclude_path_prefixes=0
+overview: tracked_source_files=62 tracked_nonsource_files=42 tracked_files_total=104 tracked_folders=36 source_extensions=121 exclude_dir_names=9 exclude_path_prefixes=0
 source_extensions[]:
   - .astro
   - .bash
@@ -174,7 +174,7 @@ folders[36]{path,summary,source}:
   skills/claude,Claude guidance for ProjectAtlas usage.,database
   skills/codex,Codex guidance for ProjectAtlas usage.,database
   templates,Reusable agent templates and snippets.,database
-files[64]{path,summary,source}:
+files[66]{path,summary,source}:
   .agents/plugins/marketplace.json,Codex plugin marketplace catalog for ProjectAtlas,database
   .codex/rules/memory/activeContext.md,ProjectAtlas active context,database
   .codex/rules/memory/productContext.md,ProjectAtlas product context,database
@@ -204,6 +204,8 @@ files[64]{path,summary,source}:
   crates/projectatlas-cli/Cargo.toml,CLI Rust crate manifest for ProjectAtlas 3,database
   crates/projectatlas-cli/src/atlas_map.rs,Generate and lint `ProjectAtlas` structure maps from Rust.,database
   crates/projectatlas-cli/src/main.rs,Provide the `ProjectAtlas` 3 command-line adapter.,database
+  crates/projectatlas-cli/src/mcp.rs,Provide the native MCP adapter that exposes ProjectAtlas atlas tools to agent harnesses.,database
+  crates/projectatlas-cli/src/runtime.rs,"Provide shared CLI and MCP runtime orchestration for scan policy, indexing, watching, settings, cleanup, and telemetry.",database
   crates/projectatlas-cli/tests/e2e.rs,Validate `ProjectAtlas` 3 CLI end-to-end behavior.,database
   crates/projectatlas-core/Cargo.toml,Core Rust crate manifest for ProjectAtlas 3,database
   crates/projectatlas-core/src/health.rs,Detect structural health issues in `ProjectAtlas` indexes.,database

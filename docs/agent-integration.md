@@ -58,12 +58,16 @@ non-source summaries and is merged into the atlas. Agents still read only the ge
 
 Prefer the installer-generated project-local MCP config at `.projectatlas/projectatlas.mcp.json`.
 It contains an absolute native `projectatlas` binary path plus explicit project-local `--db` and
-`--config` arguments, so Codex/OpenCode/Claude Code do not attach to an old PATH wrapper or the
-wrong current working directory.
+`--config` arguments plus a `cwd` project-root hint, so Codex/OpenCode/Claude Code do not attach to
+an old PATH wrapper or the wrong current working directory. `mcp-config` discovers both
+`.projectatlas/config.toml` and `projectatlas.toml` from the selected DB/project root. The MCP server
+also resolves path-less root-sensitive tools from config, indexed DB metadata, or the default
+`.projectatlas/projectatlas.db` location so clients that ignore `cwd` still use the intended project
+root.
 
 The plugin-provided `plugins/projectatlas/.mcp.json` is only a fallback for harnesses that register
-the plugin file directly from the project root after `projectatlas --help` has verified the
-ProjectAtlas 3 runtime:
+the plugin file directly from the project root after `projectatlas --format json runtime-info` has
+verified the ProjectAtlas 3 runtime:
 
 ```json
 {
@@ -75,6 +79,9 @@ ProjectAtlas 3 runtime:
   }
 }
 ```
+
+Use `projectatlas --format json runtime-info` as the compatibility probe. It reports runtime identity
+and capabilities without creating `.projectatlas` or touching the project-local database.
 
 The plugin installation must install or invoke the native `projectatlas` runtime before any server
 is registered. From a source checkout, use:
@@ -88,6 +95,15 @@ On Linux/macOS:
 ```bash
 plugins/projectatlas/scripts/install-runtime.sh
 ```
+
+Installer verification uses the stable runtime contract:
+
+```bash
+projectatlas --format json runtime-info
+```
+
+The response must identify project `ProjectAtlas`, major version 3 or newer, capability `mcp`, and
+text format `TOON`.
 
 ## MCP Tool Sequence
 
@@ -108,12 +124,12 @@ Prefer MCP tools when the harness exposes them:
 13. `atlas_token_report`: report estimated token savings.
 14. `atlas_settings` and `atlas_watch_status`: diagnose runtime/index/cache state.
 15. `atlas_reset_index`: preview or clear local SQLite/cache files when the index is corrupt or intentionally being rebuilt.
-
-For read-only reviews or diagnostics, set `PROJECTATLAS_NO_TELEMETRY=1` before running CLI commands or the MCP server.
-This preserves normal atlas reads while preventing usage telemetry writes to `.projectatlas/projectatlas.db`.
 16. `atlas_strip_legacy_purpose`: remove migrated `.purpose` files when explicitly requested.
 17. `atlas_purpose_set`: write agent-approved purpose metadata into SQLite.
 18. `atlas_health_resolve`: mark an intentional deterministic health finding resolved with rationale.
+
+For read-only reviews or diagnostics, set `PROJECTATLAS_NO_TELEMETRY=1` before running CLI commands or the MCP server.
+This preserves normal atlas reads while preventing usage telemetry writes to `.projectatlas/projectatlas.db`.
 
 ## When To Call What
 

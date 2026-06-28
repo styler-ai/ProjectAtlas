@@ -177,6 +177,10 @@ pub struct SearchReport {
     pub start_index: usize,
     /// Matches observed before pagination and bounded early stop.
     pub total: usize,
+    /// Alias for `total` that makes bounded search semantics explicit.
+    pub observed_total: usize,
+    /// Whether `total`/`observed_total` is known to be the exhaustive match count.
+    pub total_is_complete: bool,
     /// Returned matches after pagination.
     pub returned: usize,
     /// Indexed files opened while serving the query.
@@ -430,6 +434,8 @@ pub fn search_indexed_files(
         source: "sqlite-file-text".to_string(),
         start_index,
         total: 0,
+        observed_total: 0,
+        total_is_complete: true,
         returned: 0,
         searched_files: 0,
         searched_bytes: 0,
@@ -462,6 +468,8 @@ pub fn search_indexed_files(
         Ok(true)
     })?;
     report.returned = report.results.len();
+    report.observed_total = report.total;
+    report.total_is_complete = !report.truncated;
     Ok(report)
 }
 
@@ -1498,6 +1506,12 @@ mod tests {
         require_eq(&report.returned, &1, "returned rows")?;
         require_eq(&report.searched_files, &1, "bounded searched files")?;
         require_eq(&report.truncated, &true, "truncated flag")?;
+        require_eq(&report.observed_total, &report.total, "observed total")?;
+        require_eq(
+            &report.total_is_complete,
+            &false,
+            "truncated search completeness",
+        )?;
 
         let report = search_indexed_files(
             &store,
@@ -1511,6 +1525,7 @@ mod tests {
             10,
         )?;
         require_eq(&report.returned, &2, "windows glob returned rows")?;
+        require_eq(&report.total_is_complete, &true, "complete search total")?;
         if report
             .results
             .iter()

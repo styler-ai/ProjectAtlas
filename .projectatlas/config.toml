@@ -14,6 +14,7 @@ exclude_dir_suffixes = [".egg-info"]
 exclude_path_prefixes = []
 non_source_path_prefixes = []
 max_scan_lines = 80
+text_index_max_bytes = 2000000
 
 [purpose]
 default_style = "javadoc"

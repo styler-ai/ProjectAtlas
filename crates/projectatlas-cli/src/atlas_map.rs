@@ -19,6 +19,8 @@ const DEFAULT_MAP_PATH: &str = ".projectatlas/projectatlas.toon";
 const DEFAULT_NONSOURCE_PATH: &str = ".projectatlas/projectatlas-nonsource-files.toon";
 /// Default maximum number of lines scanned for purpose headers.
 const DEFAULT_MAX_SCAN_LINES: usize = 80;
+/// Default maximum UTF-8 file size persisted into `SQLite` text search.
+pub(crate) const DEFAULT_TEXT_INDEX_MAX_BYTES: u64 = 2_000_000;
 /// Default maximum purpose summary length.
 const DEFAULT_SUMMARY_MAX_LENGTH: usize = 140;
 /// Ordered overview keys written into the TOON map.
@@ -152,6 +154,8 @@ struct RawScan {
     non_source_path_prefixes: Option<Vec<String>>,
     /// Maximum header scan lines.
     max_scan_lines: Option<usize>,
+    /// Maximum UTF-8 file size persisted into `SQLite` text search.
+    text_index_max_bytes: Option<u64>,
 }
 
 /// Raw purpose table.
@@ -226,6 +230,8 @@ pub(crate) struct AtlasMapConfig {
     db_path: PathBuf,
     /// Maximum lines to scan for purpose headers.
     max_scan_lines: usize,
+    /// Maximum UTF-8 file size persisted into `SQLite` text search.
+    text_index_max_bytes: u64,
     /// Maximum purpose summary length.
     summary_max_length: usize,
     /// Whether summaries must be ASCII.
@@ -246,6 +252,11 @@ impl AtlasMapConfig {
         ScanOptions {
             exclude_dir_names: self.exclude_dir_names.iter().cloned().collect(),
         }
+    }
+
+    /// Return the configured maximum UTF-8 file size for `SQLite` text search.
+    pub(crate) fn text_index_max_bytes(&self) -> u64 {
+        self.text_index_max_bytes
     }
 }
 
@@ -354,6 +365,14 @@ pub(crate) fn load_atlas_config(config_path: Option<&Path>) -> AtlasMapResult<At
         (RawConfig::default(), cwd.clone())
     };
     normalize_config(raw, config_file.as_deref(), &base_dir, &cwd)
+}
+
+/// Load atlas map configuration for an explicit project root.
+pub(crate) fn load_atlas_config_for_root(root: &Path) -> AtlasMapResult<AtlasMapConfig> {
+    if let Some(config_path) = find_config_path(root) {
+        return load_atlas_config(Some(&config_path));
+    }
+    normalize_config(RawConfig::default(), None, root, root)
 }
 
 /// Write default `ProjectAtlas` config files.
@@ -666,6 +685,10 @@ fn normalize_config(
         })),
         db_path: root.join(".projectatlas").join("projectatlas.db"),
         max_scan_lines: scan.max_scan_lines.unwrap_or(DEFAULT_MAX_SCAN_LINES),
+        text_index_max_bytes: scan
+            .text_index_max_bytes
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_TEXT_INDEX_MAX_BYTES),
         summary_max_length: summary.max_length.unwrap_or(DEFAULT_SUMMARY_MAX_LENGTH),
         summary_ascii_only: summary.ascii_only.unwrap_or(true),
         summary_no_commas: summary.no_commas.unwrap_or(true),
@@ -2087,6 +2110,7 @@ fn default_config_text() -> String {
         "exclude_path_prefixes = []",
         "non_source_path_prefixes = []",
         "max_scan_lines = 80",
+        &format!("text_index_max_bytes = {DEFAULT_TEXT_INDEX_MAX_BYTES}"),
         "",
         "[purpose]",
         "default_style = \"line-comment\"",
@@ -2133,9 +2157,9 @@ impl From<serde_json::Error> for AtlasMapError {
 #[cfg(test)]
 mod tests {
     use super::{
-        AtlasMapConfig, MapRecord, append_existing_map_purpose_records, append_record_rows,
-        normalize_repo_string, seed_purpose_files, split_record_cells, stable_generated_at,
-        toon_cell,
+        AtlasMapConfig, DEFAULT_TEXT_INDEX_MAX_BYTES, MapRecord,
+        append_existing_map_purpose_records, append_record_rows, normalize_repo_string,
+        seed_purpose_files, split_record_cells, stable_generated_at, toon_cell,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -2161,6 +2185,7 @@ mod tests {
             asset_extensions: BTreeSet::new(),
             db_path: root.join("projectatlas.db"),
             max_scan_lines: 80,
+            text_index_max_bytes: DEFAULT_TEXT_INDEX_MAX_BYTES,
             summary_max_length: 140,
             summary_ascii_only: true,
             summary_no_commas: true,

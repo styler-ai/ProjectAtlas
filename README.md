@@ -101,6 +101,7 @@ projectatlas health-check
 projectatlas settings
 projectatlas watch-status
 projectatlas reset-index --dry-run
+projectatlas --format json runtime-info
 projectatlas --format json mcp-config
 projectatlas watch --once
 projectatlas watch
@@ -171,6 +172,12 @@ For an absolute, project-local registration document, run:
 projectatlas --format json --db .projectatlas/projectatlas.db mcp-config > .projectatlas/projectatlas.mcp.json
 ```
 
+The generated config contains the absolute binary path, absolute `--db` path, a `--config` path when
+available, and a `cwd` project-root hint. `mcp-config` discovers both `.projectatlas/config.toml`
+and `projectatlas.toml` from the selected DB/project root. The MCP server also resolves path-less
+root-sensitive tools from config, indexed DB metadata, or the default `.projectatlas/projectatlas.db`
+parent, so hosts that ignore `cwd` still scan the intended project.
+
 Use MCP tools in the same funnel order: `atlas_scan`, `atlas_overview`, `atlas_folders`, `atlas_files`,
 `atlas_file_summary`, `atlas_outline`, `atlas_symbols`, `atlas_symbol_relations`, `atlas_search`, `atlas_slice`,
 `atlas_health`, `atlas_watch_once`, and `atlas_token_report`.
@@ -201,9 +208,11 @@ plugins/projectatlas/scripts/install-runtime.ps1
 plugins/projectatlas/scripts/install-runtime.sh
 ```
 
-Run the installer from the target project root or pass the project root explicitly. The installer prefers a local
-source checkout, otherwise downloads the pinned `v0.3.0` GitHub Release binary for the platform, and falls back to
-the pinned `v0.3.0` Cargo Git install path. It then writes the absolute MCP registration file for that project.
+Run the installer from the target project root or pass the project root explicitly. The installer verifies
+`projectatlas --format json runtime-info`, prefers a local source checkout, otherwise downloads the pinned `v0.3.0`
+GitHub Release binary for the platform, and falls back to the pinned `v0.3.0` Cargo Git install path. It then writes
+the absolute MCP registration file for that project. `runtime-info` is intentionally a read-only compatibility
+probe and does not create `.projectatlas` by itself.
 
 Marketplace installation should run or point to the native runtime installer before registering `projectatlas mcp`,
 so Codex, OpenCode, Claude Code, and other MCP-capable harnesses can call the same `atlas_*` TOON tools.
@@ -281,6 +290,7 @@ See `docs/configuration.md` for all settings. Most projects only need to adjust:
 
 - `scan.source_extensions`
 - `scan.exclude_dir_names`, honored by scan, MCP scan, watcher refresh, and legacy purpose cleanup
+- `scan.text_index_max_bytes`, the per-file UTF-8 text-index cap for large repositories
 - `untracked.asset_allowed_prefixes`
 - `project.map_path`
 - `purpose.default_style`

@@ -79,11 +79,11 @@ This skill is part of the ProjectAtlas plugin on purpose. Installing the plugin 
 
 1. Establish the project root first. If the workspace root is unambiguous, use it; otherwise ask the user once. Do not use one global ProjectAtlas database for unrelated projects.
 2. Run all setup commands from that root so the default index is `<project-root>/.projectatlas/projectatlas.db`.
-3. Confirm the native runtime is ProjectAtlas 3 with `projectatlas --help`; the help text must mention the ProjectAtlas 3 repository intelligence engine and `mcp-config`.
-4. If the command is missing or resolves to an older non-ProjectAtlas-3 wrapper, run the plugin runtime installer from the target project root or pass the project root explicitly. The installer verifies the ProjectAtlas 3 help surface, uses a local ProjectAtlas source checkout when present, otherwise downloads the pinned `v0.3.0` GitHub Release binary for the platform, then falls back to `cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.0 --package projectatlas-cli --locked`. It writes `.projectatlas/projectatlas.mcp.json` with absolute MCP paths:
+3. Confirm the native runtime is ProjectAtlas 3 with `projectatlas --format json runtime-info`; the report must identify project `ProjectAtlas`, major version 3 or newer, capability `mcp`, and text format `TOON`.
+4. If the command is missing or resolves to an older non-ProjectAtlas-3 wrapper, run the plugin runtime installer from the target project root or pass the project root explicitly. The installer verifies the stable `runtime-info` contract, uses a local ProjectAtlas source checkout when present, otherwise downloads the pinned `v0.3.0` GitHub Release binary for the platform, then falls back to `cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.0 --package projectatlas-cli --locked`. It writes `.projectatlas/projectatlas.mcp.json` with absolute MCP paths:
    - Windows: `plugins/projectatlas/scripts/install-runtime.ps1`
    - Linux/macOS: `plugins/projectatlas/scripts/install-runtime.sh`
-5. Confirm MCP registration uses the generated `.projectatlas/projectatlas.mcp.json` whenever possible. It contains absolute runtime, DB, and config paths. The fallback plugin `.mcp.json` starts `projectatlas --db .projectatlas/projectatlas.db mcp` from PATH and should only be used from the project root when PATH resolves to the verified ProjectAtlas 3 binary.
+5. Confirm MCP registration uses the generated `.projectatlas/projectatlas.mcp.json` whenever possible. It contains absolute runtime, DB, and config paths plus a `cwd` project-root hint. `mcp-config` discovers `.projectatlas/config.toml` and flat `projectatlas.toml` from the selected DB/project root. The MCP server also resolves path-less root-sensitive tools from config, indexed DB metadata, or the default `.projectatlas/projectatlas.db` parent, so hosts that ignore `cwd` still use the intended project. The fallback plugin `.mcp.json` starts `projectatlas --db .projectatlas/projectatlas.db mcp` from PATH and should only be used from the project root when PATH resolves to the verified ProjectAtlas 3 binary.
 6. Initialize the target repo with `projectatlas init --seed-purpose`.
 7. Check `.projectatlas/config.toml` and add generated/vendor/build-heavy directories to `[scan].exclude_dir_names` before large-repo indexing.
 8. Run `projectatlas scan`.
@@ -130,7 +130,7 @@ Use the MCP tools when the harness exposes them. They are preferred over shell c
 - Planning cleanup/refactor/DRY work: call `atlas_health` after overview/folder/file orientation and before proposing moves/merges.
 - Intentional health conflict after inspection: call `atlas_health_resolve` with a rationale.
 - User asks about saved tokens: call `atlas_token_report`.
-- Runtime looks wrong: call `atlas_settings` and `atlas_watch_status`.
+- Runtime looks wrong: call `projectatlas --format json runtime-info`, then `atlas_settings` and `atlas_watch_status`.
 - Local index/cache is corrupt or intentionally discarded: call `atlas_reset_index` dry-run first; apply only when rebuilding from source is acceptable.
 - Read-only review or CI smoke must not mutate telemetry: set `PROJECTATLAS_NO_TELEMETRY=1` before running ProjectAtlas CLI commands or launching the MCP server.
 - Migrating old metadata: call `atlas_scan` first, then `atlas_strip_legacy_purpose` with dry-run; apply only on explicit user request.
@@ -141,7 +141,7 @@ When MCP registration files are needed from the CLI, generate them with:
 projectatlas --format json --db .projectatlas/projectatlas.db mcp-config
 ```
 
-This emits a `.mcp.json`-compatible document with the absolute `projectatlas` executable path and the selected project database.
+This emits a `.mcp.json`-compatible document with the absolute `projectatlas` executable path, selected project database, optional config path, and project-root `cwd` hint. `projectatlas --format json runtime-info` is the read-only compatibility probe; it must not create `.projectatlas` by itself.
 
 If MCP tools are unavailable, use the equivalent CLI sequence:
 

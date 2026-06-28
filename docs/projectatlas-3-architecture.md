@@ -157,15 +157,21 @@ crates/
   projectatlas-db/          SQLite schema, migrations, persistence
   projectatlas-fs/          walking, ignore handling, hashes, file metadata
   projectatlas-service/     shared query services for CLI and MCP adapters
-  projectatlas-cli/         CLI binary plus current MCP stdio host
+  projectatlas-cli/         CLI binary, runtime orchestration, MCP stdio host
   projectatlas-symbols/     tree-sitter and fallback code intelligence
 ```
 
-The CLI currently hosts the MCP stdio server so a plugin installation only
-needs one native executable. A later split into a dedicated MCP adapter crate is
-an architecture-hardening option if the adapter grows, but shared behavior must
-stay in `projectatlas-service`, `projectatlas-db`, `projectatlas-fs`,
-`projectatlas-symbols`, and `projectatlas-core`.
+The CLI crate currently hosts the MCP stdio server so a plugin installation
+only needs one native executable. Inside that crate, `runtime.rs` owns
+application orchestration that is shared by CLI and MCP adapters: scan policy,
+text-index refresh, symbol refresh, watcher refresh, settings diagnostics,
+legacy cleanup, reset-index behavior, indexed-file access, and token telemetry.
+`main.rs` remains the human/CI command adapter and `mcp.rs` remains the
+agent/harness adapter. A later split into a dedicated MCP adapter crate is an
+architecture-hardening option if the adapter grows, but shared behavior must
+stay in `runtime.rs` or the reusable `projectatlas-service`,
+`projectatlas-db`, `projectatlas-fs`, `projectatlas-symbols`, and
+`projectatlas-core` crates.
 
 ## Interface Strategy: Core First, CLI And MCP As Adapters
 
@@ -183,10 +189,10 @@ projectatlas-db/projectatlas-fs/projectatlas-service/projectatlas-symbols
   implement storage, scanning, shared query services, and parsing
 
 projectatlas-cli
-  human and CI command adapter
+  human and CI command adapter plus shared runtime orchestration module
 
-projectatlas-mcp
-  agent/harness adapter
+projectatlas-cli::mcp
+  current agent/harness adapter over the same runtime module
 
 future adapters
   language server, daemon, editor extensions, HTTP bridge
@@ -536,7 +542,7 @@ Required plugin contents for 3.0:
   MCP-aware harnesses
 - `.mcp.json` that starts the native ProjectAtlas MCP server
 - `projectatlas mcp-config` support for generated per-project MCP configs with
-  absolute executable and DB paths
+  absolute executable, DB/config paths, and a `cwd` project-root hint
 - packaged or installable `projectatlas` Rust binary
 - TOON output support as the default agent-facing format
 - SQLite index support with bundled SQLite through the Rust binary
@@ -550,13 +556,20 @@ Preferred install behavior:
 2. make the native `projectatlas` runtime available
 3. register the MCP server for the harness
 4. expose skills/prompts that enforce the context funnel
-5. verify the runtime with a lightweight `projectatlas --help` check that
-   confirms the ProjectAtlas 3 help surface and `mcp-config`
+5. verify the runtime with `projectatlas --format json runtime-info`, a
+   read-only compatibility contract that confirms ProjectAtlas 3, MCP support,
+   and TOON output without creating `.projectatlas`
 
 If a harness cannot install native binaries directly, the plugin should provide
 clear fallback instructions for `cargo install`, GitHub release binaries, or a
 local executable path. The product goal remains one plugin that brings the full
 ProjectAtlas 3 workflow with it.
+
+MCP hosts are allowed to ignore `cwd`, so `projectatlas mcp` cannot rely on
+process current directory for path-less tools. Root-sensitive MCP tools resolve
+their default project root from the explicit config path, indexed DB metadata,
+or the default `.projectatlas/projectatlas.db` parent before falling back to
+process cwd.
 
 ## Token Savings Telemetry
 

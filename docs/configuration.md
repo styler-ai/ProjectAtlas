@@ -32,6 +32,7 @@ exclude_dir_suffixes = [".egg-info"]
 exclude_path_prefixes = []
 non_source_path_prefixes = []
 max_scan_lines = 80
+text_index_max_bytes = 2000000
 
 [purpose]
 default_style = "javadoc"
@@ -56,6 +57,11 @@ asset_extensions = [".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".ico", ".
 `scan.exclude_dir_names` is used by `projectatlas scan`, `atlas_scan`, watcher refresh, and
 `strip-legacy-purpose`, so generated/vendor/build-heavy directories should be listed here before large-repo
 indexing. Search then operates over the indexed file set and can use literal, regex, or fuzzy matching.
+
+`scan.text_index_max_bytes` caps the size of each UTF-8 file stored in SQLite for indexed text search. Oversized
+files remain indexed as repository nodes, but their full text is skipped for search to keep large repositories fast
+and memory bounded. Use a higher value only when the repository needs indexed search inside large generated or data
+files.
 
 Path-like entries in scan and untracked configuration are repository-relative. Absolute paths, drive-prefixed
 paths, root paths, and `..` traversal are rejected before ProjectAtlas performs existence checks or lint probes.

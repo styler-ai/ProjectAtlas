@@ -12,6 +12,32 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[test]
+fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    let atlas_dir = repo.join(".projectatlas");
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "runtime-info"])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "runtime-info command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let runtime_json: Value = serde_json::from_slice(&output.stdout)?;
+    require_json_string(&runtime_json, &["project"], "ProjectAtlas")?;
+    require_json_usize(&runtime_json, &["major_version"], 3)?;
+    if atlas_dir.exists() {
+        return Err(io::Error::other("runtime-info created .projectatlas").into());
+    }
+    Ok(())
+}
+
+#[test]
 fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("repo");
@@ -205,6 +231,7 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
     let mcp_args = mcp_config_json["mcpServers"]["projectatlas"]["args"]
         .as_array()
         .ok_or_else(|| io::Error::other("mcp args missing"))?;
+    let expected_root = repo.canonicalize()?;
     let config_path = mcp_args
         .get(3)
         .ok_or_else(|| io::Error::other("mcp config path missing"))?
@@ -212,6 +239,21 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| io::Error::other("mcp config path missing"))?;
     if !std::path::Path::new(config_path).is_absolute() {
         return Err(io::Error::other("mcp config path was not absolute").into());
+    }
+    let generated_cwd = mcp_config_json["mcpServers"]["projectatlas"]["cwd"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("mcp cwd missing"))?;
+    if !std::path::Path::new(generated_cwd).is_absolute() {
+        return Err(io::Error::other("mcp cwd was not absolute").into());
+    }
+    if cfg!(windows) && generated_cwd.starts_with(r"\\?\") {
+        return Err(io::Error::other("mcp cwd used a Windows extended path prefix").into());
+    }
+    if std::path::Path::new(generated_cwd).canonicalize()? != expected_root {
+        return Err(io::Error::other(format!(
+            "mcp cwd mismatch: expected {expected_root:?}, got {generated_cwd}"
+        ))
+        .into());
     }
     let mut settings_args = vec!["--format".to_string(), "json".to_string()];
     for value in &mcp_args[..mcp_args.len().saturating_sub(1)] {
@@ -235,10 +277,40 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .as_str()
         .ok_or_else(|| io::Error::other("settings repo root missing"))?;
     let actual_root = std::path::Path::new(settings_root).canonicalize()?;
-    let expected_root = repo.canonicalize()?;
     if actual_root != expected_root {
         return Err(io::Error::other(format!(
             "mcp config repo root mismatch: expected {expected_root:?}, got {actual_root:?}"
+        ))
+        .into());
+    }
+    let launch_args = mcp_args
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| io::Error::other("mcp arg was not a string"))
+                .map(ToString::to_string)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mcp_stdout = run_mcp_stdio(
+        std::path::Path::new(command),
+        &outside_cwd,
+        &launch_args,
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_scan","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_scan","arguments":{"path":"."}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_watch_once","arguments":{"path":"."}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"atlas_files","arguments":{"file_pattern":"*.rs","limit":1}}}"#,
+        ],
+    )?;
+    if !mcp_stdout.contains("scan:")
+        || !mcp_stdout.contains("src/main.rs")
+        || !mcp_stdout.contains("watch:")
+    {
+        return Err(io::Error::other(format!(
+            "generated mcp config did not use the project root from outside cwd: {mcp_stdout}"
         ))
         .into());
     }
@@ -450,56 +522,17 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_overview","arguments":{}}}"#,
         r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_files","arguments":{"file_pattern":"*.rs","limit":1}}}"#,
     ];
-    let input = format!("{}\n", messages.join("\n"));
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
-    let mut child = StdCommand::new(executable)
-        .current_dir(&repo)
-        .arg("--db")
-        .arg(&db)
-        .arg("mcp")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-
-    child
-        .stdin
-        .as_mut()
-        .ok_or_else(|| io::Error::other("mcp stdin was not piped"))?
-        .write_all(input.as_bytes())?;
-    drop(child.stdin.take());
-
-    let started = Instant::now();
-    loop {
-        if child.try_wait()?.is_some() {
-            break;
-        }
-        if started.elapsed() > Duration::from_secs(10) {
-            if child.try_wait()?.is_none() {
-                child.kill()?;
-            }
-            match child.wait() {
-                Ok(_status) => {}
-                Err(error) => return Err(error.into()),
-            }
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "projectatlas mcp did not exit after stdin closed",
-            )
-            .into());
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "projectatlas mcp failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
-        .into());
-    }
-    let stdout = String::from_utf8(output.stdout)?;
+    let stdout = run_mcp_stdio(
+        &executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            db.display().to_string(),
+            "mcp".to_string(),
+        ],
+        &messages,
+    )?;
     if !stdout.contains(r#""id":1"#)
         || !stdout.contains(r#""name":"atlas_files""#)
         || !stdout.contains("overview:")
@@ -519,9 +552,15 @@ fn indexed_reads_use_scanned_project_root_from_any_cwd() -> Result<(), Box<dyn E
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("repo");
     let outside = temp.path().join("outside");
+    let unrelated = temp.path().join("unrelated");
     fs::create_dir(&repo)?;
     fs::create_dir(&outside)?;
+    fs::create_dir(&unrelated)?;
     fs::create_dir(repo.join("src"))?;
+    fs::write(
+        outside.join("projectatlas.toml"),
+        "[project]\nroot = \"../unrelated\"\n\n[scan]\nexclude_dir_names = [\"src\"]\n",
+    )?;
     fs::write(
         repo.join("src").join("lib.rs"),
         "/// Demo API.\npub fn from_scanned_root() {\n    helper();\n}\n\nfn helper() {}\n",
@@ -578,6 +617,59 @@ fn indexed_reads_use_scanned_project_root_from_any_cwd() -> Result<(), Box<dyn E
         .assert()
         .success()
         .stdout(predicate::str::contains("from_scanned_root"));
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&outside)
+        .arg("--db")
+        .arg(&db)
+        .args(["symbols", "build"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("symbols_build:"));
+
+    fs::write(
+        repo.join("src").join("lib.rs"),
+        "/// Demo API.\npub fn from_scanned_root() {\n    helper();\n}\n\npub fn after_outside_watch() {}\n\nfn helper() {}\n",
+    )?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&outside)
+        .arg("--db")
+        .arg(&db)
+        .args(["watch", "--once"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("watch:"));
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&outside)
+        .arg("--db")
+        .arg(&db)
+        .args(["symbols", "list", "--file", "src/lib.rs"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("after_outside_watch"));
+
+    let raw_settings = Command::cargo_bin("projectatlas")?
+        .current_dir(&outside)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .arg("settings")
+        .output()?;
+    if !raw_settings.status.success() {
+        return Err(io::Error::other("outside-cwd settings command failed").into());
+    }
+    let settings_json: Value = serde_json::from_slice(&raw_settings.stdout)?;
+    let settings_root = settings_json["repo_root"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("settings repo root missing"))?;
+    if std::path::Path::new(settings_root).canonicalize()? != repo.canonicalize()? {
+        return Err(io::Error::other(format!(
+            "outside-cwd settings root mismatch: {settings_root}"
+        ))
+        .into());
+    }
     Ok(())
 }
 
@@ -651,6 +743,86 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
     require_json_string(&search_json, &["mode"], "fuzzy")?;
     require_json_usize(&search_json, &["returned"], 1)?;
     require_json_string(&search_json, &["results", "0", "path"], "src/engine.rs")?;
+    Ok(())
+}
+
+#[test]
+fn mcp_config_discovers_flat_config_from_db_root() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    let outside = temp.path().join("outside");
+    let unrelated = temp.path().join("unrelated");
+    fs::create_dir(&repo)?;
+    fs::create_dir(&outside)?;
+    fs::create_dir(&unrelated)?;
+    fs::create_dir(repo.join("src"))?;
+    fs::create_dir_all(repo.join("generated"))?;
+    fs::write(
+        outside.join("projectatlas.toml"),
+        "[project]\nroot = \"../unrelated\"\n\n[scan]\nexclude_dir_names = [\"src\"]\n",
+    )?;
+    fs::write(
+        repo.join("projectatlas.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"generated\"]\n",
+    )?;
+    fs::write(
+        repo.join("src").join("engine.rs"),
+        "pub fn flat_config_engine() {}\n",
+    )?;
+    fs::write(
+        repo.join("generated").join("noise.rs"),
+        "pub fn flat_config_noise() {}\n",
+    )?;
+    let atlas_dir = repo.join(".projectatlas");
+    fs::create_dir(&atlas_dir)?;
+    let db = atlas_dir.join("projectatlas.db");
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    let raw_config = Command::cargo_bin("projectatlas")?
+        .current_dir(&outside)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .arg("mcp-config")
+        .output()?;
+    if !raw_config.status.success() {
+        return Err(io::Error::other("outside mcp-config command failed").into());
+    }
+    let config_json: Value = serde_json::from_slice(&raw_config.stdout)?;
+    let args = config_json["mcpServers"]["projectatlas"]["args"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("mcp args missing"))?;
+    let config_arg = args
+        .iter()
+        .position(|value| value.as_str() == Some("--config"))
+        .ok_or_else(|| io::Error::other("flat config was not emitted"))?;
+    let emitted_config = args
+        .get(config_arg + 1)
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::other("flat config path missing"))?;
+    if cfg!(windows) && (emitted_config.starts_with(r"\\?\") || emitted_config.starts_with("//?/"))
+    {
+        return Err(io::Error::other("mcp config path used a Windows extended path prefix").into());
+    }
+    if std::path::Path::new(emitted_config).canonicalize()?
+        != repo.join("projectatlas.toml").canonicalize()?
+    {
+        return Err(io::Error::other("emitted config was not projectatlas.toml").into());
+    }
+    let cwd = config_json["mcpServers"]["projectatlas"]["cwd"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("mcp cwd missing"))?;
+    if std::path::Path::new(cwd).canonicalize()? != repo.canonicalize()? {
+        return Err(io::Error::other("mcp cwd did not use DB project root").into());
+    }
     Ok(())
 }
 
@@ -1637,6 +1809,62 @@ fn skipped_symbol_builds_invalidate_stale_symbols() -> Result<(), Box<dyn Error>
         .stdout(predicate::str::contains("new_timeout_symbol").not());
 
     Ok(())
+}
+
+/// Launch a real MCP stdio child and return stdout after stdin closes.
+fn run_mcp_stdio(
+    executable: &std::path::Path,
+    cwd: &std::path::Path,
+    args: &[String],
+    messages: &[&str],
+) -> Result<String, Box<dyn Error>> {
+    let input = format!("{}\n", messages.join("\n"));
+    let mut child = StdCommand::new(executable)
+        .current_dir(cwd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| io::Error::other("mcp stdin was not piped"))?
+        .write_all(input.as_bytes())?;
+    drop(child.stdin.take());
+
+    let started = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(10) {
+            if child.try_wait()?.is_none() {
+                child.kill()?;
+            }
+            match child.wait() {
+                Ok(_status) => {}
+                Err(error) => return Err(error.into()),
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "projectatlas mcp did not exit after stdin closed",
+            )
+            .into());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "projectatlas mcp failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(String::from_utf8(output.stdout)?)
 }
 
 /// Require a nested JSON string value.
