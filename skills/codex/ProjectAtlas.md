@@ -17,7 +17,7 @@ the folder, choose the file, inspect compressed context, and only then open exac
 ## First-Time Setup
 
 1. Establish the project root first. ProjectAtlas stores one project-local index at `.projectatlas/projectatlas.db`.
-2. Install the Rust binary if missing: `cargo install --path crates/projectatlas-cli --locked`.
+2. Install the ProjectAtlas plugin or run the plugin runtime installer from the target project root. Use `cargo install --path crates/projectatlas-cli --locked` only when developing ProjectAtlas from this source checkout.
 3. Initialize: `projectatlas init --seed-purpose`.
 4. Run `projectatlas scan`.
 5. Add or import purpose records for important folders and files.

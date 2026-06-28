@@ -22,9 +22,49 @@ It keeps a fast local SQLite atlas of folders, files, one-line purposes, determi
 
 No required `.purpose` files. No source-header tax. No hosted index. The project lives beside your repo in `.projectatlas/`, returns compact TOON by default, and runs as a native Rust CLI plus MCP server.
 
+## Quickstart
+
+```bash
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.6
+codex plugin add projectatlas --marketplace projectatlas
+```
+
+Then tell Codex: "Use ProjectAtlas for this repo."
+
+That is the intended path. The plugin gives the agent the workflow skill, native runtime installer, and MCP config templates. The agent does the rest: install or verify the runtime, map the repo, keep the atlas fresh, choose the right folder, choose the right file, and read exact source only after the target is known.
+
+## What Happens Next
+
+ProjectAtlas is intentionally agent-first. In normal use you should not have to memorize command syntax.
+
+The agent follows this loop:
+
+1. Build or refresh the local atlas.
+2. Read folder purposes before opening source.
+3. Read file purposes and content summaries inside the likely folder.
+4. Use the detailed summary, outline, symbols, or search when compressed context is enough.
+5. Open exact slices only when real code is needed.
+
+For active sessions, the agent can run the watcher so file edits continuously refresh the database. For cleanup sessions, it can ask ProjectAtlas for missing purposes, stale metadata, duplicate folder roles, and structure drift.
+
+<p align="center">
+  <img src="docs/assets/agent-harness-funnel.svg" alt="ProjectAtlas agent harness workflow from folder purpose overview to file purpose, detailed summary, symbols, bounded search, exact source slice, and watch refresh" width="860">
+</p>
+
 ## What It Saves
 
-The current benchmark record is intentionally neutral: a representative large application audit, not a marketing toy.
+The current benchmark record is intentionally neutral: a representative large application audit, not a marketing toy. The savings rate is not a universal constant. It depends on repository size, how often the agent asks for orientation, and how much source code ProjectAtlas prevents the agent from opening.
+
+The estimate is:
+
+```text
+without ProjectAtlas = avoided candidate files, directory walks, and full-file reads
+with ProjectAtlas    = compact TOON payloads returned by overview, folders, files, summaries, search, symbols, and slices
+saved                = without ProjectAtlas - with ProjectAtlas
+savings rate         = saved / without ProjectAtlas
+```
+
+The default estimator is deliberately simple and local: `ceil(chars_or_bytes / 4)`. It is a workflow estimate, not provider billing telemetry.
 
 | Signal | Result |
 | --- | ---: |
@@ -35,12 +75,43 @@ The current benchmark record is intentionally neutral: a representative large ap
 | Symbols | 5,145 |
 | Relations | 12,122 |
 | Token telemetry calls | 142 |
-| Estimated without ProjectAtlas | 221,114,448 tokens |
-| Estimated with ProjectAtlas | 425,622 tokens |
+| Average baseline avoided per call | 1,557,144 tokens |
+| Average ProjectAtlas payload per call | 2,997 tokens |
+| Total estimated without ProjectAtlas | 221,114,448 tokens |
+| Total estimated with ProjectAtlas | 425,622 tokens |
 | Estimated saved | 220,688,826 tokens |
-| Estimated savings rate | 99.8% |
+| Observed savings rate for this workload | 99.8% |
 
-Warm CLI reads from that audit stayed interactive:
+<p align="center">
+  <img src="docs/assets/token-savings-bar.svg" alt="Token savings benchmark bar chart: without ProjectAtlas 221.1 million estimated tokens, with ProjectAtlas 0.4 million estimated tokens across 142 calls" width="820">
+</p>
+
+That bar chart is intentionally lopsided. The point of ProjectAtlas is not that every repository magically saves 99.8%; the point is that repeated agent lookups in a large repo should read compact folder/file intelligence first, not broad source trees first.
+
+Sizing intuition:
+
+| Workload shape | What usually happens |
+| --- | --- |
+| Small repo, few lookups | Savings are real but modest because there is less wrong code to avoid. |
+| Medium repo, repeated feature work | Savings grow when folder and file purpose prevent wrong-file reads. |
+| Large repo, many exploratory lookups | Savings can become very high because each lookup avoids broad candidate sets and repeated full-file reads. |
+
+## Expected Large-Repo Latency
+
+The latency sample below is for warm indexed reads after ProjectAtlas has already scanned the repo. Initial scan/watch refresh is a different operation because it hashes files, updates SQLite, refreshes text, and parses symbol candidates.
+
+Benchmark scale:
+
+| Repo shape | Size |
+| --- | ---: |
+| Files | 679 |
+| Folders | 206 |
+| Indexed text files | 554 |
+| Indexed text bytes | 7.1 MB |
+| Symbols | 5,145 |
+| Relations | 12,122 |
+
+Warm CLI reads from that audit stayed around 160-166 ms:
 
 | Command shape | Sample latency |
 | --- | ---: |
@@ -49,7 +120,9 @@ Warm CLI reads from that audit stayed interactive:
 | `token` | ~161 ms |
 | `overview` | ~166 ms |
 
-Token numbers are workflow estimates, not billing-grade provider counts. The default estimator is the offline `chars/bytes / 4` heuristic, reported with bucket, baseline, and confidence metadata so observed full-file compression is not silently mixed with modeled navigation savings. That is deliberate: normal agent orientation stays local, fast, and credential-free.
+For a comparable large application, the practical expectation is that warm orientation commands stay comfortably sub-second and usually feel like ordinary CLI reads. The scan/build step can take longer, but the agent should not pay that full cost for every lookup; it should use `watch` or `watch --once` to keep the database fresh and then read from the indexed atlas.
+
+Token reports expose bucket, baseline, and confidence metadata so observed full-file compression is not silently mixed with modeled navigation savings. That is deliberate: normal agent orientation stays local, fast, and credential-free.
 
 ## The Funnel
 
@@ -77,31 +150,6 @@ Most agent waste happens before code is edited: broad search, wrong folder, wron
 - `slice`: exact source after the target is known.
 - `watch`: continuous local refresh while files change.
 - `token`: estimated context saved by the atlas-first workflow.
-
-## Quickstart
-
-```bash
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.6
-codex plugin add projectatlas --marketplace projectatlas
-```
-
-Then tell Codex: "Use ProjectAtlas for this repo."
-
-That is the intended path. The plugin gives the agent the workflow skill, native runtime installer, and MCP config templates. The agent does the rest: install or verify the runtime, map the repo, keep the atlas fresh, choose the right folder, choose the right file, and read exact source only after the target is known.
-
-## What Happens Next
-
-ProjectAtlas is intentionally agent-first. In normal use you should not have to memorize command syntax.
-
-The agent follows this loop:
-
-1. Build or refresh the local atlas.
-2. Read folder purposes before opening source.
-3. Read file purposes and content summaries inside the likely folder.
-4. Use the detailed summary, outline, symbols, or search when compressed context is enough.
-5. Open exact slices only when real code is needed.
-
-For active sessions, the agent can run the watcher so file edits continuously refresh the database. For cleanup sessions, it can ask ProjectAtlas for missing purposes, stale metadata, duplicate folder roles, and structure drift.
 
 ## CLI Reference
 

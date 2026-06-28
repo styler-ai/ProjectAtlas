@@ -30,15 +30,17 @@ pub fn extract_symbol_graph(path: &str, language: Option<&str>, content: &str) -
     if is_vue_sfc(path, language) {
         return extract_vue_sfc_graph(path, language, parse_content.as_ref());
     }
-    if let Some(graph) = extract_tree_sitter_graph(path, language, parse_content.as_ref()) {
-        if !graph.symbols.is_empty() || !graph.relations.is_empty() {
-            return graph;
+    if let Some(parsed) = extract_tree_sitter_graph(path, language, parse_content.as_ref()) {
+        if !parsed.graph.symbols.is_empty() || !parsed.graph.relations.is_empty() {
+            return parsed.graph;
         }
-        let fallback = extract_fallback_graph(path, language, parse_content.as_ref());
-        if !fallback.symbols.is_empty() || !fallback.relations.is_empty() {
-            return fallback;
+        if parsed.had_errors {
+            let fallback = extract_fallback_graph(path, language, parse_content.as_ref());
+            if !fallback.symbols.is_empty() || !fallback.relations.is_empty() {
+                return fallback;
+            }
         }
-        return graph;
+        return parsed.graph;
     }
     extract_fallback_graph(path, language, parse_content.as_ref())
 }
@@ -464,12 +466,20 @@ fn normalize_toml_section(section: &str) -> String {
     parts.join(".")
 }
 
+/// Tree-sitter extraction result with parse health metadata.
+struct TreeSitterParse {
+    /// Extracted symbol graph.
+    graph: SymbolGraph,
+    /// Whether tree-sitter found syntax errors while parsing.
+    had_errors: bool,
+}
+
 /// Extract a graph through tree-sitter when the language has a grammar.
 fn extract_tree_sitter_graph(
     path: &str,
     language: Option<&str>,
     content: &str,
-) -> Option<SymbolGraph> {
+) -> Option<TreeSitterParse> {
     let language_name = language?;
     let parser_language = tree_sitter_language(language_name)?;
     let mut parser = Parser::new();
@@ -478,9 +488,11 @@ fn extract_tree_sitter_graph(
     }
     let tree = parser.parse(content, None)?;
     let mut graph = empty_graph(path, language, ParserKind::TreeSitter);
-    visit_node(tree.root_node(), content, &mut graph);
+    let root = tree.root_node();
+    let had_errors = root.has_error();
+    visit_node(root, content, &mut graph);
     languages::augment_language_graph(&mut graph, content);
-    Some(graph)
+    Some(TreeSitterParse { graph, had_errors })
 }
 
 /// Return a tree-sitter language for supported source families.
@@ -1699,6 +1711,27 @@ fn helper() {}
     #[test]
     fn native_parser_graph_survives_when_empty() {
         let graph = extract_symbol_graph("src/empty.rs", Some("rust"), "// comment only\n");
+        assert_eq!(graph.parser, ParserKind::TreeSitter);
+        assert!(graph.symbols.is_empty());
+        assert!(graph.relations.is_empty());
+    }
+
+    #[test]
+    fn native_parser_ignores_fallback_patterns_inside_comments() {
+        let graph = extract_symbol_graph(
+            "src/commented.rs",
+            Some("rust"),
+            "/*\ndef leaked():\n    pass\nfunction leaked() {}\nimport x\n*/\n",
+        );
+        assert_eq!(graph.parser, ParserKind::TreeSitter);
+        assert!(graph.symbols.is_empty());
+        assert!(graph.relations.is_empty());
+
+        let graph = extract_symbol_graph(
+            "src/commented.ts",
+            Some("typescript"),
+            "/*\ndef leaked():\n    pass\nfunction leaked() {}\nimport x\n*/\n",
+        );
         assert_eq!(graph.parser, ParserKind::TreeSitter);
         assert!(graph.symbols.is_empty());
         assert!(graph.relations.is_empty());

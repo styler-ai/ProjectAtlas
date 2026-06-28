@@ -1,9 +1,9 @@
 version: 1
-generated_at: unix:1782671446
-file_hash: "2feb0aeef888a6f8e8b8f7ca505dfd2604bbb9f2548f7ab64e3ed5417a600d1c"
-folder_hash: "39e84b5b8f8717fb2b914e743cc0033600882dbeb89fdcd70b32270d29f43b3c"
+generated_at: unix:1782676748
+file_hash: "2d29b1755323da9a73c46d8d98ccb1baaef64c0e515d5d21f5af4db2b5053830"
+folder_hash: "f5ec84a38eaa8b9ee18c1d22563973db7217f346e2815ff1fa6abb9273e95036"
 root: .
-overview: tracked_source_files=93 tracked_nonsource_files=35 tracked_files_total=128 tracked_folders=57 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
+overview: tracked_source_files=96 tracked_nonsource_files=35 tracked_files_total=131 tracked_folders=58 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
 source_extensions[]:
   - .astro
   - .bash
@@ -138,12 +138,13 @@ exclude_dir_names[]:
   - node_modules
   - target
 exclude_path_prefixes[]:
-folders[57]{path,summary,source}:
+folders[58]{path,summary,source}:
   .,ProjectAtlas repository root.,database
   .agents,Agent marketplace metadata for ProjectAtlas.,database
   .agents/plugins,Codex plugin marketplace catalog for ProjectAtlas.,database
   .githooks,Git hook scripts for ProjectAtlas commits.,database
   .github,ProjectAtlas GitHub metadata and workflows.,database
+  .github/ISSUE_TEMPLATE,GitHub issue forms for public bug reports and improvement requests.,database
   .github/workflows,ProjectAtlas CI and release workflows.,database
   crates,Rust workspace crates for ProjectAtlas 3.,database
   crates/projectatlas-cli,Command-line adapter for ProjectAtlas 3.,database
@@ -196,11 +197,14 @@ folders[57]{path,summary,source}:
   skills/claude,Claude guidance for ProjectAtlas usage.,database
   skills/codex,Codex guidance for ProjectAtlas usage.,database
   templates,Reusable agent templates and snippets.,database
-files[99]{path,summary,source}:
+files[102]{path,summary,source}:
   .agents/plugins/marketplace.json,Codex plugin marketplace catalog for ProjectAtlas,database
   .gitattributes,Line-ending policy for ProjectAtlas repository fixtures,nonsource
   .githooks/commit-msg,Git hook to enforce issue references in commits,nonsource
   .githooks/pre-push,Git hook to run full local checks before push,nonsource
+  .github/ISSUE_TEMPLATE/bug_report.yml,GitHub issue form for public ProjectAtlas bug reports.,database
+  .github/ISSUE_TEMPLATE/config.yml,GitHub issue template chooser configuration for ProjectAtlas.,database
+  .github/ISSUE_TEMPLATE/improvement_request.yml,GitHub issue form for public ProjectAtlas improvement requests.,database
   .github/pull_request_template.md,Pull request checklist for ProjectAtlas,database
   .github/workflows/03-auto-release.yml,ProjectAtlas auto release workflow,database
   .github/workflows/04-docs.yml,ProjectAtlas docs site workflow,database
@@ -249,7 +253,7 @@ files[99]{path,summary,source}:
   docs/adoption.md,Adoption checklist for ProjectAtlas,database
   docs/agent-integration.md,Agent integration instructions for ProjectAtlas,database
   docs/assets/projectatlas-brand.png,ProjectAtlas README brand image,nonsource
-  docs/benchmarks/large-application-token-savings.md,Document large-application benchmark evidence for token-savings and responsiveness checks.,database
+  docs/benchmarks/large-application-token-savings.md,Document large-application benchmark evidence for token savings and responsiveness checks.,database
   docs/concepts.md,Core concepts for ProjectAtlas usage,database
   docs/configuration.md,Configuration reference for ProjectAtlas,database
   docs/format.md,ProjectAtlas TOON schema reference,database
@@ -293,8 +297,8 @@ files[99]{path,summary,source}:
   plugins/projectatlas/scripts/install-runtime.ps1,Install and verify the ProjectAtlas native runtime on Windows.,database
   plugins/projectatlas/scripts/install-runtime.sh,POSIX installer for the native ProjectAtlas runtime.,database
   plugins/projectatlas/skills/projectatlas/SKILL.md,ProjectAtlas installable Codex skill,database
-  skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas,database
-  skills/codex/ProjectAtlas.md,Packaged Codex skill instructions for ProjectAtlas,database
+  skills/claude/ProjectAtlas.md,Claude skill guidance for using ProjectAtlas as an atlas-first repository workflow.,database
+  skills/codex/ProjectAtlas.md,Codex skill guidance for using ProjectAtlas as an atlas-first repository workflow.,database
   templates/AGENTS.md,Agent startup snippet for ProjectAtlas,database
 folder_summary_duplicates[]:
 file_summary_duplicates[]:
@@ -304,6 +308,7 @@ folder_tree[]:
   - "  plugins/ - Codex plugin marketplace catalog for ProjectAtlas."
   - .githooks/ - Git hook scripts for ProjectAtlas commits.
   - .github/ - ProjectAtlas GitHub metadata and workflows.
+  - "  ISSUE_TEMPLATE/ - GitHub issue forms for public bug reports and improvement requests."
   - "  workflows/ - ProjectAtlas CI and release workflows."
   - crates/ - Rust workspace crates for ProjectAtlas 3.
   - "  projectatlas-cli/ - Command-line adapter for ProjectAtlas 3."

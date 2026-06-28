@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc" viewBox="0 0 960 360">
+  <title id="title">ProjectAtlas agent harness funnel</title>
+  <desc id="desc">Workflow diagram showing an agent moving from folder purpose overview, to file purpose and content summary, to detailed summary and symbols, to exact source slices, with watch keeping the atlas current.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #24292f; }
+    .title { font-size: 24px; font-weight: 700; }
+    .subtitle { font-size: 15px; fill: #57606a; }
+    .step { font-size: 16px; font-weight: 700; }
+    .small { font-size: 13px; fill: #57606a; }
+    .tiny { font-size: 12px; fill: #57606a; }
+    .box { fill: #ffffff; stroke-width: 2; rx: 8; }
+    .blue { stroke: #0969da; }
+    .green { stroke: #1a7f37; }
+    .amber { stroke: #9a6700; }
+    .red { stroke: #cf222e; }
+    .gray { stroke: #57606a; }
+    .arrow { stroke: #57606a; stroke-width: 2.2; fill: none; marker-end: url(#arrowhead); }
+    .loop { stroke: #0969da; stroke-width: 2; fill: none; stroke-dasharray: 7 5; marker-end: url(#arrowheadBlue); }
+  </style>
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#57606a" />
+    </marker>
+    <marker id="arrowheadBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0969da" />
+    </marker>
+  </defs>
+
+  <text x="36" y="36" class="title">Agent harness flow: high-level navigation to exact source</text>
+  <text x="36" y="60" class="subtitle">ProjectAtlas keeps the expensive code read as the last step, not the first guess.</text>
+
+  <rect x="36" y="96" width="168" height="130" class="box blue" />
+  <text x="56" y="124" class="step">1. Folder map</text>
+  <text x="56" y="151" class="small">Which area matters?</text>
+  <text x="56" y="176" class="tiny">overview</text>
+  <text x="56" y="195" class="tiny">folders query</text>
+  <text x="56" y="214" class="tiny">folder_purpose</text>
+
+  <path d="M 214 161 H 258" class="arrow" />
+
+  <rect x="270" y="96" width="168" height="130" class="box green" />
+  <text x="290" y="124" class="step">2. File vicinity</text>
+  <text x="290" y="151" class="small">Which file is close?</text>
+  <text x="290" y="176" class="tiny">files query</text>
+  <text x="290" y="195" class="tiny">file_purpose</text>
+  <text x="290" y="214" class="tiny">content_summary</text>
+
+  <path d="M 448 161 H 492" class="arrow" />
+
+  <rect x="504" y="96" width="168" height="130" class="box amber" />
+  <text x="524" y="124" class="step">3. Detail plan</text>
+  <text x="524" y="151" class="small">What exactly matters?</text>
+  <text x="524" y="176" class="tiny">summary / outline</text>
+  <text x="524" y="195" class="tiny">symbols / relations</text>
+  <text x="524" y="214" class="tiny">bounded search</text>
+
+  <path d="M 682 161 H 726" class="arrow" />
+
+  <rect x="738" y="96" width="168" height="130" class="box red" />
+  <text x="758" y="124" class="step">4. Exact slice</text>
+  <text x="758" y="151" class="small">Read only target code.</text>
+  <text x="758" y="176" class="tiny">slice lines</text>
+  <text x="758" y="195" class="tiny">symbol slice</text>
+  <text x="758" y="214" class="tiny">then edit/test</text>
+
+  <rect x="266" y="270" width="426" height="54" class="box gray" />
+  <text x="286" y="300" class="step">watch keeps the atlas current while files change</text>
+  <text x="286" y="318" class="small">watch / watch --once refreshes text, summaries, symbols, purposes, and health signals.</text>
+
+  <path d="M 822 236 C 822 306 724 330 694 302" class="loop" />
+  <path d="M 264 302 C 146 302 104 258 104 232" class="loop" />
+</svg>

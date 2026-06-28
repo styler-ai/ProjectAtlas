@@ -1,0 +1,71 @@
+name: Bug report
+description: Report something in ProjectAtlas that is broken or behaving incorrectly.
+title: "bug: "
+labels:
+  - type:bug
+  - priority:medium
+  - status:ready
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a ProjectAtlas bug. Please include enough detail for someone else to reproduce it without access to your private repository.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What is broken?
+      placeholder: "ProjectAtlas reports stale file purposes after..."
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: List the smallest steps that reproduce the behavior.
+      placeholder: |
+        1. Run `projectatlas scan`
+        2. Run `projectatlas summary ...`
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should ProjectAtlas have done?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead? Include relevant output if possible.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, shell, ProjectAtlas version, host agent, and install method.
+      placeholder: |
+        - OS: Windows / Linux / macOS
+        - Shell: PowerShell / bash / zsh
+        - ProjectAtlas version: `projectatlas --version`
+        - Agent host: Codex / Claude Code / OpenCode / other
+        - Install method: plugin / release asset / cargo install
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or output
+      description: Paste relevant terminal output. Redact secrets and private paths.
+      render: shell
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed secrets, tokens, private repository names, and private filesystem paths from this report.
+          required: true
