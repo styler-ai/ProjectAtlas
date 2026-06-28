@@ -3,6 +3,8 @@
     "projectatlas": {
       "command": "projectatlas",
       "args": [
+        "--require-version",
+        "0.3.4",
         "--db",
         ".projectatlas/projectatlas.db",
         "mcp"

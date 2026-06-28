@@ -2,11 +2,14 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use projectatlas_core::language::{BROAD_SOURCE_EXTENSIONS, detect_language_for_path};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Write as IoWrite};
+use std::path::Path;
 use std::process::{Command as StdCommand, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -34,6 +37,104 @@ fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn E
     if atlas_dir.exists() {
         return Err(io::Error::other("runtime-info created .projectatlas").into());
     }
+    let required_version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args([
+            "--require-version",
+            required_version.as_str(),
+            "runtime-info",
+        ])
+        .assert()
+        .success();
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--require-version", "0.0.0", "runtime-info"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "does not satisfy required version",
+        ));
+    Ok(())
+}
+
+#[test]
+fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Error>> {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .ok_or_else(|| io::Error::other("workspace root not found"))?;
+    let powershell_installer = fs::read_to_string(
+        workspace_root
+            .join("plugins")
+            .join("projectatlas")
+            .join("scripts")
+            .join("install-runtime.ps1"),
+    )?;
+    let posix_installer = fs::read_to_string(
+        workspace_root
+            .join("plugins")
+            .join("projectatlas")
+            .join("scripts")
+            .join("install-runtime.sh"),
+    )?;
+    let fallback_mcp = fs::read_to_string(
+        workspace_root
+            .join("plugins")
+            .join("projectatlas")
+            .join(".mcp.json"),
+    )?;
+
+    for required in [
+        "Convert-ProjectAtlasVersionTag",
+        "$runtime.version -eq $expectedRuntimeVersion",
+        "Sync-ProjectAtlasRuntimeToLocalAppData",
+        "Find-ProjectAtlas $ProjectAtlasVersion",
+        r#"$installArgs += @("projectatlas-cli", "--locked", "--force")"#,
+    ] {
+        if !powershell_installer.contains(required) {
+            return Err(io::Error::other(format!(
+                "PowerShell installer is missing runtime version guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    if powershell_installer.contains("\"--package\", \"projectatlas-cli\"") {
+        return Err(io::Error::other(
+            "PowerShell installer uses invalid cargo install --git --package syntax",
+        )
+        .into());
+    }
+    for required in [
+        "expected_runtime_version()",
+        "runtime_version=$(printf",
+        "[ \"$runtime_version\" = \"$expected_version\" ]",
+        "cargo install --git \"$repository\" --tag \"$projectatlas_version\" projectatlas-cli --locked --force",
+    ] {
+        if !posix_installer.contains(required) {
+            return Err(io::Error::other(format!(
+                "POSIX installer is missing runtime version guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    if posix_installer.contains("--package projectatlas-cli") {
+        return Err(io::Error::other(
+            "POSIX installer uses invalid cargo install --git --package syntax",
+        )
+        .into());
+    }
+    let fallback_json: Value = serde_json::from_str(&fallback_mcp)?;
+    require_json_string(
+        &fallback_json,
+        &["mcpServers", "projectatlas", "args", "0"],
+        "--require-version",
+    )?;
+    require_json_string(
+        &fallback_json,
+        &["mcpServers", "projectatlas", "args", "1"],
+        env!("CARGO_PKG_VERSION"),
+    )?;
     Ok(())
 }
 
@@ -77,7 +178,7 @@ fn bare_relative_projectatlas_config_path_drives_scan_map_and_lint() -> Result<(
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("files: 1"))
+        .stdout(predicate::str::contains("files: 3"))
         .stderr(predicate::str::contains("io error for \"\"").not());
 
     Command::cargo_bin("projectatlas")?
@@ -91,7 +192,7 @@ fn bare_relative_projectatlas_config_path_drives_scan_map_and_lint() -> Result<(
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"files\": 1"));
+        .stdout(predicate::str::contains("\"files\": 3"));
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -302,16 +403,26 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
     require_json_string(
         &mcp_config_json,
         &["mcpServers", "projectatlas", "args", "0"],
-        "--db",
+        "--require-version",
+    )?;
+    require_json_string(
+        &mcp_config_json,
+        &["mcpServers", "projectatlas", "args", "1"],
+        env!("CARGO_PKG_VERSION"),
     )?;
     require_json_string(
         &mcp_config_json,
         &["mcpServers", "projectatlas", "args", "2"],
-        "--config",
+        "--db",
     )?;
     require_json_string(
         &mcp_config_json,
         &["mcpServers", "projectatlas", "args", "4"],
+        "--config",
+    )?;
+    require_json_string(
+        &mcp_config_json,
+        &["mcpServers", "projectatlas", "args", "6"],
         "mcp",
     )?;
     let mcp_args = mcp_config_json["mcpServers"]["projectatlas"]["args"]
@@ -319,7 +430,7 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| io::Error::other("mcp args missing"))?;
     let expected_root = repo.canonicalize()?;
     let config_path = mcp_args
-        .get(3)
+        .get(5)
         .ok_or_else(|| io::Error::other("mcp config path missing"))?
         .as_str()
         .ok_or_else(|| io::Error::other("mcp config path missing"))?;
@@ -1008,6 +1119,7 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
         r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_overview","arguments":{}}}"#,
         r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_files","arguments":{"file_pattern":"*.rs","limit":1}}}"#,
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"atlas_health","arguments":{"category":"missing-purpose","path_prefix":".","limit":1}}}"#,
     ];
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let stdout = run_mcp_stdio(
@@ -1024,6 +1136,9 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !stdout.contains(r#""name":"atlas_files""#)
         || !stdout.contains("overview:")
         || !stdout.contains("files[1]")
+        || !stdout.contains("health:")
+        || !stdout.contains("health_findings[1]")
+        || !stdout.contains("next_start_index: 1")
         || !stdout.contains("src/lib.rs")
     {
         return Err(io::Error::other(format!(
@@ -1204,7 +1319,7 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
         return Err(io::Error::other("configured scan command failed").into());
     }
     let scan_json: Value = serde_json::from_slice(&raw_scan.stdout)?;
-    require_json_usize(&scan_json, &["overview", "files"], 2)?;
+    require_json_usize(&scan_json, &["overview", "files"], 3)?;
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -1267,6 +1382,585 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
     require_json_string(&search_json, &["mode"], "fuzzy")?;
     require_json_usize(&search_json, &["returned"], 1)?;
     require_json_string(&search_json, &["results", "0", "path"], "src/engine.rs")?;
+    Ok(())
+}
+
+#[test]
+fn default_scan_drops_stale_nodes_after_prefix_exclude_config_change() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir_all(repo.join(".projectatlas"))?;
+    fs::create_dir_all(repo.join("src").join("api"))?;
+    fs::create_dir_all(repo.join("docs").join("api"))?;
+    fs::write(
+        repo.join("src").join("engine.rs"),
+        "pub fn active_engine() {}\n",
+    )?;
+    fs::write(
+        repo.join("src").join("api").join("live.rs"),
+        "pub fn live_api() {}\n",
+    )?;
+    fs::write(
+        repo.join("docs").join("api").join("noise.rs"),
+        "pub fn generated_doc_noise() {}\n",
+    )?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["scan", "."])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("files: 3"));
+
+    fs::write(
+        repo.join(".projectatlas").join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\"]\nexclude_path_prefixes = [\"docs/api\"]\n",
+    )?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["scan", ".", "--text-index-max-bytes", "2000000"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("files: 3"))
+        .stdout(predicate::str::contains("folders: 5"));
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["folders", "api", "--limit", "10"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("src/api"))
+        .stdout(predicate::str::contains("docs/api").not());
+
+    let raw_search = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args([
+            "--format",
+            "json",
+            "search",
+            "generated_doc_noise",
+            "--file-pattern",
+            "*.rs",
+        ])
+        .output()?;
+    if !raw_search.status.success() {
+        return Err(io::Error::other("excluded stale search command failed").into());
+    }
+    let search_json: Value = serde_json::from_slice(&raw_search.stdout)?;
+    require_json_usize(&search_json, &["returned"], 0)?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("health-check")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("health_findings"))
+        .stdout(predicate::str::contains("docs/api").not());
+    Ok(())
+}
+
+#[test]
+fn vue_composition_api_summary_uses_bindings() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir_all(repo.join("src"))?;
+    fs::write(
+        repo.join("src").join("DealStage.vue"),
+        r#"
+<template><article>{{ currentPriceLabel }}</article></template>
+<script setup lang="ts">
+import { computed, ref } from "vue";
+
+const props = withDefaults(defineProps<{
+  title: string;
+}>(), { title: "Deal" });
+const emit = defineEmits<{
+  select: [id: string];
+}>();
+const dealTitleId = computed(() => props.title.toLowerCase());
+const currentPriceLabel = computed(() => `$${props.title}`);
+const retryCount = ref(0);
+</script>
+"#,
+    )?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["summary", "src/DealStage.vue", "--limit", "10"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("vue source defining bindings"))
+        .stdout(predicate::str::contains("currentPriceLabel"))
+        .stdout(predicate::str::contains("vue file,").not());
+    Ok(())
+}
+
+#[test]
+fn javascript_summary_ignores_locals_and_object_stub_methods() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir_all(repo.join("app").join("scripts"))?;
+    fs::write(
+        repo.join("app")
+            .join("scripts")
+            .join("generate-dataset-manifest.mjs"),
+        r#"
+import path from "node:path";
+import { createHash } from "node:crypto";
+
+const DATA_DIRECTORY = path.resolve("app/public/data");
+const OUTPUT_FILE = path.join(DATA_DIRECTORY, "datasets.manifest.json");
+const CACHE_NAME = (() => `sw-${Date.now()}`)();
+const listenerStub = {
+  addListener() {},
+  removeListener() {},
+  addEventListener() {},
+  removeEventListener() {}
+};
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+async function readDatasetEntry(filePath) {
+  return sha256(filePath);
+}
+
+async function main() {
+  const datasetEntries = await Promise.all(["a"].map((file) => readDatasetEntry(file)));
+  const versionSeed = datasetEntries.map((entry) => entry.id).join("\n");
+  return versionSeed;
+}
+"#,
+    )?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    let raw_summary = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args([
+            "--format",
+            "json",
+            "summary",
+            "app/scripts/generate-dataset-manifest.mjs",
+            "--limit",
+            "20",
+        ])
+        .output()?;
+    if !raw_summary.status.success() {
+        return Err(io::Error::other("javascript summary command failed").into());
+    }
+    let summary_json: Value = serde_json::from_slice(&raw_summary.stdout)?;
+    require_json_string(
+        &summary_json,
+        &["observed_summary"],
+        "javascript source defining functions main, readDatasetEntry, sha256 with imports import path from \"node:path\";, import { createHash } from \"node:crypto\";.",
+    )?;
+    require_json_usize(&summary_json, &["total_functions"], 3)?;
+    require_json_usize(&summary_json, &["total_methods"], 0)?;
+    let function_names = json_symbol_names(&summary_json, "functions")?;
+    for expected in ["main", "readDatasetEntry", "sha256"] {
+        if !function_names.iter().any(|name| name == expected) {
+            return Err(io::Error::other(format!("missing function {expected}")).into());
+        }
+    }
+    for incidental in [
+        "DATA_DIRECTORY",
+        "OUTPUT_FILE",
+        "CACHE_NAME",
+        "datasetEntries",
+        "versionSeed",
+    ] {
+        if function_names.iter().any(|name| name == incidental) {
+            return Err(io::Error::other(format!(
+                "incidental binding {incidental} must not appear as a function"
+            ))
+            .into());
+        }
+    }
+    let method_names = json_symbol_names(&summary_json, "methods")?;
+    for stub in [
+        "addListener",
+        "removeListener",
+        "addEventListener",
+        "removeEventListener",
+    ] {
+        if method_names.iter().any(|name| name == stub) {
+            return Err(io::Error::other(format!(
+                "object literal stub {stub} must not appear as a method"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn structural_summaries_cover_declarative_files_and_projectatlas_inputs()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir_all(repo.join(".projectatlas"))?;
+    fs::create_dir_all(repo.join(".github").join("workflows"))?;
+    fs::create_dir_all(repo.join("app").join("styles"))?;
+    fs::create_dir_all(repo.join("public"))?;
+    fs::create_dir_all(repo.join("src"))?;
+    fs::write(
+        repo.join(".projectatlas").join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\"]\nexclude_path_prefixes = [\"docs/api\"]\n",
+    )?;
+    fs::write(
+        repo.join(".projectatlas")
+            .join("projectatlas-nonsource-files.toon"),
+        "nonsource_files[]:\n  # path,summary\n",
+    )?;
+    fs::write(repo.join(".projectatlas").join("projectatlas.db"), b"db")?;
+    fs::write(
+        repo.join(".projectatlas").join("projectatlas.toon"),
+        "generated map\n",
+    )?;
+    fs::write(
+        repo.join(".projectatlas").join("projectatlas.mcp.json"),
+        "{}\n",
+    )?;
+    fs::write(
+        repo.join("README.md"),
+        "# ProjectAtlas Demo\n\n## Install\n## Usage\n",
+    )?;
+    fs::write(
+        repo.join("package.json"),
+        r#"{"name":"demo","scripts":{"test":"vitest"},"dependencies":{"react":"1.0.0"}}"#,
+    )?;
+    fs::write(
+        repo.join(".github").join("workflows").join("ci.yml"),
+        "name: CI\non:\n  push:\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-latest\n",
+    )?;
+    fs::write(
+        repo.join("app").join("styles").join("tokens.css"),
+        ":root { --brand: #fff; }\n.card, .panel { color: red; }\n@media (min-width: 40rem) { .card { display: grid; } }\n",
+    )?;
+    fs::write(
+        repo.join("public").join("index.html"),
+        "<html><head><title>Home</title><meta name=\"description\" content=\"Welcome page\"></head><body><h1>Hello</h1><script type=\"application/ld+json\">{}</script></body></html>",
+    )?;
+    fs::write(
+        repo.join("src").join("empty.rs"),
+        "// no declarations yet\n",
+    )?;
+    let db = temp.path().join("projectatlas.db");
+
+    let raw_scan = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .output()?;
+    if !raw_scan.status.success() {
+        return Err(io::Error::other("structural scan command failed").into());
+    }
+    let scan_json: Value = serde_json::from_slice(&raw_scan.stdout)?;
+    require_json_usize_at_least(&scan_json, &["structural_summaries", "summarized"], 7)?;
+    require_json_usize_at_least(
+        &scan_json,
+        &["structural_summaries", "purpose_suggestions"],
+        5,
+    )?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("config")
+        .arg("--print")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("exclude_path_prefixes"))
+        .stdout(predicate::str::contains("docs/api"))
+        .stdout(predicate::str::contains("source_extensions"));
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["files", "projectatlas", "--limit", "20"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(".projectatlas/config.toml"))
+        .stdout(predicate::str::contains(
+            ".projectatlas/projectatlas-nonsource-files.toon",
+        ))
+        .stdout(predicate::str::contains(".projectatlas/projectatlas.db").not())
+        .stdout(predicate::str::contains(".projectatlas/projectatlas.toon").not())
+        .stdout(predicate::str::contains(".projectatlas/projectatlas.mcp.json").not());
+
+    let readme_summary = json_summary_command(&repo, &db, "README.md")?;
+    require_json_string(
+        &readme_summary,
+        &["observed_summary"],
+        "markdown document titled ProjectAtlas Demo with sections Install, Usage.",
+    )?;
+    require_json_string(&readme_summary, &["parser_kind"], "structural")?;
+    require_json_string(&readme_summary, &["summary_status"], "ok")?;
+    require_json_string(&readme_summary, &["purpose_status"], "suggested")?;
+
+    let package_summary = json_summary_command(&repo, &db, "package.json")?;
+    require_json_string(
+        &package_summary,
+        &["observed_summary"],
+        "package manifest for demo with scripts test and 1 dependencies.",
+    )?;
+
+    let workflow_summary = json_summary_command(&repo, &db, ".github/workflows/ci.yml")?;
+    require_json_string(
+        &workflow_summary,
+        &["observed_summary"],
+        "yaml workflow CI triggered by pull_request, push with jobs test.",
+    )?;
+
+    let config_summary = json_summary_command(&repo, &db, ".projectatlas/config.toml")?;
+    require_json_string(
+        &config_summary,
+        &["observed_summary"],
+        "ProjectAtlas config with tables project, scan and 5 scan excludes.",
+    )?;
+    require_json_string(&config_summary, &["purpose_status"], "approved")?;
+
+    let css_summary = json_summary_command(&repo, &db, "app/styles/tokens.css")?;
+    require_json_contains(
+        &css_summary,
+        &["observed_summary"],
+        "css stylesheet with selectors .card, .panel, :root",
+    )?;
+
+    let html_summary = json_summary_command(&repo, &db, "public/index.html")?;
+    require_json_contains(
+        &html_summary,
+        &["observed_summary"],
+        "html document with title Home, meta description Welcome page",
+    )?;
+
+    let rust_summary = json_summary_command(&repo, &db, "src/empty.rs")?;
+    require_json_string(
+        &rust_summary,
+        &["observed_summary"],
+        "rust source file with no declarations found.",
+    )?;
+    require_json_string(&rust_summary, &["parser_kind"], "symbol-graph")?;
+    require_json_string(&rust_summary, &["summary_status"], "ok")?;
+
+    Ok(())
+}
+
+#[test]
+fn scan_indexes_every_supported_language_extension() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    let fixture_root = repo.join("all");
+    fs::create_dir_all(&fixture_root)?;
+    let db = temp.path().join("projectatlas.db");
+    let mut expected = Vec::new();
+
+    for (index, extension) in BROAD_SOURCE_EXTENSIONS.iter().enumerate() {
+        let file_name = format!("file_{index:03}{extension}");
+        let relative_path = format!("all/{file_name}");
+        let language =
+            detect_language_for_path(&relative_path, Some(extension)).ok_or_else(|| {
+                io::Error::other(format!(
+                    "language registry has unsupported extension {extension}"
+                ))
+            })?;
+        fs::write(
+            fixture_root.join(file_name),
+            fixture_content_for_extension(extension),
+        )?;
+        expected.push((relative_path, language));
+    }
+
+    for (relative_path, expected_language, content) in special_language_fixtures() {
+        let disk_path = repo.join(relative_path);
+        if let Some(parent) = disk_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&disk_path, content)?;
+        expected.push((relative_path.to_string(), expected_language.to_string()));
+    }
+
+    let raw_scan = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .output()?;
+    if !raw_scan.status.success() {
+        return Err(io::Error::other(format!(
+            "language registry scan failed: {}",
+            String::from_utf8_lossy(&raw_scan.stderr)
+        ))
+        .into());
+    }
+    let scan_json: Value = serde_json::from_slice(&raw_scan.stdout)?;
+    require_json_usize_at_least(&scan_json, &["overview", "files"], expected.len())?;
+
+    let limit = (expected.len() + 10).to_string();
+    let raw_files = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["files", "--file-pattern", "**/*", "--limit", &limit])
+        .output()?;
+    if !raw_files.status.success() {
+        return Err(io::Error::other(format!(
+            "language registry files command failed: {}",
+            String::from_utf8_lossy(&raw_files.stderr)
+        ))
+        .into());
+    }
+    let files_json: Value = serde_json::from_slice(&raw_files.stdout)?;
+    let file_entries = files_json
+        .as_array()
+        .ok_or_else(|| io::Error::other("files output was not an array"))?;
+    let indexed_by_path = file_entries
+        .iter()
+        .filter_map(|entry| {
+            let path = entry["node"]["path"].as_str()?;
+            Some((path.to_string(), entry))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    for (relative_path, expected_language) in &expected {
+        let entry = indexed_by_path.get(relative_path.as_str()).ok_or_else(|| {
+            io::Error::other(format!("missing indexed language fixture {relative_path}"))
+        })?;
+        require_json_string(entry, &["node", "language"], expected_language)?;
+        if entry
+            .get("summary")
+            .and_then(Value::as_str)
+            .is_some_and(|summary| summary.trim().is_empty())
+        {
+            return Err(io::Error::other(format!(
+                "empty summary for indexed language fixture {relative_path}"
+            ))
+            .into());
+        }
+        let summary = json_summary_command(&repo, &db, relative_path)?;
+        require_json_string(&summary, &["language"], expected_language)?;
+        let observed_summary = json_at(&summary, &["observed_summary"])?
+            .as_str()
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "observed summary for language fixture {relative_path} was not a string"
+                ))
+            })?;
+        if observed_summary.trim().is_empty() {
+            return Err(io::Error::other(format!(
+                "empty observed summary for language fixture {relative_path}"
+            ))
+            .into());
+        }
+        let parser_kind = json_at(&summary, &["parser_kind"])?
+            .as_str()
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "parser kind for language fixture {relative_path} was not a string"
+                ))
+            })?;
+        if parser_kind == "missing" {
+            return Err(io::Error::other(format!(
+                "missing parser kind for language fixture {relative_path}"
+            ))
+            .into());
+        }
+        let summary_status = json_at(&summary, &["summary_status"])?
+            .as_str()
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "summary status for language fixture {relative_path} was not a string"
+                ))
+            })?;
+        if summary_status == "missing" {
+            return Err(io::Error::other(format!(
+                "missing summary status for language fixture {relative_path}"
+            ))
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn language_fixture_summaries_match_baselines() -> Result<(), Box<dyn Error>> {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .ok_or_else(|| io::Error::other("workspace root not found"))?;
+    let fixture_source = workspace_root.join("fixtures").join("languages");
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    copy_directory_tree(&fixture_source, &repo)?;
+    fs::create_dir_all(repo.join("python"))?;
+    fs::write(
+        repo.join("python").join("builder.py"),
+        python_baseline_fixture_source(),
+    )?;
+    let db = temp.path().join("projectatlas.db");
+
+    let raw_scan = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .output()?;
+    if !raw_scan.status.success() {
+        return Err(io::Error::other(format!(
+            "language fixture scan failed: {}",
+            String::from_utf8_lossy(&raw_scan.stderr)
+        ))
+        .into());
+    }
+    let scan_json: Value = serde_json::from_slice(&raw_scan.stdout)?;
+    require_json_usize_at_least(&scan_json, &["symbols", "parsed"], 18)?;
+    require_json_usize_at_least(&scan_json, &["structural_summaries", "summarized"], 7)?;
+
+    for baseline in language_summary_baselines()? {
+        let summary = json_summary_command(&repo, &db, &baseline.path)?;
+        require_json_string(&summary, &["language"], &baseline.language)?;
+        require_json_string(&summary, &["parser_kind"], &baseline.parser_kind)?;
+        require_json_string(&summary, &["summary_status"], &baseline.status)?;
+        require_json_string(&summary, &["observed_summary"], &baseline.summary)?;
+        if baseline.minimum_symbol_count > 0 {
+            require_json_usize_at_least(
+                &summary,
+                &["symbol_count"],
+                baseline.minimum_symbol_count,
+            )?;
+        } else {
+            require_json_usize(&summary, &["symbol_count"], 0)?;
+        }
+    }
+
     Ok(())
 }
 
@@ -1382,8 +2076,8 @@ files[2]{path,summary,source}:\n\
         return Err(io::Error::other("overview after legacy import scan failed").into());
     }
     let overview_json: Value = serde_json::from_slice(&raw_overview.stdout)?;
-    require_json_usize(&overview_json, &["files"], 1)?;
-    require_json_usize(&overview_json, &["approved_purposes"], 2)?;
+    require_json_usize(&overview_json, &["files"], 2)?;
+    require_json_usize(&overview_json, &["approved_purposes"], 4)?;
     Ok(())
 }
 
@@ -1944,6 +2638,16 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         ))
         .stdout(predicate::str::contains("5 suggested"));
 
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["parity", "--profile", "repository-intelligence"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("parity:"))
+        .stdout(predicate::str::contains("5 suggested"));
+
     Ok(())
 }
 
@@ -2390,6 +3094,10 @@ fn skipped_symbol_builds_invalidate_stale_symbols() -> Result<(), Box<dyn Error>
     fs::create_dir(repo.join("src"))?;
     let source = repo.join("src").join("main.rs");
     fs::write(&source, "pub fn old_too_large_symbol() {}\n")?;
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"skip-summary\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )?;
     let db = temp.path().join("projectatlas.db");
 
     Command::cargo_bin("projectatlas")?
@@ -2408,7 +3116,11 @@ fn skipped_symbol_builds_invalidate_stale_symbols() -> Result<(), Box<dyn Error>
         .args(["symbols", "build", ".", "--max-bytes", "1"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("too_large: 1"));
+        .stdout(predicate::str::contains("too_large: 2"));
+
+    let cargo_summary = json_summary_command(&repo, &db, "Cargo.toml")?;
+    require_json_contains(&cargo_summary, &["observed_summary"], "cargo manifest")?;
+    require_json_string(&cargo_summary, &["summary_status"], "ok")?;
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -2449,6 +3161,172 @@ fn skipped_symbol_builds_invalidate_stale_symbols() -> Result<(), Box<dyn Error>
         .stdout(predicate::str::contains("old_timeout_symbol").not())
         .stdout(predicate::str::contains("new_timeout_symbol").not());
 
+    Ok(())
+}
+
+/// Expected summary behavior for one checked-in language fixture.
+struct LanguageSummaryBaseline {
+    /// Repository-relative fixture path.
+    path: String,
+    /// Expected detected language or file family.
+    language: String,
+    /// Expected summary parser family.
+    parser_kind: String,
+    /// Expected quality status for agent consumers.
+    status: String,
+    /// Expected deterministic observed summary.
+    summary: String,
+    /// Minimum expected symbol count.
+    minimum_symbol_count: usize,
+}
+
+/// Decode exact baseline summaries for representative supported language families.
+fn language_summary_baselines() -> Result<Vec<LanguageSummaryBaseline>, Box<dyn Error>> {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .ok_or_else(|| io::Error::other("workspace root not found"))?;
+    let baseline_text = fs::read_to_string(
+        workspace_root
+            .join("fixtures")
+            .join("languages")
+            .join("baselines.toon"),
+    )?;
+    let decoded: Value = toon_format::decode_default(&baseline_text)
+        .map_err(|error| io::Error::other(format!("baseline TOON decode failed: {error}")))?;
+    let rows = decoded
+        .get("summaries")
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("baseline TOON missing summaries array"))?;
+    rows.iter()
+        .map(|row| {
+            let min_symbols = row
+                .get("min_symbols")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| io::Error::other("baseline row missing min_symbols"))?;
+            Ok(LanguageSummaryBaseline {
+                path: required_baseline_string(row, "path")?,
+                language: required_baseline_string(row, "language")?,
+                parser_kind: required_baseline_string(row, "parser_kind")?,
+                status: required_baseline_string(row, "status")?,
+                summary: required_baseline_string(row, "summary")?,
+                minimum_symbol_count: usize::try_from(min_symbols)?,
+            })
+        })
+        .collect()
+}
+
+/// Return a required string from a decoded baseline row.
+fn required_baseline_string(row: &Value, field: &str) -> Result<String, Box<dyn Error>> {
+    row.get(field)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| io::Error::other(format!("baseline row missing {field}")).into())
+}
+
+/// Return path-based language fixtures without ordinary extensions.
+fn special_language_fixtures() -> &'static [(&'static str, &'static str, &'static str)] {
+    &[
+        (
+            "special/Cargo.toml",
+            "cargo-manifest",
+            "[package]\nname = \"all-language-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        ),
+        (
+            "special/Cargo.lock",
+            "cargo-lock",
+            "# This file is automatically @generated by Cargo.\nversion = 4\n\n[[package]]\nname = \"all-language-fixture\"\nversion = \"0.1.0\"\n",
+        ),
+        ("special/build.rs", "rust-build-script", "fn main() {}\n"),
+        ("special/Dockerfile", "dockerfile", "FROM scratch\n"),
+        ("special/Makefile", "makefile", "all:\n\t@echo ok\n"),
+    ]
+}
+
+/// Return minimal valid fixture content for one supported extension.
+fn fixture_content_for_extension(extension: &str) -> &'static str {
+    let normalized = extension.to_ascii_lowercase();
+    match normalized.as_str() {
+        ".py" | ".pyw" => "def fixture():\n    return \"ok\"\n",
+        ".js" | ".jsx" | ".mjs" | ".cjs" => "export function fixture() { return \"ok\"; }\n",
+        ".ts" => "export function fixture(): string { return \"ok\"; }\n",
+        ".tsx" => "export function Fixture() { return <div />; }\n",
+        ".d.ts" => "export interface Fixture { value: string }\n",
+        ".java" => "class Fixture { void run() {} }\n",
+        ".c" => "void fixture(void) {}\n",
+        ".cpp" | ".cxx" | ".cc" => "class Fixture { void run() {} };\n",
+        ".h" => "void fixture_header(void);\n",
+        ".hpp" | ".hxx" | ".hh" => "class FixtureHeader { void run(); };\n",
+        ".cs" => "class Fixture { void Run() {} }\n",
+        ".go" => "package fixture\nfunc Run() {}\n",
+        ".m" | ".mm" => {
+            "@interface Fixture\n- (void)run;\n@end\n@implementation Fixture\n- (void)run {}\n@end\n"
+        }
+        ".rb" => "def fixture\n  :ok\nend\n",
+        ".php" => "<?php function fixture() { return 'ok'; }\n",
+        ".swift" => "func fixture() -> String { \"ok\" }\n",
+        ".kt" | ".kts" => "class Fixture { fun run() = \"ok\" }\n",
+        ".rs" => "pub fn fixture() {}\n",
+        ".scala" => "object Fixture { def run(): String = \"ok\" }\n",
+        ".sh" | ".bash" | ".zsh" => "#!/usr/bin/env sh\necho ok\n",
+        ".ps1" | ".psm1" | ".psd1" => "function Invoke-Fixture { 'ok' }\n",
+        ".bat" | ".cmd" => "@echo off\necho ok\n",
+        ".r" => "fixture <- function() { \"ok\" }\n",
+        ".pl" | ".pm" => "sub fixture { return 'ok'; }\n",
+        ".lua" => "function fixture() return 'ok' end\n",
+        ".dart" => "String fixture() => 'ok';\n",
+        ".hs" => "fixture = \"ok\"\n",
+        ".ml" | ".mli" | ".fs" | ".fsx" => "let fixture = \"ok\"\n",
+        ".clj" | ".cljs" => "(defn fixture [] \"ok\")\n",
+        ".vim" => "function! Fixture()\nendfunction\n",
+        ".zig" | ".zon" => "pub fn fixture() void {}\n",
+        ".html" | ".htm" => "<!doctype html><title>Fixture</title><h1>Fixture</h1>\n",
+        ".css" | ".scss" | ".sass" | ".less" | ".styl" | ".stylus" => ":root { --fixture: ok; }\n",
+        ".md" | ".mdx" => "# Fixture\n\n## Usage\n",
+        ".json" => "{\"name\":\"fixture\"}\n",
+        ".jsonc" => "{// comment\n\"name\":\"fixture\"}\n",
+        ".xml" => "<fixture />\n",
+        ".yml" | ".yaml" => "name: fixture\n",
+        ".toml" => "name = \"fixture\"\n",
+        ".toon" => "fixture:\n  name: fixture\n",
+        ".txt" => "fixture text\n",
+        ".ini" | ".cfg" | ".conf" | ".properties" => "name=fixture\n",
+        ".vue" => "<script setup>\nconst fixture = 'ok'\n</script>\n",
+        ".svelte" => "<script>let fixture = 'ok';</script>\n",
+        ".astro" => "---\nconst fixture = 'ok';\n---\n<div>{fixture}</div>\n",
+        ".jsp" | ".jspx" | ".jspf" | ".tag" | ".tagx" => "<%@ page language=\"java\" %>\n",
+        ".gsp" => "<html><body>${fixture}</body></html>\n",
+        ".gradle" | ".groovy" => "def fixture = 'ok'\n",
+        ".proto" => "syntax = \"proto3\";\nmessage Fixture {}\n",
+        ".hbs" | ".handlebars" | ".ejs" | ".pug" | ".ftl" | ".mustache" | ".liquid" | ".erb" => {
+            "fixture {{name}}\n"
+        }
+        ".sql" | ".ddl" | ".dml" | ".mysql" | ".postgresql" | ".psql" | ".sqlite" | ".mssql"
+        | ".oracle" | ".ora" | ".db2" | ".proc" | ".procedure" | ".func" | ".function"
+        | ".view" | ".trigger" | ".index" | ".migration" | ".seed" | ".fixture" | ".schema"
+        | ".cql" | ".cypher" | ".sparql" | ".gql" | ".liquibase" | ".flyway" => "SELECT 1;\n",
+        _ => "fixture\n",
+    }
+}
+
+/// Return the generated Python baseline source used only inside temporary repos.
+fn python_baseline_fixture_source() -> &'static str {
+    "\"\"\"Python fixture module for ProjectAtlas language coverage.\"\"\"\n\n\nclass Builder:\n    \"\"\"Builds atlas state.\"\"\"\n\n    def build(self):\n        \"\"\"Build the atlas.\"\"\"\n        return helper()\n\n\ndef helper():\n    return \"atlas\"\n"
+}
+
+/// Copy a fixture directory tree into a temporary repository.
+fn copy_directory_tree(source: &Path, destination: &Path) -> Result<(), Box<dyn Error>> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_directory_tree(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), target)?;
+        }
+    }
     Ok(())
 }
 
@@ -2569,6 +3447,26 @@ fn require_json_string(value: &Value, path: &[&str], expected: &str) -> Result<(
     }
 }
 
+/// Require a nested JSON string to contain a substring.
+fn require_json_contains(
+    value: &Value,
+    path: &[&str],
+    expected: &str,
+) -> Result<(), Box<dyn Error>> {
+    let current = json_at(value, path)?;
+    let text = current
+        .as_str()
+        .ok_or_else(|| io::Error::other(format!("expected string at {path:?}")))?;
+    if text.contains(expected) {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "expected {path:?} to contain {expected:?}, found {text:?}"
+        ))
+        .into())
+    }
+}
+
 /// Require a nested JSON integer value.
 fn require_json_usize(value: &Value, path: &[&str], expected: usize) -> Result<(), Box<dyn Error>> {
     let current = json_at(value, path)?;
@@ -2676,6 +3574,40 @@ fn require_json_bool(value: &Value, path: &[&str], expected: bool) -> Result<(),
     }
 }
 
+/// Return symbol names from a structured summary section.
+fn json_symbol_names(value: &Value, section: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    let symbols = json_at(value, &[section])?
+        .as_array()
+        .ok_or_else(|| io::Error::other(format!("expected array section {section}")))?;
+    symbols
+        .iter()
+        .map(|symbol| {
+            symbol
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| io::Error::other(format!("missing symbol name in {section}")))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+/// Run a JSON summary command for one indexed path.
+fn json_summary_command(repo: &Path, db: &Path, file: &str) -> Result<Value, Box<dyn Error>> {
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(db)
+        .args(["summary", file, "--limit", "10"])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!("summary command failed for {file}")).into());
+    }
+    serde_json::from_slice(&output.stdout).map_err(Into::into)
+}
+
 /// Navigate a JSON value by object keys and decimal array indexes.
 fn json_at<'a>(value: &'a Value, path: &[&str]) -> Result<&'a Value, Box<dyn Error>> {
     let mut current = value;
@@ -2778,7 +3710,7 @@ fn init_map_and_lint_flow_uses_rust_implementation() -> Result<(), Box<dyn Error
         .args(["scan", "."])
         .assert()
         .success()
-        .stdout(predicate::str::contains("approved_purposes: 5"));
+        .stdout(predicate::str::contains("approved_purposes: 8"));
 
     Ok(())
 }

@@ -1,10 +1,14 @@
 //! Purpose: Generate and lint `ProjectAtlas` structure maps from Rust.
 
 use blake3::Hasher;
-use projectatlas_core::{NodeKind, language::BROAD_SOURCE_EXTENSIONS, validated_repo_file_key};
+use projectatlas_core::{
+    NodeKind,
+    language::{BROAD_SOURCE_EXTENSIONS, detect_language},
+    validated_repo_file_key,
+};
 use projectatlas_db::AtlasStore;
 use projectatlas_fs::{ScanOptions, scan_repo};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,6 +21,11 @@ const DEFAULT_PURPOSE_FILENAME: &str = ".purpose";
 const DEFAULT_MAP_PATH: &str = ".projectatlas/projectatlas.toon";
 /// Default non-source summary input path.
 const DEFAULT_NONSOURCE_PATH: &str = ".projectatlas/projectatlas-nonsource-files.toon";
+/// Durable `.projectatlas` inputs indexed by `SQLite` but ignored by legacy map/lint.
+const DURABLE_PROJECTATLAS_INPUT_PATHS: &[&str] = &[
+    ".projectatlas/config.toml",
+    ".projectatlas/projectatlas-nonsource-files.toon",
+];
 /// Default maximum number of lines scanned for purpose headers.
 const DEFAULT_MAX_SCAN_LINES: usize = 80;
 /// Default maximum UTF-8 file size persisted into `SQLite` text search.
@@ -261,6 +270,65 @@ impl AtlasMapConfig {
     }
 }
 
+/// Serializable view of the effective `ProjectAtlas` configuration.
+#[derive(Debug, Serialize)]
+pub(crate) struct EffectiveConfigReport {
+    /// Repository root.
+    pub(crate) root: String,
+    /// Generated TOON map path.
+    pub(crate) map_path: String,
+    /// Non-source purpose registry path.
+    pub(crate) nonsource_files_path: String,
+    /// Durable `SQLite` index path.
+    pub(crate) db_path: String,
+    /// Purpose metadata filename.
+    pub(crate) purpose_filename: String,
+    /// Source extensions treated as indexable project content.
+    pub(crate) source_extensions: Vec<String>,
+    /// Directory names excluded from normal scans.
+    pub(crate) exclude_dir_names: Vec<String>,
+    /// Repository-relative path prefixes excluded from normal scans.
+    pub(crate) exclude_path_prefixes: Vec<String>,
+    /// Configured non-source path prefixes.
+    pub(crate) non_source_path_prefixes: Vec<String>,
+    /// Default purpose style.
+    pub(crate) purpose_default_style: String,
+    /// Per-extension purpose style overrides.
+    pub(crate) purpose_styles: BTreeMap<String, String>,
+    /// Supported line comment prefixes for purpose headers.
+    pub(crate) line_comment_prefixes: Vec<String>,
+    /// Maximum file size persisted into `SQLite` text search.
+    pub(crate) text_index_max_bytes: u64,
+    /// Maximum purpose line length.
+    pub(crate) summary_max_length: usize,
+    /// Whether purpose summaries must be ASCII.
+    pub(crate) summary_ascii_only: bool,
+    /// Whether purpose summaries may not contain commas.
+    pub(crate) summary_no_commas: bool,
+}
+
+/// Build the effective configuration report used by agents and docs.
+pub(crate) fn effective_config_report(config: &AtlasMapConfig) -> EffectiveConfigReport {
+    EffectiveConfigReport {
+        root: config.root.display().to_string(),
+        map_path: config.map_path.display().to_string(),
+        nonsource_files_path: config.nonsource_files_path.display().to_string(),
+        db_path: config.db_path.display().to_string(),
+        purpose_filename: config.purpose_filename.clone(),
+        source_extensions: config.source_extensions.iter().cloned().collect(),
+        exclude_dir_names: config.exclude_dir_names.iter().cloned().collect(),
+        exclude_path_prefixes: config.exclude_path_prefixes.iter().cloned().collect(),
+        non_source_path_prefixes: config.non_source_path_prefixes.iter().cloned().collect(),
+        purpose_default_style: config.purpose_default_style.clone(),
+        purpose_styles: config.purpose_styles.clone(),
+        line_comment_prefixes: config.line_comment_prefixes.clone(),
+        text_index_max_bytes: config.text_index_max_bytes,
+        summary_max_length: config.summary_max_length,
+        summary_ascii_only: config.summary_ascii_only,
+        summary_no_commas: config.summary_no_commas,
+    }
+}
+
 /// `ProjectAtlas` map record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct MapRecord {
@@ -471,9 +539,14 @@ pub(crate) fn imported_purpose_records(
 ) -> AtlasMapResult<Vec<ImportedPurposeRecord>> {
     let mut imported = BTreeMap::new();
     append_existing_map_purpose_records(config, &mut imported)?;
-    let snapshot = build_snapshot(config)?;
-    append_imported_records(&mut imported, &snapshot.folder_records);
-    append_imported_records(&mut imported, &snapshot.file_records);
+    let paths = collect_repo_paths(config)?;
+    let db_purposes = BTreeMap::new();
+    let (file_records, _, _) = build_file_records(&paths.source_files, config, &db_purposes)?;
+    let nonsource = read_nonsource_file_entries(config)?;
+    let merged_file_records = merge_records(&file_records, &nonsource.records);
+    let (folder_records, _, _) = build_folder_records(&paths.folders, config, &db_purposes)?;
+    append_imported_records(&mut imported, &folder_records);
+    append_imported_records(&mut imported, &merged_file_records);
     Ok(imported
         .into_iter()
         .map(|(path, summary)| ImportedPurposeRecord { path, summary })
@@ -583,7 +656,7 @@ pub(crate) fn lint_map(
     let mut errors = Vec::new();
 
     append_nonsource_errors(&mut errors, &nonsource);
-    append_header_errors(&mut errors, &missing_headers, &invalid_headers);
+    append_header_errors(&mut errors, &missing_headers, &invalid_headers, config);
     append_folder_errors(
         &mut errors,
         options.strict_folders,
@@ -801,8 +874,16 @@ fn collect_repo_paths(config: &AtlasMapConfig) -> AtlasMapResult<RepoPaths> {
             continue;
         }
         match node.kind {
-            NodeKind::Folder => folders.push(node.path),
+            NodeKind::Folder => {
+                if is_legacy_map_metadata_folder(&node.path) {
+                    continue;
+                }
+                folders.push(node.path);
+            }
             NodeKind::File => {
+                if is_durable_projectatlas_input(&node.path) {
+                    continue;
+                }
                 if is_source_node(
                     &node.path,
                     node.extension.as_deref(),
@@ -834,6 +915,16 @@ fn has_excluded_suffix_component(path: &str, suffixes: &BTreeSet<String>) -> boo
             .iter()
             .any(|suffix| !suffix.is_empty() && part.ends_with(suffix))
     })
+}
+
+/// Return whether a folder is `ProjectAtlas` metadata ignored by legacy map/lint.
+fn is_legacy_map_metadata_folder(path: &str) -> bool {
+    path == ".projectatlas"
+}
+
+/// Return whether a file is a durable `ProjectAtlas` input outside legacy map/lint.
+fn is_durable_projectatlas_input(path: &str) -> bool {
+    DURABLE_PROJECTATLAS_INPUT_PATHS.contains(&path)
 }
 
 /// Return whether a scanned file should be treated as source.
@@ -1816,15 +1907,84 @@ fn append_header_errors(
     errors: &mut Vec<String>,
     missing_headers: &[String],
     invalid_headers: &BTreeMap<String, Vec<String>>,
+    config: &AtlasMapConfig,
 ) {
     if !missing_headers.is_empty() {
         errors.push("Missing Purpose headers:".to_string());
         errors.push(format_list(missing_headers));
+        append_purpose_style_suggestions(errors, missing_headers, config);
     }
     if !invalid_headers.is_empty() {
         errors.push("Invalid Purpose headers:".to_string());
         append_invalid_map(errors, invalid_headers);
     }
+}
+
+/// Append purpose-style config suggestions for missing source headers.
+fn append_purpose_style_suggestions(
+    errors: &mut Vec<String>,
+    missing_headers: &[String],
+    config: &AtlasMapConfig,
+) {
+    let suggestions = missing_purpose_style_suggestions(missing_headers, config);
+    if !suggestions.is_empty() {
+        errors.push("Purpose style suggestions:".to_string());
+        errors.push(format_list(&suggestions));
+    }
+}
+
+/// Build purpose-style suggestions for source extensions using the default style.
+fn missing_purpose_style_suggestions(
+    missing_headers: &[String],
+    config: &AtlasMapConfig,
+) -> Vec<String> {
+    let mut extensions = BTreeSet::new();
+    for path in missing_headers {
+        let extension = normalized_extension(path);
+        if extension.is_empty() || config.purpose_styles.contains_key(&extension) {
+            continue;
+        }
+        extensions.insert(extension);
+    }
+    extensions
+        .into_iter()
+        .map(|extension| {
+            let style = suggested_purpose_style(&extension, config);
+            let label = if is_default_source_extension(&extension) {
+                "known source extension"
+            } else {
+                "custom source extension"
+            };
+            format!(
+                "{extension}: add [purpose.styles_by_extension] \"{extension}\" = \"{style}\" ({label})"
+            )
+        })
+        .collect()
+}
+
+/// Suggest a purpose style from known language tables, falling back to the configured default.
+fn suggested_purpose_style(extension: &str, config: &AtlasMapConfig) -> String {
+    match detect_language(Some(extension)).as_deref() {
+        Some(
+            "javascript" | "typescript" | "tsx" | "rust" | "go" | "shell" | "powershell" | "batch"
+            | "ruby" | "python" | "groovy" | "protobuf" | "sql" | "graphql" | "toml" | "yaml"
+            | "config" | "perl" | "lua" | "r" | "haskell" | "ocaml" | "fsharp" | "clojure" | "vim"
+            | "zig",
+        )
+        | None => "line-comment".to_string(),
+        Some(
+            "c" | "cpp" | "h" | "hpp" | "java" | "kotlin" | "csharp" | "objective-c" | "swift"
+            | "scala" | "css" | "dart",
+        ) => "block-comment".to_string(),
+        Some(_) => config.purpose_default_style.clone(),
+    }
+}
+
+/// Return whether an extension is part of the default source-extension table.
+fn is_default_source_extension(extension: &str) -> bool {
+    DEFAULT_SOURCE_EXTENSIONS
+        .iter()
+        .any(|default| default.eq_ignore_ascii_case(extension))
 }
 
 /// Append folder validation errors.

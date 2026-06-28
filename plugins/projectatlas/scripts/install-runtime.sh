@@ -34,28 +34,38 @@ truthy() {
 }
 
 find_projectatlas() {
-  if [ -x "$HOME/.local/bin/projectatlas" ] && is_projectatlas3 "$HOME/.local/bin/projectatlas"; then
+  if [ -x "$HOME/.local/bin/projectatlas" ] && is_projectatlas_runtime "$HOME/.local/bin/projectatlas"; then
     printf '%s\n' "$HOME/.local/bin/projectatlas"
     return 0
   fi
-  if [ -x "$HOME/.cargo/bin/projectatlas" ] && is_projectatlas3 "$HOME/.cargo/bin/projectatlas"; then
+  if [ -x "$HOME/.cargo/bin/projectatlas" ] && is_projectatlas_runtime "$HOME/.cargo/bin/projectatlas"; then
     printf '%s\n' "$HOME/.cargo/bin/projectatlas"
     return 0
   fi
-  if command -v projectatlas >/dev/null 2>&1 && is_projectatlas3 "$(command -v projectatlas)"; then
+  if command -v projectatlas >/dev/null 2>&1 && is_projectatlas_runtime "$(command -v projectatlas)"; then
     command -v projectatlas
     return 0
   fi
   return 1
 }
 
-is_projectatlas3() {
+expected_runtime_version() {
+  if [ -z "$projectatlas_version" ]; then
+    return 0
+  fi
+  printf '%s\n' "${projectatlas_version#v}"
+}
+
+is_projectatlas_runtime() {
   candidate=$1
   runtime_info=$("$candidate" --format json runtime-info 2>/dev/null || true)
   major_version=$(printf '%s\n' "$runtime_info" | sed -n 's/.*"major_version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+  runtime_version=$(printf '%s\n' "$runtime_info" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+  expected_version=$(expected_runtime_version)
   case "$runtime_info" in
     *'"project": "ProjectAtlas"'*'"mcp"'*'"text_format": "TOON"'*)
-      [ "${major_version:-0}" -ge 3 ] 2>/dev/null
+      [ "${major_version:-0}" -ge 3 ] 2>/dev/null &&
+        { [ -z "$expected_version" ] || [ "$runtime_version" = "$expected_version" ]; }
       ;;
     *)
       return 1
@@ -127,9 +137,9 @@ elif install_release_binary; then
   installed_bin="$HOME/.local/bin/projectatlas"
 elif command -v cargo >/dev/null 2>&1; then
   if [ -n "$projectatlas_version" ]; then
-    cargo install --git "$repository" --tag "$projectatlas_version" --package projectatlas-cli --locked --force
+    cargo install --git "$repository" --tag "$projectatlas_version" projectatlas-cli --locked --force
   else
-    cargo install --git "$repository" --package projectatlas-cli --locked --force
+    cargo install --git "$repository" projectatlas-cli --locked --force
   fi
 fi
 
@@ -139,11 +149,11 @@ else
   projectatlas_bin=$(find_projectatlas || true)
 fi
 if [ -z "$projectatlas_bin" ]; then
-  printf '%s\n' "ProjectAtlas 3 runtime was not found. Install Rust/Cargo or provide a compatible ProjectAtlas 3 release binary on PATH." >&2
+  printf '%s\n' "A ProjectAtlas runtime matching $projectatlas_version was not found. Install Rust/Cargo or provide the matching ProjectAtlas release binary on PATH." >&2
   exit 1
 fi
-if ! is_projectatlas3 "$projectatlas_bin"; then
-  printf '%s\n' "Installed ProjectAtlas runtime did not satisfy the ProjectAtlas 3 runtime contract: $projectatlas_bin" >&2
+if ! is_projectatlas_runtime "$projectatlas_bin"; then
+  printf '%s\n' "Installed ProjectAtlas runtime did not satisfy the ProjectAtlas runtime/version contract: $projectatlas_bin" >&2
   exit 1
 fi
 

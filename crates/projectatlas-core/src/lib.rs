@@ -301,6 +301,26 @@ pub fn repo_path_to_native(path: &str) -> PathBuf {
     })
 }
 
+/// Normalize a repository-relative path prefix used by query filters.
+///
+/// This helper accepts `.` and empty prefixes because filter callers often use
+/// them to mean the repository root. Exact file reads should still use
+/// [`validated_repo_file_key`] so absolute paths and traversal are rejected.
+#[must_use]
+pub fn normalize_repo_path_prefix(value: &str) -> String {
+    let normalized = value
+        .replace('\\', "/")
+        .trim()
+        .trim_start_matches("./")
+        .trim_end_matches('/')
+        .to_string();
+    if normalized.is_empty() {
+        ".".to_string()
+    } else {
+        normalized
+    }
+}
+
 /// Return whether normalized text starts with a Windows drive prefix.
 fn has_windows_drive_prefix(path: &str) -> bool {
     let bytes = path.as_bytes();
@@ -334,7 +354,10 @@ pub fn normalized_extension(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_native_path_display_str, repo_path_to_native, validated_repo_file_key};
+    use super::{
+        normalize_native_path_display_str, normalize_repo_path_prefix, repo_path_to_native,
+        validated_repo_file_key,
+    };
     use std::io;
     use std::path::Path;
 
@@ -365,6 +388,14 @@ mod tests {
             repo_path_to_native("src/main.rs"),
             Path::new("src").join("main.rs")
         );
+    }
+
+    #[test]
+    fn normalize_repo_path_prefix_accepts_root_and_slashes() {
+        assert_eq!(normalize_repo_path_prefix(""), ".");
+        assert_eq!(normalize_repo_path_prefix("."), ".");
+        assert_eq!(normalize_repo_path_prefix(".\\docs\\api\\"), "docs/api");
+        assert_eq!(normalize_repo_path_prefix("./src/lib"), "src/lib");
     }
 
     #[test]

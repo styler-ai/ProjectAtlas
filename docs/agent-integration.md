@@ -42,7 +42,7 @@ result text is TOON by default, so agents get compact structured payloads withou
 3. Run `projectatlas overview`.
 4. Run `projectatlas folders <query>` to choose where to work.
 5. Run `projectatlas files <query> --folder <path>` to pick targets; use `projectatlas files --file-pattern <glob>` when the filename/path pattern is already known.
-6. Run `projectatlas summary <file> --limit 25` before opening full source.
+6. Run `projectatlas summary <file> --limit 25` before opening full source; inspect `parser_kind` and `summary_status` before trusting the observed summary.
 7. Run `projectatlas outline <file>` if the structured summary is not enough.
 8. Run `projectatlas symbols list --file <file>` and `projectatlas symbols relations --file <file>` when symbol context is needed.
 9. Run `projectatlas search <pattern> --file-pattern <glob>` for bounded, glob-filtered text search in selected areas; search is intentionally case-insensitive by default for agent discovery, add `--case-sensitive` only when exact casing matters, add `--fuzzy` when the name is approximate, and check returned, searched file, searched byte, and truncated counters before widening the search.
@@ -72,15 +72,15 @@ to that bound project root. Start a separate project-local MCP server instead of
 project's DB/config at another repository.
 
 The plugin-provided `plugins/projectatlas/.mcp.json` is only a fallback for harnesses that register
-the plugin file directly from the project root after `projectatlas --format json runtime-info` has
-verified the ProjectAtlas 3 runtime:
+the plugin file directly from the project root. It includes `--require-version` so a stale PATH runtime
+fails closed instead of starting an older MCP server:
 
 ```json
 {
   "mcpServers": {
     "projectatlas": {
       "command": "projectatlas",
-      "args": ["--db", ".projectatlas/projectatlas.db", "mcp"]
+      "args": ["--require-version", "0.3.4", "--db", ".projectatlas/projectatlas.db", "mcp"]
     }
   }
 }
@@ -108,8 +108,8 @@ Installer verification uses the stable runtime contract:
 projectatlas --format json runtime-info
 ```
 
-The response must identify project `ProjectAtlas`, major version 3 or newer, capability `mcp`, and
-text format `TOON`.
+The response must identify project `ProjectAtlas`, major version 3 or newer, capability `mcp`, text format `TOON`,
+and the expected release `version` when a plugin manifest or `PROJECTATLAS_VERSION` pins the runtime.
 
 ## MCP Tool Sequence
 
@@ -125,7 +125,7 @@ Prefer MCP tools when the harness exposes them:
 8. `atlas_symbol_relations`: inspect imports, calls, dependencies, and containment.
 9. `atlas_search`: search indexed files with filters and pagination.
 10. `atlas_slice`: fetch exact line or symbol source only after selection.
-11. `atlas_health`: find cleanup/refactor/DRY structure issues.
+11. `atlas_health`: find cleanup/refactor/DRY structure issues. Use `limit`, `start_index`, `category`, `severity`, `path_prefix`, or `summary_only` for large health surfaces.
 12. `atlas_watch_once`: bounded refresh after local file changes when no continuous watcher is running.
 13. `atlas_token_report`: report estimated token savings.
 14. `atlas_settings` and `atlas_watch_status`: diagnose runtime/index/cache state.
@@ -146,6 +146,7 @@ This preserves normal atlas reads while preventing usage telemetry writes to `.p
 | Choose files inside a work area | `atlas_files` | `projectatlas files <query> --folder <path>` |
 | Direct glob file discovery | `atlas_files` with `file_pattern` | `projectatlas files --file-pattern <glob>` |
 | Need structured file facts | `atlas_file_summary` | `projectatlas summary <file> --limit <n>` |
+| Need effective scan/config policy | `atlas_settings` | `projectatlas config --print` |
 | Need compressed file context | `atlas_outline` | `projectatlas outline <file>` |
 | Need functions/classes/methods/packages | `atlas_symbols` | `projectatlas symbols list --file <file>` |
 | Need imports/calls/dependencies/containment | `atlas_symbol_relations` | `projectatlas symbols relations --file <file>` |
@@ -153,7 +154,7 @@ This preserves normal atlas reads while preventing usage telemetry writes to `.p
 | Need exact source | `atlas_slice` | `projectatlas slice ...` or `projectatlas symbols slice ... --symbol-parent <parent>` |
 | Files changed locally | `atlas_watch_once` | `projectatlas watch --once` |
 | Long local editing session | `atlas_watch_status` for diagnostics | `projectatlas watch` |
-| Planning cleanup/refactor/DRY work | `atlas_health` | `projectatlas health-check` |
+| Planning cleanup/refactor/DRY work | `atlas_health` with filters/paging when needed | `projectatlas health-check` |
 | Intentional health conflict | `atlas_health_resolve` | `projectatlas health resolve ... --rationale <why>` |
 | User asks for saved tokens | `atlas_token_report` | `projectatlas token` |
 | Human asks for a terminal token dashboard | `atlas_token_report` first for agent state | `projectatlas token --view tui` |

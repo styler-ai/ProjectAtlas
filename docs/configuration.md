@@ -18,7 +18,7 @@ source_extensions = [
   ".pl", ".pm", ".lua", ".dart", ".hs", ".ml", ".mli", ".fs", ".fsx",
   ".clj", ".cljs", ".vim", ".zig", ".zon", ".html", ".htm", ".css", ".scss",
   ".sass", ".less", ".stylus", ".styl", ".md", ".mdx", ".json", ".jsonc",
-  ".xml", ".yml", ".yaml", ".toml", ".txt", ".ini", ".cfg", ".conf", ".vue",
+  ".xml", ".yml", ".yaml", ".toml", ".toon", ".txt", ".ini", ".cfg", ".conf", ".vue",
   ".svelte", ".astro", ".jsp", ".jspx", ".jspf", ".tag", ".tagx", ".gsp",
   ".properties", ".gradle", ".groovy", ".proto", ".hbs", ".handlebars", ".ejs",
   ".pug", ".ftl", ".mustache", ".liquid", ".erb", ".sql", ".ddl", ".dml",

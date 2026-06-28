@@ -53,9 +53,20 @@ function Find-Cargo {
     return $null
 }
 
+function Convert-ProjectAtlasVersionTag {
+    param(
+        [string]$Version
+    )
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        return $null
+    }
+    return $Version.Trim().TrimStart("v")
+}
+
 function Test-ProjectAtlasRuntime {
     param(
-        [string]$FilePath
+        [string]$FilePath,
+        [string]$ExpectedVersion
     )
     if (-not $FilePath -or -not (Test-Path -LiteralPath $FilePath)) {
         return $false
@@ -67,10 +78,13 @@ function Test-ProjectAtlasRuntime {
         }
         $payload = $runtimeJson | ConvertFrom-Json
         $runtime = if ($payload.runtime) { $payload.runtime } else { $payload }
+        $expectedRuntimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
+        $versionMatches = -not $expectedRuntimeVersion -or $runtime.version -eq $expectedRuntimeVersion
         return $runtime.project -eq "ProjectAtlas" `
             -and [int]$runtime.major_version -ge 3 `
             -and @($runtime.capabilities) -contains "mcp" `
-            -and $runtime.text_format -eq "TOON"
+            -and $runtime.text_format -eq "TOON" `
+            -and $versionMatches
     }
     catch {
         return $false
@@ -120,18 +134,47 @@ function Set-ProjectAtlasPathPrecedence {
     [Environment]::SetEnvironmentVariable("Path", ((@($runtimeDir) + $userEntries) -join ";"), "User")
 }
 
+function Sync-ProjectAtlasRuntimeToLocalAppData {
+    param(
+        [string]$FilePath,
+        [string]$ExpectedVersion
+    )
+    if (-not (Test-ProjectAtlasRuntime $FilePath $ExpectedVersion)) {
+        return $null
+    }
+    $installDir = Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin"
+    New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+    $target = Join-Path $installDir "projectatlas.exe"
+    if ((Get-NormalizedPathEntry $FilePath) -ne (Get-NormalizedPathEntry $target)) {
+        try {
+            Copy-Item -LiteralPath $FilePath -Destination $target -Force
+        }
+        catch {
+            Write-Warning "ProjectAtlas LocalAppData mirror skipped because ${target} is locked: $($_.Exception.Message)"
+            return $FilePath
+        }
+    }
+    if (Test-ProjectAtlasRuntime $target $ExpectedVersion) {
+        return $target
+    }
+    return $FilePath
+}
+
 function Find-ProjectAtlas {
+    param(
+        [string]$ExpectedVersion
+    )
     $candidates = @(
         (Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin\projectatlas.exe"),
         (Join-Path $env:USERPROFILE ".cargo\bin\projectatlas.exe")
     )
     foreach ($candidate in $candidates) {
-        if (Test-ProjectAtlasRuntime $candidate) {
+        if (Test-ProjectAtlasRuntime $candidate $ExpectedVersion) {
             return $candidate
         }
     }
     $projectAtlasCommand = Get-Command projectatlas -ErrorAction SilentlyContinue
-    if ($projectAtlasCommand -and (Test-ProjectAtlasRuntime $projectAtlasCommand.Source)) {
+    if ($projectAtlasCommand -and (Test-ProjectAtlasRuntime $projectAtlasCommand.Source $ExpectedVersion)) {
         return $projectAtlasCommand.Source
     }
     return $null
@@ -223,17 +266,22 @@ else {
         $installedBinary = $releaseBinary
     }
     if (-not $releaseBinary -and $cargo) {
-        $installArgs = @("install", "--git", $Repository, "--package", "projectatlas-cli", "--locked", "--force")
+        $installArgs = @("install", "--git", $Repository)
         if ($ProjectAtlasVersion) {
             $installArgs += @("--tag", $ProjectAtlasVersion)
         }
+        $installArgs += @("projectatlas-cli", "--locked", "--force")
         Invoke-Checked $cargo $installArgs
     }
 }
 
-$projectAtlas = if ($installedBinary -and (Test-ProjectAtlasRuntime $installedBinary)) { $installedBinary } else { Find-ProjectAtlas }
+$projectAtlas = if ($installedBinary -and (Test-ProjectAtlasRuntime $installedBinary $ProjectAtlasVersion)) { $installedBinary } else { Find-ProjectAtlas $ProjectAtlasVersion }
 if (-not $projectAtlas) {
-    throw "ProjectAtlas 3 runtime was not found. Install Rust/Cargo or provide a compatible ProjectAtlas 3 release binary on PATH."
+    throw "A ProjectAtlas runtime matching $ProjectAtlasVersion was not found. Install Rust/Cargo or provide the matching ProjectAtlas release binary on PATH."
+}
+$mirroredProjectAtlas = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
+if ($mirroredProjectAtlas) {
+    $projectAtlas = $mirroredProjectAtlas
 }
 
 Set-ProjectAtlasPathPrecedence $projectAtlas

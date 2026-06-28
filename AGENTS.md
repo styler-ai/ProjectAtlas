@@ -18,15 +18,16 @@
 3. Run `projectatlas overview` to orient on the repository.
 4. Run `projectatlas folders <query>` before choosing a work area.
 5. Run `projectatlas files <query> --folder <path>` before opening source; use `projectatlas files --file-pattern <glob>` when the file/path pattern is already known.
-6. Run `projectatlas summary <file> --limit 25` for structured file facts and purpose state.
+6. Run `projectatlas summary <file> --limit 25` for structured file facts and purpose state; inspect `parser_kind` and `summary_status` before trusting the observed summary.
 7. Run `projectatlas outline <file>` if the summary is not enough.
 8. Run `projectatlas search <pattern> --file-pattern <glob>` for bounded glob-filtered text matches; add `--fuzzy` for approximate names and inspect returned, searched file, searched byte, and truncated counters before widening the search.
 9. Run `projectatlas slice <file> --start-line <n> --end-line <m>` or `projectatlas symbols slice <file> <symbol> --symbol-parent <parent> --symbol-kind <kind> --symbol-line <line>` for exact source; add disambiguators when duplicate symbol names exist.
 10. Run `projectatlas health-check` for cleanup/refactor work.
 11. Run `projectatlas lint --strict-folders --report-untracked`.
 12. Only then use language-server lookups or broad file reads on selected files.
-13. Run `projectatlas runtime-info` when installer/runtime identity is unclear.
-14. Run `projectatlas token` when asked for token savings.
+13. Run `projectatlas config --print` when effective scan, purpose, or exclusion policy is unclear.
+14. Run `projectatlas runtime-info` when installer/runtime identity is unclear.
+15. Run `projectatlas token` when asked for token savings.
 
 ## Rust/Dependency Discipline
 - Prefer official or canonical Rust crates and standard implementations for protocols, formats, parsers, storage, watchers, token tooling, and platform integration before writing custom code.

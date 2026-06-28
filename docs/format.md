@@ -2,6 +2,8 @@
 
 ProjectAtlas writes a compatibility TOON snapshot at `.projectatlas/projectatlas.toon` with these sections. ProjectAtlas 3's durable source of truth is `.projectatlas/projectatlas.db`; TOON is the compact agent/export format.
 
+The map snapshot is a stable ProjectAtlas compatibility artifact used by legacy map/lint/import workflows. Agent-facing CLI/MCP payloads use official TOON-compatible text, and TOON fixtures are decoded with the `toon-format` crate in tests. The compatibility map writer keeps a local row reader/writer only to preserve backward-compatible atlas snapshots and must keep escaping/round-trip coverage when the row schema changes.
+
 ```
 version: 1
 generated_at: 2026-01-01T12:00:00Z

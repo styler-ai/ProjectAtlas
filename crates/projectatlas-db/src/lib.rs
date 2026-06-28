@@ -7,12 +7,12 @@ use projectatlas_core::symbols::{
 use projectatlas_core::telemetry::{TokenOverview, UsageEvent};
 use projectatlas_core::{
     IndexedNode, Node, NodeKind, Overview, Purpose, PurposeSource, PurposeStatus,
-    normalize_native_path_display,
+    normalize_native_path_display, normalize_repo_path_prefix,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::TryFromIntError;
 use std::path::Path;
 use thiserror::Error;
@@ -92,6 +92,78 @@ pub struct HealthResolution {
     /// Agent rationale for suppressing future repeats.
     pub rationale: String,
 }
+
+/// Bounded health query used by agent-facing adapters.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HealthQuery {
+    /// Pagination start index after filters are applied.
+    pub start_index: usize,
+    /// Maximum findings to return.
+    pub limit: usize,
+    /// Optional finding category filter.
+    pub category: Option<String>,
+    /// Optional severity filter.
+    pub severity: Option<Severity>,
+    /// Optional repository-relative path prefix filter.
+    pub path_prefix: Option<String>,
+    /// Return counts without finding rows.
+    pub summary_only: bool,
+}
+
+/// Bounded health findings page returned by the database layer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HealthFindingsPage {
+    /// Findings after filters are applied.
+    pub total: usize,
+    /// Findings before filters are applied, after resolved findings are removed.
+    pub unfiltered_total: usize,
+    /// Findings returned in this page.
+    pub returned: usize,
+    /// Pagination start index used for this page.
+    pub start_index: usize,
+    /// Maximum findings requested for this page.
+    pub limit: usize,
+    /// Returned health finding rows.
+    pub findings: Vec<HealthFinding>,
+}
+
+/// Static metadata for one purpose lifecycle health category.
+#[derive(Clone, Copy, Debug)]
+struct PurposeHealthSpec {
+    /// Stored purpose status that emits this health category.
+    status: &'static str,
+    /// Health finding category for the lifecycle status.
+    category: &'static str,
+    /// Health finding message for every row in this lifecycle category.
+    message: &'static str,
+    /// Agent recommendation for resolving this lifecycle category.
+    recommendation: &'static str,
+}
+
+/// Purpose lifecycle health categories that can be paged directly in `SQLite`.
+const PURPOSE_HEALTH_SPECS: [PurposeHealthSpec; 3] = [
+    PurposeHealthSpec {
+        status: "missing",
+        category: "missing-purpose",
+        message: "Path is indexed but has no approved purpose.",
+        recommendation: "Set or approve a one-line purpose in the ProjectAtlas index.",
+    },
+    PurposeHealthSpec {
+        status: "suggested",
+        category: "suggested-purpose-review",
+        message: "Path has a generated purpose suggestion but no agent-approved purpose.",
+        recommendation: "Inspect the folder/file summary and approve or correct the purpose in SQLite.",
+    },
+    PurposeHealthSpec {
+        status: "stale",
+        category: "stale-purpose",
+        message: "Path changed after its purpose was approved.",
+        recommendation: "Inspect the current summary and approve or correct the one-line purpose.",
+    },
+];
+
+/// Folder names treated as repeated temporary/generated-output buckets.
+const TEMP_FOLDER_BUCKETS: [&str; 6] = ["tmp", "temp", "cache", "generated", "out", "output"];
 
 impl AtlasStore {
     /// Open or create an index store.
@@ -703,6 +775,19 @@ impl AtlasStore {
         Ok(())
     }
 
+    /// Clear symbols and relations for one live file path while preserving node summaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if persistence fails.
+    pub fn clear_symbol_graph_for_path(&self, path: &str) -> DbResult<()> {
+        self.connection
+            .execute("DELETE FROM symbols WHERE path = ?1", [path])?;
+        self.connection
+            .execute("DELETE FROM symbol_relations WHERE path = ?1", [path])?;
+        Ok(())
+    }
+
     /// Persist an observed one-line summary for an indexed node.
     ///
     /// # Errors
@@ -721,6 +806,25 @@ impl AtlasStore {
                 updated_at = CURRENT_TIMESTAMP
             ",
             params![node_id, summary],
+        )?;
+        Ok(())
+    }
+
+    /// Remove the observed node-level summary for an indexed node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path does not exist or persistence fails.
+    pub fn clear_node_summary(&self, path: &str) -> DbResult<()> {
+        let node_id = self.node_id_for_path(path)?;
+        self.connection.execute(
+            "
+            DELETE FROM summaries
+            WHERE node_id = ?1
+              AND summary_level = 'node'
+              AND subject = ''
+            ",
+            [node_id],
         )?;
         Ok(())
     }
@@ -1321,6 +1425,30 @@ impl AtlasStore {
         Ok(i64_to_usize(count))
     }
 
+    /// Return distinct parser strategies that produced symbols for one path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading fails.
+    pub fn symbol_parser_kinds_for_path(&self, path: &str) -> DbResult<Vec<ParserKind>> {
+        let mut statement = self.connection.prepare(
+            "
+            SELECT DISTINCT parser
+            FROM symbols
+            WHERE path = ?1
+            ORDER BY parser
+            ",
+        )?;
+        let rows = statement.query_map([path], |row| {
+            Ok(ParserKind::from_db(&row.get::<_, String>(0)?))
+        })?;
+        let mut parsers = Vec::new();
+        for row in rows {
+            parsers.push(row?);
+        }
+        Ok(parsers)
+    }
+
     /// Load the maximum indexed symbol end line for one file path.
     ///
     /// # Errors
@@ -1708,40 +1836,143 @@ impl AtlasStore {
         resolved_ids: &[String],
     ) -> DbResult<Vec<HealthFinding>> {
         let mut findings = Vec::new();
-        findings.extend(self.purpose_status_findings(
-            "missing",
-            "missing-purpose",
-            "Path is indexed but has no approved purpose.",
-            "Set or approve a one-line purpose in the ProjectAtlas index.",
-        )?);
-        findings.extend(self.purpose_status_findings(
-            "suggested",
-            "suggested-purpose-review",
-            "Path has a generated purpose suggestion but no agent-approved purpose.",
-            "Inspect the folder/file summary and approve or correct the purpose in SQLite.",
-        )?);
-        findings.extend(self.purpose_status_findings(
-            "stale",
-            "stale-purpose",
-            "Path changed after its purpose was approved.",
-            "Inspect the current summary and approve or correct the one-line purpose.",
-        )?);
-        findings.extend(self.duplicate_purpose_findings()?);
-        findings.extend(self.repeated_temp_folder_findings()?);
-        Ok(findings
-            .into_iter()
-            .filter(|finding| !resolved_ids.iter().any(|id| id == &finding.id))
-            .collect())
+        self.visit_unresolved_health_findings(resolved_ids, |finding| {
+            findings.push(finding);
+            Ok(true)
+        })?;
+        Ok(findings)
+    }
+
+    /// Build a bounded unresolved health findings page.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading fails or stored enum values are invalid.
+    pub fn unresolved_health_findings_page(
+        &self,
+        resolved_ids: &[String],
+        query: &HealthQuery,
+    ) -> DbResult<HealthFindingsPage> {
+        let mut unfiltered_total = 0_usize;
+        let mut total = 0_usize;
+        let mut findings = Vec::new();
+
+        for spec in PURPOSE_HEALTH_SPECS {
+            unfiltered_total += self.count_purpose_status_findings(spec, None, resolved_ids)?;
+            if !purpose_health_spec_matches_query(spec, query) {
+                continue;
+            }
+
+            let matching_count = self.count_purpose_status_findings(
+                spec,
+                query.path_prefix.as_deref(),
+                resolved_ids,
+            )?;
+            if !query.summary_only
+                && findings.len() < query.limit
+                && total + matching_count > query.start_index
+            {
+                let local_start = query.start_index.saturating_sub(total);
+                let local_limit = query.limit - findings.len();
+                findings.extend(self.load_purpose_status_findings_page(
+                    spec,
+                    query.path_prefix.as_deref(),
+                    resolved_ids,
+                    local_start,
+                    local_limit,
+                )?);
+            }
+            total += matching_count;
+        }
+
+        for category in ["duplicate-purpose", "repeated-temporary-folder"] {
+            let unfiltered_count =
+                self.count_structural_health_findings(category, None, resolved_ids)?;
+            unfiltered_total += unfiltered_count;
+            if !health_category_matches_query(category, Severity::Warning, query) {
+                continue;
+            }
+            let matching_count = self.count_structural_health_findings(
+                category,
+                query.path_prefix.as_deref(),
+                resolved_ids,
+            )?;
+            if !query.summary_only
+                && findings.len() < query.limit
+                && total + matching_count > query.start_index
+            {
+                let local_start = query.start_index.saturating_sub(total);
+                let local_limit = query.limit - findings.len();
+                findings.extend(self.load_structural_health_findings_page(
+                    category,
+                    query.path_prefix.as_deref(),
+                    resolved_ids,
+                    local_start,
+                    local_limit,
+                )?);
+            }
+            total += matching_count;
+        }
+        Ok(HealthFindingsPage {
+            total,
+            unfiltered_total,
+            returned: findings.len(),
+            start_index: query.start_index,
+            limit: query.limit,
+            findings,
+        })
+    }
+
+    /// Visit unresolved health findings without materializing the full table.
+    fn visit_unresolved_health_findings<F>(
+        &self,
+        resolved_ids: &[String],
+        mut visitor: F,
+    ) -> DbResult<()>
+    where
+        F: FnMut(HealthFinding) -> DbResult<bool>,
+    {
+        let resolved = resolved_ids.iter().cloned().collect::<HashSet<_>>();
+        if !self.visit_purpose_status_findings(PURPOSE_HEALTH_SPECS[0], &resolved, &mut visitor)? {
+            return Ok(());
+        }
+        if !self.visit_purpose_status_findings(PURPOSE_HEALTH_SPECS[1], &resolved, &mut visitor)? {
+            return Ok(());
+        }
+        if !self.visit_purpose_status_findings(PURPOSE_HEALTH_SPECS[2], &resolved, &mut visitor)? {
+            return Ok(());
+        }
+        self.visit_structural_health_findings(&resolved, &mut visitor)
+    }
+
+    /// Visit structural health findings that are not simple purpose statuses.
+    fn visit_structural_health_findings<F>(
+        &self,
+        resolved_ids: &HashSet<String>,
+        mut visitor: F,
+    ) -> DbResult<()>
+    where
+        F: FnMut(HealthFinding) -> DbResult<bool>,
+    {
+        if !self.visit_duplicate_purpose_findings(resolved_ids, &mut visitor)? {
+            return Ok(());
+        }
+        if !self.visit_repeated_temp_folder_findings(resolved_ids, &mut visitor)? {
+            return Ok(());
+        }
+        Ok(())
     }
 
     /// Build findings for one purpose lifecycle status.
-    fn purpose_status_findings(
+    fn visit_purpose_status_findings<F>(
         &self,
-        status: &str,
-        category: &str,
-        message: &str,
-        recommendation: &str,
-    ) -> DbResult<Vec<HealthFinding>> {
+        spec: PurposeHealthSpec,
+        resolved_ids: &HashSet<String>,
+        visitor: &mut F,
+    ) -> DbResult<bool>
+    where
+        F: FnMut(HealthFinding) -> DbResult<bool>,
+    {
         let mut statement = self.connection.prepare(
             "
             SELECT n.path
@@ -1752,25 +1983,443 @@ impl AtlasStore {
             ORDER BY n.path
             ",
         )?;
-        let rows = statement.query_map([status], |row| row.get::<_, String>(0))?;
+        let rows = statement.query_map([spec.status], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            let path = row?;
+            let finding = HealthFinding {
+                id: finding_id(spec.category, &path, None),
+                severity: Severity::Warning,
+                category: spec.category.to_string(),
+                path,
+                related_path: None,
+                message: spec.message.to_string(),
+                recommendation: spec.recommendation.to_string(),
+            };
+            if !emit_unresolved_finding(finding, resolved_ids, visitor)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Count unresolved purpose lifecycle findings directly in `SQLite`.
+    fn count_purpose_status_findings(
+        &self,
+        spec: PurposeHealthSpec,
+        path_prefix: Option<&str>,
+        resolved_ids: &[String],
+    ) -> DbResult<usize> {
+        let (where_clause, values) = purpose_status_where_clause(spec, path_prefix, resolved_ids);
+        let sql = format!(
+            "
+            SELECT COUNT(*)
+            FROM nodes n
+            JOIN purposes p ON p.node_id = n.id
+            WHERE {where_clause}
+            "
+        );
+        let count = self
+            .connection
+            .query_row(&sql, params_from_iter(values), |row| row.get::<_, i64>(0))?;
+        count_to_usize("health_purpose_status_count", count)
+    }
+
+    /// Load one bounded unresolved purpose lifecycle page directly from `SQLite`.
+    fn load_purpose_status_findings_page(
+        &self,
+        spec: PurposeHealthSpec,
+        path_prefix: Option<&str>,
+        resolved_ids: &[String],
+        start_index: usize,
+        limit: usize,
+    ) -> DbResult<Vec<HealthFinding>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (where_clause, mut values) =
+            purpose_status_where_clause(spec, path_prefix, resolved_ids);
+        let limit_placeholder = values.len() + 1;
+        let offset_placeholder = values.len() + 2;
+        values.push(Value::from(usize_to_i64(limit)));
+        values.push(Value::from(usize_to_i64(start_index)));
+        let sql = format!(
+            "
+            SELECT n.path
+            FROM nodes n
+            JOIN purposes p ON p.node_id = n.id
+            WHERE {where_clause}
+            ORDER BY n.path
+            LIMIT ?{limit_placeholder} OFFSET ?{offset_placeholder}
+            "
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(values), |row| row.get::<_, String>(0))?;
         let mut findings = Vec::new();
         for row in rows {
             let path = row?;
             findings.push(HealthFinding {
-                id: finding_id(category, &path, None),
+                id: finding_id(spec.category, &path, None),
                 severity: Severity::Warning,
-                category: category.to_string(),
+                category: spec.category.to_string(),
                 path,
                 related_path: None,
-                message: message.to_string(),
-                recommendation: recommendation.to_string(),
+                message: spec.message.to_string(),
+                recommendation: spec.recommendation.to_string(),
             });
         }
         Ok(findings)
     }
 
-    /// Build duplicate-purpose health findings through grouped SQL candidates.
-    fn duplicate_purpose_findings(&self) -> DbResult<Vec<HealthFinding>> {
+    /// Count unresolved structural health findings directly in `SQLite`.
+    fn count_structural_health_findings(
+        &self,
+        category: &str,
+        path_prefix: Option<&str>,
+        resolved_ids: &[String],
+    ) -> DbResult<usize> {
+        match category {
+            "duplicate-purpose" => self.count_duplicate_purpose_findings(path_prefix, resolved_ids),
+            "repeated-temporary-folder" => {
+                self.count_repeated_temp_folder_findings(path_prefix, resolved_ids)
+            }
+            _ => Ok(0),
+        }
+    }
+
+    /// Load a bounded unresolved structural health page directly from `SQLite`.
+    fn load_structural_health_findings_page(
+        &self,
+        category: &str,
+        path_prefix: Option<&str>,
+        resolved_ids: &[String],
+        start_index: usize,
+        limit: usize,
+    ) -> DbResult<Vec<HealthFinding>> {
+        match category {
+            "duplicate-purpose" => self.load_duplicate_purpose_findings_page(
+                path_prefix,
+                resolved_ids,
+                start_index,
+                limit,
+            ),
+            "repeated-temporary-folder" => self.load_repeated_temp_folder_findings_page(
+                path_prefix,
+                resolved_ids,
+                start_index,
+                limit,
+            ),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// Count duplicate-purpose findings directly in `SQLite`.
+    fn count_duplicate_purpose_findings(
+        &self,
+        path_prefix: Option<&str>,
+        resolved_ids: &[String],
+    ) -> DbResult<usize> {
+        let (where_clause, values) =
+            structural_finding_where_clause("duplicate-purpose", path_prefix, resolved_ids, 1);
+        let sql = format!(
+            "
+            WITH duplicate_rows AS (
+                SELECT n.path,
+                       n.kind,
+                       p.purpose,
+                       FIRST_VALUE(n.path) OVER (
+                           PARTITION BY n.kind, lower(p.purpose)
+                           ORDER BY n.path
+                       ) AS related_path,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY n.kind, lower(p.purpose)
+                           ORDER BY n.path
+                       ) AS duplicate_rank,
+                       COUNT(*) OVER (
+                           PARTITION BY n.kind, lower(p.purpose)
+                       ) AS duplicate_count
+                FROM nodes n
+                JOIN purposes p ON p.node_id = n.id
+                WHERE n.exists_now = 1
+                  AND p.status = 'approved'
+                  AND p.purpose IS NOT NULL
+            ),
+            findings AS (
+                SELECT path, kind, purpose, related_path
+                FROM duplicate_rows
+                WHERE duplicate_count > 1
+                  AND duplicate_rank > 1
+            )
+            SELECT COUNT(*)
+            FROM findings
+            {where_clause}
+            "
+        );
+        let count = self
+            .connection
+            .query_row(&sql, params_from_iter(values), |row| row.get::<_, i64>(0))?;
+        count_to_usize("health_duplicate_purpose_count", count)
+    }
+
+    /// Load a bounded duplicate-purpose findings page directly in `SQLite`.
+    fn load_duplicate_purpose_findings_page(
+        &self,
+        path_prefix: Option<&str>,
+        resolved_ids: &[String],
+        start_index: usize,
+        limit: usize,
+    ) -> DbResult<Vec<HealthFinding>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (where_clause, mut values) =
+            structural_finding_where_clause("duplicate-purpose", path_prefix, resolved_ids, 1);
+        let limit_placeholder = values.len() + 1;
+        let offset_placeholder = values.len() + 2;
+        values.push(Value::from(usize_to_i64(limit)));
+        values.push(Value::from(usize_to_i64(start_index)));
+        let sql = format!(
+            "
+            WITH duplicate_rows AS (
+                SELECT n.path,
+                       n.kind,
+                       p.purpose,
+                       FIRST_VALUE(n.path) OVER (
+                           PARTITION BY n.kind, lower(p.purpose)
+                           ORDER BY n.path
+                       ) AS related_path,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY n.kind, lower(p.purpose)
+                           ORDER BY n.path
+                       ) AS duplicate_rank,
+                       COUNT(*) OVER (
+                           PARTITION BY n.kind, lower(p.purpose)
+                       ) AS duplicate_count
+                FROM nodes n
+                JOIN purposes p ON p.node_id = n.id
+                WHERE n.exists_now = 1
+                  AND p.status = 'approved'
+                  AND p.purpose IS NOT NULL
+            ),
+            findings AS (
+                SELECT path, kind, purpose, related_path
+                FROM duplicate_rows
+                WHERE duplicate_count > 1
+                  AND duplicate_rank > 1
+            )
+            SELECT path, kind, related_path
+            FROM findings
+            {where_clause}
+            ORDER BY kind, lower(purpose), path
+            LIMIT ?{limit_placeholder} OFFSET ?{offset_placeholder}
+            "
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(values), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut findings = Vec::new();
+        for row in rows {
+            let (path, kind_value, related_path) = row?;
+            let kind = NodeKind::from_db(&kind_value).ok_or_else(|| DbError::InvalidEnum {
+                field: "kind",
+                value: kind_value,
+            })?;
+            findings.push(HealthFinding {
+                id: finding_id("duplicate-purpose", &path, Some(&related_path)),
+                severity: Severity::Warning,
+                category: "duplicate-purpose".to_string(),
+                path,
+                related_path: Some(related_path),
+                message: format!("Multiple {kind} nodes share the same purpose."),
+                recommendation:
+                    "Review whether these paths duplicate responsibility or need clearer purposes."
+                        .to_string(),
+            });
+        }
+        Ok(findings)
+    }
+
+    /// Count repeated temporary-folder findings directly in `SQLite`.
+    fn count_repeated_temp_folder_findings(
+        &self,
+        path_prefix: Option<&str>,
+        resolved_ids: &[String],
+    ) -> DbResult<usize> {
+        let mut total = 0_usize;
+        for bucket in TEMP_FOLDER_BUCKETS {
+            total +=
+                self.count_repeated_temp_folder_bucket_findings(bucket, path_prefix, resolved_ids)?;
+        }
+        Ok(total)
+    }
+
+    /// Count one repeated temporary-folder bucket directly in `SQLite`.
+    fn count_repeated_temp_folder_bucket_findings(
+        &self,
+        bucket: &str,
+        path_prefix: Option<&str>,
+        resolved_ids: &[String],
+    ) -> DbResult<usize> {
+        let exact = bucket.to_string();
+        let suffix = format!("%/{bucket}");
+        let (where_clause, mut filter_values) = structural_finding_where_clause(
+            "repeated-temporary-folder",
+            path_prefix,
+            resolved_ids,
+            3,
+        );
+        let mut values = vec![Value::from(exact), Value::from(suffix)];
+        values.append(&mut filter_values);
+        let sql = format!(
+            "
+            WITH bucket_rows AS (
+                SELECT path,
+                       FIRST_VALUE(path) OVER (ORDER BY path) AS related_path,
+                       ROW_NUMBER() OVER (ORDER BY path) AS duplicate_rank,
+                       COUNT(*) OVER () AS duplicate_count
+                FROM nodes
+                WHERE exists_now = 1
+                  AND kind = 'folder'
+                  AND (lower(path) = ?1 OR lower(path) LIKE ?2)
+            ),
+            findings AS (
+                SELECT path, related_path
+                FROM bucket_rows
+                WHERE duplicate_count > 1
+                  AND duplicate_rank > 1
+            )
+            SELECT COUNT(*)
+            FROM findings
+            {where_clause}
+            "
+        );
+        let count = self
+            .connection
+            .query_row(&sql, params_from_iter(values), |row| row.get::<_, i64>(0))?;
+        count_to_usize("health_repeated_temp_count", count)
+    }
+
+    /// Load a bounded repeated temporary-folder findings page directly in `SQLite`.
+    fn load_repeated_temp_folder_findings_page(
+        &self,
+        path_prefix: Option<&str>,
+        resolved_ids: &[String],
+        start_index: usize,
+        limit: usize,
+    ) -> DbResult<Vec<HealthFinding>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut total = 0_usize;
+        let mut findings = Vec::new();
+        for bucket in TEMP_FOLDER_BUCKETS {
+            let matching_count =
+                self.count_repeated_temp_folder_bucket_findings(bucket, path_prefix, resolved_ids)?;
+            if findings.len() < limit && total + matching_count > start_index {
+                let local_start = start_index.saturating_sub(total);
+                let local_limit = limit - findings.len();
+                findings.extend(self.load_repeated_temp_folder_bucket_findings_page(
+                    bucket,
+                    path_prefix,
+                    resolved_ids,
+                    local_start,
+                    local_limit,
+                )?);
+            }
+            total += matching_count;
+            if findings.len() >= limit {
+                break;
+            }
+        }
+        Ok(findings)
+    }
+
+    /// Load one repeated temporary-folder bucket directly in `SQLite`.
+    fn load_repeated_temp_folder_bucket_findings_page(
+        &self,
+        bucket: &str,
+        path_prefix: Option<&str>,
+        resolved_ids: &[String],
+        start_index: usize,
+        limit: usize,
+    ) -> DbResult<Vec<HealthFinding>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let exact = bucket.to_string();
+        let suffix = format!("%/{bucket}");
+        let (where_clause, mut filter_values) = structural_finding_where_clause(
+            "repeated-temporary-folder",
+            path_prefix,
+            resolved_ids,
+            3,
+        );
+        let mut values = vec![Value::from(exact), Value::from(suffix)];
+        values.append(&mut filter_values);
+        let limit_placeholder = values.len() + 1;
+        let offset_placeholder = values.len() + 2;
+        values.push(Value::from(usize_to_i64(limit)));
+        values.push(Value::from(usize_to_i64(start_index)));
+        let sql = format!(
+            "
+            WITH bucket_rows AS (
+                SELECT path,
+                       FIRST_VALUE(path) OVER (ORDER BY path) AS related_path,
+                       ROW_NUMBER() OVER (ORDER BY path) AS duplicate_rank,
+                       COUNT(*) OVER () AS duplicate_count
+                FROM nodes
+                WHERE exists_now = 1
+                  AND kind = 'folder'
+                  AND (lower(path) = ?1 OR lower(path) LIKE ?2)
+            ),
+            findings AS (
+                SELECT path, related_path
+                FROM bucket_rows
+                WHERE duplicate_count > 1
+                  AND duplicate_rank > 1
+            )
+            SELECT path, related_path
+            FROM findings
+            {where_clause}
+            ORDER BY path
+            LIMIT ?{limit_placeholder} OFFSET ?{offset_placeholder}
+            "
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(values), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut findings = Vec::new();
+        for row in rows {
+            let (path, related_path) = row?;
+            findings.push(HealthFinding {
+                id: finding_id("repeated-temporary-folder", &path, Some(&related_path)),
+                severity: Severity::Warning,
+                category: "repeated-temporary-folder".to_string(),
+                path,
+                related_path: Some(related_path),
+                message: format!("Repeated temporary/generated folder name `{bucket}` found."),
+                recommendation:
+                    "Consolidate temporary/generated output roots or add an allowlist rationale."
+                        .to_string(),
+            });
+        }
+        Ok(findings)
+    }
+
+    /// Visit duplicate-purpose health findings through grouped SQL candidates.
+    fn visit_duplicate_purpose_findings<F>(
+        &self,
+        resolved_ids: &HashSet<String>,
+        visitor: &mut F,
+    ) -> DbResult<bool>
+    where
+        F: FnMut(HealthFinding) -> DbResult<bool>,
+    {
         let mut statement = self.connection.prepare(
             "
             SELECT n.path, n.kind, p.purpose
@@ -1799,7 +2448,6 @@ impl AtlasStore {
                 row.get::<_, String>(2)?,
             ))
         })?;
-        let mut findings = Vec::new();
         let mut current_key: Option<(String, String)> = None;
         let mut first_path = String::new();
         for row in rows {
@@ -1814,7 +2462,7 @@ impl AtlasStore {
                 first_path = path;
                 continue;
             }
-            findings.push(HealthFinding {
+            let finding = HealthFinding {
                 id: finding_id("duplicate-purpose", &path, Some(&first_path)),
                 severity: Severity::Warning,
                 category: "duplicate-purpose".to_string(),
@@ -1824,16 +2472,24 @@ impl AtlasStore {
                 recommendation:
                     "Review whether these paths duplicate responsibility or need clearer purposes."
                         .to_string(),
-            });
+            };
+            if !emit_unresolved_finding(finding, resolved_ids, visitor)? {
+                return Ok(false);
+            }
         }
-        Ok(findings)
+        Ok(true)
     }
 
-    /// Build repeated temporary/generated folder findings.
-    fn repeated_temp_folder_findings(&self) -> DbResult<Vec<HealthFinding>> {
-        let suspicious = ["tmp", "temp", "cache", "generated", "out", "output"];
-        let mut findings = Vec::new();
-        for bucket in suspicious {
+    /// Visit repeated temporary/generated folder findings.
+    fn visit_repeated_temp_folder_findings<F>(
+        &self,
+        resolved_ids: &HashSet<String>,
+        visitor: &mut F,
+    ) -> DbResult<bool>
+    where
+        F: FnMut(HealthFinding) -> DbResult<bool>,
+    {
+        for bucket in TEMP_FOLDER_BUCKETS {
             let exact = bucket.to_string();
             let suffix = format!("%/{bucket}");
             let mut statement = self.connection.prepare(
@@ -1848,19 +2504,19 @@ impl AtlasStore {
             )?;
             let rows =
                 statement.query_map(params![exact, suffix], |row| row.get::<_, String>(0))?;
-            let mut paths = Vec::new();
+            let mut first_path = None;
             for row in rows {
-                paths.push(row?);
-            }
-            let Some(first_path) = paths.first().cloned() else {
-                continue;
-            };
-            if paths.len() < 2 {
-                continue;
-            }
-            for path in paths.into_iter().skip(1) {
-                findings.push(HealthFinding {
-                    id: finding_id("repeated-temporary-folder", &path, Some(&first_path)),
+                let path = row?;
+                let Some(first_path) = first_path.as_ref() else {
+                    first_path = Some(path);
+                    continue;
+                };
+                let finding = HealthFinding {
+                    id: finding_id(
+                        "repeated-temporary-folder",
+                        &path,
+                        Some(first_path.as_str()),
+                    ),
                     severity: Severity::Warning,
                     category: "repeated-temporary-folder".to_string(),
                     path,
@@ -1869,10 +2525,13 @@ impl AtlasStore {
                     recommendation:
                         "Consolidate temporary/generated output roots or add an allowlist rationale."
                             .to_string(),
-                });
+                };
+                if !emit_unresolved_finding(finding, resolved_ids, visitor)? {
+                    return Ok(false);
+                }
             }
         }
-        Ok(findings)
+        Ok(true)
     }
 
     /// Compute an overview from the current index.
@@ -2474,6 +3133,139 @@ fn path_label(path: &str) -> String {
         .replace(['-', '_'], " ")
 }
 
+/// Emit a health finding when it has not already been resolved.
+fn emit_unresolved_finding<F>(
+    finding: HealthFinding,
+    resolved_ids: &HashSet<String>,
+    visitor: &mut F,
+) -> DbResult<bool>
+where
+    F: FnMut(HealthFinding) -> DbResult<bool>,
+{
+    if resolved_ids.contains(&finding.id) {
+        return Ok(true);
+    }
+    visitor(finding)
+}
+
+/// Return whether a purpose-status source can match a bounded health query.
+fn purpose_health_spec_matches_query(spec: PurposeHealthSpec, query: &HealthQuery) -> bool {
+    health_category_matches_query(spec.category, Severity::Warning, query)
+}
+
+/// Return whether a health category/severity can match a bounded query.
+fn health_category_matches_query(category: &str, severity: Severity, query: &HealthQuery) -> bool {
+    query
+        .category
+        .as_deref()
+        .is_none_or(|requested| category.eq_ignore_ascii_case(requested))
+        && query.severity.is_none_or(|requested| severity == requested)
+}
+
+/// Build the shared SQL filter for purpose lifecycle health findings.
+fn purpose_status_where_clause(
+    spec: PurposeHealthSpec,
+    path_prefix: Option<&str>,
+    resolved_ids: &[String],
+) -> (String, Vec<Value>) {
+    let mut clauses = vec!["n.exists_now = 1".to_string(), "p.status = ?1".to_string()];
+    let mut values = vec![Value::from(spec.status.to_string())];
+
+    let normalized_prefix = path_prefix
+        .map(normalize_repo_path_prefix)
+        .filter(|prefix| prefix != ".");
+    if let Some(prefix) = normalized_prefix {
+        clauses.push(format!(
+            "(n.path = ?{} OR n.path LIKE ?{} ESCAPE '\\')",
+            values.len() + 1,
+            values.len() + 2
+        ));
+        values.push(Value::from(prefix.clone()));
+        values.push(Value::from(sqlite_descendant_pattern(&prefix)));
+    }
+
+    let resolved_paths = resolved_purpose_paths(resolved_ids, spec.category);
+    if !resolved_paths.is_empty() {
+        clauses.push(format!(
+            "n.path NOT IN ({})",
+            numbered_placeholders(values.len() + 1, resolved_paths.len())
+        ));
+        values.extend(resolved_paths.into_iter().map(Value::from));
+    }
+
+    (clauses.join(" AND "), values)
+}
+
+/// Build a structural-health SQL filter over `findings` CTE columns.
+fn structural_finding_where_clause(
+    category: &str,
+    path_prefix: Option<&str>,
+    resolved_ids: &[String],
+    first_placeholder: usize,
+) -> (String, Vec<Value>) {
+    let mut placeholder = first_placeholder;
+    let mut clauses = Vec::new();
+    let mut values = Vec::new();
+
+    let normalized_prefix = path_prefix
+        .map(normalize_repo_path_prefix)
+        .filter(|prefix| prefix != ".");
+    if let Some(prefix) = normalized_prefix {
+        clauses.push(format!(
+            "((path = ?{path_exact} OR path LIKE ?{path_descendant} ESCAPE '\\') \
+              OR (related_path = ?{related_exact} OR related_path LIKE ?{related_descendant} ESCAPE '\\'))",
+            path_exact = placeholder,
+            path_descendant = placeholder + 1,
+            related_exact = placeholder + 2,
+            related_descendant = placeholder + 3
+        ));
+        values.push(Value::from(prefix.clone()));
+        values.push(Value::from(sqlite_descendant_pattern(&prefix)));
+        values.push(Value::from(prefix.clone()));
+        values.push(Value::from(sqlite_descendant_pattern(&prefix)));
+        placeholder += 4;
+    }
+
+    let resolved_ids = resolved_ids_for_category(resolved_ids, category);
+    if !resolved_ids.is_empty() {
+        clauses.push(format!(
+            "('{category}:' || path || ':' || related_path) NOT IN ({})",
+            numbered_placeholders(placeholder, resolved_ids.len())
+        ));
+        values.extend(resolved_ids.into_iter().map(Value::from));
+    }
+
+    if clauses.is_empty() {
+        (String::new(), values)
+    } else {
+        (format!("WHERE {}", clauses.join(" AND ")), values)
+    }
+}
+
+/// Extract resolved primary paths for lifecycle categories without related paths.
+fn resolved_purpose_paths(resolved_ids: &[String], category: &str) -> Vec<String> {
+    let prefix = format!("{category}:");
+    resolved_ids
+        .iter()
+        .filter_map(|id| {
+            id.strip_prefix(&prefix)
+                .and_then(|rest| rest.strip_suffix(':'))
+                .filter(|path| !path.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .collect()
+}
+
+/// Extract resolved full ids for categories that include related paths.
+fn resolved_ids_for_category(resolved_ids: &[String], category: &str) -> Vec<String> {
+    let prefix = format!("{category}:");
+    resolved_ids
+        .iter()
+        .filter(|id| id.starts_with(&prefix))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2785,6 +3577,153 @@ mod tests {
         })?;
         let remaining = store.unresolved_health_findings(&store.resolved_health_ids()?)?;
         require_eq(&remaining.is_empty(), &true, "resolved SQL health finding")?;
+        Ok(())
+    }
+
+    #[test]
+    fn unresolved_health_findings_page_filters_and_bounds_rows() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_folder_node("."),
+            test_folder_node("src"),
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("docs/a.rs", "hash-doc"),
+        ])?;
+        let query = HealthQuery {
+            start_index: 1,
+            limit: 1,
+            category: Some("missing-purpose".to_string()),
+            severity: Some(Severity::Warning),
+            path_prefix: Some("src".to_string()),
+            summary_only: false,
+        };
+
+        let page = store.unresolved_health_findings_page(&[], &query)?;
+        require_eq(&page.unfiltered_total, &4, "unfiltered health total")?;
+        require_eq(&page.total, &2, "filtered health total")?;
+        require_eq(&page.returned, &1, "returned health rows")?;
+        require_eq(
+            &page.findings[0].path,
+            &"src/a.rs".to_string(),
+            "paged path",
+        )?;
+
+        let summary_page = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                summary_only: true,
+                ..query
+            },
+        )?;
+        require_eq(&summary_page.total, &2, "summary-only total")?;
+        require_eq(
+            &summary_page.findings.is_empty(),
+            &true,
+            "summary-only rows",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn unresolved_health_findings_page_skips_resolved_lifecycle_rows_before_paging()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("src/b.rs", "hash-b"),
+            test_file_node("src/c.rs", "hash-c"),
+            test_file_node("src/d.rs", "hash-d"),
+        ])?;
+        store.resolve_health_finding(&HealthResolution {
+            finding_id: finding_id("missing-purpose", "src/b.rs", None),
+            category: "missing-purpose".to_string(),
+            path: "src/b.rs".to_string(),
+            related_path: None,
+            rationale: "Resolved for pagination regression.".to_string(),
+        })?;
+
+        let page = store.unresolved_health_findings_page(
+            &store.resolved_health_ids()?,
+            &HealthQuery {
+                start_index: 0,
+                limit: 2,
+                category: Some("missing-purpose".to_string()),
+                severity: Some(Severity::Warning),
+                path_prefix: Some("src".to_string()),
+                summary_only: false,
+            },
+        )?;
+
+        require_eq(&page.total, &3, "filtered unresolved missing total")?;
+        require_eq(&page.returned, &2, "returned unresolved missing rows")?;
+        require_eq(
+            &page
+                .findings
+                .iter()
+                .map(|finding| finding.path.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["src/a.rs", "src/c.rs"],
+            "resolved row skipped before limit",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn unresolved_health_findings_page_streams_duplicate_and_temp_rows()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_folder_node("."),
+            test_folder_node("tmp"),
+            test_folder_node("src"),
+            test_folder_node("src/tmp"),
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("src/b.rs", "hash-b"),
+        ])?;
+        store.set_purpose(".", "Repository root", PurposeSource::Agent)?;
+        store.set_purpose("src", "Source folder", PurposeSource::Agent)?;
+        store.set_purpose("tmp", "Temporary output", PurposeSource::Agent)?;
+        store.set_purpose("src/tmp", "Source temporary output", PurposeSource::Agent)?;
+        store.set_purpose("src/a.rs", "Shared implementation", PurposeSource::Agent)?;
+        store.set_purpose("src/b.rs", "Shared implementation", PurposeSource::Agent)?;
+
+        let duplicate_page = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                start_index: 0,
+                limit: 1,
+                category: Some("duplicate-purpose".to_string()),
+                severity: Some(Severity::Warning),
+                path_prefix: Some("src".to_string()),
+                summary_only: false,
+            },
+        )?;
+        require_eq(&duplicate_page.total, &1, "duplicate total")?;
+        require_eq(&duplicate_page.returned, &1, "duplicate returned")?;
+        require_eq(
+            &duplicate_page.findings[0].category,
+            &"duplicate-purpose".to_string(),
+            "duplicate category",
+        )?;
+
+        let temp_page = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                start_index: 0,
+                limit: 1,
+                category: Some("repeated-temporary-folder".to_string()),
+                severity: Some(Severity::Warning),
+                path_prefix: Some(".".to_string()),
+                summary_only: false,
+            },
+        )?;
+        require_eq(&temp_page.total, &1, "temp total")?;
+        require_eq(&temp_page.returned, &1, "temp returned")?;
+        require_eq(
+            &temp_page.findings[0].category,
+            &"repeated-temporary-folder".to_string(),
+            "temp category",
+        )?;
         Ok(())
     }
 

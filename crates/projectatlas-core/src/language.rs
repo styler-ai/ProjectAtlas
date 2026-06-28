@@ -71,6 +71,7 @@ pub const BROAD_SOURCE_EXTENSIONS: &[&str] = &[
     ".yml",
     ".yaml",
     ".toml",
+    ".toon",
     ".txt",
     ".ini",
     ".cfg",
@@ -169,6 +170,7 @@ pub fn detect_language(extension: Option<&str>) -> Option<String> {
         | ".cql" | ".cypher" | ".sparql" | ".liquibase" | ".flyway" => "sql",
         ".gql" => "graphql",
         ".toml" => "toml",
+        ".toon" => "toon",
         ".txt" => "text",
         ".ini" | ".cfg" | ".conf" | ".properties" | ".env" | ".gitignore" | ".dockerignore"
         | ".editorconfig" => "config",
@@ -245,6 +247,7 @@ mod tests {
         assert_eq!(detect_language(Some(".R")).as_deref(), Some("r"));
         assert_eq!(detect_language(Some(".ini")).as_deref(), Some("config"));
         assert_eq!(detect_language(Some(".liquibase")).as_deref(), Some("sql"));
+        assert_eq!(detect_language(Some(".toon")).as_deref(), Some("toon"));
     }
 
     #[test]
