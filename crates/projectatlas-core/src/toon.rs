@@ -14,21 +14,46 @@ pub fn render_overview(overview: &Overview) -> String {
     encode_agent_payload(&json!({ "overview": overview }))
 }
 
+/// Build the agent-facing folder/file row projection used by TOON and JSON.
+#[must_use]
+pub fn render_node_rows(label: &str, nodes: &[IndexedNode]) -> Vec<serde_json::Value> {
+    nodes
+        .iter()
+        .map(|node| {
+            let purpose = node.purpose.purpose.as_deref().unwrap_or("");
+            let content_summary = node.summary.as_deref().unwrap_or("");
+            match label {
+                "folders" => json!({
+                    "path": node.node.path,
+                    "kind": node.node.kind.to_string(),
+                    "folder_purpose": purpose,
+                    "content_summary": content_summary,
+                    "status": node.purpose.status.to_string(),
+                }),
+                "files" => json!({
+                    "path": node.node.path,
+                    "kind": node.node.kind.to_string(),
+                    "language": node.node.language.as_deref().unwrap_or(""),
+                    "file_purpose": purpose,
+                    "content_summary": content_summary,
+                    "status": node.purpose.status.to_string(),
+                }),
+                _ => json!({
+                    "path": node.node.path,
+                    "kind": node.node.kind.to_string(),
+                    "purpose": purpose,
+                    "content_summary": content_summary,
+                    "status": node.purpose.status.to_string(),
+                }),
+            }
+        })
+        .collect()
+}
+
 /// Render indexed nodes as standard TOON.
 #[must_use]
 pub fn render_nodes(label: &str, nodes: &[IndexedNode]) -> String {
-    let rows = nodes
-        .iter()
-        .map(|node| {
-            json!({
-                "path": node.node.path,
-                "kind": node.node.kind.to_string(),
-                "purpose": node.purpose.purpose.as_deref().unwrap_or(""),
-                "summary": node.summary.as_deref().unwrap_or(""),
-                "status": node.purpose.status.to_string(),
-            })
-        })
-        .collect::<Vec<_>>();
+    let rows = render_node_rows(label, nodes);
     encode_agent_payload(&json!({ label: rows }))
 }
 
@@ -66,6 +91,9 @@ pub fn render_token_overview(overview: &TokenOverview) -> String {
         .map(|rate| format!("{:.1}%", rate * 100.0));
     encode_agent_payload(&json!({
         "token_savings": {
+            "estimate_kind": overview.estimate_kind,
+            "estimator": overview.estimator,
+            "estimate_scope": overview.estimate_scope,
             "calls": overview.calls,
             "estimated_without_projectatlas": overview.estimated_without_projectatlas,
             "estimated_with_projectatlas": overview.estimated_with_projectatlas,

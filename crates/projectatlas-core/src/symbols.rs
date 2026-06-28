@@ -132,6 +132,8 @@ pub enum ParserKind {
     TreeSitter,
     /// A manifest parser produced the result.
     Manifest,
+    /// A deterministic structural adapter produced the result.
+    Structural,
     /// A conservative regex fallback produced the result.
     Fallback,
 }
@@ -141,6 +143,7 @@ impl fmt::Display for ParserKind {
         formatter.write_str(match self {
             Self::TreeSitter => "tree-sitter",
             Self::Manifest => "manifest",
+            Self::Structural => "structural",
             Self::Fallback => "fallback",
         })
     }
@@ -153,6 +156,7 @@ impl ParserKind {
         match value {
             "tree-sitter" => Self::TreeSitter,
             "manifest" => Self::Manifest,
+            "structural" => Self::Structural,
             _ => Self::Fallback,
         }
     }

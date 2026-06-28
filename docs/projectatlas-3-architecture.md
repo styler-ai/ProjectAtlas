@@ -568,9 +568,13 @@ Required plugin contents for 3.0:
 
 - ProjectAtlas skill/instructions for Codex, OpenCode, Claude Code, and generic
   MCP-aware harnesses
-- `.mcp.json` that starts the native ProjectAtlas MCP server
+- `.mcp.json` that starts the native ProjectAtlas MCP server for compatible hosts
+- Claude Code plugin metadata under `.claude-plugin/plugin.json`
+- OpenCode `opencode.json` MCP config template
 - `projectatlas mcp-config` support for generated per-project MCP configs with
-  absolute executable, DB/config paths, and a `cwd` project-root hint
+  absolute executable and DB/config paths. Codex/OpenCode outputs include a
+  `cwd` project-root hint where supported; Claude Code output avoids relying on
+  `cwd` and binds the project through absolute DB/config arguments.
 - packaged or installable `projectatlas` Rust binary
 - TOON output support as the default agent-facing format
 - SQLite index support with bundled SQLite through the Rust binary
@@ -587,6 +591,8 @@ Preferred install behavior:
 5. verify the runtime with `projectatlas --format json runtime-info`, a
    read-only compatibility contract that confirms ProjectAtlas 3, MCP support,
    and TOON output without creating `.projectatlas`
+6. verify generated Codex-compatible, Claude Code, and OpenCode MCP config files
+   against the newest release/runtime path
 
 If a harness cannot install native binaries directly, the plugin should provide
 clear fallback instructions for `cargo install`, GitHub release binaries, or a
@@ -614,12 +620,25 @@ Token accounting model:
   telemetry must measure TOON output for TOON commands and JSON output for
   `--format json`; MCP telemetry measures TOON tool text inside the JSON-RPC
   envelope.
-- Save the delta in `usage_events`.
-- Aggregate reports in SQLite so long-lived projects do not materialize every
-  event just to render a token report.
+- Save the raw estimates and per-event delta in `usage_events`.
+- Compute aggregate `saved = estimated_tokens_without_projectatlas -
+  estimated_tokens_with_projectatlas` from the stored raw estimates instead of
+  trusting historical per-row saved values.
+- Compute `savings_rate = saved / estimated_tokens_without_projectatlas` only
+  when the baseline is greater than zero. A zero baseline yields an unknown rate
+  instead of a fake percentage.
+- Use bounded aggregate reads and saturating Rust conversions so very large
+  long-lived projects do not produce overflowing token reports.
 - Report per session and all-time totals.
 - Prefer TOON output for usage reports shown to agents. A human terminal
   dashboard is allowed only as an explicit view.
+- The default estimator is an offline text-size heuristic: emitted text uses
+  `ceil(chars / 4)` and file-size baselines use `ceil(bytes / 4)`. It is
+  workflow telemetry for avoided wrong-folder exploration, wrong-file opens,
+  and unnecessary full-code reads; it is not provider billing telemetry. Future
+  model-aware calibration should be opt-in, label the provider/model/tokenizer,
+  cache the calibration source, and never require network access for ordinary
+  `projectatlas token` reports.
 
 Canonical commands:
 
@@ -650,14 +669,14 @@ Example output:
 
 ```toon
 token_savings:
-  command: projectatlas token
-  session: 2026-06-27T12:00:00Z
+  estimate_kind: heuristic
+  estimator: chars_or_bytes_div_ceil_4
+  estimate_scope: workflow_payload_estimate_not_model_billing_tokens
   calls: 14
   estimated_without_projectatlas: 118000
   estimated_with_projectatlas: 9200
   estimated_saved: 108800
   savings_rate: 92.2%
-  top_saving_command: atlas_outline
 ```
 
 Every funnel command should record telemetry when it can estimate a baseline.

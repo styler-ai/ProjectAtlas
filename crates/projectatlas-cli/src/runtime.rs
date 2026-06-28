@@ -19,7 +19,7 @@ use projectatlas_core::{
     validated_repo_file_key,
 };
 use projectatlas_db::{AtlasStore, IndexedFileText};
-use projectatlas_fs::{ScanOptions, scan_path, scan_repo};
+use projectatlas_fs::{ScanOptions, gitignore_excludes_path, scan_path, scan_repo};
 use projectatlas_service::{
     FilePathMatcher, FileSummaryReport, file_summary_baseline_text, load_ranked_file_nodes,
 };
@@ -264,9 +264,9 @@ pub(crate) fn run_scan_pipeline(
             purpose_import.imported += 1;
         }
     }
+    let symbols = build_symbols_for_index(store, &plan.root, symbol_options, None)?;
     let structural_summaries =
         refresh_structural_summaries_for_nodes(store, &nodes, &text_refresh.rows)?;
-    let symbols = build_symbols_for_index(store, &plan.root, symbol_options, None)?;
     let overview = store.overview()?;
     Ok(ScanReport {
         overview,
@@ -1243,7 +1243,7 @@ pub(crate) fn empty_symbol_build_report() -> SymbolBuildReport {
     }
 }
 
-/// Create a deterministic one-line observed summary from extracted symbols.
+/// Create a deterministic one-line content summary from extracted symbols.
 pub(crate) fn summarize_symbol_graph(graph: &SymbolGraph, fallback: Option<&str>) -> String {
     if graph.symbols.is_empty() {
         if let Some(fallback) = fallback.filter(|summary| !is_scanner_fallback_summary(summary)) {
@@ -1280,7 +1280,7 @@ pub(crate) fn summarize_symbol_graph(graph: &SymbolGraph, fallback: Option<&str>
     )
 }
 
-/// Return a readable language label for agent-facing observed summaries.
+/// Return a readable language label for agent-facing content summaries.
 fn observed_language_label(language: Option<&str>) -> String {
     match language.unwrap_or("source") {
         "cargo-manifest" => "cargo manifest".to_string(),
@@ -1293,7 +1293,7 @@ fn observed_language_label(language: Option<&str>) -> String {
     }
 }
 
-/// Return the subject phrase for manifest-style observed summaries.
+/// Return the subject phrase for manifest-style content summaries.
 fn observed_manifest_subject(language: &str) -> String {
     if language.contains("manifest") {
         language.to_string()
@@ -1433,14 +1433,45 @@ pub(crate) fn relation_targets(
     targets
 }
 
-/// Create a generated file-purpose suggestion from an observed summary.
+/// Create a generated file-purpose suggestion from a path and content summary.
 pub(crate) fn suggest_file_purpose(path: &str, summary: &str) -> String {
     let name = path
         .rsplit('/')
         .next()
         .filter(|value| !value.is_empty())
         .unwrap_or(path);
-    format!("Provide {name} behavior: {}", summary.trim_end_matches('.'))
+    let stem = name.split_once('.').map_or(name, |(stem, _)| stem);
+    let subject = stem.replace(['-', '_'], " ");
+    if summary.contains("dataset manifest") {
+        if let Some(datasets) = summary_between(summary, " including ", " and keys") {
+            format!("Define the {subject} dataset manifest for {datasets}.")
+        } else {
+            format!("Define the {subject} dataset manifest.")
+        }
+    } else if let Some(workflow) = summary_between(summary, "yaml workflow ", " triggered") {
+        format!("Define the {workflow} workflow.")
+    } else if summary.contains("manifest") {
+        if let Some(package) = summary_between(summary, " manifest for ", " with ") {
+            format!("Define the {package} manifest.")
+        } else {
+            format!("Define the {subject} manifest.")
+        }
+    } else if let Some(title) = summary_between(summary, "document titled ", " with ") {
+        format!("Document {title}.")
+    } else if summary.contains("stylesheet") {
+        format!("Style the {subject} stylesheet.")
+    } else if summary.contains("config") {
+        format!("Configure {subject}.")
+    } else {
+        format!("Implement {subject}.")
+    }
+}
+
+/// Return a non-empty substring between two markers.
+fn summary_between<'a>(summary: &'a str, start: &str, end: &str) -> Option<&'a str> {
+    let after_start = summary.split_once(start)?.1;
+    let value = after_start.split_once(end)?.0.trim();
+    (!value.is_empty()).then_some(value)
 }
 
 /// Return whether a language should be parsed for symbols.
@@ -1752,6 +1783,13 @@ pub(crate) fn watch_path_affects_index(
     if relative == "." {
         return true;
     }
+    // Unknown ignore state should not admit a path into the incremental index.
+    let Ok(gitignore_ignored) = gitignore_excludes_path(root, &candidate) else {
+        return false;
+    };
+    if gitignore_ignored {
+        return false;
+    }
     !relative.split('/').any(|component| component == ".purpose")
         && !scan_options.excludes_relative_path(&relative)
 }
@@ -1846,9 +1884,9 @@ pub(crate) fn refresh_index(
     seed_builtin_projectatlas_purposes(store, &nodes)?;
     let text_refresh = refresh_text_index_for_nodes_with_rows(store, &root, &nodes, text_options)?;
     let text_index = text_refresh.report.clone();
+    let symbols = build_symbols_for_index(store, &root, symbol_options, Some(&previous_hashes))?;
     let structural_summaries =
         refresh_structural_summaries_for_nodes(store, &nodes, &text_refresh.rows)?;
-    let symbols = build_symbols_for_index(store, &root, symbol_options, Some(&previous_hashes))?;
     Ok(IndexRefreshReport {
         text_index,
         structural_summaries,
@@ -1902,14 +1940,14 @@ pub(crate) fn refresh_index_for_changes(
         text_options,
     )?;
     let text_index = text_refresh.report.clone();
-    let structural_summaries =
-        refresh_structural_summaries_for_nodes(store, &nodes, &text_refresh.rows)?;
     let target_paths = nodes
         .iter()
         .filter(|node| node.kind == NodeKind::File)
         .map(|node| node.path.clone())
         .collect::<HashSet<_>>();
     if target_paths.is_empty() {
+        let structural_summaries =
+            refresh_structural_summaries_for_nodes(store, &nodes, &text_refresh.rows)?;
         return Ok(IndexRefreshReport {
             text_index,
             structural_summaries,
@@ -1923,6 +1961,8 @@ pub(crate) fn refresh_index_for_changes(
         Some(&previous_hashes),
         Some(&target_paths),
     )?;
+    let structural_summaries =
+        refresh_structural_summaries_for_nodes(store, &nodes, &text_refresh.rows)?;
     Ok(IndexRefreshReport {
         text_index,
         structural_summaries,
@@ -1969,6 +2009,7 @@ pub(crate) fn refresh_structural_summaries_for_nodes(
         return Ok(StructuralSummaryReport::default());
     }
     let indexed_nodes = store.load_nodes_by_paths(&paths)?;
+    let symbol_counts = store.symbol_counts_for_paths(&paths)?;
     let text_by_path = text_rows
         .iter()
         .filter_map(|row| row.text.as_ref().map(|text| (text.path.as_str(), text)))
@@ -2003,6 +2044,15 @@ pub(crate) fn refresh_structural_summaries_for_nodes(
             }
             continue;
         };
+        if symbol_counts
+            .get(indexed.node.path.as_str())
+            .is_some_and(|count| *count > 0)
+            && indexed.summary.as_deref().is_some_and(|summary| {
+                !summary.trim().is_empty() && !is_scanner_fallback_summary(summary)
+            })
+        {
+            continue;
+        }
         let Some(summary) = structural_summary_for_path(
             &indexed.node.path,
             indexed.node.language.as_deref(),

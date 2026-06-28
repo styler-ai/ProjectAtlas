@@ -1,11 +1,12 @@
 # Structural Summaries
 
-ProjectAtlas stores two different one-liners for indexed project nodes:
+ProjectAtlas stores distinct navigation fields for indexed project nodes:
 
-- `purpose`: why the folder or file exists. This is agent-approved project intent.
-- `observed_summary`: what the index can deterministically observe inside the file.
+- `folder_purpose`: why a folder exists. This is agent-approved project intent used before choosing a work area.
+- `file_purpose`: why a file exists. This is agent-approved or generated-suggested project intent used before detailed inspection.
+- `content_summary`: what the index can deterministically observe inside the file.
 
-For source files with declarations, the deep symbol graph produces the observed summary. For declaration-light files, ProjectAtlas uses deterministic structural adapters before symbol extraction so agents do not see weak byte-count fallbacks as normal intelligence.
+For source files with declarations, the deep symbol graph produces the content summary. For declaration-light files, ProjectAtlas uses deterministic structural adapters before symbol extraction so agents do not see weak byte-count fallbacks as normal intelligence.
 
 ## Current Structural Adapters
 
@@ -18,14 +19,14 @@ For source files with declarations, the deep symbol graph produces the observed 
 - TOON: named sections.
 - Simple config/text files: key-like entries, plus first non-empty line excerpts for plain text.
 
-The adapters are intentionally bounded and deterministic. They do not approve purposes. If a file has no approved purpose, the scan can create a generated purpose suggestion from the observed summary, and the agent harness must inspect enough context to approve or correct it with `projectatlas purpose set` or `atlas_purpose_set`.
+The adapters are intentionally bounded and deterministic. They do not approve purposes. If a file has no approved purpose, the scan can create a generated `file_purpose` suggestion from the `content_summary`, and the agent harness must inspect enough context to approve or correct it with `projectatlas purpose set` or `atlas_purpose_set`.
 
 ## Quality Signals
 
 `projectatlas summary <file>` exposes:
 
 - `parser_kind`: `tree-sitter-symbol-graph`, `manifest-symbol-graph`,
-  `fallback-symbol-graph`, `mixed-symbol-graph`, `symbol-graph`,
+  `structural-symbol-graph`, `fallback-symbol-graph`, `mixed-symbol-graph`, `symbol-graph`,
   `structural`, `scanner-metadata`, or `missing`.
 - `summary_status`: `ok`, `fallback`, or `missing`.
 
@@ -42,7 +43,7 @@ The separate end-to-end test `scan_indexes_every_supported_language_extension`
 creates one temporary fixture for every extension in ProjectAtlas's public
 language registry and proves the real scanner indexes each path with the
 expected language family. It also runs the real `projectatlas summary` command
-for each fixture and verifies a non-empty observed summary, non-missing parser
+for each fixture and verifies a non-empty content summary, non-missing parser
 kind, and non-missing summary status. This broad registry test is intentionally
 separate from the exact summary baseline so fallback-supported languages remain
 covered without requiring brittle one-line summaries for every extension alias.

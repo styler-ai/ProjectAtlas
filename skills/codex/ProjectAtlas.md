@@ -40,7 +40,19 @@ the folder, choose the file, inspect compressed context, and only then open exac
 11. Use deeper source reads only for selected targets.
 12. Run `projectatlas token` when token-savings reporting is requested; use `projectatlas token --view tui` only for a human terminal dashboard.
 
-Token savings estimate avoided wrong-folder exploration, wrong-file opens, and unnecessary full-code reads caused by the atlas-first workflow. Agent and MCP surfaces should stay structured by default; the TUI dashboard is explicit terminal UI.
+Token savings estimate avoided wrong-folder exploration, wrong-file opens, and unnecessary full-code reads caused by the atlas-first workflow. Agent and MCP surfaces should stay structured by default; the TUI dashboard is explicit terminal UI with "Without PA", "With PA", and "Saved" comparison bars.
+
+## MCP Config
+
+Prefer installer-generated project-local config:
+
+```bash
+projectatlas --format json --db .projectatlas/projectatlas.db mcp-config
+projectatlas --format json --db .projectatlas/projectatlas.db mcp-config --harness claude-code
+projectatlas --format json --db .projectatlas/projectatlas.db mcp-config --harness opencode
+```
+
+The ProjectAtlas installer writes `.projectatlas/projectatlas.mcp.json`, `.projectatlas/projectatlas.claude.mcp.json`, and `.projectatlas/projectatlas.opencode.json` after verifying `projectatlas --format json runtime-info`.
 
 ## AGENTS.md Snippet
 

@@ -95,7 +95,7 @@ jobs:
         run: git diff --exit-code -- .projectatlas/projectatlas.toon .projectatlas/projectatlas-nonsource-files.toon
 
   package-unix:
-    name: package ${{ matrix.suffix }}
+    name: package ${{ matrix.label }}
     needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
@@ -103,10 +103,13 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            label: linux-x64
             suffix: x86_64-unknown-linux-gnu
           - os: macos-15-intel
+            label: macos-x64
             suffix: x86_64-apple-darwin
           - os: macos-14
+            label: macos-arm64
             suffix: aarch64-apple-darwin
     steps:
       - name: Checkout
@@ -138,7 +141,7 @@ jobs:
           if-no-files-found: error
 
   package-windows:
-    name: package x86_64-pc-windows-msvc
+    name: package windows-x64
     needs: verify
     runs-on: windows-latest
     steps:
@@ -178,9 +181,174 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
 
+  prepublish-installer-smoke-unix:
+    name: prepublish installer smoke ${{ matrix.label }}
+    needs: package-unix
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x64-posix
+            suffix: x86_64-unknown-linux-gnu
+          - os: macos-15-intel
+            label: macos-x64-posix
+            suffix: x86_64-apple-darwin
+          - os: macos-14
+            label: macos-arm64-posix
+            suffix: aarch64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download packaged runtime
+        uses: actions/download-artifact@v8
+        with:
+          name: projectatlas-${{ matrix.suffix }}
+          path: release-assets
+
+      - name: Install packaged runtime through plugin
+        timeout-minutes: 5
+        env:
+          PROJECTATLAS_SUFFIX: ${{ matrix.suffix }}
+        run: |
+          archive="release-assets/projectatlas-${RELEASE_VERSION}-${PROJECTATLAS_SUFFIX}.tar.gz"
+          mkdir -p "$RUNNER_TEMP/projectatlas-prepublish"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/projectatlas-prepublish"
+          runtime="$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas"
+          chmod +x "$runtime"
+          project_root="$RUNNER_TEMP/projectatlas-installer-prepublish"
+          mkdir -p "$project_root"
+          PROJECTATLAS_VERSION="$RELEASE_VERSION" PROJECTATLAS_RUNTIME_PATH="$runtime" \
+            bash ./plugins/projectatlas/scripts/install-runtime.sh "$project_root"
+          PROJECTATLAS_NO_TELEMETRY=1 "$runtime" --require-version "$RELEASE_VERSION" --format json runtime-info
+          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$runtime" config --print)
+          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$runtime" ignore list)
+          PROJECT_ROOT="$project_root" PROJECTATLAS_RUNTIME="$runtime" python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["PROJECT_ROOT"]).resolve()
+          runtime = Path(os.environ["PROJECTATLAS_RUNTIME"]).resolve()
+          version = os.environ["RELEASE_VERSION"].lstrip("v")
+          db = (root / ".projectatlas" / "projectatlas.db").resolve()
+
+          def load(name):
+              with (root / ".projectatlas" / name).open(encoding="utf-8") as handle:
+                  return json.load(handle)
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          def require_args(args):
+              require(args[0:2] == ["--require-version", version], f"bad version args: {args}")
+              require(args[-1] == "mcp", f"mcp arg missing: {args}")
+              require("--db" in args, f"db arg missing: {args}")
+              require(Path(args[args.index("--db") + 1]).resolve() == db, f"bad db arg: {args}")
+
+          codex = load("projectatlas.mcp.json")["mcpServers"]["projectatlas"]
+          require(Path(codex["command"]).resolve() == runtime, "codex command path mismatch")
+          require_args(codex["args"])
+          require(Path(codex["cwd"]).resolve() == root, "codex cwd mismatch")
+
+          claude = load("projectatlas.claude.mcp.json")["mcpServers"]["projectatlas"]
+          require(Path(claude["command"]).resolve() == runtime, "claude command path mismatch")
+          require_args(claude["args"])
+
+          opencode = load("projectatlas.opencode.json")["mcp"]["projectatlas"]
+          command = opencode["command"]
+          require(opencode["type"] == "local" and opencode["enabled"] is True, "opencode server disabled or non-local")
+          require(Path(command[0]).resolve() == runtime, "opencode command path mismatch")
+          require_args(command[1:])
+          require(Path(opencode["cwd"]).resolve() == root, "opencode cwd mismatch")
+          PY
+
+  prepublish-installer-smoke-windows:
+    name: prepublish installer smoke windows-x64
+    needs: package-windows
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download packaged runtime
+        uses: actions/download-artifact@v8
+        with:
+          name: projectatlas-x86_64-pc-windows-msvc
+          path: release-assets
+
+      - name: Install packaged runtime through plugin
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $archive = Join-Path "release-assets" "projectatlas-$($env:RELEASE_VERSION)-x86_64-pc-windows-msvc.zip"
+          $extractRoot = Join-Path $env:RUNNER_TEMP "projectatlas-prepublish"
+          Expand-Archive -Path $archive -DestinationPath $extractRoot -Force
+          $runtime = Join-Path $extractRoot "projectatlas.exe"
+          $projectRoot = Join-Path $env:RUNNER_TEMP "projectatlas-installer-prepublish"
+          New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
+          .\plugins\projectatlas\scripts\install-runtime.ps1 -ProjectRoot $projectRoot -ProjectAtlasVersion $env:RELEASE_VERSION -RuntimePath $runtime
+          $env:PROJECTATLAS_NO_TELEMETRY = "1"
+          & $runtime --require-version $env:RELEASE_VERSION --format json runtime-info
+          Push-Location $projectRoot
+          try {
+            & $runtime config --print
+            & $runtime ignore list
+          } finally {
+            Pop-Location
+          }
+          $expectedRuntime = [System.IO.Path]::GetFullPath($runtime)
+          $expectedRoot = [System.IO.Path]::GetFullPath($projectRoot)
+          $expectedDb = [System.IO.Path]::GetFullPath((Join-Path $projectRoot ".projectatlas\projectatlas.db"))
+          $expectedVersion = $env:RELEASE_VERSION.TrimStart("v")
+
+          function Assert-Equal {
+            param([string]$Actual, [string]$Expected, [string]$Message)
+            if ($Actual -ne $Expected) {
+              throw "$Message. Expected '$Expected', found '$Actual'."
+            }
+          }
+
+          function Assert-McpArgs {
+            param([object[]]$Args)
+            Assert-Equal $Args[0] "--require-version" "Missing require-version flag"
+            Assert-Equal $Args[1] $expectedVersion "Runtime version mismatch"
+            $dbIndex = [Array]::IndexOf($Args, "--db")
+            if ($dbIndex -lt 0) {
+              throw "Missing --db argument."
+            }
+            Assert-Equal ([System.IO.Path]::GetFullPath($Args[$dbIndex + 1])) $expectedDb "Database path mismatch"
+            Assert-Equal $Args[-1] "mcp" "Missing mcp command"
+          }
+
+          $atlasDir = Join-Path $projectRoot ".projectatlas"
+          $codex = Get-Content -Raw -LiteralPath (Join-Path $atlasDir "projectatlas.mcp.json") | ConvertFrom-Json
+          $codexServer = $codex.mcpServers.projectatlas
+          Assert-Equal ([System.IO.Path]::GetFullPath($codexServer.command)) $expectedRuntime "Codex command path mismatch"
+          Assert-McpArgs @($codexServer.args)
+          Assert-Equal ([System.IO.Path]::GetFullPath($codexServer.cwd)) $expectedRoot "Codex cwd mismatch"
+
+          $claude = Get-Content -Raw -LiteralPath (Join-Path $atlasDir "projectatlas.claude.mcp.json") | ConvertFrom-Json
+          $claudeServer = $claude.mcpServers.projectatlas
+          Assert-Equal ([System.IO.Path]::GetFullPath($claudeServer.command)) $expectedRuntime "Claude command path mismatch"
+          Assert-McpArgs @($claudeServer.args)
+
+          $opencode = Get-Content -Raw -LiteralPath (Join-Path $atlasDir "projectatlas.opencode.json") | ConvertFrom-Json
+          $opencodeServer = $opencode.mcp.projectatlas
+          if ($opencodeServer.type -ne "local" -or -not $opencodeServer.enabled) {
+            throw "OpenCode server was not enabled as a local MCP server."
+          }
+          $command = @($opencodeServer.command)
+          Assert-Equal ([System.IO.Path]::GetFullPath($command[0])) $expectedRuntime "OpenCode command path mismatch"
+          Assert-McpArgs @($command[1..($command.Count - 1)])
+          Assert-Equal ([System.IO.Path]::GetFullPath($opencodeServer.cwd)) $expectedRoot "OpenCode cwd mismatch"
+
   publish:
     name: publish
-    needs: [package-unix, package-windows]
+    needs: [prepublish-installer-smoke-unix, prepublish-installer-smoke-windows]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -215,7 +383,7 @@ jobs:
             --generate-notes
 
   installer-smoke-unix:
-    name: installer smoke ${{ matrix.suffix }}
+    name: installer smoke ${{ matrix.label }}
     needs: publish
     runs-on: ${{ matrix.os }}
     strategy:
@@ -223,27 +391,72 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            label: linux-x64-posix
             suffix: x86_64-unknown-linux-gnu
           - os: macos-15-intel
+            label: macos-x64-posix
             suffix: x86_64-apple-darwin
           - os: macos-14
+            label: macos-arm64-posix
             suffix: aarch64-apple-darwin
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
       - name: Install release runtime through plugin
+        timeout-minutes: 5
         env:
           PROJECTATLAS_RELEASE_BINARY_ONLY: "1"
         run: |
           project_root="$RUNNER_TEMP/projectatlas-installer-smoke"
           mkdir -p "$project_root"
           PROJECTATLAS_VERSION="$RELEASE_VERSION" bash ./plugins/projectatlas/scripts/install-runtime.sh "$project_root"
-          "$HOME/.local/bin/projectatlas" --format json runtime-info
-          test -f "$project_root/.projectatlas/projectatlas.mcp.json"
+          PROJECTATLAS_NO_TELEMETRY=1 "$HOME/.local/bin/projectatlas" --require-version "$RELEASE_VERSION" --format json runtime-info
+          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$HOME/.local/bin/projectatlas" config --print)
+          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$HOME/.local/bin/projectatlas" ignore list)
+          PROJECT_ROOT="$project_root" PROJECTATLAS_RUNTIME="$HOME/.local/bin/projectatlas" python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["PROJECT_ROOT"]).resolve()
+          runtime = Path(os.environ["PROJECTATLAS_RUNTIME"]).resolve()
+          version = os.environ["RELEASE_VERSION"].lstrip("v")
+          db = (root / ".projectatlas" / "projectatlas.db").resolve()
+
+          def load(name):
+              with (root / ".projectatlas" / name).open(encoding="utf-8") as handle:
+                  return json.load(handle)
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          def require_args(args):
+              require(args[0:2] == ["--require-version", version], f"bad version args: {args}")
+              require(args[-1] == "mcp", f"mcp arg missing: {args}")
+              require("--db" in args, f"db arg missing: {args}")
+              require(Path(args[args.index("--db") + 1]).resolve() == db, f"bad db arg: {args}")
+
+          codex = load("projectatlas.mcp.json")["mcpServers"]["projectatlas"]
+          require(Path(codex["command"]).resolve() == runtime, "codex command path mismatch")
+          require_args(codex["args"])
+          require(Path(codex["cwd"]).resolve() == root, "codex cwd mismatch")
+
+          claude = load("projectatlas.claude.mcp.json")["mcpServers"]["projectatlas"]
+          require(Path(claude["command"]).resolve() == runtime, "claude command path mismatch")
+          require_args(claude["args"])
+
+          opencode = load("projectatlas.opencode.json")["mcp"]["projectatlas"]
+          command = opencode["command"]
+          require(opencode["type"] == "local" and opencode["enabled"] is True, "opencode server disabled or non-local")
+          require(Path(command[0]).resolve() == runtime, "opencode command path mismatch")
+          require_args(command[1:])
+          require(Path(opencode["cwd"]).resolve() == root, "opencode cwd mismatch")
+          PY
 
   installer-smoke-windows:
-    name: installer smoke x86_64-pc-windows-msvc
+    name: installer smoke windows-x64
     needs: publish
     runs-on: windows-latest
     steps:
@@ -251,14 +464,64 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install release runtime through plugin
+        timeout-minutes: 5
         shell: pwsh
         run: |
           $projectRoot = Join-Path $env:RUNNER_TEMP "projectatlas-installer-smoke"
           New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
           .\plugins\projectatlas\scripts\install-runtime.ps1 -ProjectRoot $projectRoot -ProjectAtlasVersion $env:RELEASE_VERSION -ReleaseBinaryOnly
           $runtime = Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin\projectatlas.exe"
-          & $runtime --format json runtime-info
-          if (-not (Test-Path -LiteralPath (Join-Path $projectRoot ".projectatlas\projectatlas.mcp.json"))) {
-            Write-Error "Project-local MCP config was not generated."
-            exit 1
+          $env:PROJECTATLAS_NO_TELEMETRY = "1"
+          & $runtime --require-version $env:RELEASE_VERSION --format json runtime-info
+          Push-Location $projectRoot
+          try {
+            & $runtime config --print
+            & $runtime ignore list
+          } finally {
+            Pop-Location
           }
+          $expectedRuntime = [System.IO.Path]::GetFullPath($runtime)
+          $expectedRoot = [System.IO.Path]::GetFullPath($projectRoot)
+          $expectedDb = [System.IO.Path]::GetFullPath((Join-Path $projectRoot ".projectatlas\projectatlas.db"))
+          $expectedVersion = $env:RELEASE_VERSION.TrimStart("v")
+
+          function Assert-Equal {
+            param([string]$Actual, [string]$Expected, [string]$Message)
+            if ($Actual -ne $Expected) {
+              throw "$Message. Expected '$Expected', found '$Actual'."
+            }
+          }
+
+          function Assert-McpArgs {
+            param([object[]]$Args)
+            Assert-Equal $Args[0] "--require-version" "Missing require-version flag"
+            Assert-Equal $Args[1] $expectedVersion "Runtime version mismatch"
+            $dbIndex = [Array]::IndexOf($Args, "--db")
+            if ($dbIndex -lt 0) {
+              throw "Missing --db argument."
+            }
+            Assert-Equal ([System.IO.Path]::GetFullPath($Args[$dbIndex + 1])) $expectedDb "Database path mismatch"
+            Assert-Equal $Args[-1] "mcp" "Missing mcp command"
+          }
+
+          $atlasDir = Join-Path $projectRoot ".projectatlas"
+          $codex = Get-Content -Raw -LiteralPath (Join-Path $atlasDir "projectatlas.mcp.json") | ConvertFrom-Json
+          $codexServer = $codex.mcpServers.projectatlas
+          Assert-Equal ([System.IO.Path]::GetFullPath($codexServer.command)) $expectedRuntime "Codex command path mismatch"
+          Assert-McpArgs @($codexServer.args)
+          Assert-Equal ([System.IO.Path]::GetFullPath($codexServer.cwd)) $expectedRoot "Codex cwd mismatch"
+
+          $claude = Get-Content -Raw -LiteralPath (Join-Path $atlasDir "projectatlas.claude.mcp.json") | ConvertFrom-Json
+          $claudeServer = $claude.mcpServers.projectatlas
+          Assert-Equal ([System.IO.Path]::GetFullPath($claudeServer.command)) $expectedRuntime "Claude command path mismatch"
+          Assert-McpArgs @($claudeServer.args)
+
+          $opencode = Get-Content -Raw -LiteralPath (Join-Path $atlasDir "projectatlas.opencode.json") | ConvertFrom-Json
+          $opencodeServer = $opencode.mcp.projectatlas
+          if ($opencodeServer.type -ne "local" -or -not $opencodeServer.enabled) {
+            throw "OpenCode server was not enabled as a local MCP server."
+          }
+          $command = @($opencodeServer.command)
+          Assert-Equal ([System.IO.Path]::GetFullPath($command[0])) $expectedRuntime "OpenCode command path mismatch"
+          Assert-McpArgs @($command[1..($command.Count - 1)])
+          Assert-Equal ([System.IO.Path]::GetFullPath($opencodeServer.cwd)) $expectedRoot "OpenCode cwd mismatch"

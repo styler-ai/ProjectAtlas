@@ -6,15 +6,16 @@ mod runtime;
 mod structural;
 
 use atlas_map::{
-    LintOptions, effective_config_report, init_project, lint_map, load_atlas_config,
+    IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report, init_gitignore,
+    init_project, lint_map, list_ignore_entries, load_atlas_config, remove_ignore_entry,
     seed_purpose_files, write_map,
 };
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use projectatlas_core::outline::build_outline;
 use projectatlas_core::telemetry::TokenOverview;
 use projectatlas_core::toon::{
-    encode_agent_payload, render_health, render_nodes, render_outline, render_overview,
-    render_symbol_relations, render_symbols, render_token_overview,
+    encode_agent_payload, render_health, render_node_rows, render_nodes, render_outline,
+    render_overview, render_symbol_relations, render_symbols, render_token_overview,
 };
 use projectatlas_core::{NodeKind, PurposeSource, normalize_native_path_display};
 use projectatlas_db::{AtlasStore, DbError, HealthResolution};
@@ -110,6 +111,39 @@ enum TokenView {
     Agent,
     /// Human terminal dashboard with a compact savings diagram.
     Tui,
+}
+
+/// Manual `ProjectAtlas` ignore entry kind for CLI input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum IgnoreKind {
+    /// Ignore every directory with this name anywhere under the repository.
+    DirName,
+    /// Ignore one repository-relative path subtree.
+    PathPrefix,
+}
+
+/// MCP host configuration format.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+enum HarnessConfig {
+    /// Standard `.mcp.json` shape with `mcpServers`.
+    McpJson,
+    /// Codex-compatible `.mcp.json` shape with a project-root `cwd` hint.
+    Codex,
+    /// Claude Code plugin/project MCP config shape.
+    ClaudeCode,
+    /// `OpenCode` `opencode.json` MCP config shape.
+    #[value(name = "opencode")]
+    OpenCode,
+}
+
+impl From<IgnoreKind> for IgnoreEntryKind {
+    fn from(value: IgnoreKind) -> Self {
+        match value {
+            IgnoreKind::DirName => Self::DirName,
+            IgnoreKind::PathPrefix => Self::PathPrefix,
+        }
+    }
 }
 
 /// Top-level parsed CLI arguments.
@@ -270,6 +304,12 @@ enum Command {
         #[arg(long)]
         print: bool,
     },
+    /// Manage the manual `ProjectAtlas` ignore layer in config.
+    Ignore {
+        /// Ignore subcommand to run.
+        #[command(subcommand)]
+        command: IgnoreCommand,
+    },
     /// Print watcher availability and current status.
     WatchStatus,
     /// Watch a repository and refresh the index when files change.
@@ -368,6 +408,9 @@ enum Command {
         /// MCP server name to emit.
         #[arg(long, default_value = "projectatlas")]
         server_name: String,
+        /// Harness-specific config shape to emit.
+        #[arg(long, value_enum, default_value_t = HarnessConfig::McpJson)]
+        harness: HarnessConfig,
     },
     /// Print structured runtime identity and capability information.
     RuntimeInfo,
@@ -376,6 +419,31 @@ enum Command {
         /// Purpose subcommand to run.
         #[command(subcommand)]
         command: PurposeCommand,
+    },
+}
+
+/// Manual ignore management subcommands.
+#[derive(Debug, Subcommand)]
+enum IgnoreCommand {
+    /// List effective `ProjectAtlas` manual ignore policy.
+    List,
+    /// Create a project-root `.gitignore` when it is missing.
+    InitGitignore,
+    /// Add one manual ignore entry to `.projectatlas/config.toml`.
+    Add {
+        /// Ignore kind to add.
+        #[arg(long, value_enum)]
+        kind: IgnoreKind,
+        /// Directory name or repository-relative path prefix.
+        value: String,
+    },
+    /// Remove one manual ignore entry from `.projectatlas/config.toml`.
+    Remove {
+        /// Ignore kind to remove. Omit to remove from both manual ignore lists.
+        #[arg(long, value_enum)]
+        kind: Option<IgnoreKind>,
+        /// Directory name or repository-relative path prefix.
+        value: String,
     },
 }
 
@@ -556,6 +624,7 @@ fn run() -> Result<(), CliError> {
             let store = open_atlas_store(&cli.db)?;
             let selected = store.load_ranked_nodes(query, NodeKind::Folder, None, *limit, 0)?;
             let toon = render_nodes("folders", &selected);
+            let payload = render_node_rows("folders", &selected);
             print_tracked_output_estimate(
                 cli.format,
                 &store,
@@ -565,7 +634,7 @@ fn run() -> Result<(), CliError> {
                 Some(query.clone()),
                 estimated_source_tokens_for_indexed_files(&store, None, None)?,
                 &toon,
-                &selected,
+                &payload,
             )?;
         }
         Command::Files {
@@ -593,6 +662,7 @@ fn run() -> Result<(), CliError> {
                 file_pattern.as_deref(),
             )?;
             let toon = render_nodes("files", &selected);
+            let payload = render_node_rows("files", &selected);
             print_tracked_output_estimate(
                 cli.format,
                 &store,
@@ -602,7 +672,7 @@ fn run() -> Result<(), CliError> {
                 query.clone(),
                 baseline_tokens,
                 &toon,
-                &selected,
+                &payload,
             )?;
         }
         Command::Outline { file, lines } => {
@@ -828,6 +898,50 @@ fn run() -> Result<(), CliError> {
                 &report,
             )?;
         }
+        Command::Ignore { command } => match command {
+            IgnoreCommand::List => {
+                let project_root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+                let report = list_ignore_entries(cli.config.as_deref(), &project_root)?;
+                print_output(
+                    cli.format,
+                    &encode_agent_payload(&json!({ "ignore": report })),
+                    &report,
+                )?;
+            }
+            IgnoreCommand::InitGitignore => {
+                let project_root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+                let report = init_gitignore(cli.config.as_deref(), &project_root)?;
+                print_output(
+                    cli.format,
+                    &encode_agent_payload(&json!({ "gitignore": report })),
+                    &report,
+                )?;
+            }
+            IgnoreCommand::Add { kind, value } => {
+                let project_root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+                let report =
+                    add_ignore_entry(cli.config.as_deref(), &project_root, (*kind).into(), value)?;
+                print_output(
+                    cli.format,
+                    &encode_agent_payload(&json!({ "ignore": report })),
+                    &report,
+                )?;
+            }
+            IgnoreCommand::Remove { kind, value } => {
+                let project_root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+                let report = remove_ignore_entry(
+                    cli.config.as_deref(),
+                    &project_root,
+                    kind.map(Into::into),
+                    value,
+                )?;
+                print_output(
+                    cli.format,
+                    &encode_agent_payload(&json!({ "ignore": report })),
+                    &report,
+                )?;
+            }
+        },
         Command::WatchStatus => {
             let report = watcher_status_report(false);
             let toon = render_watch_status(&report);
@@ -991,8 +1105,16 @@ fn run() -> Result<(), CliError> {
         Command::Mcp => {
             mcp::run_mcp_server(cli.db.clone(), cli.config.clone(), cli.session.clone())?;
         }
-        Command::McpConfig { server_name } => {
-            let report = build_mcp_config_report(server_name, &cli.db, cli.config.as_deref())?;
+        Command::McpConfig {
+            server_name,
+            harness,
+        } => {
+            let report = build_harness_mcp_config_report(
+                *harness,
+                server_name,
+                &cli.db,
+                cli.config.as_deref(),
+            )?;
             print_output(cli.format, &render_mcp_config_report(&report), &report)?;
         }
         Command::RuntimeInfo => {
@@ -1008,6 +1130,53 @@ fn run() -> Result<(), CliError> {
         },
     }
     Ok(())
+}
+
+/// Build a harness-specific MCP configuration document for this binary.
+fn build_harness_mcp_config_report(
+    harness: HarnessConfig,
+    server_name: &str,
+    db: &Path,
+    config: Option<&Path>,
+) -> Result<serde_json::Value, CliError> {
+    let config = build_mcp_config_report(server_name, db, config)?;
+    Ok(match harness {
+        HarnessConfig::McpJson | HarnessConfig::Codex => serde_json::to_value(config)?,
+        HarnessConfig::ClaudeCode => {
+            let mut mcp_servers = BTreeMap::new();
+            for (name, server) in config.mcp_servers {
+                mcp_servers.insert(
+                    name,
+                    ClaudeMcpServerConfig {
+                        command: server.command,
+                        args: server.args,
+                    },
+                );
+            }
+            serde_json::to_value(ClaudeMcpConfigDocument { mcp_servers })?
+        }
+        HarnessConfig::OpenCode => {
+            let mut mcp = BTreeMap::new();
+            for (name, server) in config.mcp_servers {
+                let mut command = Vec::with_capacity(server.args.len() + 1);
+                command.push(server.command);
+                command.extend(server.args);
+                mcp.insert(
+                    name,
+                    OpenCodeMcpServerConfig {
+                        server_type: "local".to_string(),
+                        command,
+                        cwd: server.cwd,
+                        enabled: true,
+                    },
+                );
+            }
+            serde_json::to_value(OpenCodeConfigDocument {
+                schema: "https://opencode.ai/config.json".to_string(),
+                mcp,
+            })?
+        }
+    })
 }
 
 /// Build a standards-compliant MCP configuration document for this binary.
@@ -1081,7 +1250,7 @@ fn native_launch_path(path: &str) -> String {
 }
 
 /// Render MCP configuration as TOON for agents.
-fn render_mcp_config_report(report: &McpConfigDocument) -> String {
+fn render_mcp_config_report(report: &serde_json::Value) -> String {
     encode_agent_payload(&json!({ "mcp_config": report }))
 }
 
@@ -1246,6 +1415,47 @@ struct McpServerConfig {
     cwd: String,
 }
 
+/// Claude Code MCP server launch entry.
+#[derive(Debug, Serialize)]
+struct ClaudeMcpServerConfig {
+    /// Absolute command path for the native `projectatlas` binary.
+    command: String,
+    /// Global CLI arguments followed by the `mcp` subcommand.
+    args: Vec<String>,
+}
+
+/// Claude Code `.mcp.json` compatible configuration document.
+#[derive(Debug, Serialize)]
+struct ClaudeMcpConfigDocument {
+    /// MCP server map keyed by server name.
+    #[serde(rename = "mcpServers")]
+    mcp_servers: BTreeMap<String, ClaudeMcpServerConfig>,
+}
+
+/// `OpenCode` `opencode.json` compatible configuration document.
+#[derive(Debug, Serialize)]
+struct OpenCodeConfigDocument {
+    /// `OpenCode` JSON schema URL.
+    #[serde(rename = "$schema")]
+    schema: String,
+    /// MCP server map keyed by server name.
+    mcp: BTreeMap<String, OpenCodeMcpServerConfig>,
+}
+
+/// `OpenCode` local MCP server launch entry.
+#[derive(Debug, Serialize)]
+struct OpenCodeMcpServerConfig {
+    /// `OpenCode` local MCP type discriminator.
+    #[serde(rename = "type")]
+    server_type: String,
+    /// Command array: executable followed by arguments.
+    command: Vec<String>,
+    /// Project root working directory.
+    cwd: String,
+    /// Whether the server is enabled by default.
+    enabled: bool,
+}
+
 /// Stable runtime identity and capability report for installers.
 #[derive(Debug, Serialize)]
 struct RuntimeInfoReport {
@@ -1294,38 +1504,56 @@ fn render_watch_status(report: &WatchStatusReport) -> String {
 
 /// Render a human-facing token savings dashboard for terminal use.
 fn render_token_dashboard(overview: &TokenOverview, session: Option<&str>) -> String {
-    let rate = overview.savings_rate.unwrap_or(0.0);
-    let positive_rate = rate.clamp(0.0, 1.0);
-    let filled = (positive_rate * 32.0).round() as usize;
-    let empty = 32usize.saturating_sub(filled);
     let session_label = session.unwrap_or("all sessions");
     let rate_label = overview.savings_rate.map_or_else(
         || "unknown".to_string(),
         |value| format!("{:.1}%", value * 100.0),
     );
     let saved_label = signed_count(overview.estimated_saved);
+    let without = overview.estimated_without_projectatlas;
+    let with = overview.estimated_with_projectatlas;
+    let saved = overview.estimated_saved.max(0).unsigned_abs();
+    let max_tokens = without.max(with).max(saved).max(1);
+    let without_bar = token_dashboard_bar(without, max_tokens);
+    let with_bar = token_dashboard_bar(with, max_tokens);
+    let saved_bar = token_dashboard_bar(saved, max_tokens);
     format!(
         "\
-+--------------------------------------------------+\n\
-| ProjectAtlas Token Savings                       |\n\
-+--------------------------------------------------+\n\
-| Session | {session_label}\n\
-| Calls   | {calls}\n\
-| Saved   | {saved_label} tokens\n\
-| Before  | {without} tokens avoided\n\
-| After   | {with} tokens used through atlas\n\
-| Rate    | {rate_label}\n\
-+--------------------------------------------------+\n\
-| Funnel  | overview > folders > files > exact slice\n\
-| Impact  | wrong folders and wrong-file opens avoided\n\
-| Reads   | unnecessary full-code reads avoided\n\
-| Savings | [{bar}{rest}] {rate_label}\n\
-+--------------------------------------------------+\n",
++----------------------------------------------------------------+\n\
+| ProjectAtlas Token Delta                                       |\n\
++----------------------------------------------------------------+\n\
+| Session        {session_label}\n\
+| Calls          {calls}\n\
+| Estimate       heuristic chars/bytes / 4, not model billing tokens\n\
+| Saved          {saved_label} tokens ({rate_label})\n\
++----------------------------------------------------------------+\n\
+| Without PA     [{without_bar}] {without_label:>14} tokens\n\
+| With PA        [{with_bar}] {with_label:>14} tokens\n\
+| Saved          [{saved_bar}] {saved_label:>14} tokens\n\
++----------------------------------------------------------------+\n\
+| Funnel         overview > folders > files > summary > slice\n\
+| Avoided        wrong folders, wrong files, unnecessary full reads\n\
++----------------------------------------------------------------+\n",
         calls = overview.calls,
-        without = grouped_count(overview.estimated_without_projectatlas),
-        with = grouped_count(overview.estimated_with_projectatlas),
-        bar = "#".repeat(filled),
-        rest = ".".repeat(empty),
+        without_label = grouped_count(without),
+        with_label = grouped_count(with),
+    )
+}
+
+/// Render one fixed-width token comparison bar.
+fn token_dashboard_bar(value: usize, max_tokens: usize) -> String {
+    const BAR_WIDTH: usize = 36;
+    let filled = if value == 0 {
+        0
+    } else {
+        ((value as f64 / max_tokens as f64) * BAR_WIDTH as f64)
+            .round()
+            .clamp(1.0, BAR_WIDTH as f64) as usize
+    };
+    format!(
+        "{}{}",
+        "#".repeat(filled),
+        ".".repeat(BAR_WIDTH.saturating_sub(filled))
     )
 }
 
@@ -1632,23 +1860,27 @@ mod tests {
                 "src/empty.rs",
                 "rust source file with no declarations found."
             ),
-            "Provide empty.rs behavior: rust source file with no declarations found"
+            "Implement empty."
         );
     }
 
     #[test]
     fn summarizes_vue_composition_bindings_without_functions() {
         let graph = SymbolGraph {
-            path: "src/DealStage.vue".to_string(),
+            path: "src/ProductPanel.vue".to_string(),
             language: Some("vue".to_string()),
-            parser: ParserKind::Fallback,
+            parser: ParserKind::Structural,
             symbols: vec![
-                test_symbol("src/DealStage.vue", SymbolKind::Value, "props"),
-                test_symbol("src/DealStage.vue", SymbolKind::Value, "emit"),
-                test_symbol("src/DealStage.vue", SymbolKind::Value, "currentPriceLabel"),
+                test_symbol("src/ProductPanel.vue", SymbolKind::Value, "props"),
+                test_symbol("src/ProductPanel.vue", SymbolKind::Value, "emit"),
+                test_symbol(
+                    "src/ProductPanel.vue",
+                    SymbolKind::Value,
+                    "currentPriceLabel",
+                ),
             ],
             relations: vec![test_relation(
-                "src/DealStage.vue",
+                "src/ProductPanel.vue",
                 RelationKind::Imports,
                 "import { computed, ref } from \"vue\";",
             )],
@@ -1761,6 +1993,13 @@ mod tests {
         require_condition(
             watch_path_affects_index(root, &root.join(".gitignore"), &scan_options),
             "gitignore event should refresh scanner rules",
+        )?;
+        fs::create_dir(root.join("local-state"))?;
+        fs::write(root.join("local-state/cache.md"), "ignored local cache\n")?;
+        fs::write(root.join(".gitignore"), "local-state/\n")?;
+        require_condition(
+            !watch_path_affects_index(root, &root.join("local-state/cache.md"), &scan_options),
+            "gitignore-ignored local state events should be ignored",
         )?;
         require_condition(
             !watch_path_affects_index(
@@ -1922,6 +2161,13 @@ mod tests {
                 .is_some(),
             "summary should exist before skip",
         )?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "config.toml".to_string(),
+            language: Some("toml".to_string()),
+            parser: ParserKind::Manifest,
+            symbols: vec![test_symbol("config.toml", SymbolKind::Value, "project")],
+            relations: Vec::new(),
+        })?;
 
         let skipped_text = refresh_text_index_for_nodes_with_rows(
             &mut store,
@@ -2025,6 +2271,9 @@ mod tests {
     fn token_dashboard_is_human_readable_and_ascii() {
         let dashboard = render_token_dashboard(
             &TokenOverview {
+                estimate_kind: "heuristic".to_string(),
+                estimator: "chars_or_bytes_div_ceil_4".to_string(),
+                estimate_scope: "workflow_payload_estimate_not_model_billing_tokens".to_string(),
                 calls: 3,
                 estimated_without_projectatlas: 12_000,
                 estimated_with_projectatlas: 3_000,
@@ -2034,12 +2283,16 @@ mod tests {
             Some("session-a"),
         );
 
-        assert!(dashboard.contains("ProjectAtlas Token Savings"));
-        assert!(dashboard.contains("| Session | session-a"));
-        assert!(dashboard.contains("| Saved   | 9,000 tokens"));
-        assert!(dashboard.contains("[########################........] 75.0%"));
-        assert!(dashboard.contains("wrong-file opens"));
-        assert!(dashboard.contains("overview > folders > files > exact slice"));
+        assert!(dashboard.contains("ProjectAtlas Token Delta"));
+        assert!(dashboard.contains("| Session        session-a"));
+        assert!(dashboard.contains("heuristic chars/bytes / 4"));
+        assert!(dashboard.contains("not model billing tokens"));
+        assert!(dashboard.contains("| Saved          9,000 tokens (75.0%)"));
+        assert!(dashboard.contains("| Without PA     [####################################]"));
+        assert!(dashboard.contains("| With PA        [#########...........................]"));
+        assert!(dashboard.contains("| Saved          [###########################.........]"));
+        assert!(dashboard.contains("wrong folders, wrong files"));
+        assert!(dashboard.contains("overview > folders > files > summary > slice"));
         assert!(dashboard.is_ascii());
     }
 
@@ -2193,7 +2446,7 @@ mod tests {
         if !summary_text.contains("file_summary:") {
             return Err("atlas_file_summary result did not contain summary payload".into());
         }
-        if !summary_text.contains("purpose_status: suggested") {
+        if !summary_text.contains("file_purpose_status: suggested") {
             return Err("atlas_file_summary result did not expose purpose status".into());
         }
         if !summary_text.contains("helper") {

@@ -5,6 +5,7 @@ repository=${PROJECTATLAS_REPOSITORY:-https://github.com/styler-ai/ProjectAtlas}
 projectatlas_version=${PROJECTATLAS_VERSION:-}
 release_base_url=${PROJECTATLAS_RELEASE_BASE_URL:-https://github.com/styler-ai/ProjectAtlas/releases/download}
 release_binary_only=${PROJECTATLAS_RELEASE_BINARY_ONLY:-}
+runtime_override=${PROJECTATLAS_RUNTIME_PATH:-}
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 plugin_root=$(cd "$script_dir/.." && pwd -P)
@@ -20,6 +21,10 @@ if [ "${1:-}" ]; then
   project_root=$(cd "$1" && pwd -P)
 else
   project_root=$(pwd -P)
+fi
+if [ -n "$runtime_override" ]; then
+  runtime_dir=$(CDPATH= cd -- "$(dirname -- "$runtime_override")" && pwd -P)
+  runtime_override="$runtime_dir/$(basename -- "$runtime_override")"
 fi
 
 truthy() {
@@ -124,37 +129,45 @@ install_release_binary() {
   rm -rf "$tmp_dir"
 }
 
-installed_bin=
-if truthy "$release_binary_only"; then
-  install_release_binary || {
-    printf '%s\n' "ProjectAtlas release-binary install was required but failed for $projectatlas_version." >&2
+if [ -n "$runtime_override" ]; then
+  if ! is_projectatlas_runtime "$runtime_override"; then
+    printf '%s\n' "Provided ProjectAtlas runtime does not satisfy the ProjectAtlas runtime/version contract: $runtime_override" >&2
     exit 1
-  }
-  installed_bin="$HOME/.local/bin/projectatlas"
-elif command -v cargo >/dev/null 2>&1 && [ -f "$project_root/crates/projectatlas-cli/Cargo.toml" ]; then
-  (cd "$project_root" && cargo install --path crates/projectatlas-cli --locked --force)
-elif install_release_binary; then
-  installed_bin="$HOME/.local/bin/projectatlas"
-elif command -v cargo >/dev/null 2>&1; then
-  if [ -n "$projectatlas_version" ]; then
-    cargo install --git "$repository" --tag "$projectatlas_version" projectatlas-cli --locked --force
-  else
-    cargo install --git "$repository" projectatlas-cli --locked --force
   fi
-fi
-
-if [ -n "$installed_bin" ]; then
-  projectatlas_bin=$installed_bin
+  projectatlas_bin=$runtime_override
 else
-  projectatlas_bin=$(find_projectatlas || true)
-fi
-if [ -z "$projectatlas_bin" ]; then
-  printf '%s\n' "A ProjectAtlas runtime matching $projectatlas_version was not found. Install Rust/Cargo or provide the matching ProjectAtlas release binary on PATH." >&2
-  exit 1
-fi
-if ! is_projectatlas_runtime "$projectatlas_bin"; then
-  printf '%s\n' "Installed ProjectAtlas runtime did not satisfy the ProjectAtlas runtime/version contract: $projectatlas_bin" >&2
-  exit 1
+  installed_bin=
+  if truthy "$release_binary_only"; then
+    install_release_binary || {
+      printf '%s\n' "ProjectAtlas release-binary install was required but failed for $projectatlas_version." >&2
+      exit 1
+    }
+    installed_bin="$HOME/.local/bin/projectatlas"
+  elif command -v cargo >/dev/null 2>&1 && [ -f "$project_root/crates/projectatlas-cli/Cargo.toml" ]; then
+    (cd "$project_root" && cargo install --path crates/projectatlas-cli --locked --force)
+  elif install_release_binary; then
+    installed_bin="$HOME/.local/bin/projectatlas"
+  elif command -v cargo >/dev/null 2>&1; then
+    if [ -n "$projectatlas_version" ]; then
+      cargo install --git "$repository" --tag "$projectatlas_version" projectatlas-cli --locked --force
+    else
+      cargo install --git "$repository" projectatlas-cli --locked --force
+    fi
+  fi
+
+  if [ -n "$installed_bin" ]; then
+    projectatlas_bin=$installed_bin
+  else
+    projectatlas_bin=$(find_projectatlas || true)
+  fi
+  if [ -z "$projectatlas_bin" ]; then
+    printf '%s\n' "A ProjectAtlas runtime matching $projectatlas_version was not found. Install Rust/Cargo or provide the matching ProjectAtlas release binary on PATH." >&2
+    exit 1
+  fi
+  if ! is_projectatlas_runtime "$projectatlas_bin"; then
+    printf '%s\n' "Installed ProjectAtlas runtime did not satisfy the ProjectAtlas runtime/version contract: $projectatlas_bin" >&2
+    exit 1
+  fi
 fi
 
 "$projectatlas_bin" --format json runtime-info >/dev/null
@@ -162,15 +175,32 @@ fi
 atlas_dir="$project_root/.projectatlas"
 mkdir -p "$atlas_dir"
 mcp_config_path="$atlas_dir/projectatlas.mcp.json"
+claude_mcp_config_path="$atlas_dir/projectatlas.claude.mcp.json"
+opencode_config_path="$atlas_dir/projectatlas.opencode.json"
 flat_config="$project_root/projectatlas.toml"
 project_config="$atlas_dir/config.toml"
-if [ -f "$project_config" ]; then
-  "$projectatlas_bin" --format json --db "$atlas_dir/projectatlas.db" --config "$project_config" mcp-config > "$mcp_config_path"
-elif [ -f "$flat_config" ]; then
-  "$projectatlas_bin" --format json --db "$atlas_dir/projectatlas.db" --config "$flat_config" mcp-config > "$mcp_config_path"
-else
-  "$projectatlas_bin" --format json --db "$atlas_dir/projectatlas.db" mcp-config > "$mcp_config_path"
-fi
+
+write_mcp_config() {
+  output_path=$1
+  harness=${2:-}
+  if [ -f "$project_config" ]; then
+    set -- --format json --db "$atlas_dir/projectatlas.db" --config "$project_config" mcp-config
+  elif [ -f "$flat_config" ]; then
+    set -- --format json --db "$atlas_dir/projectatlas.db" --config "$flat_config" mcp-config
+  else
+    set -- --format json --db "$atlas_dir/projectatlas.db" mcp-config
+  fi
+  if [ -n "$harness" ]; then
+    set -- "$@" --harness "$harness"
+  fi
+  "$projectatlas_bin" "$@" > "$output_path"
+}
+
+write_mcp_config "$mcp_config_path"
+write_mcp_config "$claude_mcp_config_path" claude-code
+write_mcp_config "$opencode_config_path" opencode
 
 printf 'ProjectAtlas runtime installed and verified: %s\n' "$projectatlas_bin"
 printf 'Project-local MCP config written: %s\n' "$mcp_config_path"
+printf 'Project-local Claude Code MCP config written: %s\n' "$claude_mcp_config_path"
+printf 'Project-local OpenCode MCP config written: %s\n' "$opencode_config_path"

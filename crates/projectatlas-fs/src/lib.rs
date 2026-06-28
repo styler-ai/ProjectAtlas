@@ -1,7 +1,7 @@
 //! Purpose: Scan repository files and folders for `ProjectAtlas` 3.
 
 use blake3::Hasher;
-use ignore::{DirEntry, WalkBuilder, WalkState};
+use ignore::{DirEntry, WalkBuilder, WalkState, gitignore::GitignoreBuilder};
 use projectatlas_core::language::detect_language_for_path;
 use projectatlas_core::{
     CoreError, Node, NodeKind, normalize_repo_path, normalized_extension, normalized_parent,
@@ -99,7 +99,11 @@ pub fn scan_repo(root: &Path, options: &ScanOptions) -> FsResult<Vec<Node>> {
         source,
     })?;
     let mut builder = WalkBuilder::new(&root);
-    builder.hidden(false).git_ignore(true).git_exclude(true);
+    builder
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .require_git(false);
     builder.threads(0);
 
     let nodes = Arc::new(Mutex::new(Vec::new()));
@@ -183,10 +187,159 @@ pub fn scan_path(root: &Path, path: &Path, options: &ScanOptions) -> FsResult<Op
     } else {
         root.join(path)
     };
-    if should_skip_path(&root, &absolute, options) || !absolute.exists() {
+    if !absolute.exists() {
+        return Ok(None);
+    }
+    let symlink_checked_absolute = path_for_symlink_component_check(&absolute)?;
+    if path_has_symlink_component(&root, &symlink_checked_absolute)? {
+        return Ok(None);
+    }
+    let absolute = symlink_checked_absolute
+        .canonicalize()
+        .map_err(|source| FsError::Io {
+            path: symlink_checked_absolute.clone(),
+            source,
+        })?;
+    if !absolute.starts_with(&root) {
+        return Ok(None);
+    }
+    if gitignore_excludes_path(&root, &absolute)? || should_skip_path(&root, &absolute, options) {
         return Ok(None);
     }
     scanned_node(&root, &absolute)
+}
+
+/// Return a path with a canonical parent but the leaf component preserved.
+fn path_for_symlink_component_check(absolute: &Path) -> FsResult<PathBuf> {
+    if absolute.is_dir() {
+        return absolute.canonicalize().map_err(|source| FsError::Io {
+            path: absolute.to_path_buf(),
+            source,
+        });
+    }
+    let Some(parent) = absolute.parent() else {
+        return Ok(absolute.to_path_buf());
+    };
+    let parent = parent.canonicalize().map_err(|source| FsError::Io {
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    if let Some(file_name) = absolute.file_name() {
+        Ok(parent.join(file_name))
+    } else {
+        Ok(parent)
+    }
+}
+
+/// Return whether any path component below root is a symlink.
+fn path_has_symlink_component(root: &Path, absolute: &Path) -> FsResult<bool> {
+    let Ok(relative) = absolute.strip_prefix(root) else {
+        return Ok(true);
+    };
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        if fs::symlink_metadata(&current)
+            .map_err(|source| FsError::Io {
+                path: current.clone(),
+                source,
+            })?
+            .file_type()
+            .is_symlink()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Return whether repository `.gitignore` rules exclude a path.
+///
+/// This helper is for single-path refreshes. Full repository scans use
+/// `ignore::WalkBuilder` directly.
+///
+/// # Errors
+///
+/// Returns an error if the root cannot be canonicalized or a discovered
+/// `.gitignore` file cannot be parsed.
+pub fn gitignore_excludes_path(root: &Path, path: &Path) -> FsResult<bool> {
+    let input_root = root;
+    let root = root.canonicalize().map_err(|source| FsError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let absolute = if path.is_absolute() {
+        if let Ok(relative) = path.strip_prefix(input_root) {
+            root.join(relative)
+        } else if let Ok(relative) = path.strip_prefix(&root) {
+            root.join(relative)
+        } else {
+            path.to_path_buf()
+        }
+    } else {
+        root.join(path)
+    };
+    let absolute = if absolute.exists() {
+        absolute.canonicalize().map_err(|source| FsError::Io {
+            path: absolute.clone(),
+            source,
+        })?
+    } else {
+        absolute
+    };
+    let relative = normalize_repo_path(&root, &absolute)?;
+    if relative == "." || relative.split('/').any(|component| component == "..") {
+        return Ok(false);
+    }
+    let is_dir = absolute.metadata().is_ok_and(|metadata| metadata.is_dir());
+    let target_dir = if is_dir {
+        absolute.as_path()
+    } else {
+        absolute.parent().unwrap_or(root.as_path())
+    };
+    let mut ignored = false;
+    for directory in gitignore_search_dirs(&root, target_dir) {
+        let gitignore_path = directory.join(".gitignore");
+        if !gitignore_path.exists() {
+            continue;
+        }
+        let mut builder = GitignoreBuilder::new(&directory);
+        if let Some(error) = builder.add(&gitignore_path) {
+            return Err(FsError::Io {
+                path: gitignore_path,
+                source: io::Error::other(error.to_string()),
+            });
+        }
+        let matcher = builder.build().map_err(|error| FsError::Io {
+            path: directory.join(".gitignore"),
+            source: io::Error::other(error.to_string()),
+        })?;
+        let matched = matcher.matched_path_or_any_parents(&absolute, is_dir);
+        if matched.is_ignore() {
+            ignored = true;
+        } else if matched.is_whitelist() {
+            ignored = false;
+        }
+    }
+    Ok(ignored)
+}
+
+/// Return directories whose `.gitignore` files can affect a target path.
+fn gitignore_search_dirs(root: &Path, target_dir: &Path) -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    let mut current = target_dir;
+    loop {
+        directories.push(current.to_path_buf());
+        if current == root {
+            break;
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+    }
+    directories.reverse();
+    directories
 }
 
 /// Return the correct walker state for a skipped entry.
@@ -377,6 +530,29 @@ mod tests {
     }
 
     #[test]
+    fn default_scan_uses_gitignore_for_local_state() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join("local-agent-state").join("rules").join("memory"))?;
+        fs::create_dir(repo.join("src"))?;
+        fs::write(
+            repo.join("local-agent-state")
+                .join("rules")
+                .join("memory")
+                .join("activeContext.md"),
+            "private local agent state\n",
+        )?;
+        fs::write(repo.join("src").join("main.rs"), "fn main() {}\n")?;
+        fs::write(repo.join(".gitignore"), "local-agent-state/\n")?;
+
+        let nodes = scan_repo(&repo, &ScanOptions::default())?;
+        reject_path(&nodes, "local-agent-state")?;
+        reject_path(&nodes, "local-agent-state/rules/memory/activeContext.md")?;
+        require_path(&nodes, "src/main.rs")?;
+        Ok(())
+    }
+
+    #[test]
     fn scans_repo_under_excluded_named_parent() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let repo = temp.path().join("target").join("repo");
@@ -448,6 +624,99 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn scan_inherits_gitignore_for_ignored_directories() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join("local-state").join("memory"))?;
+        fs::create_dir(repo.join("src"))?;
+        fs::write(repo.join(".gitignore"), "local-state/\n")?;
+        fs::write(
+            repo.join("local-state").join("memory").join("notes.md"),
+            "local ignored notes\n",
+        )?;
+        fs::write(repo.join("src").join("main.rs"), "fn main() {}\n")?;
+
+        let nodes = scan_repo(&repo, &ScanOptions::default())?;
+        reject_path(&nodes, "local-state")?;
+        reject_path(&nodes, "local-state/memory/notes.md")?;
+        require_path(&nodes, "src/main.rs")?;
+        Ok(())
+    }
+
+    #[test]
+    fn scan_path_inherits_gitignore_for_single_path_refresh() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join("local-state").join("memory"))?;
+        fs::create_dir(repo.join("src"))?;
+        fs::write(repo.join(".gitignore"), "local-state/\n")?;
+        fs::write(
+            repo.join("local-state").join("memory").join("notes.md"),
+            "local ignored notes\n",
+        )?;
+        fs::write(repo.join("src").join("main.rs"), "fn main() {}\n")?;
+
+        let ignored = scan_path(
+            &repo,
+            &repo.join("local-state").join("memory").join("notes.md"),
+            &ScanOptions::default(),
+        )?;
+        let indexed = scan_path(
+            &repo,
+            &repo.join("src").join("main.rs"),
+            &ScanOptions::default(),
+        )?;
+        if ignored.is_some() {
+            return Err(io::Error::other("single-path refresh indexed ignored state").into());
+        }
+        if indexed.is_none() {
+            return Err(io::Error::other("single-path refresh skipped indexed source").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scan_path_skips_symlinked_files_before_canonicalizing() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        fs::create_dir(&repo)?;
+        let outside = temp.path().join("outside.txt");
+        let link = repo.join("linked.txt");
+        fs::write(&outside, "outside secret\n")?;
+        if !create_file_symlink(&outside, &link)? {
+            return Ok(());
+        }
+
+        let indexed = scan_path(&repo, &link, &ScanOptions::default())?;
+        if indexed.is_some() {
+            return Err(io::Error::other("single-path refresh indexed a symlink").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scan_path_skips_symlinked_ancestor_before_canonicalizing() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&repo)?;
+        fs::create_dir(&outside)?;
+        fs::write(outside.join("secret.rs"), "fn secret() {}\n")?;
+        let link = repo.join("linked");
+        if !create_dir_symlink(&outside, &link)? {
+            return Ok(());
+        }
+
+        let indexed = scan_path(&repo, &link.join("secret.rs"), &ScanOptions::default())?;
+        if indexed.is_some() {
+            return Err(
+                io::Error::other("single-path refresh indexed through a symlinked folder").into(),
+            );
+        }
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn skips_symlinked_files() -> Result<(), Box<dyn Error>> {
@@ -463,6 +732,50 @@ mod tests {
         let nodes = scan_repo(&repo, &ScanOptions::default())?;
         reject_path(&nodes, "linked.txt")?;
         Ok(())
+    }
+
+    /// Create a file symlink for tests, returning false when the host forbids it.
+    #[cfg(unix)]
+    fn create_file_symlink(target: &Path, link: &Path) -> Result<bool, Box<dyn Error>> {
+        std::os::unix::fs::symlink(target, link)?;
+        Ok(true)
+    }
+
+    /// Create a file symlink for tests, returning false when the host forbids it.
+    #[cfg(windows)]
+    fn create_file_symlink(target: &Path, link: &Path) -> Result<bool, Box<dyn Error>> {
+        match std::os::windows::fs::symlink_file(target, link) {
+            Ok(()) => Ok(true),
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    || error.raw_os_error() == Some(1314) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Create a directory symlink for tests, returning false when the host forbids it.
+    #[cfg(unix)]
+    fn create_dir_symlink(target: &Path, link: &Path) -> Result<bool, Box<dyn Error>> {
+        std::os::unix::fs::symlink(target, link)?;
+        Ok(true)
+    }
+
+    /// Create a directory symlink for tests, returning false when the host forbids it.
+    #[cfg(windows)]
+    fn create_dir_symlink(target: &Path, link: &Path) -> Result<bool, Box<dyn Error>> {
+        match std::os::windows::fs::symlink_dir(target, link) {
+            Ok(()) => Ok(true),
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    || error.raw_os_error() == Some(1314) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Require a scanned node path to exist.

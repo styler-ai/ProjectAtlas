@@ -10,13 +10,14 @@ ProjectAtlas is designed to be read at agent startup so you can:
 
 ProjectAtlas is an atlas of the entire project, not a shortcut to full-file reads:
 
-1. First, learn where things live: folder structure and folder purpose.
-2. Second, learn what each selected folder contains: file purpose and one-line high-level file content.
-3. Third, after the folder and file are known, inspect outlines, classes, methods, functions, imports, calls, and exact source slices.
+1. First, learn where things live: folder structure and `folder_purpose`.
+2. Second, learn what each selected folder contains: `file_purpose` and one-line `content_summary`.
+3. Third, after the folder and file are known, read the detailed summary report.
+4. Fourth, inspect exact source slices only after the right folder and file are selected.
 
 The atlas update order is always folder index first, file purpose and one-line file summaries second, and deep code index last. Do not treat symbol indexing as the first gate.
 
-Purpose correctness matters. A purpose explains why a folder or file exists; a summary explains what the index observes inside it. Generated summaries can be deterministic metadata, but generated purposes are only suggestions. Treat a purpose as correct only when it is imported from trusted metadata or agent-approved in the SQLite index. When lint or health reports a missing purpose, the agent should inspect the folder/file enough to write the correct one-line purpose and set it with `atlas_purpose_set` or `projectatlas purpose set`; ProjectAtlas is for the agent harness, so there should be no human approval bottleneck in normal operation.
+Purpose correctness matters. `folder_purpose` and `file_purpose` explain why a folder or file exists; `content_summary` explains what the index currently observes inside a file. Generated summaries can be deterministic metadata, but generated purposes are only suggestions. Treat a purpose as correct only when it is imported from trusted metadata or agent-approved in the SQLite index. When lint or health reports a missing purpose, the agent should inspect the folder/file enough to write the correct one-line purpose and set it with `atlas_purpose_set` or `projectatlas purpose set`; ProjectAtlas is for the agent harness, so there should be no human approval bottleneck in normal operation.
 
 Purpose completion loop:
 
@@ -40,9 +41,9 @@ result text is TOON by default, so agents get compact structured payloads withou
 1. Establish the project root. Run ProjectAtlas from that root so `.projectatlas/projectatlas.db` belongs to this project only.
 2. Run `projectatlas scan` or `projectatlas map --force` when the index may be stale.
 3. Run `projectatlas overview`.
-4. Run `projectatlas folders <query>` to choose where to work.
-5. Run `projectatlas files <query> --folder <path>` to pick targets; use `projectatlas files --file-pattern <glob>` when the filename/path pattern is already known.
-6. Run `projectatlas summary <file> --limit 25` before opening full source; inspect `parser_kind` and `summary_status` before trusting the observed summary.
+4. Run `projectatlas folders <query>` to choose where to work from `folder_purpose` overviews.
+5. Run `projectatlas files <query> --folder <path>` to pick targets from `file_purpose` and `content_summary`; use `projectatlas files --file-pattern <glob>` when the filename/path pattern is already known.
+6. Run `projectatlas summary <file> --limit 25` for detailed file intelligence before opening full source; inspect `parser_kind` and `summary_status` before trusting the `content_summary`.
 7. Run `projectatlas outline <file>` if the structured summary is not enough.
 8. Run `projectatlas symbols list --file <file>` and `projectatlas symbols relations --file <file>` when symbol context is needed.
 9. Run `projectatlas search <pattern> --file-pattern <glob>` for bounded, glob-filtered text search in selected areas; search is intentionally case-insensitive by default for agent discovery, add `--case-sensitive` only when exact casing matters, add `--fuzzy` when the name is approximate, and check returned, searched file, searched byte, and truncated counters before widening the search.
@@ -58,10 +59,13 @@ non-source summaries and is merged into the atlas. Agents still read only the ge
 
 ## MCP Server
 
-Prefer the installer-generated project-local MCP config at `.projectatlas/projectatlas.mcp.json`.
-It contains an absolute native `projectatlas` binary path plus explicit project-local `--db` and
-`--config` arguments plus a `cwd` project-root hint, so Codex/OpenCode/Claude Code do not attach to
-an old PATH wrapper or the wrong current working directory. `mcp-config` discovers both
+Prefer the installer-generated project-local MCP config at `.projectatlas/projectatlas.mcp.json`
+for `.mcp.json`-compatible hosts. The installer also writes
+`.projectatlas/projectatlas.claude.mcp.json` for Claude Code and
+`.projectatlas/projectatlas.opencode.json` for OpenCode. These files contain an absolute native
+`projectatlas` binary path plus explicit project-local `--db` and `--config` arguments, and the
+Codex/OpenCode configs include a `cwd` project-root hint where the host supports it. This prevents
+agents from attaching to an old PATH wrapper or the wrong current working directory. `mcp-config` discovers both
 `.projectatlas/config.toml` and `projectatlas.toml` from the selected DB/project root. The MCP server
 also resolves path-less root-sensitive tools from config, indexed DB metadata, or the default
 `.projectatlas/projectatlas.db` location so clients that ignore `cwd` still use the intended project
@@ -80,7 +84,7 @@ fails closed instead of starting an older MCP server:
   "mcpServers": {
     "projectatlas": {
       "command": "projectatlas",
-      "args": ["--require-version", "0.3.4", "--db", ".projectatlas/projectatlas.db", "mcp"]
+      "args": ["--require-version", "0.3.5", "--db", ".projectatlas/projectatlas.db", "mcp"]
     }
   }
 }
@@ -99,8 +103,28 @@ plugins/projectatlas/scripts/install-runtime.ps1
 On Linux/macOS:
 
 ```bash
-plugins/projectatlas/scripts/install-runtime.sh
+bash plugins/projectatlas/scripts/install-runtime.sh
 ```
+
+Installer and release tests can provide an already-built runtime without
+downloading a release or mutating PATH: use `-RuntimePath <path-to-projectatlas>`
+on PowerShell or `PROJECTATLAS_RUNTIME_PATH=<path-to-projectatlas>` with the
+POSIX installer. The supplied binary is still verified through
+`projectatlas --format json runtime-info`, including version pinning when
+`PROJECTATLAS_VERSION` is set.
+
+Harness-specific config can also be generated directly:
+
+```bash
+projectatlas --format json --db .projectatlas/projectatlas.db mcp-config --harness codex
+projectatlas --format json --db .projectatlas/projectatlas.db mcp-config --harness claude-code
+projectatlas --format json --db .projectatlas/projectatlas.db mcp-config --harness opencode
+```
+
+OpenCode uses the generated `opencode.json` shape with `mcp.projectatlas.type = "local"` and a
+command array. Claude Code uses a plugin-compatible `.mcp.json` shape under `mcpServers`; ProjectAtlas
+does not rely on Claude Code `cwd` support because the generated arguments bind the absolute DB/config
+paths.
 
 Installer verification uses the stable runtime contract:
 
@@ -182,14 +206,25 @@ wrong-file opens, and unnecessary full-code reads avoided by the overview -> fol
 -> exact-slice funnel. Agent and MCP surfaces stay structured TOON; terminal decoration belongs only to the
 explicit `projectatlas token --view tui` view.
 
+For freshness, treat `projectatlas watch` as the steady-state updater for local editing sessions. Line slices
+validate against SQLite and then read the current file from disk. Symbol slices also read current disk content,
+but their line ranges come from the deep symbol index and should be kept fresh by the watcher or `atlas_watch_once`.
+
 ## Codex skills
 
-ProjectAtlas ships a Codex skill at `.codex/skills/ProjectAtlas.md`. Copy that file into your
-Codex workspace or keep it in place so Codex can load the ProjectAtlas workflow.
+ProjectAtlas ships public agent guidance through `AGENTS.md`, repository docs, and the packaged plugin skill.
+Personal workspace memory is local state and should stay ignored/untracked through `.gitignore`.
 
-## Claude / skills
+## Claude Code / OpenCode plugins
 
-Drop the `skills/claude/ProjectAtlas.md` into your Claude skills folder and reference it in your agent setup.
+The ProjectAtlas plugin package includes:
+
+- `.codex-plugin/plugin.json` for Codex plugin metadata.
+- `.claude-plugin/plugin.json` plus the root `skills/` folder and `.mcp.json` for Claude Code plugin packaging.
+- `opencode/opencode.json` as an OpenCode MCP config template.
+- Installer scripts that generate project-local Codex-compatible, Claude Code, and OpenCode config files after runtime verification.
+
+The generated project-local files should be preferred over the checked-in templates because they contain absolute runtime and project paths.
 
 ## Lint and CI
 

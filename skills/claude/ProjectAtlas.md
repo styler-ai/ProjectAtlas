@@ -39,7 +39,17 @@ repository overview to folder, file, compressed outline, and exact source only w
 11. Open full source only for selected files or exact slices.
 12. Run `projectatlas token` when token-savings reporting is requested; use `projectatlas token --view tui` only for a human terminal dashboard.
 
-Token savings estimate avoided wrong-folder exploration, wrong-file opens, and unnecessary full-code reads caused by the atlas-first workflow. Agent and MCP surfaces should stay structured by default; the TUI dashboard is explicit terminal UI.
+Token savings estimate avoided wrong-folder exploration, wrong-file opens, and unnecessary full-code reads caused by the atlas-first workflow. Agent and MCP surfaces should stay structured by default; the TUI dashboard is explicit terminal UI with "Without PA", "With PA", and "Saved" comparison bars.
+
+## MCP Config
+
+Prefer installer-generated project-local config:
+
+```bash
+projectatlas --format json --db .projectatlas/projectatlas.db mcp-config --harness claude-code
+```
+
+The ProjectAtlas installer writes `.projectatlas/projectatlas.claude.mcp.json` after verifying `projectatlas --format json runtime-info`. The Claude Code config binds the project through absolute DB/config arguments instead of relying on `cwd`.
 
 ## References
 

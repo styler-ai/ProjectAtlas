@@ -11,6 +11,7 @@
 - For interactive browser or Electron debugging and manual UI QA loops, use the global `playwright-interactive` skill by default.
 - Keep documentation and specs in sync with behavior; update decision records as needed.
 - Ask for clarification when requirements conflict; document assumptions and blockers.
+- Do not turn local editor, agent, cache, or workspace-state folder names into product invariants. ProjectAtlas honors `.gitignore` dynamically, and the ProjectAtlas ignore config is only the stricter atlas-specific layer applied after `.gitignore`.
 
 ## ProjectAtlas Workflow
 1. Establish the project root and run ProjectAtlas from that root so `.projectatlas/projectatlas.db` is project-local.
@@ -18,7 +19,7 @@
 3. Run `projectatlas overview` to orient on the repository.
 4. Run `projectatlas folders <query>` before choosing a work area.
 5. Run `projectatlas files <query> --folder <path>` before opening source; use `projectatlas files --file-pattern <glob>` when the file/path pattern is already known.
-6. Run `projectatlas summary <file> --limit 25` for structured file facts and purpose state; inspect `parser_kind` and `summary_status` before trusting the observed summary.
+6. Run `projectatlas summary <file> --limit 25` for detailed file facts: `file_purpose`, `content_summary`, parser state, imports, symbols, calls, and counts; inspect `parser_kind` and `summary_status` before trusting the `content_summary`.
 7. Run `projectatlas outline <file>` if the summary is not enough.
 8. Run `projectatlas search <pattern> --file-pattern <glob>` for bounded glob-filtered text matches; add `--fuzzy` for approximate names and inspect returned, searched file, searched byte, and truncated counters before widening the search.
 9. Run `projectatlas slice <file> --start-line <n> --end-line <m>` or `projectatlas symbols slice <file> <symbol> --symbol-parent <parent> --symbol-kind <kind> --symbol-line <line>` for exact source; add disambiguators when duplicate symbol names exist.
@@ -26,8 +27,10 @@
 11. Run `projectatlas lint --strict-folders --report-untracked`.
 12. Only then use language-server lookups or broad file reads on selected files.
 13. Run `projectatlas config --print` when effective scan, purpose, or exclusion policy is unclear.
-14. Run `projectatlas runtime-info` when installer/runtime identity is unclear.
-15. Run `projectatlas token` when asked for token savings.
+14. Run `projectatlas ignore list` before adding repository-specific atlas excludes; `.gitignore` is inherited dynamically and manual ProjectAtlas ignores are applied after it as stricter atlas-only exclusions. Use `projectatlas ignore init-gitignore` only when a project needs a missing project-root `.gitignore` created. Keep personal/local workspace state in `.gitignore`.
+15. Run `projectatlas runtime-info` when installer/runtime identity is unclear.
+16. Run `projectatlas token` when asked for token savings; use `projectatlas token --view tui` only when a human asks for the terminal dashboard.
+17. Generate harness MCP config with `projectatlas --format json --db .projectatlas/projectatlas.db mcp-config`, adding `--harness claude-code` or `--harness opencode` for those hosts. Prefer installer-generated project-local configs over checked-in fallback templates.
 
 ## Rust/Dependency Discipline
 - Prefer official or canonical Rust crates and standard implementations for protocols, formats, parsers, storage, watchers, token tooling, and platform integration before writing custom code.

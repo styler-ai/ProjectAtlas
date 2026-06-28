@@ -168,13 +168,16 @@ fn json_summary(path: &str, content: &str) -> Option<String> {
     }
     let keys = object.keys().map(String::as_str).collect::<Vec<_>>();
     if object.contains_key("datasets") || path.ends_with("datasets.manifest.json") {
-        let dataset_count = object
-            .get("datasets")
-            .and_then(JsonValue::as_array)
-            .map_or(0, Vec::len);
+        let (dataset_count, dataset_ids) = dataset_manifest_facts(object.get("datasets"));
+        let key_list = join_limited(keys);
+        if dataset_ids.is_empty() {
+            return Some(format!(
+                "json dataset manifest with {dataset_count} datasets and keys {key_list}."
+            ));
+        }
         return Some(format!(
-            "json dataset manifest with {dataset_count} datasets and keys {}.",
-            join_limited(keys)
+            "json dataset manifest with {dataset_count} datasets including {} and keys {key_list}.",
+            join_limited(dataset_ids.iter().map(String::as_str).collect())
         ));
     }
     if keys.is_empty() {
@@ -185,6 +188,33 @@ fn json_summary(path: &str, content: &str) -> Option<String> {
             join_limited(keys)
         ))
     }
+}
+
+/// Extract dataset count and bounded identifiers from common manifest shapes.
+fn dataset_manifest_facts(value: Option<&JsonValue>) -> (usize, Vec<String>) {
+    let Some(value) = value else {
+        return (0, Vec::new());
+    };
+    if let Some(object) = value.as_object() {
+        let ids = object.keys().cloned().collect::<Vec<_>>();
+        return (ids.len(), ids);
+    }
+    let Some(array) = value.as_array() else {
+        return (0, Vec::new());
+    };
+    let ids = array
+        .iter()
+        .filter_map(|item| {
+            item.as_object().and_then(|object| {
+                object
+                    .get("id")
+                    .or_else(|| object.get("name"))
+                    .and_then(JsonValue::as_str)
+                    .map(compact_label)
+            })
+        })
+        .collect::<Vec<_>>();
+    (array.len(), ids)
 }
 
 /// Build a package.json summary from common manifest keys.
@@ -495,9 +525,15 @@ fn html_summary(content: &str) -> Option<String> {
         "content",
     );
     let headings = html_texts(&document, "h1, h2", LIST_LIMIT);
+    let link_rels = html_link_rel_values(&document, LIST_LIMIT);
     let has_structured_data = html_select(&document, "script[type=\"application/ld+json\"]")
         .is_some_and(|selector| document.select(&selector).next().is_some());
-    if title.is_none() && description.is_none() && headings.is_empty() && !has_structured_data {
+    if title.is_none()
+        && description.is_none()
+        && headings.is_empty()
+        && link_rels.is_empty()
+        && !has_structured_data
+    {
         return None;
     }
     let mut parts = Vec::new();
@@ -513,10 +549,38 @@ fn html_summary(content: &str) -> Option<String> {
             join_limited(headings.iter().map(String::as_str).collect())
         ));
     }
+    if !link_rels.is_empty() {
+        parts.push(format!(
+            "link rels {}",
+            join_limited(link_rels.iter().map(String::as_str).collect())
+        ));
+    }
     if has_structured_data {
         parts.push("structured data".to_string());
     }
     Some(format!("html document with {}.", parts.join(", ")))
+}
+
+/// Extract bounded link relation markers from an HTML document.
+fn html_link_rel_values(document: &Html, limit: usize) -> Vec<String> {
+    let Some(selector) = html_select(document, "link[rel]") else {
+        return Vec::new();
+    };
+    let mut rels = document
+        .select(&selector)
+        .filter_map(|element| element.attr("rel"))
+        .flat_map(|value| {
+            value
+                .split_ascii_whitespace()
+                .map(compact_label)
+                .collect::<Vec<_>>()
+        })
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    rels.truncate(limit);
+    rels
 }
 
 /// Compile an HTML selector.
@@ -735,6 +799,29 @@ mod tests {
     }
 
     #[test]
+    fn summarizes_object_keyed_dataset_manifest() {
+        let summary = structural_summary_for_path(
+            "app/public/data/datasets.manifest.json",
+            Some("json"),
+            r#"{
+  "generated_at": "2026-06-28T00:00:00Z",
+  "version": "2026.06.28",
+  "datasets": {
+    "catalog.primary": {"path": "primary.json"},
+    "catalog.secondary": {"path": "secondary.json"},
+    "catalog.archive": {"path": "archive.json"}
+  }
+}"#,
+        );
+        assert_eq!(
+            summary.as_deref(),
+            Some(
+                "json dataset manifest with 3 datasets including catalog.archive, catalog.primary, catalog.secondary and keys datasets, generated_at, version."
+            )
+        );
+    }
+
+    #[test]
     fn summarizes_workflow_yaml() {
         let summary = structural_summary_for_path(
             ".github/workflows/ci.yml",
@@ -780,12 +867,12 @@ mod tests {
         let summary = structural_summary_for_path(
             "index.html",
             Some("html"),
-            "<html><head><title>Home</title><meta name=\"description\" content=\"Welcome page\"></head><body><h1>Hello</h1><script type=\"application/ld+json\">{}</script></body></html>",
+            "<html><head><title>Home</title><meta name=\"description\" content=\"Welcome page\"><link rel=\"canonical\" href=\"https://example.test/\"><link rel=\"manifest\" href=\"/site.webmanifest\"><link rel=\"alternate\" href=\"/de/\"></head><body><h1>Hello</h1><script type=\"application/ld+json\">{}</script></body></html>",
         );
         assert_eq!(
             summary.as_deref(),
             Some(
-                "html document with title Home, meta description Welcome page, headings Hello, structured data."
+                "html document with title Home, meta description Welcome page, headings Hello, link rels alternate, canonical, manifest, structured data."
             )
         );
     }

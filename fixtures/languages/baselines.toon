@@ -6,7 +6,7 @@ summaries[26]{path,language,parser_kind,status,min_symbols,summary}:
   javascript/service.js,javascript,tree-sitter-symbol-graph,ok,2,"javascript source defining functions helper, runService."
   typescript/service.ts,typescript,tree-sitter-symbol-graph,ok,3,"typescript source defining type and functions AtlasService, helper, run."
   typescript/component.tsx,tsx,tree-sitter-symbol-graph,ok,1,tsx source defining function AtlasPanel.
-  vue/DealStage.vue,vue,fallback-symbol-graph,fallback,3,"vue source defining bindings dealTitleId, props, retryCount with imports import { computed, ref } from \"vue\";."
+  vue/ProductPanel.vue,vue,structural-symbol-graph,ok,3,"vue source defining bindings productTitleId, props, retryCount with imports import { computed, ref } from \"vue\";."
   java/AtlasService.java,java,tree-sitter-symbol-graph,ok,4,"java source defining type and functions AtlasService, helper, run."
   kotlin/Runner.kt,kotlin,tree-sitter-symbol-graph,ok,4,"kotlin source defining type and functions Runner, helper, run."
   csharp/Runner.cs,csharp,tree-sitter-symbol-graph,ok,4,"C# source defining type and functions Helper, Run, Runner."

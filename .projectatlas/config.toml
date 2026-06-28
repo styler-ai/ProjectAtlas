@@ -9,7 +9,7 @@ purpose_filename = ".purpose"
 
 [scan]
 source_extensions = [".py", ".pyw", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".d.ts", ".java", ".c", ".cpp", ".h", ".hpp", ".cxx", ".cc", ".hxx", ".hh", ".cs", ".go", ".m", ".mm", ".rb", ".php", ".swift", ".kt", ".kts", ".rs", ".scala", ".sh", ".bash", ".zsh", ".ps1", ".psm1", ".psd1", ".bat", ".cmd", ".r", ".pl", ".pm", ".lua", ".dart", ".hs", ".ml", ".mli", ".fs", ".fsx", ".clj", ".cljs", ".vim", ".zig", ".zon", ".html", ".htm", ".css", ".scss", ".sass", ".less", ".stylus", ".styl", ".md", ".mdx", ".json", ".jsonc", ".xml", ".yml", ".yaml", ".toml", ".toon", ".txt", ".ini", ".cfg", ".conf", ".vue", ".svelte", ".astro", ".jsp", ".jspx", ".jspf", ".tag", ".tagx", ".gsp", ".properties", ".gradle", ".groovy", ".proto", ".hbs", ".handlebars", ".ejs", ".pug", ".ftl", ".mustache", ".liquid", ".erb", ".sql", ".ddl", ".dml", ".mysql", ".postgresql", ".psql", ".sqlite", ".mssql", ".oracle", ".ora", ".db2", ".proc", ".procedure", ".func", ".function", ".view", ".trigger", ".index", ".migration", ".seed", ".fixture", ".schema", ".cql", ".cypher", ".sparql", ".gql", ".liquibase", ".flyway"]
-exclude_dir_names = [".git", ".projectatlas", ".venv", "__pycache__", ".egg-info", "node_modules", "dist", "build", "target"]
+exclude_dir_names = [".egg-info", ".git", ".projectatlas", ".venv", "__pycache__", "build", "dist", "node_modules", "target"]
 exclude_dir_suffixes = [".egg-info"]
 exclude_path_prefixes = []
 non_source_path_prefixes = []

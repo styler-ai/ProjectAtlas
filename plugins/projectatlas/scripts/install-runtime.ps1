@@ -3,6 +3,7 @@ param(
     [string]$Repository = "https://github.com/styler-ai/ProjectAtlas",
     [string]$ProjectAtlasVersion,
     [string]$ReleaseBaseUrl = "https://github.com/styler-ai/ProjectAtlas/releases/download",
+    [string]$RuntimePath,
     [switch]$ReleaseBinaryOnly
 )
 
@@ -239,52 +240,65 @@ if (-not $ProjectAtlasVersion) {
     }
 }
 
+if (-not $RuntimePath -and $env:PROJECTATLAS_RUNTIME_PATH) {
+    $RuntimePath = $env:PROJECTATLAS_RUNTIME_PATH
+}
+
 $releaseBinaryOnly = $ReleaseBinaryOnly -or (Test-Truthy $env:PROJECTATLAS_RELEASE_BINARY_ONLY)
 $ProjectRoot = (Resolve-Path $ProjectRoot).Path
-$cargo = Find-Cargo
-$sourceManifest = Join-Path $ProjectRoot "crates\projectatlas-cli\Cargo.toml"
-$installedBinary = $null
 
-if ($releaseBinaryOnly) {
-    $installedBinary = Install-ReleaseBinary $ProjectAtlasVersion $ReleaseBaseUrl
-    if (-not $installedBinary) {
-        throw "ProjectAtlas release-binary install was required but failed for $ProjectAtlasVersion."
-    }
-}
-elseif ($cargo -and (Test-Path -LiteralPath $sourceManifest)) {
-    Push-Location $ProjectRoot
-    try {
-        Invoke-Checked $cargo @("install", "--path", "crates/projectatlas-cli", "--locked", "--force")
-    }
-    finally {
-        Pop-Location
+if ($RuntimePath) {
+    $projectAtlas = (Resolve-Path $RuntimePath).Path
+    if (-not (Test-ProjectAtlasRuntime $projectAtlas $ProjectAtlasVersion)) {
+        throw "Provided ProjectAtlas runtime does not satisfy the ProjectAtlas runtime/version contract: $projectAtlas"
     }
 }
 else {
-    $releaseBinary = Install-ReleaseBinary $ProjectAtlasVersion $ReleaseBaseUrl
-    if ($releaseBinary) {
-        $installedBinary = $releaseBinary
-    }
-    if (-not $releaseBinary -and $cargo) {
-        $installArgs = @("install", "--git", $Repository)
-        if ($ProjectAtlasVersion) {
-            $installArgs += @("--tag", $ProjectAtlasVersion)
+    $cargo = Find-Cargo
+    $sourceManifest = Join-Path $ProjectRoot "crates\projectatlas-cli\Cargo.toml"
+    $installedBinary = $null
+
+    if ($releaseBinaryOnly) {
+        $installedBinary = Install-ReleaseBinary $ProjectAtlasVersion $ReleaseBaseUrl
+        if (-not $installedBinary) {
+            throw "ProjectAtlas release-binary install was required but failed for $ProjectAtlasVersion."
         }
-        $installArgs += @("projectatlas-cli", "--locked", "--force")
-        Invoke-Checked $cargo $installArgs
     }
-}
+    elseif ($cargo -and (Test-Path -LiteralPath $sourceManifest)) {
+        Push-Location $ProjectRoot
+        try {
+            Invoke-Checked $cargo @("install", "--path", "crates/projectatlas-cli", "--locked", "--force")
+        }
+        finally {
+            Pop-Location
+        }
+    }
+    else {
+        $releaseBinary = Install-ReleaseBinary $ProjectAtlasVersion $ReleaseBaseUrl
+        if ($releaseBinary) {
+            $installedBinary = $releaseBinary
+        }
+        if (-not $releaseBinary -and $cargo) {
+            $installArgs = @("install", "--git", $Repository)
+            if ($ProjectAtlasVersion) {
+                $installArgs += @("--tag", $ProjectAtlasVersion)
+            }
+            $installArgs += @("projectatlas-cli", "--locked", "--force")
+            Invoke-Checked $cargo $installArgs
+        }
+    }
 
-$projectAtlas = if ($installedBinary -and (Test-ProjectAtlasRuntime $installedBinary $ProjectAtlasVersion)) { $installedBinary } else { Find-ProjectAtlas $ProjectAtlasVersion }
-if (-not $projectAtlas) {
-    throw "A ProjectAtlas runtime matching $ProjectAtlasVersion was not found. Install Rust/Cargo or provide the matching ProjectAtlas release binary on PATH."
-}
-$mirroredProjectAtlas = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
-if ($mirroredProjectAtlas) {
-    $projectAtlas = $mirroredProjectAtlas
-}
+    $projectAtlas = if ($installedBinary -and (Test-ProjectAtlasRuntime $installedBinary $ProjectAtlasVersion)) { $installedBinary } else { Find-ProjectAtlas $ProjectAtlasVersion }
+    if (-not $projectAtlas) {
+        throw "A ProjectAtlas runtime matching $ProjectAtlasVersion was not found. Install Rust/Cargo or provide the matching ProjectAtlas release binary on PATH."
+    }
+    $mirroredProjectAtlas = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
+    if ($mirroredProjectAtlas) {
+        $projectAtlas = $mirroredProjectAtlas
+    }
 
-Set-ProjectAtlasPathPrecedence $projectAtlas
+    Set-ProjectAtlasPathPrecedence $projectAtlas
+}
 Invoke-Checked $projectAtlas @("--format", "json", "runtime-info") | Out-Null
 
 $atlasDir = Join-Path $ProjectRoot ".projectatlas"
@@ -293,19 +307,39 @@ $dbPath = Join-Path $atlasDir "projectatlas.db"
 $projectConfigPath = Join-Path $atlasDir "config.toml"
 $flatConfigPath = Join-Path $ProjectRoot "projectatlas.toml"
 $mcpConfigPath = Join-Path $atlasDir "projectatlas.mcp.json"
-$mcpArgs = @("--format", "json", "--db", $dbPath)
-if (Test-Path -LiteralPath $projectConfigPath) {
-    $mcpArgs += @("--config", $projectConfigPath)
+$claudeMcpConfigPath = Join-Path $atlasDir "projectatlas.claude.mcp.json"
+$opencodeConfigPath = Join-Path $atlasDir "projectatlas.opencode.json"
+
+function Write-ProjectAtlasMcpConfig {
+    param(
+        [string]$OutputPath,
+        [string]$Harness
+    )
+    $mcpArgs = @("--format", "json", "--db", $dbPath)
+    if (Test-Path -LiteralPath $projectConfigPath) {
+        $mcpArgs += @("--config", $projectConfigPath)
+    }
+    elseif (Test-Path -LiteralPath $flatConfigPath) {
+        $mcpArgs += @("--config", $flatConfigPath)
+    }
+    $mcpArgs += @("mcp-config")
+    if ($Harness) {
+        $mcpArgs += @("--harness", $Harness)
+    }
+    $mcpConfig = & $projectAtlas @mcpArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "ProjectAtlas MCP config generation failed with exit code $LASTEXITCODE for harness '$Harness'."
+    }
+    $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+    $mcpConfigText = ($mcpConfig -join [Environment]::NewLine) + [Environment]::NewLine
+    [System.IO.File]::WriteAllText($OutputPath, $mcpConfigText, $utf8NoBom)
 }
-elseif (Test-Path -LiteralPath $flatConfigPath) {
-    $mcpArgs += @("--config", $flatConfigPath)
-}
-$mcpArgs += @("mcp-config")
-$mcpConfig = & $projectAtlas @mcpArgs
-if ($LASTEXITCODE -ne 0) {
-    throw "ProjectAtlas MCP config generation failed with exit code $LASTEXITCODE."
-}
-$mcpConfig | Set-Content -LiteralPath $mcpConfigPath -Encoding utf8
+
+Write-ProjectAtlasMcpConfig $mcpConfigPath $null
+Write-ProjectAtlasMcpConfig $claudeMcpConfigPath "claude-code"
+Write-ProjectAtlasMcpConfig $opencodeConfigPath "opencode"
 
 Write-Output "ProjectAtlas runtime installed and verified: $projectAtlas"
 Write-Output "Project-local MCP config written: $mcpConfigPath"
+Write-Output "Project-local Claude Code MCP config written: $claudeMcpConfigPath"
+Write-Output "Project-local OpenCode MCP config written: $opencodeConfigPath"

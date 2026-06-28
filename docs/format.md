@@ -17,10 +17,10 @@ exclude_dir_names[]:
   - .git
 exclude_path_prefixes[]:
   - docs/generated
-folders[3]{path,summary,source}:
+folders[3]{path,folder_purpose,source}:
   .,Project root,purpose
-files[4]{path,summary,source}:
-  src/main.py,Main entry,header
+files[4]{path,file_purpose,content_summary,source}:
+  src/main.py,Main entry,Python application entry point,header
 folder_summary_duplicates[]:
   - Shared utils :: src/utils | app/utils
 file_summary_duplicates[]:
@@ -42,4 +42,6 @@ Sections are stable so agents can scan quickly and tooling can diff.
 ## Non-source list
 
 The generated atlas can merge `.projectatlas/projectatlas-nonsource-files.toon` entries into `files[]`
-for compatibility. New ProjectAtlas 3 workflows should prefer SQLite purpose records and structured summaries from `projectatlas summary` / `atlas_file_summary`.
+for compatibility. New ProjectAtlas 3 workflows should prefer SQLite `folder_purpose` and
+`file_purpose` records, plus deterministic `content_summary` values from `projectatlas summary`
+or `atlas_file_summary`.

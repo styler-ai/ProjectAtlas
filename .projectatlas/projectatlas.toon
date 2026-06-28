@@ -1,9 +1,9 @@
 version: 1
-generated_at: unix:1782647440
-file_hash: "174711445445ff3f9ef2cdf2b933f336f5b143da5e87f6ad71ac6b947f6ec6c4"
-folder_hash: "0f57a5d335636b00f50faebeb6a45b7fa006dad12ae2723b19b908d25a052080"
+generated_at: unix:1782662719
+file_hash: "e1f7b2cf1f927297ecc62f68a7b63559805a7a503c8e4d2bd1bcc2b9e10cb4fa"
+folder_hash: "f58d1066150efc05695c367c84afd774ddae91cab5781359a16993942b1b5e6f"
 root: .
-overview: tracked_source_files=100 tracked_nonsource_files=42 tracked_files_total=142 tracked_folders=59 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
+overview: tracked_source_files=93 tracked_nonsource_files=34 tracked_files_total=127 tracked_folders=56 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
 source_extensions[]:
   - .astro
   - .bash
@@ -138,15 +138,10 @@ exclude_dir_names[]:
   - node_modules
   - target
 exclude_path_prefixes[]:
-folders[59]{path,summary,source}:
+folders[56]{path,summary,source}:
   .,ProjectAtlas repository root.,database
   .agents,Agent marketplace metadata for ProjectAtlas.,database
   .agents/plugins,Codex plugin marketplace catalog for ProjectAtlas.,database
-  .codex,Codex configuration and skills for ProjectAtlas.,database
-  .codex/rules,ProjectAtlas rules for Codex usage.,database
-  .codex/rules/memory,ProjectAtlas Memory Bank files.,database
-  .codex/rules/projectatlas,ProjectAtlas-specific rule files and practices.,database
-  .codex/skills,Codex skill copies for ProjectAtlas adoption.,database
   .githooks,Git hook scripts for ProjectAtlas commits.,database
   .github,ProjectAtlas GitHub metadata and workflows.,database
   .github/workflows,ProjectAtlas CI and release workflows.,database
@@ -190,7 +185,9 @@ folders[59]{path,summary,source}:
   fixtures/languages/zig,Zig fixture folder for parser and summary baseline coverage.,database
   plugins,Installable Codex plugins for ProjectAtlas.,database
   plugins/projectatlas,ProjectAtlas Codex plugin package.,database
+  plugins/projectatlas/.claude-plugin,Claude Code plugin metadata folder for packaging ProjectAtlas harness integration.,database
   plugins/projectatlas/.codex-plugin,ProjectAtlas plugin manifest metadata.,database
+  plugins/projectatlas/opencode,OpenCode integration templates for registering ProjectAtlas as a local MCP server.,database
   plugins/projectatlas/scripts,Runtime installer scripts for the ProjectAtlas plugin.,database
   plugins/projectatlas/skills,ProjectAtlas plugin skills.,database
   plugins/projectatlas/skills/projectatlas,Codex skill for ProjectAtlas workflows.,database
@@ -198,17 +195,9 @@ folders[59]{path,summary,source}:
   skills/claude,Claude guidance for ProjectAtlas usage.,database
   skills/codex,Codex guidance for ProjectAtlas usage.,database
   templates,Reusable agent templates and snippets.,database
-files[104]{path,summary,source}:
+files[98]{path,summary,source}:
   .agents/plugins/marketplace.json,Codex plugin marketplace catalog for ProjectAtlas,database
-  .codex/rules/memory/activeContext.md,ProjectAtlas active context,database
-  .codex/rules/memory/productContext.md,ProjectAtlas product context,database
-  .codex/rules/memory/progress.md,ProjectAtlas progress log,database
-  .codex/rules/memory/projectbrief.md,ProjectAtlas project brief,database
-  .codex/rules/memory/ruleIndex.md,ProjectAtlas memory bank index,database
-  .codex/rules/memory/systemPatterns.md,ProjectAtlas system patterns,database
-  .codex/rules/memory/techContext.md,ProjectAtlas tech context,database
-  .codex/rules/projectatlas/github-rules.md,ProjectAtlas GitHub workflow rules,database
-  .codex/skills/ProjectAtlas.md,Repo-local Codex skill instructions for ProjectAtlas,database
+  .gitattributes,Line-ending policy for ProjectAtlas repository fixtures,nonsource
   .githooks/commit-msg,Git hook to enforce issue references in commits,nonsource
   .githooks/pre-push,Git hook to run full local checks before push,nonsource
   .github/pull_request_template.md,Pull request checklist for ProjectAtlas,database
@@ -258,7 +247,7 @@ files[104]{path,summary,source}:
   deny.toml,Cargo dependency and license policy for ProjectAtlas,database
   docs/adoption.md,Adoption checklist for ProjectAtlas,database
   docs/agent-integration.md,Agent integration instructions for ProjectAtlas,database
-  docs/benchmarks/swipinggale-token-savings.md,Record SwipingGale token savings benchmark evidence,database
+  docs/benchmarks/large-application-token-savings.md,Document large-application benchmark evidence for token-savings and responsiveness checks.,database
   docs/concepts.md,Core concepts for ProjectAtlas usage,database
   docs/configuration.md,Configuration reference for ProjectAtlas,database
   docs/format.md,ProjectAtlas TOON schema reference,database
@@ -292,11 +281,13 @@ files[104]{path,summary,source}:
   fixtures/languages/toon/projectatlas-nonsource-files.toon,Exercise TOON section summary extraction,database
   fixtures/languages/typescript/component.tsx,Exercise TSX component summary extraction.,database
   fixtures/languages/typescript/service.ts,"Exercise TypeScript class, method, and helper summary extraction.",database
-  fixtures/languages/vue/DealStage.vue,Exercise Vue script setup binding and import summary extraction.,database
+  fixtures/languages/vue/ProductPanel.vue,Provide a Vue Composition API fixture for verifying binding and import summaries.,database
   fixtures/languages/yaml/workflow.yml,Exercise workflow trigger and job summaries,database
   fixtures/languages/zig/runner.zig,Exercise Zig type and function summary extraction.,database
+  plugins/projectatlas/.claude-plugin/plugin.json,Claude Code plugin manifest declaring ProjectAtlas metadata for Claude Code installation.,database
   plugins/projectatlas/.codex-plugin/plugin.json,ProjectAtlas Codex plugin manifest,database
   plugins/projectatlas/.mcp.json,Fallback MCP server configuration for the ProjectAtlas Codex plugin.,database
+  plugins/projectatlas/opencode/opencode.json,OpenCode config template registering ProjectAtlas as a local MCP server.,database
   plugins/projectatlas/scripts/install-runtime.ps1,Install and verify the ProjectAtlas native runtime on Windows.,database
   plugins/projectatlas/scripts/install-runtime.sh,POSIX installer for the native ProjectAtlas runtime.,database
   plugins/projectatlas/skills/projectatlas/SKILL.md,ProjectAtlas installable Codex skill,database
@@ -309,11 +300,6 @@ folder_tree[]:
   - . - ProjectAtlas repository root.
   - .agents/ - Agent marketplace metadata for ProjectAtlas.
   - "  plugins/ - Codex plugin marketplace catalog for ProjectAtlas."
-  - .codex/ - Codex configuration and skills for ProjectAtlas.
-  - "  rules/ - ProjectAtlas rules for Codex usage."
-  - "    memory/ - ProjectAtlas Memory Bank files."
-  - "    projectatlas/ - ProjectAtlas-specific rule files and practices."
-  - "  skills/ - Codex skill copies for ProjectAtlas adoption."
   - .githooks/ - Git hook scripts for ProjectAtlas commits.
   - .github/ - ProjectAtlas GitHub metadata and workflows.
   - "  workflows/ - ProjectAtlas CI and release workflows."
@@ -357,7 +343,9 @@ folder_tree[]:
   - "    zig/ - Zig fixture folder for parser and summary baseline coverage."
   - plugins/ - Installable Codex plugins for ProjectAtlas.
   - "  projectatlas/ - ProjectAtlas Codex plugin package."
+  - "    .claude-plugin/ - Claude Code plugin metadata folder for packaging ProjectAtlas harness integration."
   - "    .codex-plugin/ - ProjectAtlas plugin manifest metadata."
+  - "    opencode/ - OpenCode integration templates for registering ProjectAtlas as a local MCP server."
   - "    scripts/ - Runtime installer scripts for the ProjectAtlas plugin."
   - "    skills/ - ProjectAtlas plugin skills."
   - "      projectatlas/ - Codex skill for ProjectAtlas workflows."
