@@ -14,6 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 /// Default `ProjectAtlas` purpose filename.
 const DEFAULT_PURPOSE_FILENAME: &str = ".purpose";
@@ -44,6 +45,8 @@ const OVERVIEW_KEYS: &[&str] = &[
 ];
 /// Source extensions scanned for Purpose metadata by default.
 const DEFAULT_SOURCE_EXTENSIONS: &[&str] = BROAD_SOURCE_EXTENSIONS;
+/// Directory names excluded from scans even when config is hand-edited.
+const REQUIRED_EXCLUDE_DIR_NAMES: &[&str] = &[".git", ".projectatlas"];
 /// Directory names excluded from scans by default.
 const DEFAULT_EXCLUDE_DIR_NAMES: &[&str] = &[
     ".cache",
@@ -111,6 +114,14 @@ pub(crate) enum AtlasMapError {
         /// Invalid path text.
         path: String,
         /// Validation failure.
+        message: String,
+    },
+    /// Editable TOML config was malformed for the requested operation.
+    #[error("toml edit error for {path:?}: {message}")]
+    TomlEdit {
+        /// Config path that failed to edit.
+        path: PathBuf,
+        /// TOML edit failure.
         message: String,
     },
 }
@@ -409,6 +420,92 @@ pub(crate) struct ImportedPurposeRecord {
     pub(crate) summary: String,
 }
 
+/// Manual `ProjectAtlas` ignore entry kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IgnoreEntryKind {
+    /// Exclude every directory with this name anywhere under the project root.
+    DirName,
+    /// Exclude one repository-relative path subtree.
+    PathPrefix,
+}
+
+impl IgnoreEntryKind {
+    /// Stable config key for this ignore kind.
+    fn config_key(self) -> &'static str {
+        match self {
+            Self::DirName => "exclude_dir_names",
+            Self::PathPrefix => "exclude_path_prefixes",
+        }
+    }
+
+    /// Agent-facing ignore kind name.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DirName => "dir-name",
+            Self::PathPrefix => "path-prefix",
+        }
+    }
+}
+
+/// Current `ProjectAtlas` ignore configuration report.
+#[derive(Debug, Serialize)]
+pub(crate) struct IgnoreListReport {
+    /// Config file used for the manual `ProjectAtlas` ignore layer.
+    pub(crate) config_path: String,
+    /// `.gitignore` file that the scanner will honor when it exists.
+    pub(crate) gitignore_path: String,
+    /// Whether a `.gitignore` file currently exists at the project root.
+    pub(crate) gitignore_present: bool,
+    /// Scanner behavior for `.gitignore`.
+    pub(crate) gitignore_mode: String,
+    /// Order of the manual `ProjectAtlas` ignore layer.
+    pub(crate) manual_layer_order: String,
+    /// Effective directory-name excludes after defaults and config are applied.
+    pub(crate) exclude_dir_names: Vec<String>,
+    /// Effective repository-relative path-prefix excludes.
+    pub(crate) exclude_path_prefixes: Vec<String>,
+}
+
+/// Result of creating a project-root `.gitignore` when it is missing.
+#[derive(Debug, Serialize)]
+pub(crate) struct GitignoreInitReport {
+    /// `.gitignore` path that was checked.
+    pub(crate) gitignore_path: String,
+    /// Whether the file already existed before the command.
+    pub(crate) existed: bool,
+    /// Whether the command created the file.
+    pub(crate) created: bool,
+    /// Whether `.gitignore` rules are inherited dynamically by the scanner.
+    pub(crate) gitignore_inherited: bool,
+}
+
+/// Result of adding or removing a manual `ProjectAtlas` ignore entry.
+#[derive(Debug, Serialize)]
+pub(crate) struct IgnoreMutationReport {
+    /// Config file that was edited.
+    pub(crate) config_path: String,
+    /// `.gitignore` file that the scanner will honor when it exists.
+    pub(crate) gitignore_path: String,
+    /// Whether a `.gitignore` file currently exists at the project root.
+    pub(crate) gitignore_present: bool,
+    /// Mutation action.
+    pub(crate) action: String,
+    /// Ignore kind that was targeted, or `any` for a broad remove.
+    pub(crate) kind: String,
+    /// Normalized ignore value.
+    pub(crate) value: String,
+    /// Whether the config file changed.
+    pub(crate) changed: bool,
+    /// Scanner behavior for `.gitignore`.
+    pub(crate) gitignore_mode: String,
+    /// Order of the manual `ProjectAtlas` ignore layer.
+    pub(crate) manual_layer_order: String,
+    /// Effective directory-name excludes after the mutation.
+    pub(crate) exclude_dir_names: Vec<String>,
+    /// Effective repository-relative path-prefix excludes after the mutation.
+    pub(crate) exclude_path_prefixes: Vec<String>,
+}
+
 /// Load atlas map configuration from disk.
 pub(crate) fn load_atlas_config(config_path: Option<&Path>) -> AtlasMapResult<AtlasMapConfig> {
     let cwd = std::env::current_dir().map_err(|source| AtlasMapError::Io {
@@ -476,6 +573,133 @@ pub(crate) fn init_project(root: &Path, seed_purpose: bool) -> AtlasMapResult<St
         ));
     }
     Ok(String::new())
+}
+
+/// List effective `ProjectAtlas` ignore policy.
+pub(crate) fn list_ignore_entries(
+    config_path: Option<&Path>,
+    project_root: &Path,
+) -> AtlasMapResult<IgnoreListReport> {
+    let path = resolve_config_edit_path(config_path, project_root)?;
+    let config = if path.exists() {
+        load_atlas_config(Some(&path))?
+    } else {
+        load_atlas_config_for_root(project_root)?
+    };
+    Ok(ignore_list_report(&path, &config))
+}
+
+/// Create a project-root `.gitignore` when it is missing.
+pub(crate) fn init_gitignore(
+    config_path: Option<&Path>,
+    project_root: &Path,
+) -> AtlasMapResult<GitignoreInitReport> {
+    let path = resolve_config_edit_path(config_path, project_root)?;
+    let config = if path.exists() {
+        load_atlas_config(Some(&path))?
+    } else {
+        load_atlas_config_for_root(project_root)?
+    };
+    let gitignore_path = config.root.join(".gitignore");
+    let existed = gitignore_path.exists();
+    if !existed {
+        fs::write(&gitignore_path, default_gitignore_text()).map_err(|source| {
+            AtlasMapError::Io {
+                path: gitignore_path.clone(),
+                source,
+            }
+        })?;
+    }
+    Ok(GitignoreInitReport {
+        gitignore_path: gitignore_path.display().to_string(),
+        existed,
+        created: !existed,
+        gitignore_inherited: true,
+    })
+}
+
+/// Add one manual `ProjectAtlas` ignore entry to config.
+pub(crate) fn add_ignore_entry(
+    config_path: Option<&Path>,
+    project_root: &Path,
+    kind: IgnoreEntryKind,
+    value: &str,
+) -> AtlasMapResult<IgnoreMutationReport> {
+    let normalized = normalize_ignore_value(kind, value)?;
+    let path = resolve_config_edit_path(config_path, project_root)?;
+    let mut document = load_config_document_for_edit(&path)?;
+    let mut values = string_array_values(&path, &document, kind)?;
+    let changed = values.insert(normalized.clone());
+    if changed {
+        write_string_array(&mut document, kind.config_key(), &values)?;
+        write_config_document(&path, &document)?;
+    }
+    let config = load_atlas_config(Some(&path))?;
+    Ok(ignore_mutation_report(
+        &path,
+        "add",
+        kind.as_str(),
+        &normalized,
+        changed,
+        &config,
+    ))
+}
+
+/// Remove one manual `ProjectAtlas` ignore entry from config.
+pub(crate) fn remove_ignore_entry(
+    config_path: Option<&Path>,
+    project_root: &Path,
+    kind: Option<IgnoreEntryKind>,
+    value: &str,
+) -> AtlasMapResult<IgnoreMutationReport> {
+    let path = resolve_config_edit_path(config_path, project_root)?;
+    let mut document = load_config_document_for_edit(&path)?;
+    let mut changed = false;
+    let normalized = if let Some(kind) = kind {
+        let normalized = normalize_ignore_value(kind, value)?;
+        let mut values = string_array_values(&path, &document, kind)?;
+        if values.remove(&normalized) {
+            changed = true;
+            write_string_array(&mut document, kind.config_key(), &values)?;
+        }
+        normalized
+    } else {
+        let normalized_prefix = normalize_ignore_value(IgnoreEntryKind::PathPrefix, value)?;
+        let normalized_dir = normalize_ignore_value(IgnoreEntryKind::DirName, value).ok();
+        let mut prefix_values = string_array_values(&path, &document, IgnoreEntryKind::PathPrefix)?;
+        if prefix_values.remove(&normalized_prefix) {
+            changed = true;
+            write_string_array(
+                &mut document,
+                IgnoreEntryKind::PathPrefix.config_key(),
+                &prefix_values,
+            )?;
+        }
+        if let Some(normalized_dir) = normalized_dir.as_deref() {
+            let mut dir_values = string_array_values(&path, &document, IgnoreEntryKind::DirName)?;
+            if dir_values.remove(normalized_dir) {
+                changed = true;
+                write_string_array(
+                    &mut document,
+                    IgnoreEntryKind::DirName.config_key(),
+                    &dir_values,
+                )?;
+            }
+        }
+        normalized_prefix
+    };
+    if changed {
+        write_config_document(&path, &document)?;
+    }
+    let config = load_atlas_config(Some(&path))?;
+    Ok(ignore_mutation_report(
+        &path,
+        "remove",
+        kind.map_or("any", IgnoreEntryKind::as_str),
+        &normalized,
+        changed,
+        &config,
+    ))
 }
 
 /// Create missing folder purpose files.
@@ -694,6 +918,123 @@ fn find_config_path(root: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Resolve the config file path that ignore commands should edit.
+fn resolve_config_edit_path(
+    config_path: Option<&Path>,
+    project_root: &Path,
+) -> AtlasMapResult<PathBuf> {
+    let cwd = std::env::current_dir().map_err(|source| AtlasMapError::Io {
+        path: PathBuf::from("."),
+        source,
+    })?;
+    if let Some(path) = config_path {
+        return Ok(if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        });
+    }
+    Ok(find_config_path(project_root)
+        .unwrap_or_else(|| project_root.join(".projectatlas").join("config.toml")))
+}
+
+/// Load an editable TOML document, creating default config text when absent.
+fn load_config_document_for_edit(path: &Path) -> AtlasMapResult<DocumentMut> {
+    let text = if path.exists() {
+        fs::read_to_string(path).map_err(|source| AtlasMapError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?
+    } else {
+        default_config_text()
+    };
+    text.parse::<DocumentMut>()
+        .map_err(|source| AtlasMapError::TomlEdit {
+            path: path.to_path_buf(),
+            message: source.to_string(),
+        })
+}
+
+/// Persist an editable TOML document to disk.
+fn write_config_document(path: &Path, document: &DocumentMut) -> AtlasMapResult<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|source| AtlasMapError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    fs::write(path, document.to_string()).map_err(|source| AtlasMapError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Read a string array from the `[scan]` table, returning an empty set when absent.
+fn string_array_values(
+    path: &Path,
+    document: &DocumentMut,
+    kind: IgnoreEntryKind,
+) -> AtlasMapResult<BTreeSet<String>> {
+    let key = kind.config_key();
+    let Some(scan) = document.get("scan") else {
+        return Ok(BTreeSet::new());
+    };
+    let Some(table) = scan.as_table() else {
+        return Err(AtlasMapError::TomlEdit {
+            path: path.to_path_buf(),
+            message: "[scan] must be a TOML table".to_string(),
+        });
+    };
+    let Some(item) = table.get(key) else {
+        return Ok(BTreeSet::new());
+    };
+    let Some(array) = item.as_array() else {
+        return Err(AtlasMapError::TomlEdit {
+            path: path.to_path_buf(),
+            message: format!("[scan].{key} must be an array of strings"),
+        });
+    };
+    let mut values = BTreeSet::new();
+    for value in array {
+        let Some(text) = value.as_str() else {
+            return Err(AtlasMapError::TomlEdit {
+                path: path.to_path_buf(),
+                message: format!("[scan].{key} must contain only strings"),
+            });
+        };
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            values.insert(normalize_ignore_value(kind, trimmed)?);
+        }
+    }
+    Ok(values)
+}
+
+/// Replace one `[scan]` string array while preserving unrelated config content.
+fn write_string_array(
+    document: &mut DocumentMut,
+    key: &str,
+    values: &BTreeSet<String>,
+) -> AtlasMapResult<()> {
+    if document.get("scan").is_none() {
+        document["scan"] = Item::Table(Table::new());
+    }
+    let Some(scan) = document["scan"].as_table_mut() else {
+        return Err(AtlasMapError::TomlEdit {
+            path: PathBuf::from("<config>"),
+            message: "[scan] must be a TOML table".to_string(),
+        });
+    };
+    let mut array = Array::new();
+    for value in values {
+        array.push(value.as_str());
+    }
+    scan[key] = value(array);
+    Ok(())
+}
+
 /// Normalize raw config into runtime config.
 fn normalize_config(
     raw: RawConfig,
@@ -738,7 +1079,7 @@ fn normalize_config(
                 .map(ToString::to_string)
                 .collect()
         })),
-        exclude_dir_names: string_set(scan.exclude_dir_names, DEFAULT_EXCLUDE_DIR_NAMES),
+        exclude_dir_names: exclude_dir_name_set(scan.exclude_dir_names),
         exclude_dir_suffixes: string_set(scan.exclude_dir_suffixes, &[".egg-info"]),
         exclude_path_prefixes: normalize_prefix_set(scan.exclude_path_prefixes)?,
         non_source_path_prefixes: normalize_prefix_set(scan.non_source_path_prefixes)?,
@@ -817,6 +1158,43 @@ fn normalize_set(values: Vec<String>) -> BTreeSet<String> {
         .collect()
 }
 
+/// Normalize one manual ignore entry.
+fn normalize_ignore_value(kind: IgnoreEntryKind, value: &str) -> AtlasMapResult<String> {
+    match kind {
+        IgnoreEntryKind::DirName => normalize_ignore_dir_name(value),
+        IgnoreEntryKind::PathPrefix => {
+            let normalized = normalize_repo_string(value)?;
+            if normalized == "." {
+                return Err(AtlasMapError::InvalidRepositoryPath {
+                    path: value.to_string(),
+                    message: "project root cannot be ignored by ProjectAtlas".to_string(),
+                });
+            }
+            Ok(normalized)
+        }
+    }
+}
+
+/// Normalize one directory-name ignore entry.
+fn normalize_ignore_dir_name(value: &str) -> AtlasMapResult<String> {
+    let trimmed = value.trim().trim_matches('/').trim_matches('\\');
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return Err(AtlasMapError::InvalidRepositoryPath {
+            path: value.to_string(),
+            message: "directory name ignore must name one directory".to_string(),
+        });
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err(AtlasMapError::InvalidRepositoryPath {
+            path: value.to_string(),
+            message:
+                "directory-name ignores cannot contain path separators; use path-prefix instead"
+                    .to_string(),
+        });
+    }
+    Ok(trimmed.to_string())
+}
+
 /// Convert optional strings into a set with defaults.
 fn string_set(values: Option<Vec<String>>, defaults: &[&str]) -> BTreeSet<String> {
     values
@@ -824,6 +1202,52 @@ fn string_set(values: Option<Vec<String>>, defaults: &[&str]) -> BTreeSet<String
         .into_iter()
         .filter(|value| !value.trim().is_empty())
         .collect()
+}
+
+/// Normalize excluded directory names and preserve required internal excludes.
+fn exclude_dir_name_set(values: Option<Vec<String>>) -> BTreeSet<String> {
+    let mut names = string_set(values, DEFAULT_EXCLUDE_DIR_NAMES);
+    names.extend(REQUIRED_EXCLUDE_DIR_NAMES.iter().map(ToString::to_string));
+    names
+}
+
+/// Build a report for current ignore settings.
+fn ignore_list_report(path: &Path, config: &AtlasMapConfig) -> IgnoreListReport {
+    let gitignore_path = config.root.join(".gitignore");
+    IgnoreListReport {
+        config_path: path.display().to_string(),
+        gitignore_path: gitignore_path.display().to_string(),
+        gitignore_present: gitignore_path.exists(),
+        gitignore_mode: "inherited-when-present".to_string(),
+        manual_layer_order: "after-gitignore".to_string(),
+        exclude_dir_names: config.exclude_dir_names.iter().cloned().collect(),
+        exclude_path_prefixes: config.exclude_path_prefixes.iter().cloned().collect(),
+    }
+}
+
+/// Build a report for an ignore mutation.
+fn ignore_mutation_report(
+    path: &Path,
+    action: &str,
+    kind: &str,
+    value: &str,
+    changed: bool,
+    config: &AtlasMapConfig,
+) -> IgnoreMutationReport {
+    let gitignore_path = config.root.join(".gitignore");
+    IgnoreMutationReport {
+        config_path: path.display().to_string(),
+        gitignore_path: gitignore_path.display().to_string(),
+        gitignore_present: gitignore_path.exists(),
+        action: action.to_string(),
+        kind: kind.to_string(),
+        value: value.to_string(),
+        changed,
+        gitignore_mode: "inherited-when-present".to_string(),
+        manual_layer_order: "after-gitignore".to_string(),
+        exclude_dir_names: config.exclude_dir_names.iter().cloned().collect(),
+        exclude_path_prefixes: config.exclude_path_prefixes.iter().cloned().collect(),
+    }
 }
 
 /// Normalize path-prefix strings into slash-separated values.
@@ -2274,7 +2698,7 @@ fn default_config_text() -> String {
         "",
         "[scan]",
         &format!("source_extensions = {source_extensions}"),
-        "exclude_dir_names = [\".git\", \".projectatlas\", \"node_modules\", \"dist\", \"build\", \"target\"]",
+        "exclude_dir_names = [\".git\", \".projectatlas\", \".venv\", \"__pycache__\", \"node_modules\", \"dist\", \"build\", \"target\"]",
         "exclude_dir_suffixes = [\".egg-info\"]",
         "exclude_path_prefixes = []",
         "non_source_path_prefixes = []",
@@ -2304,6 +2728,18 @@ fn default_config_text() -> String {
     .join("\n")
 }
 
+/// Default `.gitignore` text created only by the explicit setup helper.
+fn default_gitignore_text() -> String {
+    [
+        "# ProjectAtlas local runtime state",
+        ".projectatlas/*.db",
+        ".projectatlas/*.db-*",
+        ".projectatlas/projectatlas.mcp.json",
+        "",
+    ]
+    .join("\n")
+}
+
 /// Render string values as a TOML array.
 fn toml_array(values: &[&str]) -> String {
     let items = values
@@ -2327,9 +2763,9 @@ impl From<serde_json::Error> for AtlasMapError {
 mod tests {
     use super::{
         AtlasMapConfig, DEFAULT_TEXT_INDEX_MAX_BYTES, MapRecord,
-        append_existing_map_purpose_records, append_record_rows, normalize_repo_string,
-        project_root_for_projectatlas_config, seed_purpose_files, split_record_cells,
-        stable_generated_at, toon_cell,
+        append_existing_map_purpose_records, append_record_rows, exclude_dir_name_set,
+        normalize_repo_string, project_root_for_projectatlas_config, seed_purpose_files,
+        split_record_cells, stable_generated_at, toon_cell,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -2363,6 +2799,15 @@ mod tests {
             purpose_default_style: "line-comment".to_string(),
             line_comment_prefixes: vec!["//".to_string()],
         }
+    }
+
+    #[test]
+    fn exclude_dir_names_preserve_required_internal_excludes() {
+        let names = exclude_dir_name_set(Some(vec!["target".to_string()]));
+
+        assert!(names.contains("target"));
+        assert!(names.contains(".git"));
+        assert!(names.contains(".projectatlas"));
     }
 
     #[test]

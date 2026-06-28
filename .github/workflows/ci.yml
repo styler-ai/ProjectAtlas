@@ -102,9 +102,17 @@ jobs:
           rustup default stable
 
       - name: Install binary
+        timeout-minutes: 5
         run: |
           cargo install --path crates/projectatlas-cli --locked
-          projectatlas --help
+          expected="v$(awk -F'"' '
+            /^\[workspace.package\]/ { in_workspace_package = 1; next }
+            /^\[/ { if (in_workspace_package) exit }
+            in_workspace_package && /^version = / { print $2; exit }
+          ' Cargo.toml)"
+          PROJECTATLAS_NO_TELEMETRY=1 projectatlas --require-version "$expected" --format json runtime-info
+          PROJECTATLAS_NO_TELEMETRY=1 projectatlas config --print
+          PROJECTATLAS_NO_TELEMETRY=1 projectatlas ignore list
 
       - name: Smoke map
         run: |

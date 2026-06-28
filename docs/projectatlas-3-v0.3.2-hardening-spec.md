@@ -209,7 +209,7 @@ symbol extractor for that language and cover it with tests.
 
 - Update `docs/projectatlas-3-architecture.md` with the new module boundary and
   import-alias resolution design.
-- Update `.codex/rules/memory/*` for current status and implementation notes.
+- Keep local workspace memory notes out of Git; promote only stable public decisions into docs.
 - Regenerate `.projectatlas/projectatlas.toon`.
 - Keep `AGENTS.md` and plugin skill guidance aligned only if the command
   workflow changes. No workflow change is expected.
@@ -254,7 +254,7 @@ Hosted gates before calling the goal complete:
    can feed the existing conservative resolver through better qualified
    relation targets.
 5. Implement deterministic import-alias resolution behind service-layer helpers.
-6. Regenerate atlas map and update Memory Bank.
+6. Regenerate atlas map and update public docs or local Memory Bank as appropriate.
 7. Run strict local gates.
 8. Run final subagent reviews and fix valid findings.
 9. Open a PR. Publish v0.3.2 only if the implementation changes are intended as

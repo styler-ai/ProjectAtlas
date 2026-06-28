@@ -1,14 +1,59 @@
-.venv/
-__pycache__/
-*.pyc
-dist/
-build/
-*.egg-info/
-coverage/
-htmlcov/
-.pytest_cache/
-.DS_Store
-target/
+# Local agent/workspace state
+.codex/
+
+# ProjectAtlas runtime state
 .projectatlas/*.db
 .projectatlas/*.db-*
 .projectatlas/projectatlas.mcp.json
+
+# Rust/Cargo
+target/
+
+# JavaScript/Node
+node_modules/
+dist/
+build/
+coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python leftovers and local virtualenvs
+.venv/
+.tox/
+.nox/
+.coverage
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+
+# Documentation/site build output
+site/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Logs and temporary output
+*.log
+*.tmp
+*.bak
+*.orig
+tmp/
+temp/
+
+# Editors and OS metadata
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

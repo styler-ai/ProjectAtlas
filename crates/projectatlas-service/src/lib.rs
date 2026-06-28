@@ -444,14 +444,23 @@ fn summary_status(summary: &str, symbol_count: usize, parser_kinds: &[ParserKind
 fn symbol_parser_kind(parser_kinds: &[ParserKind]) -> &'static str {
     let has_tree_sitter = parser_kinds.contains(&ParserKind::TreeSitter);
     let has_manifest = parser_kinds.contains(&ParserKind::Manifest);
+    let has_structural = parser_kinds.contains(&ParserKind::Structural);
     let has_fallback = parser_kinds.contains(&ParserKind::Fallback);
     let family_count = usize::from(has_tree_sitter)
         .saturating_add(usize::from(has_manifest))
+        .saturating_add(usize::from(has_structural))
         .saturating_add(usize::from(has_fallback));
-    match (family_count, has_tree_sitter, has_manifest, has_fallback) {
-        (1, true, false, false) => "tree-sitter-symbol-graph",
-        (1, false, true, false) => "manifest-symbol-graph",
-        (1, false, false, true) => "fallback-symbol-graph",
+    match (
+        family_count,
+        has_tree_sitter,
+        has_manifest,
+        has_structural,
+        has_fallback,
+    ) {
+        (1, true, false, false, false) => "tree-sitter-symbol-graph",
+        (1, false, true, false, false) => "manifest-symbol-graph",
+        (1, false, false, true, false) => "structural-symbol-graph",
+        (1, false, false, false, true) => "fallback-symbol-graph",
         _ => "mixed-symbol-graph",
     }
 }
@@ -1503,6 +1512,42 @@ mod tests {
             &report.summary_status,
             &"fallback".to_string(),
             "fallback summary status",
+        )
+    }
+
+    #[test]
+    fn file_summary_marks_structural_symbol_graph_as_ok() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir(root.join("src"))?;
+        fs::write(
+            root.join("src").join("component.vue"),
+            "<script setup>const selected = ref(false)</script>",
+        )?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        store.replace_scan(&[test_node("src/component.vue", "hash-vue")])?;
+        store.set_node_summary("src/component.vue", "vue component with bindings selected.")?;
+        let mut structural_symbol = test_symbol("src/component.vue", SymbolKind::Value, "selected");
+        structural_symbol.parser = ParserKind::Structural;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/component.vue".to_string(),
+            language: Some("vue".to_string()),
+            parser: ParserKind::Structural,
+            symbols: vec![structural_symbol],
+            relations: Vec::new(),
+        })?;
+
+        let report = build_file_summary(&store, Path::new("src/component.vue"), 10)?;
+        require_eq(
+            &report.parser_kind,
+            &"structural-symbol-graph".to_string(),
+            "structural parser kind",
+        )?;
+        require_eq(
+            &report.summary_status,
+            &"ok".to_string(),
+            "structural summary status",
         )
     }
 

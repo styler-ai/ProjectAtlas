@@ -19,7 +19,7 @@ use projectatlas_core::{
     validated_repo_file_key,
 };
 use projectatlas_db::{AtlasStore, IndexedFileText};
-use projectatlas_fs::{ScanOptions, scan_path, scan_repo};
+use projectatlas_fs::{ScanOptions, gitignore_excludes_path, scan_path, scan_repo};
 use projectatlas_service::{
     FilePathMatcher, FileSummaryReport, file_summary_baseline_text, load_ranked_file_nodes,
 };
@@ -264,9 +264,9 @@ pub(crate) fn run_scan_pipeline(
             purpose_import.imported += 1;
         }
     }
+    let symbols = build_symbols_for_index(store, &plan.root, symbol_options, None)?;
     let structural_summaries =
         refresh_structural_summaries_for_nodes(store, &nodes, &text_refresh.rows)?;
-    let symbols = build_symbols_for_index(store, &plan.root, symbol_options, None)?;
     let overview = store.overview()?;
     Ok(ScanReport {
         overview,
@@ -1752,6 +1752,13 @@ pub(crate) fn watch_path_affects_index(
     if relative == "." {
         return true;
     }
+    // Unknown ignore state should not admit a path into the incremental index.
+    let Ok(gitignore_ignored) = gitignore_excludes_path(root, &candidate) else {
+        return false;
+    };
+    if gitignore_ignored {
+        return false;
+    }
     !relative.split('/').any(|component| component == ".purpose")
         && !scan_options.excludes_relative_path(&relative)
 }
@@ -1846,9 +1853,9 @@ pub(crate) fn refresh_index(
     seed_builtin_projectatlas_purposes(store, &nodes)?;
     let text_refresh = refresh_text_index_for_nodes_with_rows(store, &root, &nodes, text_options)?;
     let text_index = text_refresh.report.clone();
+    let symbols = build_symbols_for_index(store, &root, symbol_options, Some(&previous_hashes))?;
     let structural_summaries =
         refresh_structural_summaries_for_nodes(store, &nodes, &text_refresh.rows)?;
-    let symbols = build_symbols_for_index(store, &root, symbol_options, Some(&previous_hashes))?;
     Ok(IndexRefreshReport {
         text_index,
         structural_summaries,
@@ -1902,14 +1909,14 @@ pub(crate) fn refresh_index_for_changes(
         text_options,
     )?;
     let text_index = text_refresh.report.clone();
-    let structural_summaries =
-        refresh_structural_summaries_for_nodes(store, &nodes, &text_refresh.rows)?;
     let target_paths = nodes
         .iter()
         .filter(|node| node.kind == NodeKind::File)
         .map(|node| node.path.clone())
         .collect::<HashSet<_>>();
     if target_paths.is_empty() {
+        let structural_summaries =
+            refresh_structural_summaries_for_nodes(store, &nodes, &text_refresh.rows)?;
         return Ok(IndexRefreshReport {
             text_index,
             structural_summaries,
@@ -1923,6 +1930,8 @@ pub(crate) fn refresh_index_for_changes(
         Some(&previous_hashes),
         Some(&target_paths),
     )?;
+    let structural_summaries =
+        refresh_structural_summaries_for_nodes(store, &nodes, &text_refresh.rows)?;
     Ok(IndexRefreshReport {
         text_index,
         structural_summaries,
@@ -1969,6 +1978,7 @@ pub(crate) fn refresh_structural_summaries_for_nodes(
         return Ok(StructuralSummaryReport::default());
     }
     let indexed_nodes = store.load_nodes_by_paths(&paths)?;
+    let symbol_counts = store.symbol_counts_for_paths(&paths)?;
     let text_by_path = text_rows
         .iter()
         .filter_map(|row| row.text.as_ref().map(|text| (text.path.as_str(), text)))
@@ -2003,6 +2013,15 @@ pub(crate) fn refresh_structural_summaries_for_nodes(
             }
             continue;
         };
+        if symbol_counts
+            .get(indexed.node.path.as_str())
+            .is_some_and(|count| *count > 0)
+            && indexed.summary.as_deref().is_some_and(|summary| {
+                !summary.trim().is_empty() && !is_scanner_fallback_summary(summary)
+            })
+        {
+            continue;
+        }
         let Some(summary) = structural_summary_for_path(
             &indexed.node.path,
             indexed.node.language.as_deref(),

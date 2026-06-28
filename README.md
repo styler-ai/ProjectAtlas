@@ -153,13 +153,21 @@ satisfied, and reports how much indexed source was scanned. Symbol slices reject
 the agent supplies `--symbol-parent`, `--symbol-kind`, or `--symbol-line`, which keeps exact-source reads tied to
 the symbol selected during orientation.
 
-`scan`, MCP `atlas_scan`, watcher refresh, map/lint, and legacy purpose cleanup honor configured
-`[scan].exclude_dir_names` and `[scan].exclude_path_prefixes`.
+`scan`, MCP `atlas_scan`, watcher refresh, map/lint, and legacy purpose cleanup inherit `.gitignore`
+rules dynamically and then apply configured `[scan].exclude_dir_names` and
+`[scan].exclude_path_prefixes` as a stricter ProjectAtlas-only ignore layer that is applied after
+the inherited `.gitignore` baseline. Use `projectatlas ignore list`,
+`projectatlas ignore init-gitignore`, `projectatlas ignore add`, and `projectatlas ignore remove`
+to inspect the active layers, create a missing project-root `.gitignore` when desired, and manage
+manual atlas-only excludes without copying `.gitignore` entries into config.
 Initial scans that import legacy TOON map purposes skip stale or newly excluded map rows and report the skipped
 count instead of failing with a raw SQLite no-row error.
 The durable inputs `.projectatlas/config.toml` and `.projectatlas/projectatlas-nonsource-files.toon` remain
 indexable even though generated `.projectatlas` artifacts such as the SQLite DB, generated map, and MCP config stay
 excluded.
+Project-local or personal workspace state should stay ignored through `.gitignore`; move stable public guidance
+into `AGENTS.md`, docs, or plugin skills instead. ProjectAtlas manual ignores add stricter atlas-specific
+exclusions; they do not unignore paths the repository already excludes through `.gitignore`.
 Deep symbol builds support `--max-workers` and `--timeout-seconds` so large repositories can trade throughput,
 CPU pressure, and bounded agent wait time.
 

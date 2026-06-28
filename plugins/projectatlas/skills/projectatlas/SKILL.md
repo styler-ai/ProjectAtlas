@@ -87,7 +87,7 @@ This skill is part of the ProjectAtlas plugin on purpose. Installing the plugin 
 5. Confirm MCP registration uses the generated `.projectatlas/projectatlas.mcp.json` whenever possible. It contains absolute runtime, DB, and config paths plus a `cwd` project-root hint. `mcp-config` discovers `.projectatlas/config.toml` and flat `projectatlas.toml` from the selected DB/project root. The MCP server also resolves path-less root-sensitive tools from config, indexed DB metadata, or the default `.projectatlas/projectatlas.db` parent, so hosts that ignore `cwd` still use the intended project. The fallback plugin `.mcp.json` starts `projectatlas --require-version <plugin-version> --db .projectatlas/projectatlas.db mcp` from PATH and fails closed if PATH resolves to a stale runtime.
    MCP root-changing arguments such as `atlas_scan.path` and `atlas_watch_once.path` must resolve to this same project root. If you need a different repository, start or install a separate project-local ProjectAtlas MCP server for that repository.
 6. Initialize the target repo with `projectatlas init --seed-purpose`.
-7. Check `.projectatlas/config.toml` before large-repo indexing. Add broad generated/vendor/build directory names to `[scan].exclude_dir_names`, and add exact generated or published subtrees to `[scan].exclude_path_prefixes`.
+7. Run `projectatlas ignore list` before large-repo indexing. ProjectAtlas inherits `.gitignore` dynamically and then applies the manual ProjectAtlas ignore layer as stricter atlas-only exclusions. If the project has no `.gitignore` and needs one for local runtime state, run `projectatlas ignore init-gitignore`. Add broad generated/vendor/build directory names with `projectatlas ignore add --kind dir-name <name>`, and add exact generated or published subtrees with `projectatlas ignore add --kind path-prefix <path>`.
 8. Run `projectatlas scan`.
 9. Add or import one-line purpose records for important folders and files.
 10. Add summaries for non-source files to `.projectatlas/projectatlas-nonsource-files.toon` when needed.
@@ -168,6 +168,7 @@ If MCP tools are unavailable, use the equivalent CLI sequence:
 | Token savings | `projectatlas token` |
 | Human token dashboard | `projectatlas token --view tui` |
 | Diagnostics | `projectatlas settings`, `projectatlas config --print`, and `projectatlas watch-status` |
+| Ignore policy | `projectatlas ignore list`, `projectatlas ignore init-gitignore`, `projectatlas ignore add --kind dir-name <name>`, and `projectatlas ignore add --kind path-prefix <path>` |
 | Reset local index/cache | `projectatlas reset-index --dry-run` then `projectatlas reset-index --apply` |
 
 ## Startup Workflow

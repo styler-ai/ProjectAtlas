@@ -6,6 +6,7 @@ nonsource_files[]:
   README.md,ProjectAtlas overview and usage guide
   LICENSE,ProjectAtlas MIT license
   .gitignore,Ignored files for ProjectAtlas repository
+  .gitattributes,Line-ending policy for ProjectAtlas repository fixtures
   CONTRIBUTING.md,Contribution policy for ProjectAtlas
   SECURITY.md,Security contact information for ProjectAtlas
   CODE_OF_CONDUCT.md,Community conduct expectations for ProjectAtlas
@@ -23,15 +24,6 @@ nonsource_files[]:
   crates/projectatlas-cli/Cargo.toml,CLI Rust crate manifest for ProjectAtlas 3
   .githooks/commit-msg,Git hook to enforce issue references in commits
   .githooks/pre-push,Git hook to run full local checks before push
-  .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas
-  .codex/rules/memory/projectbrief.md,ProjectAtlas project brief
-  .codex/rules/memory/productContext.md,ProjectAtlas product context
-  .codex/rules/memory/activeContext.md,ProjectAtlas active context
-  .codex/rules/memory/systemPatterns.md,ProjectAtlas system patterns
-  .codex/rules/memory/techContext.md,ProjectAtlas tech context
-  .codex/rules/projectatlas/github-rules.md,ProjectAtlas GitHub workflow rules
-  .codex/rules/memory/progress.md,ProjectAtlas progress log
-  .codex/rules/memory/ruleIndex.md,ProjectAtlas memory bank index
   docs/agent-integration.md,Agent integration instructions for ProjectAtlas
   docs/adoption.md,Adoption checklist for ProjectAtlas
   docs/index.md,Documentation landing page for ProjectAtlas

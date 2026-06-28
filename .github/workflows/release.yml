@@ -233,13 +233,16 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install release runtime through plugin
+        timeout-minutes: 5
         env:
           PROJECTATLAS_RELEASE_BINARY_ONLY: "1"
         run: |
           project_root="$RUNNER_TEMP/projectatlas-installer-smoke"
           mkdir -p "$project_root"
           PROJECTATLAS_VERSION="$RELEASE_VERSION" bash ./plugins/projectatlas/scripts/install-runtime.sh "$project_root"
-          "$HOME/.local/bin/projectatlas" --format json runtime-info
+          PROJECTATLAS_NO_TELEMETRY=1 "$HOME/.local/bin/projectatlas" --require-version "$RELEASE_VERSION" --format json runtime-info
+          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$HOME/.local/bin/projectatlas" config --print)
+          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$HOME/.local/bin/projectatlas" ignore list)
           test -f "$project_root/.projectatlas/projectatlas.mcp.json"
 
   installer-smoke-windows:
@@ -251,13 +254,22 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install release runtime through plugin
+        timeout-minutes: 5
         shell: pwsh
         run: |
           $projectRoot = Join-Path $env:RUNNER_TEMP "projectatlas-installer-smoke"
           New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
           .\plugins\projectatlas\scripts\install-runtime.ps1 -ProjectRoot $projectRoot -ProjectAtlasVersion $env:RELEASE_VERSION -ReleaseBinaryOnly
           $runtime = Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin\projectatlas.exe"
-          & $runtime --format json runtime-info
+          $env:PROJECTATLAS_NO_TELEMETRY = "1"
+          & $runtime --require-version $env:RELEASE_VERSION --format json runtime-info
+          Push-Location $projectRoot
+          try {
+            & $runtime config --print
+            & $runtime ignore list
+          } finally {
+            Pop-Location
+          }
           if (-not (Test-Path -LiteralPath (Join-Path $projectRoot ".projectatlas\projectatlas.mcp.json"))) {
             Write-Error "Project-local MCP config was not generated."
             exit 1

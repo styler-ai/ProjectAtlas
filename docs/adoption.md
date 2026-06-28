@@ -75,4 +75,5 @@ projectatlas-lint:
 ## 9. Agent setup
 
 - Add the startup snippet from `templates/AGENTS.md` to your `AGENTS.md`.
-- Copy the Codex skill to `~/.codex/skills/ProjectAtlas.md` if you use Codex.
+- Install the ProjectAtlas plugin skill or copy public guidance from this repository's docs. Keep personal
+  workspace memory local and ignored through `.gitignore`.

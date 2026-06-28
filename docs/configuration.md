@@ -54,11 +54,36 @@ asset_extensions = [".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".ico", ".
 
 `projectatlas init` writes the Rust configuration template. Adjust `scan.source_extensions` only when a project needs a narrower or broader compatibility-map surface.
 
-`scan.exclude_dir_names` and `scan.exclude_path_prefixes` are used by `projectatlas scan`, `projectatlas map`,
-`projectatlas lint`, MCP `atlas_scan`, watcher refresh, and `strip-legacy-purpose`. Use directory-name excludes for
-broad generated/vendor/build folders such as `node_modules` or `target`; use path-prefix excludes for exact
-repository subtrees such as `docs/api` or `app/public/generated`. Search then operates over the indexed file set
-and can use literal, regex, or fuzzy matching.
+ProjectAtlas inherits `.gitignore` dynamically on every scan/watch run through the Rust scanner. Do not copy
+`.gitignore` entries into ProjectAtlas config just to keep them in sync; update `.gitignore` and ProjectAtlas will
+honor the change the next time it scans. `scan.exclude_dir_names` and `scan.exclude_path_prefixes` are the stricter
+ProjectAtlas-only ignore layer applied after the inherited `.gitignore` baseline by `projectatlas scan`,
+`projectatlas map`, `projectatlas lint`, MCP `atlas_scan`, watcher refresh, and `strip-legacy-purpose`.
+Use directory-name excludes for broad
+generated/vendor/build folders such as `node_modules` or `target`; use path-prefix excludes for exact repository
+subtrees such as `docs/api` or `app/public/generated`. Search then operates over the indexed file set and can use
+literal, regex, or fuzzy matching. ProjectAtlas manual ignores add atlas-specific exclusions; they do not unignore
+paths already excluded by `.gitignore`.
+
+Keep private Memory Bank, cache, and harness state out of ProjectAtlas indexes and public Git history by listing
+that local workspace state in `.gitignore`. ProjectAtlas will inherit those rules without copying tool-specific
+folder names into source code or ProjectAtlas config.
+
+Manage the manual ProjectAtlas layer with:
+
+```powershell
+projectatlas ignore list
+projectatlas ignore init-gitignore
+projectatlas ignore add --kind dir-name generated
+projectatlas ignore add --kind path-prefix docs/api
+projectatlas ignore remove --kind path-prefix docs/api
+```
+
+`projectatlas ignore init-gitignore` creates a missing project-root `.gitignore` with ProjectAtlas runtime-state
+defaults. It is a no-op when the file already exists and does not require GitHub or a remote Git repository.
+Project-local or personal workspace state should stay in `.gitignore`. ProjectAtlas honors those ignore rules and
+does not need tool-specific folders copied into its own config. If a workflow note needs to be public, promote it
+to `AGENTS.md`, `docs/`, or plugin skill documentation instead of committing private workspace memory.
 
 During migration from legacy TOON maps, `projectatlas scan` imports purpose records only for paths still present in
 the freshly indexed file set. Stale or newly excluded map rows are counted as skipped stale imports instead of

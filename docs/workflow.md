@@ -6,13 +6,14 @@ ProjectAtlas is designed to run locally and produce a deterministic map.
 
 1. `projectatlas init --seed-purpose` (first-time setup).
 2. Run `projectatlas scan` to update the SQLite index.
-3. Run `projectatlas overview`, `projectatlas folders <query>`, and `projectatlas files <query>` before broad source reads; use `projectatlas files --file-pattern <glob>` for direct glob discovery.
-4. Run `projectatlas summary <file> --limit 25` before opening full files.
-5. Run `projectatlas outline <file>` when line-level compressed context is still needed.
-6. Run `projectatlas map --force` when the compatibility TOON snapshot should be regenerated.
-7. Run `projectatlas lint --strict-folders --report-untracked`.
-8. Open a PR that references the GitHub issue (CI requires `#NNN` in title or body).
-9. Install git hooks by copying or linking files from `.githooks/` into `.git/hooks/`.
+3. Run `projectatlas config --print` when effective scan, purpose, or exclusion policy is unclear.
+4. Run `projectatlas overview`, `projectatlas folders <query>`, and `projectatlas files <query>` before broad source reads; use `projectatlas files --file-pattern <glob>` for direct glob discovery.
+5. Run `projectatlas summary <file> --limit 25` before opening full files.
+6. Run `projectatlas outline <file>` when line-level compressed context is still needed.
+7. Run `projectatlas map --force` when the compatibility TOON snapshot should be regenerated.
+8. Run `projectatlas lint --strict-folders --report-untracked`.
+9. Open a PR that references the GitHub issue (CI requires `#NNN` in title or body).
+10. Install git hooks by copying or linking files from `.githooks/` into `.git/hooks/`.
 
 For long local sessions, run `projectatlas watch` from the project root. It uses event-backed `notify`
 watching with debounce/exclude handling and falls back to portable polling when the platform watcher is

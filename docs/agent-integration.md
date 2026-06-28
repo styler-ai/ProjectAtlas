@@ -184,8 +184,8 @@ explicit `projectatlas token --view tui` view.
 
 ## Codex skills
 
-ProjectAtlas ships a Codex skill at `.codex/skills/ProjectAtlas.md`. Copy that file into your
-Codex workspace or keep it in place so Codex can load the ProjectAtlas workflow.
+ProjectAtlas ships public agent guidance through `AGENTS.md`, repository docs, and the packaged plugin skill.
+Personal workspace memory is local state and should stay ignored/untracked through `.gitignore`.
 
 ## Claude / skills
 

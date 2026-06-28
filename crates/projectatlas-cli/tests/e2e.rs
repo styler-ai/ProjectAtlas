@@ -599,6 +599,81 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn no_telemetry_readonly_cli_smoke() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir(repo.join("src"))?;
+    fs::write(
+        repo.join("src").join("main.rs"),
+        "pub fn main_entry() -> &'static str {\n    \"atlas\"\n}\n",
+    )?;
+    let db = temp.path().join("projectatlas.db");
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    for (path, purpose) in [
+        (".", "Repository root for no-telemetry CLI smoke."),
+        ("src", "Rust source folder for no-telemetry CLI smoke."),
+        (
+            "src/main.rs",
+            "Rust source file for no-telemetry CLI smoke.",
+        ),
+    ] {
+        Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .arg("--db")
+            .arg(&db)
+            .args(["purpose", "set", path, purpose])
+            .assert()
+            .success();
+    }
+
+    let calls_before = token_call_count(&repo, &db)?;
+    for args in [
+        vec!["overview"],
+        vec!["folders", "src", "--limit", "5"],
+        vec!["files", "main", "--folder", "src", "--limit", "5"],
+        vec!["summary", "src/main.rs", "--limit", "5"],
+        vec![
+            "search",
+            "main_entry",
+            "--file-pattern",
+            "src/*.rs",
+            "--limit",
+            "5",
+        ],
+        vec!["parity", "report", "--profile", "repository-intelligence"],
+        vec!["parity", "--profile", "repository-intelligence"],
+        vec!["token"],
+        vec!["token", "--view", "tui"],
+    ] {
+        Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .arg("--db")
+            .arg(&db)
+            .args(args)
+            .assert()
+            .success();
+    }
+    let calls_after = token_call_count(&repo, &db)?;
+    if calls_before != calls_after {
+        return Err(io::Error::other(format!(
+            "read-only no-telemetry smoke mutated token calls: before {calls_before}, after {calls_after}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn large_repository_agent_funnel_stays_bounded() -> Result<(), Box<dyn Error>> {
     const MODULES: usize = 24;
     const FILES_PER_MODULE: usize = 24;
@@ -1386,6 +1461,318 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn ignore_commands_preserve_manual_layer_while_gitignore_updates_apply()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir_all(repo.join("src"))?;
+    fs::create_dir_all(repo.join("generated"))?;
+    fs::create_dir_all(repo.join("docs").join("api"))?;
+    fs::create_dir_all(repo.join("local-cache"))?;
+    fs::write(repo.join("src").join("main.rs"), "fn main() {}\n")?;
+    fs::write(
+        repo.join("generated").join("noise.rs"),
+        "fn generated_noise() {}\n",
+    )?;
+    fs::write(
+        repo.join("docs").join("api").join("noise.rs"),
+        "fn docs_noise() {}\n",
+    )?;
+    fs::write(
+        repo.join("local-cache").join("noise.rs"),
+        "fn ignored_by_gitignore() {}\n",
+    )?;
+    let db = temp.path().join("projectatlas.db");
+
+    let raw_missing_gitignore = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["ignore", "list"])
+        .output()?;
+    if !raw_missing_gitignore.status.success() {
+        return Err(io::Error::other("ignore list without .gitignore failed").into());
+    }
+    let missing_gitignore_json: Value = serde_json::from_slice(&raw_missing_gitignore.stdout)?;
+    require_json_bool(&missing_gitignore_json, &["gitignore_present"], false)?;
+    require_json_string(
+        &missing_gitignore_json,
+        &["gitignore_mode"],
+        "inherited-when-present",
+    )?;
+    require_json_string(
+        &missing_gitignore_json,
+        &["manual_layer_order"],
+        "after-gitignore",
+    )?;
+
+    let raw_init_gitignore = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["ignore", "init-gitignore"])
+        .output()?;
+    if !raw_init_gitignore.status.success() {
+        return Err(io::Error::other("ignore init-gitignore failed").into());
+    }
+    let init_gitignore_json: Value = serde_json::from_slice(&raw_init_gitignore.stdout)?;
+    require_json_bool(&init_gitignore_json, &["created"], true)?;
+    require_json_bool(&init_gitignore_json, &["existed"], false)?;
+    require_json_bool(&init_gitignore_json, &["gitignore_inherited"], true)?;
+    let gitignore_path = repo.join(".gitignore");
+    let gitignore_text = fs::read_to_string(&gitignore_path)?;
+    if !gitignore_text.contains(".projectatlas/*.db") {
+        return Err(io::Error::other(format!(
+            "created .gitignore did not protect ProjectAtlas runtime DBs: {gitignore_text}"
+        ))
+        .into());
+    }
+
+    let raw_existing_gitignore = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["ignore", "init-gitignore"])
+        .output()?;
+    if !raw_existing_gitignore.status.success() {
+        return Err(io::Error::other("repeat ignore init-gitignore failed").into());
+    }
+    let existing_gitignore_json: Value = serde_json::from_slice(&raw_existing_gitignore.stdout)?;
+    require_json_bool(&existing_gitignore_json, &["created"], false)?;
+    require_json_bool(&existing_gitignore_json, &["existed"], true)?;
+
+    fs::write(gitignore_path, format!("{gitignore_text}local-cache/\n"))?;
+
+    let raw_add_dir = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["ignore", "add", "--kind", "dir-name", "generated"])
+        .output()?;
+    if !raw_add_dir.status.success() {
+        return Err(io::Error::other("ignore add dir-name failed").into());
+    }
+    let add_dir_json: Value = serde_json::from_slice(&raw_add_dir.stdout)?;
+    require_json_bool(&add_dir_json, &["gitignore_present"], true)?;
+    require_json_string(&add_dir_json, &["gitignore_mode"], "inherited-when-present")?;
+    require_json_string(&add_dir_json, &["manual_layer_order"], "after-gitignore")?;
+    require_json_string(&add_dir_json, &["kind"], "dir-name")?;
+    require_json_string(&add_dir_json, &["value"], "generated")?;
+    require_json_bool(&add_dir_json, &["changed"], true)?;
+
+    let raw_add_prefix = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["ignore", "add", "--kind", "path-prefix", "docs/api"])
+        .output()?;
+    if !raw_add_prefix.status.success() {
+        return Err(io::Error::other("ignore add path-prefix failed").into());
+    }
+    let add_prefix_json: Value = serde_json::from_slice(&raw_add_prefix.stdout)?;
+    require_json_string(&add_prefix_json, &["kind"], "path-prefix")?;
+    require_json_string(&add_prefix_json, &["value"], "docs/api")?;
+    require_json_bool(&add_prefix_json, &["changed"], true)?;
+
+    let config_text = fs::read_to_string(repo.join(".projectatlas").join("config.toml"))?;
+    if !config_text.contains(r"exclude_dir_names = [")
+        || !config_text.contains(r#""generated""#)
+        || !config_text.contains(r#""docs/api""#)
+    {
+        return Err(io::Error::other(format!(
+            "ignore add did not persist manual excludes: {config_text}"
+        ))
+        .into());
+    }
+    if config_text.contains("local-cache") {
+        return Err(
+            io::Error::other(".gitignore entry was copied into ProjectAtlas config").into(),
+        );
+    }
+
+    let raw_scan = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .output()?;
+    if !raw_scan.status.success() {
+        return Err(io::Error::other("ignore-policy scan command failed").into());
+    }
+    let scan_json: Value = serde_json::from_slice(&raw_scan.stdout)?;
+    require_json_usize_at_least(&scan_json, &["overview", "files"], 1)?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["files", "--file-pattern", "**/*", "--limit", "10"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("src/main.rs"))
+        .stdout(predicate::str::contains("generated/noise.rs").not())
+        .stdout(predicate::str::contains("docs/api/noise.rs").not())
+        .stdout(predicate::str::contains("local-cache/noise.rs").not());
+
+    let nested = repo.join("nested").join("work");
+    fs::create_dir_all(&nested)?;
+    let raw_nested_add = Command::cargo_bin("projectatlas")?
+        .current_dir(&nested)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["ignore", "add", "--kind", "dir-name", "nested-generated"])
+        .output()?;
+    if !raw_nested_add.status.success() {
+        return Err(io::Error::other("nested ignore add with explicit DB failed").into());
+    }
+    let nested_add_json: Value = serde_json::from_slice(&raw_nested_add.stdout)?;
+    require_json_string(&nested_add_json, &["value"], "nested-generated")?;
+    require_json_bool(&nested_add_json, &["changed"], true)?;
+    if nested.join(".projectatlas").join("config.toml").exists() {
+        return Err(io::Error::other("nested ignore command created a nested config").into());
+    }
+    let nested_config_text = fs::read_to_string(repo.join(".projectatlas").join("config.toml"))?;
+    if !nested_config_text.contains(r#""nested-generated""#) {
+        return Err(io::Error::other("nested ignore command did not edit project config").into());
+    }
+
+    fs::write(repo.join(".gitignore"), "local-cache/\nsrc/\n")?;
+    let raw_rescan = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .output()?;
+    if !raw_rescan.status.success() {
+        return Err(io::Error::other("ignore-policy rescan command failed").into());
+    }
+    let rescan_json: Value = serde_json::from_slice(&raw_rescan.stdout)?;
+    require_json_usize_at_least(&rescan_json, &["overview", "files"], 1)?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["files", "--file-pattern", "**/*", "--limit", "10"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("src/main.rs").not())
+        .stdout(predicate::str::contains("generated/noise.rs").not())
+        .stdout(predicate::str::contains("docs/api/noise.rs").not())
+        .stdout(predicate::str::contains("local-cache/noise.rs").not());
+
+    let updated_config_text = fs::read_to_string(repo.join(".projectatlas").join("config.toml"))?;
+    if updated_config_text.contains("local-cache") || updated_config_text.contains(r#""src""#) {
+        return Err(
+            io::Error::other(".gitignore update was copied into ProjectAtlas config").into(),
+        );
+    }
+    if !updated_config_text.contains(r#""generated""#)
+        || !updated_config_text.contains(r#""docs/api""#)
+    {
+        return Err(io::Error::other("manual ProjectAtlas excludes were not preserved").into());
+    }
+
+    let raw_ignored_src_search = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["search", "fn main", "--file-pattern", "*.rs"])
+        .output()?;
+    if !raw_ignored_src_search.status.success() {
+        return Err(io::Error::other("ignored src search failed").into());
+    }
+    let ignored_src_search_json: Value = serde_json::from_slice(&raw_ignored_src_search.stdout)?;
+    require_json_usize(&ignored_src_search_json, &["returned"], 0)?;
+
+    let raw_remove_prefix = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["ignore", "remove", "--kind", "path-prefix", "docs/api"])
+        .output()?;
+    if !raw_remove_prefix.status.success() {
+        return Err(io::Error::other("ignore remove path-prefix failed").into());
+    }
+    let remove_prefix_json: Value = serde_json::from_slice(&raw_remove_prefix.stdout)?;
+    require_json_bool(&remove_prefix_json, &["changed"], true)?;
+    require_json_string(&remove_prefix_json, &["kind"], "path-prefix")?;
+    require_json_string(&remove_prefix_json, &["value"], "docs/api")?;
+    let removed_config_text = fs::read_to_string(repo.join(".projectatlas").join("config.toml"))?;
+    if !removed_config_text.contains(r#""generated""#)
+        || removed_config_text.contains(r#""docs/api""#)
+    {
+        return Err(io::Error::other(format!(
+            "manual ignore remove did not edit only the requested ProjectAtlas rule: {removed_config_text}"
+        ))
+        .into());
+    }
+
+    let windows_prefix_config = removed_config_text.replace(
+        "exclude_path_prefixes = []",
+        "exclude_path_prefixes = ['docs\\api']",
+    );
+    fs::write(
+        repo.join(".projectatlas").join("config.toml"),
+        windows_prefix_config,
+    )?;
+    let raw_remove_windows_prefix = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["ignore", "remove", "--kind", "path-prefix", "docs/api"])
+        .output()?;
+    if !raw_remove_windows_prefix.status.success() {
+        return Err(io::Error::other("ignore remove Windows-style path-prefix failed").into());
+    }
+    let remove_windows_prefix_json: Value =
+        serde_json::from_slice(&raw_remove_windows_prefix.stdout)?;
+    require_json_bool(&remove_windows_prefix_json, &["changed"], true)?;
+    let normalized_removed_config_text =
+        fs::read_to_string(repo.join(".projectatlas").join("config.toml"))?;
+    if normalized_removed_config_text.contains("docs\\api")
+        || normalized_removed_config_text.contains("docs/api")
+    {
+        return Err(io::Error::other(format!(
+            "Windows-style path-prefix survived normalized ignore remove: {normalized_removed_config_text}"
+        ))
+        .into());
+    }
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["ignore", "add", "--kind", "path-prefix", "../outside"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("parent traversal is not allowed"));
+
+    Ok(())
+}
+
+#[test]
 fn default_scan_drops_stale_nodes_after_prefix_exclude_config_change() -> Result<(), Box<dyn Error>>
 {
     let temp = tempfile::tempdir()?;
@@ -1469,7 +1856,7 @@ fn vue_composition_api_summary_uses_bindings() -> Result<(), Box<dyn Error>> {
     fs::create_dir(&repo)?;
     fs::create_dir_all(repo.join("src"))?;
     fs::write(
-        repo.join("src").join("DealStage.vue"),
+        repo.join("src").join("ProductPanel.vue"),
         r#"
 <template><article>{{ currentPriceLabel }}</article></template>
 <script setup lang="ts">
@@ -1477,11 +1864,11 @@ import { computed, ref } from "vue";
 
 const props = withDefaults(defineProps<{
   title: string;
-}>(), { title: "Deal" });
+}>(), { title: "Product" });
 const emit = defineEmits<{
   select: [id: string];
 }>();
-const dealTitleId = computed(() => props.title.toLowerCase());
+const productTitleId = computed(() => props.title.toLowerCase());
 const currentPriceLabel = computed(() => `$${props.title}`);
 const retryCount = ref(0);
 </script>
@@ -1496,12 +1883,20 @@ const retryCount = ref(0);
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
-        .args(["summary", "src/DealStage.vue", "--limit", "10"])
+        .args(["summary", "src/ProductPanel.vue", "--limit", "10"])
         .assert()
         .success()
         .stdout(predicate::str::contains("vue source defining bindings"))
         .stdout(predicate::str::contains("currentPriceLabel"))
         .stdout(predicate::str::contains("vue file,").not());
+
+    let summary_json = json_summary_command(
+        &repo,
+        &repo.join(".projectatlas").join("projectatlas.db"),
+        "src/ProductPanel.vue",
+    )?;
+    require_json_string(&summary_json, &["parser_kind"], "structural-symbol-graph")?;
+    require_json_string(&summary_json, &["summary_status"], "ok")?;
     Ok(())
 }
 
@@ -1619,6 +2014,7 @@ fn structural_summaries_cover_declarative_files_and_projectatlas_inputs()
     fs::create_dir_all(repo.join(".projectatlas"))?;
     fs::create_dir_all(repo.join(".github").join("workflows"))?;
     fs::create_dir_all(repo.join("app").join("styles"))?;
+    fs::create_dir_all(repo.join("app").join("public").join("data"))?;
     fs::create_dir_all(repo.join("public"))?;
     fs::create_dir_all(repo.join("src"))?;
     fs::write(
@@ -1656,8 +2052,23 @@ fn structural_summaries_cover_declarative_files_and_projectatlas_inputs()
         ":root { --brand: #fff; }\n.card, .panel { color: red; }\n@media (min-width: 40rem) { .card { display: grid; } }\n",
     )?;
     fs::write(
+        repo.join("app")
+            .join("public")
+            .join("data")
+            .join("datasets.manifest.json"),
+        r#"{
+  "generated_at": "2026-06-28T00:00:00Z",
+  "version": "2026.06.28",
+  "datasets": {
+    "catalog.primary": {"path": "primary.json"},
+    "catalog.secondary": {"path": "secondary.json"},
+    "catalog.archive": {"path": "archive.json"}
+  }
+}"#,
+    )?;
+    fs::write(
         repo.join("public").join("index.html"),
-        "<html><head><title>Home</title><meta name=\"description\" content=\"Welcome page\"></head><body><h1>Hello</h1><script type=\"application/ld+json\">{}</script></body></html>",
+        "<html><head><title>Home</title><meta name=\"description\" content=\"Welcome page\"><link rel=\"canonical\" href=\"https://example.test/\"><link rel=\"manifest\" href=\"/site.webmanifest\"><link rel=\"alternate\" href=\"/de/\"></head><body><h1>Hello</h1><script type=\"application/ld+json\">{}</script></body></html>",
     )?;
     fs::write(
         repo.join("src").join("empty.rs"),
@@ -1677,7 +2088,7 @@ fn structural_summaries_cover_declarative_files_and_projectatlas_inputs()
         return Err(io::Error::other("structural scan command failed").into());
     }
     let scan_json: Value = serde_json::from_slice(&raw_scan.stdout)?;
-    require_json_usize_at_least(&scan_json, &["structural_summaries", "summarized"], 7)?;
+    require_json_usize_at_least(&scan_json, &["structural_summaries", "summarized"], 8)?;
     require_json_usize_at_least(
         &scan_json,
         &["structural_summaries", "purpose_suggestions"],
@@ -1732,6 +2143,7 @@ fn structural_summaries_cover_declarative_files_and_projectatlas_inputs()
         &["observed_summary"],
         "yaml workflow CI triggered by pull_request, push with jobs test.",
     )?;
+    require_json_string(&workflow_summary, &["purpose_status"], "suggested")?;
 
     let config_summary = json_summary_command(&repo, &db, ".projectatlas/config.toml")?;
     require_json_string(
@@ -1748,11 +2160,30 @@ fn structural_summaries_cover_declarative_files_and_projectatlas_inputs()
         "css stylesheet with selectors .card, .panel, :root",
     )?;
 
+    let manifest_summary =
+        json_summary_command(&repo, &db, "app/public/data/datasets.manifest.json")?;
+    require_json_string(
+        &manifest_summary,
+        &["observed_summary"],
+        "json dataset manifest with 3 datasets including catalog.archive, catalog.primary, catalog.secondary and keys datasets, generated_at, version.",
+    )?;
+    require_json_string(&manifest_summary, &["purpose_status"], "suggested")?;
+    require_json_contains(
+        &manifest_summary,
+        &["purpose"],
+        "catalog.archive, catalog.primary, catalog.secondary",
+    )?;
+
     let html_summary = json_summary_command(&repo, &db, "public/index.html")?;
     require_json_contains(
         &html_summary,
         &["observed_summary"],
         "html document with title Home, meta description Welcome page",
+    )?;
+    require_json_contains(
+        &html_summary,
+        &["observed_summary"],
+        "link rels alternate, canonical, manifest",
     )?;
 
     let rust_summary = json_summary_command(&repo, &db, "src/empty.rs")?;
@@ -2379,6 +2810,55 @@ fn watch_once_preserves_unchanged_deep_summary_and_text_index() -> Result<(), Bo
 }
 
 #[test]
+fn watch_once_preserves_manifest_symbol_summary() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"manifest-demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nserde = \"1\"\n",
+    )?;
+    let db = temp.path().join("projectatlas.db");
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    let before = json_summary_command(&repo, &db, "Cargo.toml")?;
+    require_json_string(&before, &["parser_kind"], "manifest-symbol-graph")?;
+    require_json_string(&before, &["summary_status"], "ok")?;
+    let before_summary = json_at(&before, &["observed_summary"])?
+        .as_str()
+        .ok_or_else(|| io::Error::other("manifest summary before watch was not a string"))?
+        .to_string();
+    if !before_summary.contains("depending on serde") {
+        return Err(io::Error::other(format!(
+            "manifest summary did not include dependency facts before watch: {before_summary}"
+        ))
+        .into());
+    }
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["watch", ".", "--once"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("unchanged: 1"));
+
+    let after = json_summary_command(&repo, &db, "Cargo.toml")?;
+    require_json_string(&after, &["parser_kind"], "manifest-symbol-graph")?;
+    require_json_string(&after, &["summary_status"], "ok")?;
+    require_json_string(&after, &["observed_summary"], &before_summary)?;
+    Ok(())
+}
+
+#[test]
 fn watch_once_detects_new_files_folders_text_and_symbols() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("repo");
@@ -2647,6 +3127,69 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .failure()
         .stdout(predicate::str::contains("parity:"))
         .stdout(predicate::str::contains("5 suggested"));
+
+    Ok(())
+}
+
+#[test]
+fn parity_alias_passes_clean_repository() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir(repo.join("src"))?;
+    fs::write(
+        repo.join("src").join("lib.rs"),
+        "pub fn library_entry() -> &'static str {\n    \"atlas\"\n}\n",
+    )?;
+    let db = temp.path().join("projectatlas.db");
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    for (path, purpose) in [
+        (".", "Repository root for clean parity alias tests."),
+        ("src", "Rust source folder for clean parity alias tests."),
+        (
+            "src/lib.rs",
+            "Rust library source file for clean parity alias tests.",
+        ),
+    ] {
+        Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .arg("--db")
+            .arg(&db)
+            .args(["purpose", "set", path, purpose])
+            .assert()
+            .success();
+    }
+
+    for args in [
+        vec!["parity", "report", "--profile", "repository-intelligence"],
+        vec!["parity", "--profile", "repository-intelligence"],
+    ] {
+        let output = Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .arg("--format")
+            .arg("json")
+            .arg("--db")
+            .arg(&db)
+            .args(args)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "clean parity command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        let parity_json: Value = serde_json::from_slice(&output.stdout)?;
+        require_json_bool(&parity_json, &["ok"], true)?;
+    }
 
     Ok(())
 }
@@ -3192,7 +3735,8 @@ fn language_summary_baselines() -> Result<Vec<LanguageSummaryBaseline>, Box<dyn 
             .join("languages")
             .join("baselines.toon"),
     )?;
-    let decoded: Value = toon_format::decode_default(&baseline_text)
+    let normalized_baseline_text = baseline_text.replace("\r\n", "\n").replace('\r', "\n");
+    let decoded: Value = toon_format::decode_default(&normalized_baseline_text)
         .map_err(|error| io::Error::other(format!("baseline TOON decode failed: {error}")))?;
     let rows = decoded
         .get("summaries")
@@ -3432,6 +3976,30 @@ fn assert_summary_called_by(
         ))
         .into())
     }
+}
+
+/// Return the current token telemetry call count without mutating telemetry.
+fn token_call_count(repo: &std::path::Path, db: &std::path::Path) -> Result<u64, Box<dyn Error>> {
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(db)
+        .arg("token")
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "token call-count command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let token_json: Value = serde_json::from_slice(&output.stdout)?;
+    token_json["calls"]
+        .as_u64()
+        .ok_or_else(|| io::Error::other("token call count missing").into())
 }
 
 /// Require a nested JSON string value.

@@ -6,7 +6,8 @@ mod runtime;
 mod structural;
 
 use atlas_map::{
-    LintOptions, effective_config_report, init_project, lint_map, load_atlas_config,
+    IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report, init_gitignore,
+    init_project, lint_map, list_ignore_entries, load_atlas_config, remove_ignore_entry,
     seed_purpose_files, write_map,
 };
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -110,6 +111,24 @@ enum TokenView {
     Agent,
     /// Human terminal dashboard with a compact savings diagram.
     Tui,
+}
+
+/// Manual `ProjectAtlas` ignore entry kind for CLI input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum IgnoreKind {
+    /// Ignore every directory with this name anywhere under the repository.
+    DirName,
+    /// Ignore one repository-relative path subtree.
+    PathPrefix,
+}
+
+impl From<IgnoreKind> for IgnoreEntryKind {
+    fn from(value: IgnoreKind) -> Self {
+        match value {
+            IgnoreKind::DirName => Self::DirName,
+            IgnoreKind::PathPrefix => Self::PathPrefix,
+        }
+    }
 }
 
 /// Top-level parsed CLI arguments.
@@ -270,6 +289,12 @@ enum Command {
         #[arg(long)]
         print: bool,
     },
+    /// Manage the manual `ProjectAtlas` ignore layer in config.
+    Ignore {
+        /// Ignore subcommand to run.
+        #[command(subcommand)]
+        command: IgnoreCommand,
+    },
     /// Print watcher availability and current status.
     WatchStatus,
     /// Watch a repository and refresh the index when files change.
@@ -376,6 +401,31 @@ enum Command {
         /// Purpose subcommand to run.
         #[command(subcommand)]
         command: PurposeCommand,
+    },
+}
+
+/// Manual ignore management subcommands.
+#[derive(Debug, Subcommand)]
+enum IgnoreCommand {
+    /// List effective `ProjectAtlas` manual ignore policy.
+    List,
+    /// Create a project-root `.gitignore` when it is missing.
+    InitGitignore,
+    /// Add one manual ignore entry to `.projectatlas/config.toml`.
+    Add {
+        /// Ignore kind to add.
+        #[arg(long, value_enum)]
+        kind: IgnoreKind,
+        /// Directory name or repository-relative path prefix.
+        value: String,
+    },
+    /// Remove one manual ignore entry from `.projectatlas/config.toml`.
+    Remove {
+        /// Ignore kind to remove. Omit to remove from both manual ignore lists.
+        #[arg(long, value_enum)]
+        kind: Option<IgnoreKind>,
+        /// Directory name or repository-relative path prefix.
+        value: String,
     },
 }
 
@@ -828,6 +878,50 @@ fn run() -> Result<(), CliError> {
                 &report,
             )?;
         }
+        Command::Ignore { command } => match command {
+            IgnoreCommand::List => {
+                let project_root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+                let report = list_ignore_entries(cli.config.as_deref(), &project_root)?;
+                print_output(
+                    cli.format,
+                    &encode_agent_payload(&json!({ "ignore": report })),
+                    &report,
+                )?;
+            }
+            IgnoreCommand::InitGitignore => {
+                let project_root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+                let report = init_gitignore(cli.config.as_deref(), &project_root)?;
+                print_output(
+                    cli.format,
+                    &encode_agent_payload(&json!({ "gitignore": report })),
+                    &report,
+                )?;
+            }
+            IgnoreCommand::Add { kind, value } => {
+                let project_root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+                let report =
+                    add_ignore_entry(cli.config.as_deref(), &project_root, (*kind).into(), value)?;
+                print_output(
+                    cli.format,
+                    &encode_agent_payload(&json!({ "ignore": report })),
+                    &report,
+                )?;
+            }
+            IgnoreCommand::Remove { kind, value } => {
+                let project_root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
+                let report = remove_ignore_entry(
+                    cli.config.as_deref(),
+                    &project_root,
+                    kind.map(Into::into),
+                    value,
+                )?;
+                print_output(
+                    cli.format,
+                    &encode_agent_payload(&json!({ "ignore": report })),
+                    &report,
+                )?;
+            }
+        },
         Command::WatchStatus => {
             let report = watcher_status_report(false);
             let toon = render_watch_status(&report);
@@ -1639,16 +1733,20 @@ mod tests {
     #[test]
     fn summarizes_vue_composition_bindings_without_functions() {
         let graph = SymbolGraph {
-            path: "src/DealStage.vue".to_string(),
+            path: "src/ProductPanel.vue".to_string(),
             language: Some("vue".to_string()),
-            parser: ParserKind::Fallback,
+            parser: ParserKind::Structural,
             symbols: vec![
-                test_symbol("src/DealStage.vue", SymbolKind::Value, "props"),
-                test_symbol("src/DealStage.vue", SymbolKind::Value, "emit"),
-                test_symbol("src/DealStage.vue", SymbolKind::Value, "currentPriceLabel"),
+                test_symbol("src/ProductPanel.vue", SymbolKind::Value, "props"),
+                test_symbol("src/ProductPanel.vue", SymbolKind::Value, "emit"),
+                test_symbol(
+                    "src/ProductPanel.vue",
+                    SymbolKind::Value,
+                    "currentPriceLabel",
+                ),
             ],
             relations: vec![test_relation(
-                "src/DealStage.vue",
+                "src/ProductPanel.vue",
                 RelationKind::Imports,
                 "import { computed, ref } from \"vue\";",
             )],
@@ -1761,6 +1859,13 @@ mod tests {
         require_condition(
             watch_path_affects_index(root, &root.join(".gitignore"), &scan_options),
             "gitignore event should refresh scanner rules",
+        )?;
+        fs::create_dir(root.join("local-state"))?;
+        fs::write(root.join("local-state/cache.md"), "ignored local cache\n")?;
+        fs::write(root.join(".gitignore"), "local-state/\n")?;
+        require_condition(
+            !watch_path_affects_index(root, &root.join("local-state/cache.md"), &scan_options),
+            "gitignore-ignored local state events should be ignored",
         )?;
         require_condition(
             !watch_path_affects_index(
@@ -1922,6 +2027,13 @@ mod tests {
                 .is_some(),
             "summary should exist before skip",
         )?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "config.toml".to_string(),
+            language: Some("toml".to_string()),
+            parser: ParserKind::Manifest,
+            symbols: vec![test_symbol("config.toml", SymbolKind::Value, "project")],
+            relations: Vec::new(),
+        })?;
 
         let skipped_text = refresh_text_index_for_nodes_with_rows(
             &mut store,

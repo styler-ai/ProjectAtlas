@@ -7,6 +7,7 @@ use projectatlas_core::symbols::{
 };
 use regex::Regex;
 use std::borrow::Cow;
+use std::path::Path;
 use toml::Value as TomlValue;
 use tree_sitter::{Language, Node, Parser};
 
@@ -26,6 +27,9 @@ pub fn extract_symbol_graph(path: &str, language: Option<&str>, content: &str) -
         return extract_cargo_manifest_graph(path, language, content);
     }
     let parse_content = content_without_leading_purpose_header(content);
+    if is_vue_sfc(path, language) {
+        return extract_vue_sfc_graph(path, language, parse_content.as_ref());
+    }
     if let Some(graph) = extract_tree_sitter_graph(path, language, parse_content.as_ref()) {
         return graph;
     }
@@ -66,6 +70,93 @@ fn is_cargo_manifest(path: &str, language: Option<&str>) -> bool {
     path.ends_with("Cargo.toml")
         || path.ends_with("Cargo.lock")
         || matches!(language, Some("cargo-manifest" | "cargo-lock"))
+}
+
+/// Return whether this source is a Vue single-file component.
+fn is_vue_sfc(path: &str, language: Option<&str>) -> bool {
+    matches!(language, Some("vue"))
+        || Path::new(path)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("vue"))
+}
+
+/// Extract Vue SFC Composition API bindings with a deterministic structural adapter.
+fn extract_vue_sfc_graph(path: &str, language: Option<&str>, content: &str) -> SymbolGraph {
+    let mut graph = empty_graph(path, language, ParserKind::Structural);
+    for (line_index, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if let Some(name) = vue_composition_binding_name(trimmed) {
+            push_symbol(
+                &mut graph,
+                &name,
+                SymbolKind::Value,
+                line_index + 1,
+                line_index + 1,
+                None,
+                Some("vue-composition-binding"),
+                trimmed,
+            );
+        }
+        if is_fallback_import(trimmed) {
+            push_relation(
+                &mut graph,
+                "<module>",
+                trimmed,
+                RelationKind::Imports,
+                line_index + 1,
+                trimmed,
+            );
+        }
+    }
+    graph
+}
+
+/// Extract a Composition API binding name from a script setup row.
+fn vue_composition_binding_name(line: &str) -> Option<String> {
+    const MACROS: &[&str] = &[
+        "defineProps",
+        "defineEmits",
+        "defineModel",
+        "defineSlots",
+        "computed",
+        "ref",
+        "shallowRef",
+        "reactive",
+        "toRef",
+        "toRefs",
+        "watch",
+    ];
+    let rest = line
+        .strip_prefix("const ")
+        .or_else(|| line.strip_prefix("let "))
+        .or_else(|| line.strip_prefix("var "))?;
+    let (name, initializer) = rest.split_once('=')?;
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let initializer = initializer.trim_start();
+    MACROS
+        .iter()
+        .any(|macro_name| vue_initializer_starts_with_macro(initializer, macro_name))
+        .then(|| name.to_string())
+}
+
+/// Return whether a Vue initializer starts with a supported Composition API macro.
+fn vue_initializer_starts_with_macro(initializer: &str, macro_name: &str) -> bool {
+    vue_initializer_is_macro_call(initializer, macro_name)
+        || initializer
+            .strip_prefix("withDefaults(")
+            .is_some_and(|nested| vue_initializer_is_macro_call(nested.trim_start(), macro_name))
+}
+
+/// Return whether an initializer begins with the named macro call.
+fn vue_initializer_is_macro_call(initializer: &str, macro_name: &str) -> bool {
+    let Some(rest) = initializer.strip_prefix(macro_name) else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    rest.starts_with('(') || rest.starts_with('<')
 }
 
 /// Extract Cargo package, workspace, and dependency entries.
@@ -1517,7 +1608,7 @@ fn is_snippet_boundary(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{extract_symbol_graph, specialized_languages};
-    use projectatlas_core::symbols::{RelationKind, SymbolKind};
+    use projectatlas_core::symbols::{ParserKind, RelationKind, SymbolKind};
 
     #[test]
     fn extracts_rust_symbols_and_calls() {
@@ -1796,9 +1887,9 @@ const helper = function helperFactory() { return createThing(); };
     #[test]
     fn file_purpose_docblock_is_not_symbol_documentation() {
         let source = r#"/**
- * Purpose: Choose a fresher deck start so repeated app opens avoid the same opening cards.
+ * Purpose: Choose a fresher catalog start so repeated app opens avoid the same opening items.
  */
-import type { Deal } from "@/types/deals";
+import type { CatalogItem } from "@/types/catalog";
 export function applyLaunchFreshness() {}
 "#;
         let graph = extract_symbol_graph("src/launch-freshness.ts", Some("typescript"), source);
@@ -1820,14 +1911,11 @@ export function applyLaunchFreshness() {}
     #[test]
     fn boundary_truncates_long_import_snippet() {
         let truncated = super::truncate_chars_at_boundary(
-            "import type { EmailDigestDraft, MarketingChannel, MarketingDatasetDeal } from \"@/marketing\";",
+            "import type { DigestDraft, DeliveryChannel, CatalogDatasetItem } from \"@/catalog\";",
             56,
         );
 
-        assert_eq!(
-            truncated,
-            "import type { EmailDigestDraft, MarketingChannel..."
-        );
+        assert_eq!(truncated, "import type { DigestDraft, DeliveryChannel...");
     }
 
     #[test]
@@ -1854,20 +1942,20 @@ import { computed, ref } from "vue";
 
 const props = withDefaults(defineProps<{
   title: string;
-}>(), { title: "Deal" });
+}>(), { title: "Product" });
 const emit = defineEmits<{
   select: [id: string];
 }>();
-const dealTitleId = computed(() => props.title.toLowerCase());
+const productTitleId = computed(() => props.title.toLowerCase());
 const currentPriceLabel = computed(() => `$${props.title}`);
 const retryCount = ref(0);
 </script>
 "#;
-        let graph = extract_symbol_graph("src/DealStage.vue", Some("vue"), source);
+        let graph = extract_symbol_graph("src/ProductPanel.vue", Some("vue"), source);
         for expected in [
             "props",
             "emit",
-            "dealTitleId",
+            "productTitleId",
             "currentPriceLabel",
             "retryCount",
         ] {
@@ -1875,14 +1963,49 @@ const retryCount = ref(0);
                 graph.symbols.iter().any(|symbol| {
                     symbol.kind == SymbolKind::Value
                         && symbol.name == expected
-                        && symbol.detail.as_deref() == Some("fallback-composition-binding")
+                        && symbol.detail.as_deref() == Some("vue-composition-binding")
+                        && symbol.parser == ParserKind::Structural
                 }),
                 "missing Vue Composition API binding {expected}"
             );
         }
+        assert_eq!(graph.parser, ParserKind::Structural);
         assert!(graph.relations.iter().any(|relation| {
-            relation.kind == RelationKind::Imports && relation.target_name.contains("computed")
+            relation.kind == RelationKind::Imports
+                && relation.target_name.contains("computed")
+                && relation.parser == ParserKind::Structural
         }));
+    }
+
+    #[test]
+    fn vue_composition_binding_detection_requires_macro_call_boundary() {
+        let source = r#"
+<script setup lang="ts">
+const data = refreshData();
+const value = computedValue();
+const typed = ref<string>("ok");
+const delayed = computed (() => typed.value);
+const props = withDefaults(defineProps<{ title: string }>(), { title: "Product" });
+</script>
+"#;
+        let graph = extract_symbol_graph("src/Widget.vue", Some("vue"), source);
+
+        for absent in ["data", "value"] {
+            assert!(
+                graph.symbols.iter().all(|symbol| symbol.name != absent),
+                "ordinary function call {absent} was incorrectly treated as a Vue binding"
+            );
+        }
+        for expected in ["typed", "delayed", "props"] {
+            assert!(
+                graph.symbols.iter().any(|symbol| {
+                    symbol.kind == SymbolKind::Value
+                        && symbol.name == expected
+                        && symbol.detail.as_deref() == Some("vue-composition-binding")
+                }),
+                "missing Vue macro binding {expected}"
+            );
+        }
     }
 
     #[test]

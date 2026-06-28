@@ -1,7 +1,7 @@
 //! Purpose: Scan repository files and folders for `ProjectAtlas` 3.
 
 use blake3::Hasher;
-use ignore::{DirEntry, WalkBuilder, WalkState};
+use ignore::{DirEntry, WalkBuilder, WalkState, gitignore::GitignoreBuilder};
 use projectatlas_core::language::detect_language_for_path;
 use projectatlas_core::{
     CoreError, Node, NodeKind, normalize_repo_path, normalized_extension, normalized_parent,
@@ -99,7 +99,11 @@ pub fn scan_repo(root: &Path, options: &ScanOptions) -> FsResult<Vec<Node>> {
         source,
     })?;
     let mut builder = WalkBuilder::new(&root);
-    builder.hidden(false).git_ignore(true).git_exclude(true);
+    builder
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .require_git(false);
     builder.threads(0);
 
     let nodes = Arc::new(Mutex::new(Vec::new()));
@@ -183,10 +187,106 @@ pub fn scan_path(root: &Path, path: &Path, options: &ScanOptions) -> FsResult<Op
     } else {
         root.join(path)
     };
-    if should_skip_path(&root, &absolute, options) || !absolute.exists() {
+    if !absolute.exists() {
+        return Ok(None);
+    }
+    let absolute = absolute.canonicalize().map_err(|source| FsError::Io {
+        path: absolute.clone(),
+        source,
+    })?;
+    if gitignore_excludes_path(&root, &absolute)? || should_skip_path(&root, &absolute, options) {
         return Ok(None);
     }
     scanned_node(&root, &absolute)
+}
+
+/// Return whether repository `.gitignore` rules exclude a path.
+///
+/// This helper is for single-path refreshes. Full repository scans use
+/// `ignore::WalkBuilder` directly.
+///
+/// # Errors
+///
+/// Returns an error if the root cannot be canonicalized or a discovered
+/// `.gitignore` file cannot be parsed.
+pub fn gitignore_excludes_path(root: &Path, path: &Path) -> FsResult<bool> {
+    let input_root = root;
+    let root = root.canonicalize().map_err(|source| FsError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let absolute = if path.is_absolute() {
+        if let Ok(relative) = path.strip_prefix(input_root) {
+            root.join(relative)
+        } else if let Ok(relative) = path.strip_prefix(&root) {
+            root.join(relative)
+        } else {
+            path.to_path_buf()
+        }
+    } else {
+        root.join(path)
+    };
+    let absolute = if absolute.exists() {
+        absolute.canonicalize().map_err(|source| FsError::Io {
+            path: absolute.clone(),
+            source,
+        })?
+    } else {
+        absolute
+    };
+    let relative = normalize_repo_path(&root, &absolute)?;
+    if relative == "." || relative.split('/').any(|component| component == "..") {
+        return Ok(false);
+    }
+    let is_dir = absolute.metadata().is_ok_and(|metadata| metadata.is_dir());
+    let target_dir = if is_dir {
+        absolute.as_path()
+    } else {
+        absolute.parent().unwrap_or(root.as_path())
+    };
+    let mut ignored = false;
+    for directory in gitignore_search_dirs(&root, target_dir) {
+        let gitignore_path = directory.join(".gitignore");
+        if !gitignore_path.exists() {
+            continue;
+        }
+        let mut builder = GitignoreBuilder::new(&directory);
+        if let Some(error) = builder.add(&gitignore_path) {
+            return Err(FsError::Io {
+                path: gitignore_path,
+                source: io::Error::other(error.to_string()),
+            });
+        }
+        let matcher = builder.build().map_err(|error| FsError::Io {
+            path: directory.join(".gitignore"),
+            source: io::Error::other(error.to_string()),
+        })?;
+        let matched = matcher.matched_path_or_any_parents(&absolute, is_dir);
+        if matched.is_ignore() {
+            ignored = true;
+        } else if matched.is_whitelist() {
+            ignored = false;
+        }
+    }
+    Ok(ignored)
+}
+
+/// Return directories whose `.gitignore` files can affect a target path.
+fn gitignore_search_dirs(root: &Path, target_dir: &Path) -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    let mut current = target_dir;
+    loop {
+        directories.push(current.to_path_buf());
+        if current == root {
+            break;
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+    }
+    directories.reverse();
+    directories
 }
 
 /// Return the correct walker state for a skipped entry.
@@ -377,6 +477,29 @@ mod tests {
     }
 
     #[test]
+    fn default_scan_uses_gitignore_for_local_state() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join("local-agent-state").join("rules").join("memory"))?;
+        fs::create_dir(repo.join("src"))?;
+        fs::write(
+            repo.join("local-agent-state")
+                .join("rules")
+                .join("memory")
+                .join("activeContext.md"),
+            "private local agent state\n",
+        )?;
+        fs::write(repo.join("src").join("main.rs"), "fn main() {}\n")?;
+        fs::write(repo.join(".gitignore"), "local-agent-state/\n")?;
+
+        let nodes = scan_repo(&repo, &ScanOptions::default())?;
+        reject_path(&nodes, "local-agent-state")?;
+        reject_path(&nodes, "local-agent-state/rules/memory/activeContext.md")?;
+        require_path(&nodes, "src/main.rs")?;
+        Ok(())
+    }
+
+    #[test]
     fn scans_repo_under_excluded_named_parent() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let repo = temp.path().join("target").join("repo");
@@ -445,6 +568,58 @@ mod tests {
         reject_path(&nodes, ".projectatlas/projectatlas.db")?;
         reject_path(&nodes, ".projectatlas/projectatlas.toon")?;
         reject_path(&nodes, ".projectatlas/projectatlas.mcp.json")?;
+        Ok(())
+    }
+
+    #[test]
+    fn scan_inherits_gitignore_for_ignored_directories() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join("local-state").join("memory"))?;
+        fs::create_dir(repo.join("src"))?;
+        fs::write(repo.join(".gitignore"), "local-state/\n")?;
+        fs::write(
+            repo.join("local-state").join("memory").join("notes.md"),
+            "local ignored notes\n",
+        )?;
+        fs::write(repo.join("src").join("main.rs"), "fn main() {}\n")?;
+
+        let nodes = scan_repo(&repo, &ScanOptions::default())?;
+        reject_path(&nodes, "local-state")?;
+        reject_path(&nodes, "local-state/memory/notes.md")?;
+        require_path(&nodes, "src/main.rs")?;
+        Ok(())
+    }
+
+    #[test]
+    fn scan_path_inherits_gitignore_for_single_path_refresh() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join("local-state").join("memory"))?;
+        fs::create_dir(repo.join("src"))?;
+        fs::write(repo.join(".gitignore"), "local-state/\n")?;
+        fs::write(
+            repo.join("local-state").join("memory").join("notes.md"),
+            "local ignored notes\n",
+        )?;
+        fs::write(repo.join("src").join("main.rs"), "fn main() {}\n")?;
+
+        let ignored = scan_path(
+            &repo,
+            &repo.join("local-state").join("memory").join("notes.md"),
+            &ScanOptions::default(),
+        )?;
+        let indexed = scan_path(
+            &repo,
+            &repo.join("src").join("main.rs"),
+            &ScanOptions::default(),
+        )?;
+        if ignored.is_some() {
+            return Err(io::Error::other("single-path refresh indexed ignored state").into());
+        }
+        if indexed.is_none() {
+            return Err(io::Error::other("single-path refresh skipped indexed source").into());
+        }
         Ok(())
     }
 

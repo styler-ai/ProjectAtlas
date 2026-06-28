@@ -92,6 +92,7 @@ tempfile = "3.14"
 thiserror = "2.0"
 tokio = { version = "1.48", features = ["io-std", "macros", "rt-multi-thread", "time"] }
 toml = "0.8"
+toml_edit = "0.22"
 toon-format = { version = "0.5.0", default-features = false }
 tree-sitter = "0.26.9"
 tree-sitter-c = "0.24.2"

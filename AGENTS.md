@@ -11,6 +11,7 @@
 - For interactive browser or Electron debugging and manual UI QA loops, use the global `playwright-interactive` skill by default.
 - Keep documentation and specs in sync with behavior; update decision records as needed.
 - Ask for clarification when requirements conflict; document assumptions and blockers.
+- Do not turn local editor, agent, cache, or workspace-state folder names into product invariants. ProjectAtlas honors `.gitignore` dynamically, and the ProjectAtlas ignore config is only the stricter atlas-specific layer applied after `.gitignore`.
 
 ## ProjectAtlas Workflow
 1. Establish the project root and run ProjectAtlas from that root so `.projectatlas/projectatlas.db` is project-local.
@@ -26,8 +27,9 @@
 11. Run `projectatlas lint --strict-folders --report-untracked`.
 12. Only then use language-server lookups or broad file reads on selected files.
 13. Run `projectatlas config --print` when effective scan, purpose, or exclusion policy is unclear.
-14. Run `projectatlas runtime-info` when installer/runtime identity is unclear.
-15. Run `projectatlas token` when asked for token savings.
+14. Run `projectatlas ignore list` before adding repository-specific atlas excludes; `.gitignore` is inherited dynamically and manual ProjectAtlas ignores are applied after it as stricter atlas-only exclusions. Use `projectatlas ignore init-gitignore` only when a project needs a missing project-root `.gitignore` created. Keep personal/local workspace state in `.gitignore`.
+15. Run `projectatlas runtime-info` when installer/runtime identity is unclear.
+16. Run `projectatlas token` when asked for token savings.
 
 ## Rust/Dependency Discipline
 - Prefer official or canonical Rust crates and standard implementations for protocols, formats, parsers, storage, watchers, token tooling, and platform integration before writing custom code.

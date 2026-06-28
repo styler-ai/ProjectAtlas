@@ -1425,6 +1425,37 @@ impl AtlasStore {
         Ok(i64_to_usize(count))
     }
 
+    /// Count persisted symbols for a batch of file paths.
+    ///
+    /// Paths without symbols are omitted from the returned map.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading fails.
+    pub fn symbol_counts_for_paths(&self, paths: &[String]) -> DbResult<HashMap<String, usize>> {
+        let mut counts = HashMap::new();
+        for chunk in paths.chunks(900) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT path, COUNT(*) FROM symbols WHERE path IN ({placeholders}) GROUP BY path"
+            );
+            let mut statement = self.connection.prepare(&sql)?;
+            let rows = statement.query_map(params_from_iter(chunk.iter()), |row| {
+                let path = row.get::<_, String>(0)?;
+                let count = row.get::<_, i64>(1)?;
+                Ok((path, i64_to_usize(count)))
+            })?;
+            for row in rows {
+                let (path, count) = row?;
+                counts.insert(path, count);
+            }
+        }
+        Ok(counts)
+    }
+
     /// Return distinct parser strategies that produced symbols for one path.
     ///
     /// # Errors

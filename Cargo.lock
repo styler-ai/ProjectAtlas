@@ -1085,6 +1085,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "toml_edit",
  "toon-format",
  "yaml-rust2",
 ]

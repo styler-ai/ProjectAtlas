@@ -25,7 +25,7 @@ The adapters are intentionally bounded and deterministic. They do not approve pu
 `projectatlas summary <file>` exposes:
 
 - `parser_kind`: `tree-sitter-symbol-graph`, `manifest-symbol-graph`,
-  `fallback-symbol-graph`, `mixed-symbol-graph`, `symbol-graph`,
+  `structural-symbol-graph`, `fallback-symbol-graph`, `mixed-symbol-graph`, `symbol-graph`,
   `structural`, `scanner-metadata`, or `missing`.
 - `summary_status`: `ok`, `fallback`, or `missing`.
 
