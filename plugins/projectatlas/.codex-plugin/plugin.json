@@ -1,0 +1,45 @@
+{
+  "name": "projectatlas",
+  "version": "0.3.0",
+  "description": "Agent-first Rust repository atlas, TOON output, and MCP workflows for coding agents.",
+  "author": {
+    "name": "ProjectAtlas Contributors",
+    "url": "https://github.com/styler-ai/ProjectAtlas"
+  },
+  "homepage": "https://styler-ai.github.io/ProjectAtlas/",
+  "repository": "https://github.com/styler-ai/ProjectAtlas",
+  "license": "MIT",
+  "keywords": [
+    "agents",
+    "codex",
+    "codebase-map",
+    "mcp",
+    "project-structure",
+    "rust",
+    "toon"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "ProjectAtlas",
+    "shortDescription": "TOON-first repo atlas and MCP tools.",
+    "longDescription": "Use ProjectAtlas to install or invoke the native Rust runtime, generate a project-local MCP config, and guide agents through overview -> folders -> files -> summary/outline/symbols -> exact slices before broad source reads. ProjectAtlas stores purpose metadata and symbol intelligence in SQLite, returns compact TOON payloads, reports token savings, and surfaces cleanup/refactor health findings.",
+    "developerName": "ProjectAtlas Contributors",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Instructions",
+      "Native CLI",
+      "MCP Server",
+      "TOON Output",
+      "Symbol Index",
+      "Token Telemetry"
+    ],
+    "websiteURL": "https://styler-ai.github.io/ProjectAtlas/",
+    "defaultPrompt": [
+      "Use ProjectAtlas to map this repo.",
+      "Use the ProjectAtlas MCP tools before opening files.",
+      "Adopt ProjectAtlas in this project.",
+      "Fix ProjectAtlas lint failures."
+    ],
+    "brandColor": "#2563EB"
+  }
+}

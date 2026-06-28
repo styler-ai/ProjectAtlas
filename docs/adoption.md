@@ -4,10 +4,8 @@ Use this checklist when adding ProjectAtlas to an existing repo.
 
 ## 1. Install
 
-Run this from an activated virtual environment.
-
 ```bash
-python -m pip install -e .
+cargo install --path crates/projectatlas-cli --locked
 ```
 
 ## 2. Initialize
@@ -16,18 +14,27 @@ python -m pip install -e .
 projectatlas init --seed-purpose
 ```
 
-`projectatlas init` auto-detects repo languages to seed `scan.source_extensions` and `purpose.styles_by_extension`.
-Use `--no-detect-languages` to keep the static template.
+Run this from the project root. ProjectAtlas 3 stores one durable index per project at `.projectatlas/projectatlas.db`.
+The current Rust `init` command supports `--seed-purpose` for migration seeding; it does not require a language-detection flag.
 
-## 3. Fill folder summaries
+## 3. Build the atlas
 
-- Add a one-line summary to every `.purpose` file.
-- Keep summaries short and single-line.
+```bash
+projectatlas scan
+projectatlas overview
+projectatlas folders <query>
+projectatlas files <query> --folder <path>
+projectatlas files --file-pattern <glob>
+projectatlas summary <file> --limit 25
+```
 
-## 4. Add Purpose headers
+ProjectAtlas 3 stores durable index state in `.projectatlas/projectatlas.db`.
+Legacy `.purpose` files are migration input, not the final storage model.
 
-Add a `Purpose:` header to every tracked source file using the configured comment style.
-Python modules should use a module docstring with `Purpose:`.
+## 4. Add or import purpose summaries
+
+Use `projectatlas purpose set <path> <purpose>` for explicit purpose records.
+Legacy Purpose headers and `.purpose` files can still be used while migrating existing repositories.
 
 ## 5. Track non-source files
 
@@ -47,15 +54,12 @@ projectatlas lint --strict-folders --report-untracked
 
 ## 8. Wire into local scripts
 
-Example `package.json`:
+Example shell target:
 
-```json
-{
-  "scripts": {
-    "projectatlas:map": "projectatlas map",
-    "projectatlas:lint": "projectatlas lint --strict-folders --report-untracked"
-  }
-}
+```bash
+projectatlas scan
+projectatlas map --force
+projectatlas lint --strict-folders --report-untracked
 ```
 
 Example `Makefile`:

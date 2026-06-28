@@ -1,0 +1,31 @@
+[package]
+name = "projectatlas-symbols"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+projectatlas-core.workspace = true
+regex.workspace = true
+toml.workspace = true
+tree-sitter.workspace = true
+tree-sitter-c.workspace = true
+tree-sitter-c-sharp.workspace = true
+tree-sitter-cpp.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-java.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-kotlin-ng.workspace = true
+tree-sitter-objc.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-zig.workspace = true
+
+[dev-dependencies]
+projectatlas-core.workspace = true
+
+[lints]
+workspace = true

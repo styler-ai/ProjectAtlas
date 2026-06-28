@@ -2,285 +2,298 @@
 
 ![CI](https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml/badge.svg)
 
-Agent-first project map + health index - give coding agents a one-line purpose for every file and folder.
+ProjectAtlas is a Rust-native repository atlas for coding agents. It gives agents an orientation layer before
+they spend tokens on broad search, full-file reads, or symbol-level inspection.
 
-ProjectAtlas scans a repo, reads per-file Purpose headers and per-folder `.purpose` files, and emits a TOON
-snapshot you can read at startup to understand structure, spot duplicates, and keep the tree healthy.
+The original ProjectAtlas goal has not changed: maintain an agent-first map where important folders and files have
+one-line purposes, so agents can navigate fast, spot structure drift, and choose the right file before deep indexing.
+ProjectAtlas 3 keeps that goal and upgrades the implementation with Rust speed, a SQLite atlas database, MCP tools,
+broader source support, and an improved deep code index.
 
-Live docs: https://styler-ai.github.io/ProjectAtlas/
+ProjectAtlas 3 merges folder purpose, file purpose, source summaries, search, health checks, lint policy, and
+token-savings telemetry into one workflow:
 
-## Problem it solves
+1. inspect the project overview
+2. choose the relevant folder
+3. choose the relevant file
+4. inspect compressed outlines and source summaries
+5. request exact symbols, ranges, or source only when correctness requires it
 
-Agents and humans struggle with the same problem on growing repos: you start a new session without a structural
-overview. Without a fast map:
+ProjectAtlas 3 is inspired by the repository indexing ideas in code-index MCP, but it is a Rust-native
+ProjectAtlas implementation with ProjectAtlas-owned naming, architecture, commands, health checks, purpose
+tracking, and token telemetry.
 
-- Agents over-read code or index the wrong files, wasting context budget.
-- Duplicate folders and files appear because intent is not visible.
-- A clean folder structure slowly drifts into a mess.
+## Why It Exists
 
-ProjectAtlas fixes this by creating a lightweight, human- and agent-readable map that sits above deep code search.
-It answers "where should I look?" and "where should I put this?" before running heavy indexing tools.
+Large repositories make agents waste context. Without an atlas, an agent tends to search broadly, read entire
+files too early, or place new code in folders whose intent is unclear.
 
-## Features
+ProjectAtlas fixes that by keeping durable local repository intelligence in `.projectatlas/projectatlas.db` and
+returning compact TOON responses for agents. The goal is to answer "where should I look?" before "which source
+should I read?".
 
-- Purpose enforcement for source files and folders.
-- TOON output for fast agent consumption.
-- Duplicate summary detection for early structure drift.
-- Lint mode that fails when headers or `.purpose` files are missing.
-- Language-aware Purpose styles for common languages (line, block, or Javadoc).
-- Configurable exclusions, asset roots, and allowlists.
+## Current Capabilities
 
-## How it works
+- Rust workspace with strict lint, test, and rustdoc gates.
+- `.gitignore`-aware scanning with fast content hashes.
+- SQLite-backed index state for files, folders, purposes, and usage telemetry.
+- SQL-bounded folder/file ranking, health checks, token aggregation, and streamed text search for large repositories.
+- TOON-first output for compact agent context, with JSON available for integrations.
+- Progressive CLI funnel: `scan`, `overview`, `folders`, `files`, `summary`, `outline`, `search`, `slice`, `symbols`, `watch`, `health-check`, `settings`, `watch-status`, `reset-index`, `lint`, and `token`.
+- Native MCP server through `projectatlas mcp`, built on the official Rust MCP SDK, with `atlas_*` tools returning TOON text payloads.
+- Rust/Cargo-aware and tree-sitter-backed symbol graph extraction for functions, classes, methods, imports, calls, dependencies, and manifest symbols.
+- Event-backed `projectatlas watch` using the canonical Rust `notify` crate, with debouncing, repository excludes, and portable polling fallback.
+- Rust-native legacy map/lint compatibility for `.projectatlas/projectatlas.toon`.
+- Broad language/file extension recognition across the repository-intelligence parity set.
+- Health checks for missing purposes, duplicate purposes, and repeated temp/generated folder roles.
+- Token-savings telemetry through `projectatlas token`.
+- Read-only review mode through `PROJECTATLAS_NO_TELEMETRY=1` when orientation commands must not write usage rows.
 
-ProjectAtlas is designed for the first 60 seconds of an agent session.
+## ProjectAtlas 3 Roadmap
 
-1. Each folder carries a `.purpose` file with a one-line summary so folder intent is explicit (no guesswork).
-2. Each tracked source file starts with a `Purpose:` header or module docstring so file intent is visible without
-   a deep read.
-3. `projectatlas map` builds a TOON snapshot (`.projectatlas/projectatlas.toon`) that contains:
-   - a folder tree with inline purpose summaries
-   - file summaries for targeted code reads
-   - duplicate-summary warnings to spot drift
-   - overview stats that show scope and coverage
-4. `projectatlas lint` fails when Purpose headers or `.purpose` files are missing. The goal is to force a decision
-   before you proceed: add the missing summary, or remove/relocate the folder/file if it no longer belongs.
+ProjectAtlas 3 stable must complete the full repository-intelligence surface in Rust:
 
-Why this matters:
-
-- Agents read the atlas at startup (via AGENTS.md) to decide where to look next.
-- The atlas tells you *which* files to open with deep-indexing tools (for example code-index MCP or language
-  servers) so you only deep-index what you actually need. Deep indexing here means full-file or symbol-level
-  analysis that can consume a lot of context if you run it blindly.
-- The lint gate keeps structure healthy over time by preventing silent drift.
-
-ProjectAtlas also supports non-source files (README, workflows, configs) via
-`.projectatlas/projectatlas-nonsource-files.toon` so the snapshot stays complete even for files without headers.
-
-### Why there are two TOON files
-
-- `.projectatlas/projectatlas.toon` is **generated output**. It is safe to rebuild on every run.
-- `.projectatlas/projectatlas-nonsource-files.toon` is **agent-maintained input** for non-source files that cannot
-  carry a `Purpose:` header (for example YAML, TOML, images, or configs you do not want to edit).
-
-ProjectAtlas merges the non-source entries into the generated atlas, so **agents only read the generated atlas**.
-The input file exists only to preserve those non-source summaries across regenerations. Agents update it when
-`projectatlas lint` reports missing non-source entries or when new config/doc files are added.
-
-The atlas header makes the split explicit: `tracked_source_files` counts files scanned for Purpose headers,
-`tracked_nonsource_files` counts the manual entries, and `tracked_files_total` is the combined list shown in
-`files[]`.
-
-## Workflow (agent-focused)
-
-1. Run `projectatlas init --seed-purpose` once to scaffold missing `.purpose` files.
-2. For every new folder, write a one-line purpose in its `.purpose` file (this is your folder contract).
-3. For every new source file, add a `Purpose:` header or module docstring (this is your file contract).
-4. Add non-source summaries to `.projectatlas/projectatlas-nonsource-files.toon`.
-5. Regenerate the map with `projectatlas map`.
-6. Read `.projectatlas/projectatlas.toon` at startup and look for:
-   - the folder tree to locate the right area of the repo
-   - duplicate summaries to spot drift or overlap
-   - file summaries to pick targets for deeper inspection
-6. Use code-index or other deep tools *only* on the files you selected from the atlas.
-7. Run `projectatlas lint --strict-folders --report-untracked` and fix any missing Purpose entries before you move on.
-
-Agent integrations (Codex, Claude, etc.) should read the map at startup and treat it as the authoritative
-structural overview before doing deeper indexing.
+- workspace selection and safe project switching
+- shallow refresh and deep symbol indexing
+- all-language discovery and fallback indexing
+- literal, regex, fuzzy, paginated, and filtered search; search is intentionally case-insensitive by default for agent discovery and can be narrowed with `--case-sensitive`
+- source summaries, outlines, imports, exports, and symbol relationships
+- exact symbol/range slices to avoid full-file reads
+- watcher status and incremental refresh
+- settings/cache inspection
+- MCP tools with `atlas_*` names for Codex, OpenCode, Claude Code, and other harnesses
+- plugin packaging that installs or invokes the native runtime and registers the MCP server
 
 ## Install
 
-Local (editable) install:
-
-Run this from an activated virtual environment.
+From this repository:
 
 ```bash
-python -m pip install -e .
+cargo install --path crates/projectatlas-cli --locked
 ```
 
-Agent-assisted install:
+For local development without installing:
 
-Give your agent the repo URL (https://github.com/styler-ai/ProjectAtlas) and ask it to:
-
-1. Install ProjectAtlas (`python -m pip install -e .`).
-2. Run `projectatlas init --seed-purpose`.
-3. Add or update `.purpose` files and Purpose headers.
-4. Wire `projectatlas map` + `projectatlas lint` into local build steps.
-5. Paste the startup snippet into your `AGENTS.md`.
+```bash
+cargo run -p projectatlas-cli -- --help
+```
 
 ## Quickstart
 
 ```bash
-python -m pip install -e .
 projectatlas init --seed-purpose
-projectatlas map
+projectatlas map --force
+projectatlas scan
+projectatlas overview
+projectatlas folders auth
+projectatlas files auth --folder src
+projectatlas files --file-pattern "*.rs"
+projectatlas summary src/main.rs --limit 25
+projectatlas outline src/main.rs
+projectatlas symbols list --file src/main.rs
+projectatlas symbols relations --file src/main.rs
+projectatlas search "fn main" --file-pattern "*.rs" --context-lines 2
+projectatlas search "fnm" --fuzzy --file-pattern "*.rs"
+projectatlas slice src/main.rs --start-line 1 --end-line 40
+projectatlas symbols build . --max-workers 4 --timeout-seconds 120
+projectatlas symbols slice src/main.rs main --symbol-kind function
+projectatlas health-check
+projectatlas settings
+projectatlas watch-status
+projectatlas reset-index --dry-run
+projectatlas --format json mcp-config
+projectatlas watch --once
+projectatlas watch
+projectatlas token
+projectatlas token --view tui
+PROJECTATLAS_NO_TELEMETRY=1 projectatlas overview
 projectatlas lint --strict-folders --report-untracked
 ```
 
-`projectatlas init` auto-detects repo languages and seeds the config with the detected extensions.
-Use `--no-detect-languages` if you want the static template instead.
+The legacy `.purpose` files and Purpose headers are still supported as migration/import sources. The ProjectAtlas
+3 source of truth is the SQLite index plus explicit purpose records, so future workflows do not need to pollute
+source files or product folders with required metadata files.
 
-Install git hooks (enforces issue references in commit messages):
+## Agent Workflow
 
-```bash
-python scripts/install_hooks.py
+Agents should use ProjectAtlas before broad source reads:
+
+1. Establish the project root and run ProjectAtlas from that root so `.projectatlas/projectatlas.db` belongs to this project.
+2. Run `projectatlas scan` or `projectatlas map --force` when the index may be stale.
+3. Run `projectatlas overview` to understand repository shape.
+4. Run `projectatlas folders <query>` to choose the right area.
+5. Run `projectatlas files <query> --folder <path>` to pick targets; use `projectatlas files --file-pattern <glob>` when the filename or path pattern is already known.
+6. Run `projectatlas summary <file> --limit 25` for structured file facts and purpose state.
+7. Run `projectatlas outline <file>` if the summary is not enough.
+8. Run `projectatlas symbols list --file <file>` and `projectatlas symbols relations --file <file>` when symbol context matters.
+9. Run `projectatlas search <pattern> --file-pattern <glob>` when you need bounded text matches inside the chosen area; use `--fuzzy` when you only remember an approximate name, and inspect returned, searched file, searched byte, and truncated counters before widening the search.
+10. Run `projectatlas slice <file> --start-line <n> --end-line <m>` or `projectatlas symbols slice <file> <symbol> --symbol-parent <parent> --symbol-kind <kind> --symbol-line <line>` for exact source slices; add symbol disambiguators when names repeat.
+11. Run `projectatlas health-check` before cleanup/refactor decisions.
+12. Run `projectatlas token` to inspect structured estimated saved tokens; use `projectatlas token --view tui` only when a human terminal dashboard is wanted.
+
+The canonical token report command is `projectatlas token`; the MCP tool is `atlas_token_report`.
+Harness-specific slash commands can alias that surface.
+
+Token savings are an estimate of avoided wrong-place exploration, avoided wrong-file opens, and avoided
+unnecessary full-code reads. The default CLI and MCP reports stay structured for agents; the opt-in TUI view is a
+human-facing terminal dashboard and does not replace the TOON/MCP contract.
+
+`summary` is designed for large repositories: repeated sections are bounded by `--limit`, totals come from SQLite
+count queries, `called_by` is conservative when symbol names are ambiguous, and `source_status` tells the agent
+whether live source or indexed metadata backed the source-derived fields.
+
+`search` and symbol slicing share the same service-layer indexed-file boundary as MCP. Search uses
+`globset` repository globs, supports literal/regex/fuzzy line matching, stops after the requested page is
+satisfied, and reports how much indexed source was scanned. Symbol slices reject ambiguous duplicate names until
+the agent supplies `--symbol-parent`, `--symbol-kind`, or `--symbol-line`, which keeps exact-source reads tied to
+the symbol selected during orientation.
+
+`scan`, MCP `atlas_scan`, watcher refresh, and legacy purpose cleanup honor configured `[scan].exclude_dir_names`.
+Deep symbol builds support `--max-workers` and `--timeout-seconds` so large repositories can trade throughput,
+CPU pressure, and bounded agent wait time.
+
+For MCP-capable agents, register the native server:
+
+```json
+{
+  "mcpServers": {
+    "projectatlas": {
+      "command": "projectatlas",
+      "args": ["mcp"]
+    }
+  }
+}
 ```
 
-Issue hygiene: label every issue with `type:*`, `priority:*`, and `status:*`.
-The pre-push hook runs `python scripts/check_all.py` to validate the full local suite before pushes.
-Assign issues you are actively working on to the target release milestone; CI enforces that referenced issues have a milestone.
-
-Run tests, docs, and build artifacts locally:
+For an absolute, project-local registration document, run:
 
 ```bash
-python scripts/check_all.py
+projectatlas --format json --db .projectatlas/projectatlas.db mcp-config > .projectatlas/projectatlas.mcp.json
 ```
 
-Or run the steps individually:
+Use MCP tools in the same funnel order: `atlas_scan`, `atlas_overview`, `atlas_folders`, `atlas_files`,
+`atlas_file_summary`, `atlas_outline`, `atlas_symbols`, `atlas_symbol_relations`, `atlas_search`, `atlas_slice`,
+`atlas_health`, `atlas_watch_once`, and `atlas_token_report`.
+
+`projectatlas watch` is the continuous local watcher. It starts with a baseline refresh, then uses filesystem
+events to refresh SQLite summaries/symbols after relevant file changes. Ordinary file changes use partial
+SQLite and symbol refresh; directory/root/ignore-rule events fall back to a full scan for correctness. `atlas_watch_once` and
+`projectatlas watch --once` are the bounded refresh surfaces agents should call after edits when no continuous
+watcher is running.
+
+## Codex Plugin
+
+ProjectAtlas ships a plugin package from this repository:
 
 ```bash
-python -m unittest discover -s tests
-python scripts/check_docstrings.py
-python scripts/generate_api_docs.py
-python -m pip install build
-python -m build --sdist --wheel
+codex plugin marketplace add styler-ai/ProjectAtlas --ref main
+codex plugin add projectatlas --marketplace projectatlas
 ```
+
+The plugin provides the ProjectAtlas workflow skill, a fallback MCP server config at `plugins/projectatlas/.mcp.json`,
+runtime install scripts, and a generated project-local MCP config at `.projectatlas/projectatlas.mcp.json`:
+
+```powershell
+plugins/projectatlas/scripts/install-runtime.ps1
+```
+
+```bash
+plugins/projectatlas/scripts/install-runtime.sh
+```
+
+Run the installer from the target project root or pass the project root explicitly. The installer prefers a local
+source checkout, otherwise downloads the pinned `v0.3.0` GitHub Release binary for the platform, and falls back to
+the pinned `v0.3.0` Cargo Git install path. It then writes the absolute MCP registration file for that project.
+
+Marketplace installation should run or point to the native runtime installer before registering `projectatlas mcp`,
+so Codex, OpenCode, Claude Code, and other MCP-capable harnesses can call the same `atlas_*` TOON tools.
+
+## Local Verification
+
+Run the full Rust gate stack:
+
+```bash
+cargo fmt --check
+cargo check --workspace --all-targets --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+cargo test --doc --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
+cargo run -p projectatlas-cli -- map --force
+cargo run -p projectatlas-cli -- lint --strict-folders --report-untracked
+```
+
+Install local git hooks by linking or copying the scripts in `.githooks/` into `.git/hooks/`.
 
 ## Documentation
 
-- Live docs: https://styler-ai.github.io/ProjectAtlas/
+- `docs/projectatlas-3-architecture.md`: target architecture and parity map
+- `docs/agent-integration.md`: agent startup instructions
 - `docs/configuration.md`: configuration reference
-- `docs/adoption.md`: adoption checklist for new repos
+- `docs/adoption.md`: adoption checklist
 - `docs/format.md`: TOON schema
-- `docs/workflow.md`: workflow + troubleshooting
-- `docs/api.md`: generated API documentation
+- `docs/workflow.md`: workflow and troubleshooting
 
-## Related projects
-
-- TOON format: https://github.com/toon-format/toon
-- code-index (deep code summaries / symbol extraction): https://github.com/johnhuang316/code-index-mcp
-
-If you do not use a deep indexing tool, ProjectAtlas still provides the atlas and lint gate, but you will need to
-open source files manually for deeper context.
-
-## Branches and releases
-
-- `dev`: active development branch.
-- `main`: stable releases only.
-
-Release flow:
-
-1. Merge feature branches into `dev`.
-2. Ensure `dev` includes the latest `main` changes (sync if needed).
-3. Run `python scripts/prepare_release.py --issue <NNN> --bump patch` to create a release branch and PR.
-4. If `dev` is behind `main`, the script will stop unless you pass `--allow-base-divergence`.
-5. Optional: add `--post-release` to open a dev PR that bumps to the next `.dev` version.
-6. Merge to `main` after CI is green.
-7. Auto-release runs on `main` pushes and creates a GitHub release if the version is not a `.dev` build.
-8. Use the manual Release workflow if you need to re-run tagging.
-
-## Versioning
-
-ProjectAtlas follows PEP 440 for Python packaging. Pre-release versions use `.devN` (for example `0.1.0.dev0`).
-Release tags should match the package version (for example `v0.1.0.dev0`).
-
-Helper:
+Rust API documentation is generated with:
 
 ```bash
-python scripts/prepare_release.py --issue <NNN> --bump patch
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
-## Output files
+## Release Flow
 
-Default outputs:
+- `dev`: active development branch
+- `main`: stable releases only
+- release tags match the Cargo workspace version, for example `v0.3.0`
 
-- `.projectatlas/config.toml`
-- `.projectatlas/projectatlas-nonsource-files.toon`
-- `.projectatlas/projectatlas.toon`
+Before a release, run the full local verification stack, merge `dev` into `main` through a PR, and use the manual
+Release workflow if a tag needs to be created explicitly.
 
-## Folder structure (ProjectAtlas repo)
+## Repository Layout
 
-```
+```text
 .
+|-- .github/
+|   `-- workflows/
 |-- .projectatlas/
 |   |-- config.toml
 |   |-- projectatlas-nonsource-files.toon
 |   `-- projectatlas.toon
-|-- .codex/
-|   `-- skills/
-|       `-- ProjectAtlas.md
+|-- crates/
+|   |-- projectatlas-cli/
+|   |-- projectatlas-core/
+|   |-- projectatlas-db/
+|   |-- projectatlas-fs/
+|   |-- projectatlas-service/
+|   `-- projectatlas-symbols/
+|-- docs/
+|-- plugins/
+|   `-- projectatlas/
 |-- skills/
-|   |-- codex/ProjectAtlas.md
-|   `-- claude/ProjectAtlas.md
-|-- scripts/
-|   |-- install_hooks.py
-|   `-- check_commit_issue.py
+|   |-- claude/
+|   `-- codex/
 `-- templates/
-    `-- AGENTS.md
 ```
-
-Use this tree when contributing to ProjectAtlas itself.
-
-## Folder structure (your repo after install)
-
-```
-your-repo/
-|-- .projectatlas/
-|   |-- config.toml
-|   |-- projectatlas-nonsource-files.toon
-|   `-- projectatlas.toon
-|-- .purpose
-`-- (your source and docs)
-```
-
-For Codex, copy `.codex/skills/ProjectAtlas.md` into your local Codex skills folder
-(for example `~/.codex/skills/ProjectAtlas.md`). For Claude, copy
-`skills/claude/ProjectAtlas.md` into your Claude skills location.
-
-## Purpose headers
-
-ProjectAtlas expects a one-line `Purpose:` entry near the top of each tracked file.
-The comment style is configurable per extension.
-
-```txt
-/**
- * Purpose: Describe the file in one sentence.
- */
-```
-
-Line-comment and block-comment styles are also supported when configured:
-
-```txt
-// Purpose: Describe the file in one sentence.
-# Purpose: Describe the file in one sentence.
-/* Purpose: Describe the file in one sentence. */
-```
-
-Python files use a module docstring with `Purpose:` on the first lines. Vue files place a Javadoc-style
-block at the top of the first `<script>` or `<style>` block. The default mapping already covers major
-languages; override it in `purpose.styles_by_extension` if needed.
 
 ## Configuration
 
-See `docs/configuration.md` for all available settings. Most teams only need to adjust:
+See `docs/configuration.md` for all settings. Most projects only need to adjust:
 
 - `scan.source_extensions`
-- `scan.exclude_dir_names`
+- `scan.exclude_dir_names`, honored by scan, MCP scan, watcher refresh, and legacy purpose cleanup
 - `untracked.asset_allowed_prefixes`
 - `project.map_path`
 - `purpose.default_style`
 - `purpose.styles_by_extension`
-- `purpose.line_comment_prefixes`
-
-## Agent integration
-
-Use `docs/agent-integration.md` for a ready-to-copy snippet for AGENTS.md, plus suggested startup steps.
-ProjectAtlas includes a Codex skill at `.codex/skills/ProjectAtlas.md` and a Claude skill in
-`skills/claude/ProjectAtlas.md`.
 
 ## License
 
 MIT. See `LICENSE`.
 
-## Contribution policy
+## Contribution Policy
 
 External code contributions are not accepted at this time. See `CONTRIBUTING.md`.
+
+Release and CI gates include `cargo fmt`, `cargo check`, `cargo clippy -D warnings`, workspace tests,
+doctests, rustdoc warnings as errors, `cargo deny check`, ProjectAtlas lint/map drift checks, and
+installer/package smoke checks.

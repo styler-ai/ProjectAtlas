@@ -1,64 +1,215 @@
 name: 02-Release
 
 # /**
-#  * Purpose: Tag and validate ProjectAtlas releases.
+#  * Purpose: Validate, package, tag, and publish ProjectAtlas releases.
 #  */
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. v0.1.0)"
+        description: "Release version (e.g. v0.3.0)"
         required: true
         type: string
 
 permissions:
   contents: write
 
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+
 jobs:
-  release:
-    name: release
+  verify:
+    name: verify
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install
-        run: python -m pip install -e .
-
-      - name: Lint atlas
-        run: projectatlas lint --strict-folders --report-untracked
-
-      - name: Docstring check
-        run: python scripts/check_docstrings.py
-
-      - name: API docs
+      - name: Setup Rust
         run: |
-          python scripts/generate_api_docs.py
-          git diff --exit-code docs/api.md
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
 
-      - name: Unit tests
-        run: python -m unittest discover -s tests
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Check
+        run: cargo check --workspace --all-targets --all-features --locked
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Dependency policy
+        run: cargo deny check
+
+      - name: Tests
+        run: cargo test --workspace --all-features --locked
+
+      - name: Doc tests
+        run: cargo test --doc --workspace --all-features --locked
+
+      - name: Rustdoc
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 
       - name: Verify version
-        run: python scripts/verify_version.py "${{ inputs.version }}"
-
-      - name: Build package
         run: |
-          python -m pip install build
-          python -m build --sdist --wheel
+          requested="$RELEASE_VERSION"
+          if [[ ! "$requested" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release version must match vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          requested="${requested#v}"
+          version="$(awk -F'"' '
+            /^\[workspace.package\]/ { in_workspace_package = 1; next }
+            /^\[/ { if (in_workspace_package) exit }
+            in_workspace_package && /^version = / { print $2; exit }
+          ' Cargo.toml)"
+          if [[ -z "$version" ]]; then
+            echo "Could not read workspace package version from Cargo.toml" >&2
+            exit 1
+          fi
+          if [[ "$version" != "$requested" ]]; then
+            echo "Cargo.toml version $version does not match requested $requested" >&2
+            exit 1
+          fi
 
-      - name: Install wheel
+      - name: ProjectAtlas scan
+        run: cargo run --locked -p projectatlas-cli -- --format json scan .
+
+      - name: ProjectAtlas parity
+        run: cargo run --locked -p projectatlas-cli -- parity report --profile repository-intelligence
+
+      - name: ProjectAtlas lint
+        run: cargo run --locked -p projectatlas-cli -- lint --strict-folders --report-untracked
+
+      - name: ProjectAtlas map
+        run: cargo run --locked -p projectatlas-cli -- map --force
+
+      - name: ProjectAtlas map diff
+        run: git diff --exit-code -- .projectatlas/projectatlas.toon .projectatlas/projectatlas-nonsource-files.toon
+
+  package-unix:
+    name: package ${{ matrix.suffix }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            suffix: x86_64-unknown-linux-gnu
+          - os: macos-13
+            suffix: x86_64-apple-darwin
+          - os: macos-14
+            suffix: aarch64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
         run: |
-          python -m pip install dist/*.whl
-          projectatlas --help
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Build
+        run: cargo build --locked -p projectatlas-cli --release
+
+      - name: Package
+        run: |
+          archive="projectatlas-${RELEASE_VERSION}-${{ matrix.suffix }}.tar.gz"
+          mkdir -p "dist/projectatlas"
+          cp target/release/projectatlas "dist/projectatlas/"
+          cp README.md LICENSE "dist/projectatlas/"
+          tar -czf "$archive" -C dist projectatlas
+          mkdir -p release-assets
+          mv "$archive" release-assets/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: projectatlas-${{ matrix.suffix }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  package-windows:
+    name: package x86_64-pc-windows-msvc
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Build
+        shell: pwsh
+        run: cargo build --locked -p projectatlas-cli --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_VERSION -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+            Write-Error "Release version must match vMAJOR.MINOR.PATCH"
+            exit 1
+          }
+          $archive = "projectatlas-$($env:RELEASE_VERSION)-x86_64-pc-windows-msvc.zip"
+          New-Item -ItemType Directory -Force -Path "dist/projectatlas" | Out-Null
+          Copy-Item "target/release/projectatlas.exe" "dist/projectatlas/"
+          Copy-Item "README.md" "dist/projectatlas/"
+          Copy-Item "LICENSE" "dist/projectatlas/"
+          Compress-Archive -Path "dist/projectatlas/*" -DestinationPath $archive -Force
+          New-Item -ItemType Directory -Force -Path "release-assets" | Out-Null
+          Move-Item -LiteralPath $archive -Destination "release-assets/"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: projectatlas-x86_64-pc-windows-msvc
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: [package-unix, package-windows]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
 
       - name: Create tag
         run: |
-          git tag "${{ inputs.version }}"
-          git push origin "${{ inputs.version }}"
+          if [[ ! "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release version must match vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          git fetch --tags
+          if git tag -l "$RELEASE_VERSION" | grep -q .; then
+            echo "Tag $RELEASE_VERSION already exists" >&2
+            exit 1
+          fi
+          git tag "$RELEASE_VERSION"
+          git push origin "$RELEASE_VERSION"
+
+      - name: Create GitHub release
+        run: |
+          gh release create "$RELEASE_VERSION" release-assets/* \
+            --title "$RELEASE_VERSION" \
+            --generate-notes

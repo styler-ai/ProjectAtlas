@@ -1,36 +1,38 @@
 # Concepts
 
-ProjectAtlas is a lightweight way to keep structural intent close to the codebase and visible to agents.
+ProjectAtlas is a Rust-native way to keep structural intent and source intelligence visible to coding agents without polluting product folders or source files.
 
-## Folder purpose files
+## SQLite Purpose Records
 
-Each folder has a `.purpose` file with a single-line summary. This keeps intent discoverable from the tree view.
-ProjectAtlas treats missing `.purpose` files as a lint error when `--strict-folders` is enabled.
+ProjectAtlas 3 stores folder and file purposes in `.projectatlas/projectatlas.db`.
+Each project has its own database under the project root. Folder purpose and file purpose are different records:
 
-## File Purpose headers
+- A folder purpose describes the folder's structural responsibility.
+- A file purpose describes why that file exists inside its folder.
 
-Each tracked source file carries a one-line `Purpose:` header near the top of the file. The comment
-style is configurable per extension (Javadoc blocks, block comments, or line comments).
+Missing purposes are health/lint findings. Agents should inspect enough context to set a correct one-line purpose with `projectatlas purpose set` or the MCP `atlas_purpose_set` tool.
 
-This allows:
+## Summaries
 
-- quick file selection before deep indexing
-- early detection of duplicate responsibilities
-- consistent, low-overhead documentation
+Summaries are not purposes. A summary describes what the index observes in a file: language, line count, dependencies, imports, functions, methods, classes/types, calls, and line ranges where available.
+Use `projectatlas summary <file> --limit 25` or `atlas_file_summary` before opening full source.
 
-## Non-source summaries
+Generated file-purpose guesses may be stored as suggestions, but they remain review-required until an agent approves or corrects them.
 
-Some files cannot safely carry inline Purpose headers (JSON, lockfiles, images, generated outputs). Those live in
-`.projectatlas/projectatlas-nonsource-files.toon`, which is merged into the atlas at map time. The generated
-`projectatlas.toon` still shows a single `files[]` list, but the header distinguishes
-`tracked_source_files`, `tracked_nonsource_files`, and the combined `tracked_files_total`.
+## Legacy metadata
+
+Legacy `.purpose` files, source `Purpose:` headers, and `.projectatlas/projectatlas-nonsource-files.toon` remain import/migration sources. They are not the final ProjectAtlas 3 storage model.
+
+The compatibility map at `.projectatlas/projectatlas.toon` is an exported snapshot for older workflows and quick diffs; the SQLite database is the durable source of truth.
 
 ## Health signals
 
 ProjectAtlas surfaces:
 
-- missing or invalid Purpose summaries
-- duplicate summaries across files or folders
+- missing or suggested-but-unapproved purposes
+- duplicate or overlapping approved purposes across files or folders
 - untracked assets outside approved roots
+- repeated temporary/generated folder roles
+- stale index or structure drift signals
 
 These signals are meant to prompt cleanup before the structure drifts.

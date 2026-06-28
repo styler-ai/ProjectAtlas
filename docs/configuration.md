@@ -10,8 +10,24 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
 purpose_filename = ".purpose"
 
 [scan]
-source_extensions = [".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".css", ".mjs", ".cjs", ".d.ts", ".java", ".kt", ".scala", ".cs", ".go", ".rs", ".rb", ".php", ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".swift", ".lua", ".sh", ".bash", ".zsh", ".ps1", ".psm1", ".psd1", ".sql"]
-exclude_dir_names = [".git", ".projectatlas", ".venv", "__pycache__", "node_modules", "dist", "build"]
+source_extensions = [
+  ".py", ".pyw", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".d.ts", ".java",
+  ".c", ".cpp", ".h", ".hpp", ".cxx", ".cc", ".hxx", ".hh", ".cs", ".go",
+  ".m", ".mm", ".rb", ".php", ".swift", ".kt", ".kts", ".rs", ".scala",
+  ".sh", ".bash", ".zsh", ".ps1", ".psm1", ".psd1", ".bat", ".cmd", ".r",
+  ".pl", ".pm", ".lua", ".dart", ".hs", ".ml", ".mli", ".fs", ".fsx",
+  ".clj", ".cljs", ".vim", ".zig", ".zon", ".html", ".htm", ".css", ".scss",
+  ".sass", ".less", ".stylus", ".styl", ".md", ".mdx", ".json", ".jsonc",
+  ".xml", ".yml", ".yaml", ".toml", ".txt", ".ini", ".cfg", ".conf", ".vue",
+  ".svelte", ".astro", ".jsp", ".jspx", ".jspf", ".tag", ".tagx", ".gsp",
+  ".properties", ".gradle", ".groovy", ".proto", ".hbs", ".handlebars", ".ejs",
+  ".pug", ".ftl", ".mustache", ".liquid", ".erb", ".sql", ".ddl", ".dml",
+  ".mysql", ".postgresql", ".psql", ".sqlite", ".mssql", ".oracle", ".ora",
+  ".db2", ".proc", ".procedure", ".func", ".function", ".view", ".trigger",
+  ".index", ".migration", ".seed", ".fixture", ".schema", ".cql", ".cypher",
+  ".sparql", ".gql", ".liquibase", ".flyway"
+]
+exclude_dir_names = [".git", ".projectatlas", ".venv", "__pycache__", "node_modules", "dist", "build", "target"]
 exclude_dir_suffixes = [".egg-info"]
 exclude_path_prefixes = []
 non_source_path_prefixes = []
@@ -35,8 +51,14 @@ asset_allowed_prefixes = []
 asset_extensions = [".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".ico", ".pdf", ".ttf", ".woff", ".woff2"]
 ```
 
-`projectatlas init` auto-detects repo languages and writes the config with the detected extensions by default.
-Pass `--no-detect-languages` to keep the static template.
+`projectatlas init` writes the Rust configuration template. Adjust `scan.source_extensions` only when a project needs a narrower or broader compatibility-map surface.
+
+`scan.exclude_dir_names` is used by `projectatlas scan`, `atlas_scan`, watcher refresh, and
+`strip-legacy-purpose`, so generated/vendor/build-heavy directories should be listed here before large-repo
+indexing. Search then operates over the indexed file set and can use literal, regex, or fuzzy matching.
+
+Path-like entries in scan and untracked configuration are repository-relative. Absolute paths, drive-prefixed
+paths, root paths, and `..` traversal are rejected before ProjectAtlas performs existence checks or lint probes.
 
 ### Purpose styles
 

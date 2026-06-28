@@ -1,6 +1,6 @@
 # TOON Output Format
 
-ProjectAtlas writes a `atlas.toon` snapshot with these sections:
+ProjectAtlas writes a compatibility TOON snapshot at `.projectatlas/projectatlas.toon` with these sections. ProjectAtlas 3's durable source of truth is `.projectatlas/projectatlas.db`; TOON is the compact agent/export format.
 
 ```
 version: 1
@@ -32,12 +32,12 @@ Sections are stable so agents can scan quickly and tooling can diff.
 
 ## Overview fields
 
-- `tracked_source_files` counts files scanned for Purpose headers (source extensions).
-- `tracked_nonsource_files` counts entries supplied by `projectatlas-nonsource-files.toon`.
+- `tracked_source_files` counts indexed source files.
+- `tracked_nonsource_files` counts imported non-source summary entries and indexed non-source records.
 - `tracked_files_total` is the combined total shown in `files[]`.
 - The remaining fields (`tracked_folders`, `source_extensions`, `exclude_*`) describe the scan surface.
 
 ## Non-source list
 
-The generated atlas merges the manual `.projectatlas/projectatlas-nonsource-files.toon` entries into `files[]`
-so the snapshot stays complete without forcing headers into formats that cannot safely accept them.
+The generated atlas can merge `.projectatlas/projectatlas-nonsource-files.toon` entries into `files[]`
+for compatibility. New ProjectAtlas 3 workflows should prefer SQLite purpose records and structured summaries from `projectatlas summary` / `atlas_file_summary`.
