@@ -14,13 +14,14 @@ use crate::{
     render_file_summary, render_parity_report, render_search_report, render_settings_report,
     render_watch_status,
 };
+use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
 use projectatlas_core::toon::{
-    encode_agent_payload, render_health, render_nodes, render_outline, render_overview,
-    render_symbol_relations, render_symbols, render_token_overview,
+    encode_agent_payload, render_nodes, render_outline, render_overview, render_symbol_relations,
+    render_symbols, render_token_overview,
 };
-use projectatlas_core::{NodeKind, PurposeSource};
-use projectatlas_db::{AtlasStore, HealthResolution};
+use projectatlas_core::{NodeKind, PurposeSource, normalize_repo_path_prefix};
+use projectatlas_db::{AtlasStore, HealthFindingsPage, HealthQuery, HealthResolution};
 use projectatlas_service::{
     SymbolSliceSelector, build_file_summary, read_indexed_code_slice, read_symbol_slice,
     search_indexed_files,
@@ -32,6 +33,11 @@ use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::Deserialize;
 use serde_json::json;
 use std::path::PathBuf;
+
+/// Default MCP health rows returned when the caller does not request a page size.
+const DEFAULT_HEALTH_LIMIT: usize = 50;
+/// Maximum MCP health rows returned in one payload.
+const MAX_HEALTH_LIMIT: usize = 200;
 
 /// MCP tools required for the agent-first repository-intelligence surface.
 pub(crate) const REQUIRED_MCP_TOOL_NAMES: &[&str] = &[
@@ -209,6 +215,23 @@ struct AtlasTokenParams {
     session: Option<String>,
 }
 
+/// MCP parameter payload for bounded health finding lookup.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AtlasHealthParams {
+    /// Pagination start index after filters are applied.
+    start_index: Option<usize>,
+    /// Maximum findings to return, capped to a safe MCP page size.
+    limit: Option<usize>,
+    /// Optional finding category filter.
+    category: Option<String>,
+    /// Optional severity filter: info, warning, or error.
+    severity: Option<String>,
+    /// Optional repository-relative primary or related path prefix.
+    path_prefix: Option<String>,
+    /// Return counts and paging metadata without finding rows.
+    summary_only: Option<bool>,
+}
+
 /// MCP parameter payload for parity reports.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct AtlasParityParams {
@@ -341,6 +364,98 @@ impl ProjectAtlasMcpServer {
                 }
             })),
         }
+    }
+}
+
+/// Convert MCP health parameters into a DB health query.
+fn health_query_from_params(params: &AtlasHealthParams) -> Result<HealthQuery, CliError> {
+    Ok(HealthQuery {
+        start_index: params.start_index.unwrap_or(0),
+        limit: params
+            .limit
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_HEALTH_LIMIT)
+            .min(MAX_HEALTH_LIMIT),
+        category: trimmed_filter(params.category.as_deref()),
+        severity: trimmed_filter(params.severity.as_deref())
+            .as_deref()
+            .map(parse_health_severity)
+            .transpose()?,
+        path_prefix: trimmed_filter(params.path_prefix.as_deref())
+            .map(|value| normalize_repo_path_prefix(&value)),
+        summary_only: params.summary_only.unwrap_or(false),
+    })
+}
+
+/// Return a compact health report page for MCP agents.
+fn render_health_page(page: &HealthFindingsPage, query: &HealthQuery) -> String {
+    let rows = page
+        .findings
+        .iter()
+        .map(|finding| {
+            json!({
+                "severity": severity_name(finding.severity),
+                "id": finding.id,
+                "category": finding.category,
+                "path": finding.path,
+                "related_path": finding.related_path.as_deref().unwrap_or(""),
+                "message": finding.message,
+                "recommendation": finding.recommendation,
+            })
+        })
+        .collect::<Vec<_>>();
+    let page_width = page.limit.min(page.total.saturating_sub(page.start_index));
+    let page_end = page.start_index.saturating_add(page_width);
+    let next_start_index = if page_width == 0 || page_end >= page.total {
+        None
+    } else {
+        Some(page_end)
+    };
+    encode_agent_payload(&json!({
+        "health": {
+            "total": page.total,
+            "unfiltered_total": page.unfiltered_total,
+            "returned": page.returned,
+            "start_index": page.start_index,
+            "limit": page.limit,
+            "max_limit": MAX_HEALTH_LIMIT,
+            "next_start_index": next_start_index,
+            "truncated": next_start_index.is_some(),
+            "summary_only": query.summary_only,
+            "category": query.category.as_deref().unwrap_or(""),
+            "severity": query.severity.map_or("", severity_name),
+            "path_prefix": query.path_prefix.as_deref().unwrap_or(""),
+        },
+        "health_findings": rows,
+    }))
+}
+
+/// Return a trimmed non-empty string parameter.
+fn trimmed_filter(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+/// Return a stable lowercase severity name.
+fn severity_name(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Info => "info",
+        Severity::Warning => "warning",
+        Severity::Error => "error",
+    }
+}
+
+/// Parse an MCP health severity filter.
+fn parse_health_severity(value: &str) -> Result<Severity, CliError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "info" => Ok(Severity::Info),
+        "warning" => Ok(Severity::Warning),
+        "error" => Ok(Severity::Error),
+        other => Err(CliError::InvalidInput(format!(
+            "invalid health severity '{other}'; expected info, warning, or error"
+        ))),
     }
 }
 
@@ -689,13 +804,15 @@ impl ProjectAtlasMcpServer {
     /// Return structural health findings.
     #[tool(
         name = "atlas_health",
-        description = "Return ProjectAtlas structural health findings for cleanup and refactor work."
+        description = "Return a bounded ProjectAtlas structural health page with optional category, severity, and path-prefix filters."
     )]
-    fn atlas_health(&self) -> String {
+    fn atlas_health(&self, Parameters(params): Parameters<AtlasHealthParams>) -> String {
         Self::as_mcp_text((|| {
             let store = self.open_store()?;
-            let findings = store.unresolved_health_findings(&store.resolved_health_ids()?)?;
-            let toon = render_health(&findings);
+            let query = health_query_from_params(&params)?;
+            let page =
+                store.unresolved_health_findings_page(&store.resolved_health_ids()?, &query)?;
+            let toon = render_health_page(&page, &query);
             record_usage_estimate(
                 &store,
                 &self.session,

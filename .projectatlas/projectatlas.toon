@@ -1,9 +1,9 @@
 version: 1
-generated_at: unix:1782631081
-file_hash: "8219de162872de2d1277673c575495c6e65d68967d2a2b5f7d3414352860214e"
-folder_hash: "00412e13569547fda627b63d020c6cc56a7bc359415e8bcf6e3aa10799b7d863"
+generated_at: unix:1782647440
+file_hash: "174711445445ff3f9ef2cdf2b933f336f5b143da5e87f6ad71ac6b947f6ec6c4"
+folder_hash: "0f57a5d335636b00f50faebeb6a45b7fa006dad12ae2723b19b908d25a052080"
 root: .
-overview: tracked_source_files=68 tracked_nonsource_files=42 tracked_files_total=110 tracked_folders=37 source_extensions=121 exclude_dir_names=9 exclude_path_prefixes=0
+overview: tracked_source_files=100 tracked_nonsource_files=42 tracked_files_total=142 tracked_folders=59 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
 source_extensions[]:
   - .astro
   - .bash
@@ -113,6 +113,7 @@ source_extensions[]:
   - .tag
   - .tagx
   - .toml
+  - .toon
   - .trigger
   - .ts
   - .tsx
@@ -137,7 +138,7 @@ exclude_dir_names[]:
   - node_modules
   - target
 exclude_path_prefixes[]:
-folders[37]{path,summary,source}:
+folders[59]{path,summary,source}:
   .,ProjectAtlas repository root.,database
   .agents,Agent marketplace metadata for ProjectAtlas.,database
   .agents/plugins,Codex plugin marketplace catalog for ProjectAtlas.,database
@@ -165,6 +166,28 @@ folders[37]{path,summary,source}:
   crates/projectatlas-symbols/src,Source folder for symbol graph extraction implementation.,database
   crates/projectatlas-symbols/src/languages,Hosts private language-specific symbol augmentation strategies used after generic tree-sitter extraction.,database
   docs,ProjectAtlas documentation and guides.,database
+  docs/benchmarks,Document measured repository token savings findings,database
+  fixtures,Store ProjectAtlas regression fixtures,database
+  fixtures/languages,Store language summary baseline fixtures,database
+  fixtures/languages/c,C fixture folder for parser and summary baseline coverage.,database
+  fixtures/languages/cpp,C++ fixture folder for parser and summary baseline coverage.,database
+  fixtures/languages/csharp,C# fixture folder for parser and summary baseline coverage.,database
+  fixtures/languages/css,Store CSS structural summary fixtures,database
+  fixtures/languages/go,Go fixture folder for parser and summary baseline coverage.,database
+  fixtures/languages/html,Store HTML structural summary fixtures,database
+  fixtures/languages/java,Java fixture folder for parser and summary baseline coverage.,database
+  fixtures/languages/javascript,JavaScript fixture folder for parser and summary baseline coverage.,database
+  fixtures/languages/json,Store JSON structural summary fixtures,database
+  fixtures/languages/kotlin,Kotlin fixture folder for parser and summary baseline coverage.,database
+  fixtures/languages/markdown,Store Markdown structural summary fixtures,database
+  fixtures/languages/objective-c,Objective-C fixture folder for parser and summary baseline coverage.,database
+  fixtures/languages/rust,Store Rust empty source summary fixtures,database
+  fixtures/languages/toml,TOML and Cargo fixture folder for manifest summary baseline coverage.,database
+  fixtures/languages/toon,Store TOON structural summary fixtures,database
+  fixtures/languages/typescript,TypeScript fixture folder for parser and summary baseline coverage.,database
+  fixtures/languages/vue,Vue fixture folder for Composition API summary baseline coverage.,database
+  fixtures/languages/yaml,Store YAML workflow summary fixtures,database
+  fixtures/languages/zig,Zig fixture folder for parser and summary baseline coverage.,database
   plugins,Installable Codex plugins for ProjectAtlas.,database
   plugins/projectatlas,ProjectAtlas Codex plugin package.,database
   plugins/projectatlas/.codex-plugin,ProjectAtlas plugin manifest metadata.,database
@@ -175,7 +198,7 @@ folders[37]{path,summary,source}:
   skills/claude,Claude guidance for ProjectAtlas usage.,database
   skills/codex,Codex guidance for ProjectAtlas usage.,database
   templates,Reusable agent templates and snippets.,database
-files[72]{path,summary,source}:
+files[104]{path,summary,source}:
   .agents/plugins/marketplace.json,Codex plugin marketplace catalog for ProjectAtlas,database
   .codex/rules/memory/activeContext.md,ProjectAtlas active context,database
   .codex/rules/memory/productContext.md,ProjectAtlas product context,database
@@ -207,7 +230,9 @@ files[72]{path,summary,source}:
   crates/projectatlas-cli/src/main.rs,Provide the `ProjectAtlas` 3 command-line adapter.,database
   crates/projectatlas-cli/src/mcp.rs,Provide the native MCP adapter that exposes ProjectAtlas atlas tools to agent harnesses.,database
   crates/projectatlas-cli/src/runtime.rs,"Provide shared CLI and MCP runtime orchestration for scan policy, indexing, watching, settings, cleanup, and telemetry.",database
+  crates/projectatlas-cli/src/structural.rs,Create deterministic structural summaries for declaration light files,database
   crates/projectatlas-cli/tests/e2e.rs,Validate `ProjectAtlas` 3 CLI end-to-end behavior.,database
+  crates/projectatlas-cli/tests/lint_diagnostics.rs,Validate lint diagnostics for source extension purpose styles.,database
   crates/projectatlas-core/Cargo.toml,Core Rust crate manifest for ProjectAtlas 3,database
   crates/projectatlas-core/src/health.rs,Detect structural health issues in `ProjectAtlas` indexes.,database
   crates/projectatlas-core/src/language.rs,Detect file language families from extensions.,database
@@ -233,13 +258,43 @@ files[72]{path,summary,source}:
   deny.toml,Cargo dependency and license policy for ProjectAtlas,database
   docs/adoption.md,Adoption checklist for ProjectAtlas,database
   docs/agent-integration.md,Agent integration instructions for ProjectAtlas,database
+  docs/benchmarks/swipinggale-token-savings.md,Record SwipingGale token savings benchmark evidence,database
   docs/concepts.md,Core concepts for ProjectAtlas usage,database
   docs/configuration.md,Configuration reference for ProjectAtlas,database
   docs/format.md,ProjectAtlas TOON schema reference,database
   docs/index.md,Documentation landing page for ProjectAtlas,database
+  docs/memory-bank-extension.md,Define ProjectAtlas memory bank integration boundaries,database
   docs/projectatlas-3-architecture.md,ProjectAtlas 3 Rust architecture plan,database
   docs/projectatlas-3-v0.3.2-hardening-spec.md,"Specifies the v0.3.2 hardening plan for symbol modules, path normalization, and import-alias caller resolution.",database
+  docs/structural-summaries.md,Document structural summary adapters and quality signals,database
   docs/workflow.md,ProjectAtlas workflow and troubleshooting guide,database
+  fixtures/languages/README.md,Describe structural summary fixture coverage,database
+  fixtures/languages/baselines.toon,Record expected structural summary baselines,database
+  fixtures/languages/c/header.h,Exercise C header symbol extraction in language fixture tests.,database
+  fixtures/languages/c/runner.c,Exercise C source symbol and import extraction in language fixture tests.,database
+  fixtures/languages/cpp/runner.cpp,Exercise C++ source type and function summary extraction.,database
+  fixtures/languages/cpp/runner.hpp,Exercise C++ header type and method summary extraction.,database
+  fixtures/languages/csharp/Runner.cs,Exercise C# type and method summary extraction.,database
+  fixtures/languages/css/tokens.css,Exercise CSS selector and token summaries,database
+  fixtures/languages/go/service.go,"Exercise Go type, method, function, and import summary extraction.",database
+  fixtures/languages/html/index.html,Exercise HTML metadata and heading summaries,database
+  fixtures/languages/java/AtlasService.java,Exercise Java class and method summary extraction.,database
+  fixtures/languages/javascript/service.js,Exercise JavaScript exported and local function summary extraction.,database
+  fixtures/languages/json/package.json,Exercise package manifest summary extraction,database
+  fixtures/languages/kotlin/Runner.kt,Exercise Kotlin class and function summary extraction.,database
+  fixtures/languages/markdown/readme.md,Exercise Markdown heading summary extraction,database
+  fixtures/languages/objective-c/UserManager.m,Exercise Objective-C type and method summary extraction.,database
+  fixtures/languages/rust/build.rs,Exercise Rust build-script language detection and summary extraction.,database
+  fixtures/languages/rust/empty.rs,Exercise empty Rust source summary behavior,database
+  fixtures/languages/rust/lib.rs,Exercise Rust function summary extraction in language fixture tests.,database
+  fixtures/languages/toml/Cargo.lock,Exercise Cargo lockfile package summary extraction.,database
+  fixtures/languages/toml/Cargo.toml,Exercise Cargo manifest dependency summary extraction.,database
+  fixtures/languages/toon/projectatlas-nonsource-files.toon,Exercise TOON section summary extraction,database
+  fixtures/languages/typescript/component.tsx,Exercise TSX component summary extraction.,database
+  fixtures/languages/typescript/service.ts,"Exercise TypeScript class, method, and helper summary extraction.",database
+  fixtures/languages/vue/DealStage.vue,Exercise Vue script setup binding and import summary extraction.,database
+  fixtures/languages/yaml/workflow.yml,Exercise workflow trigger and job summaries,database
+  fixtures/languages/zig/runner.zig,Exercise Zig type and function summary extraction.,database
   plugins/projectatlas/.codex-plugin/plugin.json,ProjectAtlas Codex plugin manifest,database
   plugins/projectatlas/.mcp.json,Fallback MCP server configuration for the ProjectAtlas Codex plugin.,database
   plugins/projectatlas/scripts/install-runtime.ps1,Install and verify the ProjectAtlas native runtime on Windows.,database
@@ -278,6 +333,28 @@ folder_tree[]:
   - "    src/ - Source folder for symbol graph extraction implementation."
   - "      languages/ - Hosts private language-specific symbol augmentation strategies used after generic tree-sitter extraction."
   - docs/ - ProjectAtlas documentation and guides.
+  - "  benchmarks/ - Document measured repository token savings findings"
+  - fixtures/ - Store ProjectAtlas regression fixtures
+  - "  languages/ - Store language summary baseline fixtures"
+  - "    c/ - C fixture folder for parser and summary baseline coverage."
+  - "    cpp/ - C++ fixture folder for parser and summary baseline coverage."
+  - "    csharp/ - C# fixture folder for parser and summary baseline coverage."
+  - "    css/ - Store CSS structural summary fixtures"
+  - "    go/ - Go fixture folder for parser and summary baseline coverage."
+  - "    html/ - Store HTML structural summary fixtures"
+  - "    java/ - Java fixture folder for parser and summary baseline coverage."
+  - "    javascript/ - JavaScript fixture folder for parser and summary baseline coverage."
+  - "    json/ - Store JSON structural summary fixtures"
+  - "    kotlin/ - Kotlin fixture folder for parser and summary baseline coverage."
+  - "    markdown/ - Store Markdown structural summary fixtures"
+  - "    objective-c/ - Objective-C fixture folder for parser and summary baseline coverage."
+  - "    rust/ - Store Rust empty source summary fixtures"
+  - "    toml/ - TOML and Cargo fixture folder for manifest summary baseline coverage."
+  - "    toon/ - Store TOON structural summary fixtures"
+  - "    typescript/ - TypeScript fixture folder for parser and summary baseline coverage."
+  - "    vue/ - Vue fixture folder for Composition API summary baseline coverage."
+  - "    yaml/ - Store YAML workflow summary fixtures"
+  - "    zig/ - Zig fixture folder for parser and summary baseline coverage."
   - plugins/ - Installable Codex plugins for ProjectAtlas.
   - "  projectatlas/ - ProjectAtlas Codex plugin package."
   - "    .codex-plugin/ - ProjectAtlas plugin manifest metadata."

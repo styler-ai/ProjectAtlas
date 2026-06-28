@@ -3,6 +3,9 @@
 use crate::atlas_map::{
     self, imported_purpose_records, load_atlas_config, load_atlas_config_for_root,
 };
+use crate::structural::{
+    is_scanner_fallback_summary, is_structural_summary_candidate, structural_summary_for_path,
+};
 use crate::{
     CliError, OutputFormat, WATCH_MODE_NOTIFY, WATCH_MODE_ONCE, WATCH_MODE_POLLING, truthy_env,
 };
@@ -18,7 +21,7 @@ use projectatlas_core::{
 use projectatlas_db::{AtlasStore, IndexedFileText};
 use projectatlas_fs::{ScanOptions, scan_path, scan_repo};
 use projectatlas_service::{
-    FileSummaryReport, file_path_matches_glob, file_summary_baseline_text, load_ranked_file_nodes,
+    FilePathMatcher, FileSummaryReport, file_summary_baseline_text, load_ranked_file_nodes,
 };
 use projectatlas_symbols::extract_symbol_graph;
 use rayon::ThreadPoolBuilder;
@@ -35,6 +38,22 @@ use std::time::{Duration, Instant};
 
 /// Maximum file size parsed for symbols by default.
 pub(crate) const MAX_SYMBOL_FILE_BYTES: u64 = 2_000_000;
+
+/// Built-in purposes for reserved project-local `ProjectAtlas` metadata inputs.
+const BUILTIN_PROJECTATLAS_PURPOSES: &[(&str, &str)] = &[
+    (
+        ".projectatlas",
+        "Store project-local ProjectAtlas metadata, configuration, and runtime state.",
+    ),
+    (
+        ".projectatlas/config.toml",
+        "Configure project-local ProjectAtlas scan, lint, purpose, and output policy.",
+    ),
+    (
+        ".projectatlas/projectatlas-nonsource-files.toon",
+        "Declare project-local non-source file purposes for ProjectAtlas map compatibility.",
+    ),
+];
 
 /// Resolved scan runtime policy shared by CLI and MCP adapters.
 pub(crate) struct ScanRuntimePlan {
@@ -80,6 +99,8 @@ pub(crate) struct ScanReport {
     pub(crate) purpose_import: PurposeImportReport,
     /// Persisted text search index report.
     pub(crate) text_index: TextIndexReport,
+    /// Structural summaries refreshed for declaration-light files.
+    pub(crate) structural_summaries: StructuralSummaryReport,
     /// Symbol graph build report.
     pub(crate) symbols: SymbolBuildReport,
 }
@@ -224,7 +245,10 @@ pub(crate) fn run_scan_pipeline(
     let nodes = scan_repo(&plan.root, &plan.scan_options)?;
     store.set_project_root(&plan.root)?;
     store.replace_scan(&nodes)?;
-    let text_index = refresh_text_index_for_nodes(store, &plan.root, &nodes, plan.text_options)?;
+    seed_builtin_projectatlas_purposes(store, &nodes)?;
+    let text_refresh =
+        refresh_text_index_for_nodes_with_rows(store, &plan.root, &nodes, plan.text_options)?;
+    let text_index = text_refresh.report.clone();
     let indexed_paths = nodes
         .iter()
         .map(|node| node.path.as_str())
@@ -240,12 +264,15 @@ pub(crate) fn run_scan_pipeline(
             purpose_import.imported += 1;
         }
     }
+    let structural_summaries =
+        refresh_structural_summaries_for_nodes(store, &nodes, &text_refresh.rows)?;
     let symbols = build_symbols_for_index(store, &plan.root, symbol_options, None)?;
     let overview = store.overview()?;
     Ok(ScanReport {
         overview,
         purpose_import,
         text_index,
+        structural_summaries,
         symbols,
     })
 }
@@ -309,10 +336,10 @@ pub(crate) fn estimated_source_tokens_for_indexed_files(
     folder: Option<&str>,
     file_pattern: Option<&str>,
 ) -> Result<usize, CliError> {
-    validate_file_pattern(file_pattern)?;
+    let matcher = FilePathMatcher::new(file_pattern)?;
     let mut total = 0usize;
     store.visit_file_token_estimates(folder, |path, size_bytes| {
-        if file_path_matches_glob(&path, file_pattern).unwrap_or(false) {
+        if matcher.is_match(&path) {
             total =
                 total.saturating_add(estimated_source_tokens_for_file_metadata(&path, size_bytes));
         }
@@ -343,12 +370,6 @@ pub(crate) fn byte_size_to_tokens(bytes: u64) -> usize {
 /// Estimate source tokens from a searched byte count.
 pub(crate) fn byte_count_to_tokens(bytes: usize) -> usize {
     if bytes == 0 { 0 } else { bytes.div_ceil(4) }
-}
-
-/// Validate an optional file glob through the shared service matcher.
-pub(crate) fn validate_file_pattern(file_pattern: Option<&str>) -> Result<(), CliError> {
-    let _matches = file_path_matches_glob("", file_pattern)?;
-    Ok(())
 }
 
 /// Load ranked file nodes in bounded pages and apply exact glob semantics.
@@ -427,6 +448,23 @@ pub(crate) struct TextIndexReport {
     pub(crate) bytes: usize,
 }
 
+/// Deterministic structural-summary refresh report.
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct StructuralSummaryReport {
+    /// Indexed files considered for structural summaries.
+    pub(crate) candidates: usize,
+    /// Files whose observed summaries were refreshed.
+    pub(crate) summarized: usize,
+    /// Existing observed summaries cleared because current content was not summarizable.
+    pub(crate) cleared: usize,
+    /// Files skipped because they exceeded the parser size limit.
+    pub(crate) too_large: usize,
+    /// Files skipped because content was not valid UTF-8.
+    pub(crate) binary_or_non_utf8: usize,
+    /// Generated purpose suggestions that still need agent review.
+    pub(crate) purpose_suggestions: usize,
+}
+
 /// Options controlling full-text persistence for `SQLite` search.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TextIndexOptions {
@@ -444,10 +482,20 @@ impl TextIndexOptions {
 /// Outcome of considering one file for persisted text search.
 #[derive(Clone, Debug)]
 pub(crate) struct TextIndexRow {
+    /// Repository-relative path considered for text indexing.
+    path: String,
     /// Persistable text row when the file is search-indexed.
     text: Option<IndexedFileText>,
     /// Indexing outcome for reporting.
     reason: TextIndexSkipReason,
+}
+
+/// Persisted text refresh result plus rows reused by structural summarizers.
+pub(crate) struct TextIndexRefresh {
+    /// Aggregate report rendered to callers.
+    pub(crate) report: TextIndexReport,
+    /// Per-file text outcomes from the same scan batch.
+    pub(crate) rows: Vec<TextIndexRow>,
 }
 
 /// Text-index outcome categories.
@@ -504,6 +552,8 @@ pub(crate) struct WatchReport {
     pub(crate) fallback_reason: Option<String>,
     /// Last persisted text search index report.
     pub(crate) text_index: TextIndexReport,
+    /// Last structural summary refresh report.
+    pub(crate) structural_summaries: StructuralSummaryReport,
     /// Last symbol refresh report.
     pub(crate) last_symbols: SymbolBuildReport,
 }
@@ -1052,7 +1102,7 @@ pub(crate) fn build_symbols_for_paths(
     for node in nodes
         .iter()
         .filter(|node| node.node.kind == NodeKind::File)
-        .filter(|node| is_symbol_candidate(node.node.language.as_deref()))
+        .filter(|node| is_symbol_candidate(&node.node.path, node.node.language.as_deref()))
     {
         report.candidates += 1;
         if node
@@ -1060,7 +1110,7 @@ pub(crate) fn build_symbols_for_paths(
             .size_bytes
             .is_some_and(|size| size > options.max_bytes)
         {
-            store.clear_source_index_for_path(&node.node.path)?;
+            clear_skipped_symbol_index(store, &node.node.path, node.node.language.as_deref())?;
             report.too_large += 1;
             continue;
         }
@@ -1097,11 +1147,11 @@ pub(crate) fn build_symbols_for_paths(
                 report.parsed += 1;
             }
             SymbolParseOutcome::TimedOut { path } => {
-                store.clear_source_index_for_path(&path)?;
+                clear_skipped_symbol_index_for_path(store, &path)?;
                 report.timed_out += 1;
             }
             SymbolParseOutcome::BinaryOrNonUtf8 { path } => {
-                store.clear_source_index_for_path(&path)?;
+                clear_skipped_symbol_index_for_path(store, &path)?;
                 report.binary_or_non_utf8 += 1;
             }
             SymbolParseOutcome::Io { path, source } => {
@@ -1196,19 +1246,21 @@ pub(crate) fn empty_symbol_build_report() -> SymbolBuildReport {
 /// Create a deterministic one-line observed summary from extracted symbols.
 pub(crate) fn summarize_symbol_graph(graph: &SymbolGraph, fallback: Option<&str>) -> String {
     if graph.symbols.is_empty() {
-        return fallback.map_or_else(
-            || "Indexed source file with no declarations found.".to_string(),
-            str::to_string,
-        );
+        if let Some(fallback) = fallback.filter(|summary| !is_scanner_fallback_summary(summary)) {
+            return fallback.to_string();
+        }
+        let language = observed_language_label(graph.language.as_deref());
+        return format!("{language} source file with no declarations found.");
     }
-    let language = graph.language.as_deref().unwrap_or("source");
+    let language = observed_language_label(graph.language.as_deref());
     let primary_names = primary_symbol_names(graph, 4);
     let primary_kinds = primary_symbol_kinds(graph);
     let imports = relation_targets(graph, RelationKind::Imports, 2);
     let dependencies = relation_targets(graph, RelationKind::DependsOn, 3);
     if !dependencies.is_empty() {
+        let subject = observed_manifest_subject(&language);
         return format!(
-            "{language} manifest declaring {} and depending on {}.",
+            "{subject} declaring {} and depending on {}.",
             primary_names.join(", "),
             dependencies.join(", ")
         );
@@ -1228,11 +1280,34 @@ pub(crate) fn summarize_symbol_graph(graph: &SymbolGraph, fallback: Option<&str>
     )
 }
 
+/// Return a readable language label for agent-facing observed summaries.
+fn observed_language_label(language: Option<&str>) -> String {
+    match language.unwrap_or("source") {
+        "cargo-manifest" => "cargo manifest".to_string(),
+        "cargo-lock" => "cargo lock".to_string(),
+        "rust-build-script" => "rust build script".to_string(),
+        "objective-c" => "Objective-C".to_string(),
+        "csharp" => "C#".to_string(),
+        "cpp" => "C++".to_string(),
+        other => other.replace('-', " "),
+    }
+}
+
+/// Return the subject phrase for manifest-style observed summaries.
+fn observed_manifest_subject(language: &str) -> String {
+    if language.contains("manifest") {
+        language.to_string()
+    } else {
+        format!("{language} manifest")
+    }
+}
+
 /// Return a compact phrase describing the most important symbol kinds.
 pub(crate) fn primary_symbol_kinds(graph: &SymbolGraph) -> String {
     let mut function_like = 0_usize;
     let mut type_like = 0_usize;
     let mut manifest_like = 0_usize;
+    let mut value_like = 0_usize;
     for symbol in &graph.symbols {
         match symbol.kind {
             SymbolKind::Function | SymbolKind::Method => function_like += 1,
@@ -1245,11 +1320,15 @@ pub(crate) fn primary_symbol_kinds(graph: &SymbolGraph) -> String {
             SymbolKind::Package | SymbolKind::Workspace | SymbolKind::Dependency => {
                 manifest_like += 1;
             }
-            SymbolKind::Module | SymbolKind::Value | SymbolKind::Import | SymbolKind::Unknown => {}
+            SymbolKind::Value => value_like += 1,
+            SymbolKind::Module | SymbolKind::Import | SymbolKind::Unknown => {}
         }
     }
     if manifest_like > 0 && function_like == 0 && type_like == 0 {
         return "manifest entries".to_string();
+    }
+    if value_like > 0 && function_like == 0 && type_like == 0 {
+        return value_only_symbol_kind_label(graph, value_like);
     }
     match (type_like, function_like) {
         (0, 0) => "symbols".to_string(),
@@ -1264,12 +1343,51 @@ pub(crate) fn primary_symbol_kinds(graph: &SymbolGraph) -> String {
     }
 }
 
+/// Return the right value-only summary noun for the indexed language.
+pub(crate) fn value_only_symbol_kind_label(graph: &SymbolGraph, count: usize) -> String {
+    let language = graph.language.as_deref().unwrap_or_default();
+    let binding_language = matches!(
+        language,
+        "javascript" | "typescript" | "tsx" | "vue" | "svelte"
+    ) || graph
+        .symbols
+        .iter()
+        .any(|symbol| symbol.detail.as_deref() == Some("fallback-composition-binding"));
+    let singular = if binding_language { "binding" } else { "value" };
+    let plural = if binding_language {
+        "bindings"
+    } else {
+        "values"
+    };
+    if count == 1 {
+        singular.to_string()
+    } else {
+        plural.to_string()
+    }
+}
+
 /// Return stable names for the most important declaration symbols.
 pub(crate) fn primary_symbol_names(graph: &SymbolGraph, limit: usize) -> Vec<String> {
+    let has_primary_definitions = graph.symbols.iter().any(|symbol| {
+        matches!(
+            symbol.kind,
+            SymbolKind::Function
+                | SymbolKind::Method
+                | SymbolKind::Class
+                | SymbolKind::Struct
+                | SymbolKind::Enum
+                | SymbolKind::Trait
+                | SymbolKind::Interface
+                | SymbolKind::Type
+        )
+    });
     let mut names = graph
         .symbols
         .iter()
         .filter(|symbol| {
+            if has_primary_definitions && symbol.kind == SymbolKind::Value {
+                return false;
+            }
             !matches!(
                 symbol.kind,
                 SymbolKind::Import
@@ -1326,13 +1444,50 @@ pub(crate) fn suggest_file_purpose(path: &str, summary: &str) -> String {
 }
 
 /// Return whether a language should be parsed for symbols.
-pub(crate) fn is_symbol_candidate(language: Option<&str>) -> bool {
+pub(crate) fn is_symbol_candidate(path: &str, language: Option<&str>) -> bool {
+    if path.ends_with("Cargo.toml")
+        || path.ends_with("Cargo.lock")
+        || matches!(language, Some("cargo-manifest" | "cargo-lock"))
+    {
+        return true;
+    }
     language.is_some_and(|language| {
         !matches!(
             language,
-            "text" | "json" | "yaml" | "xml" | "config" | "markdown"
+            "text"
+                | "json"
+                | "yaml"
+                | "xml"
+                | "config"
+                | "markdown"
+                | "css"
+                | "html"
+                | "toml"
+                | "toon"
         )
     })
+}
+
+/// Clear stale symbol output while preserving structural summaries when present.
+fn clear_skipped_symbol_index(
+    store: &AtlasStore,
+    path: &str,
+    language: Option<&str>,
+) -> Result<(), CliError> {
+    if is_structural_summary_candidate(path, language) {
+        store.clear_symbol_graph_for_path(path)?;
+    } else {
+        store.clear_source_index_for_path(path)?;
+    }
+    Ok(())
+}
+
+/// Clear stale symbol output for a skipped path loaded from the index.
+fn clear_skipped_symbol_index_for_path(store: &AtlasStore, path: &str) -> Result<(), CliError> {
+    let language = store
+        .load_node_by_path(path)?
+        .and_then(|indexed| indexed.node.language);
+    clear_skipped_symbol_index(store, path, language.as_deref())
 }
 
 /// Normalize and validate a user-supplied path as a repository-relative file key.
@@ -1449,6 +1604,7 @@ pub(crate) fn run_single_watch_refresh(
         once: true,
         fallback_reason: None,
         text_index: last_refresh.text_index,
+        structural_summaries: last_refresh.structural_summaries,
         last_symbols: last_refresh.symbols,
     })
 }
@@ -1510,6 +1666,7 @@ pub(crate) fn run_notify_watch_loop(
         once: false,
         fallback_reason: None,
         text_index: last_refresh.text_index,
+        structural_summaries: last_refresh.structural_summaries,
         last_symbols: last_refresh.symbols,
     })
 }
@@ -1658,6 +1815,7 @@ pub(crate) fn run_polling_watch_loop(
         once: false,
         fallback_reason,
         text_index: last_refresh.text_index,
+        structural_summaries: last_refresh.structural_summaries,
         last_symbols: last_refresh.symbols,
     })
 }
@@ -1666,6 +1824,8 @@ pub(crate) fn run_polling_watch_loop(
 pub(crate) struct IndexRefreshReport {
     /// Persisted text search index refresh report.
     pub(crate) text_index: TextIndexReport,
+    /// Structural summary refresh report.
+    pub(crate) structural_summaries: StructuralSummaryReport,
     /// Deep symbol graph refresh report.
     symbols: SymbolBuildReport,
 }
@@ -1683,10 +1843,15 @@ pub(crate) fn refresh_index(
     let nodes = scan_repo(&root, scan_options)?;
     store.set_project_root(&root)?;
     store.replace_scan(&nodes)?;
-    let text_index = refresh_text_index_for_nodes(store, &root, &nodes, text_options)?;
+    seed_builtin_projectatlas_purposes(store, &nodes)?;
+    let text_refresh = refresh_text_index_for_nodes_with_rows(store, &root, &nodes, text_options)?;
+    let text_index = text_refresh.report.clone();
+    let structural_summaries =
+        refresh_structural_summaries_for_nodes(store, &nodes, &text_refresh.rows)?;
     let symbols = build_symbols_for_index(store, &root, symbol_options, Some(&previous_hashes))?;
     Ok(IndexRefreshReport {
         text_index,
+        structural_summaries,
         symbols,
     })
 }
@@ -1724,12 +1889,21 @@ pub(crate) fn refresh_index_for_changes(
     store.set_project_root(&root)?;
     if !nodes.is_empty() {
         store.upsert_scan_nodes(&nodes)?;
+        seed_builtin_projectatlas_purposes(store, &nodes)?;
     }
     if !absent_paths.is_empty() {
         store.mark_paths_absent(&absent_paths)?;
     }
-    let text_index =
-        refresh_text_index_for_changed_paths(store, &root, &changed_paths, &nodes, text_options)?;
+    let text_refresh = refresh_text_index_for_changed_paths_with_rows(
+        store,
+        &root,
+        &changed_paths,
+        &nodes,
+        text_options,
+    )?;
+    let text_index = text_refresh.report.clone();
+    let structural_summaries =
+        refresh_structural_summaries_for_nodes(store, &nodes, &text_refresh.rows)?;
     let target_paths = nodes
         .iter()
         .filter(|node| node.kind == NodeKind::File)
@@ -1738,6 +1912,7 @@ pub(crate) fn refresh_index_for_changes(
     if target_paths.is_empty() {
         return Ok(IndexRefreshReport {
             text_index,
+            structural_summaries,
             symbols: empty_symbol_build_report(),
         });
     }
@@ -1750,23 +1925,130 @@ pub(crate) fn refresh_index_for_changes(
     )?;
     Ok(IndexRefreshReport {
         text_index,
+        structural_summaries,
         symbols,
     })
 }
 
+/// Seed built-in purposes for reserved `ProjectAtlas` metadata nodes when needed.
+pub(crate) fn seed_builtin_projectatlas_purposes(
+    store: &AtlasStore,
+    nodes: &[Node],
+) -> Result<(), CliError> {
+    let indexed_paths = nodes
+        .iter()
+        .map(|node| node.path.as_str())
+        .collect::<HashSet<_>>();
+    for (path, purpose) in BUILTIN_PROJECTATLAS_PURPOSES {
+        if !indexed_paths.contains(path) {
+            continue;
+        }
+        let Some(indexed) = store.load_node_by_path(path)? else {
+            continue;
+        };
+        if indexed.purpose.status != PurposeStatus::Approved {
+            store.set_purpose(path, purpose, PurposeSource::Imported)?;
+        }
+    }
+    Ok(())
+}
+
+/// Refresh deterministic structural summaries for indexed declaration-light files.
+pub(crate) fn refresh_structural_summaries_for_nodes(
+    store: &mut AtlasStore,
+    nodes: &[Node],
+    text_rows: &[TextIndexRow],
+) -> Result<StructuralSummaryReport, CliError> {
+    let paths = nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::File)
+        .filter(|node| is_structural_summary_candidate(&node.path, node.language.as_deref()))
+        .map(|node| node.path.clone())
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return Ok(StructuralSummaryReport::default());
+    }
+    let indexed_nodes = store.load_nodes_by_paths(&paths)?;
+    let text_by_path = text_rows
+        .iter()
+        .filter_map(|row| row.text.as_ref().map(|text| (text.path.as_str(), text)))
+        .collect::<HashMap<_, _>>();
+    let reason_by_path = text_rows
+        .iter()
+        .map(|row| (row.path.as_str(), row.reason))
+        .collect::<HashMap<_, _>>();
+    let mut report = StructuralSummaryReport {
+        candidates: indexed_nodes.len(),
+        ..StructuralSummaryReport::default()
+    };
+    for indexed in indexed_nodes {
+        if reason_by_path.get(indexed.node.path.as_str()) == Some(&TextIndexSkipReason::TooLarge)
+            || indexed
+                .node
+                .size_bytes
+                .is_some_and(|size_bytes| size_bytes > MAX_SYMBOL_FILE_BYTES)
+        {
+            store.clear_node_summary(&indexed.node.path)?;
+            report.cleared += 1;
+            report.too_large += 1;
+            continue;
+        }
+        let Some(text) = text_by_path.get(indexed.node.path.as_str()) else {
+            store.clear_node_summary(&indexed.node.path)?;
+            report.cleared += 1;
+            if reason_by_path.get(indexed.node.path.as_str())
+                == Some(&TextIndexSkipReason::BinaryOrNonUtf8)
+            {
+                report.binary_or_non_utf8 += 1;
+            }
+            continue;
+        };
+        let Some(summary) = structural_summary_for_path(
+            &indexed.node.path,
+            indexed.node.language.as_deref(),
+            &text.content,
+        ) else {
+            store.clear_node_summary(&indexed.node.path)?;
+            report.cleared += 1;
+            continue;
+        };
+        store.set_node_summary(&indexed.node.path, &summary)?;
+        report.summarized += 1;
+        if indexed.purpose.status == PurposeStatus::Missing {
+            store.set_suggested_purpose(
+                &indexed.node.path,
+                &suggest_file_purpose(&indexed.node.path, &summary),
+            )?;
+            report.purpose_suggestions += 1;
+        }
+    }
+    Ok(report)
+}
+
 /// Refresh the persisted text index for every scanned file node.
+#[cfg(test)]
 pub(crate) fn refresh_text_index_for_nodes(
     store: &mut AtlasStore,
     root: &Path,
     nodes: &[Node],
     options: TextIndexOptions,
 ) -> Result<TextIndexReport, CliError> {
+    Ok(refresh_text_index_for_nodes_with_rows(store, root, nodes, options)?.report)
+}
+
+/// Refresh the persisted text index and retain the in-memory text rows.
+pub(crate) fn refresh_text_index_for_nodes_with_rows(
+    store: &mut AtlasStore,
+    root: &Path,
+    nodes: &[Node],
+    options: TextIndexOptions,
+) -> Result<TextIndexRefresh, CliError> {
     let file_paths = nodes
         .iter()
         .filter(|node| node.kind == NodeKind::File)
         .map(|node| node.path.clone())
         .collect::<Vec<_>>();
-    refresh_text_index_for_changed_paths(
+    refresh_text_index_for_changed_paths_with_rows(
         store,
         root,
         &file_paths.iter().cloned().collect::<HashSet<_>>(),
@@ -1775,14 +2057,14 @@ pub(crate) fn refresh_text_index_for_nodes(
     )
 }
 
-/// Refresh persisted text index rows for an incremental path set.
-pub(crate) fn refresh_text_index_for_changed_paths(
+/// Refresh persisted text index rows for an incremental path set and retain outcomes.
+pub(crate) fn refresh_text_index_for_changed_paths_with_rows(
     store: &mut AtlasStore,
     root: &Path,
     changed_paths: &HashSet<String>,
     nodes: &[Node],
     options: TextIndexOptions,
-) -> Result<TextIndexReport, CliError> {
+) -> Result<TextIndexRefresh, CliError> {
     let mut considered_paths = changed_paths.iter().cloned().collect::<Vec<_>>();
     considered_paths.sort();
     let text_rows = indexed_file_texts_for_nodes(root, nodes, options)?;
@@ -1815,7 +2097,10 @@ pub(crate) fn refresh_text_index_for_changed_paths(
             .fold(0usize, usize::saturating_add),
     };
     store.replace_file_texts_for_paths(&considered_paths, &texts)?;
-    Ok(report)
+    Ok(TextIndexRefresh {
+        report,
+        rows: text_rows,
+    })
 }
 
 /// Build indexed text rows for UTF-8 scanned files with size caps.
@@ -1831,6 +2116,7 @@ pub(crate) fn indexed_file_texts_for_nodes(
             .is_some_and(|size_bytes| size_bytes > options.max_bytes)
         {
             rows.push(TextIndexRow {
+                path: node.path.clone(),
                 text: None,
                 reason: TextIndexSkipReason::TooLarge,
             });
@@ -1843,12 +2129,14 @@ pub(crate) fn indexed_file_texts_for_nodes(
         })?;
         let Ok(content) = String::from_utf8(bytes) else {
             rows.push(TextIndexRow {
+                path: node.path.clone(),
                 text: None,
                 reason: TextIndexSkipReason::BinaryOrNonUtf8,
             });
             continue;
         };
         rows.push(TextIndexRow {
+            path: node.path.clone(),
             reason: TextIndexSkipReason::Indexed,
             text: Some(IndexedFileText {
                 path: node.path.clone(),
@@ -1974,7 +2262,7 @@ pub(crate) fn purpose_header_candidates(
     for node in nodes
         .iter()
         .filter(|node| node.kind == NodeKind::File)
-        .filter(|node| is_symbol_candidate(node.language.as_deref()))
+        .filter(|node| is_symbol_candidate(&node.path, node.language.as_deref()))
     {
         let path = root.join(repo_path_to_native(&node.path));
         let content = fs::read_to_string(&path).map_err(|source| CliError::Io { path, source })?;

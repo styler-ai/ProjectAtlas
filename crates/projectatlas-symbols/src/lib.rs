@@ -6,6 +6,7 @@ use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
 };
 use regex::Regex;
+use std::borrow::Cow;
 use toml::Value as TomlValue;
 use tree_sitter::{Language, Node, Parser};
 
@@ -24,10 +25,11 @@ pub fn extract_symbol_graph(path: &str, language: Option<&str>, content: &str) -
     if is_cargo_manifest(path, language) {
         return extract_cargo_manifest_graph(path, language, content);
     }
-    if let Some(graph) = extract_tree_sitter_graph(path, language, content) {
+    let parse_content = content_without_leading_purpose_header(content);
+    if let Some(graph) = extract_tree_sitter_graph(path, language, parse_content.as_ref()) {
         return graph;
     }
-    extract_fallback_graph(path, language, content)
+    extract_fallback_graph(path, language, parse_content.as_ref())
 }
 
 /// Return whether the language has a specialized tree-sitter parser.
@@ -79,14 +81,21 @@ fn extract_cargo_manifest_graph(path: &str, language: Option<&str>, content: &st
 
 /// Extract package names from Cargo.lock.
 fn extract_cargo_lock_packages(graph: &mut SymbolGraph, content: &str) {
-    let Ok(name_regex) = Regex::new(r#"(?m)^name\s*=\s*"([^"]+)""#) else {
+    let Ok(lockfile) = content.parse::<TomlValue>() else {
         return;
     };
-    for capture in name_regex.captures_iter(content) {
-        let Some(name) = capture.get(1).map(|value| value.as_str()) else {
+    let Some(packages) = lockfile.get("package").and_then(TomlValue::as_array) else {
+        return;
+    };
+    for package in packages {
+        let Some(name) = package
+            .as_table()
+            .and_then(|table| table.get("name"))
+            .and_then(TomlValue::as_str)
+        else {
             continue;
         };
-        let line = line_for_byte(content, capture.get(0).map_or(0, |value| value.start()));
+        let line = cargo_lock_name_line(content, name).unwrap_or(1);
         push_symbol(
             graph,
             name,
@@ -98,6 +107,29 @@ fn extract_cargo_lock_packages(graph: &mut SymbolGraph, content: &str) {
             &format!("lock package {name}"),
         );
     }
+}
+
+/// Return the one-based source line for a package name in a Cargo.lock file.
+fn cargo_lock_name_line(content: &str, package_name: &str) -> Option<usize> {
+    let mut in_package = false;
+    for (index, raw_line) in content.lines().enumerate() {
+        let line = raw_line.trim();
+        if line == "[[package]]" {
+            in_package = true;
+            continue;
+        }
+        if line.starts_with('[') {
+            in_package = false;
+        }
+        if in_package
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim() == "name"
+            && value.trim().trim_matches('"') == package_name
+        {
+            return Some(index + 1);
+        }
+    }
+    None
 }
 
 /// Extract package, workspace, and dependencies from Cargo.toml.
@@ -335,7 +367,7 @@ fn tree_sitter_language(language: &str) -> Option<Language> {
 fn visit_node(node: Node<'_>, content: &str, graph: &mut SymbolGraph) {
     if graph.symbols.len() < MAX_SYMBOLS_PER_FILE
         && let Some(kind) = declaration_kind(node.kind())
-        && should_emit_declaration_symbol(node)
+        && should_emit_declaration_symbol(node, content)
     {
         push_tree_symbol(graph, node, content, effective_declaration_kind(node, kind));
     }
@@ -357,7 +389,10 @@ fn effective_declaration_kind(node: Node<'_>, kind: SymbolKind) -> SymbolKind {
     if kind == SymbolKind::Function && declaration_is_method_context(node) {
         return SymbolKind::Method;
     }
-    if kind == SymbolKind::Value && declaration_has_callable_initializer(node) {
+    if kind == SymbolKind::Value
+        && !is_local_value_declaration(node)
+        && declaration_has_direct_callable_initializer(node)
+    {
         return SymbolKind::Function;
     }
     if kind == SymbolKind::Type {
@@ -386,7 +421,10 @@ fn declaration_is_method_context(node: Node<'_>) -> bool {
 }
 
 /// Return whether this declaration node should become its own symbol row.
-fn should_emit_declaration_symbol(node: Node<'_>) -> bool {
+fn should_emit_declaration_symbol(node: Node<'_>, content: &str) -> bool {
+    if is_object_literal_method(node) {
+        return object_literal_method_owner(node, content).is_some_and(|owner| owner.exported);
+    }
     if node.kind() == "field_declaration"
         && has_descendant_kind(node, &["function_declarator", "method_declarator"])
     {
@@ -420,30 +458,170 @@ fn has_declaration_ancestor(mut node: Option<Node<'_>>) -> bool {
     false
 }
 
-/// Return whether a value declaration initializes a callable value.
-fn declaration_has_callable_initializer(node: Node<'_>) -> bool {
+/// Return whether a value declaration initializes directly to a callable value.
+fn declaration_has_direct_callable_initializer(node: Node<'_>) -> bool {
     if !matches!(
         node.kind(),
         "lexical_declaration" | "variable_declaration" | "variable_statement" | "var_declaration"
     ) {
         return false;
     }
-    has_descendant_kind(
-        node,
+    first_variable_initializer(node).is_some_and(|initializer| {
+        matches!(
+            initializer.kind(),
+            "arrow_function"
+                | "function"
+                | "function_expression"
+                | "generator_function"
+                | "lambda_expression"
+        )
+    })
+}
+
+/// Return the initializer node for the first variable declarator in a statement.
+fn first_variable_initializer(node: Node<'_>) -> Option<Node<'_>> {
+    if matches!(node.kind(), "variable_declarator" | "variable_declaration") {
+        return node.child_by_field_name("value");
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if matches!(child.kind(), "variable_declarator" | "variable_declaration")
+            && let Some(value) = child.child_by_field_name("value")
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Return whether a declaration is a local binding inside a callable body.
+fn is_local_value_declaration(node: Node<'_>) -> bool {
+    matches!(
+        node.kind(),
+        "lexical_declaration" | "variable_declaration" | "variable_statement" | "var_declaration"
+    ) && has_ancestor_kind_any(
+        node.parent(),
         &[
             "arrow_function",
             "function",
             "function_expression",
+            "function_declaration",
             "generator_function",
-            "lambda_expression",
+            "method_definition",
+            "method_declaration",
+            "function_item",
+            "function_definition",
+            "function_declaration_with_receiver",
+            "func_literal",
         ],
     )
+}
+
+/// Return whether a method declaration belongs to an object literal, not a type.
+fn is_object_literal_method(node: Node<'_>) -> bool {
+    node.kind() == "method_definition"
+        && has_ancestor_kind_any(node.parent(), &["object", "object_pattern", "pair"])
+}
+
+/// Parent object metadata for a JavaScript object-literal method.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ObjectLiteralMethodOwner {
+    /// Object or export-assignment name that owns the method.
+    name: String,
+    /// Whether the owning object is part of the module API.
+    exported: bool,
+}
+
+/// Return the owner of an object-literal method when it is useful to index.
+fn object_literal_method_owner(
+    method_node: Node<'_>,
+    content: &str,
+) -> Option<ObjectLiteralMethodOwner> {
+    if !is_object_literal_method(method_node) {
+        return None;
+    }
+    let object = nearest_ancestor_kind(method_node.parent(), "object")?;
+    object_literal_owner(object, content)
+}
+
+/// Return the declaration or assignment that owns an object literal.
+fn object_literal_owner(object: Node<'_>, content: &str) -> Option<ObjectLiteralMethodOwner> {
+    let parent = object.parent()?;
+    match parent.kind() {
+        "variable_declarator" | "variable_declaration" => {
+            let name = declarator_name(parent, content)?;
+            Some(ObjectLiteralMethodOwner {
+                name,
+                exported: is_directly_exported_declaration(parent),
+            })
+        }
+        "assignment_expression" | "augmented_assignment_expression" => {
+            let target = parent
+                .child_by_field_name("left")
+                .or_else(|| first_named_child(parent))?;
+            let name = compact_text(node_text(target, content).as_deref().unwrap_or(""));
+            if name.is_empty() {
+                return None;
+            }
+            let exported = name == "module.exports"
+                || name.starts_with("module.exports.")
+                || name == "exports"
+                || name.starts_with("exports.");
+            Some(ObjectLiteralMethodOwner { name, exported })
+        }
+        "export_statement" => Some(ObjectLiteralMethodOwner {
+            name: "default".to_string(),
+            exported: true,
+        }),
+        "pair" => {
+            let property = parent
+                .child_by_field_name("key")
+                .and_then(|key| named_text(key, content))
+                .unwrap_or_else(|| "object".to_string());
+            let outer = nearest_ancestor_kind(parent.parent(), "object")
+                .and_then(|outer| object_literal_owner(outer, content));
+            outer.map(|owner| ObjectLiteralMethodOwner {
+                name: format!("{}.{}", owner.name, property),
+                exported: owner.exported,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Return whether a declaration statement is directly wrapped in an export.
+fn is_directly_exported_declaration(node: Node<'_>) -> bool {
+    let mut current = Some(node);
+    while let Some(candidate) = current {
+        if has_direct_export_parent(candidate) {
+            return true;
+        }
+        if matches!(
+            candidate.kind(),
+            "lexical_declaration" | "variable_declaration" | "variable_statement"
+        ) {
+            return false;
+        }
+        current = candidate.parent();
+    }
+    false
 }
 
 /// Return whether a node has an ancestor of the given tree-sitter kind.
 fn has_ancestor_kind(mut node: Option<Node<'_>>, kind: &str) -> bool {
     while let Some(current) = node {
         if current.kind() == kind {
+            return true;
+        }
+        node = current.parent();
+    }
+    false
+}
+
+/// Return whether a node has any ancestor with one of the given tree-sitter kinds.
+fn has_ancestor_kind_any(mut node: Option<Node<'_>>, kinds: &[&str]) -> bool {
+    while let Some(current) = node {
+        if kinds.contains(&current.kind()) {
             return true;
         }
         node = current.parent();
@@ -476,7 +654,8 @@ fn push_tree_symbol(
     }
     let signature = declaration_signature(node, content);
     let parent = symbol_parent(node, content);
-    let exported = has_ancestor_kind(node.parent(), "export_statement")
+    let exported = has_direct_export_parent(node)
+        || object_literal_method_owner(node, content).is_some_and(|owner| owner.exported)
         || is_exported_symbol(graph.language.as_deref(), &name, &signature);
     let documentation = symbol_documentation(node, content);
     push_symbol_with_metadata(
@@ -503,8 +682,76 @@ fn push_tree_symbol(
     }
 }
 
+/// Return whether a declaration is directly wrapped by a JavaScript-like export.
+fn has_direct_export_parent(node: Node<'_>) -> bool {
+    node.parent()
+        .is_some_and(|parent| parent.kind() == "export_statement")
+}
+
+/// Return source content with a leading `ProjectAtlas` `Purpose:` header blanked.
+fn content_without_leading_purpose_header(content: &str) -> Cow<'_, str> {
+    let Some(start) = content.find(|character: char| !character.is_whitespace()) else {
+        return Cow::Borrowed(content);
+    };
+    let rest = &content[start..];
+    if let Some(end) = leading_purpose_block_end(rest) {
+        return Cow::Owned(blank_prefix_preserving_newlines(content, start + end));
+    }
+    if let Some(end) = leading_purpose_line_end(rest) {
+        return Cow::Owned(blank_prefix_preserving_newlines(content, start + end));
+    }
+    Cow::Borrowed(content)
+}
+
+/// Return the byte end of a leading block comment when it is a purpose header.
+fn leading_purpose_block_end(rest: &str) -> Option<usize> {
+    if !(rest.starts_with("/**") || rest.starts_with("/*")) {
+        return None;
+    }
+    let end = rest.find("*/")? + "*/".len();
+    let documentation = rest[..end]
+        .lines()
+        .filter_map(|line| clean_doc_comment_line(line.trim()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    compact_documentation(&documentation)
+        .is_some_and(|value| value.starts_with("Purpose:"))
+        .then_some(end)
+}
+
+/// Return the byte end of a leading line comment when it is a purpose header.
+fn leading_purpose_line_end(rest: &str) -> Option<usize> {
+    let line_end = rest.find('\n').map_or(rest.len(), |index| index + 1);
+    let line = rest[..line_end].trim();
+    let cleaned = line
+        .strip_prefix("//")
+        .or_else(|| line.strip_prefix('#'))
+        .or_else(|| {
+            line.strip_prefix("<!--")
+                .and_then(|value| value.strip_suffix("-->"))
+        })?
+        .trim();
+    cleaned.starts_with("Purpose:").then_some(line_end)
+}
+
+/// Blank a source prefix without changing line numbers.
+fn blank_prefix_preserving_newlines(content: &str, end: usize) -> String {
+    let mut output = String::with_capacity(content.len());
+    for (index, character) in content.char_indices() {
+        if index < end && !matches!(character, '\n' | '\r') {
+            output.push(' ');
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
 /// Return the semantic parent for a declaration symbol.
 fn symbol_parent(node: Node<'_>, content: &str) -> Option<String> {
+    if let Some(owner) = object_literal_method_owner(node, content) {
+        return Some(owner.name);
+    }
     if node.kind() == "function_item"
         && let Some(impl_node) = nearest_ancestor_kind(node.parent(), "impl_item")
     {
@@ -899,9 +1146,9 @@ fn clean_doc_comment_line(trimmed: &str) -> Option<String> {
         rest
     } else if let Some(rest) = trimmed.strip_prefix("/**") {
         rest
-    } else if let Some(rest) = trimmed.strip_prefix('*') {
-        rest
     } else if let Some(rest) = trimmed.strip_prefix("*/") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix('*') {
         rest
     } else if let Some(rest) = trimmed.strip_prefix("# ") {
         rest
@@ -1070,6 +1317,11 @@ fn fallback_patterns() -> Vec<FallbackPattern> {
             "fallback-js-function",
         ),
         (
+            r"^(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:withDefaults\s*\(\s*)?(?:defineProps|defineEmits|defineModel|defineSlots|computed|ref|shallowRef|reactive|toRef|toRefs|watch)\b",
+            SymbolKind::Value,
+            "fallback-composition-binding",
+        ),
+        (
             r"^(?:pub\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)",
             SymbolKind::Function,
             "fallback-rust-function",
@@ -1163,7 +1415,7 @@ fn push_symbol_with_metadata(
         language: graph.language.clone(),
         name: cleaned_name,
         kind,
-        signature: truncate_chars(&compact_text(signature), MAX_SNIPPET_CHARS),
+        signature: truncate_chars_at_boundary(&compact_text(signature), MAX_SNIPPET_CHARS),
         exported,
         documentation: documentation.map(ToString::to_string),
         line_start,
@@ -1192,11 +1444,11 @@ fn push_relation(
     }
     graph.relations.push(SymbolRelation {
         path: graph.path.clone(),
-        source_name: truncate_chars(&compact_text(source_name), MAX_SNIPPET_CHARS),
-        target_name: truncate_chars(&target, MAX_SNIPPET_CHARS),
+        source_name: truncate_chars_at_boundary(&compact_text(source_name), MAX_SNIPPET_CHARS),
+        target_name: truncate_chars_at_boundary(&target, MAX_SNIPPET_CHARS),
         kind,
         line,
-        context: truncate_chars(&compact_text(context), MAX_SNIPPET_CHARS),
+        context: truncate_chars_at_boundary(&compact_text(context), MAX_SNIPPET_CHARS),
         parser: graph.parser,
     });
 }
@@ -1214,13 +1466,52 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
-/// Convert a byte offset into a one-based line number.
-fn line_for_byte(content: &str, byte: usize) -> usize {
-    content[..byte.min(content.len())]
-        .bytes()
-        .filter(|byte| *byte == b'\n')
-        .count()
-        + 1
+/// Truncate a long snippet at a stable syntactic boundary and mark omission.
+fn truncate_chars_at_boundary(value: &str, max_chars: usize) -> String {
+    let value_chars = value.chars().count();
+    if value_chars <= max_chars {
+        return value.to_string();
+    }
+    let marker = "...";
+    let marker_chars = marker.chars().count();
+    if max_chars <= marker_chars {
+        return value.chars().take(max_chars).collect();
+    }
+    let target_chars = max_chars - marker_chars;
+    let mut fallback_end = 0_usize;
+    let mut boundary_end = None;
+    for (char_index, (index, character)) in value.char_indices().enumerate() {
+        if char_index >= target_chars {
+            break;
+        }
+        fallback_end = index + character.len_utf8();
+        if is_snippet_boundary(character) {
+            boundary_end = Some(fallback_end);
+        }
+    }
+    let end = boundary_end.unwrap_or(fallback_end);
+    let prefix = value[..end]
+        .trim_end_matches(|character: char| {
+            character.is_whitespace() || matches!(character, ',' | ';' | ':' | '{')
+        })
+        .to_string();
+    if prefix.is_empty() {
+        format!(
+            "{}{marker}",
+            value.chars().take(target_chars).collect::<String>()
+        )
+    } else {
+        format!("{prefix}{marker}")
+    }
+}
+
+/// Return whether a character is a good truncation boundary for source snippets.
+fn is_snippet_boundary(character: char) -> bool {
+    character.is_whitespace()
+        || matches!(
+            character,
+            ',' | ';' | ':' | '{' | '}' | '(' | ')' | '[' | ']' | '/' | '\\' | '.'
+        )
 }
 
 #[cfg(test)]
@@ -1302,6 +1593,295 @@ export const createWriter = () => createReader();
         }));
         assert!(graph.relations.iter().any(|relation| {
             relation.kind == RelationKind::Imports && relation.target_name.contains("readFile")
+        }));
+    }
+
+    #[test]
+    fn typescript_nested_locals_do_not_inherit_exported_parent() {
+        let source = r#"
+export function useAtlas() {
+  type LocalMode = "fast" | "safe";
+  const localCache = new Map<string, string>();
+  const computeLocal = () => localCache.size;
+  return computeLocal();
+}
+"#;
+        let graph = extract_symbol_graph("src/use-atlas.ts", Some("typescript"), source);
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Function && symbol.name == "useAtlas" && symbol.exported
+        }));
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.name == "LocalMode"
+                && symbol.parent.as_deref() == Some("useAtlas")
+                && !symbol.exported
+        }));
+        for nested_value in ["localCache", "computeLocal"] {
+            assert!(
+                graph.symbols.iter().any(|symbol| {
+                    symbol.name == nested_value
+                        && symbol.kind == SymbolKind::Value
+                        && symbol.parent.as_deref() == Some("useAtlas")
+                        && !symbol.exported
+                }),
+                "nested value {nested_value} should remain indexed with parent and no export"
+            );
+        }
+    }
+
+    #[test]
+    fn javascript_summary_symbols_ignore_locals_and_iife_constants() {
+        let source = r#"
+import path from "node:path";
+import { createHash } from "node:crypto";
+
+const DATA_DIRECTORY = path.resolve("app/public/data");
+const OUTPUT_FILE = path.join(DATA_DIRECTORY, "datasets.manifest.json");
+const CACHE_NAME = (() => `sw-${Date.now()}`)();
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+async function readDatasetEntry(filePath) {
+  return sha256(filePath);
+}
+
+async function main() {
+  const datasetEntries = await Promise.all(["a"].map((file) => readDatasetEntry(file)));
+  const versionSeed = datasetEntries.map((entry) => entry.id).join("\n");
+  return versionSeed;
+}
+"#;
+        let graph = extract_symbol_graph("scripts/generate.mjs", Some("javascript"), source);
+        for name in ["sha256", "readDatasetEntry", "main"] {
+            assert!(
+                graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.kind == SymbolKind::Function && symbol.name == name),
+                "missing top-level function {name}"
+            );
+        }
+        for name in ["DATA_DIRECTORY", "OUTPUT_FILE", "CACHE_NAME"] {
+            assert!(
+                graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.kind == SymbolKind::Value && symbol.name == name),
+                "missing top-level constant {name}"
+            );
+            assert!(
+                !graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.kind == SymbolKind::Function && symbol.name == name),
+                "constant {name} must not be promoted to a function"
+            );
+        }
+        for local in ["datasetEntries", "versionSeed"] {
+            assert!(
+                graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.kind == SymbolKind::Value && symbol.name == local),
+                "local binding {local} should remain indexed as a nested value"
+            );
+            assert!(
+                !graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.kind == SymbolKind::Function && symbol.name == local),
+                "local binding {local} must not become a function"
+            );
+        }
+    }
+
+    #[test]
+    fn javascript_object_literal_methods_are_not_file_level_methods() {
+        let source = r"
+const stub = {
+  addListener() {},
+  removeListener() {},
+  nested: {
+    addEventListener() {},
+    removeEventListener() {}
+  }
+};
+
+class Harness {
+  run() {}
+}
+";
+        let graph = extract_symbol_graph("tests/browser.spec.js", Some("javascript"), source);
+        for object_method in [
+            "addListener",
+            "removeListener",
+            "addEventListener",
+            "removeEventListener",
+        ] {
+            assert!(
+                !graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.name == object_method),
+                "object literal method {object_method} must not become a file-level method"
+            );
+        }
+        assert!(
+            graph
+                .symbols
+                .iter()
+                .any(|symbol| { symbol.kind == SymbolKind::Class && symbol.name == "Harness" })
+        );
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Method
+                && symbol.name == "run"
+                && symbol.parent.as_deref() == Some("Harness")
+        }));
+    }
+
+    #[test]
+    fn javascript_exported_object_literal_methods_remain_indexed() {
+        let source = r"
+export const api = {
+  list() {},
+  nested: {
+    refresh() {}
+  }
+};
+
+module.exports = {
+  boot() {}
+};
+";
+        let graph = extract_symbol_graph("src/api.js", Some("javascript"), source);
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Method
+                && symbol.name == "list"
+                && symbol.parent.as_deref() == Some("api")
+                && symbol.exported
+        }));
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Method
+                && symbol.name == "refresh"
+                && symbol.parent.as_deref() == Some("api.nested")
+                && symbol.exported
+        }));
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Method
+                && symbol.name == "boot"
+                && symbol.parent.as_deref() == Some("module.exports")
+                && symbol.exported
+        }));
+    }
+
+    #[test]
+    fn javascript_direct_callable_constants_remain_functions() {
+        let source = r#"
+export const createThing = () => ({ kind: "thing" });
+const helper = function helperFactory() { return createThing(); };
+"#;
+        let graph = extract_symbol_graph("src/factory.js", Some("javascript"), source);
+        for name in ["createThing", "helper"] {
+            assert!(
+                graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.kind == SymbolKind::Function && symbol.name == name),
+                "callable constant {name} should remain function-like"
+            );
+        }
+    }
+
+    #[test]
+    fn file_purpose_docblock_is_not_symbol_documentation() {
+        let source = r#"/**
+ * Purpose: Choose a fresher deck start so repeated app opens avoid the same opening cards.
+ */
+import type { Deal } from "@/types/deals";
+export function applyLaunchFreshness() {}
+"#;
+        let graph = extract_symbol_graph("src/launch-freshness.ts", Some("typescript"), source);
+        assert!(
+            graph
+                .symbols
+                .iter()
+                .any(|symbol| symbol.kind == SymbolKind::Import && symbol.documentation.is_none())
+        );
+        assert!(
+            graph
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "applyLaunchFreshness"
+                    && symbol.documentation.is_none())
+        );
+    }
+
+    #[test]
+    fn boundary_truncates_long_import_snippet() {
+        let truncated = super::truncate_chars_at_boundary(
+            "import type { EmailDigestDraft, MarketingChannel, MarketingDatasetDeal } from \"@/marketing\";",
+            56,
+        );
+
+        assert_eq!(
+            truncated,
+            "import type { EmailDigestDraft, MarketingChannel..."
+        );
+    }
+
+    #[test]
+    fn import_specific_comment_remains_import_documentation() {
+        let source = r#"/** Loads a required browser polyfill. */
+import "./polyfill";
+"#;
+        let graph = extract_symbol_graph("src/polyfills.ts", Some("typescript"), source);
+        assert!(
+            graph.symbols.iter().any(|symbol| {
+                symbol.kind == SymbolKind::Import
+                    && symbol.documentation.as_deref() == Some("Loads a required browser polyfill.")
+            }),
+            "import-specific documentation should remain attached to the import symbol"
+        );
+    }
+
+    #[test]
+    fn extracts_vue_composition_bindings_from_script_setup() {
+        let source = r#"
+<template><article>{{ currentPriceLabel }}</article></template>
+<script setup lang="ts">
+import { computed, ref } from "vue";
+
+const props = withDefaults(defineProps<{
+  title: string;
+}>(), { title: "Deal" });
+const emit = defineEmits<{
+  select: [id: string];
+}>();
+const dealTitleId = computed(() => props.title.toLowerCase());
+const currentPriceLabel = computed(() => `$${props.title}`);
+const retryCount = ref(0);
+</script>
+"#;
+        let graph = extract_symbol_graph("src/DealStage.vue", Some("vue"), source);
+        for expected in [
+            "props",
+            "emit",
+            "dealTitleId",
+            "currentPriceLabel",
+            "retryCount",
+        ] {
+            assert!(
+                graph.symbols.iter().any(|symbol| {
+                    symbol.kind == SymbolKind::Value
+                        && symbol.name == expected
+                        && symbol.detail.as_deref() == Some("fallback-composition-binding")
+                }),
+                "missing Vue Composition API binding {expected}"
+            );
+        }
+        assert!(graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Imports && relation.target_name.contains("computed")
         }));
     }
 

@@ -1,0 +1,28 @@
+version: 1
+summaries[26]{path,language,parser_kind,status,min_symbols,summary}:
+  rust/lib.rs,rust,tree-sitter-symbol-graph,ok,2,"rust source defining functions helper, run_rust_fixture."
+  rust/build.rs,rust-build-script,tree-sitter-symbol-graph,ok,1,rust build script source defining function main.
+  python/builder.py,python,tree-sitter-symbol-graph,ok,3,"python source defining type and functions Builder, build, helper."
+  javascript/service.js,javascript,tree-sitter-symbol-graph,ok,2,"javascript source defining functions helper, runService."
+  typescript/service.ts,typescript,tree-sitter-symbol-graph,ok,3,"typescript source defining type and functions AtlasService, helper, run."
+  typescript/component.tsx,tsx,tree-sitter-symbol-graph,ok,1,tsx source defining function AtlasPanel.
+  vue/DealStage.vue,vue,fallback-symbol-graph,fallback,3,"vue source defining bindings dealTitleId, props, retryCount with imports import { computed, ref } from \"vue\";."
+  java/AtlasService.java,java,tree-sitter-symbol-graph,ok,4,"java source defining type and functions AtlasService, helper, run."
+  kotlin/Runner.kt,kotlin,tree-sitter-symbol-graph,ok,4,"kotlin source defining type and functions Runner, helper, run."
+  csharp/Runner.cs,csharp,tree-sitter-symbol-graph,ok,4,"C# source defining type and functions Helper, Run, Runner."
+  go/service.go,go,tree-sitter-symbol-graph,ok,5,"go source defining type and functions Run, Runner, helper with imports import \"fmt\"."
+  objective-c/UserManager.m,objective-c,tree-sitter-symbol-graph,ok,2,"Objective-C source defining type and function UserManager, run."
+  zig/runner.zig,zig,tree-sitter-symbol-graph,ok,2,"zig source defining type and function Runner, run."
+  c/runner.c,c,tree-sitter-symbol-graph,ok,2,c source defining function c_run with imports #include <stdio.h>.
+  c/header.h,h,tree-sitter-symbol-graph,ok,1,h source defining function c_header_run.
+  cpp/runner.cpp,cpp,tree-sitter-symbol-graph,ok,3,"C++ source defining type and functions CppRunner, inline_run, run."
+  cpp/runner.hpp,hpp,tree-sitter-symbol-graph,ok,2,"hpp source defining type and function HeaderRunner, run."
+  toml/Cargo.toml,cargo-manifest,manifest-symbol-graph,ok,2,cargo manifest declaring fixture-crate and depending on serde.
+  toml/Cargo.lock,cargo-lock,manifest-symbol-graph,ok,2,"cargo lock source defining manifest entries fixture-crate, serde."
+  markdown/readme.md,markdown,structural,ok,0,"markdown document titled ProjectAtlas Demo with sections Install, Usage."
+  json/package.json,json,structural,ok,0,package manifest for demo with scripts test and 1 dependencies.
+  yaml/workflow.yml,yaml,structural,ok,0,"yaml workflow CI triggered by pull_request, push with jobs test."
+  css/tokens.css,css,structural,ok,0,"css stylesheet with selectors .card, .panel, :root, custom properties --brand, 1 media queries, and 0 supports queries."
+  html/index.html,html,structural,ok,0,"html document with title Home, meta description Welcome page, headings Hello, structured data."
+  rust/empty.rs,rust,symbol-graph,ok,0,rust source file with no declarations found.
+  toon/projectatlas-nonsource-files.toon,toon,structural,ok,0,TOON document with sections nonsource_files.

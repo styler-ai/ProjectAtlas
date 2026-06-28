@@ -61,7 +61,7 @@ messages, not LSP-style `Content-Length` framed messages. Tool result text is TO
 This skill is part of the ProjectAtlas plugin on purpose. Installing the plugin should give the agent:
 
 - this skill as the workflow and decision manual,
-- `plugins/projectatlas/.mcp.json` as the MCP server registration,
+- `plugins/projectatlas/.mcp.json` as a guarded fallback MCP server registration,
 - native runtime installer scripts under `plugins/projectatlas/scripts/`,
 - `projectatlas mcp-config` plus generated `.projectatlas/projectatlas.mcp.json` for absolute MCP paths,
 - `projectatlas mcp` as the executable MCP server,
@@ -80,11 +80,11 @@ This skill is part of the ProjectAtlas plugin on purpose. Installing the plugin 
 
 1. Establish the project root first. If the workspace root is unambiguous, use it; otherwise ask the user once. Do not use one global ProjectAtlas database for unrelated projects.
 2. Run all setup commands from that root so the default index is `<project-root>/.projectatlas/projectatlas.db`.
-3. Confirm the native runtime is ProjectAtlas 3 with `projectatlas --format json runtime-info`; the report must identify project `ProjectAtlas`, major version 3 or newer, capability `mcp`, and text format `TOON`.
-4. If the command is missing or resolves to an older non-ProjectAtlas-3 wrapper, run the plugin runtime installer from the target project root or pass the project root explicitly. The installer verifies the stable `runtime-info` contract, uses a local ProjectAtlas source checkout when present, otherwise downloads the release tag derived from the plugin manifest for the platform, then falls back to `cargo install --git https://github.com/styler-ai/ProjectAtlas --tag <plugin-release-tag> --package projectatlas-cli --locked`. It writes `.projectatlas/projectatlas.mcp.json` with absolute MCP paths:
+3. Confirm the native runtime with `projectatlas --format json runtime-info`; the report must identify project `ProjectAtlas`, major version 3 or newer, capability `mcp`, text format `TOON`, and the plugin manifest version when a plugin release tag is known.
+4. If the command is missing, resolves to an older non-ProjectAtlas wrapper, or reports a stale runtime version for the installed plugin, run the plugin runtime installer from the target project root or pass the project root explicitly. The installer verifies the stable `runtime-info` contract and matching release version, uses a local ProjectAtlas source checkout when present, otherwise downloads the release tag derived from the plugin manifest for the platform, then falls back to `cargo install --git https://github.com/styler-ai/ProjectAtlas --tag <plugin-release-tag> projectatlas-cli --locked`. It writes `.projectatlas/projectatlas.mcp.json` with absolute MCP paths:
    - Windows: `plugins/projectatlas/scripts/install-runtime.ps1`
    - Linux/macOS: `plugins/projectatlas/scripts/install-runtime.sh`
-5. Confirm MCP registration uses the generated `.projectatlas/projectatlas.mcp.json` whenever possible. It contains absolute runtime, DB, and config paths plus a `cwd` project-root hint. `mcp-config` discovers `.projectatlas/config.toml` and flat `projectatlas.toml` from the selected DB/project root. The MCP server also resolves path-less root-sensitive tools from config, indexed DB metadata, or the default `.projectatlas/projectatlas.db` parent, so hosts that ignore `cwd` still use the intended project. The fallback plugin `.mcp.json` starts `projectatlas --db .projectatlas/projectatlas.db mcp` from PATH and should only be used from the project root when PATH resolves to the verified ProjectAtlas 3 binary.
+5. Confirm MCP registration uses the generated `.projectatlas/projectatlas.mcp.json` whenever possible. It contains absolute runtime, DB, and config paths plus a `cwd` project-root hint. `mcp-config` discovers `.projectatlas/config.toml` and flat `projectatlas.toml` from the selected DB/project root. The MCP server also resolves path-less root-sensitive tools from config, indexed DB metadata, or the default `.projectatlas/projectatlas.db` parent, so hosts that ignore `cwd` still use the intended project. The fallback plugin `.mcp.json` starts `projectatlas --require-version <plugin-version> --db .projectatlas/projectatlas.db mcp` from PATH and fails closed if PATH resolves to a stale runtime.
    MCP root-changing arguments such as `atlas_scan.path` and `atlas_watch_once.path` must resolve to this same project root. If you need a different repository, start or install a separate project-local ProjectAtlas MCP server for that repository.
 6. Initialize the target repo with `projectatlas init --seed-purpose`.
 7. Check `.projectatlas/config.toml` before large-repo indexing. Add broad generated/vendor/build directory names to `[scan].exclude_dir_names`, and add exact generated or published subtrees to `[scan].exclude_path_prefixes`.
@@ -102,12 +102,12 @@ Use the MCP tools when the harness exposes them. They are preferred over shell c
 2. `atlas_overview` at startup to understand repository size and purpose coverage.
 3. `atlas_folders` with the task query to choose the right work area.
 4. `atlas_files` with the task query and selected folder to pick target files; add `file_pattern` when you already know the filename/path glob.
-5. `atlas_file_summary` for structured file facts: purpose state, observed summary, imports/dependencies, functions, methods, classes/types, calls, and line ranges.
+5. `atlas_file_summary` for structured file facts: purpose state, observed summary, `parser_kind`, `summary_status`, imports/dependencies, functions, methods, classes/types, calls, and line ranges. Treat `summary_status: fallback` as a signal to inspect deeper or improve the parser.
 6. `atlas_outline` for a compact line-level file outline when the summary is not enough.
 7. `atlas_symbols` and `atlas_symbol_relations` when function/class/import/call context is needed.
 8. `atlas_search` for filtered literal, regex, or fuzzy matches inside indexed files.
 9. `atlas_slice` for exact line or symbol source after folder/file/symbol selection.
-10. `atlas_health` before cleanup, refactor, or DRY decisions.
+10. `atlas_health` before cleanup, refactor, or DRY decisions. On large repositories, pass `limit`, `start_index`, `category`, `severity`, `path_prefix`, or `summary_only` so health review stays bounded.
 11. `atlas_watch_once` after file changes when a continuous watcher is not running.
 12. `atlas_token_report` when the user asks how many tokens ProjectAtlas saved.
 13. `atlas_settings` and `atlas_watch_status` for diagnostics.
@@ -122,14 +122,14 @@ Use the MCP tools when the harness exposes them. They are preferred over shell c
 - New session after scan: call `atlas_overview`, then `atlas_folders` with the task terms.
 - Choosing where to work: call `atlas_folders` before `atlas_files`; do not jump directly to broad source reads.
 - Choosing source targets: call `atlas_files` with the selected folder and task terms; add `file_pattern` for exact glob discovery such as `*.rs` or `src/**/*.ts`.
-- Need structured file-level context: call `atlas_file_summary` before opening a full file.
+- Need structured file-level context: call `atlas_file_summary` before opening a full file, and verify `summary_status` is not `fallback` before relying on the observed summary.
 - Need compact line-level context: call `atlas_outline` after `atlas_file_summary` when the summary is not enough.
 - Need API/function/class/module context: call `atlas_symbols` for declarations and `atlas_symbol_relations` for imports, calls, dependencies, and containment.
 - Need exact code: call `atlas_slice` only after the folder, file, and range or symbol are known; pass symbol parent, kind, or line when duplicate symbol names exist.
 - Need text occurrences: call `atlas_search` with `file_pattern`, `context_lines`, and `limit` rather than broad shell search; search is intentionally case-insensitive by default for agent discovery, set `case_sensitive` only when exact casing matters, set `fuzzy` when the name is approximate, and treat `truncated`, searched file count, and searched byte count as the signal for whether to narrow or widen the glob.
 - After creating, moving, deleting, or editing files: call `atlas_watch_once`, `projectatlas watch --once`, or `atlas_scan` before trusting old results.
 - During a long local editing session: prefer a single continuous `projectatlas watch` process from the project root, then use MCP reads against the refreshed SQLite index. File edits refresh incrementally; directory/root/ignore-rule changes may trigger a full scan for correctness.
-- Planning cleanup/refactor/DRY work: call `atlas_health` after overview/folder/file orientation and before proposing moves/merges.
+- Planning cleanup/refactor/DRY work: call `atlas_health` after overview/folder/file orientation and before proposing moves/merges; use `summary_only`, `category`, `severity`, `path_prefix`, `limit`, and `start_index` when the health surface is large.
 - Intentional health conflict after inspection: call `atlas_health_resolve` with a rationale.
 - User asks about saved tokens: call `atlas_token_report`.
 - Runtime looks wrong: call `projectatlas --format json runtime-info`, then `atlas_settings` and `atlas_watch_status`.
@@ -167,7 +167,7 @@ If MCP tools are unavailable, use the equivalent CLI sequence:
 | Cleanup/refactor signals | `projectatlas health-check` |
 | Token savings | `projectatlas token` |
 | Human token dashboard | `projectatlas token --view tui` |
-| Diagnostics | `projectatlas settings` and `projectatlas watch-status` |
+| Diagnostics | `projectatlas settings`, `projectatlas config --print`, and `projectatlas watch-status` |
 | Reset local index/cache | `projectatlas reset-index --dry-run` then `projectatlas reset-index --apply` |
 
 ## Startup Workflow
@@ -177,7 +177,7 @@ If MCP tools are unavailable, use the equivalent CLI sequence:
 3. Run `projectatlas overview`.
 4. Run `projectatlas folders <query>` to choose the right part of the repo.
 5. Run `projectatlas files <query> --folder <path>` to select targets; use `projectatlas files --file-pattern <glob>` when the file/path pattern is already known.
-6. Run `projectatlas summary <file> --limit 25` before opening full source.
+6. Run `projectatlas summary <file> --limit 25` before opening full source; inspect `parser_kind` and `summary_status`.
 7. Run `projectatlas outline <file>` if the structured summary is not enough.
 8. Run `projectatlas symbols list --file <file>` and `projectatlas symbols relations --file <file>` when symbol context is needed.
 9. Run `projectatlas search <pattern> --file-pattern <glob>` for bounded filtered text matches; add `--fuzzy` when the name is approximate, and inspect returned, searched file, searched byte, and truncated counters before widening the search.

@@ -3,9 +3,11 @@
 mod atlas_map;
 mod mcp;
 mod runtime;
+mod structural;
 
 use atlas_map::{
-    LintOptions, init_project, lint_map, load_atlas_config, seed_purpose_files, write_map,
+    LintOptions, effective_config_report, init_project, lint_map, load_atlas_config,
+    seed_purpose_files, write_map,
 };
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use projectatlas_core::outline::build_outline;
@@ -128,6 +130,9 @@ struct Cli {
     /// Path to `ProjectAtlas` config.toml for map/lint/init workflows.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Require this exact runtime version before executing the selected command.
+    #[arg(long)]
+    require_version: Option<String>,
     /// Subcommand to execute.
     #[command(subcommand)]
     command: Command,
@@ -259,6 +264,12 @@ enum Command {
     },
     /// Print local `ProjectAtlas` settings and cache/index locations.
     Settings,
+    /// Print the effective `ProjectAtlas` configuration.
+    Config {
+        /// Print the normalized configuration used by scan, map, lint, and watch.
+        #[arg(long)]
+        print: bool,
+    },
     /// Print watcher availability and current status.
     WatchStatus,
     /// Watch a repository and refresh the index when files change.
@@ -318,7 +329,10 @@ enum Command {
     Parity {
         /// Parity subcommand to run.
         #[command(subcommand)]
-        command: ParityCommand,
+        command: Option<ParityCommand>,
+        /// Parity profile to evaluate when omitting the `report` subcommand.
+        #[arg(long, default_value = "repository-intelligence")]
+        profile: String,
     },
     /// Dry-run or apply cleanup of legacy `.purpose` metadata files.
     StripLegacyPurpose {
@@ -481,6 +495,9 @@ fn main() {
 /// Execute the selected CLI command.
 fn run() -> Result<(), CliError> {
     let cli = Cli::parse();
+    if let Some(required_version) = cli.require_version.as_deref() {
+        validate_required_runtime_version(required_version)?;
+    }
     match &cli.command {
         Command::Init { seed_purpose } => {
             let root = std::env::current_dir().map_err(|source| CliError::Io {
@@ -802,6 +819,15 @@ fn run() -> Result<(), CliError> {
             let toon = render_settings_report(&report);
             print_output(cli.format, &toon, &report)?;
         }
+        Command::Config { print: _ } => {
+            let config = load_atlas_config(cli.config.as_deref())?;
+            let report = effective_config_report(&config);
+            print_output(
+                cli.format,
+                &encode_agent_payload(&json!({ "config": report })),
+                &report,
+            )?;
+        }
         Command::WatchStatus => {
             let report = watcher_status_report(false);
             let toon = render_watch_status(&report);
@@ -917,17 +943,19 @@ fn run() -> Result<(), CliError> {
                 }
             }
         }
-        Command::Parity { command } => match command {
-            ParityCommand::Report { profile } => {
-                let store = open_atlas_store(&cli.db)?;
-                let report = build_parity_report(&store, profile)?;
-                let ok = report.ok;
-                print_output(cli.format, &render_parity_report(&report), &report)?;
-                if !ok {
-                    std::process::exit(1);
-                }
+        Command::Parity { command, profile } => {
+            let profile = match command {
+                Some(ParityCommand::Report { profile }) => profile,
+                None => profile,
+            };
+            let store = open_atlas_store(&cli.db)?;
+            let report = build_parity_report(&store, profile)?;
+            let ok = report.ok;
+            print_output(cli.format, &render_parity_report(&report), &report)?;
+            if !ok {
+                std::process::exit(1);
             }
-        },
+        }
         Command::StripLegacyPurpose {
             path,
             apply,
@@ -993,7 +1021,12 @@ fn build_mcp_config_report(
         source,
     })?;
     let absolute_db = absolute_path(db)?;
-    let mut args = vec!["--db".to_string(), mcp_launch_path(&absolute_db)];
+    let mut args = vec![
+        "--require-version".to_string(),
+        env!("CARGO_PKG_VERSION").to_string(),
+        "--db".to_string(),
+        mcp_launch_path(&absolute_db),
+    ];
     let resolved_config = resolved_mcp_config_path(&absolute_db, config)?;
     if let Some(config_path) = resolved_config.as_ref() {
         args.push("--config".to_string());
@@ -1011,6 +1044,19 @@ fn build_mcp_config_report(
         },
     );
     Ok(McpConfigDocument { mcp_servers })
+}
+
+/// Validate a caller-provided runtime version guard.
+fn validate_required_runtime_version(required_version: &str) -> Result<(), CliError> {
+    let normalized = required_version.trim().trim_start_matches('v');
+    let current = env!("CARGO_PKG_VERSION");
+    if normalized == current {
+        Ok(())
+    } else {
+        Err(CliError::InvalidInput(format!(
+            "ProjectAtlas runtime version {current} does not satisfy required version {required_version}"
+        )))
+    }
 }
 
 /// Render a native path for MCP launch config without Windows extended prefixes.
@@ -1438,6 +1484,7 @@ fn required_cli_surface_present() -> bool {
         "slice",
         "symbols",
         "settings",
+        "config",
         "watch-status",
         "watch",
         "health-check",
@@ -1484,11 +1531,15 @@ mod tests {
     };
     use super::runtime::{
         TextIndexOptions, byte_count_to_tokens, estimated_source_tokens_for_file_node,
-        event_kind_affects_index, primary_symbol_names, refresh_text_index_for_nodes,
-        relation_targets, reset_index_files, suggest_file_purpose, summarize_symbol_graph,
-        watch_path_affects_index, watch_path_requires_full_scan, watcher_status_report,
+        event_kind_affects_index, is_symbol_candidate, primary_symbol_names,
+        refresh_structural_summaries_for_nodes, refresh_text_index_for_nodes,
+        refresh_text_index_for_nodes_with_rows, relation_targets, reset_index_files,
+        suggest_file_purpose, summarize_symbol_graph, watch_path_affects_index,
+        watch_path_requires_full_scan, watcher_status_report,
     };
-    use super::{OutputFormat, build_runtime_info, render_token_dashboard, serialized_output};
+    use super::{
+        OutputFormat, build_runtime_info, render_token_dashboard, serialized_output, truthy_env,
+    };
     use notify::EventKind;
     use projectatlas_core::Node;
     use projectatlas_core::NodeKind;
@@ -1543,7 +1594,7 @@ mod tests {
     fn summarizes_manifest_graph_from_dependencies() {
         let graph = SymbolGraph {
             path: "Cargo.toml".to_string(),
-            language: Some("cargo-toml".to_string()),
+            language: Some("cargo-manifest".to_string()),
             parser: ParserKind::Manifest,
             symbols: vec![
                 test_symbol("Cargo.toml", SymbolKind::Package, "projectatlas"),
@@ -1558,7 +1609,7 @@ mod tests {
 
         assert_eq!(
             summarize_symbol_graph(&graph, None),
-            "cargo-toml manifest declaring projectatlas and depending on rmcp, serde."
+            "cargo manifest declaring projectatlas and depending on rmcp, serde."
         );
     }
 
@@ -1574,11 +1625,98 @@ mod tests {
 
         assert_eq!(
             summarize_symbol_graph(&graph, Some("rust file, 0 bytes")),
-            "rust file, 0 bytes"
+            "rust source file with no declarations found."
         );
         assert_eq!(
-            suggest_file_purpose("src/empty.rs", "rust file, 0 bytes"),
-            "Provide empty.rs behavior: rust file, 0 bytes"
+            suggest_file_purpose(
+                "src/empty.rs",
+                "rust source file with no declarations found."
+            ),
+            "Provide empty.rs behavior: rust source file with no declarations found"
+        );
+    }
+
+    #[test]
+    fn summarizes_vue_composition_bindings_without_functions() {
+        let graph = SymbolGraph {
+            path: "src/DealStage.vue".to_string(),
+            language: Some("vue".to_string()),
+            parser: ParserKind::Fallback,
+            symbols: vec![
+                test_symbol("src/DealStage.vue", SymbolKind::Value, "props"),
+                test_symbol("src/DealStage.vue", SymbolKind::Value, "emit"),
+                test_symbol("src/DealStage.vue", SymbolKind::Value, "currentPriceLabel"),
+            ],
+            relations: vec![test_relation(
+                "src/DealStage.vue",
+                RelationKind::Imports,
+                "import { computed, ref } from \"vue\";",
+            )],
+        };
+
+        assert_eq!(
+            summarize_symbol_graph(&graph, Some("vue file, 9990 bytes")),
+            "vue source defining bindings currentPriceLabel, emit, props with imports import { computed, ref } from \"vue\";."
+        );
+    }
+
+    #[test]
+    fn summarizes_value_only_non_javascript_files_as_values() {
+        let graph = SymbolGraph {
+            path: "src/constants.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![
+                test_symbol("src/constants.rs", SymbolKind::Value, "CACHE_LIMIT"),
+                test_symbol("src/constants.rs", SymbolKind::Value, "DEFAULT_TIMEOUT"),
+            ],
+            relations: Vec::new(),
+        };
+
+        assert_eq!(
+            summarize_symbol_graph(&graph, None),
+            "rust source defining values CACHE_LIMIT, DEFAULT_TIMEOUT."
+        );
+    }
+
+    #[test]
+    fn symbol_candidate_policy_keeps_structural_formats_out_of_symbol_scan() {
+        assert!(is_symbol_candidate("Cargo.toml", Some("cargo-manifest")));
+        assert!(is_symbol_candidate("src/lib.rs", Some("rust")));
+        assert!(!is_symbol_candidate(
+            "fixtures/baselines.toon",
+            Some("toon")
+        ));
+        assert!(!is_symbol_candidate("README.md", Some("markdown")));
+    }
+
+    #[test]
+    fn summarizes_functions_before_javascript_constants_when_both_exist() {
+        let graph = SymbolGraph {
+            path: "scripts/generate.mjs".to_string(),
+            language: Some("javascript".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![
+                test_symbol("scripts/generate.mjs", SymbolKind::Value, "DATA_DIRECTORY"),
+                test_symbol("scripts/generate.mjs", SymbolKind::Value, "OUTPUT_FILE"),
+                test_symbol("scripts/generate.mjs", SymbolKind::Function, "sha256"),
+                test_symbol(
+                    "scripts/generate.mjs",
+                    SymbolKind::Function,
+                    "readDatasetEntry",
+                ),
+                test_symbol("scripts/generate.mjs", SymbolKind::Function, "main"),
+            ],
+            relations: vec![test_relation(
+                "scripts/generate.mjs",
+                RelationKind::Imports,
+                "import path from \"node:path\";",
+            )],
+        };
+
+        assert_eq!(
+            summarize_symbol_graph(&graph, None),
+            "javascript source defining functions main, readDatasetEntry, sha256 with imports import path from \"node:path\";."
         );
     }
 
@@ -1746,6 +1884,61 @@ mod tests {
         require_condition(
             store.load_file_text("large.txt")?.is_none(),
             "large text skipped",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn structural_summary_refresh_clears_stale_summary_when_text_is_skipped()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::write(root.join("config.toml"), "[project]\nroot = \".\"\n")?;
+        let nodes = vec![Node {
+            path: "config.toml".to_string(),
+            kind: NodeKind::File,
+            parent_path: None,
+            extension: Some(".toml".to_string()),
+            language: Some("toml".to_string()),
+            size_bytes: Some(19),
+            mtime_ns: Some(1),
+            content_hash: Some("config-hash".to_string()),
+        }];
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&nodes)?;
+        let text_refresh = refresh_text_index_for_nodes_with_rows(
+            &mut store,
+            root,
+            &nodes,
+            TextIndexOptions::new(100),
+        )?;
+        let first_report =
+            refresh_structural_summaries_for_nodes(&mut store, &nodes, &text_refresh.rows)?;
+        require_condition(first_report.summarized == 1, "initial structural summary")?;
+        require_condition(
+            store
+                .load_node_by_path("config.toml")?
+                .and_then(|node| node.summary)
+                .is_some(),
+            "summary should exist before skip",
+        )?;
+
+        let skipped_text = refresh_text_index_for_nodes_with_rows(
+            &mut store,
+            root,
+            &nodes,
+            TextIndexOptions::new(5),
+        )?;
+        let stale_report =
+            refresh_structural_summaries_for_nodes(&mut store, &nodes, &skipped_text.rows)?;
+        require_condition(stale_report.too_large == 1, "structural too-large count")?;
+        require_condition(stale_report.cleared == 1, "cleared stale summary count")?;
+        require_condition(
+            store
+                .load_node_by_path("config.toml")?
+                .and_then(|node| node.summary)
+                .is_none(),
+            "summary should be cleared after current text is skipped",
         )?;
         Ok(())
     }
@@ -2042,7 +2235,11 @@ mod tests {
         if !token_text.contains("token_savings:") {
             return Err("atlas_token_report result did not contain token payload".into());
         }
-        if !token_text.contains("calls: 2") {
+        if truthy_env("PROJECTATLAS_NO_TELEMETRY") {
+            if !token_text.contains("calls: 0") {
+                return Err("atlas_token_report recorded MCP usage in no-telemetry mode".into());
+            }
+        } else if !token_text.contains("calls: 2") {
             return Err("atlas_token_report did not count MCP usage events".into());
         }
 
@@ -2060,6 +2257,62 @@ mod tests {
             || !parity_text.contains("profile: \"repository-intelligence\"")
         {
             return Err("atlas_parity_report result did not contain parity payload".into());
+        }
+
+        let mut health_args = Map::new();
+        health_args.insert("category".to_string(), json!("missing-purpose"));
+        health_args.insert("path_prefix".to_string(), json!(".\\src\\"));
+        health_args.insert("limit".to_string(), json!(1));
+        let health = client
+            .peer()
+            .call_tool(CallToolRequestParams::new("atlas_health").with_arguments(health_args))
+            .await?;
+        let health_text = health
+            .content
+            .first()
+            .and_then(|content| content.raw.as_text())
+            .map(|text| text.text.as_str())
+            .ok_or_else(|| std::io::Error::other("health result did not contain text"))?;
+        if !health_text.contains("health:")
+            || !health_text.contains("returned: 1")
+            || !health_text.contains("limit: 1")
+            || !health_text.contains("next_start_index: null")
+            || !health_text.contains("path_prefix: src")
+            || !health_text.contains("health_findings[1]")
+            || health_text.contains("suggested-purpose-review")
+        {
+            return Err(
+                format!("atlas_health result was not bounded and filtered: {health_text}").into(),
+            );
+        }
+
+        let mut summary_health_args = Map::new();
+        summary_health_args.insert("category".to_string(), json!("missing-purpose"));
+        summary_health_args.insert("path_prefix".to_string(), json!(".\\src\\"));
+        summary_health_args.insert("limit".to_string(), json!(1));
+        summary_health_args.insert("summary_only".to_string(), json!(true));
+        let summary_health = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new("atlas_health").with_arguments(summary_health_args),
+            )
+            .await?;
+        let summary_health_text = summary_health
+            .content
+            .first()
+            .and_then(|content| content.raw.as_text())
+            .map(|text| text.text.as_str())
+            .ok_or_else(|| std::io::Error::other("summary health result did not contain text"))?;
+        if !summary_health_text.contains("returned: 0")
+            || !summary_health_text.contains("limit: 1")
+            || !summary_health_text.contains("next_start_index: null")
+            || !summary_health_text.contains("summary_only: true")
+            || !summary_health_text.contains("health_findings[0]")
+        {
+            return Err(format!(
+                "atlas_health summary_only result lost paging metadata: {summary_health_text}"
+            )
+            .into());
         }
 
         client.cancel().await?;

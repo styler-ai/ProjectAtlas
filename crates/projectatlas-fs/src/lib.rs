@@ -16,6 +16,13 @@ use thiserror::Error;
 /// Reserved metadata files that should not become indexed project nodes.
 const RESERVED_METADATA_FILE_NAMES: &[&str] = &[".purpose"];
 
+/// Durable `.projectatlas` inputs that are part of the project contract.
+const INDEXED_PROJECTATLAS_INPUT_PATHS: &[&str] = &[
+    ".projectatlas",
+    ".projectatlas/config.toml",
+    ".projectatlas/projectatlas-nonsource-files.toon",
+];
+
 /// Filesystem scanner errors.
 #[derive(Debug, Error)]
 pub enum FsError {
@@ -69,6 +76,9 @@ impl ScanOptions {
     /// Return whether a repository-relative slash path is excluded.
     #[must_use]
     pub fn excludes_relative_path(&self, relative_path: &str) -> bool {
+        if is_indexed_projectatlas_input(relative_path) {
+            return false;
+        }
         has_excluded_directory_component(relative_path, self)
             || has_excluded_path_prefix(relative_path, self)
     }
@@ -263,13 +273,18 @@ fn has_excluded_path_prefix(relative_path: &str, options: &ScanOptions) -> bool 
     })
 }
 
+/// Return whether a ProjectAtlas-local metadata path should remain indexable.
+fn is_indexed_projectatlas_input(relative_path: &str) -> bool {
+    let normalized = relative_path.replace('\\', "/");
+    let normalized = normalized.trim_matches('/');
+    INDEXED_PROJECTATLAS_INPUT_PATHS.contains(&normalized)
+}
+
 /// Return whether a path is a reserved metadata file.
 fn is_reserved_metadata_file(path: &Path) -> bool {
     path.file_name().is_some_and(|name| {
         let name = name.to_string_lossy();
-        RESERVED_METADATA_FILE_NAMES
-            .iter()
-            .any(|reserved| *reserved == name.as_ref())
+        RESERVED_METADATA_FILE_NAMES.contains(&name.as_ref())
     })
 }
 
@@ -402,6 +417,34 @@ mod tests {
         require_path(&nodes, "docs")?;
         require_path(&nodes, "src/api")?;
         require_path(&nodes, "src/api/live.rs")?;
+        Ok(())
+    }
+
+    #[test]
+    fn default_scan_indexes_durable_projectatlas_inputs_only() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        let projectatlas = repo.join(".projectatlas");
+        fs::create_dir_all(&projectatlas)?;
+        fs::write(
+            projectatlas.join("config.toml"),
+            "[project]\nroot = \".\"\n",
+        )?;
+        fs::write(
+            projectatlas.join("projectatlas-nonsource-files.toon"),
+            "nonsource_files[]:\n",
+        )?;
+        fs::write(projectatlas.join("projectatlas.db"), b"sqlite bytes")?;
+        fs::write(projectatlas.join("projectatlas.toon"), "generated map\n")?;
+        fs::write(projectatlas.join("projectatlas.mcp.json"), "{}\n")?;
+
+        let nodes = scan_repo(&repo, &ScanOptions::default())?;
+        require_path(&nodes, ".projectatlas")?;
+        require_path(&nodes, ".projectatlas/config.toml")?;
+        require_path(&nodes, ".projectatlas/projectatlas-nonsource-files.toon")?;
+        reject_path(&nodes, ".projectatlas/projectatlas.db")?;
+        reject_path(&nodes, ".projectatlas/projectatlas.toon")?;
+        reject_path(&nodes, ".projectatlas/projectatlas.mcp.json")?;
         Ok(())
     }
 

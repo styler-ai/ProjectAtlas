@@ -5,7 +5,9 @@ mod import_aliases;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use import_aliases::{ImportAliasMap, load_import_alias_map};
 use projectatlas_core::outline::estimate_tokens;
-use projectatlas_core::symbols::{CodeSymbol, RelationKind, SymbolKind, SymbolRelation};
+use projectatlas_core::symbols::{
+    CodeSymbol, ParserKind, RelationKind, SymbolKind, SymbolRelation,
+};
 use projectatlas_core::{IndexedNode, NodeKind, repo_path_to_native, validated_repo_file_key};
 use projectatlas_db::{AtlasStore, DbError, IndexedFileText};
 use regex::RegexBuilder;
@@ -64,6 +66,10 @@ pub struct FileSummaryReport {
     pub source_status: String,
     /// Error text when live source could not be read.
     pub source_error: String,
+    /// Parser family that produced the stored observed summary.
+    pub parser_kind: String,
+    /// Summary quality status: `ok`, `fallback`, or `missing`.
+    pub summary_status: String,
     /// Current purpose one-liner, if approved or suggested.
     pub purpose: String,
     /// Purpose lifecycle status.
@@ -332,6 +338,7 @@ pub fn build_file_summary(
         store.count_distinct_relation_targets_by_kind(&file_key, RelationKind::DependsOn)?;
     let total_exports = store.exported_symbol_count_for_path(&file_key)?;
     let symbol_count = store.symbol_count_for_path(&file_key)?;
+    let symbol_parser_kinds = store.symbol_parser_kinds_for_path(&file_key)?;
     let truncated = [
         total_functions,
         total_methods,
@@ -345,6 +352,12 @@ pub fn build_file_summary(
     .iter()
     .any(|total| *total > effective_limit);
 
+    let observed_summary = indexed.summary.unwrap_or_default();
+    let parser_kind =
+        summary_parser_kind(&observed_summary, symbol_count, &symbol_parser_kinds).to_string();
+    let summary_status =
+        summary_status(&observed_summary, symbol_count, &symbol_parser_kinds).to_string();
+
     Ok(FileSummaryReport {
         file_path: file_key,
         language: indexed
@@ -356,12 +369,14 @@ pub fn build_file_summary(
         purpose: indexed.purpose.purpose.clone().unwrap_or_default(),
         purpose_status: indexed.purpose.status.to_string(),
         purpose_source: indexed.purpose.source.to_string(),
-        observed_summary: indexed.summary.unwrap_or_default(),
+        observed_summary,
         package: package_name(&metadata_symbols),
         docstring,
         symbol_count,
         source_status,
         source_error,
+        parser_kind,
+        summary_status,
         limit: effective_limit,
         total_functions,
         total_methods,
@@ -390,6 +405,83 @@ pub fn build_file_summary(
 /// Returns an error when the summary payload cannot be serialized.
 pub fn file_summary_baseline_text(report: &FileSummaryReport) -> ServiceResult<String> {
     Ok(serde_json::to_string(report)?)
+}
+
+/// Return the parser family implied by stored summary and parser metadata.
+fn summary_parser_kind(
+    summary: &str,
+    symbol_count: usize,
+    parser_kinds: &[ParserKind],
+) -> &'static str {
+    if symbol_count > 0 {
+        return symbol_parser_kind(parser_kinds);
+    }
+    if is_symbol_graph_empty_summary(summary) {
+        "symbol-graph"
+    } else if summary.is_empty() {
+        "missing"
+    } else if is_scanner_fallback_summary(summary) {
+        "scanner-metadata"
+    } else {
+        "structural"
+    }
+}
+
+/// Return a summary quality status for agent consumers.
+fn summary_status(summary: &str, symbol_count: usize, parser_kinds: &[ParserKind]) -> &'static str {
+    if summary.is_empty() {
+        "missing"
+    } else if is_scanner_fallback_summary(summary)
+        || fallback_only_symbols(symbol_count, parser_kinds)
+    {
+        "fallback"
+    } else {
+        "ok"
+    }
+}
+
+/// Return the parser family for a non-empty symbol graph.
+fn symbol_parser_kind(parser_kinds: &[ParserKind]) -> &'static str {
+    let has_tree_sitter = parser_kinds.contains(&ParserKind::TreeSitter);
+    let has_manifest = parser_kinds.contains(&ParserKind::Manifest);
+    let has_fallback = parser_kinds.contains(&ParserKind::Fallback);
+    let family_count = usize::from(has_tree_sitter)
+        .saturating_add(usize::from(has_manifest))
+        .saturating_add(usize::from(has_fallback));
+    match (family_count, has_tree_sitter, has_manifest, has_fallback) {
+        (1, true, false, false) => "tree-sitter-symbol-graph",
+        (1, false, true, false) => "manifest-symbol-graph",
+        (1, false, false, true) => "fallback-symbol-graph",
+        _ => "mixed-symbol-graph",
+    }
+}
+
+/// Return whether the only available symbol graph was created by fallback parsing.
+fn fallback_only_symbols(symbol_count: usize, parser_kinds: &[ParserKind]) -> bool {
+    symbol_count > 0
+        && !parser_kinds.is_empty()
+        && parser_kinds
+            .iter()
+            .all(|parser_kind| *parser_kind == ParserKind::Fallback)
+}
+
+/// Return whether a no-declaration source summary came from the symbol graph.
+fn is_symbol_graph_empty_summary(summary: &str) -> bool {
+    summary
+        .trim()
+        .ends_with("source file with no declarations found.")
+}
+
+/// Return whether a summary is only the filesystem byte-count fallback.
+fn is_scanner_fallback_summary(summary: &str) -> bool {
+    let trimmed = summary.trim_end_matches('.');
+    let Some((_, tail)) = trimmed.rsplit_once(", ") else {
+        return false;
+    };
+    let Some(number) = tail.strip_suffix(" bytes") else {
+        return false;
+    };
+    !number.is_empty() && number.chars().all(|character| character.is_ascii_digit())
 }
 
 /// Search indexed project files with bounded source reads and `globset` filters.
@@ -487,11 +579,11 @@ pub fn filter_files_by_glob(
     nodes: Vec<IndexedNode>,
     file_pattern: Option<&str>,
 ) -> ServiceResult<Vec<IndexedNode>> {
-    let matcher = build_path_matcher(file_pattern)?;
+    let matcher = FilePathMatcher::new(file_pattern)?;
     Ok(nodes
         .into_iter()
         .filter(|node| node.node.kind == NodeKind::File)
-        .filter(|node| path_matches(&node.node.path, matcher.as_ref()))
+        .filter(|node| matcher.is_match(&node.node.path))
         .collect())
 }
 
@@ -508,8 +600,8 @@ pub fn load_ranked_file_nodes(
     file_pattern: Option<&str>,
     limit: usize,
 ) -> ServiceResult<Vec<IndexedNode>> {
-    let matcher = build_path_matcher(file_pattern)?;
-    if matcher.is_none() {
+    let matcher = FilePathMatcher::new(file_pattern)?;
+    if !matcher.filters() {
         return Ok(store.load_ranked_nodes(query, NodeKind::File, folder, limit.max(1), 0)?);
     }
     let target = limit.max(1);
@@ -523,7 +615,7 @@ pub fn load_ranked_file_nodes(
         }
         offset = offset.saturating_add(batch.len());
         for node in batch {
-            if path_matches(&node.node.path, matcher.as_ref()) {
+            if matcher.is_match(&node.node.path) {
                 selected.push(node);
                 if selected.len() >= target {
                     return Ok(selected);
@@ -540,8 +632,38 @@ pub fn load_ranked_file_nodes(
 ///
 /// Returns an error when `file_pattern` is not a valid repository glob.
 pub fn file_path_matches_glob(path: &str, file_pattern: Option<&str>) -> ServiceResult<bool> {
-    let matcher = build_path_matcher(file_pattern)?;
-    Ok(path_matches(path, matcher.as_ref()))
+    Ok(FilePathMatcher::new(file_pattern)?.is_match(path))
+}
+
+/// Reusable repository-relative file path matcher.
+pub struct FilePathMatcher {
+    /// Compiled optional glob matcher.
+    matcher: Option<GlobSet>,
+}
+
+impl FilePathMatcher {
+    /// Compile a repository-relative glob matcher once for many path checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `file_pattern` is not a valid repository glob.
+    pub fn new(file_pattern: Option<&str>) -> ServiceResult<Self> {
+        Ok(Self {
+            matcher: build_path_matcher(file_pattern)?,
+        })
+    }
+
+    /// Return whether this matcher has an active filtering glob.
+    #[must_use]
+    pub fn filters(&self) -> bool {
+        self.matcher.is_some()
+    }
+
+    /// Return whether `path` matches the compiled repository-relative glob.
+    #[must_use]
+    pub fn is_match(&self, path: &str) -> bool {
+        path_matches(path, self.matcher.as_ref())
+    }
 }
 
 /// Borrow indexed text content as line slices for context extraction.
@@ -1344,6 +1466,47 @@ mod tests {
     }
 
     #[test]
+    fn file_summary_marks_fallback_symbol_graph_as_fallback() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir(root.join("src"))?;
+        fs::write(
+            root.join("src").join("component.vue"),
+            "<script setup></script>",
+        )?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        store.replace_scan(&[test_node("src/component.vue", "hash-vue")])?;
+        store.set_purpose(
+            "src/component.vue",
+            "Provide Vue component behavior",
+            PurposeSource::Agent,
+        )?;
+        store.set_node_summary("src/component.vue", "vue component with bindings selected.")?;
+        let mut fallback_symbol = test_symbol("src/component.vue", SymbolKind::Value, "selected");
+        fallback_symbol.parser = ParserKind::Fallback;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/component.vue".to_string(),
+            language: Some("vue".to_string()),
+            parser: ParserKind::Fallback,
+            symbols: vec![fallback_symbol],
+            relations: Vec::new(),
+        })?;
+
+        let report = build_file_summary(&store, Path::new("src/component.vue"), 10)?;
+        require_eq(
+            &report.parser_kind,
+            &"fallback-symbol-graph".to_string(),
+            "fallback parser kind",
+        )?;
+        require_eq(
+            &report.summary_status,
+            &"fallback".to_string(),
+            "fallback summary status",
+        )
+    }
+
+    #[test]
     fn module_aliases_include_package_entries_and_compound_extensions() -> Result<(), Box<dyn Error>>
     {
         require_eq(
@@ -2001,6 +2164,15 @@ mod tests {
 
         let filtered = filter_files_by_glob(nodes.clone(), Some("*.rs"))?;
         require_eq(&filtered.len(), &2, "rs glob count")?;
+        let matcher = FilePathMatcher::new(Some("*.rs"))?;
+        require_eq(&matcher.filters(), &true, "compiled glob filters")?;
+        require_eq(&matcher.is_match("src/a.rs"), &true, "compiled nested rs")?;
+        require_eq(&matcher.is_match("a.rs"), &true, "compiled basename rs")?;
+        require_eq(
+            &matcher.is_match("docs/readme.md"),
+            &false,
+            "compiled markdown miss",
+        )?;
 
         let nested = filter_files_by_glob(nodes, Some("src\\nested\\*.rs"))?;
         require_eq(&nested.len(), &1, "windows glob count")?;

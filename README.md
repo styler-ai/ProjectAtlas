@@ -39,12 +39,13 @@ should I read?".
 - SQLite-backed index state for files, folders, purposes, and usage telemetry.
 - SQL-bounded folder/file ranking, health checks, token aggregation, and streamed text search for large repositories.
 - TOON-first output for compact agent context, with JSON available for integrations.
-- Progressive CLI funnel: `scan`, `overview`, `folders`, `files`, `summary`, `outline`, `search`, `slice`, `symbols`, `watch`, `health-check`, `settings`, `watch-status`, `reset-index`, `lint`, and `token`.
+- Progressive CLI funnel: `scan`, `overview`, `folders`, `files`, `summary`, `outline`, `search`, `slice`, `symbols`, `watch`, `health-check`, `settings`, `config --print`, `watch-status`, `reset-index`, `lint`, `parity`, and `token`.
 - Native MCP server through `projectatlas mcp`, built on the official Rust MCP SDK, with `atlas_*` tools returning TOON text payloads.
 - Rust/Cargo-aware and tree-sitter-backed symbol graph extraction for functions, classes, methods, imports, calls, dependencies, and manifest symbols.
 - Event-backed `projectatlas watch` using the canonical Rust `notify` crate, with debouncing, repository excludes, and portable polling fallback.
 - Rust-native legacy map/lint compatibility for `.projectatlas/projectatlas.toon`.
 - Broad language/file extension recognition across the repository-intelligence parity set.
+- Structural summaries for declaration-light Markdown, JSON, YAML, TOML, CSS, HTML, TOON, and config files so supported files do not silently rely on byte-count fallbacks.
 - Health checks for missing purposes, duplicate purposes, and repeated temp/generated folder roles.
 - Token-savings telemetry through `projectatlas token`.
 - Read-only review mode through `PROJECTATLAS_NO_TELEMETRY=1` when orientation commands must not write usage rows.
@@ -142,6 +143,9 @@ human-facing terminal dashboard and does not replace the TOON/MCP contract.
 `summary` is designed for large repositories: repeated sections are bounded by `--limit`, totals come from SQLite
 count queries, `called_by` is conservative when symbol names are ambiguous, and `source_status` tells the agent
 whether live source or indexed metadata backed the source-derived fields.
+File summaries also expose `parser_kind` and `summary_status`, so agents can distinguish deep symbol summaries,
+structural summaries, and weak scanner metadata. Treat `summary_status: fallback` as a reason to inspect deeper or
+improve a parser.
 
 `search` and symbol slicing share the same service-layer indexed-file boundary as MCP. Search uses
 `globset` repository globs, supports literal/regex/fuzzy line matching, stops after the requested page is
@@ -153,6 +157,9 @@ the symbol selected during orientation.
 `[scan].exclude_dir_names` and `[scan].exclude_path_prefixes`.
 Initial scans that import legacy TOON map purposes skip stale or newly excluded map rows and report the skipped
 count instead of failing with a raw SQLite no-row error.
+The durable inputs `.projectatlas/config.toml` and `.projectatlas/projectatlas-nonsource-files.toon` remain
+indexable even though generated `.projectatlas` artifacts such as the SQLite DB, generated map, and MCP config stay
+excluded.
 Deep symbol builds support `--max-workers` and `--timeout-seconds` so large repositories can trade throughput,
 CPU pressure, and bounded agent wait time.
 
@@ -185,6 +192,10 @@ Use MCP tools in the same funnel order: `atlas_scan`, `atlas_overview`, `atlas_f
 `atlas_file_summary`, `atlas_outline`, `atlas_symbols`, `atlas_symbol_relations`, `atlas_search`, `atlas_slice`,
 `atlas_health`, `atlas_watch_once`, and `atlas_token_report`.
 
+`atlas_health` returns a bounded page by default and accepts `limit`, `start_index`, `category`, `severity`,
+`path_prefix`, and `summary_only` arguments so agents can inspect large health surfaces without one oversized
+MCP payload.
+
 `projectatlas watch` is the continuous local watcher. It starts with a baseline refresh, then uses filesystem
 events to refresh SQLite summaries/symbols after relevant file changes. Ordinary file changes use partial
 SQLite and symbol refresh; directory/root/ignore-rule events fall back to a full scan for correctness. `atlas_watch_once` and
@@ -200,7 +211,7 @@ codex plugin marketplace add styler-ai/ProjectAtlas --ref main
 codex plugin add projectatlas --marketplace projectatlas
 ```
 
-The plugin provides the ProjectAtlas workflow skill, a fallback MCP server config at `plugins/projectatlas/.mcp.json`,
+The plugin provides the ProjectAtlas workflow skill, a version-guarded fallback MCP server config at `plugins/projectatlas/.mcp.json`,
 runtime install scripts, and a generated project-local MCP config at `.projectatlas/projectatlas.mcp.json`:
 
 ```powershell
@@ -212,8 +223,9 @@ plugins/projectatlas/scripts/install-runtime.sh
 ```
 
 Run the installer from the target project root or pass the project root explicitly. The installer verifies
-`projectatlas --format json runtime-info`, prefers a local source checkout, otherwise downloads the release tag
-derived from the plugin manifest, and falls back to the same tagged Cargo Git install path. It then writes the
+`projectatlas --format json runtime-info`, including the runtime version when the plugin manifest or
+`PROJECTATLAS_VERSION` supplies a release tag. It prefers a local source checkout, otherwise downloads the release
+tag derived from the plugin manifest, and falls back to the same tagged Cargo Git install path. It then writes the
 absolute MCP registration file for that project. `runtime-info` is intentionally a read-only compatibility probe and
 does not create `.projectatlas` by itself.
 
