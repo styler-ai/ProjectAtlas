@@ -313,15 +313,15 @@ jobs:
           }
 
           function Assert-McpArgs {
-            param([object[]]$Args)
-            Assert-Equal $Args[0] "--require-version" "Missing require-version flag"
-            Assert-Equal $Args[1] $expectedVersion "Runtime version mismatch"
-            $dbIndex = [Array]::IndexOf($Args, "--db")
+            param([object[]]$McpArgs)
+            Assert-Equal $McpArgs[0] "--require-version" "Missing require-version flag"
+            Assert-Equal $McpArgs[1] $expectedVersion "Runtime version mismatch"
+            $dbIndex = [Array]::IndexOf($McpArgs, "--db")
             if ($dbIndex -lt 0) {
               throw "Missing --db argument."
             }
-            Assert-Equal ([System.IO.Path]::GetFullPath($Args[$dbIndex + 1])) $expectedDb "Database path mismatch"
-            Assert-Equal $Args[-1] "mcp" "Missing mcp command"
+            Assert-Equal ([System.IO.Path]::GetFullPath($McpArgs[$dbIndex + 1])) $expectedDb "Database path mismatch"
+            Assert-Equal $McpArgs[-1] "mcp" "Missing mcp command"
           }
 
           $atlasDir = Join-Path $projectRoot ".projectatlas"
@@ -493,15 +493,15 @@ jobs:
           }
 
           function Assert-McpArgs {
-            param([object[]]$Args)
-            Assert-Equal $Args[0] "--require-version" "Missing require-version flag"
-            Assert-Equal $Args[1] $expectedVersion "Runtime version mismatch"
-            $dbIndex = [Array]::IndexOf($Args, "--db")
+            param([object[]]$McpArgs)
+            Assert-Equal $McpArgs[0] "--require-version" "Missing require-version flag"
+            Assert-Equal $McpArgs[1] $expectedVersion "Runtime version mismatch"
+            $dbIndex = [Array]::IndexOf($McpArgs, "--db")
             if ($dbIndex -lt 0) {
               throw "Missing --db argument."
             }
-            Assert-Equal ([System.IO.Path]::GetFullPath($Args[$dbIndex + 1])) $expectedDb "Database path mismatch"
-            Assert-Equal $Args[-1] "mcp" "Missing mcp command"
+            Assert-Equal ([System.IO.Path]::GetFullPath($McpArgs[$dbIndex + 1])) $expectedDb "Database path mismatch"
+            Assert-Equal $McpArgs[-1] "mcp" "Missing mcp command"
           }
 
           $atlasDir = Join-Path $projectRoot ".projectatlas"
