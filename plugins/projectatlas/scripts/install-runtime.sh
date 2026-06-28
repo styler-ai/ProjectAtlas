@@ -2,14 +2,36 @@
 set -eu
 
 repository=${PROJECTATLAS_REPOSITORY:-https://github.com/styler-ai/ProjectAtlas}
-projectatlas_version=${PROJECTATLAS_VERSION:-v0.3.0}
+projectatlas_version=${PROJECTATLAS_VERSION:-}
 release_base_url=${PROJECTATLAS_RELEASE_BASE_URL:-https://github.com/styler-ai/ProjectAtlas/releases/download}
+release_binary_only=${PROJECTATLAS_RELEASE_BINARY_ONLY:-}
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+plugin_root=$(cd "$script_dir/.." && pwd -P)
+plugin_manifest="$plugin_root/.codex-plugin/plugin.json"
+if [ -z "$projectatlas_version" ] && [ -f "$plugin_manifest" ]; then
+  plugin_version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$plugin_manifest" | head -n 1)
+  if [ -n "$plugin_version" ]; then
+    projectatlas_version="v$plugin_version"
+  fi
+fi
 
 if [ "${1:-}" ]; then
   project_root=$(cd "$1" && pwd -P)
 else
   project_root=$(pwd -P)
 fi
+
+truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
 
 find_projectatlas() {
   if [ -x "$HOME/.local/bin/projectatlas" ] && is_projectatlas3 "$HOME/.local/bin/projectatlas"; then
@@ -92,10 +114,17 @@ install_release_binary() {
   rm -rf "$tmp_dir"
 }
 
-if command -v cargo >/dev/null 2>&1 && [ -f "$project_root/crates/projectatlas-cli/Cargo.toml" ]; then
+installed_bin=
+if truthy "$release_binary_only"; then
+  install_release_binary || {
+    printf '%s\n' "ProjectAtlas release-binary install was required but failed for $projectatlas_version." >&2
+    exit 1
+  }
+  installed_bin="$HOME/.local/bin/projectatlas"
+elif command -v cargo >/dev/null 2>&1 && [ -f "$project_root/crates/projectatlas-cli/Cargo.toml" ]; then
   (cd "$project_root" && cargo install --path crates/projectatlas-cli --locked --force)
 elif install_release_binary; then
-  :
+  installed_bin="$HOME/.local/bin/projectatlas"
 elif command -v cargo >/dev/null 2>&1; then
   if [ -n "$projectatlas_version" ]; then
     cargo install --git "$repository" --tag "$projectatlas_version" --package projectatlas-cli --locked --force
@@ -104,9 +133,17 @@ elif command -v cargo >/dev/null 2>&1; then
   fi
 fi
 
-projectatlas_bin=$(find_projectatlas || true)
+if [ -n "$installed_bin" ]; then
+  projectatlas_bin=$installed_bin
+else
+  projectatlas_bin=$(find_projectatlas || true)
+fi
 if [ -z "$projectatlas_bin" ]; then
   printf '%s\n' "ProjectAtlas 3 runtime was not found. Install Rust/Cargo or provide a compatible ProjectAtlas 3 release binary on PATH." >&2
+  exit 1
+fi
+if ! is_projectatlas3 "$projectatlas_bin"; then
+  printf '%s\n' "Installed ProjectAtlas runtime did not satisfy the ProjectAtlas 3 runtime contract: $projectatlas_bin" >&2
   exit 1
 fi
 

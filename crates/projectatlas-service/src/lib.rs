@@ -490,6 +490,45 @@ pub fn filter_files_by_glob(
         .collect())
 }
 
+/// Load ranked file nodes and apply the shared repository-relative glob policy.
+///
+/// # Errors
+///
+/// Returns an error when the file pattern is invalid or indexed nodes cannot be
+/// loaded.
+pub fn load_ranked_file_nodes(
+    store: &AtlasStore,
+    query: &str,
+    folder: Option<&str>,
+    file_pattern: Option<&str>,
+    limit: usize,
+) -> ServiceResult<Vec<IndexedNode>> {
+    let matcher = build_path_matcher(file_pattern)?;
+    if matcher.is_none() {
+        return Ok(store.load_ranked_nodes(query, NodeKind::File, folder, limit.max(1), 0)?);
+    }
+    let target = limit.max(1);
+    let batch_size = target.saturating_mul(20).clamp(50, 500);
+    let mut offset = 0usize;
+    let mut selected = Vec::new();
+    loop {
+        let batch = store.load_ranked_nodes(query, NodeKind::File, folder, batch_size, offset)?;
+        if batch.is_empty() {
+            break;
+        }
+        offset = offset.saturating_add(batch.len());
+        for node in batch {
+            if path_matches(&node.node.path, matcher.as_ref()) {
+                selected.push(node);
+                if selected.len() >= target {
+                    return Ok(selected);
+                }
+            }
+        }
+    }
+    Ok(selected)
+}
+
 /// Return whether one repository-relative path matches an optional file glob.
 ///
 /// # Errors
@@ -1072,7 +1111,14 @@ fn package_name(symbols: &[CodeSymbol]) -> String {
                 symbol.kind == SymbolKind::Module
                     && matches!(
                         symbol.detail.as_deref(),
-                        Some("package_declaration" | "package_clause" | "namespace_declaration")
+                        Some(
+                            "package_declaration"
+                                | "package_clause"
+                                | "package_header"
+                                | "namespace_declaration"
+                                | "file_scoped_namespace_declaration"
+                                | "module_declaration"
+                        )
                     )
             })
         })
@@ -1553,6 +1599,38 @@ mod tests {
             &nested[0].node.path,
             &"src/nested/b.rs".to_string(),
             "windows glob path",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn ranked_file_nodes_uses_shared_glob_policy() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_node("src/a.rs", "hash-a"),
+            test_node("src/nested/b.rs", "hash-b"),
+            test_node("docs/readme.md", "hash-docs"),
+        ])?;
+        for path in ["src/a.rs", "src/nested/b.rs", "docs/readme.md"] {
+            store.set_purpose(path, "needle orientation target", PurposeSource::Agent)?;
+            store.set_node_summary(path, "needle indexed summary")?;
+        }
+
+        let selected = load_ranked_file_nodes(&store, "needle", None, Some("*.rs"), 10)?;
+        require_eq(&selected.len(), &2, "ranked rs glob count")?;
+        if selected
+            .iter()
+            .any(|node| node.node.path == "docs/readme.md")
+        {
+            return Err(io::Error::other("ranked glob included docs/readme.md").into());
+        }
+
+        let nested = load_ranked_file_nodes(&store, "needle", None, Some("src/nested/*.rs"), 10)?;
+        require_eq(&nested.len(), &1, "ranked nested glob count")?;
+        require_eq(
+            &nested[0].node.path,
+            &"src/nested/b.rs".to_string(),
+            "ranked nested glob path",
         )?;
         Ok(())
     }

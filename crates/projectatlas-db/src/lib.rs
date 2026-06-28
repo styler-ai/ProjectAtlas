@@ -381,21 +381,21 @@ impl AtlasStore {
             if path == "." || path.is_empty() {
                 continue;
             }
-            let descendant_pattern = format!("{path}/%");
+            let descendant_pattern = sqlite_descendant_pattern(path);
             transaction.execute(
-                "UPDATE nodes SET exists_now = 0 WHERE path = ?1 OR path LIKE ?2",
+                "UPDATE nodes SET exists_now = 0 WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
                 params![path, descendant_pattern],
             )?;
             transaction.execute(
-                "DELETE FROM symbol_relations WHERE path = ?1 OR path LIKE ?2",
+                "DELETE FROM symbol_relations WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
                 params![path, descendant_pattern],
             )?;
             transaction.execute(
-                "DELETE FROM symbols WHERE path = ?1 OR path LIKE ?2",
+                "DELETE FROM symbols WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
                 params![path, descendant_pattern],
             )?;
             transaction.execute(
-                "DELETE FROM file_texts WHERE path = ?1 OR path LIKE ?2",
+                "DELETE FROM file_texts WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
                 params![path, descendant_pattern],
             )?;
         }
@@ -572,7 +572,7 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn set_project_root(&self, root: &Path) -> DbResult<()> {
-        let value = root.to_string_lossy().replace('\\', "/");
+        let value = normalize_metadata_path(root);
         self.connection.execute(
             "
             INSERT INTO metadata(key, value)
@@ -1560,9 +1560,9 @@ impl AtlasStore {
         if kind == NodeKind::File
             && let Some(folder) = folder.filter(|folder| !folder.is_empty() && *folder != ".")
         {
-            sql.push_str(" AND (n.parent_path = ? OR n.parent_path LIKE ?)");
+            sql.push_str(" AND (n.parent_path = ? OR n.parent_path LIKE ? ESCAPE '\\')");
             values.push(Value::from(folder.to_string()));
-            values.push(Value::from(format!("{folder}/%")));
+            values.push(Value::from(sqlite_descendant_pattern(folder)));
         }
         sql.push_str(
             "
@@ -1601,9 +1601,9 @@ impl AtlasStore {
         );
         let mut values = Vec::new();
         if let Some(folder) = folder.filter(|folder| !folder.is_empty() && *folder != ".") {
-            sql.push_str(" AND (parent_path = ? OR parent_path LIKE ?)");
+            sql.push_str(" AND (parent_path = ? OR parent_path LIKE ? ESCAPE '\\')");
             values.push(Value::from(folder.to_string()));
-            values.push(Value::from(format!("{folder}/%")));
+            values.push(Value::from(sqlite_descendant_pattern(folder)));
         }
         let count = self
             .connection
@@ -1635,9 +1635,9 @@ impl AtlasStore {
         );
         let mut values = Vec::new();
         if let Some(folder) = folder.filter(|folder| !folder.is_empty() && *folder != ".") {
-            sql.push_str(" AND (parent_path = ? OR parent_path LIKE ?)");
+            sql.push_str(" AND (parent_path = ? OR parent_path LIKE ? ESCAPE '\\')");
             values.push(Value::from(folder.to_string()));
-            values.push(Value::from(format!("{folder}/%")));
+            values.push(Value::from(sqlite_descendant_pattern(folder)));
         }
         sql.push_str(" ORDER BY path");
         let mut statement = self.connection.prepare(&sql)?;
@@ -2042,6 +2042,23 @@ impl AtlasStore {
     }
 }
 
+/// Normalize a filesystem path stored in `SQLite` metadata.
+fn normalize_metadata_path(path: &Path) -> String {
+    normalize_metadata_path_string(&path.to_string_lossy())
+}
+
+/// Normalize a native path string stored in `SQLite` metadata.
+fn normalize_metadata_path_string(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
+        format!("//{rest}")
+    } else if let Some(rest) = normalized.strip_prefix("//?/") {
+        rest.to_string()
+    } else {
+        normalized
+    }
+}
+
 /// Upsert one scanned node into an existing transaction.
 fn upsert_node(transaction: &Transaction<'_>, node: &Node) -> DbResult<()> {
     let existing = transaction
@@ -2280,7 +2297,20 @@ fn ranked_score_expression(term_count: usize) -> String {
 
 /// Convert a normalized term into a `SQLite` LIKE pattern.
 fn sqlite_like_pattern(term: &str) -> String {
-    format!("%{}%", term.replace('%', "\\%").replace('_', "\\_"))
+    format!("%{}%", sqlite_like_escape(term))
+}
+
+/// Build a `SQLite` LIKE descendant pattern for a repository path prefix.
+fn sqlite_descendant_pattern(path: &str) -> String {
+    format!("{}/%", sqlite_like_escape(path))
+}
+
+/// Escape user or path text for `SQLite` LIKE patterns with backslash escaping.
+fn sqlite_like_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 /// Parse a stored purpose source value into the domain enum.
@@ -2522,6 +2552,18 @@ mod tests {
             &Some("C:/workspace/example".to_string()),
             "project root metadata",
         )?;
+        store.set_project_root(Path::new(r"\\?\C:\workspace\example"))?;
+        require_eq(
+            &store.project_root()?,
+            &Some("C:/workspace/example".to_string()),
+            "windows extended project root metadata",
+        )?;
+        store.set_project_root(Path::new(r"\\?\UNC\server\share\repo"))?;
+        require_eq(
+            &store.project_root()?,
+            &Some("//server/share/repo".to_string()),
+            "windows unc project root metadata",
+        )?;
         Ok(())
     }
 
@@ -2608,6 +2650,77 @@ mod tests {
             &files[0].node.path,
             &"src/auth/login.rs".to_string(),
             "ranked file path",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn folder_like_filters_treat_wildcards_as_literal_path_text() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_folder_node("src/a%b"),
+            test_folder_node("src/axb"),
+            test_folder_node("src/a_b"),
+            test_folder_node("src/acb"),
+            test_file_node("src/a%b/target.rs", "hash-percent-target"),
+            test_file_node("src/axb/false.rs", "hash-percent-false"),
+            test_file_node("src/a_b/target.rs", "hash-underscore-target"),
+            test_file_node("src/acb/false.rs", "hash-underscore-false"),
+        ])?;
+        for path in [
+            "src/a%b/target.rs",
+            "src/axb/false.rs",
+            "src/a_b/target.rs",
+            "src/acb/false.rs",
+        ] {
+            store.set_node_summary(path, "needle indexed summary")?;
+        }
+
+        let percent_files =
+            store.load_ranked_nodes("needle", NodeKind::File, Some("src/a%b"), 10, 0)?;
+        require_eq(&percent_files.len(), &1, "percent folder ranked count")?;
+        require_eq(
+            &percent_files[0].node.path,
+            &"src/a%b/target.rs".to_string(),
+            "percent folder ranked path",
+        )?;
+        require_eq(
+            &store.source_file_byte_count(Some("src/a%b"))?,
+            &12,
+            "percent folder byte count",
+        )?;
+
+        let mut visited = Vec::new();
+        store.visit_file_token_estimates(Some("src/a_b"), |path, _size| {
+            visited.push(path);
+            Ok(true)
+        })?;
+        require_eq(
+            &visited,
+            &vec!["src/a_b/target.rs".to_string()],
+            "underscore folder token paths",
+        )?;
+
+        store.mark_paths_absent(&["src/a%b".to_string(), "src/a_b".to_string()])?;
+        require_eq(
+            &store.load_node_by_path("src/axb/false.rs")?.is_some(),
+            &true,
+            "percent-like sibling remains indexed",
+        )?;
+        require_eq(
+            &store.load_node_by_path("src/acb/false.rs")?.is_some(),
+            &true,
+            "underscore-like sibling remains indexed",
+        )?;
+        require_eq(
+            &store.load_node_by_path("src/a%b/target.rs")?.is_none(),
+            &true,
+            "percent folder target removed",
+        )?;
+        require_eq(
+            &store.load_node_by_path("src/a_b/target.rs")?.is_none(),
+            &true,
+            "underscore folder target removed",
         )?;
         Ok(())
     }

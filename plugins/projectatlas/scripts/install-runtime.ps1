@@ -1,14 +1,44 @@
 param(
     [string]$ProjectRoot,
     [string]$Repository = "https://github.com/styler-ai/ProjectAtlas",
-    [string]$ProjectAtlasVersion = "v0.3.0",
-    [string]$ReleaseBaseUrl = "https://github.com/styler-ai/ProjectAtlas/releases/download"
+    [string]$ProjectAtlasVersion,
+    [string]$ReleaseBaseUrl = "https://github.com/styler-ai/ProjectAtlas/releases/download",
+    [switch]$ReleaseBinaryOnly
 )
 
 $ErrorActionPreference = "Stop"
 
 function Resolve-DefaultProjectRoot {
     (Get-Location).Path
+}
+
+function Test-Truthy {
+    param(
+        [string]$Value
+    )
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $false
+    }
+    return @("1", "true", "yes", "on") -contains $Value.ToLowerInvariant()
+}
+
+function Resolve-PluginReleaseVersion {
+    $scriptDirectory = Split-Path -Parent $PSCommandPath
+    $pluginRoot = Split-Path -Parent $scriptDirectory
+    $manifestPath = Join-Path $pluginRoot ".codex-plugin\plugin.json"
+    if (-not (Test-Path -LiteralPath $manifestPath)) {
+        return $null
+    }
+    try {
+        $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+        if ($manifest.version) {
+            return "v$($manifest.version)"
+        }
+    }
+    catch {
+        return $null
+    }
+    return $null
 }
 
 function Find-Cargo {
@@ -157,11 +187,28 @@ if (-not $ProjectRoot) {
     $ProjectRoot = Resolve-DefaultProjectRoot
 }
 
+if (-not $ProjectAtlasVersion) {
+    if ($env:PROJECTATLAS_VERSION) {
+        $ProjectAtlasVersion = $env:PROJECTATLAS_VERSION
+    }
+    else {
+        $ProjectAtlasVersion = Resolve-PluginReleaseVersion
+    }
+}
+
+$releaseBinaryOnly = $ReleaseBinaryOnly -or (Test-Truthy $env:PROJECTATLAS_RELEASE_BINARY_ONLY)
 $ProjectRoot = (Resolve-Path $ProjectRoot).Path
 $cargo = Find-Cargo
 $sourceManifest = Join-Path $ProjectRoot "crates\projectatlas-cli\Cargo.toml"
+$installedBinary = $null
 
-if ($cargo -and (Test-Path -LiteralPath $sourceManifest)) {
+if ($releaseBinaryOnly) {
+    $installedBinary = Install-ReleaseBinary $ProjectAtlasVersion $ReleaseBaseUrl
+    if (-not $installedBinary) {
+        throw "ProjectAtlas release-binary install was required but failed for $ProjectAtlasVersion."
+    }
+}
+elseif ($cargo -and (Test-Path -LiteralPath $sourceManifest)) {
     Push-Location $ProjectRoot
     try {
         Invoke-Checked $cargo @("install", "--path", "crates/projectatlas-cli", "--locked", "--force")
@@ -172,6 +219,9 @@ if ($cargo -and (Test-Path -LiteralPath $sourceManifest)) {
 }
 else {
     $releaseBinary = Install-ReleaseBinary $ProjectAtlasVersion $ReleaseBaseUrl
+    if ($releaseBinary) {
+        $installedBinary = $releaseBinary
+    }
     if (-not $releaseBinary -and $cargo) {
         $installArgs = @("install", "--git", $Repository, "--package", "projectatlas-cli", "--locked", "--force")
         if ($ProjectAtlasVersion) {
@@ -181,7 +231,7 @@ else {
     }
 }
 
-$projectAtlas = Find-ProjectAtlas
+$projectAtlas = if ($installedBinary -and (Test-ProjectAtlasRuntime $installedBinary)) { $installedBinary } else { Find-ProjectAtlas }
 if (-not $projectAtlas) {
     throw "ProjectAtlas 3 runtime was not found. Install Rust/Cargo or provide a compatible ProjectAtlas 3 release binary on PATH."
 }

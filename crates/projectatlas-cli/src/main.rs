@@ -1005,7 +1005,7 @@ fn build_mcp_config_report(
     mcp_servers.insert(
         server_name.to_string(),
         McpServerConfig {
-            command: executable.display().to_string(),
+            command: mcp_launch_path(&executable),
             args,
             cwd: mcp_launch_path(&project_root),
         },
