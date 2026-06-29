@@ -473,21 +473,45 @@ jobs:
         run: |
           $projectRoot = Join-Path $env:RUNNER_TEMP "projectatlas-installer-smoke"
           New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
-          .\plugins\projectatlas\scripts\install-runtime.ps1 -ProjectRoot $projectRoot -ProjectAtlasVersion $env:RELEASE_VERSION -ReleaseBinaryOnly
-          $runtime = Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin\projectatlas.exe"
-          $env:PROJECTATLAS_NO_TELEMETRY = "1"
-          & $runtime --require-version $env:RELEASE_VERSION --format json runtime-info
-          Push-Location $projectRoot
-          try {
-            & $runtime config --print
-            & $runtime ignore list
-          } finally {
-            Pop-Location
+          $expectedVersion = $env:RELEASE_VERSION.TrimStart("v")
+          $stableRuntime = Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin\projectatlas.exe"
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $stableRuntime) | Out-Null
+          $asset = "projectatlas-$env:RELEASE_VERSION-x86_64-pc-windows-msvc.zip"
+          $archive = Join-Path $env:RUNNER_TEMP $asset
+          $extractDir = Join-Path $env:RUNNER_TEMP "projectatlas-stable-lock"
+          Invoke-WebRequest -Uri "https://github.com/styler-ai/ProjectAtlas/releases/download/$env:RELEASE_VERSION/$asset" -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $extractDir -Force
+          $assetRuntime = Get-ChildItem -LiteralPath $extractDir -Filter "projectatlas.exe" -Recurse | Select-Object -First 1
+          if (-not $assetRuntime) {
+            throw "Release archive did not contain projectatlas.exe."
           }
-          $expectedRuntime = [System.IO.Path]::GetFullPath($runtime)
+          Copy-Item -LiteralPath $assetRuntime.FullName -Destination $stableRuntime -Force
+          $stableHash = (Get-FileHash -LiteralPath $stableRuntime -Algorithm SHA256).Hash
+          $stableLock = [System.IO.File]::Open($stableRuntime, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+          try {
+            .\plugins\projectatlas\scripts\install-runtime.ps1 -ProjectRoot $projectRoot -ProjectAtlasVersion $env:RELEASE_VERSION -ReleaseBinaryOnly
+            $expectedRuntime = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "ProjectAtlas\runtimes\$expectedVersion\x86_64-pc-windows-msvc\projectatlas.exe"))
+            if (-not (Test-Path -LiteralPath $expectedRuntime)) {
+              throw "Versioned release runtime was not installed: $expectedRuntime"
+            }
+            $env:PROJECTATLAS_NO_TELEMETRY = "1"
+            & $expectedRuntime --require-version $env:RELEASE_VERSION --format json runtime-info
+            Push-Location $projectRoot
+            try {
+              & $expectedRuntime config --print
+              & $expectedRuntime ignore list
+            } finally {
+              Pop-Location
+            }
+          } finally {
+            $stableLock.Dispose()
+          }
+          $currentStableHash = (Get-FileHash -LiteralPath $stableRuntime -Algorithm SHA256).Hash
+          if ($currentStableHash -ne $stableHash) {
+            throw "LocalAppData stable mirror unexpectedly changed while locked."
+          }
           $expectedRoot = [System.IO.Path]::GetFullPath($projectRoot)
           $expectedDb = [System.IO.Path]::GetFullPath((Join-Path $projectRoot ".projectatlas\projectatlas.db"))
-          $expectedVersion = $env:RELEASE_VERSION.TrimStart("v")
 
           function Assert-Equal {
             param([string]$Actual, [string]$Expected, [string]$Message)

@@ -153,6 +153,11 @@ jobs:
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp --test e2e
 
+      - name: Windows locked runtime update E2E
+        if: matrix.label == 'windows'
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is_locked --test e2e
+
       - name: MCP project binding E2E
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli mcp_server_stays_bound_to_one_project_database --test e2e
