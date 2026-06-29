@@ -38,7 +38,9 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo test --doc --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
-cargo run -p projectatlas-cli -- lint --report-untracked
+cargo run -p projectatlas-cli -- --format json scan .
+cargo run -p projectatlas-cli -- purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply
+cargo run -p projectatlas-cli -- lint --report-untracked --purpose-level strict
 ```
 
 ## Issue hygiene
@@ -71,7 +73,7 @@ cargo run -p projectatlas-cli -- lint --report-untracked
 
 ## CI behavior
 
-- CI refreshes the SQLite index with `projectatlas scan` and validates source metadata with `projectatlas lint`.
+- CI refreshes the SQLite index with `projectatlas scan`, replays the ProjectAtlas repo's reviewed purpose batch with `projectatlas purpose review`, and validates source metadata with strict `projectatlas lint`.
 - `projectatlas lint` checks purpose/header health, non-source declarations, and untracked files; it does not require or validate the optional compatibility TOON export.
 - `projectatlas lint --purpose-level low` is the default first-pass agent gate: stale, duplicate, and repeated temporary-folder findings fail, while missing/suggested/agent-review purpose curation for folders plus high-impact files remains advisory. Use `projectatlas purpose queue` for the actionable curation list, `--purpose-level medium` when all source files must be agent-reviewed, and `--purpose-level strict` only when every indexed file and folder must be agent-reviewed.
 - PRs must reference a GitHub issue and have a milestone.
@@ -101,11 +103,12 @@ Do not add new Purpose headers or `.purpose` files for ProjectAtlas 3. Inspect t
 ```bash
 projectatlas purpose queue --limit 20
 projectatlas purpose set <path> "<one-line purpose>"
+projectatlas purpose review --from-file reviewed-purposes.json --apply
 ```
 
 The purpose queue is source-focused and folder-first by default, so binary assets, asset-only roots, and low-priority source files do not dominate the next-action list. Pass `--include-low-priority-files` only when intentionally doing broad file-purpose cleanup, and pass `--include-assets` only when intentionally curating non-source files. Generated purpose suggestions remain review-required until an agent approves or corrects them.
 
-Purpose entries live in SQLite and are preserved across normal scans and deep index refreshes. Re-scanning keeps existing reviewed purposes for unchanged paths, marks changed approved files stale for review, and deactivates deleted/excluded paths instead of recreating purpose noise. Use the purpose queue or health output to approve only new or stale entries.
+Purpose entries live in SQLite and are preserved across normal scans and deep index refreshes. Re-scanning keeps existing reviewed purposes for unchanged paths, marks changed approved files stale for review, and deactivates deleted/excluded paths instead of recreating purpose noise. Use the purpose queue or health output to approve only new or stale entries. If a repository needs reproducible strict lint from a fresh checkout, keep a reviewed batch input in the repo and replay it with `projectatlas purpose review --apply`; do not edit the SQLite database by hand.
 
 ### Legacy Purpose headers or .purpose files
 

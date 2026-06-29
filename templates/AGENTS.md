@@ -15,7 +15,7 @@
 11. Run `projectatlas lint --report-untracked --purpose-level low`; low fails stale, duplicate, and temporary-folder health but keeps first-pass purpose curation advisory. Use `projectatlas purpose queue` for the next curation actions, `--purpose-level medium` when all source files must be agent-reviewed, and `--purpose-level strict` only when every indexed file and folder must be agent-reviewed.
 12. Only then use symbol-level indexing, language-server lookups, or broad file reads on selected files.
 13. Run `projectatlas token` when asked for token savings.
-14. Correct wrong, stale, vague, or generic purposes opportunistically with `atlas_purpose_set` or `projectatlas purpose set` after inspecting enough context. Purpose entries live in SQLite and are preserved across scans; changed approved files become stale instead of losing their curated purpose text.
+14. Correct wrong, stale, vague, or generic purposes opportunistically with `atlas_purpose_set` or `projectatlas purpose set` after inspecting enough context. Use `atlas_purpose_review` or `projectatlas purpose review --from-file <json> --apply` for reviewed batches; never edit SQLite directly. Purpose entries live in SQLite and are preserved across scans; changed approved files become stale instead of losing their curated purpose text.
 
 ## Rust/Dependency Discipline
 - Prefer official or canonical Rust crates and standard implementations for protocols, formats, parsers, storage, watchers, token tooling, and platform integration before writing custom code.

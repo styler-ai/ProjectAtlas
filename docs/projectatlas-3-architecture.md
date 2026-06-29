@@ -580,13 +580,13 @@ ProjectAtlas 3 usage. It should not be only an instruction bundle.
 
 Required plugin contents for 3.0:
 
-- ProjectAtlas skill/instructions for Codex, OpenCode, Claude Code, and generic
-  MCP-aware harnesses
+- ProjectAtlas skill/instructions for Codex, Claude Code, OpenCode MCP config
+  users, and generic MCP-aware harnesses
 - installer-generated project-local MCP configs that start the native ProjectAtlas
   MCP server through absolute runtime paths on Windows, Linux, and macOS
 - Claude Code plugin metadata under `.claude-plugin/plugin.json`
 - disabled OpenCode `opencode.json` MCP config template with absolute-path
-  placeholders
+  placeholders, not a native OpenCode JavaScript/TypeScript plugin
 - `projectatlas mcp-config` support for generated per-project MCP configs with
   absolute executable and DB/config paths. Codex/OpenCode outputs include a
   `cwd` project-root hint where supported; Claude Code output avoids relying on
@@ -600,7 +600,7 @@ Required plugin contents for 3.0:
 
 Preferred install behavior:
 
-1. install the plugin from the ProjectAtlas marketplace entry
+1. install the supported plugin or config package for the target harness
 2. make the native `projectatlas` runtime available
 3. register the MCP server for the harness
 4. expose skills/prompts that enforce the context funnel

@@ -17,7 +17,6 @@ fn lint_does_not_require_legacy_source_purpose_headers() -> Result<(), Box<dyn E
 root = "."
 map_path = ".projectatlas/projectatlas.toon"
 nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
-purpose_filename = ".purpose"
 
 [scan]
 source_extensions = [".foo"]

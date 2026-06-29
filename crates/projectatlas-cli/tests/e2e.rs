@@ -96,6 +96,14 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             .join("workflows")
             .join("ci.yml"),
     )?;
+    let readme = fs::read_to_string(workspace_root.join("README.md"))?;
+    let agent_integration =
+        fs::read_to_string(workspace_root.join("docs").join("agent-integration.md"))?;
+    let architecture = fs::read_to_string(
+        workspace_root
+            .join("docs")
+            .join("projectatlas-3-architecture.md"),
+    )?;
     let codex_fallback_mcp = workspace_root
         .join("plugins")
         .join("projectatlas")
@@ -121,6 +129,10 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             .join("opencode")
             .join("opencode.json"),
     )?;
+    let opencode_native_plugin_dir = workspace_root
+        .join("plugins")
+        .join("projectatlas")
+        .join(".opencode-plugin");
 
     for required in [
         "Convert-ProjectAtlasVersionTag",
@@ -252,6 +264,33 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         )
         .into());
     }
+    if opencode_native_plugin_dir.exists() {
+        return Err(io::Error::other(
+            "ProjectAtlas OpenCode support is an MCP config template, not a native OpenCode plugin directory",
+        )
+        .into());
+    }
+    if !readme.contains("OpenCode MCP config template")
+        || !agent_integration
+            .contains("ProjectAtlas does not ship a native OpenCode JavaScript/TypeScript plugin")
+        || !architecture.contains("not a native OpenCode JavaScript/TypeScript plugin")
+    {
+        return Err(io::Error::other(
+            "docs must distinguish Claude Code plugin packaging from OpenCode MCP config support",
+        )
+        .into());
+    }
+    for forbidden in ["OpenCode plugin assets", "Claude Code / OpenCode plugins"] {
+        if readme.contains(forbidden)
+            || agent_integration.contains(forbidden)
+            || architecture.contains(forbidden)
+        {
+            return Err(io::Error::other(format!(
+                "docs still imply native OpenCode plugin packaging through {forbidden:?}"
+            ))
+            .into());
+        }
+    }
     let windows_release_smoke = workflow_job_block(&release_workflow, "installer-smoke-windows")?;
     for required in [
         "[System.IO.FileShare]::None",
@@ -366,6 +405,43 @@ fn repository_guidance_keeps_legacy_toon_export_optional() -> Result<(), Box<dyn
         if verify.contains("--strict-folders") {
             return Err(io::Error::other(format!(
                 "{workflow_name} verify job must not require legacy folder .purpose linting"
+            ))
+            .into());
+        }
+        if !verify.contains("lint_purpose_levels_require_agent_review_at_configured_scope") {
+            return Err(io::Error::other(format!(
+                "{workflow_name} verify job must run the low/medium/strict purpose lint E2E"
+            ))
+            .into());
+        }
+        if !verify.contains("watch_once_preserves_unchanged_deep_summary_and_text_index") {
+            return Err(io::Error::other(format!(
+                "{workflow_name} verify job must test reviewed purpose preservation across deep refresh"
+            ))
+            .into());
+        }
+        if !verify.contains(
+            "purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply",
+        ) {
+            return Err(io::Error::other(format!(
+                "{workflow_name} verify job must replay reviewed purposes through ProjectAtlas before strict lint"
+            ))
+            .into());
+        }
+        if !verify.contains("lint --report-untracked --purpose-level strict") {
+            return Err(io::Error::other(format!(
+                "{workflow_name} verify job must enforce strict purpose lint after review replay"
+            ))
+            .into());
+        }
+        let scan_offset = verify.find("ProjectAtlas scan").unwrap_or(usize::MAX);
+        let review_offset = verify
+            .find("ProjectAtlas purpose review")
+            .unwrap_or(usize::MAX);
+        let lint_offset = verify.find("ProjectAtlas lint").unwrap_or(usize::MAX);
+        if !(scan_offset < review_offset && review_offset < lint_offset) {
+            return Err(io::Error::other(format!(
+                "{workflow_name} verify job must run scan, purpose review, then strict lint in order"
             ))
             .into());
         }
@@ -1016,11 +1092,19 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         .into());
     }
     let nodes = preserved_store.load_nodes()?;
-    if !nodes.iter().any(|node| {
-        node.node.path == "src/a.rs"
-            && node.purpose.purpose.as_deref() == Some("Shared plugin update state")
-    }) {
-        return Err(io::Error::other("plugin update lost approved purpose metadata").into());
+    let preserved_purpose = nodes
+        .iter()
+        .find(|node| node.node.path == "src/a.rs")
+        .ok_or_else(|| io::Error::other("plugin update lost indexed source node"))?;
+    if preserved_purpose.purpose.purpose.as_deref() != Some("Shared plugin update state")
+        || preserved_purpose.purpose.source != PurposeSource::Agent
+        || !preserved_purpose.purpose.agent_reviewed()
+    {
+        return Err(io::Error::other(format!(
+            "plugin update lost approved purpose metadata: {:?}",
+            preserved_purpose.purpose
+        ))
+        .into());
     }
     if !preserved_store
         .resolved_health_ids()?
@@ -2489,6 +2573,14 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         .args(["scan", "."])
         .assert()
         .success();
+    {
+        let store = AtlasStore::open(&db)?;
+        store.set_purpose(
+            "src/lib.rs",
+            "Imported Rust library purpose for MCP review.",
+            PurposeSource::Imported,
+        )?;
+    }
 
     let messages = [
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#,
@@ -2498,6 +2590,7 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_files","arguments":{"file_pattern":"*.rs","limit":1}}}"#,
         r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"atlas_health","arguments":{"category":"missing-purpose","path_prefix":".","limit":1}}}"#,
         r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"atlas_token_report","arguments":{"include_chart":true}}}"#,
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"atlas_purpose_review","arguments":{"apply":true,"items":[{"path":"src/lib.rs","confirm_existing":true}]}}}"#,
     ];
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let stdout = run_mcp_stdio(
@@ -2519,6 +2612,8 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !stdout.contains("health_findings[1]")
         || !stdout.contains("next_start_index: 1")
         || !stdout.contains("ProjectAtlas Token Savings")
+        || !stdout.contains("purpose_review:")
+        || !stdout.contains("failed: 0")
         || !stdout.contains("src/lib.rs")
     {
         return Err(io::Error::other(format!(
@@ -2526,6 +2621,14 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         ))
         .into());
     }
+    let reviewed_summary = json_summary_command(&repo, &db, "src/lib.rs")?;
+    require_json_string(&reviewed_summary, &["file_purpose_source"], "agent")?;
+    require_json_bool(&reviewed_summary, &["file_purpose_agent_reviewed"], true)?;
+    require_json_string(
+        &reviewed_summary,
+        &["file_purpose"],
+        "Imported Rust library purpose for MCP review.",
+    )?;
     Ok(())
 }
 
@@ -4128,6 +4231,25 @@ fn watch_once_preserves_unchanged_deep_summary_and_text_index() -> Result<(), Bo
         .stdout(predicate::str::contains("text_index:"))
         .stdout(predicate::str::contains("indexed: 1"));
 
+    {
+        let store = AtlasStore::open(&db)?;
+        store.set_purpose(
+            ".",
+            "Reviewed repository root for deep refresh preservation tests.",
+            PurposeSource::Agent,
+        )?;
+        store.set_purpose(
+            "src",
+            "Reviewed source folder for deep refresh preservation tests.",
+            PurposeSource::Agent,
+        )?;
+        store.set_purpose(
+            "src/main.rs",
+            "Reviewed Rust entrypoint for deep refresh preservation tests.",
+            PurposeSource::Agent,
+        )?;
+    }
+
     let before = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .arg("--format")
@@ -4147,6 +4269,13 @@ fn watch_once_preserves_unchanged_deep_summary_and_text_index() -> Result<(), Bo
     if !before_summary.contains("helper") {
         return Err(io::Error::other("summary before watch did not include symbol facts").into());
     }
+    require_json_string(
+        &before_json,
+        &["file_purpose"],
+        "Reviewed Rust entrypoint for deep refresh preservation tests.",
+    )?;
+    require_json_string(&before_json, &["file_purpose_source"], "agent")?;
+    require_json_bool(&before_json, &["file_purpose_agent_reviewed"], true)?;
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -4170,6 +4299,13 @@ fn watch_once_preserves_unchanged_deep_summary_and_text_index() -> Result<(), Bo
     }
     let after_json: Value = serde_json::from_slice(&after.stdout)?;
     require_json_string(&after_json, &["content_summary"], &before_summary)?;
+    require_json_string(
+        &after_json,
+        &["file_purpose"],
+        "Reviewed Rust entrypoint for deep refresh preservation tests.",
+    )?;
+    require_json_string(&after_json, &["file_purpose_source"], "agent")?;
+    require_json_bool(&after_json, &["file_purpose_agent_reviewed"], true)?;
 
     let search = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -4185,6 +4321,49 @@ fn watch_once_preserves_unchanged_deep_summary_and_text_index() -> Result<(), Bo
     let search_json: Value = serde_json::from_slice(&search.stdout)?;
     require_json_string(&search_json, &["source"], "sqlite-file-text")?;
     require_json_usize_at_least(&search_json, &["returned"], 1)?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("missing_purposes: 0"));
+
+    let final_summary = json_summary_command(&repo, &db, "src/main.rs")?;
+    require_json_string(
+        &final_summary,
+        &["file_purpose"],
+        "Reviewed Rust entrypoint for deep refresh preservation tests.",
+    )?;
+    require_json_string(&final_summary, &["file_purpose_source"], "agent")?;
+    require_json_bool(&final_summary, &["file_purpose_agent_reviewed"], true)?;
+    let final_store = AtlasStore::open(&db)?;
+    for (path, purpose) in [
+        (
+            ".",
+            "Reviewed repository root for deep refresh preservation tests.",
+        ),
+        (
+            "src",
+            "Reviewed source folder for deep refresh preservation tests.",
+        ),
+    ] {
+        let node = final_store
+            .load_node_by_path(path)?
+            .ok_or_else(|| io::Error::other(format!("{path} missing after deep refresh")))?;
+        if node.purpose.source != PurposeSource::Agent
+            || node.purpose.purpose.as_deref() != Some(purpose)
+            || !node.purpose.agent_reviewed()
+        {
+            return Err(io::Error::other(format!(
+                "deep refresh did not preserve reviewed purpose for {path}: {:?}",
+                node.purpose
+            ))
+            .into());
+        }
+    }
     Ok(())
 }
 
@@ -5184,6 +5363,226 @@ fn generated_file_purpose_suggestions_require_agent_approval() -> Result<(), Box
         .success()
         .stdout(predicate::str::contains("health_findings[0]"));
 
+    Ok(())
+}
+
+#[test]
+fn purpose_review_batch_applies_agent_review_without_raw_sql() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir(repo.join("src"))?;
+    fs::write(
+        repo.join("src").join("detail.rs"),
+        "pub fn trusted_detail() {}\n",
+    )?;
+    fs::write(
+        repo.join("src").join("service.rs"),
+        "//! Service module docs.\n/// Service API for tests.\npub struct Service;\n\nimpl Service {\n    /// Run the service.\n    pub fn run(&self) {}\n}\n",
+    )?;
+    let db = temp.path().join("projectatlas.db");
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("purpose_suggestions: 2"));
+
+    {
+        let store = AtlasStore::open(&db)?;
+        store.set_purpose(
+            "src/detail.rs",
+            "Trusted detail implementation purpose.",
+            PurposeSource::Imported,
+        )?;
+    }
+
+    let bad_review = temp.path().join("bad-review.json");
+    fs::write(
+        &bad_review,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "items": [
+                { "path": "src/service.rs", "confirm_existing": true }
+            ]
+        }))?,
+    )?;
+    let bad_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["purpose", "review", "--from-file"])
+        .arg(&bad_review)
+        .output()?;
+    if bad_output.status.success() {
+        return Err(io::Error::other("generated purpose confirm unexpectedly passed").into());
+    }
+    let bad_report: Value = serde_json::from_slice(&bad_output.stdout)?;
+    require_json_usize(&bad_report, &["failed"], 1)?;
+    require_json_string(
+        &bad_report,
+        &["items", "0", "error"],
+        "generated suggestions require an explicit reviewed purpose",
+    )?;
+
+    let review = temp.path().join("review.json");
+    fs::write(
+        &review,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "items": [
+                { "path": "src/detail.rs", "confirm_existing": true },
+                {
+                    "path": "src/service.rs",
+                    "purpose": "Service module defining the test service type and run method."
+                }
+            ]
+        }))?,
+    )?;
+
+    let dry_run_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["purpose", "review", "--from-file"])
+        .arg(&review)
+        .output()?;
+    if !dry_run_output.status.success() {
+        return Err(io::Error::other(format!(
+            "purpose review dry-run failed: {}",
+            String::from_utf8_lossy(&dry_run_output.stderr)
+        ))
+        .into());
+    }
+    let dry_run_report: Value = serde_json::from_slice(&dry_run_output.stdout)?;
+    require_json_bool(&dry_run_report, &["applied"], false)?;
+    require_json_usize(&dry_run_report, &["changed"], 2)?;
+    require_json_usize(&dry_run_report, &["failed"], 0)?;
+
+    let service_dry_summary = json_summary_command(&repo, &db, "src/service.rs")?;
+    require_json_string(&service_dry_summary, &["file_purpose_source"], "generated")?;
+    require_json_bool(
+        &service_dry_summary,
+        &["file_purpose_agent_reviewed"],
+        false,
+    )?;
+
+    let apply_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["purpose", "review", "--from-file"])
+        .arg(&review)
+        .arg("--apply")
+        .output()?;
+    if !apply_output.status.success() {
+        return Err(io::Error::other(format!(
+            "purpose review apply failed: {}",
+            String::from_utf8_lossy(&apply_output.stderr)
+        ))
+        .into());
+    }
+    let apply_report: Value = serde_json::from_slice(&apply_output.stdout)?;
+    require_json_bool(&apply_report, &["applied"], true)?;
+    require_json_usize(&apply_report, &["changed"], 2)?;
+    require_json_usize(&apply_report, &["failed"], 0)?;
+
+    let detail_summary = json_summary_command(&repo, &db, "src/detail.rs")?;
+    require_json_string(&detail_summary, &["file_purpose_source"], "agent")?;
+    require_json_bool(&detail_summary, &["file_purpose_agent_reviewed"], true)?;
+    require_json_string(
+        &detail_summary,
+        &["file_purpose"],
+        "Trusted detail implementation purpose.",
+    )?;
+    let service_summary = json_summary_command(&repo, &db, "src/service.rs")?;
+    require_json_string(&service_summary, &["file_purpose_source"], "agent")?;
+    require_json_bool(&service_summary, &["file_purpose_agent_reviewed"], true)?;
+    require_json_string(
+        &service_summary,
+        &["file_purpose"],
+        "Service module defining the test service type and run method.",
+    )?;
+
+    let repeat_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["purpose", "review", "--from-file"])
+        .arg(&review)
+        .arg("--apply")
+        .output()?;
+    if !repeat_output.status.success() {
+        return Err(io::Error::other("idempotent purpose review apply failed").into());
+    }
+    let repeat_report: Value = serde_json::from_slice(&repeat_output.stdout)?;
+    require_json_usize(&repeat_report, &["changed"], 0)?;
+    require_json_usize(&repeat_report, &["skipped"], 2)?;
+
+    Ok(())
+}
+
+#[test]
+fn powershell_summary_preserves_hyphenated_function_names() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir(repo.join("scripts"))?;
+    fs::write(
+        repo.join("scripts").join("install-runtime.ps1"),
+        "class RuntimeConfig {\n}\n\nfunction Resolve-DefaultProjectRoot {\n}\n\nfunction Get-ReleaseRuntimeInstallPath {\n}\n\nfunction Install-ReleaseBinary {\n}\n",
+    )?;
+    let db = temp.path().join("projectatlas.db");
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    let summary = json_summary_command(&repo, &db, "scripts/install-runtime.ps1")?;
+    require_json_string(&summary, &["summary_status"], "ok")?;
+    require_json_usize(&summary, &["total_classes"], 1)?;
+    require_json_string(&summary, &["classes", "0", "name"], "RuntimeConfig")?;
+    require_json_string(&summary, &["classes", "0", "kind"], "class")?;
+    let function_names = summary
+        .get("functions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("PowerShell summary functions array missing"))?
+        .iter()
+        .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    for expected in [
+        "Resolve-DefaultProjectRoot",
+        "Get-ReleaseRuntimeInstallPath",
+        "Install-ReleaseBinary",
+    ] {
+        if !function_names.contains(&expected) {
+            return Err(io::Error::other(format!(
+                "PowerShell summary missed full function name {expected}: {function_names:?}"
+            ))
+            .into());
+        }
+    }
+    for truncated in ["Resolve", "Get", "Install"] {
+        if function_names.contains(&truncated) {
+            return Err(io::Error::other(format!(
+                "PowerShell summary included truncated function name {truncated}: {function_names:?}"
+            ))
+            .into());
+        }
+    }
     Ok(())
 }
 
@@ -6634,6 +7033,13 @@ fn init_map_and_lint_flow_uses_rust_implementation() -> Result<(), Box<dyn Error
         .arg("init")
         .assert()
         .success();
+    let generated_config = fs::read_to_string(repo.join(".projectatlas").join("config.toml"))?;
+    if generated_config.contains("purpose_filename") || generated_config.contains(".purpose") {
+        return Err(io::Error::other(format!(
+            "init config advertised legacy purpose files: {generated_config}"
+        ))
+        .into());
+    }
     if repo.join(".purpose").exists() || repo.join("src").join(".purpose").exists() {
         return Err(io::Error::other("init created legacy .purpose files").into());
     }

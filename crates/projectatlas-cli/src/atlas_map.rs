@@ -12,8 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 
-/// Default `ProjectAtlas` purpose filename.
-const DEFAULT_PURPOSE_FILENAME: &str = ".purpose";
+/// Legacy folder-purpose filename accepted only as migration input.
+const DEFAULT_LEGACY_PURPOSE_FILENAME: &str = ".purpose";
 /// Default generated map path.
 const DEFAULT_MAP_PATH: &str = ".projectatlas/projectatlas.toon";
 /// Default non-source summary input path.
@@ -22,6 +22,7 @@ const DEFAULT_NONSOURCE_PATH: &str = ".projectatlas/projectatlas-nonsource-files
 const DURABLE_PROJECTATLAS_INPUT_PATHS: &[&str] = &[
     ".projectatlas/config.toml",
     ".projectatlas/projectatlas-nonsource-files.toon",
+    ".projectatlas/projectatlas-purpose-review.json",
 ];
 /// Default maximum number of lines scanned for purpose headers.
 const DEFAULT_MAX_SCAN_LINES: usize = 80;
@@ -993,7 +994,7 @@ fn normalize_config(
         ),
         purpose_filename: project
             .purpose_filename
-            .unwrap_or_else(|| DEFAULT_PURPOSE_FILENAME.to_string()),
+            .unwrap_or_else(|| DEFAULT_LEGACY_PURPOSE_FILENAME.to_string()),
         source_extensions: normalize_set(scan.source_extensions.unwrap_or_else(|| {
             DEFAULT_SOURCE_EXTENSIONS
                 .iter()
@@ -1004,10 +1005,7 @@ fn normalize_config(
         exclude_dir_suffixes: string_set(scan.exclude_dir_suffixes, &[".egg-info"]),
         exclude_path_prefixes: normalize_prefix_set(scan.exclude_path_prefixes)?,
         non_source_path_prefixes: normalize_prefix_set(scan.non_source_path_prefixes)?,
-        allowed_untracked_filenames: string_set(
-            untracked.allowed_filenames,
-            &[DEFAULT_PURPOSE_FILENAME],
-        ),
+        allowed_untracked_filenames: string_set(untracked.allowed_filenames, &[]),
         untracked_allowlist_dir_prefixes: normalize_prefix_set(untracked.allowlist_dir_prefixes)?,
         untracked_allowlist_files: normalize_prefix_set(untracked.allowlist_files)?,
         asset_allowed_prefixes: normalize_prefix_set(untracked.asset_allowed_prefixes)?,
@@ -2476,7 +2474,6 @@ fn default_config_text() -> String {
         "root = \".\"",
         "map_path = \".projectatlas/projectatlas.toon\"",
         "nonsource_files_path = \".projectatlas/projectatlas-nonsource-files.toon\"",
-        "purpose_filename = \".purpose\"",
         "",
         "[scan]",
         &format!("source_extensions = {source_extensions}"),
@@ -2500,7 +2497,7 @@ fn default_config_text() -> String {
         "max_length = 140",
         "",
         "[untracked]",
-        "allowed_filenames = [\".purpose\"]",
+        "allowed_filenames = []",
         "allowlist_dir_prefixes = [\".githooks\"]",
         "allowlist_files = []",
         "asset_allowed_prefixes = []",

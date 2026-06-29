@@ -21,6 +21,7 @@ const INDEXED_PROJECTATLAS_INPUT_PATHS: &[&str] = &[
     ".projectatlas",
     ".projectatlas/config.toml",
     ".projectatlas/projectatlas-nonsource-files.toon",
+    ".projectatlas/projectatlas-purpose-review.json",
 ];
 
 /// Filesystem scanner errors.
@@ -610,6 +611,10 @@ mod tests {
             projectatlas.join("projectatlas-nonsource-files.toon"),
             "nonsource_files[]:\n",
         )?;
+        fs::write(
+            projectatlas.join("projectatlas-purpose-review.json"),
+            "{\"items\":[]}\n",
+        )?;
         fs::write(projectatlas.join("projectatlas.db"), b"sqlite bytes")?;
         fs::write(projectatlas.join("projectatlas.toon"), "generated map\n")?;
         fs::write(projectatlas.join("projectatlas.mcp.json"), "{}\n")?;
@@ -618,6 +623,7 @@ mod tests {
         require_path(&nodes, ".projectatlas")?;
         require_path(&nodes, ".projectatlas/config.toml")?;
         require_path(&nodes, ".projectatlas/projectatlas-nonsource-files.toon")?;
+        require_path(&nodes, ".projectatlas/projectatlas-purpose-review.json")?;
         reject_path(&nodes, ".projectatlas/projectatlas.db")?;
         reject_path(&nodes, ".projectatlas/projectatlas.toon")?;
         reject_path(&nodes, ".projectatlas/projectatlas.mcp.json")?;

@@ -55,6 +55,12 @@ jobs:
       - name: Tests
         run: cargo test --workspace --all-features --locked
 
+      - name: ProjectAtlas purpose lint levels
+        run: cargo test --locked -p projectatlas-cli lint_purpose_levels_require_agent_review_at_configured_scope --test e2e
+
+      - name: ProjectAtlas purpose preservation
+        run: cargo test --locked -p projectatlas-cli watch_once_preserves_unchanged_deep_summary_and_text_index --test e2e
+
       - name: Doc tests
         run: cargo test --doc --workspace --all-features --locked
 
@@ -89,11 +95,14 @@ jobs:
       - name: ProjectAtlas scan
         run: cargo run --locked -p projectatlas-cli -- --format json scan .
 
+      - name: ProjectAtlas purpose review
+        run: cargo run --locked -p projectatlas-cli -- purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply
+
       - name: ProjectAtlas parity
         run: cargo run --locked -p projectatlas-cli -- parity report --profile repository-intelligence
 
       - name: ProjectAtlas lint
-        run: cargo run --locked -p projectatlas-cli -- lint --report-untracked
+        run: cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level strict
 
   package-unix:
     name: package ${{ matrix.label }}

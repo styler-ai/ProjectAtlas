@@ -24,7 +24,7 @@ use projectatlas_core::toon::encode_agent_payload;
 use projectatlas_core::{
     Node, NodeKind, Overview, PurposeSource, PurposeStatus, normalize_native_path_display,
     normalize_native_path_display_str, normalize_repo_path, purpose_review_signal,
-    repo_path_to_native, validated_repo_file_key,
+    repo_path_to_native, validated_repo_file_key, validated_repo_node_key,
 };
 use projectatlas_db::{AtlasStore, HealthFindingsPage, HealthQuery, HealthScope, IndexedFileText};
 use projectatlas_fs::{ScanOptions, gitignore_excludes_path, scan_path, scan_repo};
@@ -34,7 +34,7 @@ use projectatlas_service::{
 use projectatlas_symbols::extract_symbol_graph;
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -65,6 +65,10 @@ const BUILTIN_PROJECTATLAS_PURPOSES: &[(&str, &str)] = &[
     (
         ".projectatlas/projectatlas-nonsource-files.toon",
         "Declare project-local non-source file purposes for ProjectAtlas map compatibility.",
+    ),
+    (
+        ".projectatlas/projectatlas-purpose-review.json",
+        "Replay agent-reviewed ProjectAtlas purpose records into the local SQLite index.",
     ),
 ];
 
@@ -548,6 +552,159 @@ pub(crate) struct PurposeCurationItem {
     pub(crate) recommendation: String,
 }
 
+/// One agent-reviewed purpose update requested by a batch review.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct PurposeReviewRequest {
+    /// Indexed repository-relative path.
+    pub(crate) path: String,
+    /// Agent-reviewed purpose one-liner. Required for generated suggestions.
+    #[serde(default)]
+    pub(crate) purpose: Option<String>,
+    /// Confirm the currently stored non-generated purpose after inspection.
+    #[serde(default)]
+    pub(crate) confirm_existing: bool,
+}
+
+/// Batch purpose review result.
+#[derive(Debug, Serialize)]
+pub(crate) struct PurposeReviewReport {
+    /// Whether the review changed the database.
+    pub(crate) applied: bool,
+    /// Number of requested review rows.
+    pub(crate) total: usize,
+    /// Number of rows changed when applied or that would change in dry-run.
+    pub(crate) changed: usize,
+    /// Number of rows skipped because they were already agent-reviewed with the same purpose.
+    pub(crate) skipped: usize,
+    /// Number of rows that could not be reviewed.
+    pub(crate) failed: usize,
+    /// Per-path review details.
+    pub(crate) items: Vec<PurposeReviewItem>,
+}
+
+/// Per-path batch review result.
+#[derive(Debug, Serialize)]
+pub(crate) struct PurposeReviewItem {
+    /// Indexed repository-relative path.
+    pub(crate) path: String,
+    /// Action selected for this path.
+    pub(crate) action: String,
+    /// Current purpose lifecycle status.
+    pub(crate) current_status: String,
+    /// Current purpose source.
+    pub(crate) current_source: String,
+    /// Purpose that will be or was written.
+    pub(crate) purpose: String,
+    /// Validation or persistence error.
+    pub(crate) error: String,
+}
+
+/// Validate and optionally apply a batch of agent-reviewed purpose records.
+pub(crate) fn review_purposes(
+    store: &AtlasStore,
+    requests: &[PurposeReviewRequest],
+    apply: bool,
+) -> Result<PurposeReviewReport, CliError> {
+    let mut items = Vec::with_capacity(requests.len());
+    for request in requests {
+        items.push(review_purpose_request(store, request, apply)?);
+    }
+    let changed = items
+        .iter()
+        .filter(|item| item.error.is_empty() && item.action != "skip")
+        .count();
+    let skipped = items.iter().filter(|item| item.action == "skip").count();
+    let failed = items.iter().filter(|item| !item.error.is_empty()).count();
+    Ok(PurposeReviewReport {
+        applied: apply,
+        total: requests.len(),
+        changed,
+        skipped,
+        failed,
+        items,
+    })
+}
+
+/// Validate and optionally apply one agent-reviewed purpose record.
+fn review_purpose_request(
+    store: &AtlasStore,
+    request: &PurposeReviewRequest,
+    apply: bool,
+) -> Result<PurposeReviewItem, CliError> {
+    let path = validated_repo_node_key(Path::new(&request.path)).map_err(|source| {
+        CliError::InvalidInput(format!(
+            "invalid purpose review path {:?}: {source}",
+            request.path
+        ))
+    })?;
+    let Some(indexed) = store.load_node_by_path(&path)? else {
+        return Ok(PurposeReviewItem {
+            path,
+            action: "error".to_string(),
+            current_status: String::new(),
+            current_source: String::new(),
+            purpose: request.purpose.clone().unwrap_or_default(),
+            error: "path is not indexed".to_string(),
+        });
+    };
+    let current_status = indexed.purpose.status.to_string();
+    let current_source = indexed.purpose.source.to_string();
+    let current_purpose = indexed.purpose.purpose.clone().unwrap_or_default();
+    let explicit_purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(reviewed_purpose) = explicit_purpose.or_else(|| {
+        request
+            .confirm_existing
+            .then_some(current_purpose.as_str())
+            .filter(|value| !value.trim().is_empty())
+    }) else {
+        return Ok(PurposeReviewItem {
+            path,
+            action: "error".to_string(),
+            current_status,
+            current_source,
+            purpose: String::new(),
+            error: "provide a reviewed purpose or set confirm_existing=true".to_string(),
+        });
+    };
+
+    if request.confirm_existing
+        && explicit_purpose.is_none()
+        && (indexed.purpose.status == PurposeStatus::Suggested
+            || indexed.purpose.source == PurposeSource::Generated)
+    {
+        return Ok(PurposeReviewItem {
+            path,
+            action: "error".to_string(),
+            current_status,
+            current_source,
+            purpose: current_purpose,
+            error: "generated suggestions require an explicit reviewed purpose".to_string(),
+        });
+    }
+
+    let reviewed_purpose = reviewed_purpose.trim().to_string();
+    let action = if indexed.purpose.agent_reviewed() && current_purpose == reviewed_purpose {
+        "skip"
+    } else if apply {
+        store.set_purpose(&path, &reviewed_purpose, PurposeSource::Agent)?;
+        "review"
+    } else {
+        "would-review"
+    };
+    Ok(PurposeReviewItem {
+        path,
+        action: action.to_string(),
+        current_status,
+        current_source,
+        purpose: reviewed_purpose,
+        error: String::new(),
+    })
+}
+
 /// Build a purpose curation queue from the bounded health page.
 pub(crate) fn purpose_curation_page(
     store: &AtlasStore,
@@ -685,6 +842,20 @@ pub(crate) fn render_purpose_curation_page(page: &PurposeCurationPage) -> String
             "summary_only": page.summary_only,
         },
         "purpose_curation_items": page.items,
+    }))
+}
+
+/// Render a batch purpose review report as compact TOON.
+pub(crate) fn render_purpose_review_report(report: &PurposeReviewReport) -> String {
+    encode_agent_payload(&json!({
+        "purpose_review": {
+            "applied": report.applied,
+            "total": report.total,
+            "changed": report.changed,
+            "skipped": report.skipped,
+            "failed": report.failed,
+        },
+        "purpose_review_items": report.items,
     }))
 }
 

@@ -32,7 +32,7 @@
 15. Run `projectatlas runtime-info` when installer/runtime identity is unclear.
 16. Run `projectatlas token` when asked for token savings; use `projectatlas token --view tui` only when a human asks for the terminal dashboard.
 17. Generate harness MCP config with `projectatlas --format json --db .projectatlas/projectatlas.db mcp-config`, adding `--harness claude-code` or `--harness opencode` for those hosts. Prefer installer-generated project-local configs over checked-in fallback templates.
-18. Correct wrong, stale, vague, or generic purposes opportunistically with `atlas_purpose_set` or `projectatlas purpose set` after inspecting enough context. Purpose entries live in SQLite and are preserved across scans; changed approved files become stale instead of losing their curated purpose text.
+18. Correct wrong, stale, vague, or generic purposes opportunistically with `atlas_purpose_set` or `projectatlas purpose set` after inspecting enough context. Use `atlas_purpose_review` or `projectatlas purpose review --from-file <json> --apply` for reviewed batches; never edit SQLite directly. Purpose entries live in SQLite and are preserved across scans; changed approved files become stale instead of losing their curated purpose text.
 
 ## Rust/Dependency Discipline
 - Prefer official or canonical Rust crates and standard implementations for protocols, formats, parsers, storage, watchers, token tooling, and platform integration before writing custom code.

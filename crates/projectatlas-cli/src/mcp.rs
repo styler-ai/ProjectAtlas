@@ -2,13 +2,14 @@
 //! Native MCP adapter for `ProjectAtlas` agent integrations.
 
 use crate::runtime::{
-    DEFAULT_HEALTH_LIMIT, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, ScanRuntimePlan,
-    SymbolBuildOptions, build_settings_report, build_symbols_for_index, byte_count_to_tokens,
-    canonical_project_root, default_mcp_project_root, estimated_source_tokens_for_indexed_files,
-    estimated_source_tokens_for_paths, file_summary_usage_baseline, normalized_folder_filter,
-    open_atlas_store, purpose_curation_page, ranked_file_nodes, read_indexed_file_content,
-    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
-    render_health_page, render_purpose_curation_page, reset_index_files, run_scan_pipeline,
+    DEFAULT_HEALTH_LIMIT, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, PurposeReviewRequest,
+    ScanRuntimePlan, SymbolBuildOptions, build_settings_report, build_symbols_for_index,
+    byte_count_to_tokens, canonical_project_root, default_mcp_project_root,
+    estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
+    file_summary_usage_baseline, normalized_folder_filter, open_atlas_store, purpose_curation_page,
+    ranked_file_nodes, read_indexed_file_content, record_directory_walk_usage_estimate,
+    record_usage_estimate, record_usage_text, render_health_page, render_purpose_curation_page,
+    render_purpose_review_report, reset_index_files, review_purposes, run_scan_pipeline,
     run_watch_loop, strip_legacy_purpose, validated_indexed_file_key, watcher_status_report,
 };
 use crate::{
@@ -63,6 +64,7 @@ pub(crate) const REQUIRED_MCP_TOOL_NAMES: &[&str] = &[
     "atlas_reset_index",
     "atlas_purpose_queue",
     "atlas_purpose_set",
+    "atlas_purpose_review",
 ];
 
 /// Run the official RMCP stdio server.
@@ -283,6 +285,26 @@ struct AtlasPurposeSetParams {
     path: String,
     /// Agent-approved purpose one-liner.
     purpose: String,
+}
+
+/// MCP payload for one batch purpose review item.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AtlasPurposeReviewItem {
+    /// Indexed repository-relative path.
+    path: String,
+    /// Agent-reviewed purpose one-liner. Required for generated suggestions.
+    purpose: Option<String>,
+    /// Confirm the existing non-generated purpose after inspection.
+    confirm_existing: Option<bool>,
+}
+
+/// MCP parameter payload for batch purpose review.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AtlasPurposeReviewParams {
+    /// Purpose records to agent-review.
+    items: Vec<AtlasPurposeReviewItem>,
+    /// Apply reviewed purposes. Defaults to false for preview.
+    apply: Option<bool>,
 }
 
 /// MCP parameter payload for resolving health findings.
@@ -1049,6 +1071,31 @@ impl ProjectAtlasMcpServer {
                     "agent_reviewed": true
                 }
             })))
+        })())
+    }
+
+    /// Batch-review existing purpose records through the MCP surface.
+    #[tool(
+        name = "atlas_purpose_review",
+        description = "Preview or apply agent-reviewed ProjectAtlas purpose metadata for multiple indexed paths."
+    )]
+    fn atlas_purpose_review(
+        &self,
+        Parameters(params): Parameters<AtlasPurposeReviewParams>,
+    ) -> String {
+        Self::as_mcp_text((|| {
+            let store = self.open_store()?;
+            let requests = params
+                .items
+                .into_iter()
+                .map(|item| PurposeReviewRequest {
+                    path: item.path,
+                    purpose: item.purpose,
+                    confirm_existing: item.confirm_existing.unwrap_or(false),
+                })
+                .collect::<Vec<_>>();
+            let report = review_purposes(&store, &requests, params.apply.unwrap_or(false))?;
+            Ok(render_purpose_review_report(&report))
         })())
     }
 }

@@ -22,8 +22,9 @@ the folder, choose the file, inspect compressed context, and only then open exac
 4. Run `projectatlas scan`.
 5. Add or import purpose records for important folders and files.
 6. Add non-source summaries to `.projectatlas/projectatlas-nonsource-files.toon` when needed.
-7. Run `projectatlas lint --report-untracked --purpose-level low` and fix issues. Use `--purpose-level medium` for all source files and `--purpose-level strict` only when every indexed file and folder must be agent-reviewed.
-8. Run `projectatlas map --force` only when an explicit legacy TOON map export is needed.
+7. Use `projectatlas purpose review --from-file <json> --apply` for reviewed batches; never edit the SQLite database directly.
+8. Run `projectatlas lint --report-untracked --purpose-level low` and fix issues. Use `--purpose-level medium` for all source files and `--purpose-level strict` only when every indexed file and folder must be agent-reviewed.
+9. Run `projectatlas map --force` only when an explicit legacy TOON map export is needed.
 
 ## Startup Workflow
 
