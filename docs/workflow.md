@@ -1,6 +1,8 @@
+# Purpose: Document ProjectAtlas local workflow troubleshooting and verification commands.
+
 # Workflow and Troubleshooting
 
-ProjectAtlas is designed to run locally and produce a deterministic map.
+ProjectAtlas is designed to run locally with a project-local SQLite atlas and optional TOON exports.
 
 ## Recommended workflow
 
@@ -10,8 +12,8 @@ ProjectAtlas is designed to run locally and produce a deterministic map.
 4. Run `projectatlas overview`, `projectatlas folders <query>`, and `projectatlas files <query>` before broad source reads; use `projectatlas files --file-pattern <glob>` for direct glob discovery.
 5. Run `projectatlas summary <file> --limit 25` before opening full files.
 6. Run `projectatlas outline <file>` when line-level compressed context is still needed.
-7. Run `projectatlas map --force` when the compatibility TOON snapshot should be regenerated.
-8. Run `projectatlas lint --strict-folders --report-untracked`.
+7. Run `projectatlas lint --report-untracked --purpose-level low`.
+8. Run `projectatlas map --force` only when a compatibility TOON snapshot is explicitly needed.
 9. Open a PR that references the GitHub issue (CI requires `#NNN` in title or body).
 10. Install git hooks by copying or linking files from `.githooks/` into `.git/hooks/`.
 
@@ -36,8 +38,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo test --doc --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
-cargo run -p projectatlas-cli -- map --force
-cargo run -p projectatlas-cli -- lint --strict-folders --report-untracked
+cargo run -p projectatlas-cli -- lint --report-untracked
 ```
 
 ## Issue hygiene
@@ -70,29 +71,28 @@ cargo run -p projectatlas-cli -- lint --strict-folders --report-untracked
 
 ## CI behavior
 
-- `projectatlas map` skips in CI unless you pass `--force`.
-- `projectatlas lint` validates that the map is current.
+- CI refreshes the SQLite index with `projectatlas scan` and validates source metadata with `projectatlas lint`.
+- `projectatlas lint` checks purpose/header health, non-source declarations, and untracked files; it does not require or validate the optional compatibility TOON export.
+- `projectatlas lint --purpose-level low` is the default first-pass agent gate: stale, duplicate, and repeated temporary-folder findings fail, while missing/suggested/agent-review purpose curation for folders plus high-impact files remains advisory. Use `projectatlas purpose queue` for the actionable curation list, `--purpose-level medium` when all source files must be agent-reviewed, and `--purpose-level strict` only when every indexed file and folder must be agent-reviewed.
 - PRs must reference a GitHub issue and have a milestone.
 - CI can be run manually via `workflow_dispatch` when checks do not auto-trigger.
 
 Environment toggles:
 
-- `PROJECTATLAS_SKIP_UPDATE=1` skips map generation locally.
 - `PROJECTATLAS_ALLOW_UNTRACKED=1` allows local builds while still reporting untracked files.
 - `PROJECTATLAS_NO_TELEMETRY=1` runs read/orientation commands without recording usage rows in the local SQLite index.
 
 ## Troubleshooting
 
-### Map is stale
+### Optional compatibility map export
 
-If lint reports stale hashes or an overview mismatch, re-run:
+Only older integrations need a static `.projectatlas/projectatlas.toon` snapshot. Generate it explicitly:
 
 ```bash
-projectatlas map
+projectatlas map --force
 ```
 
-The `overview:` line in the atlas now reports `tracked_source_files`,
-`tracked_nonsource_files`, and `tracked_files_total` so you can see the split at a glance.
+Normal ProjectAtlas 3 agent workflows should read from `.projectatlas/projectatlas.db` through the CLI or MCP tools.
 
 ### Missing or suggested purposes
 
@@ -104,6 +104,8 @@ projectatlas purpose set <path> "<one-line purpose>"
 ```
 
 The purpose queue is source-focused and folder-first by default, so binary assets, asset-only roots, and low-priority source files do not dominate the next-action list. Pass `--include-low-priority-files` only when intentionally doing broad file-purpose cleanup, and pass `--include-assets` only when intentionally curating non-source files. Generated purpose suggestions remain review-required until an agent approves or corrects them.
+
+Purpose entries live in SQLite and are preserved across normal scans and deep index refreshes. Re-scanning keeps existing reviewed purposes for unchanged paths, marks changed approved files stale for review, and deactivates deleted/excluded paths instead of recreating purpose noise. Use the purpose queue or health output to approve only new or stale entries.
 
 ### Legacy Purpose headers or .purpose files
 

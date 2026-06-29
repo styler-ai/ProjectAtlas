@@ -8,8 +8,8 @@ Closes #NNN
 
 ## Checklist
 
-- [ ] `projectatlas map` updated (map is current).
-- [ ] `projectatlas lint --strict-folders --report-untracked` clean.
+- [ ] `projectatlas scan` run when indexed context changed.
+- [ ] `projectatlas lint --report-untracked --purpose-level low` passes, and `projectatlas purpose queue` has been reviewed for touched high-value paths.
 - [ ] `cargo fmt --check` clean.
 - [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean.
 - [ ] `cargo test --workspace --all-features` clean.

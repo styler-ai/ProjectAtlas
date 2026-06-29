@@ -1,8 +1,9 @@
 # ProjectAtlas Startup Snippet
 
 ## Startup
+0. If ProjectAtlas MCP tools are available, use `atlas_*` tools for normal scan, overview, folder, file, summary, search, slice, health, and purpose calls. Use the CLI for bootstrap/install/update/release/CI, MCP config generation, MCP startup debugging, human terminal workflows, or when MCP tools are unavailable.
 1. Establish the project root and run ProjectAtlas from that root so `.projectatlas/projectatlas.db` is project-local.
-2. Run `projectatlas scan` or `projectatlas map --force` when the index may be stale.
+2. Run `projectatlas scan` when the SQLite index may be stale.
 3. Run `projectatlas overview` to orient on the repository.
 4. Run `projectatlas folders <query>` before choosing a work area.
 5. Run `projectatlas files <query> --folder <path>` before opening source; use `projectatlas files --file-pattern <glob>` when the file/path pattern is already known.
@@ -11,9 +12,10 @@
 8. Run `projectatlas search <pattern> --file-pattern <glob>` for filtered text matches.
 9. Run `projectatlas slice <file> --start-line <n> --end-line <m>` for exact source.
 10. Run `projectatlas health-check` for cleanup/refactor work.
-11. Run `projectatlas lint --strict-folders --report-untracked`.
+11. Run `projectatlas lint --report-untracked --purpose-level low`; low fails stale, duplicate, and temporary-folder health but keeps first-pass purpose curation advisory. Use `projectatlas purpose queue` for the next curation actions, `--purpose-level medium` when all source files must be agent-reviewed, and `--purpose-level strict` only when every indexed file and folder must be agent-reviewed.
 12. Only then use symbol-level indexing, language-server lookups, or broad file reads on selected files.
 13. Run `projectatlas token` when asked for token savings.
+14. Correct wrong, stale, vague, or generic purposes opportunistically with `atlas_purpose_set` or `projectatlas purpose set` after inspecting enough context. Purpose entries live in SQLite and are preserved across scans; changed approved files become stale instead of losing their curated purpose text.
 
 ## Rust/Dependency Discipline
 - Prefer official or canonical Rust crates and standard implementations for protocols, formats, parsers, storage, watchers, token tooling, and platform integration before writing custom code.

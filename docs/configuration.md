@@ -1,3 +1,5 @@
+# Purpose: Document ProjectAtlas configuration files scan policy and legacy import settings.
+
 # ProjectAtlas Configuration
 
 ProjectAtlas reads `projectatlas.toml` or `.projectatlas/config.toml`. All paths are relative to the config file.
@@ -5,6 +7,7 @@ ProjectAtlas reads `projectatlas.toml` or `.projectatlas/config.toml`. All paths
 ```toml
 [project]
 root = "."
+# Optional compatibility export path used only by `projectatlas map`.
 map_path = ".projectatlas/projectatlas.toon"
 nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
 purpose_filename = ".purpose"

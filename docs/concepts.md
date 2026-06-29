@@ -1,3 +1,5 @@
+# Purpose: Explain ProjectAtlas purpose metadata source of truth and health concepts.
+
 # Concepts
 
 ProjectAtlas is a Rust-native way to keep structural intent and source intelligence visible to coding agents without polluting product folders or source files.
@@ -25,7 +27,7 @@ Generated file-purpose guesses may be stored as suggestions, but they remain `ag
 
 Legacy `.purpose` files, source `Purpose:` headers, and `.projectatlas/projectatlas-nonsource-files.toon` remain import/migration sources. They are not the final ProjectAtlas 3 storage model.
 
-The compatibility map at `.projectatlas/projectatlas.toon` is an exported snapshot for older workflows and quick diffs; the SQLite database is the durable source of truth.
+The compatibility map at `.projectatlas/projectatlas.toon` is an optional exported snapshot for older workflows; it should not be committed as the agent source of truth. The SQLite database is the durable source of truth.
 
 ## Health signals
 

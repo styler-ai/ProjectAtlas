@@ -26,7 +26,7 @@ use projectatlas_core::toon::{
 use projectatlas_core::{
     NodeKind, PurposeSource, normalize_repo_path_prefix, validated_repo_node_key,
 };
-use projectatlas_db::{AtlasStore, HealthQuery, HealthResolution};
+use projectatlas_db::{AtlasStore, HealthQuery, HealthResolution, HealthScope};
 use projectatlas_service::{
     SymbolSliceSelector, build_file_summary, read_indexed_code_slice, read_symbol_slice,
     search_indexed_files,
@@ -395,7 +395,7 @@ impl ProjectAtlasMcpServer {
 /// Convert MCP health parameters into a DB health query.
 fn health_query_from_params(
     params: &AtlasHealthParams,
-    high_impact_only: bool,
+    scope: HealthScope,
 ) -> Result<HealthQuery, CliError> {
     Ok(HealthQuery {
         start_index: params.start_index.unwrap_or(0),
@@ -412,9 +412,21 @@ fn health_query_from_params(
         path_prefix: trimmed_filter(params.path_prefix.as_deref())
             .map(|value| normalize_repo_path_prefix(&value)),
         summary_only: params.summary_only.unwrap_or(false),
-        source_only: params.source_only.unwrap_or(false),
-        high_impact_only,
+        scope,
     })
+}
+
+/// Return the DB scope for MCP purpose queue parameters.
+fn purpose_queue_scope(params: &AtlasHealthParams) -> HealthScope {
+    match (
+        params.include_assets.unwrap_or(false),
+        params.include_low_priority_files.unwrap_or(false),
+    ) {
+        (false, false) => HealthScope::purpose_default(),
+        (true, false) => HealthScope::purpose_with_assets(),
+        (false, true) => HealthScope::purpose_with_source_files(),
+        (true, true) => HealthScope::all(),
+    }
 }
 
 /// Return a trimmed non-empty string parameter.
@@ -788,7 +800,12 @@ impl ProjectAtlasMcpServer {
     fn atlas_health(&self, Parameters(params): Parameters<AtlasHealthParams>) -> String {
         Self::as_mcp_text((|| {
             let store = self.open_store()?;
-            let query = health_query_from_params(&params, false)?;
+            let scope = if params.source_only.unwrap_or(false) {
+                HealthScope::source_only()
+            } else {
+                HealthScope::all()
+            };
+            let query = health_query_from_params(&params, scope)?;
             let page =
                 store.unresolved_health_findings_page(&store.resolved_health_ids()?, &query)?;
             let toon = render_health_page(&page, &query);
@@ -995,18 +1012,10 @@ impl ProjectAtlasMcpServer {
         name = "atlas_purpose_queue",
         description = "Return a bounded folder-first queue of ProjectAtlas paths that need agent purpose curation."
     )]
-    fn atlas_purpose_queue(&self, Parameters(mut params): Parameters<AtlasHealthParams>) -> String {
+    fn atlas_purpose_queue(&self, Parameters(params): Parameters<AtlasHealthParams>) -> String {
         Self::as_mcp_text((|| {
-            if params.include_assets.unwrap_or(false) {
-                params.source_only = Some(false);
-            } else if params.source_only.is_none() {
-                params.source_only = Some(true);
-            }
             let store = self.open_store()?;
-            let query = health_query_from_params(
-                &params,
-                !params.include_low_priority_files.unwrap_or(false),
-            )?;
+            let query = health_query_from_params(&params, purpose_queue_scope(&params))?;
             let page = purpose_curation_page(&store, &query)?;
             let toon = render_purpose_curation_page(&page);
             record_directory_walk_usage_estimate(

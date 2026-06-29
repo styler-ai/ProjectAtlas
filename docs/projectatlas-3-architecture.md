@@ -323,6 +323,12 @@ Purpose status values:
 - `approved`: an explicit agent workflow approved the purpose after inspection
 - `stale`: file/folder changed enough that the purpose needs review
 
+Scan reconciliation preserves curated purpose state. A full or deep scan keeps
+existing purpose rows for unchanged paths, marks approved file purposes `stale`
+when the indexed file hash changes, creates missing purpose rows only for new
+paths, and marks deleted or excluded paths inactive instead of recreating
+purpose noise. Agents should then review only the new or stale queue entries.
+
 ## Indexing Behavior Parity Map
 
 Modern repository intelligence tools provide useful behavior that ProjectAtlas
@@ -478,7 +484,7 @@ projectatlas slice <file> --start-line <n> --end-line <m>
 projectatlas symbols list --file <file>
 projectatlas symbols relations --file <file>
 projectatlas health-check
-projectatlas lint --strict-folders --report-untracked
+projectatlas lint --report-untracked --purpose-level low
 projectatlas token
 ```
 
@@ -881,8 +887,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo test --doc --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
-cargo run -p projectatlas-cli -- map --force
-cargo run -p projectatlas-cli -- lint --strict-folders --report-untracked
+cargo run -p projectatlas-cli -- lint --report-untracked
 ```
 
 Parity gate for 3.0 stable:

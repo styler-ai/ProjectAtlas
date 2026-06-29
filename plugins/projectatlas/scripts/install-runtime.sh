@@ -65,24 +65,41 @@ expected_runtime_version() {
 is_projectatlas_runtime() {
   candidate=$1
   runtime_info=$("$candidate" --format json runtime-info 2>/dev/null || true)
+  project=$(printf '%s\n' "$runtime_info" | sed -n 's/.*"project"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
   major_version=$(printf '%s\n' "$runtime_info" | sed -n 's/.*"major_version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
   runtime_version=$(printf '%s\n' "$runtime_info" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+  text_format=$(printf '%s\n' "$runtime_info" | sed -n 's/.*"text_format"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
   expected_version=$(expected_runtime_version)
-  case "$runtime_info" in
-    *'"project": "ProjectAtlas"'*'"mcp"'*'"text_format": "TOON"'*)
-      [ "${major_version:-0}" -ge 3 ] 2>/dev/null &&
-        { [ -z "$expected_version" ] || [ "$runtime_version" = "$expected_version" ]; }
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  [ "$project" = "ProjectAtlas" ] &&
+    [ "${major_version:-0}" -ge 3 ] 2>/dev/null &&
+    printf '%s\n' "$runtime_info" | grep -q '"mcp"' &&
+    [ "$text_format" = "TOON" ] &&
+    { [ -z "$expected_version" ] || [ "$runtime_version" = "$expected_version" ]; }
+}
+
+is_projectatlas_runtime_contract() {
+  candidate=$1
+  runtime_info=$("$candidate" --format json runtime-info 2>/dev/null || true)
+  project=$(printf '%s\n' "$runtime_info" | sed -n 's/.*"project"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+  major_version=$(printf '%s\n' "$runtime_info" | sed -n 's/.*"major_version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+  text_format=$(printf '%s\n' "$runtime_info" | sed -n 's/.*"text_format"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+  [ "$project" = "ProjectAtlas" ] &&
+    [ "${major_version:-0}" -ge 3 ] 2>/dev/null &&
+    printf '%s\n' "$runtime_info" | grep -q '"mcp"' &&
+    [ "$text_format" = "TOON" ]
 }
 
 runtime_version() {
   candidate=$1
   runtime_info=$("$candidate" --format json runtime-info 2>/dev/null || true)
   printf '%s\n' "$runtime_info" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+}
+
+known_projectatlas_shim_paths() {
+  printf '%s\n' "$HOME/.cargo/bin/projectatlas"
+  printf '%s\n' "$HOME/.npm/bin/projectatlas"
+  printf '%s\n' "$HOME/.npm-global/bin/projectatlas"
+  printf '%s\n' "$HOME/.local/share/npm/bin/projectatlas"
 }
 
 canonical_file() {
@@ -92,6 +109,76 @@ canonical_file() {
     return 0
   }
   printf '%s/%s\n' "$dir" "$(basename -- "$file")"
+}
+
+is_known_projectatlas_shim_path() {
+  candidate_canonical=$(canonical_file "$1")
+  known_projectatlas_shim_paths | while IFS= read -r known_path; do
+    if [ "$candidate_canonical" = "$(canonical_file "$known_path")" ]; then
+      printf '%s\n' matched
+      break
+    fi
+  done | grep -q '^matched$'
+}
+
+quarantine_stale_projectatlas_shim() {
+  candidate=$1
+  version=$2
+  safe_version=$(printf '%s\n' "$version" | sed 's/[^A-Za-z0-9_.-]/_/g')
+  if [ -z "$safe_version" ]; then
+    safe_version=unknown
+  fi
+  quarantine_path="$candidate.projectatlas-stale-$safe_version.bak"
+  if [ -e "$quarantine_path" ]; then
+    quarantine_path="$quarantine_path.$(date +%Y%m%d%H%M%S)"
+  fi
+  if [ -e "$quarantine_path" ]; then
+    quarantine_path="$quarantine_path.$$"
+  fi
+  if mv "$candidate" "$quarantine_path"; then
+    printf '%s\n' "Quarantined stale ProjectAtlas shim: $candidate -> $quarantine_path version '$version'"
+  else
+    printf '%s\n' "warning: could not quarantine stale ProjectAtlas shim $candidate version '$version'." >&2
+  fi
+}
+
+quarantine_known_stale_projectatlas_shims() {
+  verified=$1
+  expected_version=$(expected_runtime_version)
+  if [ -z "$verified" ] || [ -z "$expected_version" ]; then
+    return 0
+  fi
+  verified_canonical=$(canonical_file "$verified")
+  old_ifs=$IFS
+  IFS=:
+  for entry in $PATH; do
+    candidate=$entry/projectatlas
+    if [ ! -x "$candidate" ] || [ "$(canonical_file "$candidate")" = "$verified_canonical" ]; then
+      continue
+    fi
+    if is_known_projectatlas_shim_path "$candidate"; then
+      if ! is_projectatlas_runtime_contract "$candidate"; then
+        continue
+      fi
+      version=$(runtime_version "$candidate")
+      if [ -n "$version" ] && [ "$version" != "$expected_version" ]; then
+        quarantine_stale_projectatlas_shim "$candidate" "$version"
+      fi
+    fi
+  done
+  IFS=$old_ifs
+  known_projectatlas_shim_paths | while IFS= read -r candidate; do
+    if [ ! -x "$candidate" ] || [ "$(canonical_file "$candidate")" = "$verified_canonical" ]; then
+      continue
+    fi
+    if ! is_projectatlas_runtime_contract "$candidate"; then
+      continue
+    fi
+    version=$(runtime_version "$candidate")
+    if [ -n "$version" ] && [ "$version" != "$expected_version" ]; then
+      quarantine_stale_projectatlas_shim "$candidate" "$version"
+    fi
+  done
 }
 
 warn_path_shadow() {
@@ -212,6 +299,7 @@ else
 fi
 
 "$projectatlas_bin" --format json runtime-info >/dev/null
+quarantine_known_stale_projectatlas_shims "$projectatlas_bin"
 warn_path_shadow "$projectatlas_bin"
 
 atlas_dir="$project_root/.projectatlas"

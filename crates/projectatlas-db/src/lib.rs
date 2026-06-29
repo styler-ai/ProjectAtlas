@@ -133,10 +133,101 @@ pub struct HealthQuery {
     pub path_prefix: Option<String>,
     /// Return counts without finding rows.
     pub summary_only: bool,
-    /// Restrict findings to source files and folders that contain source files.
-    pub source_only: bool,
-    /// Restrict purpose curation to folders and high-impact files.
-    pub high_impact_only: bool,
+    /// Health and purpose-curation scope.
+    pub scope: HealthScope,
+}
+
+/// Scope controls for bounded health and purpose-curation queries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HealthScope {
+    /// Include all indexed paths.
+    All,
+    /// Include only source files and folders with source descendants.
+    SourceOnly,
+    /// Include all folders plus high-impact files.
+    PurposeDefault,
+    /// Include all folders, high-impact files, and non-source files.
+    PurposeWithAssets,
+    /// Include all folders, high-impact files, and all source files.
+    PurposeWithSourceFiles,
+    /// Include every indexed file and folder.
+    PurposeStrict,
+}
+
+impl HealthScope {
+    /// Scope matching unfiltered health output.
+    pub fn all() -> Self {
+        Self::All
+    }
+
+    /// Scope restricted to source-relevant paths.
+    pub fn source_only() -> Self {
+        Self::SourceOnly
+    }
+
+    /// Default agent purpose curation scope: folders plus high-impact files.
+    pub fn purpose_default() -> Self {
+        Self::PurposeDefault
+    }
+
+    /// Purpose curation scope including non-source asset files.
+    pub fn purpose_with_assets() -> Self {
+        Self::PurposeWithAssets
+    }
+
+    /// Purpose curation scope including all source files.
+    pub fn purpose_with_source_files() -> Self {
+        Self::PurposeWithSourceFiles
+    }
+
+    /// Strict purpose curation scope including every indexed path.
+    pub fn purpose_strict() -> Self {
+        Self::PurposeStrict
+    }
+
+    /// Whether this scope should be reported as source-focused in agent payloads.
+    pub fn is_source_focused(self) -> bool {
+        self.source_only_filter()
+    }
+
+    /// Whether this scope uses the folder-first high-impact purpose queue.
+    pub fn is_purpose_queue(self) -> bool {
+        self.high_impact_queue()
+    }
+
+    /// Whether source relevance should be applied before queue-specific filters.
+    fn source_only_filter(self) -> bool {
+        matches!(
+            self,
+            Self::SourceOnly | Self::PurposeDefault | Self::PurposeWithSourceFiles
+        )
+    }
+
+    /// Whether the scope should use folder-first purpose queue selection.
+    fn high_impact_queue(self) -> bool {
+        matches!(
+            self,
+            Self::PurposeDefault
+                | Self::PurposeWithAssets
+                | Self::PurposeWithSourceFiles
+                | Self::PurposeStrict
+        )
+    }
+
+    /// Whether non-source asset files should be included in queue selection.
+    fn include_assets(self) -> bool {
+        matches!(self, Self::PurposeWithAssets)
+    }
+
+    /// Whether all source files should be included in queue selection.
+    fn include_source_files(self) -> bool {
+        matches!(self, Self::PurposeWithSourceFiles | Self::PurposeStrict)
+    }
+
+    /// Whether all files should be included in queue selection.
+    fn include_all_files(self) -> bool {
+        matches!(self, Self::PurposeStrict)
+    }
 }
 
 /// Bounded health findings page returned by the database layer.
@@ -190,6 +281,14 @@ const PURPOSE_HEALTH_SPECS: [PurposeHealthSpec; 3] = [
         recommendation: "Inspect current context and approve or correct the one-line purpose.",
     },
 ];
+/// Health category for approved purpose rows that still need agent review.
+const AGENT_REVIEW_REQUIRED_CATEGORY: &str = "purpose-agent-review-required";
+/// Health message for approved purpose rows that still need agent review.
+const AGENT_REVIEW_REQUIRED_MESSAGE: &str =
+    "Purpose is approved but has not been reviewed by an agent.";
+/// Health recommendation for approved purpose rows that still need agent review.
+const AGENT_REVIEW_REQUIRED_RECOMMENDATION: &str =
+    "Inspect current context and approve or correct the purpose with purpose set.";
 
 /// Folder names treated as repeated temporary/generated-output buckets.
 const TEMP_FOLDER_BUCKETS: [&str; 6] = ["tmp", "temp", "cache", "generated", "out", "output"];
@@ -2108,10 +2207,11 @@ impl AtlasStore {
 
         for spec in PURPOSE_HEALTH_SPECS {
             unfiltered_total +=
-                self.count_purpose_status_findings(spec, None, resolved_ids, false, false)?;
+                self.count_purpose_status_findings(spec, None, resolved_ids, HealthScope::all())?;
         }
 
-        if query.high_impact_only && query.category.is_none() {
+        let scope = query.scope;
+        if scope.high_impact_queue() && query.category.is_none() {
             let matching_count = if query
                 .severity
                 .is_none_or(|severity| severity == Severity::Warning)
@@ -2119,8 +2219,7 @@ impl AtlasStore {
                 self.count_purpose_lifecycle_findings(
                     query.path_prefix.as_deref(),
                     resolved_ids,
-                    query.source_only,
-                    query.high_impact_only,
+                    scope,
                 )?
             } else {
                 0
@@ -2134,8 +2233,7 @@ impl AtlasStore {
                 findings.extend(self.load_purpose_lifecycle_findings_page(
                     query.path_prefix.as_deref(),
                     resolved_ids,
-                    query.source_only,
-                    query.high_impact_only,
+                    scope,
                     local_start,
                     local_limit,
                 )?);
@@ -2151,8 +2249,7 @@ impl AtlasStore {
                     spec,
                     query.path_prefix.as_deref(),
                     resolved_ids,
-                    query.source_only,
-                    query.high_impact_only,
+                    scope,
                 )?;
                 if !query.summary_only
                     && findings.len() < query.limit
@@ -2164,8 +2261,7 @@ impl AtlasStore {
                         spec,
                         query.path_prefix.as_deref(),
                         resolved_ids,
-                        query.source_only,
-                        query.high_impact_only,
+                        scope,
                         local_start,
                         local_limit,
                     )?);
@@ -2174,9 +2270,22 @@ impl AtlasStore {
             }
         }
 
-        for category in ["duplicate-purpose", "repeated-temporary-folder"] {
-            let unfiltered_count =
-                self.count_structural_health_findings(category, None, resolved_ids, false, false)?;
+        for category in [
+            AGENT_REVIEW_REQUIRED_CATEGORY,
+            "duplicate-purpose",
+            "repeated-temporary-folder",
+        ] {
+            let unfiltered_scope = if category == AGENT_REVIEW_REQUIRED_CATEGORY {
+                HealthScope::purpose_strict()
+            } else {
+                HealthScope::all()
+            };
+            let unfiltered_count = self.count_structural_health_findings(
+                category,
+                None,
+                resolved_ids,
+                unfiltered_scope,
+            )?;
             unfiltered_total += unfiltered_count;
             if !health_category_matches_query(category, Severity::Warning, query) {
                 continue;
@@ -2185,8 +2294,7 @@ impl AtlasStore {
                 category,
                 query.path_prefix.as_deref(),
                 resolved_ids,
-                query.source_only,
-                query.high_impact_only,
+                scope,
             )?;
             if !query.summary_only
                 && findings.len() < query.limit
@@ -2198,8 +2306,7 @@ impl AtlasStore {
                     category,
                     query.path_prefix.as_deref(),
                     resolved_ids,
-                    query.source_only,
-                    query.high_impact_only,
+                    scope,
                     local_start,
                     local_limit,
                 )?);
@@ -2233,6 +2340,9 @@ impl AtlasStore {
             return Ok(());
         }
         if !self.visit_purpose_status_findings(PURPOSE_HEALTH_SPECS[2], &resolved, &mut visitor)? {
+            return Ok(());
+        }
+        if !self.visit_agent_review_required_findings(&resolved, &mut visitor)? {
             return Ok(());
         }
         self.visit_structural_health_findings(&resolved, &mut visitor)
@@ -2300,15 +2410,10 @@ impl AtlasStore {
         &self,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
-        source_only: bool,
-        high_impact_only: bool,
+        scope: HealthScope,
     ) -> DbResult<usize> {
-        let (where_clause, values) = purpose_lifecycle_where_clause(
-            path_prefix,
-            resolved_ids,
-            source_only,
-            high_impact_only,
-        );
+        let (where_clause, values) =
+            purpose_lifecycle_where_clause(path_prefix, resolved_ids, scope);
         let sql = format!(
             "
             SELECT COUNT(*)
@@ -2328,20 +2433,15 @@ impl AtlasStore {
         &self,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
-        source_only: bool,
-        high_impact_only: bool,
+        scope: HealthScope,
         start_index: usize,
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let (where_clause, mut values) = purpose_lifecycle_where_clause(
-            path_prefix,
-            resolved_ids,
-            source_only,
-            high_impact_only,
-        );
+        let (where_clause, mut values) =
+            purpose_lifecycle_where_clause(path_prefix, resolved_ids, scope);
         let limit_placeholder = values.len() + 1;
         let offset_placeholder = values.len() + 2;
         values.push(Value::from(usize_to_i64(limit)));
@@ -2384,16 +2484,10 @@ impl AtlasStore {
         spec: PurposeHealthSpec,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
-        source_only: bool,
-        high_impact_only: bool,
+        scope: HealthScope,
     ) -> DbResult<usize> {
-        let (where_clause, values) = purpose_status_where_clause(
-            spec,
-            path_prefix,
-            resolved_ids,
-            source_only,
-            high_impact_only,
-        );
+        let (where_clause, values) =
+            purpose_status_where_clause(spec, path_prefix, resolved_ids, scope);
         let sql = format!(
             "
             SELECT COUNT(*)
@@ -2414,26 +2508,20 @@ impl AtlasStore {
         spec: PurposeHealthSpec,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
-        source_only: bool,
-        high_impact_only: bool,
+        scope: HealthScope,
         start_index: usize,
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let (where_clause, mut values) = purpose_status_where_clause(
-            spec,
-            path_prefix,
-            resolved_ids,
-            source_only,
-            high_impact_only,
-        );
+        let (where_clause, mut values) =
+            purpose_status_where_clause(spec, path_prefix, resolved_ids, scope);
         let limit_placeholder = values.len() + 1;
         let offset_placeholder = values.len() + 2;
         values.push(Value::from(usize_to_i64(limit)));
         values.push(Value::from(usize_to_i64(start_index)));
-        let order_by = if high_impact_only {
+        let order_by = if scope.high_impact_queue() {
             purpose_default_queue_order_expression("n", "p")
         } else {
             "n.path".to_string()
@@ -2472,22 +2560,18 @@ impl AtlasStore {
         category: &str,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
-        source_only: bool,
-        high_impact_only: bool,
+        scope: HealthScope,
     ) -> DbResult<usize> {
         match category {
-            "duplicate-purpose" => self.count_duplicate_purpose_findings(
-                path_prefix,
-                resolved_ids,
-                source_only,
-                high_impact_only,
-            ),
-            "repeated-temporary-folder" => self.count_repeated_temp_folder_findings(
-                path_prefix,
-                resolved_ids,
-                source_only,
-                high_impact_only,
-            ),
+            AGENT_REVIEW_REQUIRED_CATEGORY => {
+                self.count_agent_review_required_findings(path_prefix, resolved_ids, scope)
+            }
+            "duplicate-purpose" => {
+                self.count_duplicate_purpose_findings(path_prefix, resolved_ids, scope)
+            }
+            "repeated-temporary-folder" => {
+                self.count_repeated_temp_folder_findings(path_prefix, resolved_ids, scope)
+            }
             _ => Ok(0),
         }
     }
@@ -2498,25 +2582,29 @@ impl AtlasStore {
         category: &str,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
-        source_only: bool,
-        high_impact_only: bool,
+        scope: HealthScope,
         start_index: usize,
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
         match category {
+            AGENT_REVIEW_REQUIRED_CATEGORY => self.load_agent_review_required_findings_page(
+                path_prefix,
+                resolved_ids,
+                scope,
+                start_index,
+                limit,
+            ),
             "duplicate-purpose" => self.load_duplicate_purpose_findings_page(
                 path_prefix,
                 resolved_ids,
-                source_only,
-                high_impact_only,
+                scope,
                 start_index,
                 limit,
             ),
             "repeated-temporary-folder" => self.load_repeated_temp_folder_findings_page(
                 path_prefix,
                 resolved_ids,
-                source_only,
-                high_impact_only,
+                scope,
                 start_index,
                 limit,
             ),
@@ -2524,20 +2612,152 @@ impl AtlasStore {
         }
     }
 
+    /// Visit approved navigation-critical purposes that still need agent review.
+    fn visit_agent_review_required_findings<F>(
+        &self,
+        resolved_ids: &HashSet<String>,
+        visitor: &mut F,
+    ) -> DbResult<bool>
+    where
+        F: FnMut(HealthFinding) -> DbResult<bool>,
+    {
+        let reviewed_sources = sql_string_literals(AGENT_REVIEWED_SOURCE_VALUES);
+        let high_impact = high_impact_file_path_expression("lower(n.path)");
+        let sql = format!(
+            "
+            SELECT n.path
+            FROM nodes n
+            JOIN purposes p ON p.node_id = n.id
+            WHERE n.exists_now = 1
+              AND p.status = 'approved'
+              AND p.source NOT IN ({reviewed_sources})
+              AND (n.kind = 'folder' OR (n.kind = 'file' AND {high_impact}))
+            ORDER BY CASE WHEN n.kind = 'folder' THEN 0 ELSE 1 END, n.path
+            "
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            let finding = agent_review_required_finding(row?);
+            if !emit_unresolved_finding(finding, resolved_ids, visitor)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Count approved navigation-critical purposes that still need agent review.
+    fn count_agent_review_required_findings(
+        &self,
+        path_prefix: Option<&str>,
+        resolved_ids: &[String],
+        scope: HealthScope,
+    ) -> DbResult<usize> {
+        let (where_clause, values) = structural_finding_where_clause(
+            AGENT_REVIEW_REQUIRED_CATEGORY,
+            path_prefix,
+            resolved_ids,
+            scope,
+            1,
+        );
+        let source_relevant = source_relevant_node_expression("n");
+        let reviewed_sources = sql_string_literals(AGENT_REVIEWED_SOURCE_VALUES);
+        let review_candidate = purpose_review_candidate_expression("n", scope);
+        let sql = format!(
+            "
+            WITH findings AS (
+                SELECT n.path,
+                       n.kind,
+                       n.language,
+                       '' AS related_path,
+                       {source_relevant} AS source_relevant
+                FROM nodes n
+                JOIN purposes p ON p.node_id = n.id
+                WHERE n.exists_now = 1
+                  AND p.status = 'approved'
+                  AND p.source NOT IN ({reviewed_sources})
+                  AND {review_candidate}
+            )
+            SELECT COUNT(*)
+            FROM findings
+            {where_clause}
+            "
+        );
+        let count = self
+            .connection
+            .query_row(&sql, params_from_iter(values), |row| row.get::<_, i64>(0))?;
+        count_to_usize("health_agent_review_required_count", count)
+    }
+
+    /// Load approved navigation-critical purposes that still need agent review.
+    fn load_agent_review_required_findings_page(
+        &self,
+        path_prefix: Option<&str>,
+        resolved_ids: &[String],
+        scope: HealthScope,
+        start_index: usize,
+        limit: usize,
+    ) -> DbResult<Vec<HealthFinding>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (where_clause, mut values) = structural_finding_where_clause(
+            AGENT_REVIEW_REQUIRED_CATEGORY,
+            path_prefix,
+            resolved_ids,
+            scope,
+            1,
+        );
+        let source_relevant = source_relevant_node_expression("n");
+        let reviewed_sources = sql_string_literals(AGENT_REVIEWED_SOURCE_VALUES);
+        let review_candidate = purpose_review_candidate_expression("n", scope);
+        let limit_placeholder = values.len() + 1;
+        let offset_placeholder = values.len() + 2;
+        values.push(Value::from(usize_to_i64(limit)));
+        values.push(Value::from(usize_to_i64(start_index)));
+        let sql = format!(
+            "
+            WITH findings AS (
+                SELECT n.path,
+                       n.kind,
+                       n.language,
+                       '' AS related_path,
+                       {source_relevant} AS source_relevant
+                FROM nodes n
+                JOIN purposes p ON p.node_id = n.id
+                WHERE n.exists_now = 1
+                  AND p.status = 'approved'
+                  AND p.source NOT IN ({reviewed_sources})
+                  AND {review_candidate}
+            )
+            SELECT path
+            FROM findings
+            {where_clause}
+            ORDER BY CASE WHEN kind = 'folder' THEN 0 ELSE 1 END, path
+            LIMIT ?{limit_placeholder} OFFSET ?{offset_placeholder}
+            "
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(values), |row| row.get::<_, String>(0))?;
+        let mut findings = Vec::new();
+        for row in rows {
+            findings.push(agent_review_required_finding(row?));
+        }
+        Ok(findings)
+    }
+
     /// Count duplicate-purpose findings directly in `SQLite`.
     fn count_duplicate_purpose_findings(
         &self,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
-        source_only: bool,
-        high_impact_only: bool,
+        scope: HealthScope,
     ) -> DbResult<usize> {
         let (where_clause, values) = structural_finding_where_clause(
             "duplicate-purpose",
             path_prefix,
             resolved_ids,
-            source_only,
-            high_impact_only,
+            scope,
             1,
         );
         let source_relevant = source_relevant_node_expression("n");
@@ -2590,8 +2810,7 @@ impl AtlasStore {
         &self,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
-        source_only: bool,
-        high_impact_only: bool,
+        scope: HealthScope,
         start_index: usize,
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
@@ -2602,8 +2821,7 @@ impl AtlasStore {
             "duplicate-purpose",
             path_prefix,
             resolved_ids,
-            source_only,
-            high_impact_only,
+            scope,
             1,
         );
         let source_relevant = source_relevant_node_expression("n");
@@ -2686,8 +2904,7 @@ impl AtlasStore {
         &self,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
-        source_only: bool,
-        high_impact_only: bool,
+        scope: HealthScope,
     ) -> DbResult<usize> {
         let mut total = 0_usize;
         for bucket in TEMP_FOLDER_BUCKETS {
@@ -2695,8 +2912,7 @@ impl AtlasStore {
                 bucket,
                 path_prefix,
                 resolved_ids,
-                source_only,
-                high_impact_only,
+                scope,
             )?;
         }
         Ok(total)
@@ -2708,8 +2924,7 @@ impl AtlasStore {
         bucket: &str,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
-        source_only: bool,
-        high_impact_only: bool,
+        scope: HealthScope,
     ) -> DbResult<usize> {
         let exact = bucket.to_string();
         let suffix = format!("%/{bucket}");
@@ -2717,8 +2932,7 @@ impl AtlasStore {
             "repeated-temporary-folder",
             path_prefix,
             resolved_ids,
-            source_only,
-            high_impact_only,
+            scope,
             3,
         );
         let mut values = vec![Value::from(exact), Value::from(suffix)];
@@ -2761,8 +2975,7 @@ impl AtlasStore {
         &self,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
-        source_only: bool,
-        high_impact_only: bool,
+        scope: HealthScope,
         start_index: usize,
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
@@ -2776,8 +2989,7 @@ impl AtlasStore {
                 bucket,
                 path_prefix,
                 resolved_ids,
-                source_only,
-                high_impact_only,
+                scope,
             )?;
             if findings.len() < limit && total + matching_count > start_index {
                 let local_start = start_index.saturating_sub(total);
@@ -2786,8 +2998,7 @@ impl AtlasStore {
                     bucket,
                     path_prefix,
                     resolved_ids,
-                    source_only,
-                    high_impact_only,
+                    scope,
                     local_start,
                     local_limit,
                 )?);
@@ -2806,8 +3017,7 @@ impl AtlasStore {
         bucket: &str,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
-        source_only: bool,
-        high_impact_only: bool,
+        scope: HealthScope,
         start_index: usize,
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
@@ -2820,8 +3030,7 @@ impl AtlasStore {
             "repeated-temporary-folder",
             path_prefix,
             resolved_ids,
-            source_only,
-            high_impact_only,
+            scope,
             3,
         );
         let mut values = vec![Value::from(exact), Value::from(suffix)];
@@ -3338,16 +3547,7 @@ impl AtlasStore {
     /// Returns an error if the finding is not active or persistence fails.
     pub fn resolve_health_finding(&self, resolution: &HealthResolution) -> DbResult<()> {
         let resolved_ids = self.resolved_health_ids()?;
-        let active = self
-            .unresolved_health_findings(&resolved_ids)?
-            .into_iter()
-            .any(|finding| {
-                finding.id == resolution.finding_id
-                    && finding.category == resolution.category
-                    && finding.path == resolution.path
-                    && finding.related_path == resolution.related_path
-            });
-        if !active {
+        if !self.active_health_finding_matches(&resolved_ids, resolution)? {
             return Err(DbError::HealthFindingNotActive {
                 finding_id: resolution.finding_id.clone(),
                 category: resolution.category.clone(),
@@ -3383,6 +3583,42 @@ impl AtlasStore {
             ],
         )?;
         Ok(())
+    }
+
+    /// Return whether the visible SQL health surface contains the exact finding.
+    fn active_health_finding_matches(
+        &self,
+        resolved_ids: &[String],
+        resolution: &HealthResolution,
+    ) -> DbResult<bool> {
+        const PAGE_SIZE: usize = 256;
+        let mut start_index = 0_usize;
+        loop {
+            let page = self.unresolved_health_findings_page(
+                resolved_ids,
+                &HealthQuery {
+                    start_index,
+                    limit: PAGE_SIZE,
+                    category: Some(resolution.category.clone()),
+                    severity: Some(Severity::Warning),
+                    path_prefix: Some(resolution.path.clone()),
+                    summary_only: false,
+                    scope: HealthScope::all(),
+                },
+            )?;
+            if page.findings.iter().any(|finding| {
+                finding.id == resolution.finding_id
+                    && finding.category == resolution.category
+                    && finding.path == resolution.path
+                    && finding.related_path == resolution.related_path
+            }) {
+                return Ok(true);
+            }
+            if page.returned == 0 || start_index + page.returned >= page.total {
+                return Ok(false);
+            }
+            start_index += page.returned;
+        }
     }
 
     /// Load resolved health finding ids.
@@ -3876,12 +4112,24 @@ fn purpose_health_spec_for_status(status: &str) -> DbResult<PurposeHealthSpec> {
         })
 }
 
+/// Build the health finding for an approved purpose that still needs agent review.
+fn agent_review_required_finding(path: String) -> HealthFinding {
+    HealthFinding {
+        id: finding_id(AGENT_REVIEW_REQUIRED_CATEGORY, &path, None),
+        severity: Severity::Warning,
+        category: AGENT_REVIEW_REQUIRED_CATEGORY.to_string(),
+        path,
+        related_path: None,
+        message: AGENT_REVIEW_REQUIRED_MESSAGE.to_string(),
+        recommendation: AGENT_REVIEW_REQUIRED_RECOMMENDATION.to_string(),
+    }
+}
+
 /// Build the shared SQL filter for globally ordered purpose lifecycle findings.
 fn purpose_lifecycle_where_clause(
     path_prefix: Option<&str>,
     resolved_ids: &[String],
-    source_only: bool,
-    high_impact_only: bool,
+    scope: HealthScope,
 ) -> (String, Vec<Value>) {
     let statuses = PURPOSE_HEALTH_SPECS
         .iter()
@@ -3894,15 +4142,11 @@ fn purpose_lifecycle_where_clause(
     ];
     let mut values = Vec::new();
 
-    if source_filter_applies_before_queue(source_only, high_impact_only) {
+    if source_filter_applies_before_queue(scope) {
         clauses.push(source_relevant_node_expression("n"));
     }
-    if high_impact_only {
-        clauses.push(purpose_default_queue_node_expression(
-            "n",
-            "p",
-            !source_only,
-        ));
+    if scope.high_impact_queue() {
+        clauses.push(purpose_default_queue_node_expression("n", "p", scope));
     }
 
     let normalized_prefix = path_prefix
@@ -3938,21 +4182,16 @@ fn purpose_status_where_clause(
     spec: PurposeHealthSpec,
     path_prefix: Option<&str>,
     resolved_ids: &[String],
-    source_only: bool,
-    high_impact_only: bool,
+    scope: HealthScope,
 ) -> (String, Vec<Value>) {
     let mut clauses = vec!["n.exists_now = 1".to_string(), "p.status = ?1".to_string()];
     let mut values = vec![Value::from(spec.status.to_string())];
 
-    if source_filter_applies_before_queue(source_only, high_impact_only) {
+    if source_filter_applies_before_queue(scope) {
         clauses.push(source_relevant_node_expression("n"));
     }
-    if high_impact_only {
-        clauses.push(purpose_default_queue_node_expression(
-            "n",
-            "p",
-            !source_only,
-        ));
+    if scope.high_impact_queue() {
+        clauses.push(purpose_default_queue_node_expression("n", "p", scope));
     }
 
     let normalized_prefix = path_prefix
@@ -3985,19 +4224,18 @@ fn structural_finding_where_clause(
     category: &str,
     path_prefix: Option<&str>,
     resolved_ids: &[String],
-    source_only: bool,
-    high_impact_only: bool,
+    scope: HealthScope,
     first_placeholder: usize,
 ) -> (String, Vec<Value>) {
     let mut placeholder = first_placeholder;
     let mut clauses = Vec::new();
     let mut values = Vec::new();
 
-    if source_filter_applies_before_queue(source_only, high_impact_only) {
+    if source_filter_applies_before_queue(scope) {
         clauses.push("source_relevant = 1".to_string());
     }
-    if high_impact_only {
-        clauses.push(purpose_default_queue_finding_expression(!source_only));
+    if scope.high_impact_queue() {
+        clauses.push(purpose_default_queue_finding_expression(scope));
     }
 
     let normalized_prefix = path_prefix
@@ -4035,17 +4273,36 @@ fn structural_finding_where_clause(
     }
 }
 
+/// SQL expression for approved purposes that need agent review at the requested scope.
+fn purpose_review_candidate_expression(node_alias: &str, scope: HealthScope) -> String {
+    let scope = match scope {
+        HealthScope::All => HealthScope::PurposeStrict,
+        other => other,
+    };
+    purpose_default_queue_node_expression(node_alias, "p", scope)
+}
+
 /// SQL expression for paths that belong in the default purpose queue.
 fn purpose_default_queue_node_expression(
     node_alias: &str,
     purpose_alias: &str,
-    include_assets: bool,
+    scope: HealthScope,
 ) -> String {
-    let asset_clause = if include_assets {
+    let asset_clause = if scope.include_assets() {
         format!(
             " OR ({node_alias}.kind = 'file' AND NOT ({}))",
             source_relevant_node_expression(node_alias)
         )
+    } else {
+        String::new()
+    };
+    let source_file_clause = if scope.include_source_files() {
+        format!(" OR ({node_alias}.kind = 'file' AND COALESCE({node_alias}.language, '') <> '')")
+    } else {
+        String::new()
+    };
+    let all_file_clause = if scope.include_all_files() {
+        format!(" OR {node_alias}.kind = 'file'")
     } else {
         String::new()
     };
@@ -4055,20 +4312,30 @@ fn purpose_default_queue_node_expression(
           OR ({node_alias}.kind = 'file' \
               AND {purpose_alias}.status = 'stale' \
               AND {purpose_alias}.source IN ({reviewed_sources})) \
-          OR ({node_alias}.kind = 'file' AND {}){asset_clause})",
+          OR ({node_alias}.kind = 'file' AND {}){source_file_clause}{all_file_clause}{asset_clause})",
         high_impact_file_path_expression(&format!("lower({node_alias}.path)")),
     )
 }
 
 /// SQL expression for finding CTE columns that belong in the default purpose queue.
-fn purpose_default_queue_finding_expression(include_assets: bool) -> String {
-    let asset_clause = if include_assets {
+fn purpose_default_queue_finding_expression(scope: HealthScope) -> String {
+    let asset_clause = if scope.include_assets() {
         " OR (kind = 'file' AND COALESCE(language, '') = '')"
     } else {
         ""
     };
+    let source_file_clause = if scope.include_source_files() {
+        " OR (kind = 'file' AND COALESCE(language, '') <> '')"
+    } else {
+        ""
+    };
+    let all_file_clause = if scope.include_all_files() {
+        " OR kind = 'file'"
+    } else {
+        ""
+    };
     format!(
-        "(kind = 'folder' OR (kind = 'file' AND {}){asset_clause})",
+        "(kind = 'folder' OR (kind = 'file' AND {}){source_file_clause}{all_file_clause}{asset_clause})",
         high_impact_file_path_expression("lower(path)")
     )
 }
@@ -4090,8 +4357,8 @@ fn purpose_default_queue_order_expression(node_alias: &str, purpose_alias: &str)
 }
 
 /// Return whether `source_only` should run before queue-specific folder/file selection.
-fn source_filter_applies_before_queue(source_only: bool, high_impact_only: bool) -> bool {
-    source_only && !high_impact_only
+fn source_filter_applies_before_queue(scope: HealthScope) -> bool {
+    scope.source_only_filter() && !scope.high_impact_queue()
 }
 
 /// Render trusted static strings as SQL string literals.
@@ -4800,8 +5067,7 @@ mod tests {
             severity: Some(Severity::Warning),
             path_prefix: Some("src".to_string()),
             summary_only: false,
-            source_only: false,
-            high_impact_only: false,
+            scope: HealthScope::all(),
         };
 
         let page = store.unresolved_health_findings_page(&[], &query)?;
@@ -4857,8 +5123,7 @@ mod tests {
                 severity: Some(Severity::Warning),
                 path_prefix: Some("src".to_string()),
                 summary_only: false,
-                source_only: false,
-                high_impact_only: false,
+                scope: HealthScope::all(),
             },
         )?;
 
@@ -4904,8 +5169,7 @@ mod tests {
                 severity: Some(Severity::Warning),
                 path_prefix: Some("src".to_string()),
                 summary_only: false,
-                source_only: false,
-                high_impact_only: false,
+                scope: HealthScope::all(),
             },
         )?;
         require_eq(&duplicate_page.total, &1, "duplicate total")?;
@@ -4925,8 +5189,7 @@ mod tests {
                 severity: Some(Severity::Warning),
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
-                source_only: false,
-                high_impact_only: false,
+                scope: HealthScope::all(),
             },
         )?;
         require_eq(&temp_page.total, &1, "temp total")?;
@@ -4970,8 +5233,7 @@ mod tests {
                 severity: Some(Severity::Warning),
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
-                source_only: true,
-                high_impact_only: false,
+                scope: HealthScope::source_only(),
             },
         )?;
 
@@ -5009,8 +5271,7 @@ mod tests {
                 severity: Some(Severity::Warning),
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
-                source_only: false,
-                high_impact_only: true,
+                scope: HealthScope::purpose_default(),
             },
         )?;
 
@@ -5035,8 +5296,7 @@ mod tests {
                 severity: Some(Severity::Warning),
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
-                source_only: false,
-                high_impact_only: false,
+                scope: HealthScope::all(),
             },
         )?;
         require_eq(&broad_page.total, &5, "explicit broad queue rows")?;
@@ -5074,8 +5334,7 @@ mod tests {
                 severity: Some(Severity::Warning),
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
-                source_only: true,
-                high_impact_only: true,
+                scope: HealthScope::purpose_default(),
             },
         )?;
 
@@ -5113,8 +5372,7 @@ mod tests {
                 severity: Some(Severity::Warning),
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
-                source_only: false,
-                high_impact_only: true,
+                scope: HealthScope::purpose_default(),
             },
         )?;
 
@@ -5160,8 +5418,7 @@ mod tests {
                 severity: Some(Severity::Warning),
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
-                source_only: true,
-                high_impact_only: true,
+                scope: HealthScope::purpose_default(),
             },
         )?;
 
@@ -5211,8 +5468,7 @@ mod tests {
                 severity: Some(Severity::Warning),
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
-                source_only: false,
-                high_impact_only: true,
+                scope: HealthScope::purpose_with_assets(),
             },
         )?;
 
@@ -5262,8 +5518,7 @@ mod tests {
                 severity: Some(Severity::Warning),
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
-                source_only: true,
-                high_impact_only: true,
+                scope: HealthScope::purpose_default(),
             },
         )?;
 
@@ -5298,8 +5553,7 @@ mod tests {
                 severity: Some(Severity::Warning),
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
-                source_only: false,
-                high_impact_only: false,
+                scope: HealthScope::all(),
             },
         )?;
 
@@ -5332,8 +5586,7 @@ mod tests {
                 severity: Some(Severity::Warning),
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
-                source_only: false,
-                high_impact_only: false,
+                scope: HealthScope::all(),
             },
         )?;
         require_eq(&page.total, &1, "contextual duplicate total")?;
@@ -5380,6 +5633,202 @@ mod tests {
             &false,
             "resolved contextual duplicate",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn agent_review_required_scope_expands_from_low_to_strict() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let asset_file = Node {
+            path: "assets/logo.svg".to_string(),
+            kind: NodeKind::File,
+            parent_path: Some("assets".to_string()),
+            extension: Some(".svg".to_string()),
+            language: None,
+            size_bytes: Some(42),
+            mtime_ns: Some(10),
+            content_hash: Some("hash-logo".to_string()),
+        };
+        store.replace_scan(&[
+            test_folder_node("."),
+            test_folder_node("assets"),
+            test_folder_node("src"),
+            test_file_node("Cargo.toml", "hash-cargo"),
+            test_file_node("src/detail.rs", "hash-detail"),
+            asset_file,
+        ])?;
+        for (path, purpose) in [
+            (".", "Imported repository root"),
+            ("assets", "Imported asset folder"),
+            ("src", "Imported Rust source folder"),
+            ("Cargo.toml", "Imported Rust manifest"),
+            ("src/detail.rs", "Imported implementation detail"),
+            ("assets/logo.svg", "Imported SVG brand asset"),
+        ] {
+            store.set_purpose(path, purpose, PurposeSource::Imported)?;
+        }
+
+        let low = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                start_index: 0,
+                limit: 20,
+                category: Some(AGENT_REVIEW_REQUIRED_CATEGORY.to_string()),
+                severity: Some(Severity::Warning),
+                path_prefix: Some(".".to_string()),
+                summary_only: false,
+                scope: HealthScope::purpose_default(),
+            },
+        )?;
+        require_eq(
+            &health_paths(&low),
+            &vec![".", "assets", "src", "Cargo.toml"],
+            "low purpose review scope",
+        )?;
+        require_eq(
+            &low.unfiltered_total,
+            &6,
+            "agent-review findings are counted once in unfiltered total",
+        )?;
+
+        let asset_scope = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                scope: HealthScope::purpose_with_assets(),
+                ..low_query()
+            },
+        )?;
+        require_eq(
+            &health_paths(&asset_scope),
+            &vec![".", "assets", "src", "Cargo.toml", "assets/logo.svg"],
+            "asset purpose review scope",
+        )?;
+
+        let medium = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                scope: HealthScope::purpose_with_source_files(),
+                ..low_query()
+            },
+        )?;
+        require_eq(
+            &health_paths(&medium),
+            &vec![".", "assets", "src", "Cargo.toml", "src/detail.rs"],
+            "medium purpose review scope",
+        )?;
+
+        let strict = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                scope: HealthScope::purpose_strict(),
+                ..low_query()
+            },
+        )?;
+        require_eq(
+            &health_paths(&strict),
+            &vec![
+                ".",
+                "assets",
+                "src",
+                "Cargo.toml",
+                "assets/logo.svg",
+                "src/detail.rs",
+            ],
+            "strict purpose review scope",
+        )?;
+
+        let all = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                scope: HealthScope::all(),
+                ..low_query()
+            },
+        )?;
+        require_eq(
+            &health_paths(&all),
+            &health_paths(&strict),
+            "all health scope should include every purpose review candidate",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn replace_scan_preserves_curated_purposes_and_reconciles_changed_paths()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_folder_node("."),
+            test_folder_node("src"),
+            test_file_node("src/main.rs", "hash-a"),
+        ])?;
+        store.set_purpose(".", "Agent-reviewed repository root", PurposeSource::Agent)?;
+        store.set_purpose(
+            "src",
+            "Agent-reviewed Rust source folder",
+            PurposeSource::Agent,
+        )?;
+        store.set_purpose(
+            "src/main.rs",
+            "Agent-reviewed Rust entry point",
+            PurposeSource::Agent,
+        )?;
+
+        store.replace_scan(&[
+            test_folder_node("."),
+            test_folder_node("src"),
+            test_file_node("src/main.rs", "hash-a"),
+            test_file_node("src/new.rs", "hash-new"),
+        ])?;
+        let nodes = store.load_nodes_by_paths(&[
+            ".".to_string(),
+            "src".to_string(),
+            "src/main.rs".to_string(),
+            "src/new.rs".to_string(),
+        ])?;
+        let by_path = nodes
+            .iter()
+            .map(|node| (node.node.path.as_str(), node))
+            .collect::<HashMap<_, _>>();
+        require_eq(
+            &by_path["src/main.rs"].purpose.purpose,
+            &Some("Agent-reviewed Rust entry point".to_string()),
+            "unchanged file purpose preserved",
+        )?;
+        require_eq(
+            &by_path["src/main.rs"].purpose.status,
+            &PurposeStatus::Approved,
+            "unchanged file purpose stays approved",
+        )?;
+        require_eq(
+            &by_path["src/new.rs"].purpose.status,
+            &PurposeStatus::Missing,
+            "new file starts missing",
+        )?;
+
+        store.replace_scan(&[
+            test_folder_node("."),
+            test_folder_node("src"),
+            test_file_node("src/main.rs", "hash-b"),
+            test_file_node("src/new.rs", "hash-new"),
+        ])?;
+        let changed = store
+            .load_nodes_by_paths(&["src/main.rs".to_string()])?
+            .pop()
+            .ok_or_else(|| io::Error::other("changed node missing"))?;
+        require_eq(
+            &changed.purpose.purpose,
+            &Some("Agent-reviewed Rust entry point".to_string()),
+            "changed file purpose text preserved",
+        )?;
+        require_eq(
+            &changed.purpose.status,
+            &PurposeStatus::Stale,
+            "changed file purpose becomes stale",
+        )?;
+
+        store.replace_scan(&[test_folder_node("."), test_folder_node("src")])?;
+        let removed = store.load_nodes_by_paths(&["src/main.rs".to_string()])?;
+        require_eq(&removed.is_empty(), &true, "removed file is inactive")?;
         Ok(())
     }
 
@@ -5762,6 +6211,65 @@ mod tests {
     }
 
     #[test]
+    fn health_resolution_accepts_all_scope_agent_review_findings() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let mut asset_file = test_file_node("assets/logo.svg", "hash-logo");
+        asset_file.extension = Some(".svg".to_string());
+        asset_file.language = None;
+        store.replace_scan(&[test_folder_node("assets"), asset_file])?;
+        store.set_purpose(
+            "assets/logo.svg",
+            "Imported SVG brand asset purpose",
+            PurposeSource::Imported,
+        )?;
+
+        let page = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                start_index: 0,
+                limit: 20,
+                category: Some(AGENT_REVIEW_REQUIRED_CATEGORY.to_string()),
+                severity: Some(Severity::Warning),
+                path_prefix: Some(".".to_string()),
+                summary_only: false,
+                scope: HealthScope::all(),
+            },
+        )?;
+        let finding = page
+            .findings
+            .iter()
+            .find(|finding| finding.path == "assets/logo.svg")
+            .ok_or_else(|| io::Error::other("asset review finding missing"))?;
+        store.resolve_health_finding(&HealthResolution {
+            finding_id: finding.id.clone(),
+            category: finding.category.clone(),
+            path: finding.path.clone(),
+            related_path: finding.related_path.clone(),
+            rationale: "Asset purpose imported from legacy metadata and intentionally accepted."
+                .to_string(),
+        })?;
+
+        let remaining = store.unresolved_health_findings_page(
+            &store.resolved_health_ids()?,
+            &HealthQuery {
+                start_index: 0,
+                limit: 20,
+                category: Some(AGENT_REVIEW_REQUIRED_CATEGORY.to_string()),
+                severity: Some(Severity::Warning),
+                path_prefix: Some(".".to_string()),
+                summary_only: false,
+                scope: HealthScope::all(),
+            },
+        )?;
+        require_eq(
+            &health_paths(&remaining).contains(&"assets/logo.svg"),
+            &false,
+            "resolved all-scope asset review finding",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn purpose_set_reports_unindexed_path_without_sqlite_leak() -> Result<(), Box<dyn Error>> {
         let mut store = AtlasStore::in_memory()?;
         store.replace_scan(&[test_file_node("src/main.rs", "hash")])?;
@@ -5845,6 +6353,27 @@ mod tests {
             mtime_ns: Some(10),
             content_hash: None,
         }
+    }
+
+    /// Return the default low-cost purpose review query used by agent linting.
+    fn low_query() -> HealthQuery {
+        HealthQuery {
+            start_index: 0,
+            limit: 20,
+            category: Some(AGENT_REVIEW_REQUIRED_CATEGORY.to_string()),
+            severity: Some(Severity::Warning),
+            path_prefix: Some(".".to_string()),
+            summary_only: false,
+            scope: HealthScope::purpose_default(),
+        }
+    }
+
+    /// Collect health finding paths in returned order.
+    fn health_paths(page: &HealthFindingsPage) -> Vec<&str> {
+        page.findings
+            .iter()
+            .map(|finding| finding.path.as_str())
+            .collect()
     }
 
     /// Require two test values to be equal without panicking.
