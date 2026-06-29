@@ -422,8 +422,18 @@ function Update-ProjectAtlasCodexMcpRegistry {
     $codexCommandPath = $null
     if (-not [string]::IsNullOrWhiteSpace($env:PROJECTATLAS_CODEX_COMMAND)) {
         $codexCommandPath = (Resolve-Path $env:PROJECTATLAS_CODEX_COMMAND -ErrorAction SilentlyContinue).Path
+        if (-not $codexCommandPath) {
+            $codexCommand = Get-Command $env:PROJECTATLAS_CODEX_COMMAND -ErrorAction SilentlyContinue
+            if ($codexCommand) {
+                $codexCommandPath = $codexCommand.Source
+            }
+        }
+        if (-not $codexCommandPath) {
+            Write-Warning "Codex MCP registry update skipped: PROJECTATLAS_CODEX_COMMAND does not resolve."
+            return
+        }
     }
-    if (-not $codexCommandPath) {
+    else {
         $codexCommand = Get-Command codex -ErrorAction SilentlyContinue
         if ($codexCommand) {
             $codexCommandPath = $codexCommand.Source

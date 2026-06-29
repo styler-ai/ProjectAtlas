@@ -157,6 +157,7 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "Update-ProjectAtlasCodexMcpRegistry",
         "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE",
         "PROJECTATLAS_CODEX_COMMAND",
+        "PROJECTATLAS_CODEX_COMMAND does not resolve",
         "Codex MCP registry updated to ProjectAtlas runtime",
         "mcp\", \"add\", \"projectatlas\", \"--\"",
         "Get-KnownProjectAtlasShimPaths",
