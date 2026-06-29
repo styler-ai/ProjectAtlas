@@ -1,9 +1,9 @@
 version: 1
-generated_at: unix:1782718500
-file_hash: "19adf1e8f7533ff5e0a386adc36ea57fb35a95afa88a3cd81e43b1b99e68fda3"
-folder_hash: "b88b72a9bca4a994c317ad6861ab4182cebbd93179a6a18c5ce6d184a8264407"
+generated_at: unix:1782725765
+file_hash: "ac8644ce79a4cc96e9ac498ed995ee8ff698ea0cc82ae2d381f03d5a5b42e7c0"
+folder_hash: "33ae57e42f0cff932b5a373f7f64f7cf2bfd56e13da3c7223d7ee1e03be536b3"
 root: .
-overview: tracked_source_files=96 tracked_nonsource_files=37 tracked_files_total=133 tracked_folders=59 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
+overview: tracked_source_files=99 tracked_nonsource_files=37 tracked_files_total=136 tracked_folders=60 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
 source_extensions[]:
   - .astro
   - .bash
@@ -138,7 +138,7 @@ exclude_dir_names[]:
   - node_modules
   - target
 exclude_path_prefixes[]:
-folders[59]{path,summary,source}:
+folders[60]{path,summary,source}:
   .,ProjectAtlas repository root.,database
   .agents,Agent marketplace metadata for ProjectAtlas.,database
   .agents/plugins,Codex plugin marketplace catalog for ProjectAtlas.,database
@@ -172,6 +172,7 @@ folders[59]{path,summary,source}:
   fixtures/languages/csharp,C# fixture folder for parser and summary baseline coverage.,database
   fixtures/languages/css,Store CSS structural summary fixtures,database
   fixtures/languages/go,Go fixture folder for parser and summary baseline coverage.,database
+  fixtures/languages/groovy,Provide Gradle Groovy DSL fixtures for language extraction tests.,database
   fixtures/languages/html,Store HTML structural summary fixtures,database
   fixtures/languages/java,Java fixture folder for parser and summary baseline coverage.,database
   fixtures/languages/javascript,JavaScript fixture folder for parser and summary baseline coverage.,database
@@ -198,7 +199,7 @@ folders[59]{path,summary,source}:
   skills/claude,Claude guidance for ProjectAtlas usage.,database
   skills/codex,Codex guidance for ProjectAtlas usage.,database
   templates,Reusable agent templates and snippets.,database
-files[104]{path,summary,source}:
+files[107]{path,summary,source}:
   .agents/plugins/marketplace.json,Codex plugin marketplace catalog for ProjectAtlas,database
   .gitattributes,Line-ending policy for ProjectAtlas repository fixtures,nonsource
   .githooks/commit-msg,Git hook to enforce issue references in commits,nonsource
@@ -246,6 +247,7 @@ files[104]{path,summary,source}:
   crates/projectatlas-service/src/lib.rs,Provide shared `ProjectAtlas` query services for CLI and MCP adapters.,database
   crates/projectatlas-symbols/Cargo.toml,Symbol extraction crate manifest and tree-sitter dependencies,database
   crates/projectatlas-symbols/src/languages/c_family.rs,Reserves the C and C++ language augmentation boundary for parser-specific corrections.,database
+  crates/projectatlas-symbols/src/languages/gradle.rs,Extract Gradle Kotlin and Groovy DSL task registrations as symbols.,database
   crates/projectatlas-symbols/src/languages/kotlin.rs,"Adds Kotlin package, type, and method facts that the generic tree-sitter pass does not emit reliably.",database
   crates/projectatlas-symbols/src/languages/mod.rs,Dispatches language-specific symbol graph augmentation and shared helper behavior for augmentation modules.,database
   crates/projectatlas-symbols/src/languages/objective_c.rs,Adds Objective-C class ownership and de-duplicates interface versus implementation symbols for summaries.,database
@@ -276,11 +278,13 @@ files[104]{path,summary,source}:
   fixtures/languages/csharp/Runner.cs,Exercise C# type and method summary extraction.,database
   fixtures/languages/css/tokens.css,Exercise CSS selector and token summaries,database
   fixtures/languages/go/service.go,"Exercise Go type, method, function, and import summary extraction.",database
+  fixtures/languages/groovy/build.gradle,Exercise Gradle Groovy DSL task extraction fixtures.,database
   fixtures/languages/html/index.html,Exercise HTML metadata and heading summaries,database
   fixtures/languages/java/AtlasService.java,Exercise Java class and method summary extraction.,database
   fixtures/languages/javascript/service.js,Exercise JavaScript exported and local function summary extraction.,database
   fixtures/languages/json/package.json,Exercise package manifest summary extraction,database
   fixtures/languages/kotlin/Runner.kt,Exercise Kotlin class and function summary extraction.,database
+  fixtures/languages/kotlin/build.gradle.kts,Exercise Gradle Kotlin DSL task extraction fixtures.,database
   fixtures/languages/markdown/readme.md,Exercise Markdown heading summary extraction,database
   fixtures/languages/objective-c/UserManager.m,Exercise Objective-C type and method summary extraction.,database
   fixtures/languages/rust/build.rs,Exercise Rust build-script language detection and summary extraction.,database
@@ -339,6 +343,7 @@ folder_tree[]:
   - "    csharp/ - C# fixture folder for parser and summary baseline coverage."
   - "    css/ - Store CSS structural summary fixtures"
   - "    go/ - Go fixture folder for parser and summary baseline coverage."
+  - "    groovy/ - Provide Gradle Groovy DSL fixtures for language extraction tests."
   - "    html/ - Store HTML structural summary fixtures"
   - "    java/ - Java fixture folder for parser and summary baseline coverage."
   - "    javascript/ - JavaScript fixture folder for parser and summary baseline coverage."

@@ -95,6 +95,13 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             .join(".claude-plugin")
             .join("plugin.json"),
     )?;
+    let codex_manifest = fs::read_to_string(
+        workspace_root
+            .join("plugins")
+            .join("projectatlas")
+            .join(".codex-plugin")
+            .join("plugin.json"),
+    )?;
     let opencode_template = fs::read_to_string(
         workspace_root
             .join("plugins")
@@ -167,6 +174,37 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         &["version"],
         env!("CARGO_PKG_VERSION"),
     )?;
+    let codex_manifest_json: Value = serde_json::from_str(&codex_manifest)?;
+    require_json_string(&codex_manifest_json, &["name"], "projectatlas")?;
+    require_json_string(
+        &codex_manifest_json,
+        &["version"],
+        env!("CARGO_PKG_VERSION"),
+    )?;
+    let default_prompts = codex_manifest_json["interface"]["defaultPrompt"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("Codex plugin defaultPrompt must be an array"))?;
+    if default_prompts.len() > 3 {
+        return Err(
+            io::Error::other("Codex plugin defaultPrompt must contain at most 3 prompts").into(),
+        );
+    }
+    for prompt in default_prompts {
+        let prompt = prompt.as_str().ok_or_else(|| {
+            io::Error::other("Codex plugin defaultPrompt entries must be strings")
+        })?;
+        if prompt.trim().is_empty() {
+            return Err(
+                io::Error::other("Codex plugin defaultPrompt entries must not be empty").into(),
+            );
+        }
+        if prompt.chars().count() > 128 {
+            return Err(io::Error::other(format!(
+                "Codex plugin defaultPrompt entry is longer than 128 characters: {prompt}"
+            ))
+            .into());
+        }
+    }
     let opencode_json: Value = serde_json::from_str(&opencode_template)?;
     require_json_string(
         &opencode_json,
@@ -3702,7 +3740,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
     )?;
     fs::write(
         repo.join("src").join("main.rs"),
-        "mod service;\nfn main() {\n    service::run();\n}\n",
+        "mod service;\nconst CONTENT_ONLY_ROUTE: &str = \"contentOnlyRoute\";\nfn main() {\n    service::run();\n}\n",
     )?;
     fs::write(
         repo.join("src").join("service.rs"),
@@ -3749,6 +3787,25 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .assert()
         .success()
         .stdout(predicate::str::contains("src/service.rs"));
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "files",
+            "contentOnlyRoute",
+            "--folder",
+            "src",
+            "--file-pattern",
+            "*.rs",
+            "--include-content",
+            "--limit",
+            "5",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("src/main.rs"));
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -3890,6 +3947,148 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .failure()
         .stdout(predicate::str::contains("parity:"))
         .stdout(predicate::str::contains("5 suggested"));
+
+    Ok(())
+}
+
+#[test]
+fn gradle_dsl_tasks_are_symbols_and_file_ranking_signals() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::write(
+        repo.join("build.gradle.kts"),
+        r#"
+import org.springframework.boot.gradle.tasks.run.BootRun
+
+fun loadDotEnv() = emptyMap<String, String>()
+
+tasks.register<BootRun>("bootRunE2E") {
+    group = "verification"
+}
+
+val verifyAtlas by tasks.registering {
+    group = "verification"
+}
+
+tasks {
+    register<Copy>("copyE2EReports") {
+        group = "verification"
+    }
+}
+"#,
+    )?;
+    fs::write(
+        repo.join("build.gradle"),
+        r"
+plugins { id 'java' }
+
+tasks.register('bootRunSmoke', BootRun) {
+    group = 'verification'
+}
+
+task cleanE2E(type: Delete) {}
+
+tasks {
+    create('copyGroovyReports') {
+        group = 'verification'
+    }
+}
+",
+    )?;
+    let db = temp.path().join("projectatlas.db");
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "files",
+            "bootRunE2E",
+            "--file-pattern",
+            "*.kts",
+            "--limit",
+            "5",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("build.gradle.kts"));
+
+    let kotlin_summary = json_summary_command(&repo, &db, "build.gradle.kts")?;
+    require_json_string(
+        &kotlin_summary,
+        &["parser_kind"],
+        "tree-sitter-symbol-graph",
+    )?;
+    require_json_contains(&kotlin_summary, &["content_summary"], "bootRunE2E")?;
+    require_json_contains(&kotlin_summary, &["content_summary"], "copyE2EReports")?;
+    require_json_contains(&kotlin_summary, &["content_summary"], "verifyAtlas")?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "symbols",
+            "list",
+            "--file",
+            "build.gradle.kts",
+            "--query",
+            "bootRunE2E",
+            "--limit",
+            "20",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("bootRunE2E"));
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "files",
+            "bootRunSmoke",
+            "--file-pattern",
+            "*.gradle",
+            "--limit",
+            "5",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("build.gradle"));
+
+    let groovy_summary = json_summary_command(&repo, &db, "build.gradle")?;
+    require_json_string(&groovy_summary, &["parser_kind"], "fallback-symbol-graph")?;
+    require_json_contains(&groovy_summary, &["content_summary"], "bootRunSmoke")?;
+    require_json_contains(&groovy_summary, &["content_summary"], "copyGroovyReports")?;
+    require_json_contains(&groovy_summary, &["content_summary"], "cleanE2E")?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "symbols",
+            "list",
+            "--file",
+            "build.gradle",
+            "--query",
+            "copyGroovyReports",
+            "--limit",
+            "20",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("copyGroovyReports"));
 
     Ok(())
 }
@@ -4150,7 +4349,11 @@ fn generated_file_purpose_suggestions_require_agent_approval() -> Result<(), Box
         "rust source defining type and function Service, run.",
     )?;
     require_json_string(file_entry, &["status"], "suggested")?;
-    require_json_string(file_entry, &["file_purpose"], "Implement service.")?;
+    require_json_string(
+        file_entry,
+        &["file_purpose"],
+        "Implement the service source around Service and run.",
+    )?;
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -4227,6 +4430,23 @@ fn generated_file_purpose_suggestions_require_agent_approval() -> Result<(), Box
         .stdout(predicate::str::contains("missing-purpose:src"))
         .stdout(predicate::str::contains(
             "suggested-purpose-review:src/service.rs:",
+        ));
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["purpose", "queue", "--limit", "5"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("purpose_curation:"))
+        .stdout(predicate::str::contains("source_only: true"))
+        .stdout(predicate::str::contains("missing-purpose:."))
+        .stdout(predicate::str::contains(
+            "suggested-purpose-review:src/service.rs:",
+        ))
+        .stdout(predicate::str::contains(
+            "Implement the service source around Service and run.",
         ));
 
     for (path, purpose) in [
@@ -4314,6 +4534,84 @@ fn generated_file_purpose_suggestions_require_agent_approval() -> Result<(), Box
         .assert()
         .success()
         .stdout(predicate::str::contains("health_findings[0]"));
+
+    Ok(())
+}
+
+#[test]
+fn generated_purpose_queue_avoids_generic_and_asset_noise() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir_all(repo.join("src").join("customers"))?;
+    fs::create_dir_all(repo.join("src").join("settings"))?;
+    fs::create_dir(repo.join("assets"))?;
+    fs::write(
+        repo.join("src").join("customers").join("service.rs"),
+        "pub struct CustomerService;\n\nimpl CustomerService {\n    pub fn reconcile(&self) {}\n}\n",
+    )?;
+    fs::write(
+        repo.join("src").join("settings").join("service.rs"),
+        "pub struct SettingsService;\n\nimpl SettingsService {\n    pub fn load(&self) {}\n}\n",
+    )?;
+    fs::write(
+        repo.join("build.gradle.kts"),
+        "tasks.register<BootRun>(\"bootRunE2E\") {\n    group = \"verification\"\n}\n\ntasks {\n    register<Copy>(\"copyE2EReports\") {\n        group = \"verification\"\n    }\n}\n\nval verifyAtlas by tasks.registering {\n    group = \"verification\"\n}\n",
+    )?;
+    fs::write(
+        repo.join("assets").join("logo.svg"),
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+    )?;
+    let db = temp.path().join("projectatlas.db");
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("purpose_suggestions: 3"));
+
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["purpose", "queue", "--limit", "20"])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "purpose queue failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let queue = String::from_utf8(output.stdout)?;
+    for expected in [
+        "Implement the customers service source around CustomerService and reconcile.",
+        "Implement the settings service source around SettingsService and load.",
+        "Define Gradle build tasks around bootRunE2E, copyE2EReports, and verifyAtlas.",
+    ] {
+        if !queue.contains(expected) {
+            return Err(io::Error::other(format!(
+                "purpose queue missed useful suggestion `{expected}`:\n{queue}"
+            ))
+            .into());
+        }
+    }
+    for noisy in [
+        "Implement build.",
+        "Implement service.",
+        "Implement the service source",
+        "assets/logo.svg",
+    ] {
+        if queue.contains(noisy) {
+            return Err(io::Error::other(format!(
+                "purpose queue included noisy suggestion/path `{noisy}`:\n{queue}"
+            ))
+            .into());
+        }
+    }
 
     Ok(())
 }

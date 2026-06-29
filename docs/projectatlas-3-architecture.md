@@ -235,7 +235,8 @@ indexing tool. Public and semi-public surfaces use atlas/funnel vocabulary:
   `atlas_symbols_build`, `atlas_symbols`, `atlas_symbol_relations`,
   `atlas_health`, `atlas_health_resolve`, `atlas_token_report`,
   `atlas_settings`, `atlas_watch_status`, `atlas_watch_once`,
-  `atlas_strip_legacy_purpose`, and `atlas_purpose_set`.
+  `atlas_strip_legacy_purpose`, `atlas_purpose_queue`, and
+  `atlas_purpose_set`.
 - Crates/modules: `projectatlas-core`, `projectatlas-db`, `projectatlas-fs`,
   `projectatlas-service`, `projectatlas-symbols`, `projectatlas-query`,
   `projectatlas-mcp`.
@@ -555,6 +556,7 @@ ProjectAtlas-native:
 - `atlas_watch_status`
 - `atlas_watch_once`
 - `atlas_strip_legacy_purpose`
+- `atlas_purpose_queue`
 - `atlas_purpose_set`
 
 The tool descriptions must bias agents toward the funnel:

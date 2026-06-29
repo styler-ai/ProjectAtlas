@@ -1,6 +1,6 @@
 //! Purpose: Detect structural health issues in `ProjectAtlas` indexes.
 
-use crate::{IndexedNode, NodeKind, PurposeStatus};
+use crate::{IndexedNode, NodeKind, PurposeStatus, normalized_parent};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -128,7 +128,7 @@ fn stale_purpose_findings(nodes: &[IndexedNode]) -> Vec<HealthFinding> {
 
 /// Find paths that share the same purpose text.
 fn duplicate_purpose_findings(nodes: &[IndexedNode]) -> Vec<HealthFinding> {
-    let mut by_purpose: HashMap<(NodeKind, String), Vec<&IndexedNode>> = HashMap::new();
+    let mut by_purpose: HashMap<(NodeKind, String, String), Vec<&IndexedNode>> = HashMap::new();
     for node in nodes {
         if node.purpose.status != PurposeStatus::Approved {
             continue;
@@ -137,12 +137,16 @@ fn duplicate_purpose_findings(nodes: &[IndexedNode]) -> Vec<HealthFinding> {
             continue;
         };
         by_purpose
-            .entry((node.node.kind, purpose.to_lowercase()))
+            .entry((
+                node.node.kind,
+                purpose.to_lowercase(),
+                duplicate_context_key(node),
+            ))
             .or_default()
             .push(node);
     }
     let mut findings = Vec::new();
-    for ((kind, _), matches) in by_purpose {
+    for ((kind, _, _), matches) in by_purpose {
         if matches.len() < 2 {
             continue;
         }
@@ -166,6 +170,15 @@ fn duplicate_purpose_findings(nodes: &[IndexedNode]) -> Vec<HealthFinding> {
         }
     }
     findings
+}
+
+/// Return the duplicate-purpose comparison context for a node.
+fn duplicate_context_key(node: &IndexedNode) -> String {
+    if node.node.kind == NodeKind::Folder {
+        normalized_parent(&node.node.path).unwrap_or_default()
+    } else {
+        String::new()
+    }
 }
 
 /// Find repeated temporary or generated-output folders.
@@ -267,6 +280,28 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn duplicate_folder_purpose_is_scoped_by_parent_context() -> Result<(), Box<dyn Error>> {
+        let nodes = vec![
+            test_node(
+                "customers/service",
+                NodeKind::Folder,
+                Some("Service layer"),
+                PurposeStatus::Approved,
+            ),
+            test_node(
+                "settings/service",
+                NodeKind::Folder,
+                Some("Service layer"),
+                PurposeStatus::Approved,
+            ),
+        ];
+
+        let findings = health_check(&nodes);
+        reject_category(&findings, "duplicate-purpose")?;
+        Ok(())
+    }
+
     /// Build a health-check test node.
     fn test_node(
         path: &str,
@@ -278,7 +313,7 @@ mod tests {
             node: Node {
                 path: path.to_string(),
                 kind,
-                parent_path: Some("src".to_string()),
+                parent_path: normalized_parent(path),
                 extension: Some(".rs".to_string()),
                 language: Some("rust".to_string()),
                 size_bytes: Some(10),

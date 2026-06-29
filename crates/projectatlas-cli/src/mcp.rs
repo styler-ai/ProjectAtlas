@@ -2,14 +2,14 @@
 //! Native MCP adapter for `ProjectAtlas` agent integrations.
 
 use crate::runtime::{
-    MAX_SYMBOL_FILE_BYTES, ScanRuntimePlan, SymbolBuildOptions, build_settings_report,
-    build_symbols_for_index, byte_count_to_tokens, canonical_project_root,
-    default_mcp_project_root, estimated_source_tokens_for_indexed_files,
+    DEFAULT_HEALTH_LIMIT, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, ScanRuntimePlan,
+    SymbolBuildOptions, build_settings_report, build_symbols_for_index, byte_count_to_tokens,
+    canonical_project_root, default_mcp_project_root, estimated_source_tokens_for_indexed_files,
     estimated_source_tokens_for_paths, file_summary_usage_baseline, normalized_folder_filter,
-    open_atlas_store, ranked_file_nodes, read_indexed_file_content,
+    open_atlas_store, purpose_curation_page, ranked_file_nodes, read_indexed_file_content,
     record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
-    reset_index_files, run_scan_pipeline, run_watch_loop, strip_legacy_purpose,
-    validated_indexed_file_key, watcher_status_report,
+    render_health_page, render_purpose_curation_page, reset_index_files, run_scan_pipeline,
+    run_watch_loop, strip_legacy_purpose, validated_indexed_file_key, watcher_status_report,
 };
 use crate::{
     CliError, DEFAULT_FILE_SUMMARY_LIMIT, OutputFormat, build_parity_report, render_code_slice,
@@ -26,7 +26,7 @@ use projectatlas_core::toon::{
 use projectatlas_core::{
     NodeKind, PurposeSource, normalize_repo_path_prefix, validated_repo_node_key,
 };
-use projectatlas_db::{AtlasStore, HealthFindingsPage, HealthQuery, HealthResolution};
+use projectatlas_db::{AtlasStore, HealthQuery, HealthResolution};
 use projectatlas_service::{
     SymbolSliceSelector, build_file_summary, read_indexed_code_slice, read_symbol_slice,
     search_indexed_files,
@@ -38,11 +38,6 @@ use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::Deserialize;
 use serde_json::json;
 use std::path::PathBuf;
-
-/// Default MCP health rows returned when the caller does not request a page size.
-const DEFAULT_HEALTH_LIMIT: usize = 50;
-/// Maximum MCP health rows returned in one payload.
-const MAX_HEALTH_LIMIT: usize = 200;
 
 /// MCP tools required for the agent-first repository-intelligence surface.
 pub(crate) const REQUIRED_MCP_TOOL_NAMES: &[&str] = &[
@@ -66,6 +61,7 @@ pub(crate) const REQUIRED_MCP_TOOL_NAMES: &[&str] = &[
     "atlas_watch_once",
     "atlas_strip_legacy_purpose",
     "atlas_reset_index",
+    "atlas_purpose_queue",
     "atlas_purpose_set",
 ];
 
@@ -140,6 +136,8 @@ struct AtlasQueryParams {
     folder: Option<String>,
     /// Optional repository-relative glob filter.
     file_pattern: Option<String>,
+    /// Include indexed file text as a bounded fallback ranking signal.
+    include_content: Option<bool>,
     /// Maximum number of rows to return.
     limit: Option<usize>,
 }
@@ -239,6 +237,8 @@ struct AtlasHealthParams {
     path_prefix: Option<String>,
     /// Return counts and paging metadata without finding rows.
     summary_only: Option<bool>,
+    /// Restrict findings to source files and folders that contain source files.
+    source_only: Option<bool>,
 }
 
 /// MCP parameter payload for parity reports.
@@ -405,50 +405,8 @@ fn health_query_from_params(params: &AtlasHealthParams) -> Result<HealthQuery, C
         path_prefix: trimmed_filter(params.path_prefix.as_deref())
             .map(|value| normalize_repo_path_prefix(&value)),
         summary_only: params.summary_only.unwrap_or(false),
+        source_only: params.source_only.unwrap_or(false),
     })
-}
-
-/// Return a compact health report page for MCP agents.
-fn render_health_page(page: &HealthFindingsPage, query: &HealthQuery) -> String {
-    let rows = page
-        .findings
-        .iter()
-        .map(|finding| {
-            json!({
-                "severity": severity_name(finding.severity),
-                "id": finding.id,
-                "category": finding.category,
-                "path": finding.path,
-                "related_path": finding.related_path.as_deref().unwrap_or(""),
-                "message": finding.message,
-                "recommendation": finding.recommendation,
-            })
-        })
-        .collect::<Vec<_>>();
-    let page_width = page.limit.min(page.total.saturating_sub(page.start_index));
-    let page_end = page.start_index.saturating_add(page_width);
-    let next_start_index = if page_width == 0 || page_end >= page.total {
-        None
-    } else {
-        Some(page_end)
-    };
-    encode_agent_payload(&json!({
-        "health": {
-            "total": page.total,
-            "unfiltered_total": page.unfiltered_total,
-            "returned": page.returned,
-            "start_index": page.start_index,
-            "limit": page.limit,
-            "max_limit": MAX_HEALTH_LIMIT,
-            "next_start_index": next_start_index,
-            "truncated": next_start_index.is_some(),
-            "summary_only": query.summary_only,
-            "category": query.category.as_deref().unwrap_or(""),
-            "severity": query.severity.map_or("", severity_name),
-            "path_prefix": query.path_prefix.as_deref().unwrap_or(""),
-        },
-        "health_findings": rows,
-    }))
 }
 
 /// Return a trimmed non-empty string parameter.
@@ -457,15 +415,6 @@ fn trimmed_filter(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
-}
-
-/// Return a stable lowercase severity name.
-fn severity_name(severity: Severity) -> &'static str {
-    match severity {
-        Severity::Info => "info",
-        Severity::Warning => "warning",
-        Severity::Error => "error",
-    }
 }
 
 /// Parse an MCP health severity filter.
@@ -564,7 +513,7 @@ impl ProjectAtlasMcpServer {
     /// Rank files after an agent has chosen a folder or query.
     #[tool(
         name = "atlas_files",
-        description = "Rank repository files by query, purpose, and optional folder before an agent opens source."
+        description = "Rank repository files by query, purpose, optional folder, and optional indexed text fallback before an agent opens source."
     )]
     fn atlas_files(&self, Parameters(params): Parameters<AtlasQueryParams>) -> String {
         Self::as_mcp_text((|| {
@@ -581,6 +530,7 @@ impl ProjectAtlasMcpServer {
                 folder_filter.as_deref(),
                 params.file_pattern.as_deref(),
                 params.limit.unwrap_or(10),
+                params.include_content.unwrap_or(false),
             )?;
             let baseline_tokens = estimated_source_tokens_for_indexed_files(
                 &store,
@@ -1029,6 +979,33 @@ impl ProjectAtlasMcpServer {
                 params.include_mcp_config.unwrap_or(false),
             )?;
             Ok(encode_agent_payload(&json!({ "reset_index": report })))
+        })())
+    }
+
+    /// Return a bounded purpose curation queue.
+    #[tool(
+        name = "atlas_purpose_queue",
+        description = "Return a bounded source-focused queue of ProjectAtlas paths that need agent purpose curation."
+    )]
+    fn atlas_purpose_queue(&self, Parameters(mut params): Parameters<AtlasHealthParams>) -> String {
+        Self::as_mcp_text((|| {
+            if params.source_only.is_none() {
+                params.source_only = Some(true);
+            }
+            let store = self.open_store()?;
+            let query = health_query_from_params(&params)?;
+            let page = purpose_curation_page(&store, &query)?;
+            let toon = render_purpose_curation_page(&page);
+            record_directory_walk_usage_estimate(
+                &store,
+                &self.session,
+                "mcp.atlas_purpose_queue",
+                None,
+                None,
+                estimated_source_tokens_for_indexed_files(&store, None, None)?,
+                &toon,
+            )?;
+            Ok(toon)
         })())
     }
 

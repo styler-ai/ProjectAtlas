@@ -10,31 +10,35 @@ use atlas_map::{
     init_project, lint_map, list_ignore_entries, load_atlas_config, remove_ignore_entry, write_map,
 };
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
 use projectatlas_core::telemetry::{
     TokenOverview, TokenTrendReport, TokenTrendWindow as CoreTokenTrendWindow,
 };
 use projectatlas_core::toon::{
-    encode_agent_payload, render_health, render_node_rows, render_nodes, render_outline,
-    render_overview, render_symbol_relations, render_symbols, render_token_overview,
-    render_token_trends,
+    encode_agent_payload, render_node_rows, render_nodes, render_outline, render_overview,
+    render_symbol_relations, render_symbols, render_token_overview, render_token_trends,
 };
-use projectatlas_core::{NodeKind, PurposeSource, normalize_native_path_display};
-use projectatlas_db::{AtlasStore, DbError, HealthResolution};
+use projectatlas_core::{
+    NodeKind, PurposeSource, normalize_native_path_display, normalize_repo_path_prefix,
+};
+use projectatlas_db::{AtlasStore, DbError, HealthQuery, HealthResolution};
 use projectatlas_service::{
     CodeSlice, FileSummaryReport, SearchReport, SymbolSliceSelector, build_file_summary,
     read_indexed_code_slice, read_symbol_slice, search_indexed_files,
 };
 use runtime::{
-    MAX_SYMBOL_FILE_BYTES, ScanRuntimePlan, SettingsReport, SymbolBuildOptions, WatchStatusReport,
-    absolute_path, build_settings_report, build_symbols_for_index, byte_count_to_tokens,
-    canonical_project_root, default_mcp_project_root, defaultable_cli_project_root,
+    DEFAULT_HEALTH_LIMIT, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, ScanRuntimePlan, SettingsReport,
+    SymbolBuildOptions, WatchStatusReport, absolute_path, build_settings_report,
+    build_symbols_for_index, byte_count_to_tokens, canonical_project_root,
+    default_mcp_project_root, defaultable_cli_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     file_summary_usage_baseline, lint_database_if_present, normalized_folder_filter,
-    open_atlas_store, ranked_file_nodes, read_indexed_file_content,
+    open_atlas_store, purpose_curation_page, ranked_file_nodes, read_indexed_file_content,
     record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
-    reset_index_files, resolved_mcp_config_path, run_scan_pipeline, run_watch_loop,
-    strip_legacy_purpose, validated_indexed_file_key, watcher_status_report,
+    render_health_page, render_purpose_curation_page, reset_index_files, resolved_mcp_config_path,
+    run_scan_pipeline, run_watch_loop, strip_legacy_purpose, validated_indexed_file_key,
+    watcher_status_report,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -141,6 +145,27 @@ impl From<TokenTrendWindow> for CoreTokenTrendWindow {
     }
 }
 
+/// Health severity filter accepted by CLI commands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum HealthSeverityArg {
+    /// Informational finding.
+    Info,
+    /// Warning finding.
+    Warning,
+    /// Error finding.
+    Error,
+}
+
+impl From<HealthSeverityArg> for Severity {
+    fn from(value: HealthSeverityArg) -> Self {
+        match value {
+            HealthSeverityArg::Info => Self::Info,
+            HealthSeverityArg::Warning => Self::Warning,
+            HealthSeverityArg::Error => Self::Error,
+        }
+    }
+}
+
 /// Manual `ProjectAtlas` ignore entry kind for CLI input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum IgnoreKind {
@@ -243,6 +268,9 @@ enum Command {
         /// Optional repository-relative glob filter.
         #[arg(long)]
         file_pattern: Option<String>,
+        /// Include indexed file text as a bounded fallback ranking signal.
+        #[arg(long, default_value_t = false)]
+        include_content: bool,
         /// Maximum number of files to return.
         #[arg(long, default_value_t = 10)]
         limit: usize,
@@ -365,7 +393,29 @@ enum Command {
         text_index_max_bytes: Option<u64>,
     },
     /// Report structural health findings.
-    HealthCheck,
+    HealthCheck {
+        /// Pagination start index after filters are applied.
+        #[arg(long, default_value_t = 0)]
+        start_index: usize,
+        /// Maximum findings to return.
+        #[arg(long, default_value_t = DEFAULT_HEALTH_LIMIT)]
+        limit: usize,
+        /// Optional finding category filter.
+        #[arg(long)]
+        category: Option<String>,
+        /// Optional severity filter.
+        #[arg(long, value_enum)]
+        severity: Option<HealthSeverityArg>,
+        /// Optional repository-relative primary or related path prefix.
+        #[arg(long)]
+        path_prefix: Option<String>,
+        /// Return counts and paging metadata without finding rows.
+        #[arg(long)]
+        summary_only: bool,
+        /// Restrict findings to source files and folders that contain source files.
+        #[arg(long)]
+        source_only: bool,
+    },
     /// Resolve a deterministic health finding with agent rationale.
     Health {
         /// Health subcommand to run.
@@ -501,6 +551,30 @@ enum PurposeCommand {
         path: String,
         /// Agent-approved purpose one-liner.
         purpose: String,
+    },
+    /// Return a bounded queue of paths that need purpose curation.
+    Queue {
+        /// Pagination start index after filters are applied.
+        #[arg(long, default_value_t = 0)]
+        start_index: usize,
+        /// Maximum findings to return.
+        #[arg(long, default_value_t = DEFAULT_HEALTH_LIMIT)]
+        limit: usize,
+        /// Optional finding category filter.
+        #[arg(long)]
+        category: Option<String>,
+        /// Optional severity filter.
+        #[arg(long, value_enum)]
+        severity: Option<HealthSeverityArg>,
+        /// Optional repository-relative primary or related path prefix.
+        #[arg(long)]
+        path_prefix: Option<String>,
+        /// Return counts and paging metadata without queue rows.
+        #[arg(long)]
+        summary_only: bool,
+        /// Include non-source files and asset-only folders in the queue.
+        #[arg(long)]
+        include_assets: bool,
     },
 }
 
@@ -681,6 +755,7 @@ fn run() -> Result<(), CliError> {
             query,
             folder,
             file_pattern,
+            include_content,
             limit,
         } => {
             let store = open_atlas_store(&cli.db)?;
@@ -695,6 +770,7 @@ fn run() -> Result<(), CliError> {
                 folder_filter.as_deref(),
                 file_pattern.as_deref(),
                 *limit,
+                *include_content,
             )?;
             let baseline_tokens = estimated_source_tokens_for_indexed_files(
                 &store,
@@ -1037,10 +1113,28 @@ fn run() -> Result<(), CliError> {
                 &report,
             )?;
         }
-        Command::HealthCheck => {
+        Command::HealthCheck {
+            start_index,
+            limit,
+            category,
+            severity,
+            path_prefix,
+            summary_only,
+            source_only,
+        } => {
             let store = open_atlas_store(&cli.db)?;
-            let findings = store.unresolved_health_findings(&store.resolved_health_ids()?)?;
-            let toon = render_health(&findings);
+            let query = health_query_from_cli(
+                *start_index,
+                *limit,
+                category.as_deref(),
+                *severity,
+                path_prefix.as_deref(),
+                *summary_only,
+                *source_only,
+            );
+            let page =
+                store.unresolved_health_findings_page(&store.resolved_health_ids()?, &query)?;
+            let toon = render_health_page(&page, &query);
             print_tracked_directory_output_estimate(
                 cli.format,
                 &store,
@@ -1050,7 +1144,7 @@ fn run() -> Result<(), CliError> {
                 None,
                 estimated_source_tokens_for_indexed_files(&store, None, None)?,
                 &toon,
-                &findings,
+                &page,
             )?;
         }
         Command::Health { command } => match command {
@@ -1201,6 +1295,28 @@ fn run() -> Result<(), CliError> {
                 let store = open_atlas_store(&cli.db)?;
                 store.set_purpose(path, purpose, PurposeSource::Agent)?;
                 write_stdout(&format!("purpose set: {path}\n"))?;
+            }
+            PurposeCommand::Queue {
+                start_index,
+                limit,
+                category,
+                severity,
+                path_prefix,
+                summary_only,
+                include_assets,
+            } => {
+                let store = open_atlas_store(&cli.db)?;
+                let query = health_query_from_cli(
+                    *start_index,
+                    *limit,
+                    category.as_deref(),
+                    *severity,
+                    path_prefix.as_deref(),
+                    *summary_only,
+                    !*include_assets,
+                );
+                let page = purpose_curation_page(&store, &query)?;
+                print_output(cli.format, &render_purpose_curation_page(&page), &page)?;
             }
         },
     }
@@ -1480,6 +1596,36 @@ fn serialized_output<T: serde::Serialize>(
         OutputFormat::Toon => Ok(toon.to_string()),
         OutputFormat::Json => Ok(format!("{}\n", serde_json::to_string_pretty(payload)?)),
     }
+}
+
+/// Build a bounded DB health query from CLI filter arguments.
+fn health_query_from_cli(
+    start_index: usize,
+    limit: usize,
+    category: Option<&str>,
+    severity: Option<HealthSeverityArg>,
+    path_prefix: Option<&str>,
+    summary_only: bool,
+    source_only: bool,
+) -> HealthQuery {
+    HealthQuery {
+        start_index,
+        limit: limit.clamp(1, MAX_HEALTH_LIMIT),
+        category: trimmed_cli_filter(category),
+        severity: severity.map(Severity::from),
+        path_prefix: trimmed_cli_filter(path_prefix)
+            .map(|value| normalize_repo_path_prefix(&value)),
+        summary_only,
+        source_only,
+    }
+}
+
+/// Return a trimmed non-empty CLI string filter.
+fn trimmed_cli_filter(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 /// Record estimated-token telemetry for the exact emitted CLI payload.
@@ -2238,7 +2384,28 @@ mod tests {
                 "src/empty.rs",
                 "rust source file with no declarations found."
             ),
-            "Implement empty."
+            "Implement the empty source."
+        );
+        assert_eq!(
+            suggest_file_purpose(
+                "src/customers/service.rs",
+                "rust source defining type and function CustomerService, boot."
+            ),
+            "Implement the customers service source around CustomerService and boot."
+        );
+        assert_eq!(
+            suggest_file_purpose(
+                "build.gradle.kts",
+                "kotlin source defining functions bootRunE2E, copyE2EReports, verifyAtlas."
+            ),
+            "Define Gradle build tasks around bootRunE2E, copyE2EReports, and verifyAtlas."
+        );
+        assert_eq!(
+            suggest_file_purpose(
+                "src/auth/session.test.ts",
+                "typescript source defining functions createsSession, rejectsExpiredSession."
+            ),
+            "Implement the auth session test source around createsSession and rejectsExpiredSession."
         );
     }
 
@@ -2915,6 +3082,7 @@ mod tests {
             || !health_text.contains("returned: 1")
             || !health_text.contains("limit: 1")
             || !health_text.contains("next_start_index: null")
+            || !health_text.contains("source_only: false")
             || !health_text.contains("path_prefix: src")
             || !health_text.contains("health_findings[1]")
             || health_text.contains("suggested-purpose-review")
@@ -2949,6 +3117,27 @@ mod tests {
         {
             return Err(format!(
                 "atlas_health summary_only result lost paging metadata: {summary_health_text}"
+            )
+            .into());
+        }
+
+        let purpose_queue = client
+            .peer()
+            .call_tool(CallToolRequestParams::new("atlas_purpose_queue").with_arguments(Map::new()))
+            .await?;
+        let purpose_queue_text = purpose_queue
+            .content
+            .first()
+            .and_then(|content| content.raw.as_text())
+            .map(|text| text.text.as_str())
+            .ok_or_else(|| std::io::Error::other("purpose queue result did not contain text"))?;
+        if !purpose_queue_text.contains("purpose_curation:")
+            || !purpose_queue_text.contains("source_only: true")
+            || !purpose_queue_text.contains("purpose_curation_items[")
+            || !purpose_queue_text.contains("suggested-purpose-review:src/main.rs:")
+        {
+            return Err(format!(
+                "atlas_purpose_queue result did not contain source-focused curation payload: {purpose_queue_text}"
             )
             .into());
         }
