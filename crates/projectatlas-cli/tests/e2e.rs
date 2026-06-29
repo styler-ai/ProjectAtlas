@@ -104,6 +104,14 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             .join("docs")
             .join("projectatlas-3-architecture.md"),
     )?;
+    let skill_guidance = fs::read_to_string(
+        workspace_root
+            .join("plugins")
+            .join("projectatlas")
+            .join("skills")
+            .join("projectatlas")
+            .join("SKILL.md"),
+    )?;
     let codex_fallback_mcp = workspace_root
         .join("plugins")
         .join("projectatlas")
@@ -142,6 +150,10 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         r"ProjectAtlas\runtimes\$safeVersion\x86_64-pc-windows-msvc",
         "ProjectAtlas LocalAppData mirror skipped",
         "PROJECTATLAS_SKIP_USER_PATH_UPDATE",
+        "Set-ProjectAtlasProcessPathPrecedence",
+        "Confirm-ProjectAtlasBareCommandResolution",
+        "Active process resolves bare projectatlas to verified runtime",
+        "Restart Codex or the shell",
         "Get-KnownProjectAtlasShimPaths",
         "Quarantine-ProjectAtlasStaleShims",
         "Test-ProjectAtlasRuntime $candidate $null",
@@ -185,6 +197,10 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "is_projectatlas_runtime_contract",
         "quarantine_known_stale_projectatlas_shims",
         "quarantine_stale_projectatlas_shim",
+        "prepend_projectatlas_process_path",
+        "confirm_bare_projectatlas_resolution",
+        "Active process resolves bare projectatlas to verified runtime",
+        "restart the host shell",
         "runtime_override=${PROJECTATLAS_RUNTIME_PATH:-}",
         "runtime_version=$(printf",
         "[ \"$runtime_version\" = \"$expected_version\" ]",
@@ -291,6 +307,32 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             .into());
         }
     }
+    for (document_name, document) in [
+        ("README.md", readme.as_str()),
+        ("docs/agent-integration.md", agent_integration.as_str()),
+        (
+            "plugins/projectatlas/skills/projectatlas/SKILL.md",
+            skill_guidance.as_str(),
+        ),
+    ] {
+        for required in [
+            "codex plugin marketplace upgrade projectatlas --json",
+            "codex plugin remove projectatlas --marketplace projectatlas",
+            "codex plugin add projectatlas --marketplace projectatlas",
+            "codex plugin list --marketplace projectatlas --available --json",
+            "pinned to an older release tag",
+            "dedicated `styler-ai/ProjectAtlas` source",
+            "codex plugin marketplace remove projectatlas",
+            "codex plugin marketplace add styler-ai/ProjectAtlas --ref",
+        ] {
+            if !document.contains(required) {
+                return Err(io::Error::other(format!(
+                    "{document_name} is missing Codex plugin cache/update guidance {required:?}"
+                ))
+                .into());
+            }
+        }
+    }
     let windows_release_smoke = workflow_job_block(&release_workflow, "installer-smoke-windows")?;
     for required in [
         "[System.IO.FileShare]::None",
@@ -393,7 +435,20 @@ fn repository_guidance_keeps_legacy_toon_export_optional() -> Result<(), Box<dyn
             .join("workflows")
             .join("release.yml"),
     )?;
+    let readme = fs::read_to_string(workspace_root.join("README.md"))?;
     let gitignore = fs::read_to_string(workspace_root.join(".gitignore"))?;
+    for required in [
+        "Rust-native local code index and atlas",
+        "complete SQLite-backed index",
+        "fast local SQLite index",
+    ] {
+        if !readme.contains(required) {
+            return Err(io::Error::other(format!(
+                "README must present ProjectAtlas as a complete local code index; missing {required:?}"
+            ))
+            .into());
+        }
+    }
     for (workflow_name, workflow) in [("ci", &ci_workflow), ("release", &release_workflow)] {
         let verify = workflow_job_block(workflow, "verify")?;
         if verify.contains("projectatlas.toon") || verify.contains("map --force") {
@@ -702,6 +757,14 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             ))
             .into());
         }
+        if !installer_output_text
+            .contains("Active process resolves bare projectatlas to verified runtime")
+        {
+            return Err(io::Error::other(format!(
+                "installer did not make its active process prefer the verified runtime\n{installer_output_text}"
+            ))
+            .into());
+        }
 
         let versioned_runtime = local_app_data
             .join("ProjectAtlas")
@@ -992,6 +1055,14 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         String::from_utf8_lossy(&installer_output.stdout),
         String::from_utf8_lossy(&installer_output.stderr)
     );
+    if !installer_output_text
+        .contains("Active process resolves bare projectatlas to verified runtime")
+    {
+        return Err(io::Error::other(format!(
+            "plugin update installer did not make its active process prefer the verified runtime:\n{installer_output_text}"
+        ))
+        .into());
+    }
     let safe_stale_quarantine = stale_shim_quarantine_path(&safe_stale_runtime, "0.0.1");
     if !installer_output_text.contains("Quarantined stale ProjectAtlas shim") {
         return Err(io::Error::other(format!(

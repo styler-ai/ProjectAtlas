@@ -236,7 +236,7 @@ function Get-NormalizedPathEntry {
     }
 }
 
-function Set-ProjectAtlasPathPrecedence {
+function Set-ProjectAtlasProcessPathPrecedence {
     param(
         [string]$FilePath
     )
@@ -250,6 +250,19 @@ function Set-ProjectAtlasPathPrecedence {
     $processEntries = Split-PathList $env:Path
     $processEntries = @($processEntries | Where-Object { (Get-NormalizedPathEntry $_) -ne $normalizedRuntimeDir })
     $env:Path = (@($runtimeDir) + $processEntries) -join ";"
+}
+
+function Set-ProjectAtlasPathPrecedence {
+    param(
+        [string]$FilePath
+    )
+    Set-ProjectAtlasProcessPathPrecedence $FilePath
+    $runtimeDir = Split-Path -Parent $FilePath
+    if (-not $runtimeDir) {
+        return
+    }
+
+    $normalizedRuntimeDir = Get-NormalizedPathEntry $runtimeDir
 
     if (Test-Truthy $env:PROJECTATLAS_SKIP_USER_PATH_UPDATE) {
         return
@@ -259,6 +272,29 @@ function Set-ProjectAtlasPathPrecedence {
     $userEntries = Split-PathList $userPath
     $userEntries = @($userEntries | Where-Object { (Get-NormalizedPathEntry $_) -ne $normalizedRuntimeDir })
     [Environment]::SetEnvironmentVariable("Path", ((@($runtimeDir) + $userEntries) -join ";"), "User")
+}
+
+function Confirm-ProjectAtlasBareCommandResolution {
+    param(
+        [string]$VerifiedPath,
+        [string]$ExpectedVersion
+    )
+    if (-not $VerifiedPath) {
+        return
+    }
+    $verified = Get-NormalizedPathEntry $VerifiedPath
+    $projectAtlasCommand = Get-Command projectatlas -ErrorAction SilentlyContinue
+    if (-not $projectAtlasCommand) {
+        Write-Warning "Active process still cannot resolve bare 'projectatlas'. Generated MCP configs use the verified absolute runtime: $VerifiedPath. Restart Codex or the shell before relying on bare projectatlas."
+        return
+    }
+    $commandPath = $projectAtlasCommand.Source
+    if ((Get-NormalizedPathEntry $commandPath) -eq $verified -and (Test-ProjectAtlasRuntime $commandPath $ExpectedVersion)) {
+        Write-Output "Active process resolves bare projectatlas to verified runtime: $commandPath"
+        return
+    }
+    $commandVersion = Get-ProjectAtlasRuntimeVersion $commandPath
+    Write-Warning "Active process still resolves bare 'projectatlas' to $commandPath version '$commandVersion', not the verified runtime $VerifiedPath. Generated MCP configs use the absolute runtime; restart Codex or the shell, put $(Split-Path -Parent $VerifiedPath) first on PATH, or remove the obsolete shim before relying on bare projectatlas."
 }
 
 function Sync-ProjectAtlasRuntimeToLocalAppData {
@@ -424,6 +460,7 @@ if ($RuntimePath) {
     if (-not (Test-ProjectAtlasRuntime $projectAtlas $ProjectAtlasVersion)) {
         throw "Provided ProjectAtlas runtime does not satisfy the ProjectAtlas runtime/version contract: $projectAtlas"
     }
+    Set-ProjectAtlasProcessPathPrecedence $projectAtlas
 }
 else {
     $cargo = Find-Cargo
@@ -472,6 +509,7 @@ else {
     Set-ProjectAtlasPathPrecedence $projectAtlas
 }
 Invoke-Checked $projectAtlas @("--format", "json", "runtime-info") | Out-Null
+Confirm-ProjectAtlasBareCommandResolution $projectAtlas $ProjectAtlasVersion
 Quarantine-ProjectAtlasStaleShims $projectAtlas $ProjectAtlasVersion
 Write-ProjectAtlasPathShadowReport $projectAtlas $ProjectAtlasVersion
 
