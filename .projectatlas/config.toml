@@ -23,6 +23,8 @@ line_comment_prefixes = ["//", "#", "--", ";"]
 [purpose.styles_by_extension]
 ".md" = "line-comment"
 ".rs" = "line-comment"
+".yaml" = "line-comment"
+".yml" = "line-comment"
 
 [summary_rules]
 ascii_only = true

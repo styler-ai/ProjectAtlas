@@ -14,6 +14,8 @@ on:
 
 permissions:
   contents: write
+  issues: read
+  pull-requests: read
 
 env:
   RELEASE_VERSION: ${{ inputs.version }}
@@ -56,6 +58,9 @@ jobs:
 
       - name: Rustdoc
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+
+      - name: Release notes generator self-test
+        run: python3 .github/scripts/release-notes.py --self-test
 
       - name: Verify version
         run: |
@@ -355,6 +360,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Download artifacts
         uses: actions/download-artifact@v8
@@ -378,9 +385,10 @@ jobs:
 
       - name: Create GitHub release
         run: |
+          python3 .github/scripts/release-notes.py > release-notes.md
           gh release create "$RELEASE_VERSION" release-assets/* \
             --title "$RELEASE_VERSION" \
-            --generate-notes
+            --notes-file release-notes.md
 
   installer-smoke-unix:
     name: installer smoke ${{ matrix.label }}
