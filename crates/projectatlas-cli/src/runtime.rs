@@ -23,8 +23,8 @@ use projectatlas_core::telemetry::{
 use projectatlas_core::toon::encode_agent_payload;
 use projectatlas_core::{
     Node, NodeKind, Overview, PurposeSource, PurposeStatus, normalize_native_path_display,
-    normalize_native_path_display_str, normalize_repo_path, repo_path_to_native,
-    validated_repo_file_key,
+    normalize_native_path_display_str, normalize_repo_path, purpose_review_signal,
+    repo_path_to_native, validated_repo_file_key,
 };
 use projectatlas_db::{AtlasStore, HealthFindingsPage, HealthQuery, IndexedFileText};
 use projectatlas_fs::{ScanOptions, gitignore_excludes_path, scan_path, scan_repo};
@@ -480,6 +480,10 @@ pub(crate) struct PurposeCurationPage {
     pub(crate) truncated: bool,
     /// Whether the queue is restricted to source-relevant paths.
     pub(crate) source_only: bool,
+    /// Folder scope included in the queue.
+    pub(crate) folder_scope: String,
+    /// File scope included in the queue.
+    pub(crate) file_scope: String,
     /// Applied category filter.
     pub(crate) category: String,
     /// Applied severity filter.
@@ -515,6 +519,12 @@ pub(crate) struct PurposeCurationItem {
     pub(crate) purpose_status: String,
     /// Purpose source.
     pub(crate) purpose_source: String,
+    /// Whether an agent explicitly reviewed or set this purpose.
+    pub(crate) purpose_agent_reviewed: bool,
+    /// Priority for agent curation.
+    pub(crate) review_priority: String,
+    /// Stable reason explaining the priority.
+    pub(crate) review_reason: String,
     /// Current deterministic content summary.
     pub(crate) content_summary: String,
     /// Recommended agent action.
@@ -542,6 +552,8 @@ pub(crate) fn purpose_curation_page(
         .iter()
         .map(|finding| {
             let node = nodes.get(&finding.path);
+            let review_signal =
+                node.map(|indexed| purpose_review_signal(&indexed.node, &indexed.purpose));
             PurposeCurationItem {
                 severity: health_severity_name(finding.severity).to_string(),
                 id: finding.id.clone(),
@@ -563,6 +575,14 @@ pub(crate) fn purpose_curation_page(
                 purpose_source: node
                     .map(|indexed| indexed.purpose.source.to_string())
                     .unwrap_or_default(),
+                purpose_agent_reviewed: node
+                    .is_some_and(|indexed| indexed.purpose.agent_reviewed()),
+                review_priority: review_signal
+                    .map(|signal| signal.priority.to_string())
+                    .unwrap_or_default(),
+                review_reason: review_signal
+                    .map(|signal| signal.reason.to_string())
+                    .unwrap_or_default(),
                 content_summary: node
                     .and_then(|indexed| indexed.summary.clone())
                     .unwrap_or_default(),
@@ -580,6 +600,8 @@ pub(crate) fn purpose_curation_page(
         next_start_index: health_next_start_index(&page),
         truncated: health_next_start_index(&page).is_some(),
         source_only: query.source_only,
+        folder_scope: purpose_queue_folder_scope(query).to_string(),
+        file_scope: purpose_queue_file_scope(query).to_string(),
         category: query.category.clone().unwrap_or_default(),
         severity: query.severity.map_or("", health_severity_name).to_string(),
         path_prefix: query.path_prefix.clone().unwrap_or_default(),
@@ -638,6 +660,8 @@ pub(crate) fn render_purpose_curation_page(page: &PurposeCurationPage) -> String
             "next_start_index": page.next_start_index,
             "truncated": page.truncated,
             "source_only": page.source_only,
+            "folder_scope": page.folder_scope,
+            "file_scope": page.file_scope,
             "category": page.category,
             "severity": page.severity,
             "path_prefix": page.path_prefix,
@@ -645,6 +669,25 @@ pub(crate) fn render_purpose_curation_page(page: &PurposeCurationPage) -> String
         },
         "purpose_curation_items": page.items,
     }))
+}
+
+/// Return the folder inclusion scope for purpose curation metadata.
+fn purpose_queue_folder_scope(query: &HealthQuery) -> &'static str {
+    if query.source_only && !query.high_impact_only {
+        "source_relevant"
+    } else {
+        "all"
+    }
+}
+
+/// Return the file inclusion scope for purpose curation metadata.
+fn purpose_queue_file_scope(query: &HealthQuery) -> &'static str {
+    match (query.high_impact_only, query.source_only) {
+        (true, true) => "high_impact",
+        (true, false) => "high_impact_and_assets",
+        (false, true) => "all_source",
+        (false, false) => "all",
+    }
 }
 
 /// Return a stable lowercase severity name.

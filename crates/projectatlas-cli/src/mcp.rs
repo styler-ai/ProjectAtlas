@@ -239,6 +239,10 @@ struct AtlasHealthParams {
     summary_only: Option<bool>,
     /// Restrict findings to source files and folders that contain source files.
     source_only: Option<bool>,
+    /// Include non-source files and asset-only folders in the purpose queue.
+    include_assets: Option<bool>,
+    /// Include low-priority files in the purpose queue.
+    include_low_priority_files: Option<bool>,
 }
 
 /// MCP parameter payload for parity reports.
@@ -389,7 +393,10 @@ impl ProjectAtlasMcpServer {
 }
 
 /// Convert MCP health parameters into a DB health query.
-fn health_query_from_params(params: &AtlasHealthParams) -> Result<HealthQuery, CliError> {
+fn health_query_from_params(
+    params: &AtlasHealthParams,
+    high_impact_only: bool,
+) -> Result<HealthQuery, CliError> {
     Ok(HealthQuery {
         start_index: params.start_index.unwrap_or(0),
         limit: params
@@ -406,6 +413,7 @@ fn health_query_from_params(params: &AtlasHealthParams) -> Result<HealthQuery, C
             .map(|value| normalize_repo_path_prefix(&value)),
         summary_only: params.summary_only.unwrap_or(false),
         source_only: params.source_only.unwrap_or(false),
+        high_impact_only,
     })
 }
 
@@ -780,7 +788,7 @@ impl ProjectAtlasMcpServer {
     fn atlas_health(&self, Parameters(params): Parameters<AtlasHealthParams>) -> String {
         Self::as_mcp_text((|| {
             let store = self.open_store()?;
-            let query = health_query_from_params(&params)?;
+            let query = health_query_from_params(&params, false)?;
             let page =
                 store.unresolved_health_findings_page(&store.resolved_health_ids()?, &query)?;
             let toon = render_health_page(&page, &query);
@@ -985,15 +993,20 @@ impl ProjectAtlasMcpServer {
     /// Return a bounded purpose curation queue.
     #[tool(
         name = "atlas_purpose_queue",
-        description = "Return a bounded source-focused queue of ProjectAtlas paths that need agent purpose curation."
+        description = "Return a bounded folder-first queue of ProjectAtlas paths that need agent purpose curation."
     )]
     fn atlas_purpose_queue(&self, Parameters(mut params): Parameters<AtlasHealthParams>) -> String {
         Self::as_mcp_text((|| {
-            if params.source_only.is_none() {
+            if params.include_assets.unwrap_or(false) {
+                params.source_only = Some(false);
+            } else if params.source_only.is_none() {
                 params.source_only = Some(true);
             }
             let store = self.open_store()?;
-            let query = health_query_from_params(&params)?;
+            let query = health_query_from_params(
+                &params,
+                !params.include_low_priority_files.unwrap_or(false),
+            )?;
             let page = purpose_curation_page(&store, &query)?;
             let toon = render_purpose_curation_page(&page);
             record_directory_walk_usage_estimate(
@@ -1022,7 +1035,9 @@ impl ProjectAtlasMcpServer {
             Ok(encode_agent_payload(&json!({
                 "purpose_set": {
                     "path": node_key,
-                    "status": "approved"
+                    "status": "approved",
+                    "source": "agent",
+                    "agent_reviewed": true
                 }
             })))
         })())

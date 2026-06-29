@@ -575,6 +575,9 @@ enum PurposeCommand {
         /// Include non-source files and asset-only folders in the queue.
         #[arg(long)]
         include_assets: bool,
+        /// Include low-priority files instead of the default folder-first queue.
+        #[arg(long)]
+        include_low_priority_files: bool,
     },
 }
 
@@ -1131,6 +1134,7 @@ fn run() -> Result<(), CliError> {
                 path_prefix.as_deref(),
                 *summary_only,
                 *source_only,
+                false,
             );
             let page =
                 store.unresolved_health_findings_page(&store.resolved_health_ids()?, &query)?;
@@ -1294,7 +1298,15 @@ fn run() -> Result<(), CliError> {
             PurposeCommand::Set { path, purpose } => {
                 let store = open_atlas_store(&cli.db)?;
                 store.set_purpose(path, purpose, PurposeSource::Agent)?;
-                write_stdout(&format!("purpose set: {path}\n"))?;
+                let report = json!({
+                    "purpose_set": {
+                        "path": path,
+                        "status": "approved",
+                        "source": "agent",
+                        "agent_reviewed": true
+                    }
+                });
+                print_output(cli.format, &encode_agent_payload(&report), &report)?;
             }
             PurposeCommand::Queue {
                 start_index,
@@ -1304,6 +1316,7 @@ fn run() -> Result<(), CliError> {
                 path_prefix,
                 summary_only,
                 include_assets,
+                include_low_priority_files,
             } => {
                 let store = open_atlas_store(&cli.db)?;
                 let query = health_query_from_cli(
@@ -1314,6 +1327,7 @@ fn run() -> Result<(), CliError> {
                     path_prefix.as_deref(),
                     *summary_only,
                     !*include_assets,
+                    !*include_low_priority_files,
                 );
                 let page = purpose_curation_page(&store, &query)?;
                 print_output(cli.format, &render_purpose_curation_page(&page), &page)?;
@@ -1607,6 +1621,7 @@ fn health_query_from_cli(
     path_prefix: Option<&str>,
     summary_only: bool,
     source_only: bool,
+    high_impact_only: bool,
 ) -> HealthQuery {
     HealthQuery {
         start_index,
@@ -1617,6 +1632,7 @@ fn health_query_from_cli(
             .map(|value| normalize_repo_path_prefix(&value)),
         summary_only,
         source_only,
+        high_impact_only,
     }
 }
 
@@ -2907,9 +2923,15 @@ mod tests {
         let repo = temp.path().join("repo");
         fs::create_dir(&repo)?;
         fs::create_dir(repo.join("src"))?;
+        fs::create_dir(repo.join("assets"))?;
         fs::write(
             repo.join("src").join("main.rs"),
             "fn main() {\n    helper();\n}\n\nfn helper() {}\n",
+        )?;
+        fs::write(repo.join("src").join("detail.rs"), "fn detail() {}\n")?;
+        fs::write(
+            repo.join("assets").join("logo.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
         )?;
         let db = repo.join(".projectatlas").join("projectatlas.db");
         let server = ProjectAtlasMcpServer::new(db, None, "mcp-test".to_string());
@@ -3133,11 +3155,72 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("purpose queue result did not contain text"))?;
         if !purpose_queue_text.contains("purpose_curation:")
             || !purpose_queue_text.contains("source_only: true")
+            || !purpose_queue_text.contains("folder_scope: all")
+            || !purpose_queue_text.contains("file_scope: high_impact")
             || !purpose_queue_text.contains("purpose_curation_items[")
+            || !purpose_queue_text.contains("purpose_agent_reviewed,review_priority,review_reason")
+            || !purpose_queue_text.contains("false,high,high_impact_file")
             || !purpose_queue_text.contains("suggested-purpose-review:src/main.rs:")
+            || purpose_queue_text.contains("suggested-purpose-review:src/detail.rs:")
+            || purpose_queue_text.contains("assets/logo.svg")
         {
             return Err(format!(
-                "atlas_purpose_queue result did not contain source-focused curation payload: {purpose_queue_text}"
+                "atlas_purpose_queue result did not contain folder-first curation payload: {purpose_queue_text}"
+            )
+            .into());
+        }
+
+        let mut asset_queue_args = Map::new();
+        asset_queue_args.insert("include_assets".to_string(), json!(true));
+        let asset_purpose_queue = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new("atlas_purpose_queue").with_arguments(asset_queue_args),
+            )
+            .await?;
+        let asset_purpose_queue_text = asset_purpose_queue
+            .content
+            .first()
+            .and_then(|content| content.raw.as_text())
+            .map(|text| text.text.as_str())
+            .ok_or_else(|| {
+                std::io::Error::other("asset purpose queue result did not contain text")
+            })?;
+        if !asset_purpose_queue_text.contains("source_only: false")
+            || !asset_purpose_queue_text.contains("folder_scope: all")
+            || !asset_purpose_queue_text.contains("file_scope: high_impact_and_assets")
+            || !asset_purpose_queue_text.contains("missing-purpose:assets/logo.svg:")
+            || asset_purpose_queue_text.contains("suggested-purpose-review:src/detail.rs:")
+        {
+            return Err(format!(
+                "atlas_purpose_queue include_assets did not include assets without low-priority source cleanup: {asset_purpose_queue_text}"
+            )
+            .into());
+        }
+
+        let mut broad_queue_args = Map::new();
+        broad_queue_args.insert("include_low_priority_files".to_string(), json!(true));
+        let broad_purpose_queue = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new("atlas_purpose_queue").with_arguments(broad_queue_args),
+            )
+            .await?;
+        let broad_purpose_queue_text = broad_purpose_queue
+            .content
+            .first()
+            .and_then(|content| content.raw.as_text())
+            .map(|text| text.text.as_str())
+            .ok_or_else(|| {
+                std::io::Error::other("broad purpose queue result did not contain text")
+            })?;
+        if !broad_purpose_queue_text.contains("suggested-purpose-review:src/detail.rs:")
+            || !broad_purpose_queue_text.contains("folder_scope: source_relevant")
+            || !broad_purpose_queue_text.contains("file_scope: all_source")
+            || !broad_purpose_queue_text.contains("false,low,generated_file_suggestion")
+        {
+            return Err(format!(
+                "atlas_purpose_queue include_low_priority_files missed low-priority file payload: {broad_purpose_queue_text}"
             )
             .into());
         }

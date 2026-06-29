@@ -103,7 +103,7 @@ projectatlas purpose queue --limit 20
 projectatlas purpose set <path> "<one-line purpose>"
 ```
 
-The purpose queue is source-focused by default, so binary assets and asset-only roots do not dominate the next-action list. Pass `--include-assets` only when intentionally curating non-source files. Generated purpose suggestions remain review-required until an agent approves or corrects them.
+The purpose queue is source-focused and folder-first by default, so binary assets, asset-only roots, and low-priority source files do not dominate the next-action list. Pass `--include-low-priority-files` only when intentionally doing broad file-purpose cleanup, and pass `--include-assets` only when intentionally curating non-source files. Generated purpose suggestions remain review-required until an agent approves or corrects them.
 
 ### Legacy Purpose headers or .purpose files
 

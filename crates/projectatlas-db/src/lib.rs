@@ -10,8 +10,9 @@ use projectatlas_core::telemetry::{
     UsageEvent,
 };
 use projectatlas_core::{
-    IndexedNode, Node, NodeKind, Overview, Purpose, PurposeSource, PurposeStatus,
-    normalize_native_path_display, normalize_repo_path_prefix,
+    AGENT_REVIEWED_SOURCE_VALUES, HIGH_IMPACT_FILE_NAMES, HIGH_IMPACT_PATH_PREFIXES,
+    HIGH_IMPACT_PATH_SEGMENTS, IndexedNode, Node, NodeKind, Overview, Purpose, PurposeSource,
+    PurposeStatus, normalize_native_path_display, normalize_repo_path_prefix,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
@@ -134,6 +135,8 @@ pub struct HealthQuery {
     pub summary_only: bool,
     /// Restrict findings to source files and folders that contain source files.
     pub source_only: bool,
+    /// Restrict purpose curation to folders and high-impact files.
+    pub high_impact_only: bool,
 }
 
 /// Bounded health findings page returned by the database layer.
@@ -172,19 +175,19 @@ const PURPOSE_HEALTH_SPECS: [PurposeHealthSpec; 3] = [
         status: "missing",
         category: "missing-purpose",
         message: "Path is indexed but has no approved purpose.",
-        recommendation: "Set or approve a one-line purpose in the ProjectAtlas index.",
+        recommendation: "Set an agent-reviewed one-line purpose in the ProjectAtlas index.",
     },
     PurposeHealthSpec {
         status: "suggested",
         category: "suggested-purpose-review",
         message: "Path has a generated purpose suggestion but no agent-approved purpose.",
-        recommendation: "Inspect the folder/file summary and approve or correct the purpose in SQLite.",
+        recommendation: "Inspect enough context and approve or correct the purpose in SQLite.",
     },
     PurposeHealthSpec {
         status: "stale",
         category: "stale-purpose",
         message: "Path changed after its purpose was approved.",
-        recommendation: "Inspect the current summary and approve or correct the one-line purpose.",
+        recommendation: "Inspect current context and approve or correct the one-line purpose.",
     },
 ];
 
@@ -2105,38 +2108,75 @@ impl AtlasStore {
 
         for spec in PURPOSE_HEALTH_SPECS {
             unfiltered_total +=
-                self.count_purpose_status_findings(spec, None, resolved_ids, false)?;
-            if !purpose_health_spec_matches_query(spec, query) {
-                continue;
-            }
+                self.count_purpose_status_findings(spec, None, resolved_ids, false, false)?;
+        }
 
-            let matching_count = self.count_purpose_status_findings(
-                spec,
-                query.path_prefix.as_deref(),
-                resolved_ids,
-                query.source_only,
-            )?;
+        if query.high_impact_only && query.category.is_none() {
+            let matching_count = if query
+                .severity
+                .is_none_or(|severity| severity == Severity::Warning)
+            {
+                self.count_purpose_lifecycle_findings(
+                    query.path_prefix.as_deref(),
+                    resolved_ids,
+                    query.source_only,
+                    query.high_impact_only,
+                )?
+            } else {
+                0
+            };
             if !query.summary_only
                 && findings.len() < query.limit
                 && total + matching_count > query.start_index
             {
                 let local_start = query.start_index.saturating_sub(total);
                 let local_limit = query.limit - findings.len();
-                findings.extend(self.load_purpose_status_findings_page(
-                    spec,
+                findings.extend(self.load_purpose_lifecycle_findings_page(
                     query.path_prefix.as_deref(),
                     resolved_ids,
                     query.source_only,
+                    query.high_impact_only,
                     local_start,
                     local_limit,
                 )?);
             }
             total += matching_count;
+        } else {
+            for spec in PURPOSE_HEALTH_SPECS {
+                if !purpose_health_spec_matches_query(spec, query) {
+                    continue;
+                }
+
+                let matching_count = self.count_purpose_status_findings(
+                    spec,
+                    query.path_prefix.as_deref(),
+                    resolved_ids,
+                    query.source_only,
+                    query.high_impact_only,
+                )?;
+                if !query.summary_only
+                    && findings.len() < query.limit
+                    && total + matching_count > query.start_index
+                {
+                    let local_start = query.start_index.saturating_sub(total);
+                    let local_limit = query.limit - findings.len();
+                    findings.extend(self.load_purpose_status_findings_page(
+                        spec,
+                        query.path_prefix.as_deref(),
+                        resolved_ids,
+                        query.source_only,
+                        query.high_impact_only,
+                        local_start,
+                        local_limit,
+                    )?);
+                }
+                total += matching_count;
+            }
         }
 
         for category in ["duplicate-purpose", "repeated-temporary-folder"] {
             let unfiltered_count =
-                self.count_structural_health_findings(category, None, resolved_ids, false)?;
+                self.count_structural_health_findings(category, None, resolved_ids, false, false)?;
             unfiltered_total += unfiltered_count;
             if !health_category_matches_query(category, Severity::Warning, query) {
                 continue;
@@ -2146,6 +2186,7 @@ impl AtlasStore {
                 query.path_prefix.as_deref(),
                 resolved_ids,
                 query.source_only,
+                query.high_impact_only,
             )?;
             if !query.summary_only
                 && findings.len() < query.limit
@@ -2158,6 +2199,7 @@ impl AtlasStore {
                     query.path_prefix.as_deref(),
                     resolved_ids,
                     query.source_only,
+                    query.high_impact_only,
                     local_start,
                     local_limit,
                 )?);
@@ -2254,15 +2296,104 @@ impl AtlasStore {
     }
 
     /// Count unresolved purpose lifecycle findings directly in `SQLite`.
+    fn count_purpose_lifecycle_findings(
+        &self,
+        path_prefix: Option<&str>,
+        resolved_ids: &[String],
+        source_only: bool,
+        high_impact_only: bool,
+    ) -> DbResult<usize> {
+        let (where_clause, values) = purpose_lifecycle_where_clause(
+            path_prefix,
+            resolved_ids,
+            source_only,
+            high_impact_only,
+        );
+        let sql = format!(
+            "
+            SELECT COUNT(*)
+            FROM nodes n
+            JOIN purposes p ON p.node_id = n.id
+            WHERE {where_clause}
+            "
+        );
+        let count = self
+            .connection
+            .query_row(&sql, params_from_iter(values), |row| row.get::<_, i64>(0))?;
+        count_to_usize("health_purpose_lifecycle_count", count)
+    }
+
+    /// Load one globally ordered purpose lifecycle page directly from `SQLite`.
+    fn load_purpose_lifecycle_findings_page(
+        &self,
+        path_prefix: Option<&str>,
+        resolved_ids: &[String],
+        source_only: bool,
+        high_impact_only: bool,
+        start_index: usize,
+        limit: usize,
+    ) -> DbResult<Vec<HealthFinding>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (where_clause, mut values) = purpose_lifecycle_where_clause(
+            path_prefix,
+            resolved_ids,
+            source_only,
+            high_impact_only,
+        );
+        let limit_placeholder = values.len() + 1;
+        let offset_placeholder = values.len() + 2;
+        values.push(Value::from(usize_to_i64(limit)));
+        values.push(Value::from(usize_to_i64(start_index)));
+        let order_by = purpose_default_queue_order_expression("n", "p");
+        let sql = format!(
+            "
+            SELECT n.path, p.status
+            FROM nodes n
+            JOIN purposes p ON p.node_id = n.id
+            WHERE {where_clause}
+            ORDER BY {order_by}
+            LIMIT ?{limit_placeholder} OFFSET ?{offset_placeholder}
+            "
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(values), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut findings = Vec::new();
+        for row in rows {
+            let (path, status) = row?;
+            let spec = purpose_health_spec_for_status(&status)?;
+            findings.push(HealthFinding {
+                id: finding_id(spec.category, &path, None),
+                severity: Severity::Warning,
+                category: spec.category.to_string(),
+                path,
+                related_path: None,
+                message: spec.message.to_string(),
+                recommendation: spec.recommendation.to_string(),
+            });
+        }
+        Ok(findings)
+    }
+
+    /// Count unresolved purpose lifecycle findings directly in `SQLite`.
     fn count_purpose_status_findings(
         &self,
         spec: PurposeHealthSpec,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
         source_only: bool,
+        high_impact_only: bool,
     ) -> DbResult<usize> {
-        let (where_clause, values) =
-            purpose_status_where_clause(spec, path_prefix, resolved_ids, source_only);
+        let (where_clause, values) = purpose_status_where_clause(
+            spec,
+            path_prefix,
+            resolved_ids,
+            source_only,
+            high_impact_only,
+        );
         let sql = format!(
             "
             SELECT COUNT(*)
@@ -2284,25 +2415,36 @@ impl AtlasStore {
         path_prefix: Option<&str>,
         resolved_ids: &[String],
         source_only: bool,
+        high_impact_only: bool,
         start_index: usize,
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let (where_clause, mut values) =
-            purpose_status_where_clause(spec, path_prefix, resolved_ids, source_only);
+        let (where_clause, mut values) = purpose_status_where_clause(
+            spec,
+            path_prefix,
+            resolved_ids,
+            source_only,
+            high_impact_only,
+        );
         let limit_placeholder = values.len() + 1;
         let offset_placeholder = values.len() + 2;
         values.push(Value::from(usize_to_i64(limit)));
         values.push(Value::from(usize_to_i64(start_index)));
+        let order_by = if high_impact_only {
+            purpose_default_queue_order_expression("n", "p")
+        } else {
+            "n.path".to_string()
+        };
         let sql = format!(
             "
             SELECT n.path
             FROM nodes n
             JOIN purposes p ON p.node_id = n.id
             WHERE {where_clause}
-            ORDER BY n.path
+            ORDER BY {order_by}
             LIMIT ?{limit_placeholder} OFFSET ?{offset_placeholder}
             "
         );
@@ -2331,14 +2473,21 @@ impl AtlasStore {
         path_prefix: Option<&str>,
         resolved_ids: &[String],
         source_only: bool,
+        high_impact_only: bool,
     ) -> DbResult<usize> {
         match category {
-            "duplicate-purpose" => {
-                self.count_duplicate_purpose_findings(path_prefix, resolved_ids, source_only)
-            }
-            "repeated-temporary-folder" => {
-                self.count_repeated_temp_folder_findings(path_prefix, resolved_ids, source_only)
-            }
+            "duplicate-purpose" => self.count_duplicate_purpose_findings(
+                path_prefix,
+                resolved_ids,
+                source_only,
+                high_impact_only,
+            ),
+            "repeated-temporary-folder" => self.count_repeated_temp_folder_findings(
+                path_prefix,
+                resolved_ids,
+                source_only,
+                high_impact_only,
+            ),
             _ => Ok(0),
         }
     }
@@ -2350,6 +2499,7 @@ impl AtlasStore {
         path_prefix: Option<&str>,
         resolved_ids: &[String],
         source_only: bool,
+        high_impact_only: bool,
         start_index: usize,
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
@@ -2358,6 +2508,7 @@ impl AtlasStore {
                 path_prefix,
                 resolved_ids,
                 source_only,
+                high_impact_only,
                 start_index,
                 limit,
             ),
@@ -2365,6 +2516,7 @@ impl AtlasStore {
                 path_prefix,
                 resolved_ids,
                 source_only,
+                high_impact_only,
                 start_index,
                 limit,
             ),
@@ -2378,12 +2530,14 @@ impl AtlasStore {
         path_prefix: Option<&str>,
         resolved_ids: &[String],
         source_only: bool,
+        high_impact_only: bool,
     ) -> DbResult<usize> {
         let (where_clause, values) = structural_finding_where_clause(
             "duplicate-purpose",
             path_prefix,
             resolved_ids,
             source_only,
+            high_impact_only,
             1,
         );
         let source_relevant = source_relevant_node_expression("n");
@@ -2437,6 +2591,7 @@ impl AtlasStore {
         path_prefix: Option<&str>,
         resolved_ids: &[String],
         source_only: bool,
+        high_impact_only: bool,
         start_index: usize,
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
@@ -2448,6 +2603,7 @@ impl AtlasStore {
             path_prefix,
             resolved_ids,
             source_only,
+            high_impact_only,
             1,
         );
         let source_relevant = source_relevant_node_expression("n");
@@ -2531,6 +2687,7 @@ impl AtlasStore {
         path_prefix: Option<&str>,
         resolved_ids: &[String],
         source_only: bool,
+        high_impact_only: bool,
     ) -> DbResult<usize> {
         let mut total = 0_usize;
         for bucket in TEMP_FOLDER_BUCKETS {
@@ -2539,6 +2696,7 @@ impl AtlasStore {
                 path_prefix,
                 resolved_ids,
                 source_only,
+                high_impact_only,
             )?;
         }
         Ok(total)
@@ -2551,6 +2709,7 @@ impl AtlasStore {
         path_prefix: Option<&str>,
         resolved_ids: &[String],
         source_only: bool,
+        high_impact_only: bool,
     ) -> DbResult<usize> {
         let exact = bucket.to_string();
         let suffix = format!("%/{bucket}");
@@ -2559,6 +2718,7 @@ impl AtlasStore {
             path_prefix,
             resolved_ids,
             source_only,
+            high_impact_only,
             3,
         );
         let mut values = vec![Value::from(exact), Value::from(suffix)];
@@ -2602,6 +2762,7 @@ impl AtlasStore {
         path_prefix: Option<&str>,
         resolved_ids: &[String],
         source_only: bool,
+        high_impact_only: bool,
         start_index: usize,
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
@@ -2616,6 +2777,7 @@ impl AtlasStore {
                 path_prefix,
                 resolved_ids,
                 source_only,
+                high_impact_only,
             )?;
             if findings.len() < limit && total + matching_count > start_index {
                 let local_start = start_index.saturating_sub(total);
@@ -2625,6 +2787,7 @@ impl AtlasStore {
                     path_prefix,
                     resolved_ids,
                     source_only,
+                    high_impact_only,
                     local_start,
                     local_limit,
                 )?);
@@ -2644,6 +2807,7 @@ impl AtlasStore {
         path_prefix: Option<&str>,
         resolved_ids: &[String],
         source_only: bool,
+        high_impact_only: bool,
         start_index: usize,
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
@@ -2657,6 +2821,7 @@ impl AtlasStore {
             path_prefix,
             resolved_ids,
             source_only,
+            high_impact_only,
             3,
         );
         let mut values = vec![Value::from(exact), Value::from(suffix)];
@@ -3565,8 +3730,9 @@ fn parse_source(value: &str) -> DbResult<PurposeSource> {
         "missing" => PurposeSource::Missing,
         "imported" => PurposeSource::Imported,
         "generated" => PurposeSource::Generated,
-        "agent" => PurposeSource::Agent,
-        "human" => PurposeSource::Human,
+        // Older databases could contain `human`; ProjectAtlas now treats
+        // explicit approval as agent-owned and serializes new writes as `agent`.
+        "agent" | "human" => PurposeSource::Agent,
         _ => {
             return Err(DbError::InvalidEnum {
                 field: "source",
@@ -3698,18 +3864,95 @@ fn health_category_matches_query(category: &str, severity: Severity, query: &Hea
         && query.severity.is_none_or(|requested| severity == requested)
 }
 
+/// Return purpose health metadata for a stored purpose status.
+fn purpose_health_spec_for_status(status: &str) -> DbResult<PurposeHealthSpec> {
+    PURPOSE_HEALTH_SPECS
+        .iter()
+        .copied()
+        .find(|spec| spec.status == status)
+        .ok_or_else(|| DbError::InvalidEnum {
+            field: "status",
+            value: status.to_string(),
+        })
+}
+
+/// Build the shared SQL filter for globally ordered purpose lifecycle findings.
+fn purpose_lifecycle_where_clause(
+    path_prefix: Option<&str>,
+    resolved_ids: &[String],
+    source_only: bool,
+    high_impact_only: bool,
+) -> (String, Vec<Value>) {
+    let statuses = PURPOSE_HEALTH_SPECS
+        .iter()
+        .map(|spec| format!("'{}'", spec.status))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut clauses = vec![
+        "n.exists_now = 1".to_string(),
+        format!("p.status IN ({statuses})"),
+    ];
+    let mut values = Vec::new();
+
+    if source_filter_applies_before_queue(source_only, high_impact_only) {
+        clauses.push(source_relevant_node_expression("n"));
+    }
+    if high_impact_only {
+        clauses.push(purpose_default_queue_node_expression(
+            "n",
+            "p",
+            !source_only,
+        ));
+    }
+
+    let normalized_prefix = path_prefix
+        .map(normalize_repo_path_prefix)
+        .filter(|prefix| prefix != ".");
+    if let Some(prefix) = normalized_prefix {
+        clauses.push(format!(
+            "(n.path = ?{} OR n.path LIKE ?{} ESCAPE '\\')",
+            values.len() + 1,
+            values.len() + 2
+        ));
+        values.push(Value::from(prefix.clone()));
+        values.push(Value::from(sqlite_descendant_pattern(&prefix)));
+    }
+
+    for spec in PURPOSE_HEALTH_SPECS {
+        let resolved_paths = resolved_purpose_paths(resolved_ids, spec.category);
+        if !resolved_paths.is_empty() {
+            clauses.push(format!(
+                "NOT (p.status = '{}' AND n.path IN ({}))",
+                spec.status,
+                numbered_placeholders(values.len() + 1, resolved_paths.len())
+            ));
+            values.extend(resolved_paths.into_iter().map(Value::from));
+        }
+    }
+
+    (clauses.join(" AND "), values)
+}
+
 /// Build the shared SQL filter for purpose lifecycle health findings.
 fn purpose_status_where_clause(
     spec: PurposeHealthSpec,
     path_prefix: Option<&str>,
     resolved_ids: &[String],
     source_only: bool,
+    high_impact_only: bool,
 ) -> (String, Vec<Value>) {
     let mut clauses = vec!["n.exists_now = 1".to_string(), "p.status = ?1".to_string()];
     let mut values = vec![Value::from(spec.status.to_string())];
 
-    if source_only {
+    if source_filter_applies_before_queue(source_only, high_impact_only) {
         clauses.push(source_relevant_node_expression("n"));
+    }
+    if high_impact_only {
+        clauses.push(purpose_default_queue_node_expression(
+            "n",
+            "p",
+            !source_only,
+        ));
     }
 
     let normalized_prefix = path_prefix
@@ -3743,14 +3986,18 @@ fn structural_finding_where_clause(
     path_prefix: Option<&str>,
     resolved_ids: &[String],
     source_only: bool,
+    high_impact_only: bool,
     first_placeholder: usize,
 ) -> (String, Vec<Value>) {
     let mut placeholder = first_placeholder;
     let mut clauses = Vec::new();
     let mut values = Vec::new();
 
-    if source_only {
+    if source_filter_applies_before_queue(source_only, high_impact_only) {
         clauses.push("source_relevant = 1".to_string());
+    }
+    if high_impact_only {
+        clauses.push(purpose_default_queue_finding_expression(!source_only));
     }
 
     let normalized_prefix = path_prefix
@@ -3786,6 +4033,94 @@ fn structural_finding_where_clause(
     } else {
         (format!("WHERE {}", clauses.join(" AND ")), values)
     }
+}
+
+/// SQL expression for paths that belong in the default purpose queue.
+fn purpose_default_queue_node_expression(
+    node_alias: &str,
+    purpose_alias: &str,
+    include_assets: bool,
+) -> String {
+    let asset_clause = if include_assets {
+        format!(
+            " OR ({node_alias}.kind = 'file' AND NOT ({}))",
+            source_relevant_node_expression(node_alias)
+        )
+    } else {
+        String::new()
+    };
+    let reviewed_sources = sql_string_literals(AGENT_REVIEWED_SOURCE_VALUES);
+    format!(
+        "({node_alias}.kind = 'folder' \
+          OR ({node_alias}.kind = 'file' \
+              AND {purpose_alias}.status = 'stale' \
+              AND {purpose_alias}.source IN ({reviewed_sources})) \
+          OR ({node_alias}.kind = 'file' AND {}){asset_clause})",
+        high_impact_file_path_expression(&format!("lower({node_alias}.path)")),
+    )
+}
+
+/// SQL expression for finding CTE columns that belong in the default purpose queue.
+fn purpose_default_queue_finding_expression(include_assets: bool) -> String {
+    let asset_clause = if include_assets {
+        " OR (kind = 'file' AND COALESCE(language, '') = '')"
+    } else {
+        ""
+    };
+    format!(
+        "(kind = 'folder' OR (kind = 'file' AND {}){asset_clause})",
+        high_impact_file_path_expression("lower(path)")
+    )
+}
+
+/// SQL ORDER BY expression that keeps folder-purpose work ahead of file cleanup.
+fn purpose_default_queue_order_expression(node_alias: &str, purpose_alias: &str) -> String {
+    let reviewed_sources = sql_string_literals(AGENT_REVIEWED_SOURCE_VALUES);
+    format!(
+        "CASE \
+            WHEN {node_alias}.kind = 'folder' THEN 0 \
+            WHEN {node_alias}.kind = 'file' \
+                AND {purpose_alias}.status = 'stale' \
+                AND {purpose_alias}.source IN ({reviewed_sources}) THEN 1 \
+            WHEN {node_alias}.kind = 'file' AND {} THEN 2 \
+            ELSE 3 \
+        END, {node_alias}.path",
+        high_impact_file_path_expression(&format!("lower({node_alias}.path)"))
+    )
+}
+
+/// Return whether `source_only` should run before queue-specific folder/file selection.
+fn source_filter_applies_before_queue(source_only: bool, high_impact_only: bool) -> bool {
+    source_only && !high_impact_only
+}
+
+/// Render trusted static strings as SQL string literals.
+fn sql_string_literals(values: &[&str]) -> String {
+    values
+        .iter()
+        .map(|value| format!("'{}'", value.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// SQL expression mirroring the path-based high-impact file heuristic.
+fn high_impact_file_path_expression(lower_path: &str) -> String {
+    let name_matches = HIGH_IMPACT_FILE_NAMES
+        .iter()
+        .map(|name| format!("{lower_path} = '{name}' OR {lower_path} LIKE '%/{name}'"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let prefix_matches = HIGH_IMPACT_PATH_PREFIXES
+        .iter()
+        .map(|prefix| format!("{lower_path} LIKE '{prefix}%'"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let segment_matches = HIGH_IMPACT_PATH_SEGMENTS
+        .iter()
+        .map(|segment| format!("{lower_path} LIKE '%{segment}%'"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    format!("({name_matches} OR {prefix_matches} OR {segment_matches})")
 }
 
 /// Return a SQL expression that treats source files and folders with source descendants as source-relevant.
@@ -4466,6 +4801,7 @@ mod tests {
             path_prefix: Some("src".to_string()),
             summary_only: false,
             source_only: false,
+            high_impact_only: false,
         };
 
         let page = store.unresolved_health_findings_page(&[], &query)?;
@@ -4522,6 +4858,7 @@ mod tests {
                 path_prefix: Some("src".to_string()),
                 summary_only: false,
                 source_only: false,
+                high_impact_only: false,
             },
         )?;
 
@@ -4568,6 +4905,7 @@ mod tests {
                 path_prefix: Some("src".to_string()),
                 summary_only: false,
                 source_only: false,
+                high_impact_only: false,
             },
         )?;
         require_eq(&duplicate_page.total, &1, "duplicate total")?;
@@ -4588,6 +4926,7 @@ mod tests {
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
                 source_only: false,
+                high_impact_only: false,
             },
         )?;
         require_eq(&temp_page.total, &1, "temp total")?;
@@ -4632,6 +4971,7 @@ mod tests {
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
                 source_only: true,
+                high_impact_only: false,
             },
         )?;
 
@@ -4645,6 +4985,293 @@ mod tests {
                 .collect::<Vec<_>>(),
             &vec![".", "src", "src/main.rs"],
             "source-only paths",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn high_impact_purpose_queue_filters_low_priority_files() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_folder_node("."),
+            test_folder_node("src"),
+            test_file_node("src/main.rs", "hash-main"),
+            test_file_node("src/helper.rs", "hash-helper"),
+            test_file_node("build.gradle.kts", "hash-gradle"),
+        ])?;
+
+        let page = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                start_index: 0,
+                limit: 10,
+                category: Some("missing-purpose".to_string()),
+                severity: Some(Severity::Warning),
+                path_prefix: Some(".".to_string()),
+                summary_only: false,
+                source_only: false,
+                high_impact_only: true,
+            },
+        )?;
+
+        require_eq(&page.unfiltered_total, &5, "all missing rows")?;
+        require_eq(&page.total, &4, "default actionable rows")?;
+        require_eq(
+            &page
+                .findings
+                .iter()
+                .map(|finding| finding.path.as_str())
+                .collect::<Vec<_>>(),
+            &vec![".", "src", "build.gradle.kts", "src/main.rs"],
+            "folder-first high-impact queue paths",
+        )?;
+
+        let broad_page = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                start_index: 0,
+                limit: 10,
+                category: Some("missing-purpose".to_string()),
+                severity: Some(Severity::Warning),
+                path_prefix: Some(".".to_string()),
+                summary_only: false,
+                source_only: false,
+                high_impact_only: false,
+            },
+        )?;
+        require_eq(&broad_page.total, &5, "explicit broad queue rows")?;
+        Ok(())
+    }
+
+    #[test]
+    fn high_impact_purpose_queue_keeps_asset_only_folders_without_asset_files()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let asset_file = Node {
+            path: "assets/logo.svg".to_string(),
+            kind: NodeKind::File,
+            parent_path: Some("assets".to_string()),
+            extension: Some(".svg".to_string()),
+            language: None,
+            size_bytes: Some(42),
+            mtime_ns: Some(10),
+            content_hash: Some("hash-logo".to_string()),
+        };
+        store.replace_scan(&[
+            test_folder_node("."),
+            test_folder_node("assets"),
+            test_folder_node("src"),
+            asset_file,
+            test_file_node("src/helper.rs", "hash-helper"),
+        ])?;
+
+        let page = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                start_index: 0,
+                limit: 10,
+                category: Some("missing-purpose".to_string()),
+                severity: Some(Severity::Warning),
+                path_prefix: Some(".".to_string()),
+                summary_only: false,
+                source_only: true,
+                high_impact_only: true,
+            },
+        )?;
+
+        require_eq(&page.unfiltered_total, &5, "all missing rows")?;
+        require_eq(&page.total, &3, "all folders without asset files")?;
+        require_eq(
+            &page
+                .findings
+                .iter()
+                .map(|finding| finding.path.as_str())
+                .collect::<Vec<_>>(),
+            &vec![".", "assets", "src"],
+            "folder-first default queue keeps asset-only folders",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn high_impact_purpose_queue_pages_folders_before_files() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_folder_node("."),
+            test_folder_node("src"),
+            test_file_node("Cargo.toml", "hash-cargo"),
+            test_file_node("package.json", "hash-package"),
+            test_file_node("pyproject.toml", "hash-python"),
+        ])?;
+
+        let page = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                start_index: 0,
+                limit: 2,
+                category: Some("missing-purpose".to_string()),
+                severity: Some(Severity::Warning),
+                path_prefix: Some(".".to_string()),
+                summary_only: false,
+                source_only: false,
+                high_impact_only: true,
+            },
+        )?;
+
+        require_eq(&page.total, &5, "default actionable total")?;
+        require_eq(
+            &page
+                .findings
+                .iter()
+                .map(|finding| finding.path.as_str())
+                .collect::<Vec<_>>(),
+            &vec![".", "src"],
+            "small page keeps folders first",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn high_impact_purpose_queue_pages_stale_reviewed_files_before_high_impact_files()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_file_node("src/helper.rs", "hash-a"),
+            test_file_node("Cargo.toml", "hash-cargo"),
+            test_file_node("package.json", "hash-package"),
+        ])?;
+        store.set_purpose(
+            "src/helper.rs",
+            "Reviewed helper implementation.",
+            PurposeSource::Agent,
+        )?;
+        store.replace_scan(&[
+            test_file_node("src/helper.rs", "hash-b"),
+            test_file_node("Cargo.toml", "hash-cargo"),
+            test_file_node("package.json", "hash-package"),
+        ])?;
+
+        let page = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                start_index: 0,
+                limit: 1,
+                category: None,
+                severity: Some(Severity::Warning),
+                path_prefix: Some(".".to_string()),
+                summary_only: false,
+                source_only: true,
+                high_impact_only: true,
+            },
+        )?;
+
+        require_eq(&page.total, &3, "default actionable total")?;
+        require_eq(&page.returned, &1, "small page returned")?;
+        require_eq(
+            &page.findings[0].category,
+            &"stale-purpose".to_string(),
+            "stale reviewed file is globally prioritized",
+        )?;
+        require_eq(
+            &page.findings[0].path,
+            &"src/helper.rs".to_string(),
+            "stale reviewed file path",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn include_assets_queue_includes_asset_files_not_low_priority_source()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let asset_file = Node {
+            path: "assets/logo.svg".to_string(),
+            kind: NodeKind::File,
+            parent_path: Some("assets".to_string()),
+            extension: Some(".svg".to_string()),
+            language: None,
+            size_bytes: Some(42),
+            mtime_ns: Some(10),
+            content_hash: Some("hash-logo".to_string()),
+        };
+        store.replace_scan(&[
+            test_folder_node("."),
+            test_folder_node("assets"),
+            test_folder_node("src"),
+            asset_file,
+            test_file_node("src/helper.rs", "hash-helper"),
+        ])?;
+
+        let page = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                start_index: 0,
+                limit: 10,
+                category: Some("missing-purpose".to_string()),
+                severity: Some(Severity::Warning),
+                path_prefix: Some(".".to_string()),
+                summary_only: false,
+                source_only: false,
+                high_impact_only: true,
+            },
+        )?;
+
+        require_eq(&page.unfiltered_total, &5, "all missing rows")?;
+        require_eq(
+            &page.total,
+            &4,
+            "assets included without broad source cleanup",
+        )?;
+        require_eq(
+            &page
+                .findings
+                .iter()
+                .map(|finding| finding.path.as_str())
+                .collect::<Vec<_>>(),
+            &vec![".", "assets", "src", "assets/logo.svg"],
+            "asset files included and low-priority source omitted",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_human_stale_files_remain_in_default_queue() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[test_file_node("src/helper.rs", "hash-a")])?;
+        store.set_purpose(
+            "src/helper.rs",
+            "Legacy reviewed helper implementation.",
+            PurposeSource::Agent,
+        )?;
+        store.connection.execute(
+            "
+            UPDATE purposes
+            SET source = 'human'
+            WHERE node_id = (SELECT id FROM nodes WHERE path = 'src/helper.rs')
+            ",
+            [],
+        )?;
+        store.replace_scan(&[test_file_node("src/helper.rs", "hash-b")])?;
+
+        let page = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                start_index: 0,
+                limit: 10,
+                category: Some("stale-purpose".to_string()),
+                severity: Some(Severity::Warning),
+                path_prefix: Some(".".to_string()),
+                summary_only: false,
+                source_only: true,
+                high_impact_only: true,
+            },
+        )?;
+
+        require_eq(&page.total, &1, "legacy reviewed stale row total")?;
+        require_eq(
+            &page.findings[0].path,
+            &"src/helper.rs".to_string(),
+            "legacy reviewed stale file",
         )?;
         Ok(())
     }
@@ -4672,6 +5299,7 @@ mod tests {
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
                 source_only: false,
+                high_impact_only: false,
             },
         )?;
 
@@ -4705,6 +5333,7 @@ mod tests {
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
                 source_only: false,
+                high_impact_only: false,
             },
         )?;
         require_eq(&page.total, &1, "contextual duplicate total")?;
@@ -4871,6 +5500,78 @@ mod tests {
             &nodes[0].purpose.status,
             &PurposeStatus::Approved,
             "agent-approved status",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn agent_reviewed_marker_depends_on_agent_approved_source() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[test_file_node("src/main.rs", "hash-a")])?;
+
+        store.set_suggested_purpose("src/main.rs", "Maybe application entry point")?;
+        let nodes = store.load_nodes()?;
+        require_eq(
+            &nodes[0].purpose.agent_reviewed(),
+            &false,
+            "generated suggestion is not agent reviewed",
+        )?;
+
+        store.set_purpose(
+            "src/main.rs",
+            "Imported application entry point",
+            PurposeSource::Imported,
+        )?;
+        let nodes = store.load_nodes()?;
+        require_eq(
+            &nodes[0].purpose.agent_reviewed(),
+            &false,
+            "imported purpose is not agent reviewed",
+        )?;
+
+        store.set_purpose(
+            "src/main.rs",
+            "Agent-reviewed application entry point",
+            PurposeSource::Agent,
+        )?;
+        let nodes = store.load_nodes()?;
+        require_eq(
+            &nodes[0].purpose.agent_reviewed(),
+            &true,
+            "agent-approved purpose is agent reviewed",
+        )?;
+
+        store.connection.execute(
+            "
+            UPDATE purposes
+            SET source = 'human'
+            WHERE node_id = (SELECT id FROM nodes WHERE path = 'src/main.rs')
+            ",
+            [],
+        )?;
+        let nodes = store.load_nodes()?;
+        require_eq(
+            &nodes[0].purpose.source,
+            &PurposeSource::Agent,
+            "legacy human source normalizes to agent",
+        )?;
+        require_eq(
+            &nodes[0].purpose.agent_reviewed(),
+            &true,
+            "legacy approved human row remains reviewed",
+        )?;
+
+        store.replace_scan(&[test_file_node("src/main.rs", "hash-b")])?;
+        let nodes = store.load_nodes()?;
+        require_eq(
+            &nodes[0].purpose.status,
+            &PurposeStatus::Stale,
+            "changed reviewed purpose becomes stale",
+        )?;
+        require_eq(
+            &nodes[0].purpose.agent_reviewed(),
+            &false,
+            "stale purpose is not agent reviewed",
         )?;
         Ok(())
     }
