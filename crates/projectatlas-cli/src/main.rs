@@ -204,11 +204,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Initialize `ProjectAtlas` files in a repository.
-    Init {
-        /// Deprecated no-op; purposes are stored in `SQLite`.
-        #[arg(long)]
-        seed_purpose: bool,
-    },
+    Init,
     /// Generate the `ProjectAtlas` TOON map.
     Map {
         /// Also write JSON next to the TOON map.
@@ -218,8 +214,6 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Deprecated no-op; purposes are stored in `SQLite`.
-    SeedPurpose,
     /// Scan a repository and replace the durable index.
     Scan {
         /// Repository root to scan.
@@ -618,17 +612,12 @@ fn run() -> Result<(), CliError> {
         validate_required_runtime_version(required_version)?;
     }
     match &cli.command {
-        Command::Init { seed_purpose } => {
+        Command::Init => {
             let root = std::env::current_dir().map_err(|source| CliError::Io {
                 path: PathBuf::from("."),
                 source,
             })?;
             let report = init_project(&root)?;
-            if *seed_purpose {
-                write_stderr(
-                    "Deprecated --seed-purpose ignored; ProjectAtlas stores purposes in SQLite.\n",
-                )?;
-            }
             write_stdout(&report)?;
         }
         Command::Map { json, force } => {
@@ -638,11 +627,6 @@ fn run() -> Result<(), CliError> {
             }
             let config = load_atlas_config(cli.config.as_deref())?;
             write_map(&config, *json)?;
-        }
-        Command::SeedPurpose => {
-            write_stderr(
-                "Deprecated seed-purpose ignored; ProjectAtlas stores purposes in SQLite.\n",
-            )?;
         }
         Command::Scan {
             path,
@@ -2096,7 +2080,6 @@ fn required_cli_surface_present() -> bool {
     let required = [
         "init",
         "map",
-        "seed-purpose",
         "scan",
         "overview",
         "folders",

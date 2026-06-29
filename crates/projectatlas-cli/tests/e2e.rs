@@ -5175,54 +5175,67 @@ fn health_check_reports_duplicate_temp_folders() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn purpose_file_seed_command_surface_is_removed() -> Result<(), Box<dyn Error>> {
+    Command::cargo_bin("projectatlas")?
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("seed-purpose").not());
+    Command::cargo_bin("projectatlas")?
+        .args(["init", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--seed-purpose").not());
+    Ok(())
+}
+
+#[test]
 fn init_map_and_lint_flow_uses_rust_implementation() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("repo");
     fs::create_dir(&repo)?;
     fs::create_dir(repo.join("src"))?;
-    fs::write(
-        repo.join("src").join("main.rs"),
-        "// Purpose: Provide a tiny Rust entry point for ProjectAtlas tests.\nfn main() {}\n",
-    )?;
+    fs::write(repo.join("src").join("main.rs"), "fn main() {}\n")?;
     fs::write(
         repo.join("README.md"),
-        "# Purpose: Demo readme for Rust map lint tests\n",
+        "# Demo readme for Rust map lint tests\n",
     )?;
     fs::write(repo.join("logo.png"), b"png")?;
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
-        .args(["init", "--seed-purpose"])
+        .arg("init")
         .assert()
-        .success()
-        .stderr(predicate::str::contains(
-            "Deprecated --seed-purpose ignored",
-        ));
+        .success();
     if repo.join(".purpose").exists() || repo.join("src").join(".purpose").exists() {
-        return Err(io::Error::other("init --seed-purpose created legacy .purpose files").into());
+        return Err(io::Error::other("init created legacy .purpose files").into());
     }
-    Command::cargo_bin("projectatlas")?
-        .current_dir(&repo)
-        .arg("seed-purpose")
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("Deprecated seed-purpose ignored"));
-    if repo.join(".purpose").exists() || repo.join("src").join(".purpose").exists() {
-        return Err(io::Error::other("seed-purpose created legacy .purpose files").into());
-    }
-    fs::write(
-        repo.join(".purpose"),
-        "Demo repository for Rust map lint tests\n",
-    )?;
-    fs::write(
-        repo.join("src").join(".purpose"),
-        "Rust source folder for CLI integration tests\n",
-    )?;
     fs::write(
         repo.join(".projectatlas")
             .join("projectatlas-nonsource-files.toon"),
         "nonsource_files[]:\n  # path,summary\n  logo.png,Demo asset for Rust map lint tests\n",
     )?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["scan", "."])
+        .assert()
+        .success();
+    for (path, purpose) in [
+        (".", "Demo repository for Rust map lint tests"),
+        ("src", "Rust source folder for CLI integration tests"),
+        ("README.md", "Demo readme for Rust map lint tests"),
+        (
+            "src/main.rs",
+            "Provide a tiny Rust entry point for ProjectAtlas tests",
+        ),
+    ] {
+        Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .args(["purpose", "set", path, purpose])
+            .assert()
+            .success();
+    }
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
