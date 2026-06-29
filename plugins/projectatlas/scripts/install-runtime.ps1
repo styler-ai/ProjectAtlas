@@ -251,6 +251,10 @@ function Set-ProjectAtlasPathPrecedence {
     $processEntries = @($processEntries | Where-Object { (Get-NormalizedPathEntry $_) -ne $normalizedRuntimeDir })
     $env:Path = (@($runtimeDir) + $processEntries) -join ";"
 
+    if (Test-Truthy $env:PROJECTATLAS_SKIP_USER_PATH_UPDATE) {
+        return
+    }
+
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $userEntries = Split-PathList $userPath
     $userEntries = @($userEntries | Where-Object { (Get-NormalizedPathEntry $_) -ne $normalizedRuntimeDir })
@@ -345,6 +349,20 @@ function Invoke-Checked {
     }
 }
 
+function Get-ReleaseRuntimeInstallPath {
+    param(
+        [string]$Version
+    )
+    $runtimeVersion = Convert-ProjectAtlasVersionTag $Version
+    if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
+        $runtimeVersion = "unknown"
+    }
+    $safeVersion = $runtimeVersion -replace '[^A-Za-z0-9_.-]', '_'
+    $installDir = Join-Path $env:LOCALAPPDATA "ProjectAtlas\runtimes\$safeVersion\x86_64-pc-windows-msvc"
+    New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+    return Join-Path $installDir "projectatlas.exe"
+}
+
 function Install-ReleaseBinary {
     param(
         [string]$Version,
@@ -355,9 +373,11 @@ function Install-ReleaseBinary {
     }
     $asset = "projectatlas-$Version-x86_64-pc-windows-msvc.zip"
     $url = "$BaseUrl/$Version/$asset"
-    $installDir = Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin"
+    $target = Get-ReleaseRuntimeInstallPath $Version
+    if (Test-ProjectAtlasRuntime $target $Version) {
+        return $target
+    }
     $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("projectatlas-" + [guid]::NewGuid().ToString())
-    New-Item -ItemType Directory -Force -Path $installDir | Out-Null
     New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
     $archive = Join-Path $tempDir $asset
     try {
@@ -367,7 +387,6 @@ function Install-ReleaseBinary {
         if (-not $binary) {
             throw "Release archive did not contain projectatlas.exe"
         }
-        $target = Join-Path $installDir "projectatlas.exe"
         Copy-Item -LiteralPath $binary.FullName -Destination $target -Force
         return $target
     }

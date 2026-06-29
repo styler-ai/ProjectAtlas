@@ -126,6 +126,10 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "Convert-ProjectAtlasVersionTag",
         "$runtime.version -eq $expectedRuntimeVersion",
         "Sync-ProjectAtlasRuntimeToLocalAppData",
+        "Get-ReleaseRuntimeInstallPath",
+        r"ProjectAtlas\runtimes\$safeVersion\x86_64-pc-windows-msvc",
+        "ProjectAtlas LocalAppData mirror skipped",
+        "PROJECTATLAS_SKIP_USER_PATH_UPDATE",
         "Get-KnownProjectAtlasShimPaths",
         "Quarantine-ProjectAtlasStaleShims",
         "Test-ProjectAtlasRuntime $candidate $null",
@@ -149,6 +153,17 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
     if powershell_installer.contains("\"--package\", \"projectatlas-cli\"") {
         return Err(io::Error::other(
             "PowerShell installer uses invalid cargo install --git --package syntax",
+        )
+        .into());
+    }
+    let release_binary_function = powershell_installer
+        .split("function Install-ReleaseBinary")
+        .nth(1)
+        .and_then(|tail| tail.split("if (-not $ProjectRoot)").next())
+        .ok_or_else(|| io::Error::other("PowerShell release-binary installer block missing"))?;
+    if release_binary_function.contains(r"ProjectAtlas\bin") {
+        return Err(io::Error::other(
+            "release-binary install must not write directly to the stable LocalAppData bin path",
         )
         .into());
     }
@@ -217,6 +232,14 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         )
         .into());
     }
+    if !e2e_smoke.contains(
+        "windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is_locked",
+    ) {
+        return Err(io::Error::other(
+            "Windows CI smoke must run the locked stable mirror release-binary regression",
+        )
+        .into());
+    }
     if posix_installer.contains("--package projectatlas-cli") {
         return Err(io::Error::other(
             "POSIX installer uses invalid cargo install --git --package syntax",
@@ -228,6 +251,19 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             "plugin must not ship a Codex fallback .mcp.json; generated project-local MCP configs use absolute runtime paths across supported operating systems",
         )
         .into());
+    }
+    let windows_release_smoke = workflow_job_block(&release_workflow, "installer-smoke-windows")?;
+    for required in [
+        "[System.IO.FileShare]::None",
+        r"ProjectAtlas\runtimes\$expectedVersion\x86_64-pc-windows-msvc\projectatlas.exe",
+        "LocalAppData stable mirror unexpectedly changed while locked",
+    ] {
+        if !windows_release_smoke.contains(required) {
+            return Err(io::Error::other(format!(
+                "windows release smoke does not validate locked stable mirror behavior with {required:?}"
+            ))
+            .into());
+        }
     }
     let claude_manifest_json: Value = serde_json::from_str(&claude_manifest)?;
     require_json_string(&claude_manifest_json, &["name"], "projectatlas")?;
@@ -480,6 +516,224 @@ fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> 
     )?;
 
     Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is_locked()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    let atlas_dir = repo.join(".projectatlas");
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+
+    let isolated_home = temp.path().join("isolated-home");
+    let app_data = isolated_home.join("AppData").join("Roaming");
+    let local_app_data = isolated_home.join("AppData").join("Local");
+    fs::create_dir_all(&app_data)?;
+    fs::create_dir_all(&local_app_data)?;
+
+    let stable_runtime = local_app_data
+        .join("ProjectAtlas")
+        .join("bin")
+        .join("projectatlas.exe");
+    fs::create_dir_all(
+        stable_runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("stable runtime parent missing"))?,
+    )?;
+    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    fs::copy(&runtime, &stable_runtime)?;
+
+    let db = atlas_dir.join("projectatlas.db");
+    let mut locked_runtime = StdCommand::new(&stable_runtime)
+        .arg("--require-version")
+        .arg(env!("CARGO_PKG_VERSION"))
+        .arg("--db")
+        .arg(&db)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    thread::sleep(Duration::from_millis(300));
+    if let Some(status) = locked_runtime.try_wait()? {
+        return Err(io::Error::other(format!(
+            "fixture runtime exited before it could lock the stable mirror: {status}"
+        ))
+        .into());
+    }
+
+    let test_result = (|| -> Result<(), Box<dyn Error>> {
+        let release_archive = create_windows_release_archive(temp.path(), &runtime)?;
+        let (release_base_url, release_server) =
+            serve_single_release_asset(fs::read(&release_archive)?)?;
+        let workspace_root = workspace_root()?;
+        let installer = workspace_root
+            .join("plugins")
+            .join("projectatlas")
+            .join("scripts")
+            .join("install-runtime.ps1");
+        let output = StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(installer)
+            .arg("-ProjectRoot")
+            .arg(&repo)
+            .arg("-ProjectAtlasVersion")
+            .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+            .arg("-ReleaseBaseUrl")
+            .arg(&release_base_url)
+            .arg("-ReleaseBinaryOnly")
+            .env("HOME", &isolated_home)
+            .env("USERPROFILE", &isolated_home)
+            .env("APPDATA", &app_data)
+            .env("LOCALAPPDATA", &local_app_data)
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        let server_result = release_server.join().map_err(|panic_payload| {
+            let message = if let Some(message) = panic_payload.downcast_ref::<&str>() {
+                *message
+            } else if let Some(message) = panic_payload.downcast_ref::<String>() {
+                message.as_str()
+            } else {
+                "unknown panic payload"
+            };
+            io::Error::other(format!("release asset test server panicked: {message}"))
+        })?;
+        server_result?;
+        let installer_output_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "release-binary installer failed\n{installer_output_text}"
+            ))
+            .into());
+        }
+        if !installer_output_text.contains("ProjectAtlas LocalAppData mirror skipped") {
+            return Err(io::Error::other(format!(
+                "installer did not report the locked LocalAppData mirror\n{installer_output_text}"
+            ))
+            .into());
+        }
+
+        let versioned_runtime = local_app_data
+            .join("ProjectAtlas")
+            .join("runtimes")
+            .join(env!("CARGO_PKG_VERSION"))
+            .join("x86_64-pc-windows-msvc")
+            .join("projectatlas.exe");
+        if !versioned_runtime.exists() {
+            return Err(io::Error::other(format!(
+                "release binary was not installed to the versioned runtime path: {}",
+                versioned_runtime.display()
+            ))
+            .into());
+        }
+
+        let runtime_info = StdCommand::new(&versioned_runtime)
+            .arg("--require-version")
+            .arg(env!("CARGO_PKG_VERSION"))
+            .arg("--format")
+            .arg("json")
+            .arg("runtime-info")
+            .output()?;
+        if !runtime_info.status.success() {
+            return Err(io::Error::other(format!(
+                "versioned runtime failed runtime-info: {}",
+                String::from_utf8_lossy(&runtime_info.stderr)
+            ))
+            .into());
+        }
+
+        let codex_config = read_json_file(&atlas_dir.join("projectatlas.mcp.json"))?;
+        let claude_config = read_json_file(&atlas_dir.join("projectatlas.claude.mcp.json"))?;
+        let opencode_config = read_json_file(&atlas_dir.join("projectatlas.opencode.json"))?;
+        require_same_executable(
+            json_string_at(&codex_config, &["mcpServers", "projectatlas", "command"])?,
+            &versioned_runtime,
+            "locked mirror codex",
+        )?;
+        require_json_string(
+            &codex_config,
+            &["mcpServers", "projectatlas", "args", "1"],
+            env!("CARGO_PKG_VERSION"),
+        )?;
+        require_same_directory(
+            json_string_at(&codex_config, &["mcpServers", "projectatlas", "cwd"])?,
+            &repo,
+            "locked mirror codex cwd",
+        )?;
+        require_same_executable(
+            json_string_at(&claude_config, &["mcpServers", "projectatlas", "command"])?,
+            &versioned_runtime,
+            "locked mirror claude",
+        )?;
+        require_json_string(
+            &claude_config,
+            &["mcpServers", "projectatlas", "args", "1"],
+            env!("CARGO_PKG_VERSION"),
+        )?;
+        require_same_executable(
+            json_string_at(&opencode_config, &["mcp", "projectatlas", "command", "0"])?,
+            &versioned_runtime,
+            "locked mirror opencode",
+        )?;
+        require_json_string(
+            &opencode_config,
+            &["mcp", "projectatlas", "command", "2"],
+            env!("CARGO_PKG_VERSION"),
+        )?;
+        require_same_directory(
+            json_string_at(&opencode_config, &["mcp", "projectatlas", "cwd"])?,
+            &repo,
+            "locked mirror opencode cwd",
+        )?;
+
+        let (mcp_command, mcp_args) = mcp_command_and_args(&codex_config)?;
+        let messages = [
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-locked-runtime-e2e","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+        ];
+        let mcp_stdout = run_mcp_stdio(&mcp_command, &repo, &mcp_args, &messages)?;
+        let expected_server_info = format!(
+            r#""serverInfo":{{"name":"ProjectAtlas","version":"{}"}}"#,
+            env!("CARGO_PKG_VERSION")
+        );
+        if !mcp_stdout.contains(&expected_server_info) {
+            return Err(io::Error::other(format!(
+                "locked mirror MCP config did not launch the versioned runtime: {mcp_stdout}"
+            ))
+            .into());
+        }
+
+        Ok(())
+    })();
+
+    let kill_result = locked_runtime.kill();
+    let wait_result = locked_runtime.wait();
+    if let Err(error) = kill_result
+        && test_result.is_ok()
+        && error.kind() != io::ErrorKind::InvalidInput
+    {
+        return Err(error.into());
+    }
+    if let Err(error) = wait_result
+        && test_result.is_ok()
+    {
+        return Err(error.into());
+    }
+    test_result
 }
 
 #[test]
@@ -5830,6 +6084,89 @@ fn stale_shim_quarantine_path(path: &Path, version: &str) -> std::path::PathBuf 
         "{}.projectatlas-stale-{version}.bak",
         path.display()
     ))
+}
+
+/// Build a local Windows release archive containing the current test runtime.
+#[cfg(windows)]
+fn create_windows_release_archive(
+    temp_root: &Path,
+    runtime: &Path,
+) -> Result<std::path::PathBuf, Box<dyn Error>> {
+    let asset_dir = temp_root.join("release-asset");
+    fs::create_dir_all(&asset_dir)?;
+    let release_runtime = asset_dir.join("projectatlas.exe");
+    fs::copy(runtime, &release_runtime)?;
+    let archive = temp_root.join(format!(
+        "projectatlas-v{}-x86_64-pc-windows-msvc.zip",
+        env!("CARGO_PKG_VERSION")
+    ));
+    let output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg("& { param($Source, $Destination) Compress-Archive -LiteralPath $Source -DestinationPath $Destination -Force }")
+        .arg(&release_runtime)
+        .arg(&archive)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "failed to create local release archive\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(archive)
+}
+
+/// Serve a single local release asset request for a `PowerShell` installer smoke test.
+#[cfg(windows)]
+fn serve_single_release_asset(
+    asset: Vec<u8>,
+) -> Result<(String, thread::JoinHandle<Result<(), io::Error>>), Box<dyn Error>> {
+    use std::io::Read as _;
+
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    listener.set_nonblocking(true)?;
+    let base_url = format!("http://{}", listener.local_addr()?);
+    let handle = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false)?;
+                    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                    let mut request = [0_u8; 1024];
+                    let bytes_read = stream.read(&mut request)?;
+                    if bytes_read == 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "release asset request was empty",
+                        ));
+                    }
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        asset.len()
+                    )?;
+                    stream.write_all(&asset)?;
+                    return Ok(());
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "timed out waiting for release asset request",
+                        ));
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    });
+    Ok((base_url, handle))
 }
 
 /// Run the bundled plugin installer with an explicit runtime path.
