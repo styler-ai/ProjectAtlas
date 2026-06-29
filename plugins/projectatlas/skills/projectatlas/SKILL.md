@@ -34,8 +34,10 @@ Purpose and summary are separate:
 - `content_summary` answers what currently appears to be inside a file.
 - `stale` applies to approved purpose metadata that needs review after a meaningful change; it does not mean the refreshed `content_summary` is stale.
 - Generated summaries are acceptable as deterministic content metadata.
-- Generated purposes are only suggestions and must not be treated as correct until imported from trusted legacy metadata or approved by the agent after inspection.
-- If lint, health, or the curation queue reports missing purposes, the agent must inspect the folder/file enough to write a correct one-line purpose and call `atlas_purpose_set` or `projectatlas purpose set`; do not leave the purpose blank just because no human supplied it.
+- Generated purposes are only suggestions and must not be treated as correct until imported from trusted legacy metadata or explicitly reviewed by the agent after inspection.
+- Folder purposes are high-value navigation metadata and should be curated broadly.
+- File purposes are curated selectively. Fill them when they affect current work, public API, build/config/workflow/test/runtime behavior, routes, migrations, commands, MCP surfaces, or stale trusted metadata. Do not review every file in a large repository unless the user explicitly asks for broad file-purpose cleanup.
+- If lint, health, or the curation queue reports missing folder or high-impact file purposes, the agent must inspect the path enough to write a correct one-line purpose and call `atlas_purpose_set` or `projectatlas purpose set`; do not leave the purpose blank just because no human supplied it.
 
 ## Purpose Completion Loop
 
@@ -47,9 +49,10 @@ When `atlas_purpose_queue`, `projectatlas purpose queue`, `atlas_health`, `proje
 4. Write a precise one-line purpose with `atlas_purpose_set` or `projectatlas purpose set`.
 5. Run `atlas_watch_once`, `projectatlas watch --once`, or `projectatlas scan`.
 6. Rerun health/lint.
-7. Repeat until the ProjectAtlas database has purposes for all indexed folders/files and the deep index is refreshed.
+7. Repeat until the ProjectAtlas database has reviewed folder purposes, selected high-value file purposes, and the deep index is refreshed.
 
-`atlas_purpose_queue` and `projectatlas purpose queue` default to source-relevant paths: source files and folders that contain source files. Use `projectatlas purpose queue --include-assets`, raw `atlas_health`, or bare `projectatlas health-check` only when intentionally curating assets or generated outputs.
+`atlas_purpose_queue` and `projectatlas purpose queue` default to all folders and high-impact files. Use `projectatlas purpose queue --include-low-priority-files` or MCP `include_low_priority_files: true` only when intentionally doing broad file-purpose cleanup. Use `projectatlas purpose queue --include-assets`, MCP `include_assets: true`, raw `atlas_health`, or bare `projectatlas health-check` only when intentionally curating assets or generated outputs.
+Read `folder_scope` and `file_scope` in queue metadata before deciding how broad the current curation pass is.
 
 This loop is an agent responsibility installed with the plugin. Do not wait for human purpose text during normal agent-harness operation.
 
@@ -124,7 +127,7 @@ Use the MCP tools when the harness exposes them. They are preferred over shell c
 13. `atlas_settings` and `atlas_watch_status` for diagnostics.
 14. `atlas_reset_index` dry-run first when the local SQLite/cache state is corrupt or intentionally discarded.
 15. `atlas_strip_legacy_purpose` only after migrated `.purpose` metadata is safely stored in SQLite.
-16. `atlas_purpose_queue` when an agent needs a source-focused purpose curation queue before approving or correcting generated purposes.
+16. `atlas_purpose_queue` when an agent needs a folder-first purpose curation queue before approving or correcting generated purposes.
 17. `atlas_purpose_set` when an agent-approved purpose should be written to the durable index.
 18. `atlas_health_resolve` when a deterministic conflict is intentionally correct and should not be repeated.
 

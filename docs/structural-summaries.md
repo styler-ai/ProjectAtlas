@@ -19,7 +19,7 @@ For source files with declarations, the deep symbol graph produces the content s
 - TOON: named sections.
 - Simple config/text files: key-like entries, plus first non-empty line excerpts for plain text.
 
-The adapters are intentionally bounded and deterministic. They do not approve purposes. If a file has no approved purpose, the scan can create a generated `file_purpose` suggestion from the `content_summary`, and the agent harness must inspect enough context to approve or correct it with `projectatlas purpose set` or `atlas_purpose_set`.
+The adapters are intentionally bounded and deterministic. They do not approve purposes. If a file has no approved purpose, the scan can create a generated `file_purpose` suggestion from the `content_summary`, and the agent harness must inspect enough context to approve or correct it with `projectatlas purpose set` or `atlas_purpose_set`. Generated file-purpose suggestions are useful for orientation, but broad file-purpose cleanup is opt-in; the default curation queue favors folders and high-impact files.
 
 ## Quality Signals
 

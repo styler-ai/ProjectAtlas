@@ -320,7 +320,7 @@ Purpose status values:
 
 - `missing`: path exists but no purpose is known
 - `suggested`: a model or heuristic suggested a purpose
-- `approved`: a human or explicit agent workflow approved the purpose
+- `approved`: an explicit agent workflow approved the purpose after inspection
 - `stale`: file/folder changed enough that the purpose needs review
 
 ## Indexing Behavior Parity Map

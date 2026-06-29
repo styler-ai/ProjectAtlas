@@ -10,14 +10,14 @@ Each project has its own database under the project root. Folder purpose and fil
 - A folder purpose describes the folder's structural responsibility.
 - A file purpose describes why that file exists inside its folder.
 
-Missing purposes are health/lint findings. Agents should inspect enough context to set a correct one-line purpose with `projectatlas purpose set` or the MCP `atlas_purpose_set` tool.
+Missing purposes are health/lint findings. Agents should inspect enough context to set a correct one-line purpose with `projectatlas purpose set` or the MCP `atlas_purpose_set` tool. Folder purposes should be curated broadly; file purposes should be curated selectively for current-task, public API, build/config, workflow, test, runtime, route, migration, command, MCP, or stale trusted metadata paths.
 
 ## Summaries
 
 Summaries are not purposes. A summary describes what the index observes in a file: language, line count, dependencies, imports, functions, methods, classes/types, calls, and line ranges where available.
 Use `projectatlas summary <file> --limit 25` or `atlas_file_summary` before opening full source.
 
-Generated file-purpose guesses may be stored as suggestions, but they remain review-required until an agent approves or corrects them.
+Generated file-purpose guesses may be stored as suggestions, but they remain `agent_reviewed=false` until an agent approves or corrects them.
 
 `stale` belongs to purpose metadata, not to the refreshed content summary. When an approved folder or file purpose becomes stale after a meaningful indexed change, agents should inspect the current `content_summary` and approve or correct the purpose. Scans and watch refreshes should update content summaries from the current file facts instead of preserving stale summary text.
 

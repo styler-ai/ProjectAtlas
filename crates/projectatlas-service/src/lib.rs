@@ -76,6 +76,8 @@ pub struct FileSummaryReport {
     pub file_purpose_status: String,
     /// File-purpose source.
     pub file_purpose_source: String,
+    /// Whether an agent explicitly reviewed or set this purpose.
+    pub file_purpose_agent_reviewed: bool,
     /// Current one-line content summary from scan and deep index facts.
     pub content_summary: String,
     /// Package, module, or manifest name when indexed.
@@ -380,6 +382,7 @@ pub fn build_file_summary(
         file_purpose: indexed.purpose.purpose.clone().unwrap_or_default(),
         file_purpose_status: indexed.purpose.status.to_string(),
         file_purpose_source: indexed.purpose.source.to_string(),
+        file_purpose_agent_reviewed: indexed.purpose.agent_reviewed(),
         content_summary,
         package: package_name(&metadata_symbols),
         docstring,
@@ -1770,6 +1773,11 @@ mod tests {
             &report.file_purpose_status,
             &PurposeStatus::Approved.to_string(),
             "purpose status",
+        )?;
+        require_eq(
+            &report.file_purpose_agent_reviewed,
+            &true,
+            "purpose agent reviewed",
         )?;
         let helper = report
             .functions

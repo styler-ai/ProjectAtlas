@@ -1311,7 +1311,11 @@ fn mcp_server_stays_bound_to_one_project_database() -> Result<(), Box<dyn Error>
         ))
         .into());
     }
-    if !output_a.contains("purpose_set:") || !output_a.contains("path: .") {
+    if !output_a.contains("purpose_set:")
+        || !output_a.contains("path: .")
+        || !output_a.contains("source: agent")
+        || !output_a.contains("agent_reviewed: true")
+    {
         return Err(io::Error::other(format!(
             "repo A MCP purpose_set did not accept explicit repository root: {output_a}"
         ))
@@ -4389,6 +4393,7 @@ fn generated_file_purpose_suggestions_require_agent_approval() -> Result<(), Box
     require_json_usize(&summary_json, &["symbol_count"], 2)?;
     require_json_string(&summary_json, &["file_purpose_status"], "suggested")?;
     require_json_string(&summary_json, &["file_purpose_source"], "generated")?;
+    require_json_bool(&summary_json, &["file_purpose_agent_reviewed"], false)?;
     require_json_string(&summary_json, &["docstring"], "Service module docs.")?;
     require_json_usize(&summary_json, &["total_exports"], 2)?;
     require_json_string(&summary_json, &["exports", "0"], "Service")?;
@@ -4441,9 +4446,35 @@ fn generated_file_purpose_suggestions_require_agent_approval() -> Result<(), Box
         .success()
         .stdout(predicate::str::contains("purpose_curation:"))
         .stdout(predicate::str::contains("source_only: true"))
+        .stdout(predicate::str::contains(
+            "purpose_agent_reviewed,review_priority,review_reason",
+        ))
+        .stdout(predicate::str::contains("false,high,folder_navigation"))
         .stdout(predicate::str::contains("missing-purpose:."))
+        .stdout(predicate::str::contains("missing-purpose:src:"))
+        .stdout(predicate::str::contains("suggested-purpose-review").not())
+        .stdout(
+            predicate::str::contains("Implement the service source around Service and run.").not(),
+        );
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "purpose",
+            "queue",
+            "--limit",
+            "5",
+            "--include-low-priority-files",
+        ])
+        .assert()
+        .success()
         .stdout(predicate::str::contains(
             "suggested-purpose-review:src/service.rs:",
+        ))
+        .stdout(predicate::str::contains(
+            "false,low,generated_file_suggestion",
         ))
         .stdout(predicate::str::contains(
             "Implement the service source around Service and run.",
@@ -4520,6 +4551,7 @@ fn generated_file_purpose_suggestions_require_agent_approval() -> Result<(), Box
     let summary_json: Value = serde_json::from_slice(&raw_summary.stdout)?;
     require_json_string(&summary_json, &["file_purpose_status"], "approved")?;
     require_json_string(&summary_json, &["file_purpose_source"], "agent")?;
+    require_json_bool(&summary_json, &["file_purpose_agent_reviewed"], true)?;
     require_json_string(
         &summary_json,
         &["file_purpose"],
@@ -4573,20 +4605,106 @@ fn generated_purpose_queue_avoids_generic_and_asset_noise() -> Result<(), Box<dy
         .success()
         .stdout(predicate::str::contains("purpose_suggestions: 3"));
 
-    let output = Command::cargo_bin("projectatlas")?
+    let default_output = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
         .args(["purpose", "queue", "--limit", "20"])
         .output()?;
-    if !output.status.success() {
+    if !default_output.status.success() {
         return Err(io::Error::other(format!(
             "purpose queue failed: {}",
+            String::from_utf8_lossy(&default_output.stderr)
+        ))
+        .into());
+    }
+    let default_queue = String::from_utf8(default_output.stdout)?;
+    if !default_queue
+        .contains("Define Gradle build tasks around bootRunE2E, copyE2EReports, and verifyAtlas.")
+        || !default_queue.contains("false,high,high_impact_file")
+        || !default_queue.contains("folder_scope: all")
+        || !default_queue.contains("file_scope: high_impact")
+        || !default_queue.contains("missing-purpose:assets:")
+        || default_queue.contains("assets/logo.svg")
+    {
+        return Err(io::Error::other(format!(
+            "default purpose queue missed high-impact Gradle file or asset-root folder filtering:\n{default_queue}"
+        ))
+        .into());
+    }
+    for low_priority in [
+        "Implement the customers service source around CustomerService and reconcile.",
+        "Implement the settings service source around SettingsService and load.",
+    ] {
+        if default_queue.contains(low_priority) {
+            return Err(io::Error::other(format!(
+                "default purpose queue included low-priority file suggestion `{low_priority}`:\n{default_queue}"
+            ))
+            .into());
+        }
+    }
+
+    let asset_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["purpose", "queue", "--limit", "20", "--include-assets"])
+        .output()?;
+    if !asset_output.status.success() {
+        return Err(io::Error::other(format!(
+            "asset purpose queue failed: {}",
+            String::from_utf8_lossy(&asset_output.stderr)
+        ))
+        .into());
+    }
+    let asset_queue = String::from_utf8(asset_output.stdout)?;
+    if !asset_queue.contains("assets/logo.svg")
+        || !asset_queue.contains("file_scope: high_impact_and_assets")
+    {
+        return Err(io::Error::other(format!(
+            "include-assets queue did not include asset file:\n{asset_queue}"
+        ))
+        .into());
+    }
+    for low_priority in [
+        "Implement the customers service source around CustomerService and reconcile.",
+        "Implement the settings service source around SettingsService and load.",
+    ] {
+        if asset_queue.contains(low_priority) {
+            return Err(io::Error::other(format!(
+                "include-assets queue included low-priority source suggestion `{low_priority}`:\n{asset_queue}"
+            ))
+            .into());
+        }
+    }
+
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "purpose",
+            "queue",
+            "--limit",
+            "20",
+            "--include-low-priority-files",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "broad purpose queue failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ))
         .into());
     }
     let queue = String::from_utf8(output.stdout)?;
+    if !queue.contains("folder_scope: source_relevant") || !queue.contains("file_scope: all_source")
+    {
+        return Err(io::Error::other(format!(
+            "broad purpose queue did not expose source file scope:\n{queue}"
+        ))
+        .into());
+    }
     for expected in [
         "Implement the customers service source around CustomerService and reconcile.",
         "Implement the settings service source around SettingsService and load.",

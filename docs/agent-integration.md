@@ -19,7 +19,7 @@ ProjectAtlas is an atlas of the entire project, not a shortcut to full-file read
 
 The atlas update order is always folder index first, file purpose and one-line file summaries second, and deep code index last. Do not treat symbol indexing as the first gate.
 
-Purpose correctness matters. `folder_purpose` and `file_purpose` explain why a folder or file exists; `content_summary` explains what the index currently observes inside a file. Generated summaries can be deterministic metadata, but generated purposes are only suggestions. Treat a purpose as correct only when it is imported from trusted metadata or agent-approved in the SQLite index. When lint or health reports a missing purpose, the agent should inspect the folder/file enough to write the correct one-line purpose and set it with `atlas_purpose_set` or `projectatlas purpose set`; ProjectAtlas is for the agent harness, so there should be no human approval bottleneck in normal operation.
+Purpose correctness matters. `folder_purpose` and `file_purpose` explain why a folder or file exists; `content_summary` explains what the index currently observes inside a file. Generated summaries can be deterministic metadata, but generated purposes are only suggestions. Treat a purpose as correct only when it is imported from trusted metadata or explicitly agent-reviewed in the SQLite index. Folder purposes should be curated broadly because they are the navigation backbone. File purposes should be curated selectively when they affect navigation, current work, public/build/test/runtime behavior, or stale trusted metadata. When lint or health reports a missing folder or high-impact file purpose, the agent should inspect enough context to write the correct one-line purpose and set it with `atlas_purpose_set` or `projectatlas purpose set`; ProjectAtlas is for the agent harness, so there should be no human approval bottleneck in normal operation.
 
 Purpose completion loop:
 
@@ -28,9 +28,10 @@ Purpose completion loop:
 3. Set the correct purpose with `atlas_purpose_set` or `projectatlas purpose set`.
 4. Refresh with `atlas_watch_once`, `projectatlas watch --once`, or `projectatlas scan`.
 5. Rerun health/lint.
-6. Continue until the database has complete folder/file purposes and the deep index is current.
+6. Continue until the database has complete reviewed folder purposes, selected high-value file purposes, and the deep index is current.
 
-`atlas_purpose_queue` and `projectatlas purpose queue` default to source-relevant paths: source files and folders that contain source files. Use `projectatlas purpose queue --include-assets`, raw `atlas_health`, or bare `projectatlas health-check` only when intentionally curating assets or generated outputs; non-source files should usually inherit purpose from an approved asset root instead of becoming one-by-one queue noise.
+`atlas_purpose_queue` and `projectatlas purpose queue` default to all folders and high-impact files. Low-priority source files stay out of the default queue so agents are not pushed through every file in a large repository. Pass `projectatlas purpose queue --include-low-priority-files` or MCP `include_low_priority_files: true` only for explicit broad file-purpose cleanup. Use `projectatlas purpose queue --include-assets`, MCP `include_assets: true`, raw `atlas_health`, or bare `projectatlas health-check` only when intentionally curating assets or generated outputs; non-source files should usually inherit purpose from an approved asset root instead of becoming one-by-one queue noise.
+Queue metadata includes `folder_scope` and `file_scope`; agents should use those fields to understand whether files are limited to high-impact entries, all source files, or asset-inclusive mode.
 
 If a duplicate-purpose, repeated temporary folder, or similar deterministic finding is intentional after inspection, resolve that exact finding with `atlas_health_resolve` or `projectatlas health resolve <finding-id> <category> <path> --related-path <path> --rationale "<why>"`. Do not resolve missing-purpose findings; fill the purpose instead.
 
@@ -161,7 +162,7 @@ Prefer MCP tools when the harness exposes them:
 14. `atlas_settings` and `atlas_watch_status`: diagnose runtime/index/cache state.
 15. `atlas_reset_index`: preview or clear local SQLite/cache files when the index is corrupt or intentionally being rebuilt.
 16. `atlas_strip_legacy_purpose`: remove migrated `.purpose` files when explicitly requested.
-17. `atlas_purpose_queue`: return the source-focused queue of missing, suggested, stale, and structural purpose work for agent curation.
+17. `atlas_purpose_queue`: return the folder-first queue of missing, suggested, stale, and structural purpose work for agent curation.
 18. `atlas_purpose_set`: write agent-approved purpose metadata into SQLite.
 19. `atlas_health_resolve`: mark an intentional deterministic health finding resolved with rationale.
 
