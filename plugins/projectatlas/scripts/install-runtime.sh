@@ -111,6 +111,39 @@ canonical_file() {
   printf '%s/%s\n' "$dir" "$(basename -- "$file")"
 }
 
+prepend_projectatlas_process_path() {
+  runtime_dir=$(CDPATH= cd -- "$(dirname -- "$1")" 2>/dev/null && pwd -P) || return 0
+  new_path=$runtime_dir
+  old_ifs=$IFS
+  IFS=:
+  for entry in ${PATH:-}; do
+    if [ -z "$entry" ]; then
+      continue
+    fi
+    entry_dir=$(CDPATH= cd -- "$entry" 2>/dev/null && pwd -P || printf '%s\n' "$entry")
+    if [ "$entry_dir" != "$runtime_dir" ]; then
+      new_path=$new_path:$entry
+    fi
+  done
+  IFS=$old_ifs
+  PATH=$new_path
+  export PATH
+}
+
+confirm_bare_projectatlas_resolution() {
+  verified=$1
+  verified_canonical=$(canonical_file "$verified")
+  first=$(command -v projectatlas 2>/dev/null || true)
+  if [ -z "$first" ]; then
+    printf '%s\n' "warning: active process still cannot resolve bare 'projectatlas'. Generated MCP configs use the verified absolute runtime: $verified. Restart the host shell before relying on bare projectatlas." >&2
+  elif [ "$(canonical_file "$first")" = "$verified_canonical" ] && is_projectatlas_runtime "$first"; then
+    printf 'Active process resolves bare projectatlas to verified runtime: %s\n' "$first"
+  else
+    first_version=$(runtime_version "$first")
+    printf '%s\n' "warning: active process still resolves bare 'projectatlas' to $first version '$first_version', not the verified runtime $verified. Generated MCP configs use the absolute runtime; restart the host shell, put $(dirname -- "$verified") first on PATH, or remove the obsolete shim before relying on bare projectatlas." >&2
+  fi
+}
+
 is_known_projectatlas_shim_path() {
   candidate_canonical=$(canonical_file "$1")
   known_projectatlas_shim_paths | while IFS= read -r known_path; do
@@ -298,7 +331,9 @@ else
   fi
 fi
 
+prepend_projectatlas_process_path "$projectatlas_bin"
 "$projectatlas_bin" --format json runtime-info >/dev/null
+confirm_bare_projectatlas_resolution "$projectatlas_bin"
 quarantine_known_stale_projectatlas_shims "$projectatlas_bin"
 warn_path_shadow "$projectatlas_bin"
 

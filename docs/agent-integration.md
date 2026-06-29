@@ -108,6 +108,27 @@ On Linux/macOS:
 bash plugins/projectatlas/scripts/install-runtime.sh
 ```
 
+When testing a newly released ProjectAtlas plugin through Codex, refresh the
+configured Git marketplace snapshot if `codex plugin add` keeps installing an
+older cached plugin version:
+
+```bash
+codex plugin marketplace upgrade projectatlas --json
+codex plugin remove projectatlas --marketplace projectatlas
+codex plugin add projectatlas --marketplace projectatlas
+codex plugin list --marketplace projectatlas --available --json
+```
+
+If `codex plugin marketplace list --json` shows that the `projectatlas`
+marketplace source is pinned to an older release tag, upgrade correctly keeps
+that pinned ref. Replace the marketplace source only after confirming it is the
+dedicated `styler-ai/ProjectAtlas` source and no unrelated plugin depends on it:
+
+```bash
+codex plugin marketplace remove projectatlas
+codex plugin marketplace add styler-ai/ProjectAtlas --ref <new-release-tag>
+```
+
 Installer and release tests can provide an already-built runtime without
 downloading a release or mutating PATH: use `-RuntimePath <path-to-projectatlas>`
 on PowerShell or `PROJECTATLAS_RUNTIME_PATH=<path-to-projectatlas>` with the
@@ -130,6 +151,9 @@ Installers also report obsolete `projectatlas` binaries or shims that remain on
 PATH. Generated MCP configs use absolute, version-guarded runtime paths, but a
 stale Python, npm, or Cargo shim can still affect bare `projectatlas` commands
 in another shell until PATH order is fixed or the obsolete shim is removed.
+The installer makes its own active process prefer the verified runtime on
+Windows, Linux, and macOS; if a parent host process still cannot resolve the
+bare command, restart that host or use the generated absolute MCP config.
 
 Harness-specific config can also be generated directly:
 
