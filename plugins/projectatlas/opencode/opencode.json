@@ -4,14 +4,15 @@
     "projectatlas": {
       "type": "local",
       "command": [
-        "projectatlas",
+        "/absolute/path/to/projectatlas",
         "--require-version",
-        "0.3.7",
+        "0.3.8",
         "--db",
-        ".projectatlas/projectatlas.db",
+        "/absolute/path/to/project/.projectatlas/projectatlas.db",
         "mcp"
       ],
-      "enabled": true
+      "cwd": "/absolute/path/to/project",
+      "enabled": false
     }
   }
 }

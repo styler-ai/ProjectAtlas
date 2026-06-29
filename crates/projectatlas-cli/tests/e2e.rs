@@ -84,12 +84,10 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             .join("scripts")
             .join("install-runtime.sh"),
     )?;
-    let fallback_mcp = fs::read_to_string(
-        workspace_root
-            .join("plugins")
-            .join("projectatlas")
-            .join(".mcp.json"),
-    )?;
+    let codex_fallback_mcp = workspace_root
+        .join("plugins")
+        .join("projectatlas")
+        .join(".mcp.json");
     let claude_manifest = fs::read_to_string(
         workspace_root
             .join("plugins")
@@ -156,17 +154,12 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         )
         .into());
     }
-    let fallback_json: Value = serde_json::from_str(&fallback_mcp)?;
-    require_json_string(
-        &fallback_json,
-        &["mcpServers", "projectatlas", "args", "0"],
-        "--require-version",
-    )?;
-    require_json_string(
-        &fallback_json,
-        &["mcpServers", "projectatlas", "args", "1"],
-        env!("CARGO_PKG_VERSION"),
-    )?;
+    if codex_fallback_mcp.exists() {
+        return Err(io::Error::other(
+            "plugin must not ship a Codex fallback .mcp.json; generated project-local MCP configs use absolute runtime paths across supported operating systems",
+        )
+        .into());
+    }
     let claude_manifest_json: Value = serde_json::from_str(&claude_manifest)?;
     require_json_string(&claude_manifest_json, &["name"], "projectatlas")?;
     require_json_string(
@@ -181,6 +174,12 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "https://opencode.ai/config.json",
     )?;
     require_json_string(&opencode_json, &["mcp", "projectatlas", "type"], "local")?;
+    require_json_bool(&opencode_json, &["mcp", "projectatlas", "enabled"], false)?;
+    require_json_string(
+        &opencode_json,
+        &["mcp", "projectatlas", "command", "0"],
+        "/absolute/path/to/projectatlas",
+    )?;
     require_json_string(
         &opencode_json,
         &["mcp", "projectatlas", "command", "1"],
@@ -190,6 +189,16 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         &opencode_json,
         &["mcp", "projectatlas", "command", "2"],
         env!("CARGO_PKG_VERSION"),
+    )?;
+    require_json_string(
+        &opencode_json,
+        &["mcp", "projectatlas", "command", "4"],
+        "/absolute/path/to/project/.projectatlas/projectatlas.db",
+    )?;
+    require_json_string(
+        &opencode_json,
+        &["mcp", "projectatlas", "cwd"],
+        "/absolute/path/to/project",
     )?;
     Ok(())
 }
@@ -5175,39 +5184,67 @@ fn health_check_reports_duplicate_temp_folders() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn purpose_file_seed_command_surface_is_removed() -> Result<(), Box<dyn Error>> {
+    Command::cargo_bin("projectatlas")?
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("seed-purpose").not());
+    Command::cargo_bin("projectatlas")?
+        .args(["init", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--seed-purpose").not());
+    Ok(())
+}
+
+#[test]
 fn init_map_and_lint_flow_uses_rust_implementation() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("repo");
     fs::create_dir(&repo)?;
     fs::create_dir(repo.join("src"))?;
-    fs::write(
-        repo.join("src").join("main.rs"),
-        "// Purpose: Provide a tiny Rust entry point for ProjectAtlas tests.\nfn main() {}\n",
-    )?;
+    fs::write(repo.join("src").join("main.rs"), "fn main() {}\n")?;
     fs::write(
         repo.join("README.md"),
-        "# Purpose: Demo readme for Rust map lint tests\n",
+        "# Demo readme for Rust map lint tests\n",
     )?;
     fs::write(repo.join("logo.png"), b"png")?;
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
-        .args(["init", "--seed-purpose"])
+        .arg("init")
         .assert()
         .success();
-    fs::write(
-        repo.join(".purpose"),
-        "Demo repository for Rust map lint tests\n",
-    )?;
-    fs::write(
-        repo.join("src").join(".purpose"),
-        "Rust source folder for CLI integration tests\n",
-    )?;
+    if repo.join(".purpose").exists() || repo.join("src").join(".purpose").exists() {
+        return Err(io::Error::other("init created legacy .purpose files").into());
+    }
     fs::write(
         repo.join(".projectatlas")
             .join("projectatlas-nonsource-files.toon"),
         "nonsource_files[]:\n  # path,summary\n  logo.png,Demo asset for Rust map lint tests\n",
     )?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["scan", "."])
+        .assert()
+        .success();
+    for (path, purpose) in [
+        (".", "Demo repository for Rust map lint tests"),
+        ("src", "Rust source folder for CLI integration tests"),
+        ("README.md", "Demo readme for Rust map lint tests"),
+        (
+            "src/main.rs",
+            "Provide a tiny Rust entry point for ProjectAtlas tests",
+        ),
+    ] {
+        Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .args(["purpose", "set", path, purpose])
+            .assert()
+            .success();
+    }
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)

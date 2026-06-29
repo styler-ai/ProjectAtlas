@@ -9,7 +9,7 @@ Use it to choose folders, files, structured summaries, outlines, and exact sourc
 ## Quick start
 
 1. Establish the project root and run ProjectAtlas from that root.
-2. `projectatlas init --seed-purpose`
+2. `projectatlas init`
 3. `projectatlas scan`
 4. `projectatlas overview`
 5. `projectatlas folders <query>`

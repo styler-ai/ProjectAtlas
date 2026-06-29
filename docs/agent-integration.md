@@ -77,20 +77,10 @@ MCP root-changing tool arguments such as `atlas_scan.path` and `atlas_watch_once
 to that bound project root. Start a separate project-local MCP server instead of pointing one
 project's DB/config at another repository.
 
-The plugin-provided `plugins/projectatlas/.mcp.json` is only a fallback for harnesses that register
-the plugin file directly from the project root. It includes `--require-version` so a stale PATH runtime
-fails closed instead of starting an older MCP server:
-
-```json
-{
-  "mcpServers": {
-    "projectatlas": {
-      "command": "projectatlas",
-      "args": ["--require-version", "0.3.7", "--db", ".projectatlas/projectatlas.db", "mcp"]
-    }
-  }
-}
-```
+The plugin no longer ships a PATH-based fallback `.mcp.json`. Registering a plugin-level MCP file with
+`command = "projectatlas"` is not portable across Windows, Linux, and macOS because an already-running
+host process may not see PATH changes made by the runtime installer. Use the generated project-local
+configs instead; they are version-guarded and point at the verified runtime by absolute path.
 
 Use `projectatlas --format json runtime-info` as the compatibility probe. It reports runtime identity
 and capabilities without creating `.projectatlas` or touching the project-local database.
@@ -240,11 +230,12 @@ Personal workspace memory is local state and should stay ignored/untracked throu
 The ProjectAtlas plugin package includes:
 
 - `.codex-plugin/plugin.json` for Codex plugin metadata.
-- `.claude-plugin/plugin.json` plus the root `skills/` folder and `.mcp.json` for Claude Code plugin packaging.
-- `opencode/opencode.json` as an OpenCode MCP config template.
+- `.claude-plugin/plugin.json` plus the root `skills/` folder for Claude Code plugin packaging.
+- `opencode/opencode.json` as a disabled OpenCode MCP config template with absolute-path placeholders.
 - Installer scripts that generate project-local Codex-compatible, Claude Code, and OpenCode config files after runtime verification.
 
-The generated project-local files should be preferred over the checked-in templates because they contain absolute runtime and project paths.
+The generated project-local files are the supported MCP registration path because they contain absolute runtime and project paths.
+Checked-in templates must not be enabled with a bare `projectatlas` command.
 
 ## Lint and CI
 

@@ -7,8 +7,7 @@ mod structural;
 
 use atlas_map::{
     IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report, init_gitignore,
-    init_project, lint_map, list_ignore_entries, load_atlas_config, remove_ignore_entry,
-    seed_purpose_files, write_map,
+    init_project, lint_map, list_ignore_entries, load_atlas_config, remove_ignore_entry, write_map,
 };
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use projectatlas_core::outline::build_outline;
@@ -205,11 +204,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Initialize `ProjectAtlas` files in a repository.
-    Init {
-        /// Create missing folder purpose files after initialization.
-        #[arg(long)]
-        seed_purpose: bool,
-    },
+    Init,
     /// Generate the `ProjectAtlas` TOON map.
     Map {
         /// Also write JSON next to the TOON map.
@@ -219,8 +214,6 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Create missing folder purpose files.
-    SeedPurpose,
     /// Scan a repository and replace the durable index.
     Scan {
         /// Repository root to scan.
@@ -619,12 +612,12 @@ fn run() -> Result<(), CliError> {
         validate_required_runtime_version(required_version)?;
     }
     match &cli.command {
-        Command::Init { seed_purpose } => {
+        Command::Init => {
             let root = std::env::current_dir().map_err(|source| CliError::Io {
                 path: PathBuf::from("."),
                 source,
             })?;
-            let report = init_project(&root, *seed_purpose)?;
+            let report = init_project(&root)?;
             write_stdout(&report)?;
         }
         Command::Map { json, force } => {
@@ -634,11 +627,6 @@ fn run() -> Result<(), CliError> {
             }
             let config = load_atlas_config(cli.config.as_deref())?;
             write_map(&config, *json)?;
-        }
-        Command::SeedPurpose => {
-            let config = load_atlas_config(cli.config.as_deref())?;
-            let created = seed_purpose_files(&config)?;
-            write_stderr(&format!("Seeded {created} .purpose files.\n"))?;
         }
         Command::Scan {
             path,
@@ -1383,7 +1371,7 @@ fn bind_project_root(root: &Path) -> Result<RootReport, CliError> {
             root.display()
         )));
     }
-    init_project(root, false)?;
+    init_project(root)?;
     let atlas_dir = root.join(".projectatlas");
     let db_path = atlas_dir.join("projectatlas.db");
     let config_path = atlas_dir.join("config.toml");
@@ -2092,7 +2080,6 @@ fn required_cli_surface_present() -> bool {
     let required = [
         "init",
         "map",
-        "seed-purpose",
         "scan",
         "overview",
         "folders",
