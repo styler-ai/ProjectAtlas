@@ -210,7 +210,8 @@ symbol extractor for that language and cover it with tests.
 - Update `docs/projectatlas-3-architecture.md` with the new module boundary and
   import-alias resolution design.
 - Keep local workspace memory notes out of Git; promote only stable public decisions into docs.
-- Regenerate `.projectatlas/projectatlas.toon`.
+- Do not require a committed `.projectatlas/projectatlas.toon`; the SQLite DB
+  and MCP/CLI query surfaces are the normal ProjectAtlas 3 source of truth.
 - Keep `AGENTS.md` and plugin skill guidance aligned only if the command
   workflow changes. No workflow change is expected.
 
@@ -229,7 +230,7 @@ cargo deny check
 cargo hack check --workspace --each-feature --no-dev-deps
 cargo hack check --workspace --all-targets --each-feature
 projectatlas scan .
-projectatlas lint --strict-folders --report-untracked
+projectatlas lint --report-untracked --purpose-level low
 projectatlas parity report --profile repository-intelligence
 projectatlas token --view tui
 git diff --check

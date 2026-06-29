@@ -3,6 +3,8 @@ name: projectatlas
 description: Use ProjectAtlas as the atlas-first orientation layer before broad source reads, and run ProjectAtlas CLI/MCP scan, overview, folder/file, outline, symbols, slice, health, lint, and token commands.
 ---
 
+# Purpose: Guide agents through ProjectAtlas atlas-first repository orientation and MCP workflows.
+
 # ProjectAtlas
 
 ## Goal
@@ -38,6 +40,7 @@ Purpose and summary are separate:
 - Folder purposes are high-value navigation metadata and should be curated broadly.
 - File purposes are curated selectively. Fill them when they affect current work, public API, build/config/workflow/test/runtime behavior, routes, migrations, commands, MCP surfaces, or stale trusted metadata. Do not review every file in a large repository unless the user explicitly asks for broad file-purpose cleanup.
 - If lint, health, or the curation queue reports missing folder or high-impact file purposes, the agent must inspect the path enough to write a correct one-line purpose and call `atlas_purpose_set` or `projectatlas purpose set`; do not leave the purpose blank just because no human supplied it.
+- If the agent notices a wrong, stale, vague, or generic purpose while working, fix it immediately with `atlas_purpose_set` or `projectatlas purpose set` after inspecting enough context. Purpose quality should improve during normal work.
 
 ## Purpose Completion Loop
 
@@ -53,6 +56,8 @@ When `atlas_purpose_queue`, `projectatlas purpose queue`, `atlas_health`, `proje
 
 `atlas_purpose_queue` and `projectatlas purpose queue` default to all folders and high-impact files. Use `projectatlas purpose queue --include-low-priority-files` or MCP `include_low_priority_files: true` only when intentionally doing broad file-purpose cleanup. Use `projectatlas purpose queue --include-assets`, MCP `include_assets: true`, raw `atlas_health`, or bare `projectatlas health-check` only when intentionally curating assets or generated outputs.
 Read `folder_scope` and `file_scope` in queue metadata before deciding how broad the current curation pass is.
+
+`projectatlas lint` defaults to `--purpose-level low`: stale, duplicate, and repeated temporary-folder findings fail the gate, while first-pass missing/suggested/agent-review purpose curation for folders plus high-impact files stays advisory so new installs can bootstrap. Use `projectatlas purpose queue` for the actionable low-scope curation list, `--purpose-level medium` when all source files must be agent-reviewed, and `--purpose-level strict` only when the user explicitly wants every indexed file and folder reviewed. Strict is intentionally expensive on large repositories.
 
 This loop is an agent responsibility installed with the plugin. Do not wait for human purpose text during normal agent-harness operation.
 
@@ -99,18 +104,19 @@ This skill is part of the ProjectAtlas plugin on purpose. Installing the plugin 
 
    These generated files contain absolute runtime, DB, and config paths. Codex/OpenCode configs include a `cwd` project-root hint where supported; Claude Code config does not rely on `cwd` because the absolute DB/config arguments bind the project root. `mcp-config` discovers `.projectatlas/config.toml` and flat `projectatlas.toml` from the selected DB/project root. The MCP server also resolves path-less root-sensitive tools from config, indexed DB metadata, or the default `.projectatlas/projectatlas.db` parent, so hosts that ignore `cwd` still use the intended project. The plugin does not ship a PATH-based fallback `.mcp.json`; generated project-local configs are the supported registration path on Windows, Linux, and macOS.
    Installer tests or release validation may pass an already-built runtime with PowerShell `-RuntimePath <path>` or POSIX `PROJECTATLAS_RUNTIME_PATH=<path>`. The installer must still verify that runtime with `projectatlas --format json runtime-info` before writing configs.
+   The installers remove verified stale ProjectAtlas shims only from known user-local Cargo/npm-style locations. Unknown PATH shadows remain in place and are reported with an actionable warning.
    MCP root-changing arguments such as `atlas_scan.path` and `atlas_watch_once.path` must resolve to this same project root. If you need a different repository, start or install a separate project-local ProjectAtlas MCP server for that repository.
 6. Initialize the target repo with `projectatlas init`.
 7. Run `projectatlas ignore list` before large-repo indexing. ProjectAtlas inherits `.gitignore` dynamically and then applies the manual ProjectAtlas ignore layer as stricter atlas-only exclusions. If the project has no `.gitignore` and needs one for local runtime state, run `projectatlas ignore init-gitignore`. Add broad generated/vendor/build directory names with `projectatlas ignore add --kind dir-name <name>`, and add exact generated or published subtrees with `projectatlas ignore add --kind path-prefix <path>`.
 8. Run `projectatlas scan`.
 9. Add or import one-line purpose records for important folders and files.
 10. Add summaries for non-source files to `.projectatlas/projectatlas-nonsource-files.toon` when needed.
-11. Run `projectatlas map --force`.
-12. Run `projectatlas lint --strict-folders --report-untracked` and fix every reported issue.
+11. Run `projectatlas lint --report-untracked --purpose-level low`; fix blocking lint output and use `projectatlas purpose queue` for advisory low-scope purpose curation.
+12. Run `projectatlas map --force` only when an explicit legacy TOON map export is needed.
 
 ## MCP Tool Workflow
 
-Use the MCP tools when the harness exposes them. They are preferred over shell commands because they keep the agent in the atlas-first path and return TOON text payloads directly.
+Use the MCP tools when the harness exposes them. Normal agent navigation, search, summary, health, purpose, and slice calls should be MCP-first because they keep the agent in the atlas-first path and return TOON text payloads directly. Use the CLI for bootstrap/install/update/release/CI, MCP config generation, MCP startup debugging, human terminal workflows, or when MCP tools are unavailable.
 
 1. `atlas_scan` when the index may be stale or after file/folder changes.
 2. `atlas_overview` at startup to understand repository size and purpose coverage.
@@ -133,6 +139,7 @@ Use the MCP tools when the harness exposes them. They are preferred over shell c
 
 ## Command Decision Rules
 
+- If MCP tools are available, use `atlas_*` tools for normal ProjectAtlas calls. Do not shell out to `projectatlas` for routine overview/folders/files/search/summary/slice/health/purpose work unless you are testing the CLI itself or the MCP surface is unavailable.
 - Start of any non-trivial repo task: call `atlas_scan` if the index may be stale, otherwise call `atlas_overview`.
 - New session after scan: call `atlas_overview`, then `atlas_folders` with the task terms.
 - Choosing where to work: call `atlas_folders` before `atlas_files`; do not jump directly to broad source reads.
@@ -185,6 +192,7 @@ If MCP tools are unavailable, use the equivalent CLI sequence:
 | Continuous local refresh | `projectatlas watch` |
 | Cleanup/refactor signals | `projectatlas health-check --source-only --limit <n>` |
 | Purpose curation queue | `projectatlas purpose queue --limit <n>` |
+| Purpose lint | `projectatlas lint --purpose-level low`, `projectatlas lint --purpose-level medium`, or `projectatlas lint --purpose-level strict` |
 | Token savings | `projectatlas token` |
 | Human token dashboard | `projectatlas token --view tui` |
 | Diagnostics | `projectatlas settings`, `projectatlas config --print`, and `projectatlas watch-status` |
@@ -194,7 +202,7 @@ If MCP tools are unavailable, use the equivalent CLI sequence:
 ## Startup Workflow
 
 1. Establish the project root and run ProjectAtlas from that root.
-2. Run `projectatlas scan` or `projectatlas map --force` when the index may be stale.
+2. Run `projectatlas scan` when the SQLite index may be stale.
 3. Run `projectatlas overview`.
 4. Run `projectatlas folders <query>` to choose the right part of the repo.
 5. Run `projectatlas files <query> --folder <path>` to select targets; use `projectatlas files --file-pattern <glob>` when the file/path pattern is already known.
@@ -206,7 +214,7 @@ If MCP tools are unavailable, use the equivalent CLI sequence:
 11. Run `projectatlas health-check --source-only --limit 50` before cleanup/refactor decisions.
 12. Only then use language servers or broad file reads on selected targets.
 13. Run `projectatlas token` when token-savings reporting is requested; use `projectatlas token --view tui` only for a human terminal dashboard.
-14. Run `projectatlas lint --strict-folders --report-untracked` before finishing structural changes.
+14. Run `projectatlas lint --report-untracked --purpose-level low` before finishing structural changes. Low is the nonblocking first-pass purpose curation scope; use `projectatlas purpose queue` for the next curation actions and `--purpose-level medium` or `--purpose-level strict` only for intentionally broader enforced purpose-curation passes.
 
 Token savings estimate avoided wrong-folder exploration, wrong-file opens, and unnecessary full-code reads caused by the atlas-first workflow. Agent and MCP surfaces should remain structured TOON by default; the TUI view is explicit terminal UI with "Without PA", "With PA", and "Saved" comparison bars.
 
@@ -223,11 +231,12 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo test --doc --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
-cargo run -p projectatlas-cli -- map --force
-cargo run -p projectatlas-cli -- lint --strict-folders --report-untracked
+cargo run -p projectatlas-cli -- lint --report-untracked
 ```
 
 ## Map Interpretation
+
+The SQLite database and MCP/CLI query surfaces are the primary agent source of truth. `projectatlas map --force` is an explicit compatibility export for older workflows, not a normal startup or CI requirement.
 
 - `overview` shows repository scale and purpose coverage.
 - `folders` chooses a work area by path and `folder_purpose`, and helps agents spot structural housekeeping issues.

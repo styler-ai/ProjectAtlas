@@ -1,6 +1,6 @@
 //! Purpose: Detect structural health issues in `ProjectAtlas` indexes.
 
-use crate::{IndexedNode, NodeKind, PurposeStatus, normalized_parent};
+use crate::{IndexedNode, NodeKind, PurposeStatus, is_high_impact_file_path, normalized_parent};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -42,6 +42,7 @@ pub fn health_check(nodes: &[IndexedNode]) -> Vec<HealthFinding> {
     findings.extend(missing_purpose_findings(nodes));
     findings.extend(suggested_purpose_findings(nodes));
     findings.extend(stale_purpose_findings(nodes));
+    findings.extend(agent_review_required_findings(nodes));
     findings.extend(duplicate_purpose_findings(nodes));
     findings.extend(temp_folder_findings(nodes));
     findings
@@ -121,6 +122,30 @@ fn stale_purpose_findings(nodes: &[IndexedNode]) -> Vec<HealthFinding> {
             message: "Path changed after its purpose was approved.".to_string(),
             recommendation:
                 "Inspect the current summary and approve or correct the one-line purpose."
+                    .to_string(),
+        })
+        .collect()
+}
+
+/// Find navigation-critical approved purposes that still need agent review.
+fn agent_review_required_findings(nodes: &[IndexedNode]) -> Vec<HealthFinding> {
+    nodes
+        .iter()
+        .filter(|node| node.purpose.status == PurposeStatus::Approved)
+        .filter(|node| !node.purpose.agent_reviewed())
+        .filter(|node| {
+            node.node.kind == NodeKind::Folder
+                || (node.node.kind == NodeKind::File && is_high_impact_file_path(&node.node.path))
+        })
+        .map(|node| HealthFinding {
+            id: finding_id("purpose-agent-review-required", &node.node.path, None),
+            severity: Severity::Warning,
+            category: "purpose-agent-review-required".to_string(),
+            path: node.node.path.clone(),
+            related_path: None,
+            message: "Purpose is approved but has not been reviewed by an agent.".to_string(),
+            recommendation:
+                "Inspect current context and approve or correct the purpose with purpose set."
                     .to_string(),
         })
         .collect()
@@ -258,6 +283,40 @@ mod tests {
     }
 
     #[test]
+    fn approved_navigation_purposes_require_agent_review() -> Result<(), Box<dyn Error>> {
+        let nodes = vec![
+            test_node_with_source(
+                ".",
+                NodeKind::Folder,
+                Some("Imported repository root"),
+                PurposeStatus::Approved,
+                PurposeSource::Imported,
+            ),
+            test_node_with_source(
+                "Cargo.toml",
+                NodeKind::File,
+                Some("Imported Rust manifest"),
+                PurposeStatus::Approved,
+                PurposeSource::Imported,
+            ),
+            test_node_with_source(
+                "src/detail.rs",
+                NodeKind::File,
+                Some("Imported implementation detail"),
+                PurposeStatus::Approved,
+                PurposeSource::Imported,
+            ),
+        ];
+
+        let findings = health_check(&nodes);
+        require_category(&findings, "purpose-agent-review-required")?;
+        require_path(&findings, "purpose-agent-review-required", ".")?;
+        require_path(&findings, "purpose-agent-review-required", "Cargo.toml")?;
+        reject_path(&findings, "purpose-agent-review-required", "src/detail.rs")?;
+        Ok(())
+    }
+
+    #[test]
     fn duplicate_purpose_uses_approved_purposes_only() -> Result<(), Box<dyn Error>> {
         let nodes = vec![
             test_node(
@@ -309,6 +368,22 @@ mod tests {
         purpose: Option<&str>,
         status: PurposeStatus,
     ) -> IndexedNode {
+        let source = if status == PurposeStatus::Suggested {
+            PurposeSource::Generated
+        } else {
+            PurposeSource::Agent
+        };
+        test_node_with_source(path, kind, purpose, status, source)
+    }
+
+    /// Build a health-check test node with an explicit purpose source.
+    fn test_node_with_source(
+        path: &str,
+        kind: NodeKind,
+        purpose: Option<&str>,
+        status: PurposeStatus,
+        source: PurposeSource,
+    ) -> IndexedNode {
         IndexedNode {
             node: Node {
                 path: path.to_string(),
@@ -323,11 +398,7 @@ mod tests {
             purpose: Purpose {
                 path: path.to_string(),
                 purpose: purpose.map(str::to_string),
-                source: if status == PurposeStatus::Suggested {
-                    PurposeSource::Generated
-                } else {
-                    PurposeSource::Agent
-                },
+                source,
                 status,
             },
             summary: Some("rust source summary".to_string()),
@@ -347,6 +418,38 @@ mod tests {
     fn reject_category(findings: &[HealthFinding], category: &str) -> Result<(), Box<dyn Error>> {
         if findings.iter().any(|finding| finding.category == category) {
             Err(std::io::Error::other(format!("unexpected category {category}")).into())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Require a health finding category/path pair to be present.
+    fn require_path(
+        findings: &[HealthFinding],
+        category: &str,
+        path: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        if findings
+            .iter()
+            .any(|finding| finding.category == category && finding.path == path)
+        {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!("missing category {category} path {path}")).into())
+        }
+    }
+
+    /// Require a health finding category/path pair to be absent.
+    fn reject_path(
+        findings: &[HealthFinding],
+        category: &str,
+        path: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        if findings
+            .iter()
+            .any(|finding| finding.category == category && finding.path == path)
+        {
+            Err(std::io::Error::other(format!("unexpected category {category} path {path}")).into())
         } else {
             Ok(())
         }

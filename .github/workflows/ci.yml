@@ -1,3 +1,5 @@
+# Purpose: Verify ProjectAtlas Rust quality gates and multi-OS installer/MCP smoke tests.
+
 name: 01-CI
 
 # /**
@@ -80,13 +82,7 @@ jobs:
         run: cargo run --locked -p projectatlas-cli -- parity report --profile repository-intelligence
 
       - name: ProjectAtlas lint
-        run: cargo run --locked -p projectatlas-cli -- lint --strict-folders --report-untracked
-
-      - name: ProjectAtlas map
-        run: cargo run --locked -p projectatlas-cli -- map --force
-
-      - name: ProjectAtlas map diff
-        run: git diff --exit-code -- .projectatlas/projectatlas.toon .projectatlas/projectatlas-nonsource-files.toon
+        run: cargo run --locked -p projectatlas-cli -- lint --report-untracked
 
   install-smoke:
     name: install-smoke
@@ -114,15 +110,14 @@ jobs:
           PROJECTATLAS_NO_TELEMETRY=1 projectatlas config --print
           PROJECTATLAS_NO_TELEMETRY=1 projectatlas ignore list
 
-      - name: Smoke map
+      - name: Smoke index
         run: |
           mkdir smoke
           cd smoke
           projectatlas init
           projectatlas scan
           projectatlas purpose set . "Smoke test repository root"
-          projectatlas map --force
-          projectatlas lint --strict-folders --report-untracked
+          projectatlas lint --report-untracked
 
   e2e-smoke:
     name: e2e-smoke ${{ matrix.label }}
@@ -153,6 +148,10 @@ jobs:
       - name: Plugin installer E2E
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli plugin_installer_writes_real_harness_configs --test e2e
+
+      - name: Plugin update E2E
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp --test e2e
 
       - name: MCP project binding E2E
         timeout-minutes: 5

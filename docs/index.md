@@ -17,7 +17,7 @@ Use it to choose folders, files, structured summaries, outlines, and exact sourc
 7. `projectatlas summary <file> --limit 25`
 8. `projectatlas outline <file>` when the structured summary is not enough
 9. `projectatlas slice <file> --start-line <n> --end-line <m>` only after selecting the indexed file
-10. `projectatlas lint --strict-folders --report-untracked`
+10. `projectatlas lint --report-untracked --purpose-level low`
 
 ## Why it matters
 

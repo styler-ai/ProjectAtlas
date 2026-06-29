@@ -26,7 +26,7 @@ use projectatlas_core::{
     normalize_native_path_display_str, normalize_repo_path, purpose_review_signal,
     repo_path_to_native, validated_repo_file_key,
 };
-use projectatlas_db::{AtlasStore, HealthFindingsPage, HealthQuery, IndexedFileText};
+use projectatlas_db::{AtlasStore, HealthFindingsPage, HealthQuery, HealthScope, IndexedFileText};
 use projectatlas_fs::{ScanOptions, gitignore_excludes_path, scan_path, scan_repo};
 use projectatlas_service::{
     FilePathMatcher, FileSummaryReport, file_summary_baseline_text, load_ranked_file_nodes,
@@ -125,6 +125,8 @@ pub(crate) struct PurposeImportReport {
     pub(crate) imported: usize,
     /// Legacy purpose records skipped because the path is no longer indexed.
     pub(crate) skipped_stale: usize,
+    /// Legacy purpose records skipped because a curated purpose already exists.
+    pub(crate) skipped_existing: usize,
 }
 
 /// Return a canonical absolute project root.
@@ -266,11 +268,26 @@ pub(crate) fn run_scan_pipeline(
         .iter()
         .map(|node| node.path.as_str())
         .collect::<HashSet<_>>();
+    let existing_purpose_paths = store
+        .load_nodes()?
+        .into_iter()
+        .filter(|node| {
+            matches!(
+                node.purpose.status,
+                PurposeStatus::Approved | PurposeStatus::Stale
+            )
+        })
+        .map(|node| node.node.path)
+        .collect::<HashSet<_>>();
     let mut purpose_import = PurposeImportReport::default();
     if let Some(config) = plan.config.as_ref() {
         for record in imported_purpose_records(config)? {
             if !indexed_paths.contains(record.path.as_str()) {
                 purpose_import.skipped_stale += 1;
+                continue;
+            }
+            if existing_purpose_paths.contains(record.path.as_str()) {
+                purpose_import.skipped_existing += 1;
                 continue;
             }
             store.set_purpose(&record.path, &record.summary, PurposeSource::Imported)?;
@@ -599,7 +616,7 @@ pub(crate) fn purpose_curation_page(
         max_limit: MAX_HEALTH_LIMIT,
         next_start_index: health_next_start_index(&page),
         truncated: health_next_start_index(&page).is_some(),
-        source_only: query.source_only,
+        source_only: query.scope.is_source_focused(),
         folder_scope: purpose_queue_folder_scope(query).to_string(),
         file_scope: purpose_queue_file_scope(query).to_string(),
         category: query.category.clone().unwrap_or_default(),
@@ -638,7 +655,7 @@ pub(crate) fn render_health_page(page: &HealthFindingsPage, query: &HealthQuery)
             "next_start_index": health_next_start_index(page),
             "truncated": health_next_start_index(page).is_some(),
             "summary_only": query.summary_only,
-            "source_only": query.source_only,
+            "source_only": query.scope.is_source_focused(),
             "category": query.category.as_deref().unwrap_or(""),
             "severity": query.severity.map_or("", health_severity_name),
             "path_prefix": query.path_prefix.as_deref().unwrap_or(""),
@@ -673,20 +690,19 @@ pub(crate) fn render_purpose_curation_page(page: &PurposeCurationPage) -> String
 
 /// Return the folder inclusion scope for purpose curation metadata.
 fn purpose_queue_folder_scope(query: &HealthQuery) -> &'static str {
-    if query.source_only && !query.high_impact_only {
-        "source_relevant"
-    } else {
-        "all"
+    match query.scope {
+        HealthScope::SourceOnly | HealthScope::PurposeWithSourceFiles => "source_relevant",
+        _ => "all",
     }
 }
 
 /// Return the file inclusion scope for purpose curation metadata.
 fn purpose_queue_file_scope(query: &HealthQuery) -> &'static str {
-    match (query.high_impact_only, query.source_only) {
-        (true, true) => "high_impact",
-        (true, false) => "high_impact_and_assets",
-        (false, true) => "all_source",
-        (false, false) => "all",
+    match query.scope {
+        HealthScope::PurposeDefault => "high_impact",
+        HealthScope::PurposeWithAssets => "high_impact_and_assets",
+        HealthScope::SourceOnly | HealthScope::PurposeWithSourceFiles => "all_source",
+        HealthScope::All | HealthScope::PurposeStrict => "all",
     }
 }
 
@@ -1265,29 +1281,30 @@ pub(crate) fn watcher_status_report(active: bool) -> WatchStatusReport {
 }
 
 /// Build lint output for an existing `SQLite` index.
-pub(crate) fn lint_database_if_present(db: &Path) -> Result<(String, i32), CliError> {
+pub(crate) fn lint_database_if_present(
+    db: &Path,
+    purpose_level: PurposeLintLevel,
+) -> Result<(String, i32), CliError> {
     if !db.exists() {
         return Ok((String::new(), 0));
     }
     let store = AtlasStore::open(db)?;
-    let findings = store.unresolved_health_findings(&store.resolved_health_ids()?)?;
-    let blocking = findings
+    let query = purpose_level.health_query();
+    let page = store.unresolved_health_findings_page(&store.resolved_health_ids()?, &query)?;
+    let blocking = page
+        .findings
         .iter()
-        .filter(|finding| {
-            matches!(
-                finding.category.as_str(),
-                "missing-purpose"
-                    | "suggested-purpose-review"
-                    | "stale-purpose"
-                    | "duplicate-purpose"
-                    | "repeated-temporary-folder"
-            )
-        })
+        .filter(|finding| purpose_level.blocks_category(finding.category.as_str()))
         .collect::<Vec<_>>();
     if blocking.is_empty() {
         return Ok((String::new(), 0));
     }
-    let mut report = String::from("ProjectAtlas SQLite index health findings:\n");
+    let mut report = format!(
+        "ProjectAtlas SQLite index health findings (purpose-level {}, showing {} of {}):\n",
+        purpose_level.as_str(),
+        blocking.len(),
+        page.total
+    );
     for finding in blocking {
         writeln!(
             &mut report,
@@ -1297,6 +1314,57 @@ pub(crate) fn lint_database_if_present(db: &Path) -> Result<(String, i32), CliEr
         .map_err(|source| CliError::Output(io::Error::other(source.to_string())))?;
     }
     Ok((report, 1))
+}
+
+/// Purpose curation strictness used by `projectatlas lint`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PurposeLintLevel {
+    /// Advisory first-pass curation scope for folders and high-impact files.
+    Low,
+    /// Also require agent review for all source files.
+    Medium,
+    /// Require agent review for every indexed file and folder.
+    Strict,
+}
+
+impl PurposeLintLevel {
+    /// Stable CLI/report label.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::Strict => "strict",
+        }
+    }
+
+    /// Convert lint strictness into the bounded DB health query.
+    fn health_query(self) -> HealthQuery {
+        let scope = match self {
+            Self::Low => HealthScope::purpose_default(),
+            Self::Medium => HealthScope::purpose_with_source_files(),
+            Self::Strict => HealthScope::purpose_strict(),
+        };
+        HealthQuery {
+            start_index: 0,
+            limit: MAX_HEALTH_LIMIT,
+            category: None,
+            severity: Some(Severity::Warning),
+            path_prefix: None,
+            summary_only: false,
+            scope,
+        }
+    }
+
+    /// Return whether a category should make lint fail at this strictness.
+    fn blocks_category(self, category: &str) -> bool {
+        match category {
+            "stale-purpose" | "duplicate-purpose" | "repeated-temporary-folder" => true,
+            "missing-purpose" | "suggested-purpose-review" | "purpose-agent-review-required" => {
+                self != Self::Low
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Return whether the platform watcher can be constructed in this process.

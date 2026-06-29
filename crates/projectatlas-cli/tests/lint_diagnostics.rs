@@ -1,4 +1,4 @@
-//! Purpose: Validate lint diagnostics for source extension purpose styles.
+//! Purpose: Validate compatibility behavior for legacy source purpose metadata.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -6,7 +6,7 @@ use std::error::Error;
 use std::fs;
 
 #[test]
-fn lint_suggests_style_for_custom_source_extension_missing_purpose() -> Result<(), Box<dyn Error>> {
+fn lint_does_not_require_legacy_source_purpose_headers() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("repo");
     fs::create_dir(&repo)?;
@@ -43,12 +43,9 @@ line_comment_prefixes = ["//", "#", "--", ";"]
         .current_dir(&repo)
         .arg("lint")
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("Missing Purpose headers"))
-        .stderr(predicate::str::contains("sample.foo"))
-        .stderr(predicate::str::contains("Purpose style suggestions"))
-        .stderr(predicate::str::contains(".foo"))
-        .stderr(predicate::str::contains("\".foo\" = \"line-comment\""));
+        .success()
+        .stderr(predicate::str::contains("Missing Purpose headers").not())
+        .stderr(predicate::str::contains("Purpose style suggestions").not());
 
     Ok(())
 }

@@ -22,15 +22,15 @@ use projectatlas_core::toon::{
 use projectatlas_core::{
     NodeKind, PurposeSource, normalize_native_path_display, normalize_repo_path_prefix,
 };
-use projectatlas_db::{AtlasStore, DbError, HealthQuery, HealthResolution};
+use projectatlas_db::{AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope};
 use projectatlas_service::{
     CodeSlice, FileSummaryReport, SearchReport, SymbolSliceSelector, build_file_summary,
     read_indexed_code_slice, read_symbol_slice, search_indexed_files,
 };
 use runtime::{
-    DEFAULT_HEALTH_LIMIT, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, ScanRuntimePlan, SettingsReport,
-    SymbolBuildOptions, WatchStatusReport, absolute_path, build_settings_report,
-    build_symbols_for_index, byte_count_to_tokens, canonical_project_root,
+    DEFAULT_HEALTH_LIMIT, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel,
+    ScanRuntimePlan, SettingsReport, SymbolBuildOptions, WatchStatusReport, absolute_path,
+    build_settings_report, build_symbols_for_index, byte_count_to_tokens, canonical_project_root,
     default_mcp_project_root, defaultable_cli_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     file_summary_usage_baseline, lint_database_if_present, normalized_folder_filter,
@@ -162,6 +162,27 @@ impl From<HealthSeverityArg> for Severity {
             HealthSeverityArg::Info => Self::Info,
             HealthSeverityArg::Warning => Self::Warning,
             HealthSeverityArg::Error => Self::Error,
+        }
+    }
+}
+
+/// Purpose curation strictness accepted by `projectatlas lint`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum PurposeLintLevelArg {
+    /// Require agent review for folders and high-impact files only.
+    Low,
+    /// Also require agent review for source files.
+    Medium,
+    /// Require agent review for every indexed file and folder.
+    Strict,
+}
+
+impl From<PurposeLintLevelArg> for PurposeLintLevel {
+    fn from(value: PurposeLintLevelArg) -> Self {
+        match value {
+            PurposeLintLevelArg::Low => Self::Low,
+            PurposeLintLevelArg::Medium => Self::Medium,
+            PurposeLintLevelArg::Strict => Self::Strict,
         }
     }
 }
@@ -422,11 +443,14 @@ enum Command {
         #[command(subcommand)]
         command: HealthCommand,
     },
-    /// Validate `ProjectAtlas` map, purpose summaries, and structure drift.
+    /// Validate database purpose metadata, untracked files, and structure drift.
     Lint {
-        /// Fail when folder purpose files are missing.
+        /// Deprecated compatibility flag; database folder purpose linting uses `--purpose-level`.
         #[arg(long)]
         strict_folders: bool,
+        /// Purpose curation strictness for `SQLite` health linting.
+        #[arg(long, value_enum, default_value_t = PurposeLintLevelArg::Low)]
+        purpose_level: PurposeLintLevelArg,
         /// Report non-source files not covered by source scanning.
         #[arg(long)]
         report_untracked: bool,
@@ -1133,8 +1157,11 @@ fn run() -> Result<(), CliError> {
                 *severity,
                 path_prefix.as_deref(),
                 *summary_only,
-                *source_only,
-                false,
+                if *source_only {
+                    HealthScope::source_only()
+                } else {
+                    HealthScope::all()
+                },
             );
             let page =
                 store.unresolved_health_findings_page(&store.resolved_health_ids()?, &query)?;
@@ -1177,6 +1204,7 @@ fn run() -> Result<(), CliError> {
         },
         Command::Lint {
             strict_folders,
+            purpose_level,
             report_untracked,
             strict_untracked,
         } => {
@@ -1189,7 +1217,8 @@ fn run() -> Result<(), CliError> {
                     strict_untracked: *strict_untracked,
                 },
             )?;
-            let (db_report, db_exit_code) = lint_database_if_present(&cli.db)?;
+            let (db_report, db_exit_code) =
+                lint_database_if_present(&cli.db, (*purpose_level).into())?;
             if !db_report.is_empty() {
                 if !report.ends_with('\n') {
                     report.push('\n');
@@ -1326,8 +1355,7 @@ fn run() -> Result<(), CliError> {
                     *severity,
                     path_prefix.as_deref(),
                     *summary_only,
-                    !*include_assets,
-                    !*include_low_priority_files,
+                    purpose_queue_scope(*include_assets, *include_low_priority_files),
                 );
                 let page = purpose_curation_page(&store, &query)?;
                 print_output(cli.format, &render_purpose_curation_page(&page), &page)?;
@@ -1620,8 +1648,7 @@ fn health_query_from_cli(
     severity: Option<HealthSeverityArg>,
     path_prefix: Option<&str>,
     summary_only: bool,
-    source_only: bool,
-    high_impact_only: bool,
+    scope: HealthScope,
 ) -> HealthQuery {
     HealthQuery {
         start_index,
@@ -1631,8 +1658,17 @@ fn health_query_from_cli(
         path_prefix: trimmed_cli_filter(path_prefix)
             .map(|value| normalize_repo_path_prefix(&value)),
         summary_only,
-        source_only,
-        high_impact_only,
+        scope,
+    }
+}
+
+/// Return the DB scope for purpose queue CLI switches.
+fn purpose_queue_scope(include_assets: bool, include_low_priority_files: bool) -> HealthScope {
+    match (include_assets, include_low_priority_files) {
+        (false, false) => HealthScope::purpose_default(),
+        (true, false) => HealthScope::purpose_with_assets(),
+        (false, true) => HealthScope::purpose_with_source_files(),
+        (true, true) => HealthScope::all(),
     }
 }
 
@@ -2163,10 +2199,10 @@ fn build_parity_report(store: &AtlasStore, profile: &str) -> Result<ParityReport
     );
     push_check(
         &mut checks,
-        "purpose-coverage",
-        overview.missing_purposes == 0 && overview.suggested_purposes == 0,
+        "purpose-health-surface",
+        true,
         &format!(
-            "{} missing, {} suggested, {} stale purposes",
+            "{} missing, {} suggested, {} stale purposes visible through health and purpose queue",
             overview.missing_purposes, overview.suggested_purposes, overview.stale_purposes
         ),
     );

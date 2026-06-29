@@ -84,6 +84,18 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             .join("scripts")
             .join("install-runtime.sh"),
     )?;
+    let release_workflow = fs::read_to_string(
+        workspace_root
+            .join(".github")
+            .join("workflows")
+            .join("release.yml"),
+    )?;
+    let ci_workflow = fs::read_to_string(
+        workspace_root
+            .join(".github")
+            .join("workflows")
+            .join("ci.yml"),
+    )?;
     let codex_fallback_mcp = workspace_root
         .join("plugins")
         .join("projectatlas")
@@ -114,6 +126,9 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "Convert-ProjectAtlasVersionTag",
         "$runtime.version -eq $expectedRuntimeVersion",
         "Sync-ProjectAtlasRuntimeToLocalAppData",
+        "Get-KnownProjectAtlasShimPaths",
+        "Quarantine-ProjectAtlasStaleShims",
+        "Test-ProjectAtlasRuntime $candidate $null",
         "[string]$RuntimePath",
         "PROJECTATLAS_RUNTIME_PATH",
         "Find-ProjectAtlas $ProjectAtlasVersion",
@@ -139,6 +154,10 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
     }
     for required in [
         "expected_runtime_version()",
+        "known_projectatlas_shim_paths()",
+        "is_projectatlas_runtime_contract",
+        "quarantine_known_stale_projectatlas_shims",
+        "quarantine_stale_projectatlas_shim",
         "runtime_override=${PROJECTATLAS_RUNTIME_PATH:-}",
         "runtime_version=$(printf",
         "[ \"$runtime_version\" = \"$expected_version\" ]",
@@ -154,6 +173,49 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             ))
             .into());
         }
+    }
+    for (job, expected, forbidden) in [
+        (
+            "prepublish-installer-smoke-unix",
+            "bash ./plugins/projectatlas/scripts/install-runtime.sh \"$project_root\"",
+            "install-runtime.ps1",
+        ),
+        (
+            "installer-smoke-unix",
+            "PROJECTATLAS_VERSION=\"$RELEASE_VERSION\" bash ./plugins/projectatlas/scripts/install-runtime.sh \"$project_root\"",
+            "install-runtime.ps1",
+        ),
+        (
+            "prepublish-installer-smoke-windows",
+            ".\\plugins\\projectatlas\\scripts\\install-runtime.ps1",
+            "install-runtime.sh",
+        ),
+        (
+            "installer-smoke-windows",
+            ".\\plugins\\projectatlas\\scripts\\install-runtime.ps1",
+            "install-runtime.sh",
+        ),
+    ] {
+        let block = workflow_job_block(&release_workflow, job)?;
+        if !block.contains(expected) {
+            return Err(io::Error::other(format!(
+                "release workflow job {job} is missing platform-native installer route {expected:?}"
+            ))
+            .into());
+        }
+        if block.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "release workflow job {job} contains forbidden installer route {forbidden:?}"
+            ))
+            .into());
+        }
+    }
+    let e2e_smoke = workflow_job_block(&ci_workflow, "e2e-smoke")?;
+    if !e2e_smoke.contains("plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp") {
+        return Err(io::Error::other(
+            "multi-OS CI smoke must run the plugin update stale-shim regression",
+        )
+        .into());
     }
     if posix_installer.contains("--package projectatlas-cli") {
         return Err(io::Error::other(
@@ -238,6 +300,105 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         &["mcp", "projectatlas", "cwd"],
         "/absolute/path/to/project",
     )?;
+    Ok(())
+}
+
+#[test]
+fn repository_guidance_keeps_legacy_toon_export_optional() -> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
+    let ci_workflow = fs::read_to_string(
+        workspace_root
+            .join(".github")
+            .join("workflows")
+            .join("ci.yml"),
+    )?;
+    let release_workflow = fs::read_to_string(
+        workspace_root
+            .join(".github")
+            .join("workflows")
+            .join("release.yml"),
+    )?;
+    let gitignore = fs::read_to_string(workspace_root.join(".gitignore"))?;
+    for (workflow_name, workflow) in [("ci", &ci_workflow), ("release", &release_workflow)] {
+        let verify = workflow_job_block(workflow, "verify")?;
+        if verify.contains("projectatlas.toon") || verify.contains("map --force") {
+            return Err(io::Error::other(format!(
+                "{workflow_name} verify job must not require the legacy committed TOON map artifact"
+            ))
+            .into());
+        }
+        if verify.contains("--strict-folders") {
+            return Err(io::Error::other(format!(
+                "{workflow_name} verify job must not require legacy folder .purpose linting"
+            ))
+            .into());
+        }
+    }
+    let ci_install_smoke = workflow_job_block(&ci_workflow, "install-smoke")?;
+    if ci_install_smoke.contains("map --force") {
+        return Err(io::Error::other(
+            "CI install smoke must not require the legacy TOON map export",
+        )
+        .into());
+    }
+    if ci_install_smoke.contains("--strict-folders") {
+        return Err(io::Error::other(
+            "CI install smoke must not require legacy folder .purpose linting",
+        )
+        .into());
+    }
+
+    let guidance_paths = [
+        "AGENTS.md",
+        "templates/AGENTS.md",
+        "plugins/projectatlas/skills/projectatlas/SKILL.md",
+        "skills/codex/ProjectAtlas.md",
+        "skills/claude/ProjectAtlas.md",
+        "docs/workflow.md",
+        "docs/adoption.md",
+        "docs/agent-integration.md",
+        "docs/projectatlas-3-architecture.md",
+        "docs/projectatlas-3-v0.3.2-hardening-spec.md",
+    ];
+    let mandatory_export_phrases = [
+        "scan` or `projectatlas map --force",
+        "Run `projectatlas map --force`.",
+        "cargo run -p projectatlas-cli -- map --force",
+        "lint validates that the map is current",
+        "Map is stale",
+        "Generate the map",
+        "Regenerate `.projectatlas/projectatlas.toon`",
+        "lint --strict-folders",
+        "PROJECTATLAS_SKIP_UPDATE",
+    ];
+    for path in guidance_paths {
+        let text = fs::read_to_string(workspace_root.join(path))?;
+        for phrase in mandatory_export_phrases {
+            if text.contains(phrase) {
+                return Err(io::Error::other(format!(
+                    "{path} must not make the legacy TOON map export part of normal setup, CI, or lint behavior; found {phrase:?}"
+                ))
+                .into());
+            }
+        }
+    }
+    for path in ["docs/workflow.md", "docs/adoption.md"] {
+        let text = fs::read_to_string(workspace_root.join(path))?;
+        if !text.contains("Optional compatibility map export") {
+            return Err(io::Error::other(format!(
+                "{path} must describe the static TOON map as an optional compatibility export"
+            ))
+            .into());
+        }
+    }
+    if !gitignore
+        .lines()
+        .any(|line| line == ".projectatlas/projectatlas.toon")
+    {
+        return Err(
+            io::Error::other("legacy ProjectAtlas TOON map artifact must stay ignored").into(),
+        );
+    }
     Ok(())
 }
 
@@ -411,6 +572,58 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         permissions.set_mode(0o755);
         fs::set_permissions(&stale_runtime, permissions)?;
     }
+    let isolated_home = temp.path().join("isolated-home");
+    let safe_stale_runtime = if cfg!(windows) {
+        isolated_home
+            .join("AppData")
+            .join("Roaming")
+            .join("npm")
+            .join("projectatlas.cmd")
+    } else {
+        isolated_home
+            .join(".cargo")
+            .join("bin")
+            .join("projectatlas")
+    };
+    fs::create_dir_all(
+        safe_stale_runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("safe stale runtime parent missing"))?,
+    )?;
+    fs::write(&safe_stale_runtime, stale_runtime_script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&safe_stale_runtime)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&safe_stale_runtime, permissions)?;
+    }
+    let non_project_runtime = if cfg!(windows) {
+        isolated_home
+            .join(".cargo")
+            .join("bin")
+            .join("projectatlas.cmd")
+    } else {
+        isolated_home.join(".npm").join("bin").join("projectatlas")
+    };
+    let non_project_script = if cfg!(windows) {
+        "@echo off\r\necho {\"project\":\"NotProjectAtlas\",\"major_version\":3,\"version\":\"0.0.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\n"
+    } else {
+        "#!/usr/bin/env sh\nprintf '%s\\n' '{\"project\":\"NotProjectAtlas\",\"major_version\":3,\"version\":\"0.0.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}'\n"
+    };
+    fs::create_dir_all(
+        non_project_runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("non-project runtime parent missing"))?,
+    )?;
+    fs::write(&non_project_runtime, non_project_script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&non_project_runtime)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&non_project_runtime, permissions)?;
+    }
     fs::write(
         atlas_dir.join("projectatlas.mcp.json"),
         format!(
@@ -437,17 +650,52 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
 
     let workspace_root = workspace_root()?;
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
-    let installer_output = run_projectatlas_plugin_installer_with_path_shadow(
+    let installer_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
         &workspace_root,
         &repo,
         &runtime,
         &stale_runtime_dir,
+        &isolated_home,
     )?;
     let installer_output_text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&installer_output.stdout),
         String::from_utf8_lossy(&installer_output.stderr)
     );
+    let safe_stale_quarantine = stale_shim_quarantine_path(&safe_stale_runtime, "0.0.1");
+    if !installer_output_text.contains("Quarantined stale ProjectAtlas shim") {
+        return Err(io::Error::other(format!(
+            "plugin update did not quarantine a known user-local stale shim:\n{installer_output_text}"
+        ))
+        .into());
+    }
+    if safe_stale_runtime.exists() {
+        return Err(io::Error::other(format!(
+            "known user-local stale shim was not moved out of PATH: {}",
+            safe_stale_runtime.display()
+        ))
+        .into());
+    }
+    if !safe_stale_quarantine.exists() {
+        return Err(io::Error::other(format!(
+            "known user-local stale shim was not preserved at quarantine path: {}",
+            safe_stale_quarantine.display()
+        ))
+        .into());
+    }
+    if !non_project_runtime.exists() {
+        return Err(io::Error::other(format!(
+            "installer removed a non-ProjectAtlas command from a known shim path: {}",
+            non_project_runtime.display()
+        ))
+        .into());
+    }
+    if !stale_runtime.exists() {
+        return Err(io::Error::other(
+            "installer removed an unknown external PATH shadow instead of only warning",
+        )
+        .into());
+    }
     if !installer_output_text.contains("Obsolete ProjectAtlas runtime")
         && !installer_output_text.contains("obsolete ProjectAtlas runtime")
     {
@@ -602,6 +850,57 @@ fn bare_relative_projectatlas_config_path_drives_scan_map_and_lint() -> Result<(
         .assert()
         .success()
         .stdout(predicate::str::contains("\"files\": 3"));
+
+    let store = AtlasStore::open(&repo.join(".projectatlas").join("projectatlas.db"))?;
+    for (path, purpose) in [
+        (".", "Agent-reviewed bare config regression root"),
+        (
+            ".projectatlas",
+            "Agent-reviewed ProjectAtlas metadata folder for bare config tests",
+        ),
+        (
+            "src",
+            "Agent-reviewed Rust source folder for bare config tests",
+        ),
+        (
+            "src/main.rs",
+            "Agent-reviewed Rust entry point for bare config tests",
+        ),
+    ] {
+        if !store.load_nodes_by_paths(&[path.to_string()])?.is_empty() {
+            store.set_purpose(path, purpose, PurposeSource::Agent)?;
+        }
+    }
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args([
+            "--config",
+            ".projectatlas/config.toml",
+            "lint",
+            "--strict-folders",
+            "--report-untracked",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Atlas map missing").not());
+
+    fs::write(
+        repo.join(".projectatlas").join("projectatlas.toon"),
+        "version: 1\noverview: tracked_source_files=0 tracked_nonsource_files=0 tracked_files_total=0 tracked_folders=0 source_extensions=0 exclude_dir_names=0 exclude_path_prefixes=0\nfile_hash: \"stale\"\nfolder_hash: \"stale\"\n",
+    )?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args([
+            "--config",
+            ".projectatlas/config.toml",
+            "lint",
+            "--strict-folders",
+            "--report-untracked",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Atlas map").not());
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -3275,6 +3574,70 @@ files[2]{path,summary,source}:\n\
 }
 
 #[test]
+fn scan_does_not_overwrite_agent_purpose_with_legacy_header() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir_all(repo.join(".projectatlas"))?;
+    fs::create_dir(repo.join("src"))?;
+    fs::write(
+        repo.join(".projectatlas").join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    fs::write(
+        repo.join("src").join("main.rs"),
+        "// Purpose: Legacy header purpose that should only seed empty rows.\nfn main() {}\n",
+    )?;
+    let db = temp.path().join("projectatlas.db");
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .arg("--config")
+        .arg(repo.join(".projectatlas").join("config.toml"))
+        .args(["scan", "."])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("imported: 1"));
+
+    {
+        let store = AtlasStore::open(&db)?;
+        store.set_purpose(
+            "src/main.rs",
+            "Agent-reviewed Rust entry point for the scan preservation test.",
+            PurposeSource::Agent,
+        )?;
+    }
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .arg("--config")
+        .arg(repo.join(".projectatlas").join("config.toml"))
+        .args(["scan", "."])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("imported: 0"))
+        .stdout(predicate::str::contains("skipped_existing: 1"));
+
+    let nodes = AtlasStore::open(&db)?.load_nodes_by_paths(&["src/main.rs".to_string()])?;
+    let node = nodes
+        .first()
+        .ok_or_else(|| io::Error::other("indexed source node missing after rescan"))?;
+    if node.purpose.source != PurposeSource::Agent {
+        return Err(io::Error::other("legacy import downgraded agent-reviewed purpose").into());
+    }
+    if node.purpose.purpose.as_deref()
+        != Some("Agent-reviewed Rust entry point for the scan preservation test.")
+    {
+        return Err(io::Error::other("legacy import replaced agent-reviewed purpose text").into());
+    }
+    Ok(())
+}
+
+#[test]
 fn mcp_config_discovers_flat_config_from_db_root() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("repo");
@@ -3935,7 +4298,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .arg(&db)
         .args(["parity", "report"])
         .assert()
-        .failure()
+        .success()
         .stdout(predicate::str::contains("parity:"))
         .stdout(predicate::str::contains(
             "profile: \"repository-intelligence\"",
@@ -3948,7 +4311,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .arg(&db)
         .args(["parity", "--profile", "repository-intelligence"])
         .assert()
-        .failure()
+        .success()
         .stdout(predicate::str::contains("parity:"))
         .stdout(predicate::str::contains("5 suggested"));
 
@@ -4731,6 +5094,243 @@ fn generated_purpose_queue_avoids_generic_and_asset_noise() -> Result<(), Box<dy
         }
     }
 
+    let all_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "purpose",
+            "queue",
+            "--limit",
+            "20",
+            "--include-assets",
+            "--include-low-priority-files",
+        ])
+        .output()?;
+    if !all_output.status.success() {
+        return Err(io::Error::other(format!(
+            "all-file purpose queue failed: {}",
+            String::from_utf8_lossy(&all_output.stderr)
+        ))
+        .into());
+    }
+    let all_queue = String::from_utf8(all_output.stdout)?;
+    if !all_queue.contains("folder_scope: all") || !all_queue.contains("file_scope: all") {
+        return Err(io::Error::other(format!(
+            "combined purpose queue did not expose all-file scope:\n{all_queue}"
+        ))
+        .into());
+    }
+    for expected in [
+        "Implement the customers service source around CustomerService and reconcile.",
+        "Implement the settings service source around SettingsService and load.",
+        "Define Gradle build tasks around bootRunE2E, copyE2EReports, and verifyAtlas.",
+        "assets/logo.svg",
+    ] {
+        if !all_queue.contains(expected) {
+            return Err(io::Error::other(format!(
+                "combined purpose queue missed `{expected}`:\n{all_queue}"
+            ))
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir(repo.join(".projectatlas"))?;
+    fs::create_dir(repo.join("src"))?;
+    fs::create_dir(repo.join("assets"))?;
+    fs::write(
+        repo.join(".projectatlas").join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n\n[purpose.styles_by_extension]\n\".toml\" = \"line-comment\"\n",
+    )?;
+    fs::write(
+        repo.join(".projectatlas")
+            .join("projectatlas-nonsource-files.toon"),
+        "nonsource_files[]:\n  # path,summary\n  assets/logo.svg,SVG brand asset for purpose lint strictness tests\n",
+    )?;
+    fs::write(repo.join(".gitignore"), ".projectatlas/\n")?;
+    fs::write(
+        repo.join("Cargo.toml"),
+        "# Purpose: Rust manifest for purpose lint strictness tests.\n[package]\nname = \"purpose-lint-demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )?;
+    fs::write(
+        repo.join("src").join("detail.rs"),
+        "// Purpose: Rust implementation detail for purpose lint strictness tests.\npub fn detail() {}\n",
+    )?;
+    fs::write(
+        repo.join("assets").join("logo.svg"),
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+    )?;
+    let db = temp.path().join("projectatlas.db");
+    let config = repo.join(".projectatlas").join("config.toml");
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--config")
+        .arg(&config)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--config")
+        .arg(&config)
+        .arg("--db")
+        .arg(&db)
+        .args(["lint", "--purpose-level", "low"])
+        .assert()
+        .success();
+
+    let fresh_strict = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--config")
+        .arg(&config)
+        .arg("--db")
+        .arg(&db)
+        .args(["lint", "--purpose-level", "strict"])
+        .output()?;
+    if fresh_strict.status.success() {
+        return Err(io::Error::other("fresh strict purpose lint unexpectedly passed").into());
+    }
+    let fresh_strict_stderr = String::from_utf8(fresh_strict.stderr)?;
+    if !fresh_strict_stderr.contains("[missing-purpose]")
+        && !fresh_strict_stderr.contains("[suggested-purpose-review]")
+    {
+        return Err(io::Error::other(format!(
+            "fresh strict purpose lint did not report missing or suggested purposes:\n{fresh_strict_stderr}"
+        ))
+        .into());
+    }
+
+    let store = AtlasStore::open(&db)?;
+    if !store
+        .load_nodes_by_paths(&[".gitignore".to_string()])?
+        .is_empty()
+    {
+        store.set_purpose(
+            ".gitignore",
+            "Agent-reviewed ignore policy for purpose lint tests",
+            PurposeSource::Agent,
+        )?;
+    }
+    for (path, purpose) in [
+        (".", "Imported repository root purpose"),
+        ("assets", "Imported asset folder purpose"),
+        ("src", "Imported source folder purpose"),
+        ("Cargo.toml", "Imported Rust manifest purpose"),
+        ("src/detail.rs", "Imported implementation detail purpose"),
+        ("assets/logo.svg", "Imported SVG brand asset purpose"),
+    ] {
+        store.set_purpose(path, purpose, PurposeSource::Imported)?;
+    }
+
+    let low = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--config")
+        .arg(&config)
+        .arg("--db")
+        .arg(&db)
+        .args(["lint", "--purpose-level", "low"])
+        .output()?;
+    if !low.status.success() {
+        return Err(io::Error::other(format!(
+            "low purpose lint should keep first-pass curation advisory:\n{}",
+            String::from_utf8_lossy(&low.stderr)
+        ))
+        .into());
+    }
+    let low_stderr = String::from_utf8(low.stderr)?;
+    for unexpected in [
+        "purpose-agent-review-required",
+        "src/detail.rs",
+        "assets/logo.svg",
+    ] {
+        if low_stderr.contains(unexpected) {
+            return Err(io::Error::other(format!(
+                "low purpose lint should not block on advisory curation work `{unexpected}`:\n{low_stderr}"
+            ))
+            .into());
+        }
+    }
+
+    let medium = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--config")
+        .arg(&config)
+        .arg("--db")
+        .arg(&db)
+        .args(["lint", "--purpose-level", "medium"])
+        .output()?;
+    if medium.status.success() {
+        return Err(io::Error::other("medium purpose lint unexpectedly passed").into());
+    }
+    let medium_stderr = String::from_utf8(medium.stderr)?;
+    if !medium_stderr.contains("[purpose-agent-review-required] src/detail.rs:") {
+        return Err(io::Error::other(format!(
+            "medium purpose lint missed source file:\n{medium_stderr}"
+        ))
+        .into());
+    }
+    if medium_stderr.contains("assets/logo.svg") {
+        return Err(io::Error::other(format!(
+            "medium purpose lint included asset file:\n{medium_stderr}"
+        ))
+        .into());
+    }
+
+    let strict = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--config")
+        .arg(&config)
+        .arg("--db")
+        .arg(&db)
+        .args(["lint", "--purpose-level", "strict"])
+        .output()?;
+    if strict.status.success() {
+        return Err(io::Error::other("strict purpose lint unexpectedly passed").into());
+    }
+    let strict_stderr = String::from_utf8(strict.stderr)?;
+    if !strict_stderr.contains("[purpose-agent-review-required] assets/logo.svg:") {
+        return Err(io::Error::other(format!(
+            "strict purpose lint missed asset file:\n{strict_stderr}"
+        ))
+        .into());
+    }
+
+    for (path, purpose) in [
+        (".", "Agent-reviewed repository root purpose"),
+        ("assets", "Agent-reviewed asset folder purpose"),
+        ("src", "Agent-reviewed source folder purpose"),
+        ("Cargo.toml", "Agent-reviewed Rust manifest purpose"),
+        (
+            "src/detail.rs",
+            "Agent-reviewed implementation detail purpose",
+        ),
+        ("assets/logo.svg", "Agent-reviewed SVG brand asset purpose"),
+    ] {
+        store.set_purpose(path, purpose, PurposeSource::Agent)?;
+    }
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--config")
+        .arg(&config)
+        .arg("--db")
+        .arg(&db)
+        .args(["lint", "--purpose-level", "strict"])
+        .assert()
+        .success();
+
     Ok(())
 }
 
@@ -5197,6 +5797,41 @@ fn workspace_root() -> Result<std::path::PathBuf, Box<dyn Error>> {
         .ok_or_else(|| io::Error::other("workspace root not found").into())
 }
 
+/// Return one top-level GitHub Actions job block from a workflow document.
+fn workflow_job_block(workflow: &str, job: &str) -> Result<String, Box<dyn Error>> {
+    let marker = format!("  {job}:");
+    let mut found = false;
+    let mut block = String::new();
+    for line in workflow.lines() {
+        if !found {
+            if line == marker {
+                found = true;
+                block.push_str(line);
+                block.push('\n');
+            }
+            continue;
+        }
+        if line.starts_with("  ") && !line.starts_with("    ") && line.trim_end().ends_with(':') {
+            break;
+        }
+        block.push_str(line);
+        block.push('\n');
+    }
+    if found {
+        Ok(block)
+    } else {
+        Err(io::Error::other(format!("workflow job {job:?} not found")).into())
+    }
+}
+
+/// Return the deterministic quarantine path for a fixture stale shim.
+fn stale_shim_quarantine_path(path: &Path, version: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!(
+        "{}.projectatlas-stale-{version}.bak",
+        path.display()
+    ))
+}
+
 /// Run the bundled plugin installer with an explicit runtime path.
 fn run_projectatlas_plugin_installer(
     workspace_root: &Path,
@@ -5206,18 +5841,20 @@ fn run_projectatlas_plugin_installer(
     run_projectatlas_plugin_installer_with_optional_path(workspace_root, repo, runtime, None)
 }
 
-/// Run the bundled plugin installer while shadowing PATH with a stale runtime.
-fn run_projectatlas_plugin_installer_with_path_shadow(
+/// Run the bundled plugin installer with a PATH shadow and isolated user-local dirs.
+fn run_projectatlas_plugin_installer_with_path_shadow_and_home(
     workspace_root: &Path,
     repo: &Path,
     runtime: &Path,
     path_shadow: &Path,
+    home: &Path,
 ) -> Result<std::process::Output, Box<dyn Error>> {
-    run_projectatlas_plugin_installer_with_optional_path(
+    run_projectatlas_plugin_installer_with_optional_path_and_home(
         workspace_root,
         repo,
         runtime,
         Some(path_shadow),
+        Some(home),
     )
 }
 
@@ -5227,6 +5864,23 @@ fn run_projectatlas_plugin_installer_with_optional_path(
     repo: &Path,
     runtime: &Path,
     path_shadow: Option<&Path>,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    run_projectatlas_plugin_installer_with_optional_path_and_home(
+        workspace_root,
+        repo,
+        runtime,
+        path_shadow,
+        None,
+    )
+}
+
+/// Run the bundled plugin installer and return its process output.
+fn run_projectatlas_plugin_installer_with_optional_path_and_home(
+    workspace_root: &Path,
+    repo: &Path,
+    runtime: &Path,
+    path_shadow: Option<&Path>,
+    home: Option<&Path>,
 ) -> Result<std::process::Output, Box<dyn Error>> {
     let mut command = if cfg!(windows) {
         let mut command = StdCommand::new("powershell");
@@ -5269,6 +5923,17 @@ fn run_projectatlas_plugin_installer_with_optional_path(
             std::iter::once(path_shadow.to_path_buf()).chain(std::env::split_paths(&current_path)),
         )?;
         command.env("PATH", shadowed_path);
+    }
+    if let Some(home) = home {
+        let app_data = home.join("AppData").join("Roaming");
+        let local_app_data = home.join("AppData").join("Local");
+        fs::create_dir_all(&app_data)?;
+        fs::create_dir_all(&local_app_data)?;
+        command
+            .env("HOME", home)
+            .env("USERPROFILE", home)
+            .env("APPDATA", app_data)
+            .env("LOCALAPPDATA", local_app_data);
     }
     let output = command.output()?;
     if !output.status.success() {
@@ -5660,6 +6325,17 @@ fn init_map_and_lint_flow_uses_rust_implementation() -> Result<(), Box<dyn Error
             .args(["purpose", "set", path, purpose])
             .assert()
             .success();
+    }
+    let store = AtlasStore::open(&repo.join(".projectatlas").join("projectatlas.db"))?;
+    if !store
+        .load_nodes_by_paths(&[".projectatlas".to_string()])?
+        .is_empty()
+    {
+        store.set_purpose(
+            ".projectatlas",
+            "Agent-reviewed ProjectAtlas metadata folder for CLI integration tests",
+            PurposeSource::Agent,
+        )?;
     }
 
     Command::cargo_bin("projectatlas")?

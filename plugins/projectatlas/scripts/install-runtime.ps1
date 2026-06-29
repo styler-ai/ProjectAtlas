@@ -115,6 +115,105 @@ function Get-ProjectAtlasRuntimeVersion {
     }
 }
 
+function Get-KnownProjectAtlasShimPaths {
+    $paths = @()
+    if ($env:USERPROFILE) {
+        $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
+        $paths += @(
+            (Join-Path $cargoBin "projectatlas.exe"),
+            (Join-Path $cargoBin "projectatlas.cmd"),
+            (Join-Path $cargoBin "projectatlas.ps1")
+        )
+    }
+    if ($env:APPDATA) {
+        $npmBin = Join-Path $env:APPDATA "npm"
+        $paths += @(
+            (Join-Path $npmBin "projectatlas.exe"),
+            (Join-Path $npmBin "projectatlas.cmd"),
+            (Join-Path $npmBin "projectatlas.ps1"),
+            (Join-Path $npmBin "projectatlas")
+        )
+    }
+    return @($paths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+function Test-KnownProjectAtlasShimPath {
+    param(
+        [string]$FilePath
+    )
+    if (-not $FilePath) {
+        return $false
+    }
+    $normalized = Get-NormalizedPathEntry $FilePath
+    foreach ($knownPath in (Get-KnownProjectAtlasShimPaths)) {
+        if ($normalized -eq (Get-NormalizedPathEntry $knownPath)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function New-ProjectAtlasShimQuarantinePath {
+    param(
+        [string]$FilePath,
+        [string]$Version
+    )
+    $safeVersion = if ([string]::IsNullOrWhiteSpace($Version)) { "unknown" } else { $Version -replace '[^A-Za-z0-9_.-]', '_' }
+    $basePath = "$FilePath.projectatlas-stale-$safeVersion.bak"
+    if (-not (Test-Path -LiteralPath $basePath)) {
+        return $basePath
+    }
+    $timestampPath = "$basePath.$(Get-Date -Format 'yyyyMMddHHmmss')"
+    if (-not (Test-Path -LiteralPath $timestampPath)) {
+        return $timestampPath
+    }
+    return "$timestampPath.$([Guid]::NewGuid().ToString('N'))"
+}
+
+function Quarantine-ProjectAtlasStaleShims {
+    param(
+        [string]$VerifiedPath,
+        [string]$ExpectedVersion
+    )
+    $expectedRuntimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
+    if (-not $VerifiedPath -or -not $expectedRuntimeVersion) {
+        return
+    }
+    $verified = Get-NormalizedPathEntry $VerifiedPath
+    $candidates = @()
+    $candidates += @(where.exe projectatlas 2>$null | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $candidates += Get-KnownProjectAtlasShimPaths
+    $seen = @{}
+    foreach ($candidate in $candidates) {
+        if (-not (Test-Path -LiteralPath $candidate)) {
+            continue
+        }
+        $normalized = Get-NormalizedPathEntry $candidate
+        if ($normalized -eq $verified -or $seen.ContainsKey($normalized)) {
+            continue
+        }
+        $seen[$normalized] = $true
+        if (-not (Test-KnownProjectAtlasShimPath $candidate)) {
+            continue
+        }
+        if (-not (Test-ProjectAtlasRuntime $candidate $null)) {
+            continue
+        }
+        $version = Get-ProjectAtlasRuntimeVersion $candidate
+        if ([string]::IsNullOrWhiteSpace($version) -or $version -eq $expectedRuntimeVersion) {
+            continue
+        }
+        try {
+            $quarantinePath = New-ProjectAtlasShimQuarantinePath $candidate $version
+            Move-Item -LiteralPath $candidate -Destination $quarantinePath
+            Write-Output "Quarantined stale ProjectAtlas shim: $candidate -> $quarantinePath version '$version'"
+        }
+        catch {
+            Write-Warning "Could not quarantine stale ProjectAtlas shim ${candidate} version '$version': $($_.Exception.Message)"
+        }
+    }
+}
+
 function Split-PathList {
     param(
         [string]$Value
@@ -354,6 +453,7 @@ else {
     Set-ProjectAtlasPathPrecedence $projectAtlas
 }
 Invoke-Checked $projectAtlas @("--format", "json", "runtime-info") | Out-Null
+Quarantine-ProjectAtlasStaleShims $projectAtlas $ProjectAtlasVersion
 Write-ProjectAtlasPathShadowReport $projectAtlas $ProjectAtlasVersion
 
 $atlasDir = Join-Path $ProjectRoot ".projectatlas"

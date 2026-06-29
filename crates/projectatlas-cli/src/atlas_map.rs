@@ -1,11 +1,7 @@
 //! Purpose: Generate and lint `ProjectAtlas` structure maps from Rust.
 
 use blake3::Hasher;
-use projectatlas_core::{
-    NodeKind,
-    language::{BROAD_SOURCE_EXTENSIONS, detect_language},
-    validated_repo_file_key,
-};
+use projectatlas_core::{NodeKind, language::BROAD_SOURCE_EXTENSIONS, validated_repo_file_key};
 use projectatlas_db::AtlasStore;
 use projectatlas_fs::{ScanOptions, scan_repo};
 use serde::{Deserialize, Serialize};
@@ -403,7 +399,7 @@ struct NonsourceEntries {
 /// Lint options supplied by the CLI.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LintOptions {
-    /// Whether missing folder purpose files fail lint.
+    /// Deprecated compatibility flag accepted by the CLI.
     pub(crate) strict_folders: bool,
     /// Whether to print untracked-file report.
     pub(crate) report_untracked: bool,
@@ -809,46 +805,20 @@ pub(crate) fn lint_map(
     options: LintOptions,
 ) -> AtlasMapResult<(String, i32)> {
     let paths = collect_repo_paths(config)?;
-    let db_purposes = load_db_purpose_records(config)?;
-    let (file_records, missing_headers, invalid_headers) =
-        build_file_records(&paths.source_files, config, &db_purposes)?;
     let nonsource = read_nonsource_file_entries(config)?;
-    let merged_file_records = merge_records(&file_records, &nonsource.records);
-    let (folder_records, missing_folders, invalid_folders) =
-        build_folder_records(&paths.folders, config, &db_purposes)?;
-    let expected_overview = compute_overview(
-        &paths,
-        config,
-        nonsource
-            .records
-            .iter()
-            .filter(|record| record.source == "nonsource")
-            .count(),
-    );
-    let expected_file_hash = compute_file_hash(&merged_file_records);
-    let expected_folder_hash = compute_folder_hash(&paths.folders);
     let mut report = Vec::new();
     let mut errors = Vec::new();
+    if options.strict_folders {
+        report.push(
+            "Note: --strict-folders is deprecated; database folder purpose linting uses --purpose-level."
+                .to_string(),
+        );
+    }
 
     append_nonsource_errors(&mut errors, &nonsource);
-    append_header_errors(&mut errors, &missing_headers, &invalid_headers, config);
-    append_folder_errors(
-        &mut errors,
-        options.strict_folders,
-        &missing_folders,
-        &invalid_folders,
-    );
     if options.report_untracked {
         append_untracked_report(&mut report, &mut errors, config, &paths, options)?;
     }
-    append_stale_map_errors(
-        &mut errors,
-        config,
-        &expected_overview,
-        &expected_file_hash,
-        &expected_folder_hash,
-    )?;
-    let _ = folder_records;
     if !errors.is_empty() {
         report.extend(errors);
         return Ok((join_report(&report), 1));
@@ -1664,7 +1634,7 @@ fn extract_line_comment_purpose(
     prefixes: &[String],
 ) -> (Option<String>, Vec<String>) {
     let mut comment_lines = Vec::new();
-    for line in lines.iter().take(max_scan_lines) {
+    for line in skip_yaml_frontmatter(lines).iter().take(max_scan_lines) {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             if comment_lines.is_empty() {
@@ -1696,6 +1666,19 @@ fn extract_line_comment_purpose(
         },
         |summary| (Some(summary), Vec::new()),
     )
+}
+
+/// Return lines after a leading YAML frontmatter block when one is present.
+fn skip_yaml_frontmatter(lines: &[String]) -> &[String] {
+    if lines.first().is_none_or(|line| line.trim() != "---") {
+        return lines;
+    }
+    lines
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(index, line)| (line.trim() == "---").then_some(&lines[index + 1..]))
+        .unwrap_or(lines)
 }
 
 /// Return the first content line after shebangs and blanks.
@@ -2277,108 +2260,6 @@ fn append_nonsource_errors(errors: &mut Vec<String>, nonsource: &NonsourceEntrie
     }
 }
 
-/// Append source header validation errors.
-fn append_header_errors(
-    errors: &mut Vec<String>,
-    missing_headers: &[String],
-    invalid_headers: &BTreeMap<String, Vec<String>>,
-    config: &AtlasMapConfig,
-) {
-    if !missing_headers.is_empty() {
-        errors.push("Missing Purpose headers:".to_string());
-        errors.push(format_list(missing_headers));
-        append_purpose_style_suggestions(errors, missing_headers, config);
-    }
-    if !invalid_headers.is_empty() {
-        errors.push("Invalid Purpose headers:".to_string());
-        append_invalid_map(errors, invalid_headers);
-    }
-}
-
-/// Append purpose-style config suggestions for missing source headers.
-fn append_purpose_style_suggestions(
-    errors: &mut Vec<String>,
-    missing_headers: &[String],
-    config: &AtlasMapConfig,
-) {
-    let suggestions = missing_purpose_style_suggestions(missing_headers, config);
-    if !suggestions.is_empty() {
-        errors.push("Purpose style suggestions:".to_string());
-        errors.push(format_list(&suggestions));
-    }
-}
-
-/// Build purpose-style suggestions for source extensions using the default style.
-fn missing_purpose_style_suggestions(
-    missing_headers: &[String],
-    config: &AtlasMapConfig,
-) -> Vec<String> {
-    let mut extensions = BTreeSet::new();
-    for path in missing_headers {
-        let extension = normalized_extension(path);
-        if extension.is_empty() || config.purpose_styles.contains_key(&extension) {
-            continue;
-        }
-        extensions.insert(extension);
-    }
-    extensions
-        .into_iter()
-        .map(|extension| {
-            let style = suggested_purpose_style(&extension, config);
-            let label = if is_default_source_extension(&extension) {
-                "known source extension"
-            } else {
-                "custom source extension"
-            };
-            format!(
-                "{extension}: add [purpose.styles_by_extension] \"{extension}\" = \"{style}\" ({label})"
-            )
-        })
-        .collect()
-}
-
-/// Suggest a purpose style from known language tables, falling back to the configured default.
-fn suggested_purpose_style(extension: &str, config: &AtlasMapConfig) -> String {
-    match detect_language(Some(extension)).as_deref() {
-        Some(
-            "javascript" | "typescript" | "tsx" | "rust" | "go" | "shell" | "powershell" | "batch"
-            | "ruby" | "python" | "groovy" | "protobuf" | "sql" | "graphql" | "toml" | "yaml"
-            | "config" | "perl" | "lua" | "r" | "haskell" | "ocaml" | "fsharp" | "clojure" | "vim"
-            | "zig",
-        )
-        | None => "line-comment".to_string(),
-        Some(
-            "c" | "cpp" | "h" | "hpp" | "java" | "kotlin" | "csharp" | "objective-c" | "swift"
-            | "scala" | "css" | "dart",
-        ) => "block-comment".to_string(),
-        Some(_) => config.purpose_default_style.clone(),
-    }
-}
-
-/// Return whether an extension is part of the default source-extension table.
-fn is_default_source_extension(extension: &str) -> bool {
-    DEFAULT_SOURCE_EXTENSIONS
-        .iter()
-        .any(|default| default.eq_ignore_ascii_case(extension))
-}
-
-/// Append folder validation errors.
-fn append_folder_errors(
-    errors: &mut Vec<String>,
-    strict_folders: bool,
-    missing_folders: &[String],
-    invalid_folders: &BTreeMap<String, Vec<String>>,
-) {
-    if !invalid_folders.is_empty() {
-        errors.push("Invalid folder Purpose summaries:".to_string());
-        append_invalid_map(errors, invalid_folders);
-    }
-    if strict_folders && !missing_folders.is_empty() {
-        errors.push("Missing folder Purpose files:".to_string());
-        errors.push(format_list(missing_folders));
-    }
-}
-
 /// Append invalid path issue map.
 fn append_invalid_map(errors: &mut Vec<String>, invalid: &BTreeMap<String, Vec<String>>) {
     errors.extend(
@@ -2458,56 +2339,6 @@ fn append_untracked_report(
         errors.push("Untracked files detected.".to_string());
     }
     Ok(())
-}
-
-/// Append stale map validation errors.
-fn append_stale_map_errors(
-    errors: &mut Vec<String>,
-    config: &AtlasMapConfig,
-    expected_overview: &BTreeMap<String, usize>,
-    expected_file_hash: &str,
-    expected_folder_hash: &str,
-) -> AtlasMapResult<()> {
-    if !config.map_path.exists() {
-        errors.push("Atlas map missing. Run: projectatlas map".to_string());
-        return Ok(());
-    }
-    let content = fs::read_to_string(&config.map_path).map_err(|source| AtlasMapError::Io {
-        path: config.map_path.clone(),
-        source,
-    })?;
-    match read_overview(&content) {
-        Some(overview) if &overview == expected_overview => {}
-        Some(_) => errors.push("Atlas map overview stale. Run: projectatlas map".to_string()),
-        None => errors.push("Atlas map overview invalid. Run: projectatlas map".to_string()),
-    }
-    let (file_hash, folder_hash) = read_hashes(&content);
-    if file_hash.as_deref() != Some(expected_file_hash) {
-        errors.push("Atlas map file hash stale. Run: projectatlas map".to_string());
-    }
-    if folder_hash.as_deref() != Some(expected_folder_hash) {
-        errors.push("Atlas map folder hash stale. Run: projectatlas map".to_string());
-    }
-    Ok(())
-}
-
-/// Parse overview counters from TOON.
-fn read_overview(content: &str) -> Option<BTreeMap<String, usize>> {
-    let line = content
-        .lines()
-        .map(str::trim)
-        .find(|line| line.starts_with("overview:"))?;
-    let payload = line.split_once(':')?.1.trim();
-    let mut overview = BTreeMap::new();
-    for token in payload.split_whitespace() {
-        let (key, value) = token.split_once('=')?;
-        overview.insert(key.to_string(), value.parse::<usize>().ok()?);
-    }
-    if OVERVIEW_KEYS.iter().all(|key| overview.contains_key(*key)) {
-        Some(overview)
-    } else {
-        None
-    }
 }
 
 /// Parse file and folder hashes from TOON.
@@ -2715,8 +2546,8 @@ mod tests {
     use super::{
         AtlasMapConfig, DEFAULT_TEXT_INDEX_MAX_BYTES, MapRecord,
         append_existing_map_purpose_records, append_record_rows, exclude_dir_name_set,
-        normalize_repo_string, project_root_for_projectatlas_config, split_record_cells,
-        stable_generated_at, toon_cell,
+        extract_line_comment_purpose, normalize_repo_string, project_root_for_projectatlas_config,
+        split_record_cells, stable_generated_at, toon_cell,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -2801,6 +2632,39 @@ mod tests {
     fn simple_toon_cells_remain_unquoted() {
         assert_eq!(toon_cell("src/main.rs"), "src/main.rs");
         assert_eq!(toon_cell("Plain summary"), "Plain summary");
+    }
+
+    #[test]
+    fn line_comment_purpose_skips_yaml_frontmatter() -> Result<(), Box<dyn std::error::Error>> {
+        let lines = [
+            "---",
+            "name: projectatlas",
+            "description: Skill frontmatter must stay first.",
+            "---",
+            "",
+            "# Purpose: Guide agents through ProjectAtlas workflows.",
+            "",
+            "# ProjectAtlas",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+        let prefixes = vec!["#".to_string(), "//".to_string()];
+
+        let (purpose, issues) = extract_line_comment_purpose(&lines, 80, &prefixes);
+
+        if !issues.is_empty() {
+            return Err(
+                std::io::Error::other(format!("unexpected purpose issues: {issues:?}")).into(),
+            );
+        }
+        if purpose.as_deref() != Some("Guide agents through ProjectAtlas workflows.") {
+            return Err(std::io::Error::other(format!(
+                "frontmatter purpose mismatch: {purpose:?}"
+            ))
+            .into());
+        }
+        Ok(())
     }
 
     #[test]
