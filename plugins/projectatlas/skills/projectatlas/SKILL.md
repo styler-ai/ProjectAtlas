@@ -50,9 +50,10 @@ When `atlas_purpose_queue`, `projectatlas purpose queue`, `atlas_health`, `proje
 2. Use `atlas_folders`/`atlas_files` to locate the missing path.
 3. Inspect only enough context to understand the path's actual role.
 4. Write a precise one-line purpose with `atlas_purpose_set` or `projectatlas purpose set`.
-5. Run `atlas_watch_once`, `projectatlas watch --once`, or `projectatlas scan`.
-6. Rerun health/lint.
-7. Repeat until the ProjectAtlas database has reviewed folder purposes, selected high-value file purposes, and the deep index is refreshed.
+5. For a reviewed batch, use `atlas_purpose_review` or `projectatlas purpose review --from-file <json> --apply`; do not edit SQLite directly.
+6. Run `atlas_watch_once`, `projectatlas watch --once`, or `projectatlas scan`.
+7. Rerun health/lint.
+8. Repeat until the ProjectAtlas database has reviewed folder purposes, selected high-value file purposes, and the deep index is refreshed.
 
 `atlas_purpose_queue` and `projectatlas purpose queue` default to all folders and high-impact files. Use `projectatlas purpose queue --include-low-priority-files` or MCP `include_low_priority_files: true` only when intentionally doing broad file-purpose cleanup. Use `projectatlas purpose queue --include-assets`, MCP `include_assets: true`, raw `atlas_health`, or bare `projectatlas health-check` only when intentionally curating assets or generated outputs.
 Read `folder_scope` and `file_scope` in queue metadata before deciding how broad the current curation pass is.
@@ -135,7 +136,8 @@ Use the MCP tools when the harness exposes them. Normal agent navigation, search
 15. `atlas_strip_legacy_purpose` only after migrated `.purpose` metadata is safely stored in SQLite.
 16. `atlas_purpose_queue` when an agent needs a folder-first purpose curation queue before approving or correcting generated purposes.
 17. `atlas_purpose_set` when an agent-approved purpose should be written to the durable index.
-18. `atlas_health_resolve` when a deterministic conflict is intentionally correct and should not be repeated.
+18. `atlas_purpose_review` when a reviewed batch should be previewed or applied to SQLite through the ProjectAtlas MCP surface.
+19. `atlas_health_resolve` when a deterministic conflict is intentionally correct and should not be repeated.
 
 ## Command Decision Rules
 
@@ -153,7 +155,7 @@ Use the MCP tools when the harness exposes them. Normal agent navigation, search
 - After creating, moving, deleting, or editing files: call `atlas_watch_once`, `projectatlas watch --once`, or `atlas_scan` before trusting old results.
 - During a long local editing session: prefer a single continuous `projectatlas watch` process from the project root, then use MCP reads against the refreshed SQLite index. File edits refresh incrementally; directory/root/ignore-rule changes may trigger a full scan for correctness.
 - Planning cleanup/refactor/DRY work: call `atlas_health` after overview/folder/file orientation and before proposing moves/merges; use `summary_only`, `source_only`, `category`, `severity`, `path_prefix`, `limit`, and `start_index` when the health surface is large.
-- Purpose curation: call `atlas_purpose_queue` before writing purposes; then inspect enough context and call `atlas_purpose_set`.
+- Purpose curation: call `atlas_purpose_queue` before writing purposes; then inspect enough context and call `atlas_purpose_set` for one path or `atlas_purpose_review` for a reviewed batch.
 - Intentional health conflict after inspection: call `atlas_health_resolve` with a rationale.
 - User asks about saved tokens: call `atlas_token_report`.
 - Runtime looks wrong: call `projectatlas --format json runtime-info`, then `atlas_settings` and `atlas_watch_status`.
@@ -192,6 +194,7 @@ If MCP tools are unavailable, use the equivalent CLI sequence:
 | Continuous local refresh | `projectatlas watch` |
 | Cleanup/refactor signals | `projectatlas health-check --source-only --limit <n>` |
 | Purpose curation queue | `projectatlas purpose queue --limit <n>` |
+| Purpose review batch | `projectatlas purpose review --from-file <json> --apply` |
 | Purpose lint | `projectatlas lint --purpose-level low`, `projectatlas lint --purpose-level medium`, or `projectatlas lint --purpose-level strict` |
 | Token savings | `projectatlas token` |
 | Human token dashboard | `projectatlas token --view tui` |

@@ -10,7 +10,6 @@ root = "."
 # Optional compatibility export path used only by `projectatlas map`.
 map_path = ".projectatlas/projectatlas.toon"
 nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
-purpose_filename = ".purpose"
 
 [scan]
 source_extensions = [
@@ -48,7 +47,7 @@ no_commas = true
 max_length = 140
 
 [untracked]
-allowed_filenames = [".purpose"]
+allowed_filenames = []
 allowlist_dir_prefixes = []
 allowlist_files = []
 asset_allowed_prefixes = []
@@ -56,6 +55,11 @@ asset_extensions = [".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".ico", ".
 ```
 
 `projectatlas init` writes the Rust configuration template. Adjust `scan.source_extensions` only when a project needs a narrower or broader compatibility-map surface.
+
+`project.purpose_filename` is intentionally omitted from new configs. ProjectAtlas still accepts the key as a
+legacy migration override and otherwise uses `.purpose` internally only while importing old folder-purpose files
+during `projectatlas scan`; new workflows should write purpose records to SQLite with `projectatlas purpose set`,
+`projectatlas purpose review`, or the matching MCP tools.
 
 ProjectAtlas inherits `.gitignore` dynamically on every scan/watch run through the Rust scanner. Do not copy
 `.gitignore` entries into ProjectAtlas config just to keep them in sync; update `.gitignore` and ProjectAtlas will

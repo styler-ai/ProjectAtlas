@@ -29,16 +29,16 @@ use projectatlas_service::{
 };
 use runtime::{
     DEFAULT_HEALTH_LIMIT, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel,
-    ScanRuntimePlan, SettingsReport, SymbolBuildOptions, WatchStatusReport, absolute_path,
-    build_settings_report, build_symbols_for_index, byte_count_to_tokens, canonical_project_root,
-    default_mcp_project_root, defaultable_cli_project_root,
+    PurposeReviewRequest, ScanRuntimePlan, SettingsReport, SymbolBuildOptions, WatchStatusReport,
+    absolute_path, build_settings_report, build_symbols_for_index, byte_count_to_tokens,
+    canonical_project_root, default_mcp_project_root, defaultable_cli_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     file_summary_usage_baseline, lint_database_if_present, normalized_folder_filter,
     open_atlas_store, purpose_curation_page, ranked_file_nodes, read_indexed_file_content,
     record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
-    render_health_page, render_purpose_curation_page, reset_index_files, resolved_mcp_config_path,
-    run_scan_pipeline, run_watch_loop, strip_legacy_purpose, validated_indexed_file_key,
-    watcher_status_report,
+    render_health_page, render_purpose_curation_page, render_purpose_review_report,
+    reset_index_files, resolved_mcp_config_path, review_purposes, run_scan_pipeline,
+    run_watch_loop, strip_legacy_purpose, validated_indexed_file_key, watcher_status_report,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -575,6 +575,15 @@ enum PurposeCommand {
         path: String,
         /// Agent-approved purpose one-liner.
         purpose: String,
+    },
+    /// Batch review existing purpose records from a JSON file.
+    Review {
+        /// JSON file containing review items or an object with an `items` array.
+        #[arg(long)]
+        from_file: PathBuf,
+        /// Apply reviewed purposes. Without this flag the command previews only.
+        #[arg(long)]
+        apply: bool,
     },
     /// Return a bounded queue of paths that need purpose curation.
     Queue {
@@ -1337,6 +1346,15 @@ fn run() -> Result<(), CliError> {
                 });
                 print_output(cli.format, &encode_agent_payload(&report), &report)?;
             }
+            PurposeCommand::Review { from_file, apply } => {
+                let store = open_atlas_store(&cli.db)?;
+                let requests = load_purpose_review_requests(from_file)?;
+                let report = review_purposes(&store, &requests, *apply)?;
+                print_output(cli.format, &render_purpose_review_report(&report), &report)?;
+                if report.failed > 0 {
+                    std::process::exit(1);
+                }
+            }
             PurposeCommand::Queue {
                 start_index,
                 limit,
@@ -1572,6 +1590,23 @@ fn write_mcp_config_file(
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// Load batch purpose review requests from a JSON file.
+fn load_purpose_review_requests(path: &Path) -> Result<Vec<PurposeReviewRequest>, CliError> {
+    let text = fs::read_to_string(path).map_err(|source| CliError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&text)?;
+    let items = value.get("items").cloned().unwrap_or(value);
+    let requests: Vec<PurposeReviewRequest> = serde_json::from_value(items)?;
+    if requests.is_empty() {
+        return Err(CliError::InvalidInput(
+            "purpose review input must contain at least one item".to_string(),
+        ));
+    }
+    Ok(requests)
 }
 
 /// Build a project-local root identity report.

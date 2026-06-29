@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.3.12"><img alt="release" src="https://img.shields.io/badge/release-v0.3.12-blue"></a>
+  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.3.13"><img alt="release" src="https://img.shields.io/badge/release-v0.3.13-blue"></a>
   <img alt="rust" src="https://img.shields.io/badge/Rust-2024-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
@@ -25,7 +25,7 @@ No required `.purpose` files. No source-header tax. No hosted index. The project
 ## Quickstart
 
 ```bash
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.12
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.13
 codex plugin add projectatlas --marketplace projectatlas
 ```
 
@@ -158,7 +158,7 @@ Most users can stop at the plugin install. The CLI is here for local debugging, 
 Only need the CLI yourself? Install it from the released tag:
 
 ```bash
-cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.12 projectatlas-cli --locked
+cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.13 projectatlas-cli --locked
 ```
 
 From this checkout:
@@ -201,7 +201,7 @@ projectatlas token --view tui
 
 ## Agent And MCP Setup
 
-ProjectAtlas ships plugin metadata and installer scripts for Codex, Claude Code, and OpenCode.
+ProjectAtlas ships plugin metadata and installer scripts for Codex and Claude Code, plus an OpenCode MCP config template.
 
 Generate project-local MCP configs:
 
@@ -238,7 +238,7 @@ ProjectAtlas exposes the same workflow through CLI and MCP:
 | Search narrowly | `projectatlas search <pattern> --file-pattern <glob>` | `atlas_search` |
 | Read exact code | `projectatlas slice <file> --start-line <n> --end-line <m>` | `atlas_slice` |
 | Find cleanup work | `projectatlas health-check --source-only --limit <n>` | `atlas_health` |
-| Curate purposes | `projectatlas purpose queue --limit <n>` / `projectatlas purpose set <path> "<purpose>"` | `atlas_purpose_queue` / `atlas_purpose_set` |
+| Curate purposes | `projectatlas purpose queue --limit <n>` / `projectatlas purpose set <path> "<purpose>"` / `projectatlas purpose review --from-file <json> --apply` | `atlas_purpose_queue` / `atlas_purpose_set` / `atlas_purpose_review` |
 | Report savings | `projectatlas token` | `atlas_token_report` |
 
 ## Why Rust
@@ -249,7 +249,7 @@ ProjectAtlas scans with `.gitignore` awareness, hashes files with BLAKE3, stores
 
 ## Release Quality
 
-`v0.3.12` ships through the full release matrix:
+`v0.3.13` ships through the full release matrix:
 
 - Rust format, check, clippy, dependency policy, tests, doctests, and rustdoc.
 - ProjectAtlas scan, parity, database-backed purpose lint, and health checks.
@@ -269,7 +269,7 @@ crates/
   projectatlas-service/   summaries, search, slices, health
   projectatlas-symbols/   symbol extraction
 docs/                     architecture, workflow, configuration
-plugins/projectatlas/     Codex, Claude Code, OpenCode plugin assets
+plugins/projectatlas/     Codex and Claude Code plugin metadata, OpenCode MCP config template
 skills/                   standalone agent skill snippets
 ```
 

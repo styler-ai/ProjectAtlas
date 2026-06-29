@@ -1,0 +1,688 @@
+{
+  "items": [
+    {
+      "path": ".",
+      "purpose": "Root workspace for Rust-native ProjectAtlas, including crates, docs, plugin packaging, fixtures, and release automation."
+    },
+    {
+      "path": ".agents",
+      "purpose": "Agent marketplace metadata used to publish ProjectAtlas plugin integrations."
+    },
+    {
+      "path": ".agents/plugins",
+      "purpose": "Marketplace plugin catalog entries that advertise ProjectAtlas to agent hosts."
+    },
+    {
+      "path": ".githooks",
+      "purpose": "Repository Git hooks that enforce local ProjectAtlas development checks."
+    },
+    {
+      "path": ".github",
+      "purpose": "GitHub issue templates, scripts, and workflows for ProjectAtlas development and releases."
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE",
+      "purpose": "GitHub issue forms for structured ProjectAtlas bug reports and improvement requests."
+    },
+    {
+      "path": ".github/scripts",
+      "purpose": "GitHub Actions helper scripts for ProjectAtlas release and automation workflows."
+    },
+    {
+      "path": ".github/workflows",
+      "purpose": "CI, docs, and release workflows for building, testing, packaging, and publishing ProjectAtlas."
+    },
+    {
+      "path": ".projectatlas",
+      "purpose": "Store project-local ProjectAtlas configuration, reviewed-purpose replay input, non-source summaries, and runtime state."
+    },
+    {
+      "path": "crates",
+      "purpose": "Rust workspace crates that implement ProjectAtlas scanning, storage, CLI, MCP, symbols, and services."
+    },
+    {
+      "path": "crates/projectatlas-cli",
+      "purpose": "ProjectAtlas CLI and MCP adapter crate for agent-facing repository intelligence commands."
+    },
+    {
+      "path": "crates/projectatlas-cli/src",
+      "purpose": "CLI, MCP, runtime, and compatibility-map implementation for the ProjectAtlas binary."
+    },
+    {
+      "path": "crates/projectatlas-cli/tests",
+      "purpose": "End-to-end and CLI diagnostic tests for ProjectAtlas workflows, installers, and agent contracts."
+    },
+    {
+      "path": "crates/projectatlas-core",
+      "purpose": "Core ProjectAtlas crate for shared domain models, health findings, summaries, and symbol types."
+    },
+    {
+      "path": "crates/projectatlas-core/src",
+      "purpose": "Shared Rust domain modules used by ProjectAtlas CLI, database, filesystem, and symbol crates."
+    },
+    {
+      "path": "crates/projectatlas-db",
+      "purpose": "SQLite persistence crate for ProjectAtlas indexes, purposes, health findings, text, and telemetry."
+    },
+    {
+      "path": "crates/projectatlas-db/src",
+      "purpose": "Database schema, query, migration, purpose, and health paging implementation for ProjectAtlas."
+    },
+    {
+      "path": "crates/projectatlas-fs",
+      "purpose": "Filesystem scanner crate that discovers repository files and folders with gitignore-aware filtering."
+    },
+    {
+      "path": "crates/projectatlas-fs/src",
+      "purpose": "Rust filesystem walking, ignore handling, and file metadata collection for ProjectAtlas scans."
+    },
+    {
+      "path": "crates/projectatlas-service",
+      "purpose": "Shared query service crate used by CLI and MCP to rank files, summarize slices, and search indexed text."
+    },
+    {
+      "path": "crates/projectatlas-service/src",
+      "purpose": "Service-layer Rust source for ProjectAtlas file, folder, search, summary, and slice queries."
+    },
+    {
+      "path": "crates/projectatlas-symbols",
+      "purpose": "Symbol extraction crate for tree-sitter and language-specific ProjectAtlas code understanding."
+    },
+    {
+      "path": "crates/projectatlas-symbols/src",
+      "purpose": "Tree-sitter-backed symbol graph extraction and summary code for ProjectAtlas."
+    },
+    {
+      "path": "crates/projectatlas-symbols/src/languages",
+      "purpose": "Language-specific symbol augmentation modules for DSLs and constructs beyond generic tree-sitter parsing."
+    },
+    {
+      "path": "docs",
+      "purpose": "ProjectAtlas user, architecture, workflow, configuration, adoption, and release documentation."
+    },
+    {
+      "path": "docs/assets",
+      "purpose": "Images and visual assets referenced by ProjectAtlas README and documentation pages."
+    },
+    {
+      "path": "docs/benchmarks",
+      "purpose": "Measured ProjectAtlas token-savings and repository-orientation benchmark documentation."
+    },
+    {
+      "path": "fixtures",
+      "purpose": "Regression fixtures used to verify ProjectAtlas language parsing, summaries, symbols, and scan behavior."
+    },
+    {
+      "path": "fixtures/languages",
+      "purpose": "Language-specific fixture corpus for ProjectAtlas parser, summary, and symbol regression tests."
+    },
+    {
+      "path": "fixtures/languages/c",
+      "purpose": "C language fixtures for ProjectAtlas parser, summary, and symbol regression coverage."
+    },
+    {
+      "path": "fixtures/languages/cpp",
+      "purpose": "C++ language fixtures for ProjectAtlas parser, summary, and symbol regression coverage."
+    },
+    {
+      "path": "fixtures/languages/csharp",
+      "purpose": "C# language fixtures for ProjectAtlas parser, summary, and symbol regression coverage."
+    },
+    {
+      "path": "fixtures/languages/css",
+      "purpose": "CSS fixtures for ProjectAtlas structural summary and symbol extraction coverage."
+    },
+    {
+      "path": "fixtures/languages/go",
+      "purpose": "Go language fixtures for ProjectAtlas parser, summary, and symbol regression coverage."
+    },
+    {
+      "path": "fixtures/languages/groovy",
+      "purpose": "Gradle Groovy DSL fixtures used to verify build task extraction and summaries."
+    },
+    {
+      "path": "fixtures/languages/html",
+      "purpose": "HTML fixtures for ProjectAtlas structural summary and extraction coverage."
+    },
+    {
+      "path": "fixtures/languages/java",
+      "purpose": "Java language fixtures for ProjectAtlas parser, summary, and symbol regression coverage."
+    },
+    {
+      "path": "fixtures/languages/javascript",
+      "purpose": "JavaScript fixtures for ProjectAtlas parser, summary, and symbol regression coverage."
+    },
+    {
+      "path": "fixtures/languages/json",
+      "purpose": "JSON manifest fixtures for ProjectAtlas package and config summary extraction."
+    },
+    {
+      "path": "fixtures/languages/kotlin",
+      "purpose": "Kotlin and Gradle Kotlin DSL fixtures for ProjectAtlas parser, summary, and task extraction coverage."
+    },
+    {
+      "path": "fixtures/languages/markdown",
+      "purpose": "Markdown fixtures for ProjectAtlas document structure and summary extraction coverage."
+    },
+    {
+      "path": "fixtures/languages/objective-c",
+      "purpose": "Objective-C fixtures for ProjectAtlas parser, summary, and symbol regression coverage."
+    },
+    {
+      "path": "fixtures/languages/rust",
+      "purpose": "Rust language fixtures for ProjectAtlas parser, summary, and symbol regression coverage."
+    },
+    {
+      "path": "fixtures/languages/toml",
+      "purpose": "TOML and Cargo manifest fixtures for ProjectAtlas dependency and config summary coverage."
+    },
+    {
+      "path": "fixtures/languages/toon",
+      "purpose": "TOON fixtures for ProjectAtlas structured-output summary and parsing coverage."
+    },
+    {
+      "path": "fixtures/languages/typescript",
+      "purpose": "TypeScript fixtures for ProjectAtlas parser, summary, and symbol regression coverage."
+    },
+    {
+      "path": "fixtures/languages/vue",
+      "purpose": "Vue fixtures for ProjectAtlas component summary and Composition API extraction coverage."
+    },
+    {
+      "path": "fixtures/languages/yaml",
+      "purpose": "YAML workflow and config fixtures for ProjectAtlas structural summary coverage."
+    },
+    {
+      "path": "fixtures/languages/zig",
+      "purpose": "Zig language fixtures for ProjectAtlas parser, summary, and symbol regression coverage."
+    },
+    {
+      "path": "plugins",
+      "purpose": "Installable ProjectAtlas plugin packages and host integration assets."
+    },
+    {
+      "path": "plugins/projectatlas",
+      "purpose": "ProjectAtlas plugin bundle containing manifests, skills, scripts, and host templates."
+    },
+    {
+      "path": "plugins/projectatlas/.claude-plugin",
+      "purpose": "Claude Code plugin metadata for packaging ProjectAtlas harness integration."
+    },
+    {
+      "path": "plugins/projectatlas/.codex-plugin",
+      "purpose": "Codex plugin manifest metadata for installing ProjectAtlas as a plugin."
+    },
+    {
+      "path": "plugins/projectatlas/opencode",
+      "purpose": "OpenCode templates for registering ProjectAtlas as a local MCP server."
+    },
+    {
+      "path": "plugins/projectatlas/scripts",
+      "purpose": "Cross-platform runtime installer scripts shipped with the ProjectAtlas plugin."
+    },
+    {
+      "path": "plugins/projectatlas/skills",
+      "purpose": "Skill folders included in the installable ProjectAtlas plugin bundle."
+    },
+    {
+      "path": "plugins/projectatlas/skills/projectatlas",
+      "purpose": "ProjectAtlas plugin skill that teaches agents the atlas-first MCP workflow."
+    },
+    {
+      "path": "skills",
+      "purpose": "Standalone agent skill files for using ProjectAtlas from different coding assistants."
+    },
+    {
+      "path": "skills/claude",
+      "purpose": "Claude-oriented ProjectAtlas setup and workflow guidance."
+    },
+    {
+      "path": "skills/codex",
+      "purpose": "Codex-oriented ProjectAtlas setup and workflow guidance."
+    },
+    {
+      "path": "templates",
+      "purpose": "Reusable ProjectAtlas agent instruction templates and startup snippets."
+    },
+    {
+      "path": ".agents/plugins/marketplace.json",
+      "purpose": "Codex plugin marketplace catalog for ProjectAtlas"
+    },
+    {
+      "path": ".gitattributes",
+      "purpose": "Line-ending policy for ProjectAtlas repository fixtures"
+    },
+    {
+      "path": ".githooks/commit-msg",
+      "purpose": "Git hook to enforce issue references in commits"
+    },
+    {
+      "path": ".githooks/pre-push",
+      "purpose": "Git hook to run full local checks before push"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/bug_report.yml",
+      "purpose": "GitHub issue form for public ProjectAtlas bug reports."
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/config.yml",
+      "purpose": "GitHub issue template chooser configuration for ProjectAtlas."
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/improvement_request.yml",
+      "purpose": "GitHub issue form for public ProjectAtlas improvement requests."
+    },
+    {
+      "path": ".github/pull_request_template.md",
+      "purpose": "Pull request checklist for ProjectAtlas changes, verification gates, issue links, purpose queue review, and release-note hygiene."
+    },
+    {
+      "path": ".github/scripts/release-notes.py",
+      "purpose": "Generate ProjectAtlas release notes from merged PRs and linked issues."
+    },
+    {
+      "path": ".github/workflows/03-auto-release.yml",
+      "purpose": "Workflow that automates ProjectAtlas release publication after validated version changes."
+    },
+    {
+      "path": ".github/workflows/04-docs.yml",
+      "purpose": "Workflow that builds and deploys the ProjectAtlas documentation site."
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "purpose": "Workflow that verifies ProjectAtlas Rust gates plus multi-OS installer, update, locked-runtime, and MCP smoke tests."
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "purpose": "Workflow that packages ProjectAtlas releases, validates cross-platform installers including locked Windows runtime updates, and publishes release artifacts and notes."
+    },
+    {
+      "path": ".gitignore",
+      "purpose": "Ignored files for ProjectAtlas repository"
+    },
+    {
+      "path": ".projectatlas/config.toml",
+      "purpose": "Configure project-local ProjectAtlas scan, lint, purpose, and output policy."
+    },
+    {
+      "path": ".projectatlas/projectatlas-nonsource-files.toon",
+      "purpose": "Declare project-local non-source file purposes for ProjectAtlas map compatibility."
+    },
+    {
+      "path": ".projectatlas/projectatlas-purpose-review.json",
+      "purpose": "Replay agent-reviewed ProjectAtlas purpose records into the local SQLite index."
+    },
+    {
+      "path": "AGENTS.md",
+      "purpose": "Repository-specific Codex startup rules for atlas-first ProjectAtlas development, purpose linting, and release-grade Rust workflow."
+    },
+    {
+      "path": "Cargo.lock",
+      "purpose": "Locked Rust dependency graph for the ProjectAtlas workspace release build."
+    },
+    {
+      "path": "Cargo.toml",
+      "purpose": "Rust workspace manifest for ProjectAtlas crates, shared dependencies, lints, and release version."
+    },
+    {
+      "path": "CODE_OF_CONDUCT.md",
+      "purpose": "Community conduct expectations for ProjectAtlas"
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "purpose": "Contribution policy for ProjectAtlas."
+    },
+    {
+      "path": "crates/projectatlas-cli/Cargo.toml",
+      "purpose": "Cargo manifest for the ProjectAtlas CLI crate and its runtime/test dependencies."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/atlas_map.rs",
+      "purpose": "Generate and lint `ProjectAtlas` structure maps from Rust."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/main.rs",
+      "purpose": "Defines the ProjectAtlas CLI command surface, argument parsing, command dispatch, and parity reporting."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/mcp.rs",
+      "purpose": "Serves ProjectAtlas repository intelligence tools over the Model Context Protocol."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/runtime.rs",
+      "purpose": "Coordinates ProjectAtlas scan, index refresh, purpose import, health, lint, token, watch, and legacy cleanup workflows."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/structural.rs",
+      "purpose": "Create deterministic structural summaries for declaration light files"
+    },
+    {
+      "path": "crates/projectatlas-cli/tests/e2e.rs",
+      "purpose": "End-to-end ProjectAtlas CLI tests for scan, MCP, installer updates, locked-runtime updates, purpose, lint, language, and release workflows."
+    },
+    {
+      "path": "crates/projectatlas-cli/tests/lint_diagnostics.rs",
+      "purpose": "Regression test ensuring ProjectAtlas lint no longer requires legacy source purpose headers."
+    },
+    {
+      "path": "crates/projectatlas-core/Cargo.toml",
+      "purpose": "Cargo manifest for the ProjectAtlas core domain crate."
+    },
+    {
+      "path": "crates/projectatlas-core/src/health.rs",
+      "purpose": "Detect structural health issues in `ProjectAtlas` indexes."
+    },
+    {
+      "path": "crates/projectatlas-core/src/language.rs",
+      "purpose": "Detect file language families from extensions."
+    },
+    {
+      "path": "crates/projectatlas-core/src/lib.rs",
+      "purpose": "Defines core ProjectAtlas domain models, purpose metadata, summaries, and shared helpers."
+    },
+    {
+      "path": "crates/projectatlas-core/src/outline.rs",
+      "purpose": "Build compressed file outlines for agent context."
+    },
+    {
+      "path": "crates/projectatlas-core/src/symbols.rs",
+      "purpose": "Define `ProjectAtlas` symbol graph domain types."
+    },
+    {
+      "path": "crates/projectatlas-core/src/telemetry.rs",
+      "purpose": "Track `ProjectAtlas` token savings telemetry."
+    },
+    {
+      "path": "crates/projectatlas-core/src/toon.rs",
+      "purpose": "Render `ProjectAtlas` responses with the TOON standard encoder."
+    },
+    {
+      "path": "crates/projectatlas-db/Cargo.toml",
+      "purpose": "Cargo manifest for the ProjectAtlas SQLite persistence crate."
+    },
+    {
+      "path": "crates/projectatlas-db/src/lib.rs",
+      "purpose": "Persists ProjectAtlas scan indexes, purpose metadata, health findings, symbols, text, and telemetry in SQLite."
+    },
+    {
+      "path": "crates/projectatlas-fs/Cargo.toml",
+      "purpose": "Cargo manifest for the ProjectAtlas filesystem scanning crate."
+    },
+    {
+      "path": "crates/projectatlas-fs/src/lib.rs",
+      "purpose": "Scans repository files and folders for ProjectAtlas with gitignore-aware filtering."
+    },
+    {
+      "path": "crates/projectatlas-service/Cargo.toml",
+      "purpose": "Cargo manifest for shared ProjectAtlas query services."
+    },
+    {
+      "path": "crates/projectatlas-service/src/import_aliases.rs",
+      "purpose": "Resolves deterministic import-alias caller targets from persisted import and call relations for file summaries."
+    },
+    {
+      "path": "crates/projectatlas-service/src/lib.rs",
+      "purpose": "Provides shared ProjectAtlas query services for file ranking, search, summaries, slices, and outlines."
+    },
+    {
+      "path": "crates/projectatlas-symbols/Cargo.toml",
+      "purpose": "Cargo manifest for ProjectAtlas symbol extraction and tree-sitter dependencies."
+    },
+    {
+      "path": "crates/projectatlas-symbols/src/languages/c_family.rs",
+      "purpose": "Reserves the C and C++ language augmentation boundary for parser-specific corrections."
+    },
+    {
+      "path": "crates/projectatlas-symbols/src/languages/gradle.rs",
+      "purpose": "Extract Gradle Kotlin and Groovy DSL task registrations as symbols."
+    },
+    {
+      "path": "crates/projectatlas-symbols/src/languages/kotlin.rs",
+      "purpose": "Adds Kotlin package, type, and method facts that the generic tree-sitter pass does not emit reliably."
+    },
+    {
+      "path": "crates/projectatlas-symbols/src/languages/mod.rs",
+      "purpose": "Dispatches language-specific symbol augmentation and shared relation helpers."
+    },
+    {
+      "path": "crates/projectatlas-symbols/src/languages/objective_c.rs",
+      "purpose": "Adds Objective-C class ownership and de-duplicates interface versus implementation symbols for summaries."
+    },
+    {
+      "path": "crates/projectatlas-symbols/src/languages/zig.rs",
+      "purpose": "Adds Zig struct binding names and method parents that are missing from generic parser output."
+    },
+    {
+      "path": "crates/projectatlas-symbols/src/lib.rs",
+      "purpose": "Extracts ProjectAtlas symbol graphs and language summaries from source files."
+    },
+    {
+      "path": "deny.toml",
+      "purpose": "Cargo dependency and license policy for ProjectAtlas"
+    },
+    {
+      "path": "docs/adoption.md",
+      "purpose": "Guide teams through adopting ProjectAtlas in an existing repository."
+    },
+    {
+      "path": "docs/agent-integration.md",
+      "purpose": "Document agent startup, purpose curation, lint-level, and MCP integration workflows for ProjectAtlas."
+    },
+    {
+      "path": "docs/assets/agent-harness-funnel.svg",
+      "purpose": "README diagram explaining the ProjectAtlas agent harness workflow from folder purpose to exact source slice"
+    },
+    {
+      "path": "docs/assets/projectatlas-mascot.png",
+      "purpose": "ProjectAtlas README mascot image"
+    },
+    {
+      "path": "docs/assets/token-savings-bar.svg",
+      "purpose": "README bar chart visualizing ProjectAtlas token savings benchmark results"
+    },
+    {
+      "path": "docs/benchmarks/large-application-token-savings.md",
+      "purpose": "Document large-application benchmark evidence for token savings and responsiveness checks."
+    },
+    {
+      "path": "docs/concepts.md",
+      "purpose": "Explain ProjectAtlas purpose metadata source of truth and health concepts."
+    },
+    {
+      "path": "docs/configuration.md",
+      "purpose": "Document ProjectAtlas configuration files scan policy and legacy import settings."
+    },
+    {
+      "path": "docs/format.md",
+      "purpose": "Document ProjectAtlas TOON response and optional compatibility export format."
+    },
+    {
+      "path": "docs/index.md",
+      "purpose": "Documentation landing page that summarizes ProjectAtlas quick start, workflow, and guide links."
+    },
+    {
+      "path": "docs/memory-bank-extension.md",
+      "purpose": "Define ProjectAtlas memory bank integration boundaries"
+    },
+    {
+      "path": "docs/projectatlas-3-architecture.md",
+      "purpose": "Architecture specification for Rust-native, SQLite-first ProjectAtlas 3 and its release gates."
+    },
+    {
+      "path": "docs/projectatlas-3-v0.3.2-hardening-spec.md",
+      "purpose": "Historical v0.3.2 hardening specification covering symbol modules, path normalization, import aliases, and release gates."
+    },
+    {
+      "path": "docs/structural-summaries.md",
+      "purpose": "Document structural summary adapters and quality signals"
+    },
+    {
+      "path": "docs/workflow.md",
+      "purpose": "Document ProjectAtlas local workflow, purpose linting, troubleshooting, release, and verification commands."
+    },
+    {
+      "path": "fixtures/languages/baselines.toon",
+      "purpose": "Record expected structural summary baselines"
+    },
+    {
+      "path": "fixtures/languages/c/header.h",
+      "purpose": "Exercise C header symbol extraction in language fixture tests."
+    },
+    {
+      "path": "fixtures/languages/c/runner.c",
+      "purpose": "Exercise C source symbol and import extraction in language fixture tests."
+    },
+    {
+      "path": "fixtures/languages/cpp/runner.cpp",
+      "purpose": "Exercise C++ source type and function summary extraction."
+    },
+    {
+      "path": "fixtures/languages/cpp/runner.hpp",
+      "purpose": "Exercise C++ header type and method summary extraction."
+    },
+    {
+      "path": "fixtures/languages/csharp/Runner.cs",
+      "purpose": "Exercise C# type and method summary extraction."
+    },
+    {
+      "path": "fixtures/languages/css/tokens.css",
+      "purpose": "Exercise CSS selector and token summaries"
+    },
+    {
+      "path": "fixtures/languages/go/service.go",
+      "purpose": "Exercise Go type, method, function, and import summary extraction."
+    },
+    {
+      "path": "fixtures/languages/groovy/build.gradle",
+      "purpose": "Gradle Groovy DSL fixture that exercises ProjectAtlas build task extraction."
+    },
+    {
+      "path": "fixtures/languages/html/index.html",
+      "purpose": "Exercise HTML metadata and heading summaries"
+    },
+    {
+      "path": "fixtures/languages/java/AtlasService.java",
+      "purpose": "Exercise Java class and method summary extraction."
+    },
+    {
+      "path": "fixtures/languages/javascript/service.js",
+      "purpose": "Exercise JavaScript exported and local function summary extraction."
+    },
+    {
+      "path": "fixtures/languages/json/package.json",
+      "purpose": "Package manifest fixture that exercises ProjectAtlas script and dependency summaries."
+    },
+    {
+      "path": "fixtures/languages/kotlin/build.gradle.kts",
+      "purpose": "Gradle Kotlin DSL fixture that exercises ProjectAtlas task registration extraction."
+    },
+    {
+      "path": "fixtures/languages/kotlin/Runner.kt",
+      "purpose": "Exercise Kotlin class and function summary extraction."
+    },
+    {
+      "path": "fixtures/languages/markdown/readme.md",
+      "purpose": "Exercise Markdown heading summary extraction"
+    },
+    {
+      "path": "fixtures/languages/objective-c/UserManager.m",
+      "purpose": "Exercise Objective-C type and method summary extraction."
+    },
+    {
+      "path": "fixtures/languages/README.md",
+      "purpose": "Describe structural summary fixture coverage"
+    },
+    {
+      "path": "fixtures/languages/rust/build.rs",
+      "purpose": "Exercise Rust build-script language detection and summary extraction."
+    },
+    {
+      "path": "fixtures/languages/rust/empty.rs",
+      "purpose": "Exercise empty Rust source summary behavior"
+    },
+    {
+      "path": "fixtures/languages/rust/lib.rs",
+      "purpose": "Rust fixture that exercises ProjectAtlas function summary and symbol extraction."
+    },
+    {
+      "path": "fixtures/languages/toml/Cargo.lock",
+      "purpose": "Exercise Cargo lockfile package summary extraction."
+    },
+    {
+      "path": "fixtures/languages/toml/Cargo.toml",
+      "purpose": "Cargo manifest fixture that exercises ProjectAtlas dependency summary extraction."
+    },
+    {
+      "path": "fixtures/languages/toon/projectatlas-nonsource-files.toon",
+      "purpose": "Exercise TOON section summary extraction"
+    },
+    {
+      "path": "fixtures/languages/typescript/component.tsx",
+      "purpose": "Exercise TSX component summary extraction."
+    },
+    {
+      "path": "fixtures/languages/typescript/service.ts",
+      "purpose": "Exercise TypeScript class, method, and helper summary extraction."
+    },
+    {
+      "path": "fixtures/languages/vue/ProductPanel.vue",
+      "purpose": "Provide a Vue Composition API fixture for verifying binding and import summaries."
+    },
+    {
+      "path": "fixtures/languages/yaml/workflow.yml",
+      "purpose": "Exercise workflow trigger and job summaries"
+    },
+    {
+      "path": "fixtures/languages/zig/runner.zig",
+      "purpose": "Exercise Zig type and function summary extraction."
+    },
+    {
+      "path": "LICENSE",
+      "purpose": "ProjectAtlas MIT license"
+    },
+    {
+      "path": "plugins/projectatlas/.claude-plugin/plugin.json",
+      "purpose": "Claude Code plugin manifest declaring ProjectAtlas package metadata and version."
+    },
+    {
+      "path": "plugins/projectatlas/.codex-plugin/plugin.json",
+      "purpose": "Codex plugin manifest declaring ProjectAtlas package metadata, interface text, and version."
+    },
+    {
+      "path": "plugins/projectatlas/opencode/opencode.json",
+      "purpose": "OpenCode MCP configuration template pinned to the ProjectAtlas runtime version."
+    },
+    {
+      "path": "plugins/projectatlas/scripts/install-runtime.ps1",
+      "purpose": "Install or update the ProjectAtlas plugin runtime on Windows, including locked-mirror-safe versioned binaries and absolute MCP configs."
+    },
+    {
+      "path": "plugins/projectatlas/scripts/install-runtime.sh",
+      "purpose": "Install or update the ProjectAtlas plugin runtime and POSIX MCP configs."
+    },
+    {
+      "path": "plugins/projectatlas/skills/projectatlas/SKILL.md",
+      "purpose": "Installable ProjectAtlas skill that guides agents through atlas-first orientation, purpose curation, lint levels, and MCP workflows."
+    },
+    {
+      "path": "README.md",
+      "purpose": "ProjectAtlas product overview, plugin-first quickstart, CLI reference, workflow funnel, and release quality notes."
+    },
+    {
+      "path": "SECURITY.md",
+      "purpose": "Security contact information for ProjectAtlas"
+    },
+    {
+      "path": "skills/claude/ProjectAtlas.md",
+      "purpose": "Claude-oriented ProjectAtlas skill instructions for atlas-first repository navigation."
+    },
+    {
+      "path": "skills/codex/ProjectAtlas.md",
+      "purpose": "Codex-oriented ProjectAtlas skill instructions for atlas-first repository navigation."
+    },
+    {
+      "path": "templates/AGENTS.md",
+      "purpose": "Reusable AGENTS.md startup template for repositories adopting ProjectAtlas purpose-aware atlas-first workflow."
+    }
+  ]
+}

@@ -30,6 +30,9 @@ pub fn extract_symbol_graph(path: &str, language: Option<&str>, content: &str) -
     if is_vue_sfc(path, language) {
         return extract_vue_sfc_graph(path, language, parse_content.as_ref());
     }
+    if is_powershell_script(path, language) {
+        return extract_powershell_graph(path, language, parse_content.as_ref());
+    }
     if let Some(parsed) = extract_tree_sitter_graph(path, language, parse_content.as_ref()) {
         if !parsed.graph.symbols.is_empty() || !parsed.graph.relations.is_empty() {
             return parsed.graph;
@@ -89,6 +92,17 @@ fn is_vue_sfc(path: &str, language: Option<&str>) -> bool {
             .is_some_and(|extension| extension.eq_ignore_ascii_case("vue"))
 }
 
+/// Return whether this source is a `PowerShell` script or module.
+fn is_powershell_script(path: &str, language: Option<&str>) -> bool {
+    matches!(language, Some("powershell"))
+        || Path::new(path).extension().is_some_and(|extension| {
+            matches!(
+                extension.to_str().map(str::to_ascii_lowercase).as_deref(),
+                Some("ps1" | "psm1" | "psd1")
+            )
+        })
+}
+
 /// Extract Vue SFC Composition API bindings with a deterministic structural adapter.
 fn extract_vue_sfc_graph(path: &str, language: Option<&str>, content: &str) -> SymbolGraph {
     let mut graph = extract_fallback_graph(path, language, content);
@@ -121,6 +135,87 @@ fn extract_vue_sfc_graph(path: &str, language: Option<&str>, content: &str) -> S
     }
     merge_preferred_graph_entries(&mut graph, structural);
     graph
+}
+
+/// Extract `PowerShell` declarations with a deterministic structural adapter.
+fn extract_powershell_graph(path: &str, language: Option<&str>, content: &str) -> SymbolGraph {
+    let mut graph = extract_fallback_graph(path, language, content);
+    graph.parser = ParserKind::Structural;
+    let mut structural = empty_graph(path, language, ParserKind::Structural);
+    for (line_index, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if let Some(name) = powershell_function_name(trimmed) {
+            push_symbol(
+                &mut structural,
+                &name,
+                SymbolKind::Function,
+                line_index + 1,
+                line_index + 1,
+                None,
+                Some("powershell-function"),
+                trimmed,
+            );
+        }
+        if let Some(name) = powershell_class_name(trimmed) {
+            push_symbol(
+                &mut structural,
+                &name,
+                SymbolKind::Class,
+                line_index + 1,
+                line_index + 1,
+                None,
+                Some("powershell-class"),
+                trimmed,
+            );
+        }
+        if is_fallback_import(trimmed) {
+            push_relation(
+                &mut structural,
+                "<module>",
+                trimmed,
+                RelationKind::Imports,
+                line_index + 1,
+                trimmed,
+            );
+        }
+    }
+    merge_preferred_graph_entries(&mut graph, structural);
+    graph
+}
+
+/// Extract one `PowerShell` function declaration name.
+fn powershell_function_name(line: &str) -> Option<String> {
+    let mut parts = line.split_whitespace();
+    if !parts.next()?.eq_ignore_ascii_case("function") {
+        return None;
+    }
+    let raw_name = parts.next()?;
+    let name = raw_name.split(['(', '{']).next().unwrap_or_default().trim();
+    let name = name.rsplit_once(':').map_or(name, |(_, scoped)| scoped);
+    let valid = !name.is_empty()
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'));
+    valid.then(|| name.to_string())
+}
+
+/// Extract one `PowerShell` class declaration name.
+fn powershell_class_name(line: &str) -> Option<String> {
+    let mut parts = line.split_whitespace();
+    if !parts.next()?.eq_ignore_ascii_case("class") {
+        return None;
+    }
+    let raw_name = parts.next()?;
+    let name = raw_name
+        .split([':', '{', '('])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    let valid = !name.is_empty()
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_');
+    valid.then(|| name.to_string())
 }
 
 /// Merge preferred graph entries, replacing duplicates and appending within bounds.
@@ -1465,6 +1560,11 @@ fn fallback_patterns() -> Vec<FallbackPattern> {
             "fallback-class",
         ),
         (
+            r"^function\s+([A-Za-z_][A-Za-z0-9_]*(?:-[A-Za-z_][A-Za-z0-9_]*)+)\b",
+            SymbolKind::Function,
+            "fallback-powershell-function",
+        ),
+        (
             r"^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)",
             SymbolKind::Function,
             "fallback-js-function",
@@ -1753,6 +1853,49 @@ fn helper() {}
                 && symbol.kind == SymbolKind::Function
                 && symbol.detail.as_deref() == Some("fallback-python-function")
         }));
+    }
+
+    #[test]
+    fn fallback_preserves_full_powershell_function_names() {
+        let graph = extract_symbol_graph(
+            "scripts/install-runtime.ps1",
+            Some("powershell"),
+            "class RuntimeConfig {\n}\nfunction Resolve-DefaultProjectRoot {\n}\nfunction Get-ReleaseRuntimeInstallPath {\n}\nfunction Install-ReleaseBinary {\n}\n",
+        );
+        assert_eq!(graph.parser, ParserKind::Structural);
+        assert!(
+            graph.symbols.iter().any(|symbol| {
+                symbol.kind == SymbolKind::Class
+                    && symbol.name == "RuntimeConfig"
+                    && symbol.detail.as_deref() == Some("powershell-class")
+            }),
+            "missing PowerShell class symbol: {:?}",
+            graph.symbols
+        );
+
+        for name in [
+            "Resolve-DefaultProjectRoot",
+            "Get-ReleaseRuntimeInstallPath",
+            "Install-ReleaseBinary",
+        ] {
+            assert!(
+                graph.symbols.iter().any(|symbol| {
+                    symbol.kind == SymbolKind::Function
+                        && symbol.name == name
+                        && symbol.detail.as_deref() == Some("powershell-function")
+                }),
+                "missing full PowerShell function name {name}: {:?}",
+                graph.symbols
+            );
+        }
+        assert!(
+            !graph
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "Resolve" || symbol.name == "Install"),
+            "PowerShell function names must not be truncated to verbs: {:?}",
+            graph.symbols
+        );
     }
 
     #[test]

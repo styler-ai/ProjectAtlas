@@ -33,6 +33,7 @@ pub(crate) fn structural_summary_for_path(
         "xml" => xml_summary(content),
         "css" => css_summary(content),
         "html" => html_summary(content),
+        "powershell" => powershell_summary(content),
         "config" | "text" => config_text_summary(path, content),
         _ if has_extension(path, "toon") => toon_summary(content),
         _ => None,
@@ -51,6 +52,7 @@ pub(crate) fn is_structural_summary_candidate(path: &str, language: Option<&str>
             | "xml"
             | "css"
             | "html"
+            | "powershell"
             | "config"
             | "text"
     ) || has_extension(path, "toon")
@@ -585,6 +587,44 @@ fn html_link_rel_values(document: &Html, limit: usize) -> Vec<String> {
     rels
 }
 
+/// Summarize `PowerShell` scripts from declared function names.
+fn powershell_summary(content: &str) -> Option<String> {
+    let functions = content
+        .lines()
+        .filter_map(powershell_function_name)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if !functions.is_empty() {
+        return Some(format!(
+            "powershell script defining functions {}.",
+            join_limited(functions.iter().map(String::as_str).collect())
+        ));
+    }
+    let lines = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    (lines > 0).then(|| format!("powershell script with {lines} non-empty lines."))
+}
+
+/// Extract one `PowerShell` function declaration name.
+fn powershell_function_name(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let mut parts = trimmed.split_whitespace();
+    if !parts.next()?.eq_ignore_ascii_case("function") {
+        return None;
+    }
+    let raw_name = parts.next()?;
+    let name = raw_name.split(['(', '{']).next().unwrap_or_default().trim();
+    let name = name.rsplit_once(':').map_or(name, |(_, scoped)| scoped);
+    let valid = !name.is_empty()
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'));
+    valid.then(|| compact_label(name))
+}
+
 /// Compile an HTML selector.
 fn html_select(_document: &Html, selector: &str) -> Option<Selector> {
     Selector::parse(selector).ok()
@@ -939,6 +979,21 @@ mod tests {
             summary.as_deref(),
             Some(
                 "html document with title Home, meta description Welcome page, headings Hello, link rels alternate, canonical, manifest, structured data."
+            )
+        );
+    }
+
+    #[test]
+    fn summarizes_powershell_functions() {
+        let summary = structural_summary_for_path(
+            "scripts/install-runtime.ps1",
+            Some("powershell"),
+            "function Resolve-DefaultProjectRoot {\n}\nfunction global:Get-ReleaseRuntimeInstallPath($Root) {\n}\nfunction Install-ReleaseBinary {\n}\n",
+        );
+        assert_eq!(
+            summary.as_deref(),
+            Some(
+                "powershell script defining functions Get-ReleaseRuntimeInstallPath, Install-ReleaseBinary, Resolve-DefaultProjectRoot."
             )
         );
     }

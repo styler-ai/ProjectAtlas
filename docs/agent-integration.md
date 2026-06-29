@@ -26,9 +26,11 @@ Purpose completion loop:
 1. Read the focused curation queue with `atlas_purpose_queue` or `projectatlas purpose queue --limit <n>`.
 2. Use the atlas sequence to inspect the path: folders, files, outline or symbols as needed.
 3. Set the correct purpose with `atlas_purpose_set` or `projectatlas purpose set`.
-4. Refresh with `atlas_watch_once`, `projectatlas watch --once`, or `projectatlas scan`.
-5. Rerun health/lint.
-6. Continue until the database has complete reviewed folder purposes, selected high-value file purposes, and the deep index is current.
+4. For a reviewed batch, use `atlas_purpose_review` or `projectatlas purpose review --from-file <json> --apply`
+   instead of raw SQLite edits.
+5. Refresh with `atlas_watch_once`, `projectatlas watch --once`, or `projectatlas scan`.
+6. Rerun health/lint.
+7. Continue until the database has complete reviewed folder purposes, selected high-value file purposes, and the deep index is current.
 
 `atlas_purpose_queue` and `projectatlas purpose queue` default to all folders and high-impact files. Low-priority source files stay out of the default queue so agents are not pushed through every file in a large repository. Pass `projectatlas purpose queue --include-low-priority-files` or MCP `include_low_priority_files: true` only for explicit broad file-purpose cleanup. Use `projectatlas purpose queue --include-assets`, MCP `include_assets: true`, raw `atlas_health`, or bare `projectatlas health-check` only when intentionally curating assets or generated outputs; non-source files should usually inherit purpose from an approved asset root instead of becoming one-by-one queue noise.
 Queue metadata includes `folder_scope` and `file_scope`; agents should use those fields to understand whether files are limited to high-impact entries, all source files, or asset-inclusive mode.
@@ -63,7 +65,8 @@ result text is TOON by default, so agents get compact structured payloads withou
 
 Note: the non-source file list (`.projectatlas/projectatlas-nonsource-files.toon`) is agent-maintained input for
 non-source summaries. Agents should read current repository intelligence from the SQLite-backed CLI/MCP
-surfaces, not from a checked-in static map snapshot.
+surfaces, not from a checked-in static map snapshot. Purpose review batch files are replay inputs for
+`projectatlas purpose review`; SQLite remains authoritative after the ProjectAtlas command applies them.
 ```
 
 ## MCP Server
@@ -172,7 +175,8 @@ Prefer MCP tools when the harness exposes them:
 16. `atlas_strip_legacy_purpose`: remove migrated `.purpose` files when explicitly requested.
 17. `atlas_purpose_queue`: return the folder-first queue of missing, suggested, stale, and structural purpose work for agent curation.
 18. `atlas_purpose_set`: write agent-approved purpose metadata into SQLite.
-19. `atlas_health_resolve`: mark an intentional deterministic health finding resolved with rationale.
+19. `atlas_purpose_review`: preview or apply a reviewed purpose batch into SQLite.
+20. `atlas_health_resolve`: mark an intentional deterministic health finding resolved with rationale.
 
 For read-only reviews or diagnostics, set `PROJECTATLAS_NO_TELEMETRY=1` before running CLI commands or the MCP server.
 This preserves normal atlas reads while preventing usage telemetry writes to `.projectatlas/projectatlas.db`.
@@ -195,7 +199,7 @@ This preserves normal atlas reads while preventing usage telemetry writes to `.p
 | Files changed locally | `atlas_watch_once` | `projectatlas watch --once` |
 | Long local editing session | `atlas_watch_status` for diagnostics | `projectatlas watch` |
 | Planning cleanup/refactor/DRY work | `atlas_health` with filters/paging when needed | `projectatlas health-check --source-only --limit <n>` |
-| Curating missing or generated purposes | `atlas_purpose_queue`, then `atlas_purpose_set` | `projectatlas purpose queue --limit <n>`, then `projectatlas purpose set ...` |
+| Curating missing or generated purposes | `atlas_purpose_queue`, then `atlas_purpose_set` or `atlas_purpose_review` | `projectatlas purpose queue --limit <n>`, then `projectatlas purpose set ...` or `projectatlas purpose review --from-file <json> --apply` |
 | Intentional health conflict | `atlas_health_resolve` | `projectatlas health resolve ... --rationale <why>` |
 | User asks for saved tokens | `atlas_token_report` | `projectatlas token` |
 | Human asks for a terminal token dashboard | `atlas_token_report` first for agent state | `projectatlas token --view tui` |
@@ -238,7 +242,7 @@ but their line ranges come from the deep symbol index and should be kept fresh b
 ProjectAtlas ships public agent guidance through `AGENTS.md`, repository docs, and the packaged plugin skill.
 Personal workspace memory is local state and should stay ignored/untracked through `.gitignore`.
 
-## Claude Code / OpenCode plugins
+## Claude Code Plugin And OpenCode MCP Config
 
 The ProjectAtlas plugin package includes:
 
@@ -249,6 +253,7 @@ The ProjectAtlas plugin package includes:
 
 The generated project-local files are the supported MCP registration path because they contain absolute runtime and project paths.
 Checked-in templates must not be enabled with a bare `projectatlas` command.
+ProjectAtlas does not ship a native OpenCode JavaScript/TypeScript plugin; OpenCode integration is the local MCP server config shape.
 
 ## Lint and CI
 
