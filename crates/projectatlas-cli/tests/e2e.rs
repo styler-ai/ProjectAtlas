@@ -154,6 +154,11 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "Confirm-ProjectAtlasBareCommandResolution",
         "Active process resolves bare projectatlas to verified runtime",
         "Restart Codex or the shell",
+        "Update-ProjectAtlasCodexMcpRegistry",
+        "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE",
+        "PROJECTATLAS_CODEX_COMMAND",
+        "Codex MCP registry updated to ProjectAtlas runtime",
+        "mcp\", \"add\", \"projectatlas\", \"--\"",
         "Get-KnownProjectAtlasShimPaths",
         "Quarantine-ProjectAtlasStaleShims",
         "Test-ProjectAtlasRuntime $candidate $null",
@@ -201,6 +206,11 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "confirm_bare_projectatlas_resolution",
         "Active process resolves bare projectatlas to verified runtime",
         "restart the host shell",
+        "update_codex_mcp_registry",
+        "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE",
+        "PROJECTATLAS_CODEX_COMMAND",
+        "Codex MCP registry updated to ProjectAtlas runtime",
+        "mcp add projectatlas --",
         "runtime_override=${PROJECTATLAS_RUNTIME_PATH:-}",
         "runtime_version=$(printf",
         "[ \"$runtime_version\" = \"$expected_version\" ]",
@@ -324,6 +334,8 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             "dedicated `styler-ai/ProjectAtlas` source",
             "codex plugin marketplace remove projectatlas",
             "codex plugin marketplace add styler-ai/ProjectAtlas --ref",
+            "codex mcp get projectatlas",
+            "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1",
         ] {
             if !document.contains(required) {
                 return Err(io::Error::other(format!(
@@ -727,6 +739,7 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             .env("APPDATA", &app_data)
             .env("LOCALAPPDATA", &local_app_data)
             .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
             .env("PROJECTATLAS_NO_TELEMETRY", "1")
             .output()?;
         let server_result = release_server.join().map_err(|panic_payload| {
@@ -966,6 +979,21 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         fs::set_permissions(&stale_runtime, permissions)?;
     }
     let isolated_home = temp.path().join("isolated-home");
+    let fake_codex_log = isolated_home.join("fake-codex.log");
+    let fake_codex = stale_runtime_dir.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+    let fake_codex_script = if cfg!(windows) {
+        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  echo projectatlas\r\n  echo   command: C:\\stale\\ProjectAtlas\\bin\\projectatlas.exe\r\n  echo   args: --require-version 0.0.1 --db C:\\stale-repo\\.projectatlas\\projectatlas.db mcp\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n"
+    } else {
+        "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${1:-}\" = \"mcp\" ] && [ \"${2:-}\" = \"get\" ]; then\n  printf '%s\\n' 'projectatlas'\n  printf '%s\\n' '  command: /stale/ProjectAtlas/bin/projectatlas'\n  printf '%s\\n' '  args: --require-version 0.0.1 --db /stale-repo/.projectatlas/projectatlas.db mcp'\n  exit 0\nfi\nexit 0\n"
+    };
+    fs::write(&fake_codex, fake_codex_script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&fake_codex)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_codex, permissions)?;
+    }
     let safe_stale_runtime = if cfg!(windows) {
         isolated_home
             .join("AppData")
@@ -1062,6 +1090,33 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
             "plugin update installer did not make its active process prefer the verified runtime:\n{installer_output_text}"
         ))
         .into());
+    }
+    if !installer_output_text.contains("Codex MCP registry updated to ProjectAtlas runtime") {
+        return Err(io::Error::other(format!(
+            "plugin update installer did not repair stale global Codex MCP registry:\n{installer_output_text}"
+        ))
+        .into());
+    }
+    let fake_codex_calls = fs::read_to_string(&fake_codex_log)?;
+    let required_codex_call_fragments = vec![
+        "mcp get projectatlas".to_string(),
+        "mcp remove projectatlas".to_string(),
+        "mcp add projectatlas --".to_string(),
+        runtime.to_string_lossy().into_owned(),
+        "--require-version".to_string(),
+        env!("CARGO_PKG_VERSION").to_string(),
+        "--db".to_string(),
+        db.to_string_lossy().into_owned(),
+        "--config".to_string(),
+        atlas_dir.join("config.toml").to_string_lossy().into_owned(),
+    ];
+    for required in required_codex_call_fragments {
+        if !fake_codex_calls.contains(&required) {
+            return Err(io::Error::other(format!(
+                "fake Codex MCP registry did not receive expected argument {required:?}:\n{fake_codex_calls}"
+            ))
+            .into());
+        }
     }
     let safe_stale_quarantine = stale_shim_quarantine_path(&safe_stale_runtime, "0.0.1");
     if !installer_output_text.contains("Quarantined stale ProjectAtlas shim") {
@@ -6723,13 +6778,20 @@ fn run_projectatlas_plugin_installer_with_optional_path_and_home(
     };
     command
         .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
-        .env("PROJECTATLAS_RUNTIME_PATH", runtime);
+        .env("PROJECTATLAS_RUNTIME_PATH", runtime)
+        .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1");
     if let Some(path_shadow) = path_shadow {
         let current_path = std::env::var_os("PATH").unwrap_or_default();
         let shadowed_path = std::env::join_paths(
             std::iter::once(path_shadow.to_path_buf()).chain(std::env::split_paths(&current_path)),
         )?;
         command.env("PATH", shadowed_path);
+        let fake_codex = path_shadow.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+        if fake_codex.exists() {
+            command
+                .env("PROJECTATLAS_CODEX_COMMAND", fake_codex)
+                .env_remove("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE");
+        }
     }
     if let Some(home) = home {
         let app_data = home.join("AppData").join("Roaming");
@@ -6740,7 +6802,8 @@ fn run_projectatlas_plugin_installer_with_optional_path_and_home(
             .env("HOME", home)
             .env("USERPROFILE", home)
             .env("APPDATA", app_data)
-            .env("LOCALAPPDATA", local_app_data);
+            .env("LOCALAPPDATA", local_app_data)
+            .env("PROJECTATLAS_FAKE_CODEX_LOG", home.join("fake-codex.log"));
     }
     let output = command.output()?;
     if !output.status.success() {

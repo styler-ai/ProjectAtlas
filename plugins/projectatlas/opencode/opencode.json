@@ -6,7 +6,7 @@
       "command": [
         "/absolute/path/to/projectatlas",
         "--require-version",
-        "0.3.14",
+        "0.3.15",
         "--db",
         "/absolute/path/to/project/.projectatlas/projectatlas.db",
         "mcp"

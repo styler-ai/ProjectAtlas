@@ -155,6 +155,17 @@ The installer makes its own active process prefer the verified runtime on
 Windows, Linux, and macOS; if a parent host process still cannot resolve the
 bare command, restart that host or use the generated absolute MCP config.
 
+When `codex` is available, installers also inspect `codex mcp get projectatlas`.
+If a global Codex MCP server named `projectatlas` exists but points to a stale
+runtime version or another project's DB/config, the installer removes and
+re-adds that registry entry with the verified absolute runtime, current project
+database, current config, and matching `--require-version`. Set
+`PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1` only when a managed environment
+intentionally owns the global Codex MCP registry. After plugin/runtime updates,
+agents should verify `codex mcp get projectatlas` or `codex mcp list`; stale
+entries should be repaired by rerunning the ProjectAtlas installer instead of
+left for the next Codex restart.
+
 Harness-specific config can also be generated directly:
 
 ```bash

@@ -16,7 +16,7 @@ repository overview to folder, file, compressed outline, and exact source only w
 ## First-Time Setup
 
 1. Establish the project root first. ProjectAtlas stores one project-local index at `.projectatlas/projectatlas.db`.
-2. Install the ProjectAtlas plugin or run the plugin runtime installer from the target project root. Use `cargo install --path crates/projectatlas-cli --locked` only when developing ProjectAtlas from this source checkout.
+2. Install the ProjectAtlas plugin or run the plugin runtime installer from the target project root. Use `cargo install --path crates/projectatlas-cli --locked` only when developing ProjectAtlas from this source checkout. When `codex` is available after a plugin/runtime update, verify `codex mcp get projectatlas` or `codex mcp list`; a stale global `projectatlas` entry for another repo/version is a bug and should be repaired by rerunning the installer. Set `PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1` only for intentionally managed global registries.
 3. Initialize: `projectatlas init`.
 4. Run `projectatlas scan`.
 5. Add or import purpose records for important folders and files.
