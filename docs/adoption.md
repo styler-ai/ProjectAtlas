@@ -11,11 +11,11 @@ cargo install --path crates/projectatlas-cli --locked
 ## 2. Initialize
 
 ```bash
-projectatlas init --seed-purpose
+projectatlas init
 ```
 
 Run this from the project root. ProjectAtlas 3 stores one durable index per project at `.projectatlas/projectatlas.db`.
-The current Rust `init` command supports `--seed-purpose` for migration seeding; it does not require a language-detection flag.
+Legacy `.purpose` files are migration input only; new purpose records should be stored with `projectatlas purpose set`.
 
 ## 3. Build the atlas
 

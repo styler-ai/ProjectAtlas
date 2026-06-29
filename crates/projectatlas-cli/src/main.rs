@@ -7,8 +7,7 @@ mod structural;
 
 use atlas_map::{
     IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report, init_gitignore,
-    init_project, lint_map, list_ignore_entries, load_atlas_config, remove_ignore_entry,
-    seed_purpose_files, write_map,
+    init_project, lint_map, list_ignore_entries, load_atlas_config, remove_ignore_entry, write_map,
 };
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use projectatlas_core::outline::build_outline;
@@ -206,7 +205,7 @@ struct Cli {
 enum Command {
     /// Initialize `ProjectAtlas` files in a repository.
     Init {
-        /// Create missing folder purpose files after initialization.
+        /// Deprecated no-op; purposes are stored in `SQLite`.
         #[arg(long)]
         seed_purpose: bool,
     },
@@ -219,7 +218,7 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Create missing folder purpose files.
+    /// Deprecated no-op; purposes are stored in `SQLite`.
     SeedPurpose,
     /// Scan a repository and replace the durable index.
     Scan {
@@ -624,7 +623,12 @@ fn run() -> Result<(), CliError> {
                 path: PathBuf::from("."),
                 source,
             })?;
-            let report = init_project(&root, *seed_purpose)?;
+            let report = init_project(&root)?;
+            if *seed_purpose {
+                write_stderr(
+                    "Deprecated --seed-purpose ignored; ProjectAtlas stores purposes in SQLite.\n",
+                )?;
+            }
             write_stdout(&report)?;
         }
         Command::Map { json, force } => {
@@ -636,9 +640,9 @@ fn run() -> Result<(), CliError> {
             write_map(&config, *json)?;
         }
         Command::SeedPurpose => {
-            let config = load_atlas_config(cli.config.as_deref())?;
-            let created = seed_purpose_files(&config)?;
-            write_stderr(&format!("Seeded {created} .purpose files.\n"))?;
+            write_stderr(
+                "Deprecated seed-purpose ignored; ProjectAtlas stores purposes in SQLite.\n",
+            )?;
         }
         Command::Scan {
             path,
@@ -1383,7 +1387,7 @@ fn bind_project_root(root: &Path) -> Result<RootReport, CliError> {
             root.display()
         )));
     }
-    init_project(root, false)?;
+    init_project(root)?;
     let atlas_dir = root.join(".projectatlas");
     let db_path = atlas_dir.join("projectatlas.db");
     let config_path = atlas_dir.join("config.toml");

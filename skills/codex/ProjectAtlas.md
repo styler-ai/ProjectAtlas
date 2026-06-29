@@ -18,7 +18,7 @@ the folder, choose the file, inspect compressed context, and only then open exac
 
 1. Establish the project root first. ProjectAtlas stores one project-local index at `.projectatlas/projectatlas.db`.
 2. Install the ProjectAtlas plugin or run the plugin runtime installer from the target project root. Use `cargo install --path crates/projectatlas-cli --locked` only when developing ProjectAtlas from this source checkout.
-3. Initialize: `projectatlas init --seed-purpose`.
+3. Initialize: `projectatlas init`.
 4. Run `projectatlas scan`.
 5. Add or import purpose records for important folders and files.
 6. Add non-source summaries to `.projectatlas/projectatlas-nonsource-files.toon` when needed.

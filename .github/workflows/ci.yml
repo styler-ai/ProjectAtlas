@@ -118,7 +118,8 @@ jobs:
         run: |
           mkdir smoke
           cd smoke
-          projectatlas init --seed-purpose
+          projectatlas init
+          projectatlas purpose set . "Smoke test repository root"
           projectatlas map --force
           projectatlas lint --strict-folders --report-untracked
 

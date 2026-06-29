@@ -4,7 +4,7 @@ ProjectAtlas is designed to run locally and produce a deterministic map.
 
 ## Recommended workflow
 
-1. `projectatlas init --seed-purpose` (first-time setup).
+1. `projectatlas init` (first-time setup).
 2. Run `projectatlas scan` to update the SQLite index.
 3. Run `projectatlas config --print` when effective scan, purpose, or exclusion policy is unclear.
 4. Run `projectatlas overview`, `projectatlas folders <query>`, and `projectatlas files <query>` before broad source reads; use `projectatlas files --file-pattern <glob>` for direct glob discovery.

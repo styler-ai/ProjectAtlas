@@ -5194,7 +5194,22 @@ fn init_map_and_lint_flow_uses_rust_implementation() -> Result<(), Box<dyn Error
         .current_dir(&repo)
         .args(["init", "--seed-purpose"])
         .assert()
-        .success();
+        .success()
+        .stderr(predicate::str::contains(
+            "Deprecated --seed-purpose ignored",
+        ));
+    if repo.join(".purpose").exists() || repo.join("src").join(".purpose").exists() {
+        return Err(io::Error::other("init --seed-purpose created legacy .purpose files").into());
+    }
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("seed-purpose")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Deprecated seed-purpose ignored"));
+    if repo.join(".purpose").exists() || repo.join("src").join(".purpose").exists() {
+        return Err(io::Error::other("seed-purpose created legacy .purpose files").into());
+    }
     fs::write(
         repo.join(".purpose"),
         "Demo repository for Rust map lint tests\n",

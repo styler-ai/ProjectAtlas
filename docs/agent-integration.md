@@ -86,7 +86,7 @@ fails closed instead of starting an older MCP server:
   "mcpServers": {
     "projectatlas": {
       "command": "projectatlas",
-      "args": ["--require-version", "0.3.7", "--db", ".projectatlas/projectatlas.db", "mcp"]
+      "args": ["--require-version", "0.3.8", "--db", ".projectatlas/projectatlas.db", "mcp"]
     }
   }
 }
