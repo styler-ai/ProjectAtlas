@@ -99,10 +99,11 @@ The `overview:` line in the atlas now reports `tracked_source_files`,
 Do not add new Purpose headers or `.purpose` files for ProjectAtlas 3. Inspect the folder/file through the atlas funnel and write the correct one-line purpose to SQLite:
 
 ```bash
+projectatlas purpose queue --limit 20
 projectatlas purpose set <path> "<one-line purpose>"
 ```
 
-Generated purpose suggestions remain review-required until an agent approves or corrects them.
+The purpose queue is source-focused by default, so binary assets and asset-only roots do not dominate the next-action list. Pass `--include-assets` only when intentionally curating non-source files. Generated purpose suggestions remain review-required until an agent approves or corrects them.
 
 ### Legacy Purpose headers or .purpose files
 

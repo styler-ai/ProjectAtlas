@@ -639,12 +639,32 @@ pub fn load_ranked_file_nodes(
     folder: Option<&str>,
     file_pattern: Option<&str>,
     limit: usize,
+    include_content: bool,
 ) -> ServiceResult<Vec<IndexedNode>> {
     let matcher = FilePathMatcher::new(file_pattern)?;
-    if !matcher.filters() {
-        return Ok(store.load_ranked_nodes(query, NodeKind::File, folder, limit.max(1), 0)?);
-    }
     let target = limit.max(1);
+    let mut selected = if matcher.filters() {
+        load_ranked_file_nodes_matching_glob(store, query, folder, &matcher, target)?
+    } else {
+        store.load_ranked_nodes(query, NodeKind::File, folder, target, 0)?
+    };
+    if include_content && !query.trim().is_empty() && selected.len() < target {
+        append_content_ranked_file_nodes(store, query, folder, &matcher, target, &mut selected)?;
+    }
+    Ok(selected)
+}
+
+/// Load ranked files while applying a compiled repository-relative glob.
+fn load_ranked_file_nodes_matching_glob(
+    store: &AtlasStore,
+    query: &str,
+    folder: Option<&str>,
+    matcher: &FilePathMatcher,
+    target: usize,
+) -> ServiceResult<Vec<IndexedNode>> {
+    if !matcher.filters() {
+        return Ok(store.load_ranked_nodes(query, NodeKind::File, folder, target, 0)?);
+    }
     let batch_size = target.saturating_mul(20).clamp(50, 500);
     let mut offset = 0usize;
     let mut selected = Vec::new();
@@ -664,6 +684,53 @@ pub fn load_ranked_file_nodes(
         }
     }
     Ok(selected)
+}
+
+/// Append indexed-text hits after ordinary ranked file results.
+fn append_content_ranked_file_nodes(
+    store: &AtlasStore,
+    query: &str,
+    folder: Option<&str>,
+    matcher: &FilePathMatcher,
+    target: usize,
+    selected: &mut Vec<IndexedNode>,
+) -> ServiceResult<()> {
+    let needle = normalized_search_text(query, false);
+    let mut seen = selected
+        .iter()
+        .map(|node| node.node.path.clone())
+        .collect::<HashSet<_>>();
+    store.visit_file_texts_for_search(Some(query), false, |text| {
+        if selected.len() >= target {
+            return Ok(false);
+        }
+        if !seen.contains(&text.path)
+            && path_is_inside_folder(&text.path, folder)
+            && matcher.is_match(&text.path)
+            && normalized_search_text(&text.content, false).contains(&needle)
+            && let Some(node) = store.load_node_by_path(&text.path)?
+        {
+            seen.insert(text.path);
+            selected.push(node);
+        }
+        Ok(selected.len() < target)
+    })?;
+    Ok(())
+}
+
+/// Return whether a file path is inside an optional repository folder filter.
+fn path_is_inside_folder(path: &str, folder: Option<&str>) -> bool {
+    let Some(folder) = folder
+        .map(|folder| folder.trim_matches('/').trim_matches('\\'))
+        .filter(|folder| !folder.is_empty() && *folder != ".")
+    else {
+        return true;
+    };
+    let folder = folder.replace('\\', "/");
+    path == folder
+        || path
+            .strip_prefix(&folder)
+            .is_some_and(|tail| tail.starts_with('/'))
 }
 
 /// Return whether one repository-relative path matches an optional file glob.
@@ -2307,7 +2374,7 @@ mod tests {
             store.set_node_summary(path, "needle indexed summary")?;
         }
 
-        let selected = load_ranked_file_nodes(&store, "needle", None, Some("*.rs"), 10)?;
+        let selected = load_ranked_file_nodes(&store, "needle", None, Some("*.rs"), 10, false)?;
         require_eq(&selected.len(), &2, "ranked rs glob count")?;
         if selected
             .iter()
@@ -2316,12 +2383,52 @@ mod tests {
             return Err(io::Error::other("ranked glob included docs/readme.md").into());
         }
 
-        let nested = load_ranked_file_nodes(&store, "needle", None, Some("src/nested/*.rs"), 10)?;
+        let nested =
+            load_ranked_file_nodes(&store, "needle", None, Some("src/nested/*.rs"), 10, false)?;
         require_eq(&nested.len(), &1, "ranked nested glob count")?;
         require_eq(
             &nested[0].node.path,
             &"src/nested/b.rs".to_string(),
             "ranked nested glob path",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn ranked_file_nodes_can_include_indexed_text_hits() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src"))?;
+        fs::create_dir_all(root.join("docs"))?;
+        fs::write(
+            root.join("src").join("owner.rs"),
+            "const ROUTE = \"hiddenNeedle\";\n",
+        )?;
+        fs::write(root.join("docs").join("owner.md"), "hiddenNeedle docs\n")?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        let nodes = [
+            test_node("src/owner.rs", "hash-src-owner"),
+            test_node("docs/owner.md", "hash-doc-owner"),
+        ];
+        store.replace_scan(&nodes)?;
+        index_test_file_texts(&mut store, root, &nodes)?;
+
+        let default_ranked =
+            load_ranked_file_nodes(&store, "hiddenNeedle", Some("src"), Some("*.rs"), 10, false)?;
+        require_eq(
+            &default_ranked.len(),
+            &0,
+            "default ranking ignores content-only hits",
+        )?;
+
+        let content_ranked =
+            load_ranked_file_nodes(&store, "hiddenNeedle", Some("src"), Some("*.rs"), 10, true)?;
+        require_eq(&content_ranked.len(), &1, "content-aware ranked count")?;
+        require_eq(
+            &content_ranked[0].node.path,
+            &"src/owner.rs".to_string(),
+            "content-aware ranked path",
         )?;
         Ok(())
     }

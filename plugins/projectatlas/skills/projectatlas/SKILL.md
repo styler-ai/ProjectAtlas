@@ -35,18 +35,21 @@ Purpose and summary are separate:
 - `stale` applies to approved purpose metadata that needs review after a meaningful change; it does not mean the refreshed `content_summary` is stale.
 - Generated summaries are acceptable as deterministic content metadata.
 - Generated purposes are only suggestions and must not be treated as correct until imported from trusted legacy metadata or approved by the agent after inspection.
-- If lint or health reports missing purposes, the agent must inspect the folder/file enough to write a correct one-line purpose and call `atlas_purpose_set` or `projectatlas purpose set`; do not leave the purpose blank just because no human supplied it.
+- If lint, health, or the curation queue reports missing purposes, the agent must inspect the folder/file enough to write a correct one-line purpose and call `atlas_purpose_set` or `projectatlas purpose set`; do not leave the purpose blank just because no human supplied it.
 
 ## Purpose Completion Loop
 
-When `atlas_health`, `projectatlas health-check`, or `projectatlas lint` reports missing purposes:
+When `atlas_purpose_queue`, `projectatlas purpose queue`, `atlas_health`, `projectatlas health-check`, or `projectatlas lint` reports missing purposes:
 
-1. Use `atlas_folders`/`atlas_files` to locate the missing path.
-2. Inspect only enough context to understand the path's actual role.
-3. Write a precise one-line purpose with `atlas_purpose_set` or `projectatlas purpose set`.
-4. Run `atlas_watch_once`, `projectatlas watch --once`, or `projectatlas scan`.
-5. Rerun health/lint.
-6. Repeat until the ProjectAtlas database has purposes for all indexed folders/files and the deep index is refreshed.
+1. Start with `atlas_purpose_queue` or `projectatlas purpose queue --limit <n>` for a source-focused next-action list.
+2. Use `atlas_folders`/`atlas_files` to locate the missing path.
+3. Inspect only enough context to understand the path's actual role.
+4. Write a precise one-line purpose with `atlas_purpose_set` or `projectatlas purpose set`.
+5. Run `atlas_watch_once`, `projectatlas watch --once`, or `projectatlas scan`.
+6. Rerun health/lint.
+7. Repeat until the ProjectAtlas database has purposes for all indexed folders/files and the deep index is refreshed.
+
+`atlas_purpose_queue` and `projectatlas purpose queue` default to source-relevant paths: source files and folders that contain source files. Use `projectatlas purpose queue --include-assets`, raw `atlas_health`, or bare `projectatlas health-check` only when intentionally curating assets or generated outputs.
 
 This loop is an agent responsibility installed with the plugin. Do not wait for human purpose text during normal agent-harness operation.
 
@@ -115,14 +118,15 @@ Use the MCP tools when the harness exposes them. They are preferred over shell c
 7. `atlas_symbols` and `atlas_symbol_relations` when function/class/import/call context is needed.
 8. `atlas_search` for filtered literal, regex, or fuzzy matches inside indexed files.
 9. `atlas_slice` for exact line or symbol source after folder/file/symbol selection.
-10. `atlas_health` before cleanup, refactor, or DRY decisions. On large repositories, pass `limit`, `start_index`, `category`, `severity`, `path_prefix`, or `summary_only` so health review stays bounded.
+10. `atlas_health` before cleanup, refactor, or DRY decisions. On large repositories, pass `limit`, `start_index`, `category`, `severity`, `path_prefix`, `summary_only`, or `source_only` so health review stays bounded.
 11. `atlas_watch_once` after file changes when a continuous watcher is not running.
 12. `atlas_token_report` when the user asks how many tokens ProjectAtlas saved.
 13. `atlas_settings` and `atlas_watch_status` for diagnostics.
 14. `atlas_reset_index` dry-run first when the local SQLite/cache state is corrupt or intentionally discarded.
 15. `atlas_strip_legacy_purpose` only after migrated `.purpose` metadata is safely stored in SQLite.
-16. `atlas_purpose_set` when an agent-approved purpose should be written to the durable index.
-17. `atlas_health_resolve` when a deterministic conflict is intentionally correct and should not be repeated.
+16. `atlas_purpose_queue` when an agent needs a source-focused purpose curation queue before approving or correcting generated purposes.
+17. `atlas_purpose_set` when an agent-approved purpose should be written to the durable index.
+18. `atlas_health_resolve` when a deterministic conflict is intentionally correct and should not be repeated.
 
 ## Command Decision Rules
 
@@ -138,7 +142,8 @@ Use the MCP tools when the harness exposes them. They are preferred over shell c
 - Need text occurrences: call `atlas_search` with `file_pattern`, `context_lines`, and `limit` rather than broad shell search; search is intentionally case-insensitive by default for agent discovery, set `case_sensitive` only when exact casing matters, set `fuzzy` when the name is approximate, and treat `truncated`, searched file count, and searched byte count as the signal for whether to narrow or widen the glob.
 - After creating, moving, deleting, or editing files: call `atlas_watch_once`, `projectatlas watch --once`, or `atlas_scan` before trusting old results.
 - During a long local editing session: prefer a single continuous `projectatlas watch` process from the project root, then use MCP reads against the refreshed SQLite index. File edits refresh incrementally; directory/root/ignore-rule changes may trigger a full scan for correctness.
-- Planning cleanup/refactor/DRY work: call `atlas_health` after overview/folder/file orientation and before proposing moves/merges; use `summary_only`, `category`, `severity`, `path_prefix`, `limit`, and `start_index` when the health surface is large.
+- Planning cleanup/refactor/DRY work: call `atlas_health` after overview/folder/file orientation and before proposing moves/merges; use `summary_only`, `source_only`, `category`, `severity`, `path_prefix`, `limit`, and `start_index` when the health surface is large.
+- Purpose curation: call `atlas_purpose_queue` before writing purposes; then inspect enough context and call `atlas_purpose_set`.
 - Intentional health conflict after inspection: call `atlas_health_resolve` with a rationale.
 - User asks about saved tokens: call `atlas_token_report`.
 - Runtime looks wrong: call `projectatlas --format json runtime-info`, then `atlas_settings` and `atlas_watch_status`.
@@ -175,7 +180,8 @@ If MCP tools are unavailable, use the equivalent CLI sequence:
 | Exact symbol | `projectatlas symbols slice <file> <symbol> --symbol-parent <parent>` |
 | Refresh after edits | `projectatlas watch --once` |
 | Continuous local refresh | `projectatlas watch` |
-| Cleanup/refactor signals | `projectatlas health-check` |
+| Cleanup/refactor signals | `projectatlas health-check --source-only --limit <n>` |
+| Purpose curation queue | `projectatlas purpose queue --limit <n>` |
 | Token savings | `projectatlas token` |
 | Human token dashboard | `projectatlas token --view tui` |
 | Diagnostics | `projectatlas settings`, `projectatlas config --print`, and `projectatlas watch-status` |
@@ -194,7 +200,7 @@ If MCP tools are unavailable, use the equivalent CLI sequence:
 8. Run `projectatlas symbols list --file <file>` and `projectatlas symbols relations --file <file>` when symbol context is needed.
 9. Run `projectatlas search <pattern> --file-pattern <glob>` for bounded filtered text matches; add `--fuzzy` when the name is approximate, and inspect returned, searched file, searched byte, and truncated counters before widening the search.
 10. Run `projectatlas slice <file> --start-line <n> --end-line <m>` or `projectatlas symbols slice <file> <symbol> --symbol-parent <parent> --symbol-kind <kind> --symbol-line <line>` for exact source; add disambiguators when duplicate names exist.
-11. Run `projectatlas health-check` before cleanup/refactor decisions.
+11. Run `projectatlas health-check --source-only --limit 50` before cleanup/refactor decisions.
 12. Only then use language servers or broad file reads on selected targets.
 13. Run `projectatlas token` when token-savings reporting is requested; use `projectatlas token --view tui` only for a human terminal dashboard.
 14. Run `projectatlas lint --strict-folders --report-untracked` before finishing structural changes.

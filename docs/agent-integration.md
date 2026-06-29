@@ -23,12 +23,14 @@ Purpose correctness matters. `folder_purpose` and `file_purpose` explain why a f
 
 Purpose completion loop:
 
-1. Read missing-purpose findings from `atlas_health` or `projectatlas health-check`.
+1. Read the focused curation queue with `atlas_purpose_queue` or `projectatlas purpose queue --limit <n>`.
 2. Use the atlas sequence to inspect the path: folders, files, outline or symbols as needed.
 3. Set the correct purpose with `atlas_purpose_set` or `projectatlas purpose set`.
 4. Refresh with `atlas_watch_once`, `projectatlas watch --once`, or `projectatlas scan`.
 5. Rerun health/lint.
 6. Continue until the database has complete folder/file purposes and the deep index is current.
+
+`atlas_purpose_queue` and `projectatlas purpose queue` default to source-relevant paths: source files and folders that contain source files. Use `projectatlas purpose queue --include-assets`, raw `atlas_health`, or bare `projectatlas health-check` only when intentionally curating assets or generated outputs; non-source files should usually inherit purpose from an approved asset root instead of becoming one-by-one queue noise.
 
 If a duplicate-purpose, repeated temporary folder, or similar deterministic finding is intentional after inspection, resolve that exact finding with `atlas_health_resolve` or `projectatlas health resolve <finding-id> <category> <path> --related-path <path> --rationale "<why>"`. Do not resolve missing-purpose findings; fill the purpose instead.
 
@@ -50,7 +52,7 @@ result text is TOON by default, so agents get compact structured payloads withou
 8. Run `projectatlas symbols list --file <file>` and `projectatlas symbols relations --file <file>` when symbol context is needed.
 9. Run `projectatlas search <pattern> --file-pattern <glob>` for bounded, glob-filtered text search in selected areas; search is intentionally case-insensitive by default for agent discovery, add `--case-sensitive` only when exact casing matters, add `--fuzzy` when the name is approximate, and check returned, searched file, searched byte, and truncated counters before widening the search.
 10. Run `projectatlas slice <file> --start-line <n> --end-line <m>` or `projectatlas symbols slice <file> <symbol> --symbol-parent <parent> --symbol-kind <kind> --symbol-line <line>` for exact source slices; add symbol disambiguators when duplicate names exist.
-11. Run `projectatlas health-check` when planning cleanup or refactors.
+11. Run `projectatlas health-check --source-only --limit 50` when planning cleanup or refactors.
 12. Run `projectatlas lint --strict-folders --report-untracked`.
 13. Run `projectatlas token` when the user asks how many tokens ProjectAtlas saved.
 14. Only then run language-server lookups or broad file reads on the selected files.
@@ -153,14 +155,15 @@ Prefer MCP tools when the harness exposes them:
 8. `atlas_symbol_relations`: inspect imports, calls, dependencies, and containment.
 9. `atlas_search`: search indexed files with filters and pagination.
 10. `atlas_slice`: fetch exact line or symbol source only after selection.
-11. `atlas_health`: find cleanup/refactor/DRY structure issues. Use `limit`, `start_index`, `category`, `severity`, `path_prefix`, or `summary_only` for large health surfaces.
+11. `atlas_health`: find cleanup/refactor/DRY structure issues. Use `limit`, `start_index`, `category`, `severity`, `path_prefix`, `summary_only`, or `source_only` for large health surfaces.
 12. `atlas_watch_once`: bounded refresh after local file changes when no continuous watcher is running.
 13. `atlas_token_report`: report estimated token savings.
 14. `atlas_settings` and `atlas_watch_status`: diagnose runtime/index/cache state.
 15. `atlas_reset_index`: preview or clear local SQLite/cache files when the index is corrupt or intentionally being rebuilt.
 16. `atlas_strip_legacy_purpose`: remove migrated `.purpose` files when explicitly requested.
-17. `atlas_purpose_set`: write agent-approved purpose metadata into SQLite.
-18. `atlas_health_resolve`: mark an intentional deterministic health finding resolved with rationale.
+17. `atlas_purpose_queue`: return the source-focused queue of missing, suggested, stale, and structural purpose work for agent curation.
+18. `atlas_purpose_set`: write agent-approved purpose metadata into SQLite.
+19. `atlas_health_resolve`: mark an intentional deterministic health finding resolved with rationale.
 
 For read-only reviews or diagnostics, set `PROJECTATLAS_NO_TELEMETRY=1` before running CLI commands or the MCP server.
 This preserves normal atlas reads while preventing usage telemetry writes to `.projectatlas/projectatlas.db`.
@@ -182,7 +185,8 @@ This preserves normal atlas reads while preventing usage telemetry writes to `.p
 | Need exact source | `atlas_slice` | `projectatlas slice ...` or `projectatlas symbols slice ... --symbol-parent <parent>` |
 | Files changed locally | `atlas_watch_once` | `projectatlas watch --once` |
 | Long local editing session | `atlas_watch_status` for diagnostics | `projectatlas watch` |
-| Planning cleanup/refactor/DRY work | `atlas_health` with filters/paging when needed | `projectatlas health-check` |
+| Planning cleanup/refactor/DRY work | `atlas_health` with filters/paging when needed | `projectatlas health-check --source-only --limit <n>` |
+| Curating missing or generated purposes | `atlas_purpose_queue`, then `atlas_purpose_set` | `projectatlas purpose queue --limit <n>`, then `projectatlas purpose set ...` |
 | Intentional health conflict | `atlas_health_resolve` | `projectatlas health resolve ... --rationale <why>` |
 | User asks for saved tokens | `atlas_token_report` | `projectatlas token` |
 | Human asks for a terminal token dashboard | `atlas_token_report` first for agent state | `projectatlas token --view tui` |

@@ -11,6 +11,7 @@ use crate::{
     CliError, OutputFormat, WATCH_MODE_NOTIFY, WATCH_MODE_ONCE, WATCH_MODE_POLLING, truthy_env,
 };
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use projectatlas_core::health::Severity;
 use projectatlas_core::language::{LanguageParserSupport, language_spec};
 use projectatlas_core::outline::estimate_tokens;
 use projectatlas_core::symbols::{RelationKind, SymbolGraph, SymbolKind};
@@ -19,12 +20,13 @@ use projectatlas_core::telemetry::{
     TOKEN_BUCKET_NAVIGATION_AVOIDANCE, TOKEN_CONFIDENCE_INFERRED, TOKEN_CONFIDENCE_POLICY_ESTIMATE,
     usage_from_estimates_with_context, usage_from_text,
 };
+use projectatlas_core::toon::encode_agent_payload;
 use projectatlas_core::{
     Node, NodeKind, Overview, PurposeSource, PurposeStatus, normalize_native_path_display,
     normalize_native_path_display_str, normalize_repo_path, repo_path_to_native,
     validated_repo_file_key,
 };
-use projectatlas_db::{AtlasStore, IndexedFileText};
+use projectatlas_db::{AtlasStore, HealthFindingsPage, HealthQuery, IndexedFileText};
 use projectatlas_fs::{ScanOptions, gitignore_excludes_path, scan_path, scan_repo};
 use projectatlas_service::{
     FilePathMatcher, FileSummaryReport, file_summary_baseline_text, load_ranked_file_nodes,
@@ -33,6 +35,7 @@ use projectatlas_symbols::extract_symbol_graph;
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 use serde::Serialize;
+use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
@@ -44,6 +47,10 @@ use std::time::{Duration, Instant};
 
 /// Maximum file size parsed for symbols by default.
 pub(crate) const MAX_SYMBOL_FILE_BYTES: u64 = 2_000_000;
+/// Default health rows returned when the caller does not request a page size.
+pub(crate) const DEFAULT_HEALTH_LIMIT: usize = 50;
+/// Maximum health rows returned in one payload.
+pub(crate) const MAX_HEALTH_LIMIT: usize = 200;
 
 /// Built-in purposes for reserved project-local `ProjectAtlas` metadata inputs.
 const BUILTIN_PROJECTATLAS_PURPOSES: &[(&str, &str)] = &[
@@ -440,6 +447,7 @@ pub(crate) fn ranked_file_nodes(
     folder: Option<&str>,
     file_pattern: Option<&str>,
     limit: usize,
+    include_content: bool,
 ) -> Result<Vec<projectatlas_core::IndexedNode>, CliError> {
     Ok(load_ranked_file_nodes(
         store,
@@ -447,7 +455,216 @@ pub(crate) fn ranked_file_nodes(
         folder,
         file_pattern,
         limit,
+        include_content,
     )?)
+}
+
+/// Agent-facing purpose curation queue with bounded health metadata.
+#[derive(Debug, Serialize)]
+pub(crate) struct PurposeCurationPage {
+    /// Findings after filters are applied.
+    pub(crate) total: usize,
+    /// Findings before filters are applied, after resolved findings are removed.
+    pub(crate) unfiltered_total: usize,
+    /// Findings returned in this page.
+    pub(crate) returned: usize,
+    /// Pagination start index used for this page.
+    pub(crate) start_index: usize,
+    /// Maximum findings requested for this page.
+    pub(crate) limit: usize,
+    /// Maximum allowed page size.
+    pub(crate) max_limit: usize,
+    /// Next start index when more rows are available.
+    pub(crate) next_start_index: Option<usize>,
+    /// Whether more rows are available.
+    pub(crate) truncated: bool,
+    /// Whether the queue is restricted to source-relevant paths.
+    pub(crate) source_only: bool,
+    /// Applied category filter.
+    pub(crate) category: String,
+    /// Applied severity filter.
+    pub(crate) severity: String,
+    /// Applied path-prefix filter.
+    pub(crate) path_prefix: String,
+    /// Whether rows were intentionally omitted.
+    pub(crate) summary_only: bool,
+    /// Queue items that need agent inspection or approval.
+    pub(crate) items: Vec<PurposeCurationItem>,
+}
+
+/// One path that needs purpose curation.
+#[derive(Debug, Serialize)]
+pub(crate) struct PurposeCurationItem {
+    /// Finding severity.
+    pub(crate) severity: String,
+    /// Stable health finding id.
+    pub(crate) id: String,
+    /// Health finding category.
+    pub(crate) category: String,
+    /// Indexed repository-relative path.
+    pub(crate) path: String,
+    /// Related path for structural findings.
+    pub(crate) related_path: String,
+    /// Node kind when the path is still indexed.
+    pub(crate) kind: String,
+    /// Detected language for source files.
+    pub(crate) language: String,
+    /// Current approved or suggested purpose text.
+    pub(crate) purpose: String,
+    /// Purpose lifecycle status.
+    pub(crate) purpose_status: String,
+    /// Purpose source.
+    pub(crate) purpose_source: String,
+    /// Current deterministic content summary.
+    pub(crate) content_summary: String,
+    /// Recommended agent action.
+    pub(crate) recommendation: String,
+}
+
+/// Build a purpose curation queue from the bounded health page.
+pub(crate) fn purpose_curation_page(
+    store: &AtlasStore,
+    query: &HealthQuery,
+) -> Result<PurposeCurationPage, CliError> {
+    let page = store.unresolved_health_findings_page(&store.resolved_health_ids()?, query)?;
+    let paths = page
+        .findings
+        .iter()
+        .map(|finding| finding.path.clone())
+        .collect::<Vec<_>>();
+    let nodes = store
+        .load_nodes_by_paths(&paths)?
+        .into_iter()
+        .map(|node| (node.node.path.clone(), node))
+        .collect::<HashMap<_, _>>();
+    let items = page
+        .findings
+        .iter()
+        .map(|finding| {
+            let node = nodes.get(&finding.path);
+            PurposeCurationItem {
+                severity: health_severity_name(finding.severity).to_string(),
+                id: finding.id.clone(),
+                category: finding.category.clone(),
+                path: finding.path.clone(),
+                related_path: finding.related_path.clone().unwrap_or_default(),
+                kind: node
+                    .map(|indexed| indexed.node.kind.to_string())
+                    .unwrap_or_default(),
+                language: node
+                    .and_then(|indexed| indexed.node.language.clone())
+                    .unwrap_or_default(),
+                purpose: node
+                    .and_then(|indexed| indexed.purpose.purpose.clone())
+                    .unwrap_or_default(),
+                purpose_status: node
+                    .map(|indexed| indexed.purpose.status.to_string())
+                    .unwrap_or_default(),
+                purpose_source: node
+                    .map(|indexed| indexed.purpose.source.to_string())
+                    .unwrap_or_default(),
+                content_summary: node
+                    .and_then(|indexed| indexed.summary.clone())
+                    .unwrap_or_default(),
+                recommendation: finding.recommendation.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(PurposeCurationPage {
+        total: page.total,
+        unfiltered_total: page.unfiltered_total,
+        returned: page.returned,
+        start_index: page.start_index,
+        limit: page.limit,
+        max_limit: MAX_HEALTH_LIMIT,
+        next_start_index: health_next_start_index(&page),
+        truncated: health_next_start_index(&page).is_some(),
+        source_only: query.source_only,
+        category: query.category.clone().unwrap_or_default(),
+        severity: query.severity.map_or("", health_severity_name).to_string(),
+        path_prefix: query.path_prefix.clone().unwrap_or_default(),
+        summary_only: query.summary_only,
+        items,
+    })
+}
+
+/// Render a bounded health page as compact TOON.
+pub(crate) fn render_health_page(page: &HealthFindingsPage, query: &HealthQuery) -> String {
+    let rows = page
+        .findings
+        .iter()
+        .map(|finding| {
+            json!({
+                "severity": health_severity_name(finding.severity),
+                "id": finding.id,
+                "category": finding.category,
+                "path": finding.path,
+                "related_path": finding.related_path.as_deref().unwrap_or(""),
+                "message": finding.message,
+                "recommendation": finding.recommendation,
+            })
+        })
+        .collect::<Vec<_>>();
+    encode_agent_payload(&json!({
+        "health": {
+            "total": page.total,
+            "unfiltered_total": page.unfiltered_total,
+            "returned": page.returned,
+            "start_index": page.start_index,
+            "limit": page.limit,
+            "max_limit": MAX_HEALTH_LIMIT,
+            "next_start_index": health_next_start_index(page),
+            "truncated": health_next_start_index(page).is_some(),
+            "summary_only": query.summary_only,
+            "source_only": query.source_only,
+            "category": query.category.as_deref().unwrap_or(""),
+            "severity": query.severity.map_or("", health_severity_name),
+            "path_prefix": query.path_prefix.as_deref().unwrap_or(""),
+        },
+        "health_findings": rows,
+    }))
+}
+
+/// Render a purpose curation queue as compact TOON.
+pub(crate) fn render_purpose_curation_page(page: &PurposeCurationPage) -> String {
+    encode_agent_payload(&json!({
+        "purpose_curation": {
+            "total": page.total,
+            "unfiltered_total": page.unfiltered_total,
+            "returned": page.returned,
+            "start_index": page.start_index,
+            "limit": page.limit,
+            "max_limit": page.max_limit,
+            "next_start_index": page.next_start_index,
+            "truncated": page.truncated,
+            "source_only": page.source_only,
+            "category": page.category,
+            "severity": page.severity,
+            "path_prefix": page.path_prefix,
+            "summary_only": page.summary_only,
+        },
+        "purpose_curation_items": page.items,
+    }))
+}
+
+/// Return a stable lowercase severity name.
+pub(crate) fn health_severity_name(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Info => "info",
+        Severity::Warning => "warning",
+        Severity::Error => "error",
+    }
+}
+
+/// Return the next start index for a bounded health page.
+fn health_next_start_index(page: &HealthFindingsPage) -> Option<usize> {
+    let page_width = page.limit.min(page.total.saturating_sub(page.start_index));
+    let page_end = page.start_index.saturating_add(page_width);
+    if page_width == 0 || page_end >= page.total {
+        None
+    } else {
+        Some(page_end)
+    }
 }
 
 /// Estimate source tokens for repository paths referenced by symbols/relations.
@@ -1105,8 +1322,8 @@ pub(crate) struct SymbolParseJob {
     language: Option<String>,
     /// Existing node summary fallback.
     fallback_summary: Option<String>,
-    /// Whether a generated purpose suggestion should be written.
-    purpose_missing: bool,
+    /// Whether a generated purpose suggestion should be written or refreshed.
+    purpose_needs_suggestion: bool,
 }
 
 /// Successful parser output waiting for sequential DB persistence.
@@ -1221,7 +1438,10 @@ pub(crate) fn build_symbols_for_paths(
             native_path: root.join(repo_path_to_native(&node.node.path)),
             language: node.node.language.clone(),
             fallback_summary: node.summary.clone(),
-            purpose_missing: node.purpose.status == PurposeStatus::Missing,
+            purpose_needs_suggestion: matches!(
+                node.purpose.status,
+                PurposeStatus::Missing | PurposeStatus::Suggested
+            ),
         });
     }
     let started_at = Instant::now();
@@ -1308,7 +1528,7 @@ pub(crate) fn parse_symbol_job(
     let graph = extract_symbol_graph(&job.path, job.language.as_deref(), &content);
     let summary = summarize_symbol_graph(&graph, job.fallback_summary.as_deref());
     let purpose_suggestion = job
-        .purpose_missing
+        .purpose_needs_suggestion
         .then(|| suggest_file_purpose(&job.path, &summary));
     SymbolParseOutcome::Parsed(SymbolParseSuccess {
         path: job.path.clone(),
@@ -1528,13 +1748,7 @@ pub(crate) fn relation_targets(
 
 /// Create a generated file-purpose suggestion from a path and content summary.
 pub(crate) fn suggest_file_purpose(path: &str, summary: &str) -> String {
-    let name = path
-        .rsplit('/')
-        .next()
-        .filter(|value| !value.is_empty())
-        .unwrap_or(path);
-    let stem = name.split_once('.').map_or(name, |(stem, _)| stem);
-    let subject = stem.replace(['-', '_'], " ");
+    let subject = path_context_subject(path);
     if summary.contains("dataset manifest") {
         if let Some(datasets) = summary_between(summary, " including ", " and keys") {
             format!("Define the {subject} dataset manifest for {datasets}.")
@@ -1554,9 +1768,179 @@ pub(crate) fn suggest_file_purpose(path: &str, summary: &str) -> String {
     } else if summary.contains("stylesheet") {
         format!("Style the {subject} stylesheet.")
     } else if summary.contains("config") {
-        format!("Configure {subject}.")
+        format!("Configure the {subject}.")
+    } else if is_gradle_build_script(path) {
+        if let Some(declarations) = summary_primary_declarations(summary) {
+            format!("Define Gradle build tasks around {declarations}.")
+        } else {
+            "Configure the Gradle build.".to_string()
+        }
+    } else if let Some(declarations) = summary_primary_declarations(summary) {
+        format!("Implement the {subject} source around {declarations}.")
+    } else if summary.contains("source") {
+        format!("Implement the {subject} source.")
     } else {
-        format!("Implement {subject}.")
+        format!("Implement the {subject}.")
+    }
+}
+
+/// Return whether a path is a Gradle build script rather than ordinary Kotlin/Groovy source.
+fn is_gradle_build_script(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized.ends_with("build.gradle") || normalized.ends_with("build.gradle.kts")
+}
+
+/// Return a path-aware subject phrase for a generated purpose suggestion.
+fn path_context_subject(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let mut segments = normalized
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect::<Vec<_>>();
+    let Some(file_name) = segments.pop() else {
+        return "path".to_string();
+    };
+    let stem = file_name
+        .rsplit_once('.')
+        .map_or(file_name, |(stem, _)| stem);
+    let stem_words = path_segment_words(stem);
+    let parent_words = segments
+        .iter()
+        .rev()
+        .find(|segment| !is_generic_context_segment(segment))
+        .map(|segment| path_segment_words(segment));
+    match parent_words {
+        Some(parent) if !parent.is_empty() && parent != stem_words => {
+            format!("{parent} {stem_words}")
+        }
+        _ => stem_words,
+    }
+}
+
+/// Convert one path segment into readable lowercase words.
+fn path_segment_words(segment: &str) -> String {
+    let mut words = String::new();
+    let mut previous_lowercase = false;
+    for character in segment.chars() {
+        if character == '-' || character == '_' || character == '.' {
+            push_word_space(&mut words);
+            previous_lowercase = false;
+            continue;
+        }
+        if character.is_uppercase() && previous_lowercase {
+            push_word_space(&mut words);
+        }
+        words.extend(character.to_lowercase());
+        previous_lowercase = character.is_lowercase() || character.is_ascii_digit();
+    }
+    let words = words.trim();
+    if words.is_empty() {
+        "path".to_string()
+    } else {
+        words.to_string()
+    }
+}
+
+/// Append one word separator when the phrase already has content.
+fn push_word_space(words: &mut String) {
+    if !words.ends_with(' ') && !words.is_empty() {
+        words.push(' ');
+    }
+}
+
+/// Return whether a path segment is too generic to add useful purpose context.
+fn is_generic_context_segment(segment: &str) -> bool {
+    matches!(
+        segment.to_ascii_lowercase().as_str(),
+        "src"
+            | "source"
+            | "sources"
+            | "app"
+            | "apps"
+            | "lib"
+            | "libs"
+            | "crate"
+            | "crates"
+            | "package"
+            | "packages"
+            | "test"
+            | "tests"
+            | "spec"
+            | "specs"
+            | "fixture"
+            | "fixtures"
+            | "example"
+            | "examples"
+            | "script"
+            | "scripts"
+    )
+}
+
+/// Extract primary declaration names from a deterministic content summary.
+fn summary_primary_declarations(summary: &str) -> Option<String> {
+    let after_marker = summary
+        .split_once(" source defining ")
+        .map(|(_, value)| value)
+        .or_else(|| summary.split_once(" declaring ").map(|(_, value)| value))?;
+    let declaration_clause = trim_summary_clause(after_marker);
+    let names = strip_declaration_kind_prefix(declaration_clause)
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .take(3)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        None
+    } else {
+        Some(join_human_names(&names))
+    }
+}
+
+/// Trim trailing summary details from a declaration clause.
+fn trim_summary_clause(value: &str) -> &str {
+    value
+        .split(" with imports ")
+        .next()
+        .unwrap_or(value)
+        .split(" and depending on ")
+        .next()
+        .unwrap_or(value)
+        .trim_end_matches('.')
+        .trim()
+}
+
+/// Remove the deterministic symbol-kind phrase before the primary names.
+fn strip_declaration_kind_prefix(value: &str) -> &str {
+    const PREFIXES: &[&str] = &[
+        "types and functions ",
+        "type and functions ",
+        "types and function ",
+        "type and function ",
+        "manifest entries ",
+        "functions ",
+        "function ",
+        "types ",
+        "type ",
+        "bindings ",
+        "binding ",
+        "values ",
+        "value ",
+        "symbols ",
+    ];
+    PREFIXES
+        .iter()
+        .find_map(|prefix| value.strip_prefix(prefix))
+        .unwrap_or(value)
+}
+
+/// Join declaration names as a compact human phrase.
+fn join_human_names(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [first, second] => format!("{first} and {second}"),
+        [first, second, third, ..] => format!("{first}, {second}, and {third}"),
     }
 }
 
@@ -2151,7 +2535,10 @@ pub(crate) fn refresh_structural_summaries_for_nodes(
         };
         store.set_node_summary(&indexed.node.path, &summary)?;
         report.summarized += 1;
-        if indexed.purpose.status == PurposeStatus::Missing {
+        if matches!(
+            indexed.purpose.status,
+            PurposeStatus::Missing | PurposeStatus::Suggested
+        ) {
             store.set_suggested_purpose(
                 &indexed.node.path,
                 &suggest_file_purpose(&indexed.node.path, &summary),

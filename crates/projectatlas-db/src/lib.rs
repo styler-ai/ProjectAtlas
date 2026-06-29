@@ -23,6 +23,8 @@ use thiserror::Error;
 
 /// Current `SQLite` schema version supported by this crate.
 const SCHEMA_VERSION: i64 = 8;
+/// Maximum persisted text for denormalized symbol-name search summaries.
+const MAX_SYMBOL_SEARCH_SUMMARY_CHARS: usize = 16_000;
 
 /// Database-layer error type.
 #[derive(Debug, Error)]
@@ -130,10 +132,12 @@ pub struct HealthQuery {
     pub path_prefix: Option<String>,
     /// Return counts without finding rows.
     pub summary_only: bool,
+    /// Restrict findings to source files and folders that contain source files.
+    pub source_only: bool,
 }
 
 /// Bounded health findings page returned by the database layer.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct HealthFindingsPage {
     /// Findings after filters are applied.
     pub total: usize,
@@ -828,6 +832,13 @@ impl AtlasStore {
                 usize_to_i64(metadata.relation_count),
             ],
         )?;
+        let node_id = transaction
+            .query_row(
+                "SELECT id FROM nodes WHERE path = ?1 AND exists_now = 1",
+                [&graph.path],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
         for symbol in &graph.symbols {
             transaction.execute(
                 "
@@ -888,6 +899,13 @@ impl AtlasStore {
                 ],
             )?;
         }
+        if let Some(node_id) = node_id {
+            replace_symbol_search_summary(
+                &transaction,
+                node_id,
+                symbol_search_summary(graph).as_deref(),
+            )?;
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -912,8 +930,10 @@ impl AtlasStore {
             "
             DELETE FROM summaries
             WHERE node_id = ?1
-              AND summary_level = 'node'
-              AND subject = ''
+              AND (
+                    (summary_level = 'node' AND subject = '')
+                    OR (summary_level = 'search' AND subject = 'symbols')
+                  )
             ",
             [node_id],
         )?;
@@ -926,12 +946,22 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn clear_symbol_graph_for_path(&self, path: &str) -> DbResult<()> {
+        let node_id = self.node_id_for_path(path)?;
         self.connection
             .execute("DELETE FROM symbols WHERE path = ?1", [path])?;
         self.connection
             .execute("DELETE FROM symbol_relations WHERE path = ?1", [path])?;
         self.connection
             .execute("DELETE FROM source_parse_metadata WHERE path = ?1", [path])?;
+        self.connection.execute(
+            "
+            DELETE FROM summaries
+            WHERE node_id = ?1
+              AND summary_level = 'search'
+              AND subject = 'symbols'
+            ",
+            [node_id],
+        )?;
         Ok(())
     }
 
@@ -1933,6 +1963,9 @@ impl AtlasStore {
                 LEFT JOIN summaries s ON s.node_id = n.id
                     AND s.summary_level = 'node'
                     AND s.subject = ''
+                LEFT JOIN summaries symbol_summaries ON symbol_summaries.node_id = n.id
+                    AND symbol_summaries.summary_level = 'search'
+                    AND symbol_summaries.subject = 'symbols'
                 WHERE n.exists_now = 1
                   AND n.kind = ?
             "
@@ -1940,6 +1973,7 @@ impl AtlasStore {
         let mut values = Vec::new();
         for term in &terms {
             let pattern = sqlite_like_pattern(term);
+            values.push(Value::from(pattern.clone()));
             values.push(Value::from(pattern.clone()));
             values.push(Value::from(pattern.clone()));
             values.push(Value::from(pattern));
@@ -2070,7 +2104,8 @@ impl AtlasStore {
         let mut findings = Vec::new();
 
         for spec in PURPOSE_HEALTH_SPECS {
-            unfiltered_total += self.count_purpose_status_findings(spec, None, resolved_ids)?;
+            unfiltered_total +=
+                self.count_purpose_status_findings(spec, None, resolved_ids, false)?;
             if !purpose_health_spec_matches_query(spec, query) {
                 continue;
             }
@@ -2079,6 +2114,7 @@ impl AtlasStore {
                 spec,
                 query.path_prefix.as_deref(),
                 resolved_ids,
+                query.source_only,
             )?;
             if !query.summary_only
                 && findings.len() < query.limit
@@ -2090,6 +2126,7 @@ impl AtlasStore {
                     spec,
                     query.path_prefix.as_deref(),
                     resolved_ids,
+                    query.source_only,
                     local_start,
                     local_limit,
                 )?);
@@ -2099,7 +2136,7 @@ impl AtlasStore {
 
         for category in ["duplicate-purpose", "repeated-temporary-folder"] {
             let unfiltered_count =
-                self.count_structural_health_findings(category, None, resolved_ids)?;
+                self.count_structural_health_findings(category, None, resolved_ids, false)?;
             unfiltered_total += unfiltered_count;
             if !health_category_matches_query(category, Severity::Warning, query) {
                 continue;
@@ -2108,6 +2145,7 @@ impl AtlasStore {
                 category,
                 query.path_prefix.as_deref(),
                 resolved_ids,
+                query.source_only,
             )?;
             if !query.summary_only
                 && findings.len() < query.limit
@@ -2119,6 +2157,7 @@ impl AtlasStore {
                     category,
                     query.path_prefix.as_deref(),
                     resolved_ids,
+                    query.source_only,
                     local_start,
                     local_limit,
                 )?);
@@ -2220,8 +2259,10 @@ impl AtlasStore {
         spec: PurposeHealthSpec,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
+        source_only: bool,
     ) -> DbResult<usize> {
-        let (where_clause, values) = purpose_status_where_clause(spec, path_prefix, resolved_ids);
+        let (where_clause, values) =
+            purpose_status_where_clause(spec, path_prefix, resolved_ids, source_only);
         let sql = format!(
             "
             SELECT COUNT(*)
@@ -2242,6 +2283,7 @@ impl AtlasStore {
         spec: PurposeHealthSpec,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
+        source_only: bool,
         start_index: usize,
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
@@ -2249,7 +2291,7 @@ impl AtlasStore {
             return Ok(Vec::new());
         }
         let (where_clause, mut values) =
-            purpose_status_where_clause(spec, path_prefix, resolved_ids);
+            purpose_status_where_clause(spec, path_prefix, resolved_ids, source_only);
         let limit_placeholder = values.len() + 1;
         let offset_placeholder = values.len() + 2;
         values.push(Value::from(usize_to_i64(limit)));
@@ -2288,11 +2330,14 @@ impl AtlasStore {
         category: &str,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
+        source_only: bool,
     ) -> DbResult<usize> {
         match category {
-            "duplicate-purpose" => self.count_duplicate_purpose_findings(path_prefix, resolved_ids),
+            "duplicate-purpose" => {
+                self.count_duplicate_purpose_findings(path_prefix, resolved_ids, source_only)
+            }
             "repeated-temporary-folder" => {
-                self.count_repeated_temp_folder_findings(path_prefix, resolved_ids)
+                self.count_repeated_temp_folder_findings(path_prefix, resolved_ids, source_only)
             }
             _ => Ok(0),
         }
@@ -2304,6 +2349,7 @@ impl AtlasStore {
         category: &str,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
+        source_only: bool,
         start_index: usize,
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
@@ -2311,12 +2357,14 @@ impl AtlasStore {
             "duplicate-purpose" => self.load_duplicate_purpose_findings_page(
                 path_prefix,
                 resolved_ids,
+                source_only,
                 start_index,
                 limit,
             ),
             "repeated-temporary-folder" => self.load_repeated_temp_folder_findings_page(
                 path_prefix,
                 resolved_ids,
+                source_only,
                 start_index,
                 limit,
             ),
@@ -2329,25 +2377,36 @@ impl AtlasStore {
         &self,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
+        source_only: bool,
     ) -> DbResult<usize> {
-        let (where_clause, values) =
-            structural_finding_where_clause("duplicate-purpose", path_prefix, resolved_ids, 1);
+        let (where_clause, values) = structural_finding_where_clause(
+            "duplicate-purpose",
+            path_prefix,
+            resolved_ids,
+            source_only,
+            1,
+        );
+        let source_relevant = source_relevant_node_expression("n");
+        let duplicate_scope =
+            "CASE WHEN n.kind = 'folder' THEN COALESCE(n.parent_path, '') ELSE '' END";
         let sql = format!(
             "
             WITH duplicate_rows AS (
                 SELECT n.path,
                        n.kind,
+                       n.language,
                        p.purpose,
+                       {source_relevant} AS source_relevant,
                        FIRST_VALUE(n.path) OVER (
-                           PARTITION BY n.kind, lower(p.purpose)
+                           PARTITION BY n.kind, lower(p.purpose), {duplicate_scope}
                            ORDER BY n.path
                        ) AS related_path,
                        ROW_NUMBER() OVER (
-                           PARTITION BY n.kind, lower(p.purpose)
+                           PARTITION BY n.kind, lower(p.purpose), {duplicate_scope}
                            ORDER BY n.path
                        ) AS duplicate_rank,
                        COUNT(*) OVER (
-                           PARTITION BY n.kind, lower(p.purpose)
+                           PARTITION BY n.kind, lower(p.purpose), {duplicate_scope}
                        ) AS duplicate_count
                 FROM nodes n
                 JOIN purposes p ON p.node_id = n.id
@@ -2356,7 +2415,7 @@ impl AtlasStore {
                   AND p.purpose IS NOT NULL
             ),
             findings AS (
-                SELECT path, kind, purpose, related_path
+                SELECT path, kind, language, purpose, related_path, source_relevant
                 FROM duplicate_rows
                 WHERE duplicate_count > 1
                   AND duplicate_rank > 1
@@ -2377,14 +2436,23 @@ impl AtlasStore {
         &self,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
+        source_only: bool,
         start_index: usize,
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let (where_clause, mut values) =
-            structural_finding_where_clause("duplicate-purpose", path_prefix, resolved_ids, 1);
+        let (where_clause, mut values) = structural_finding_where_clause(
+            "duplicate-purpose",
+            path_prefix,
+            resolved_ids,
+            source_only,
+            1,
+        );
+        let source_relevant = source_relevant_node_expression("n");
+        let duplicate_scope =
+            "CASE WHEN n.kind = 'folder' THEN COALESCE(n.parent_path, '') ELSE '' END";
         let limit_placeholder = values.len() + 1;
         let offset_placeholder = values.len() + 2;
         values.push(Value::from(usize_to_i64(limit)));
@@ -2394,17 +2462,19 @@ impl AtlasStore {
             WITH duplicate_rows AS (
                 SELECT n.path,
                        n.kind,
+                       n.language,
                        p.purpose,
+                       {source_relevant} AS source_relevant,
                        FIRST_VALUE(n.path) OVER (
-                           PARTITION BY n.kind, lower(p.purpose)
+                           PARTITION BY n.kind, lower(p.purpose), {duplicate_scope}
                            ORDER BY n.path
                        ) AS related_path,
                        ROW_NUMBER() OVER (
-                           PARTITION BY n.kind, lower(p.purpose)
+                           PARTITION BY n.kind, lower(p.purpose), {duplicate_scope}
                            ORDER BY n.path
                        ) AS duplicate_rank,
                        COUNT(*) OVER (
-                           PARTITION BY n.kind, lower(p.purpose)
+                           PARTITION BY n.kind, lower(p.purpose), {duplicate_scope}
                        ) AS duplicate_count
                 FROM nodes n
                 JOIN purposes p ON p.node_id = n.id
@@ -2413,7 +2483,7 @@ impl AtlasStore {
                   AND p.purpose IS NOT NULL
             ),
             findings AS (
-                SELECT path, kind, purpose, related_path
+                SELECT path, kind, language, purpose, related_path, source_relevant
                 FROM duplicate_rows
                 WHERE duplicate_count > 1
                   AND duplicate_rank > 1
@@ -2460,11 +2530,16 @@ impl AtlasStore {
         &self,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
+        source_only: bool,
     ) -> DbResult<usize> {
         let mut total = 0_usize;
         for bucket in TEMP_FOLDER_BUCKETS {
-            total +=
-                self.count_repeated_temp_folder_bucket_findings(bucket, path_prefix, resolved_ids)?;
+            total += self.count_repeated_temp_folder_bucket_findings(
+                bucket,
+                path_prefix,
+                resolved_ids,
+                source_only,
+            )?;
         }
         Ok(total)
     }
@@ -2475,6 +2550,7 @@ impl AtlasStore {
         bucket: &str,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
+        source_only: bool,
     ) -> DbResult<usize> {
         let exact = bucket.to_string();
         let suffix = format!("%/{bucket}");
@@ -2482,24 +2558,29 @@ impl AtlasStore {
             "repeated-temporary-folder",
             path_prefix,
             resolved_ids,
+            source_only,
             3,
         );
         let mut values = vec![Value::from(exact), Value::from(suffix)];
         values.append(&mut filter_values);
+        let source_relevant = source_relevant_node_expression("n");
         let sql = format!(
             "
             WITH bucket_rows AS (
-                SELECT path,
-                       FIRST_VALUE(path) OVER (ORDER BY path) AS related_path,
+                SELECT n.path,
+                       n.kind,
+                       n.language,
+                       {source_relevant} AS source_relevant,
+                       FIRST_VALUE(n.path) OVER (ORDER BY n.path) AS related_path,
                        ROW_NUMBER() OVER (ORDER BY path) AS duplicate_rank,
                        COUNT(*) OVER () AS duplicate_count
-                FROM nodes
-                WHERE exists_now = 1
-                  AND kind = 'folder'
-                  AND (lower(path) = ?1 OR lower(path) LIKE ?2)
+                FROM nodes n
+                WHERE n.exists_now = 1
+                  AND n.kind = 'folder'
+                  AND (lower(n.path) = ?1 OR lower(n.path) LIKE ?2)
             ),
             findings AS (
-                SELECT path, related_path
+                SELECT path, kind, language, related_path, source_relevant
                 FROM bucket_rows
                 WHERE duplicate_count > 1
                   AND duplicate_rank > 1
@@ -2520,6 +2601,7 @@ impl AtlasStore {
         &self,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
+        source_only: bool,
         start_index: usize,
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
@@ -2529,8 +2611,12 @@ impl AtlasStore {
         let mut total = 0_usize;
         let mut findings = Vec::new();
         for bucket in TEMP_FOLDER_BUCKETS {
-            let matching_count =
-                self.count_repeated_temp_folder_bucket_findings(bucket, path_prefix, resolved_ids)?;
+            let matching_count = self.count_repeated_temp_folder_bucket_findings(
+                bucket,
+                path_prefix,
+                resolved_ids,
+                source_only,
+            )?;
             if findings.len() < limit && total + matching_count > start_index {
                 let local_start = start_index.saturating_sub(total);
                 let local_limit = limit - findings.len();
@@ -2538,6 +2624,7 @@ impl AtlasStore {
                     bucket,
                     path_prefix,
                     resolved_ids,
+                    source_only,
                     local_start,
                     local_limit,
                 )?);
@@ -2556,6 +2643,7 @@ impl AtlasStore {
         bucket: &str,
         path_prefix: Option<&str>,
         resolved_ids: &[String],
+        source_only: bool,
         start_index: usize,
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
@@ -2568,10 +2656,12 @@ impl AtlasStore {
             "repeated-temporary-folder",
             path_prefix,
             resolved_ids,
+            source_only,
             3,
         );
         let mut values = vec![Value::from(exact), Value::from(suffix)];
         values.append(&mut filter_values);
+        let source_relevant = source_relevant_node_expression("n");
         let limit_placeholder = values.len() + 1;
         let offset_placeholder = values.len() + 2;
         values.push(Value::from(usize_to_i64(limit)));
@@ -2579,17 +2669,20 @@ impl AtlasStore {
         let sql = format!(
             "
             WITH bucket_rows AS (
-                SELECT path,
-                       FIRST_VALUE(path) OVER (ORDER BY path) AS related_path,
-                       ROW_NUMBER() OVER (ORDER BY path) AS duplicate_rank,
+                SELECT n.path,
+                       n.kind,
+                       n.language,
+                       {source_relevant} AS source_relevant,
+                       FIRST_VALUE(n.path) OVER (ORDER BY n.path) AS related_path,
+                       ROW_NUMBER() OVER (ORDER BY n.path) AS duplicate_rank,
                        COUNT(*) OVER () AS duplicate_count
-                FROM nodes
-                WHERE exists_now = 1
-                  AND kind = 'folder'
-                  AND (lower(path) = ?1 OR lower(path) LIKE ?2)
+                FROM nodes n
+                WHERE n.exists_now = 1
+                  AND n.kind = 'folder'
+                  AND (lower(n.path) = ?1 OR lower(n.path) LIKE ?2)
             ),
             findings AS (
-                SELECT path, related_path
+                SELECT path, kind, language, related_path, source_relevant
                 FROM bucket_rows
                 WHERE duplicate_count > 1
                   AND duplicate_rank > 1
@@ -2632,54 +2725,59 @@ impl AtlasStore {
     where
         F: FnMut(HealthFinding) -> DbResult<bool>,
     {
-        let mut statement = self.connection.prepare(
+        let duplicate_scope =
+            "CASE WHEN n.kind = 'folder' THEN COALESCE(n.parent_path, '') ELSE '' END";
+        let sql = format!(
             "
-            SELECT n.path, n.kind, p.purpose
-            FROM nodes n
-            JOIN purposes p ON p.node_id = n.id
-            WHERE n.exists_now = 1
-              AND p.status = 'approved'
-              AND p.purpose IS NOT NULL
-              AND (n.kind, lower(p.purpose)) IN (
-                  SELECT n2.kind, lower(p2.purpose)
-                  FROM nodes n2
-                  JOIN purposes p2 ON p2.node_id = n2.id
-                  WHERE n2.exists_now = 1
-                    AND p2.status = 'approved'
-                    AND p2.purpose IS NOT NULL
-                  GROUP BY n2.kind, lower(p2.purpose)
-                  HAVING COUNT(*) > 1
-              )
-            ORDER BY n.kind, lower(p.purpose), n.path
-            ",
-        )?;
+            WITH duplicate_rows AS (
+                SELECT n.path,
+                       n.kind,
+                       p.purpose,
+                       FIRST_VALUE(n.path) OVER (
+                           PARTITION BY n.kind, lower(p.purpose), {duplicate_scope}
+                           ORDER BY n.path
+                       ) AS related_path,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY n.kind, lower(p.purpose), {duplicate_scope}
+                           ORDER BY n.path
+                       ) AS duplicate_rank,
+                       COUNT(*) OVER (
+                           PARTITION BY n.kind, lower(p.purpose), {duplicate_scope}
+                       ) AS duplicate_count
+                FROM nodes n
+                JOIN purposes p ON p.node_id = n.id
+                WHERE n.exists_now = 1
+                  AND p.status = 'approved'
+                  AND p.purpose IS NOT NULL
+            )
+            SELECT path, kind, purpose, related_path
+            FROM duplicate_rows
+            WHERE duplicate_count > 1
+              AND duplicate_rank > 1
+            ORDER BY kind, lower(purpose), path
+            "
+        );
+        let mut statement = self.connection.prepare(&sql)?;
         let rows = statement.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
             ))
         })?;
-        let mut current_key: Option<(String, String)> = None;
-        let mut first_path = String::new();
         for row in rows {
-            let (path, kind_value, purpose) = row?;
+            let (path, kind_value, _purpose, related_path) = row?;
             let kind = NodeKind::from_db(&kind_value).ok_or_else(|| DbError::InvalidEnum {
                 field: "kind",
                 value: kind_value.clone(),
             })?;
-            let key = (kind_value, purpose.to_lowercase());
-            if current_key.as_ref() != Some(&key) {
-                current_key = Some(key);
-                first_path = path;
-                continue;
-            }
             let finding = HealthFinding {
-                id: finding_id("duplicate-purpose", &path, Some(&first_path)),
+                id: finding_id("duplicate-purpose", &path, Some(&related_path)),
                 severity: Severity::Warning,
                 category: "duplicate-purpose".to_string(),
                 path,
-                related_path: Some(first_path.clone()),
+                related_path: Some(related_path),
                 message: format!("Multiple {kind} nodes share the same purpose."),
                 recommendation:
                     "Review whether these paths duplicate responsibility or need clearer purposes."
@@ -3374,7 +3472,8 @@ fn ranked_score_expression(term_count: usize) -> String {
         .map(|_| {
             "(CASE WHEN lower(n.path) LIKE ? ESCAPE '\\' THEN 20 ELSE 0 END \
              + CASE WHEN lower(COALESCE(p.purpose, '')) LIKE ? ESCAPE '\\' THEN 30 ELSE 0 END \
-             + CASE WHEN lower(COALESCE(s.summary, '')) LIKE ? ESCAPE '\\' THEN 10 ELSE 0 END)"
+             + CASE WHEN lower(COALESCE(s.summary, '')) LIKE ? ESCAPE '\\' THEN 10 ELSE 0 END \
+             + CASE WHEN lower(COALESCE(symbol_summaries.summary, '')) LIKE ? ESCAPE '\\' THEN 25 ELSE 0 END)"
                 .to_string()
         })
         .collect::<Vec<_>>()
@@ -3397,6 +3496,67 @@ fn sqlite_like_escape(value: &str) -> String {
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
+}
+
+/// Replace the denormalized symbol-name search summary for one file node.
+fn replace_symbol_search_summary(
+    transaction: &Transaction<'_>,
+    node_id: i64,
+    summary: Option<&str>,
+) -> DbResult<()> {
+    if let Some(summary) = summary {
+        transaction.execute(
+            "
+            INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
+            VALUES(?1, 'search', 'symbols', ?2, CURRENT_TIMESTAMP)
+            ON CONFLICT(node_id, summary_level, subject) DO UPDATE SET
+                summary = excluded.summary,
+                updated_at = CURRENT_TIMESTAMP
+            ",
+            params![node_id, summary],
+        )?;
+    } else {
+        transaction.execute(
+            "
+            DELETE FROM summaries
+            WHERE node_id = ?1
+              AND summary_level = 'search'
+              AND subject = 'symbols'
+            ",
+            [node_id],
+        )?;
+    }
+    Ok(())
+}
+
+/// Build a bounded search-only summary from symbol names.
+fn symbol_search_summary(graph: &SymbolGraph) -> Option<String> {
+    let mut names = graph
+        .symbols
+        .iter()
+        .filter(|symbol| !matches!(symbol.kind, SymbolKind::Import | SymbolKind::Unknown))
+        .map(|symbol| symbol.name.trim())
+        .filter(|name| !name.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    if names.is_empty() {
+        return None;
+    }
+    let summary = format!("symbols {}", names.join(" "));
+    Some(truncate_summary_chars(
+        &summary,
+        MAX_SYMBOL_SEARCH_SUMMARY_CHARS,
+    ))
+}
+
+/// Truncate a summary at a valid UTF-8 boundary.
+fn truncate_summary_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    value.chars().take(max_chars).collect()
 }
 
 /// Parse a stored purpose source value into the domain enum.
@@ -3543,9 +3703,14 @@ fn purpose_status_where_clause(
     spec: PurposeHealthSpec,
     path_prefix: Option<&str>,
     resolved_ids: &[String],
+    source_only: bool,
 ) -> (String, Vec<Value>) {
     let mut clauses = vec!["n.exists_now = 1".to_string(), "p.status = ?1".to_string()];
     let mut values = vec![Value::from(spec.status.to_string())];
+
+    if source_only {
+        clauses.push(source_relevant_node_expression("n"));
+    }
 
     let normalized_prefix = path_prefix
         .map(normalize_repo_path_prefix)
@@ -3577,11 +3742,16 @@ fn structural_finding_where_clause(
     category: &str,
     path_prefix: Option<&str>,
     resolved_ids: &[String],
+    source_only: bool,
     first_placeholder: usize,
 ) -> (String, Vec<Value>) {
     let mut placeholder = first_placeholder;
     let mut clauses = Vec::new();
     let mut values = Vec::new();
+
+    if source_only {
+        clauses.push("source_relevant = 1".to_string());
+    }
 
     let normalized_prefix = path_prefix
         .map(normalize_repo_path_prefix)
@@ -3616,6 +3786,24 @@ fn structural_finding_where_clause(
     } else {
         (format!("WHERE {}", clauses.join(" AND ")), values)
     }
+}
+
+/// Return a SQL expression that treats source files and folders with source descendants as source-relevant.
+fn source_relevant_node_expression(alias: &str) -> String {
+    format!(
+        "(({alias}.kind = 'file' AND COALESCE({alias}.language, '') <> '') \
+          OR ({alias}.kind = 'folder' AND EXISTS (\
+              SELECT 1 FROM nodes source_child \
+              WHERE source_child.exists_now = 1 \
+                AND source_child.kind = 'file' \
+                AND COALESCE(source_child.language, '') <> '' \
+                AND (\
+                    {alias}.path = '.' \
+                    OR source_child.parent_path = {alias}.path \
+                    OR substr(source_child.parent_path, 1, length({alias}.path) + 1) = {alias}.path || '/'\
+                )\
+          )))"
+    )
 }
 
 /// Extract resolved primary paths for lifecycle categories without related paths.
@@ -4092,11 +4280,15 @@ mod tests {
     #[test]
     fn ranked_nodes_are_loaded_bounded_from_sql() -> Result<(), Box<dyn Error>> {
         let mut store = AtlasStore::in_memory()?;
+        let mut gradle_task_node = test_file_node("build.gradle.kts", "hash-gradle");
+        gradle_task_node.extension = Some(".kts".to_string());
+        gradle_task_node.language = Some("kotlin".to_string());
         store.replace_scan(&[
             test_folder_node("src/auth"),
             test_folder_node("src/ui"),
             test_file_node("src/auth/login.rs", "hash-login"),
             test_file_node("src/ui/button.rs", "hash-button"),
+            gradle_task_node,
         ])?;
         store.set_purpose(
             "src/auth",
@@ -4120,6 +4312,41 @@ mod tests {
             &files[0].node.path,
             &"src/auth/login.rs".to_string(),
             "ranked file path",
+        )?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "build.gradle.kts".to_string(),
+            language: Some("kotlin".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![CodeSymbol {
+                path: "build.gradle.kts".to_string(),
+                language: Some("kotlin".to_string()),
+                name: "bootRunE2E".to_string(),
+                kind: SymbolKind::Function,
+                signature: "tasks.register<BootRun>(\"bootRunE2E\")".to_string(),
+                exported: false,
+                documentation: None,
+                line_start: 1,
+                line_end: 1,
+                parent: None,
+                parser: ParserKind::TreeSitter,
+                detail: Some("gradle-kotlin-dsl-task".to_string()),
+            }],
+            relations: Vec::new(),
+        })?;
+        let gradle_files = store.load_ranked_nodes("bootRunE2E", NodeKind::File, None, 10, 0)?;
+        require_eq(&gradle_files.len(), &1, "symbol-ranked file count")?;
+        require_eq(
+            &gradle_files[0].node.path,
+            &"build.gradle.kts".to_string(),
+            "symbol-ranked file path",
+        )?;
+        store.clear_symbol_graph_for_path("build.gradle.kts")?;
+        let cleared_gradle_files =
+            store.load_ranked_nodes("bootRunE2E", NodeKind::File, None, 10, 0)?;
+        require_eq(
+            &cleared_gradle_files.len(),
+            &0,
+            "cleared symbol-ranked file count",
         )?;
         Ok(())
     }
@@ -4238,6 +4465,7 @@ mod tests {
             severity: Some(Severity::Warning),
             path_prefix: Some("src".to_string()),
             summary_only: false,
+            source_only: false,
         };
 
         let page = store.unresolved_health_findings_page(&[], &query)?;
@@ -4293,6 +4521,7 @@ mod tests {
                 severity: Some(Severity::Warning),
                 path_prefix: Some("src".to_string()),
                 summary_only: false,
+                source_only: false,
             },
         )?;
 
@@ -4338,6 +4567,7 @@ mod tests {
                 severity: Some(Severity::Warning),
                 path_prefix: Some("src".to_string()),
                 summary_only: false,
+                source_only: false,
             },
         )?;
         require_eq(&duplicate_page.total, &1, "duplicate total")?;
@@ -4357,6 +4587,7 @@ mod tests {
                 severity: Some(Severity::Warning),
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
+                source_only: false,
             },
         )?;
         require_eq(&temp_page.total, &1, "temp total")?;
@@ -4365,6 +4596,160 @@ mod tests {
             &temp_page.findings[0].category,
             &"repeated-temporary-folder".to_string(),
             "temp category",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn unresolved_health_findings_page_source_only_filters_asset_noise()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let asset_file = Node {
+            path: "assets/logo.png".to_string(),
+            kind: NodeKind::File,
+            parent_path: Some("assets".to_string()),
+            extension: Some(".png".to_string()),
+            language: None,
+            size_bytes: Some(42),
+            mtime_ns: Some(10),
+            content_hash: Some("hash-logo".to_string()),
+        };
+        store.replace_scan(&[
+            test_folder_node("."),
+            test_folder_node("src"),
+            test_file_node("src/main.rs", "hash-main"),
+            test_folder_node("assets"),
+            asset_file,
+        ])?;
+
+        let page = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                start_index: 0,
+                limit: 10,
+                category: Some("missing-purpose".to_string()),
+                severity: Some(Severity::Warning),
+                path_prefix: Some(".".to_string()),
+                summary_only: false,
+                source_only: true,
+            },
+        )?;
+
+        require_eq(&page.unfiltered_total, &5, "all unresolved rows")?;
+        require_eq(&page.total, &3, "source-only missing total")?;
+        require_eq(
+            &page
+                .findings
+                .iter()
+                .map(|finding| finding.path.as_str())
+                .collect::<Vec<_>>(),
+            &vec![".", "src", "src/main.rs"],
+            "source-only paths",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_purpose_health_is_contextual_for_folders() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_folder_node("."),
+            test_folder_node("customers"),
+            test_folder_node("customers/service"),
+            test_folder_node("settings"),
+            test_folder_node("settings/service"),
+        ])?;
+        store.set_purpose("customers/service", "Service layer", PurposeSource::Agent)?;
+        store.set_purpose("settings/service", "Service layer", PurposeSource::Agent)?;
+
+        let page = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                start_index: 0,
+                limit: 10,
+                category: Some("duplicate-purpose".to_string()),
+                severity: Some(Severity::Warning),
+                path_prefix: Some(".".to_string()),
+                summary_only: false,
+                source_only: false,
+            },
+        )?;
+
+        require_eq(&page.total, &0, "folder duplicates scoped by parent")?;
+        Ok(())
+    }
+
+    #[test]
+    fn contextual_folder_duplicate_identity_matches_unpaged_health_and_resolution()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_folder_node("."),
+            test_folder_node("customers"),
+            test_folder_node("customers/service"),
+            test_folder_node("settings"),
+            test_folder_node("settings/service"),
+            test_folder_node("settings/worker"),
+        ])?;
+        store.set_purpose("customers/service", "Service layer", PurposeSource::Agent)?;
+        store.set_purpose("settings/service", "Service layer", PurposeSource::Agent)?;
+        store.set_purpose("settings/worker", "Service layer", PurposeSource::Agent)?;
+
+        let page = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                start_index: 0,
+                limit: 10,
+                category: Some("duplicate-purpose".to_string()),
+                severity: Some(Severity::Warning),
+                path_prefix: Some(".".to_string()),
+                summary_only: false,
+                source_only: false,
+            },
+        )?;
+        require_eq(&page.total, &1, "contextual duplicate total")?;
+        let paged_finding = page
+            .findings
+            .first()
+            .ok_or_else(|| io::Error::other("paged duplicate missing"))?;
+        require_eq(
+            &paged_finding.path,
+            &"settings/worker".to_string(),
+            "paged duplicate path",
+        )?;
+        require_eq(
+            &paged_finding.related_path,
+            &Some("settings/service".to_string()),
+            "paged related path",
+        )?;
+
+        let unpaged_duplicates = store
+            .unresolved_health_findings(&[])?
+            .into_iter()
+            .filter(|finding| finding.category == "duplicate-purpose")
+            .collect::<Vec<_>>();
+        require_eq(
+            &unpaged_duplicates,
+            &page.findings,
+            "unpaged duplicate identity",
+        )?;
+
+        store.resolve_health_finding(&HealthResolution {
+            finding_id: paged_finding.id.clone(),
+            category: paged_finding.category.clone(),
+            path: paged_finding.path.clone(),
+            related_path: paged_finding.related_path.clone(),
+            rationale: "Settings service and worker intentionally share a layer purpose."
+                .to_string(),
+        })?;
+        let has_remaining_duplicate = store
+            .unresolved_health_findings(&store.resolved_health_ids()?)?
+            .into_iter()
+            .any(|finding| finding.category == "duplicate-purpose");
+        require_eq(
+            &has_remaining_duplicate,
+            &false,
+            "resolved contextual duplicate",
         )?;
         Ok(())
     }

@@ -1437,6 +1437,7 @@ fn extract_fallback_graph(path: &str, language: Option<&str>, content: &str) -> 
             );
         }
     }
+    languages::augment_fallback_language_graph(&mut graph, content);
     graph
 }
 
@@ -1668,7 +1669,9 @@ fn is_snippet_boundary(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_SYMBOLS_PER_FILE, extract_symbol_graph, specialized_languages};
+    use super::{
+        MAX_SYMBOLS_PER_FILE, extract_fallback_graph, extract_symbol_graph, specialized_languages,
+    };
     use projectatlas_core::symbols::{ParserKind, RelationKind, SymbolKind};
 
     #[test]
@@ -2423,6 +2426,123 @@ class KotlinRunner { fun run() { helper() } private fun helper() {} }
                 && symbol.name == "run"
                 && symbol.parent.as_deref() == Some("KotlinRunner")
         }));
+
+        for path in ["src/Worker.kt", "scripts/tasks.kts"] {
+            let ordinary_kotlin = extract_symbol_graph(
+                path,
+                Some("kotlin"),
+                r#"
+class Worker {
+    fun queue(tasks: TaskContainer) {
+        tasks.register("notGradleTask")
+    }
+}
+"#,
+            );
+            assert!(
+                !ordinary_kotlin.symbols.iter().any(|symbol| {
+                    symbol.name == "notGradleTask"
+                        || symbol.detail.as_deref() == Some("gradle-kotlin-dsl-task")
+                }),
+                "ordinary Kotlin path {path} should not emit Gradle task symbols: {:?}",
+                ordinary_kotlin.symbols
+            );
+        }
+
+        let gradle_kotlin = extract_symbol_graph(
+            "build.gradle.kts",
+            Some("kotlin"),
+            r#"
+import org.springframework.boot.gradle.tasks.run.BootRun
+
+fun loadDotEnv() = emptyMap<String, String>()
+
+tasks.register<BootRun>("bootRunE2E") {
+    group = "verification"
+}
+
+val verifyAtlas by tasks.registering {
+    group = "verification"
+}
+
+tasks {
+    register<Copy>("copyE2EReports") {
+        group = "verification"
+    }
+}
+
+task("publishKtsE2E") {}
+"#,
+        );
+        assert_eq!(gradle_kotlin.parser, ParserKind::TreeSitter);
+        for task in [
+            "bootRunE2E",
+            "copyE2EReports",
+            "verifyAtlas",
+            "publishKtsE2E",
+        ] {
+            assert!(gradle_kotlin.symbols.iter().any(|symbol| {
+                symbol.kind == SymbolKind::Function
+                    && symbol.name == task
+                    && symbol.detail.as_deref() == Some("gradle-kotlin-dsl-task")
+            }));
+        }
+        let fallback_gradle_kotlin = extract_fallback_graph(
+            "build.gradle.kts",
+            Some("kotlin"),
+            r#"
+tasks.register<BootRun>("bootRunE2E") {
+    group = "verification"
+}
+
+fun broken(
+"#,
+        );
+        assert_eq!(fallback_gradle_kotlin.parser, ParserKind::Fallback);
+        assert!(
+            fallback_gradle_kotlin.symbols.iter().any(|symbol| {
+                symbol.kind == SymbolKind::Function
+                    && symbol.name == "bootRunE2E"
+                    && symbol.detail.as_deref() == Some("gradle-kotlin-dsl-task")
+            }),
+            "fallback Gradle KTS graph should retain task symbols: {:?}",
+            fallback_gradle_kotlin.symbols
+        );
+
+        let gradle_groovy = extract_symbol_graph(
+            "build.gradle",
+            Some("groovy"),
+            r"
+plugins { id 'java' }
+
+tasks.register('bootRunSmoke', BootRun) {
+    group = 'verification'
+}
+
+task cleanE2E(type: Delete) {}
+
+tasks {
+    create('copyGroovyReports') {
+        group = 'verification'
+    }
+}
+
+task('publishE2E') {}
+",
+        );
+        assert_eq!(gradle_groovy.parser, ParserKind::Fallback);
+        for task in [
+            "bootRunSmoke",
+            "cleanE2E",
+            "copyGroovyReports",
+            "publishE2E",
+        ] {
+            assert!(gradle_groovy.symbols.iter().any(|symbol| {
+                symbol.kind == SymbolKind::Function
+                    && symbol.name == task
+                    && symbol.detail.as_deref() == Some("gradle-groovy-dsl-task")
+            }));
+        }
 
         let zig = extract_symbol_graph(
             "src/runner.zig",

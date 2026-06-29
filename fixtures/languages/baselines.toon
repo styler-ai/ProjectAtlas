@@ -1,5 +1,5 @@
 version: 1
-summaries[26]{path,language,parser_kind,status,min_symbols,summary}:
+summaries[28]{path,language,parser_kind,status,min_symbols,summary}:
   rust/lib.rs,rust,tree-sitter-symbol-graph,ok,2,"rust source defining functions helper, run_rust_fixture."
   rust/build.rs,rust-build-script,tree-sitter-symbol-graph,ok,1,rust build script source defining function main.
   python/builder.py,python,tree-sitter-symbol-graph,ok,3,"python source defining type and functions Builder, build, helper."
@@ -9,6 +9,7 @@ summaries[26]{path,language,parser_kind,status,min_symbols,summary}:
   vue/ProductPanel.vue,vue,structural-symbol-graph,ok,3,"vue source defining bindings productTitleId, props, retryCount with imports import { computed, ref } from \"vue\";."
   java/AtlasService.java,java,tree-sitter-symbol-graph,ok,4,"java source defining type and functions AtlasService, helper, run."
   kotlin/Runner.kt,kotlin,tree-sitter-symbol-graph,ok,4,"kotlin source defining type and functions Runner, helper, run."
+  kotlin/build.gradle.kts,kotlin,tree-sitter-symbol-graph,ok,3,"kotlin source defining functions bootRunE2E, copyE2EReports, verifyAtlas."
   csharp/Runner.cs,csharp,tree-sitter-symbol-graph,ok,4,"C# source defining type and functions Helper, Run, Runner."
   go/service.go,go,tree-sitter-symbol-graph,ok,5,"go source defining type and functions Run, Runner, helper with imports import \"fmt\"."
   objective-c/UserManager.m,objective-c,tree-sitter-symbol-graph,ok,2,"Objective-C source defining type and function UserManager, run."
@@ -24,5 +25,6 @@ summaries[26]{path,language,parser_kind,status,min_symbols,summary}:
   yaml/workflow.yml,yaml,structural,ok,0,"yaml workflow CI triggered by pull_request, push with jobs test."
   css/tokens.css,css,structural,ok,0,"css stylesheet with selectors .card, .panel, :root, custom properties --brand, 1 media queries, and 0 supports queries."
   html/index.html,html,structural,ok,0,"html document with title Home, meta description Welcome page, headings Hello, structured data."
+  groovy/build.gradle,groovy,fallback-symbol-graph,fallback,4,"groovy source defining functions bootRunSmoke, cleanE2E, copyGroovyReports, publishE2E."
   rust/empty.rs,rust,tree-sitter-symbol-graph,ok,0,rust source file with no declarations found.
   toon/projectatlas-nonsource-files.toon,toon,structural,ok,0,TOON document with sections nonsource_files.
