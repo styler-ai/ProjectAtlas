@@ -385,6 +385,104 @@ function Invoke-Checked {
     }
 }
 
+function Get-ProjectAtlasMcpLaunchArguments {
+    param(
+        [string]$DbPath,
+        [string]$ProjectConfigPath,
+        [string]$FlatConfigPath,
+        [string]$ExpectedVersion
+    )
+    $runtimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
+    if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
+        return @()
+    }
+    $launchArgs = @("--require-version", $runtimeVersion, "--db", $DbPath)
+    if (Test-Path -LiteralPath $ProjectConfigPath) {
+        $launchArgs += @("--config", $ProjectConfigPath)
+    }
+    elseif (Test-Path -LiteralPath $FlatConfigPath) {
+        $launchArgs += @("--config", $FlatConfigPath)
+    }
+    $launchArgs += "mcp"
+    return $launchArgs
+}
+
+function Update-ProjectAtlasCodexMcpRegistry {
+    param(
+        [string]$VerifiedPath,
+        [string]$ExpectedVersion,
+        [string]$DbPath,
+        [string]$ProjectConfigPath,
+        [string]$FlatConfigPath
+    )
+    if (Test-Truthy $env:PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE) {
+        Write-Output "Codex MCP registry update skipped by PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE."
+        return
+    }
+    $codexCommandPath = $null
+    if (-not [string]::IsNullOrWhiteSpace($env:PROJECTATLAS_CODEX_COMMAND)) {
+        $codexCommandPath = (Resolve-Path $env:PROJECTATLAS_CODEX_COMMAND -ErrorAction SilentlyContinue).Path
+        if (-not $codexCommandPath) {
+            $codexCommand = Get-Command $env:PROJECTATLAS_CODEX_COMMAND -ErrorAction SilentlyContinue
+            if ($codexCommand) {
+                $codexCommandPath = $codexCommand.Source
+            }
+        }
+        if (-not $codexCommandPath) {
+            Write-Warning "Codex MCP registry update skipped: PROJECTATLAS_CODEX_COMMAND does not resolve."
+            return
+        }
+    }
+    else {
+        $codexCommand = Get-Command codex -ErrorAction SilentlyContinue
+        if ($codexCommand) {
+            $codexCommandPath = $codexCommand.Source
+        }
+    }
+    if (-not $codexCommandPath) {
+        Write-Output "Codex MCP registry update skipped: codex command not found."
+        return
+    }
+    $runtimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
+    $launchArgs = Get-ProjectAtlasMcpLaunchArguments $DbPath $ProjectConfigPath $FlatConfigPath $ExpectedVersion
+    if ([string]::IsNullOrWhiteSpace($runtimeVersion) -or $launchArgs.Count -eq 0) {
+        Write-Output "Codex MCP registry update skipped: ProjectAtlas version is unknown."
+        return
+    }
+    try {
+        $existing = & $codexCommandPath mcp get projectatlas 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            Write-Output "Codex MCP registry update skipped: no global projectatlas MCP server is configured."
+            return
+        }
+        $expectedConfigPath = if (Test-Path -LiteralPath $ProjectConfigPath) { $ProjectConfigPath } elseif (Test-Path -LiteralPath $FlatConfigPath) { $FlatConfigPath } else { $null }
+        $alreadyCurrent = $existing.Contains($VerifiedPath) -and $existing.Contains($runtimeVersion) -and $existing.Contains($DbPath)
+        if ($expectedConfigPath) {
+            $alreadyCurrent = $alreadyCurrent -and $existing.Contains($expectedConfigPath)
+        }
+        if ($alreadyCurrent) {
+            Write-Output "Codex MCP registry already points to ProjectAtlas $runtimeVersion for $DbPath."
+            return
+        }
+
+        & $codexCommandPath mcp remove projectatlas | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Codex MCP registry update failed: could not remove stale global projectatlas server."
+            return
+        }
+        $addArgs = @("mcp", "add", "projectatlas", "--", $VerifiedPath) + $launchArgs
+        & $codexCommandPath @addArgs | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Codex MCP registry update failed: could not add verified global projectatlas server."
+            return
+        }
+        Write-Output "Codex MCP registry updated to ProjectAtlas runtime $VerifiedPath with database $DbPath."
+    }
+    catch {
+        Write-Warning "Codex MCP registry update failed: $($_.Exception.Message)"
+    }
+}
+
 function Get-ReleaseRuntimeInstallPath {
     param(
         [string]$Version
@@ -550,6 +648,7 @@ function Write-ProjectAtlasMcpConfig {
 Write-ProjectAtlasMcpConfig $mcpConfigPath $null
 Write-ProjectAtlasMcpConfig $claudeMcpConfigPath "claude-code"
 Write-ProjectAtlasMcpConfig $opencodeConfigPath "opencode"
+Update-ProjectAtlasCodexMcpRegistry $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath
 
 Write-Output "ProjectAtlas runtime installed and verified: $projectAtlas"
 Write-Output "ProjectAtlas update preserved project state under $atlasDir; use reset-index --apply for explicit state cleanup."

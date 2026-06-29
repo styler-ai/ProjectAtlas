@@ -239,6 +239,60 @@ warn_path_shadow() {
   IFS=$old_ifs
 }
 
+update_codex_mcp_registry() {
+  if truthy "${PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE:-}"; then
+    printf '%s\n' "Codex MCP registry update skipped by PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE."
+    return 0
+  fi
+  codex_bin=${PROJECTATLAS_CODEX_COMMAND:-}
+  if [ -z "$codex_bin" ]; then
+    codex_bin=$(command -v codex 2>/dev/null || true)
+  fi
+  if [ -z "$codex_bin" ]; then
+    printf '%s\n' "Codex MCP registry update skipped: codex command not found."
+    return 0
+  fi
+  runtime_version=$(expected_runtime_version)
+  if [ -z "$runtime_version" ]; then
+    runtime_version=$(runtime_version "$projectatlas_bin")
+  fi
+  if [ -z "$runtime_version" ]; then
+    printf '%s\n' "Codex MCP registry update skipped: ProjectAtlas version is unknown."
+    return 0
+  fi
+  existing=$("$codex_bin" mcp get projectatlas 2>&1) || {
+    printf '%s\n' "Codex MCP registry update skipped: no global projectatlas MCP server is configured."
+    return 0
+  }
+  expected_config=
+  if [ -f "$project_config" ]; then
+    expected_config=$project_config
+  elif [ -f "$flat_config" ]; then
+    expected_config=$flat_config
+  fi
+  if printf '%s\n' "$existing" | grep -F "$projectatlas_bin" >/dev/null &&
+    printf '%s\n' "$existing" | grep -F "$runtime_version" >/dev/null &&
+    printf '%s\n' "$existing" | grep -F "$atlas_dir/projectatlas.db" >/dev/null &&
+    { [ -z "$expected_config" ] || printf '%s\n' "$existing" | grep -F "$expected_config" >/dev/null; }; then
+    printf 'Codex MCP registry already points to ProjectAtlas %s for %s.\n' "$runtime_version" "$atlas_dir/projectatlas.db"
+    return 0
+  fi
+  if ! "$codex_bin" mcp remove projectatlas >/dev/null 2>&1; then
+    printf '%s\n' "warning: Codex MCP registry update failed: could not remove stale global projectatlas server." >&2
+    return 0
+  fi
+  set -- mcp add projectatlas -- "$projectatlas_bin" --require-version "$runtime_version" --db "$atlas_dir/projectatlas.db"
+  if [ -n "$expected_config" ]; then
+    set -- "$@" --config "$expected_config"
+  fi
+  set -- "$@" mcp
+  if "$codex_bin" "$@" >/dev/null 2>&1; then
+    printf 'Codex MCP registry updated to ProjectAtlas runtime %s with database %s.\n' "$projectatlas_bin" "$atlas_dir/projectatlas.db"
+  else
+    printf '%s\n' "warning: Codex MCP registry update failed: could not add verified global projectatlas server." >&2
+  fi
+}
+
 install_release_binary() {
   if [ -z "$projectatlas_version" ]; then
     return 1
@@ -364,6 +418,7 @@ write_mcp_config() {
 write_mcp_config "$mcp_config_path"
 write_mcp_config "$claude_mcp_config_path" claude-code
 write_mcp_config "$opencode_config_path" opencode
+update_codex_mcp_registry
 
 printf 'ProjectAtlas runtime installed and verified: %s\n' "$projectatlas_bin"
 printf 'ProjectAtlas update preserved project state under %s; use reset-index --apply for explicit state cleanup.\n' "$atlas_dir"
