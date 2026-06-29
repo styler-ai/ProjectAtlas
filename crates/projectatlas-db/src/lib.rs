@@ -5,7 +5,10 @@ use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SourceParseMetadata, SymbolGraph, SymbolKind,
     SymbolRelation,
 };
-use projectatlas_core::telemetry::{TokenBucketOverview, TokenOverview, UsageEvent};
+use projectatlas_core::telemetry::{
+    TokenBucketOverview, TokenOverview, TokenTrendPeriod, TokenTrendReport, TokenTrendWindow,
+    UsageEvent,
+};
 use projectatlas_core::{
     IndexedNode, Node, NodeKind, Overview, Purpose, PurposeSource, PurposeStatus,
     normalize_native_path_display, normalize_repo_path_prefix,
@@ -13,7 +16,7 @@ use projectatlas_core::{
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::TryFromIntError;
 use std::path::Path;
 use thiserror::Error;
@@ -52,6 +55,24 @@ pub enum DbError {
         value: i64,
         /// Source conversion error.
         source: TryFromIntError,
+    },
+    /// A caller supplied a path that is not in the current index.
+    #[error("path {path:?} is not indexed; run scan, fix the path, or choose an indexed path")]
+    PathNotIndexed {
+        /// Repository-relative path.
+        path: String,
+    },
+    /// A caller attempted to resolve a health finding that is not currently active.
+    #[error(
+        "health finding {finding_id:?} with category {category:?} and path {path:?} is not active; run health-check and use an exact finding id/path/category"
+    )]
+    HealthFindingNotActive {
+        /// Requested finding id.
+        finding_id: String,
+        /// Requested category.
+        category: String,
+        /// Requested primary path.
+        path: String,
     },
 }
 
@@ -339,6 +360,12 @@ impl AtlasStore {
         )?;
         self.ensure_symbol_metadata_columns()?;
         self.ensure_usage_event_metadata_columns()?;
+        self.connection.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_usage_created_at ON usage_events(created_at);
+            CREATE INDEX IF NOT EXISTS idx_usage_session_created_at ON usage_events(session_id, created_at);
+            ",
+        )?;
         let stored = self
             .connection
             .query_row(
@@ -407,6 +434,11 @@ impl AtlasStore {
             &columns,
             "calculation_trace",
             "TEXT NOT NULL DEFAULT 'heuristic=ceil(chars_or_bytes/4)'",
+        )?;
+        self.ensure_usage_event_column(&columns, "created_at", "TEXT")?;
+        self.connection.execute(
+            "UPDATE usage_events SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL OR created_at = ''",
+            [],
         )?;
         Ok(())
     }
@@ -1748,12 +1780,16 @@ impl AtlasStore {
 
     /// Load a node id for a repository path.
     fn node_id_for_path(&self, path: &str) -> DbResult<i64> {
-        let node_id =
-            self.connection
-                .query_row("SELECT id FROM nodes WHERE path = ?1", [path], |row| {
-                    row.get::<_, i64>(0)
-                })?;
-        Ok(node_id)
+        self.connection
+            .query_row(
+                "SELECT id FROM nodes WHERE path = ?1 AND exists_now = 1",
+                [path],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .ok_or_else(|| DbError::PathNotIndexed {
+                path: path.to_string(),
+            })
     }
 
     /// Load existing nodes with purpose state.
@@ -2774,9 +2810,10 @@ impl AtlasStore {
                 accuracy,
                 baseline_kind,
                 confidence,
-                calculation_trace
+                calculation_trace,
+                created_at
             )
-            VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, CURRENT_TIMESTAMP)
             ",
             params![
                 event.session_id,
@@ -2933,12 +2970,127 @@ impl AtlasStore {
         Ok(token_overview_from_buckets(buckets))
     }
 
+    /// Build token trend aggregates grouped by day, week, month, or year.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the window is unsupported or loading events fails.
+    pub fn token_trends(
+        &self,
+        session_id: Option<&str>,
+        window: TokenTrendWindow,
+    ) -> DbResult<TokenTrendReport> {
+        let period_expr = token_trend_period_expression(window);
+        let sql = if session_id.is_some() {
+            format!(
+                "
+            SELECT
+                {period_expr} AS period,
+                token_savings_bucket,
+                provider,
+                model,
+                tokenizer_backend,
+                accuracy,
+                baseline_kind,
+                confidence,
+                COUNT(*),
+                TOTAL(estimated_tokens_without_projectatlas),
+                TOTAL(estimated_tokens_with_projectatlas)
+            FROM usage_events
+            WHERE session_id = ?1
+              AND estimated_tokens_without_projectatlas IS NOT NULL
+              AND estimated_tokens_with_projectatlas IS NOT NULL
+            GROUP BY period, token_savings_bucket, provider, model, tokenizer_backend,
+                     accuracy, baseline_kind, confidence
+            ORDER BY period, token_savings_bucket, accuracy, baseline_kind, confidence
+            "
+            )
+        } else {
+            format!(
+                "
+            SELECT
+                {period_expr} AS period,
+                token_savings_bucket,
+                provider,
+                model,
+                tokenizer_backend,
+                accuracy,
+                baseline_kind,
+                confidence,
+                COUNT(*),
+                TOTAL(estimated_tokens_without_projectatlas),
+                TOTAL(estimated_tokens_with_projectatlas)
+            FROM usage_events
+            WHERE estimated_tokens_without_projectatlas IS NOT NULL
+              AND estimated_tokens_with_projectatlas IS NOT NULL
+            GROUP BY period, token_savings_bucket, provider, model, tokenizer_backend,
+                     accuracy, baseline_kind, confidence
+            ORDER BY period, token_savings_bucket, accuracy, baseline_kind, confidence
+            "
+            )
+        };
+        let mapper = |row: &rusqlite::Row<'_>| {
+            let period = row.get::<_, String>(0)?;
+            let calls = row.get::<_, i64>(8)?.max(0) as u128;
+            let bucket = TokenBucketOverview::from_totals(
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                calls,
+                token_total_from_sql("estimated_tokens_without_projectatlas", row.get(9)?),
+                token_total_from_sql("estimated_tokens_with_projectatlas", row.get(10)?),
+            );
+            Ok((period, bucket))
+        };
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = if let Some(session) = session_id {
+            statement.query_map([session], mapper)?
+        } else {
+            statement.query_map([], mapper)?
+        };
+        let mut buckets_by_period = BTreeMap::<String, Vec<TokenBucketOverview>>::new();
+        for row in rows {
+            let (period, bucket) = row?;
+            buckets_by_period.entry(period).or_default().push(bucket);
+        }
+        let periods = buckets_by_period
+            .into_iter()
+            .map(|(period, buckets)| TokenTrendPeriod::from_buckets(period, buckets))
+            .collect();
+        Ok(TokenTrendReport::new(
+            session_id.map(ToString::to_string),
+            window,
+            periods,
+        ))
+    }
+
     /// Mark a deterministic health finding as agent-resolved.
     ///
     /// # Errors
     ///
-    /// Returns an error if persistence fails.
+    /// Returns an error if the finding is not active or persistence fails.
     pub fn resolve_health_finding(&self, resolution: &HealthResolution) -> DbResult<()> {
+        let resolved_ids = self.resolved_health_ids()?;
+        let active = self
+            .unresolved_health_findings(&resolved_ids)?
+            .into_iter()
+            .any(|finding| {
+                finding.id == resolution.finding_id
+                    && finding.category == resolution.category
+                    && finding.path == resolution.path
+                    && finding.related_path == resolution.related_path
+            });
+        if !active {
+            return Err(DbError::HealthFindingNotActive {
+                finding_id: resolution.finding_id.clone(),
+                category: resolution.category.clone(),
+                path: resolution.path.clone(),
+            });
+        }
         self.connection.execute(
             "
             INSERT INTO health_resolutions(
@@ -3282,6 +3434,16 @@ fn token_total_from_sql(_field: &'static str, value: f64) -> u128 {
         u128::MAX
     } else {
         value.round() as u128
+    }
+}
+
+/// Return the `SQLite` period expression for one token trend window.
+fn token_trend_period_expression(window: TokenTrendWindow) -> &'static str {
+    match window {
+        TokenTrendWindow::Day => "substr(COALESCE(created_at, CURRENT_TIMESTAMP), 1, 10)",
+        TokenTrendWindow::Week => "strftime('%Y-W%W', COALESCE(created_at, CURRENT_TIMESTAMP))",
+        TokenTrendWindow::Month => "substr(COALESCE(created_at, CURRENT_TIMESTAMP), 1, 7)",
+        TokenTrendWindow::Year => "substr(COALESCE(created_at, CURRENT_TIMESTAMP), 1, 4)",
     }
 }
 
@@ -3667,6 +3829,186 @@ mod tests {
             &large.estimated_saved,
             &isize::MAX,
             "large aggregate saturates without sqlite SUM overflow",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn token_trends_group_usage_by_period_and_bucket() -> Result<(), Box<dyn Error>> {
+        let store = AtlasStore::in_memory()?;
+        for (session, created_at, bucket, baseline_kind, confidence, without, with) in [
+            (
+                "session",
+                "2026-06-01 00:00:00",
+                TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
+                "selected_candidates",
+                "inferred",
+                100_i64,
+                25_i64,
+            ),
+            (
+                "session",
+                "2026-06-10 00:00:00",
+                TOKEN_BUCKET_FULL_FILE_COMPRESSION,
+                "full_file",
+                "observed",
+                50_i64,
+                10_i64,
+            ),
+            (
+                "session",
+                "2026-07-01 00:00:00",
+                TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
+                "selected_candidates",
+                "inferred",
+                80_i64,
+                20_i64,
+            ),
+            (
+                "other",
+                "2026-06-03 00:00:00",
+                TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
+                "selected_candidates",
+                "inferred",
+                999_i64,
+                1_i64,
+            ),
+        ] {
+            store.connection.execute(
+                "
+                INSERT INTO usage_events(
+                    session_id,
+                    command,
+                    estimated_tokens_without_projectatlas,
+                    estimated_tokens_with_projectatlas,
+                    estimated_tokens_saved,
+                    token_savings_bucket,
+                    baseline_kind,
+                    confidence,
+                    created_at
+                )
+                VALUES(?1, 'trend', ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ",
+                params![
+                    session,
+                    without,
+                    with,
+                    without - with,
+                    bucket,
+                    baseline_kind,
+                    confidence,
+                    created_at
+                ],
+            )?;
+        }
+
+        let trends = store.token_trends(Some("session"), TokenTrendWindow::Month)?;
+        require_eq(&trends.periods.len(), &2, "monthly periods")?;
+        require_eq(
+            &trends.periods[0].period,
+            &"2026-06".to_string(),
+            "first month",
+        )?;
+        require_eq(&trends.periods[0].calls, &2, "june call count")?;
+        require_eq(
+            &trends.periods[0].estimated_saved,
+            &115,
+            "june saved tokens",
+        )?;
+        require_eq(
+            &trends.periods[0].buckets.len(),
+            &2,
+            "june preserves evidence buckets",
+        )?;
+        require_eq(
+            &trends.periods[0].buckets[0].token_savings_bucket,
+            &TOKEN_BUCKET_FULL_FILE_COMPRESSION.to_string(),
+            "full-file bucket remains visible",
+        )?;
+        require_eq(
+            &trends.periods[0].buckets[0].confidence,
+            &"observed".to_string(),
+            "bucket confidence remains visible",
+        )?;
+        require_eq(
+            &trends.periods[1].period,
+            &"2026-07".to_string(),
+            "second month",
+        )?;
+        require_eq(&trends.periods[1].calls, &1, "july call count")?;
+        Ok(())
+    }
+
+    #[test]
+    fn token_trends_backfill_created_at_for_upgraded_databases() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("legacy.db");
+        {
+            let connection = Connection::open(&db_path)?;
+            connection.execute_batch(
+                "
+                CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO metadata(key, value) VALUES('schema_version', '7');
+                CREATE TABLE usage_events (
+                    id INTEGER PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    command TEXT NOT NULL,
+                    path TEXT,
+                    query TEXT,
+                    estimated_tokens_without_projectatlas INTEGER,
+                    estimated_tokens_with_projectatlas INTEGER,
+                    estimated_tokens_saved INTEGER,
+                    token_savings_bucket TEXT NOT NULL DEFAULT 'navigation_avoidance',
+                    provider TEXT NOT NULL DEFAULT 'heuristic',
+                    model TEXT NOT NULL DEFAULT 'unknown',
+                    tokenizer_backend TEXT NOT NULL DEFAULT 'chars_div_4',
+                    accuracy TEXT NOT NULL DEFAULT 'heuristic_estimate',
+                    baseline_kind TEXT NOT NULL DEFAULT 'selected_candidates',
+                    confidence TEXT NOT NULL DEFAULT 'inferred',
+                    calculation_trace TEXT NOT NULL DEFAULT 'heuristic=ceil(chars_or_bytes/4)'
+                );
+                INSERT INTO usage_events(
+                    session_id,
+                    command,
+                    estimated_tokens_without_projectatlas,
+                    estimated_tokens_with_projectatlas,
+                    estimated_tokens_saved
+                )
+                VALUES('legacy-session', 'legacy', 100, 20, 80);
+                ",
+            )?;
+        }
+
+        let store = AtlasStore::open(&db_path)?;
+        let null_created_at = store.connection.query_row(
+            "SELECT COUNT(*) FROM usage_events WHERE created_at IS NULL OR created_at = ''",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&null_created_at, &0, "legacy created_at values backfilled")?;
+        store.record_usage(&usage_from_estimates(
+            "legacy-session",
+            "new-call",
+            None,
+            None,
+            50,
+            10,
+        ))?;
+        let null_created_at = store.connection.query_row(
+            "SELECT COUNT(*) FROM usage_events WHERE created_at IS NULL OR created_at = ''",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&null_created_at, &0, "new created_at values populated")?;
+        let trends = store.token_trends(Some("legacy-session"), TokenTrendWindow::Month)?;
+        require_eq(&trends.periods.is_empty(), &false, "trend periods exist")?;
+        require_eq(
+            &trends
+                .periods
+                .iter()
+                .any(|period| period.period.starts_with("1970")),
+            &false,
+            "upgraded telemetry does not aggregate under 1970",
         )?;
         Ok(())
     }
@@ -4308,19 +4650,85 @@ mod tests {
 
     #[test]
     fn stores_health_resolution_ids() -> Result<(), Box<dyn Error>> {
-        let store = AtlasStore::in_memory()?;
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("src/b.rs", "hash-b"),
+        ])?;
+        store.set_purpose("src/a.rs", "Shared purpose", PurposeSource::Agent)?;
+        store.set_purpose("src/b.rs", "Shared purpose", PurposeSource::Agent)?;
+        let duplicate = store
+            .unresolved_health_findings(&[])?
+            .into_iter()
+            .find(|finding| finding.category == "duplicate-purpose")
+            .ok_or_else(|| io::Error::other("duplicate-purpose finding missing"))?;
+        let duplicate_id = duplicate.id.clone();
         store.resolve_health_finding(&HealthResolution {
-            finding_id: "duplicate-purpose:a:b".to_string(),
-            category: "duplicate-purpose".to_string(),
-            path: "a".to_string(),
-            related_path: Some("b".to_string()),
+            finding_id: duplicate_id.clone(),
+            category: duplicate.category,
+            path: duplicate.path,
+            related_path: duplicate.related_path,
             rationale: "Paths intentionally mirror agent skill variants.".to_string(),
         })?;
         let ids = store.resolved_health_ids()?;
+        require_eq(&ids, &vec![duplicate_id], "resolved ids")?;
+        Ok(())
+    }
+
+    #[test]
+    fn purpose_set_reports_unindexed_path_without_sqlite_leak() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[test_file_node("src/main.rs", "hash")])?;
+        let error = match store.set_purpose("no/such/file.rs", "Missing file", PurposeSource::Agent)
+        {
+            Ok(()) => return Err(io::Error::other("missing path should fail").into()),
+            Err(error) => error,
+        };
+
         require_eq(
-            &ids,
-            &vec!["duplicate-purpose:a:b".to_string()],
-            "resolved ids",
+            &error.to_string().contains("no/such/file.rs"),
+            &true,
+            "path named in error",
+        )?;
+        require_eq(
+            &error.to_string().contains("sqlite error"),
+            &false,
+            "raw sqlite error hidden",
+        )?;
+        store.replace_scan(&[])?;
+        let error = match store.set_purpose("src/main.rs", "Removed file", PurposeSource::Agent) {
+            Ok(()) => return Err(io::Error::other("stale indexed path should fail").into()),
+            Err(error) => error,
+        };
+        require_eq(
+            &error.to_string().contains("src/main.rs"),
+            &true,
+            "stale path named in error",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn health_resolution_requires_active_finding_tuple() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[test_file_node("src/main.rs", "hash")])?;
+        let error = match store.resolve_health_finding(&HealthResolution {
+            finding_id: "missing-id".to_string(),
+            category: "duplicate-purpose".to_string(),
+            path: "no/such/file.rs".to_string(),
+            related_path: None,
+            rationale: "typo".to_string(),
+        }) {
+            Ok(()) => {
+                return Err(io::Error::other("nonexistent health finding should fail").into());
+            }
+            Err(error) => error,
+        };
+
+        require_eq(
+            &error.to_string().contains("not active"),
+            &true,
+            "inactive finding rejected",
         )?;
         Ok(())
     }

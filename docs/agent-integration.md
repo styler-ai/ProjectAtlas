@@ -1,3 +1,5 @@
+# Purpose: Document agent startup and MCP integration workflows for ProjectAtlas.
+
 # Agent Integration
 
 ProjectAtlas is designed to be read at agent startup so you can:
@@ -84,7 +86,7 @@ fails closed instead of starting an older MCP server:
   "mcpServers": {
     "projectatlas": {
       "command": "projectatlas",
-      "args": ["--require-version", "0.3.6", "--db", ".projectatlas/projectatlas.db", "mcp"]
+      "args": ["--require-version", "0.3.7", "--db", ".projectatlas/projectatlas.db", "mcp"]
     }
   }
 }
@@ -112,6 +114,18 @@ on PowerShell or `PROJECTATLAS_RUNTIME_PATH=<path-to-projectatlas>` with the
 POSIX installer. The supplied binary is still verified through
 `projectatlas --format json runtime-info`, including version pinning when
 `PROJECTATLAS_VERSION` is set.
+
+Installer updates preserve project-local atlas state by default. They rewrite
+generated MCP configs and managed runtime binaries, but they do not delete
+`.projectatlas/projectatlas.db`, SQLite sidecars, token telemetry, approved
+purposes, health resolutions, project config, or nonsource metadata. Use
+`projectatlas reset-index --apply` only when you explicitly want local atlas
+state removed.
+
+Installers also report obsolete `projectatlas` binaries or shims that remain on
+PATH. Generated MCP configs use absolute, version-guarded runtime paths, but a
+stale Python, npm, or Cargo shim can still affect bare `projectatlas` commands
+in another shell until PATH order is fixed or the obsolete shim is removed.
 
 Harness-specific config can also be generated directly:
 

@@ -1,3 +1,4 @@
+//! Purpose: Serve `ProjectAtlas` repository intelligence over MCP.
 //! Native MCP adapter for `ProjectAtlas` agent integrations.
 
 use crate::runtime::{
@@ -13,13 +14,14 @@ use crate::runtime::{
 use crate::{
     CliError, DEFAULT_FILE_SUMMARY_LIMIT, OutputFormat, build_parity_report, render_code_slice,
     render_file_summary, render_parity_report, render_search_report, render_settings_report,
-    render_watch_status,
+    render_token_dashboard, render_token_trend_dashboard, render_watch_status,
 };
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
+use projectatlas_core::telemetry::TokenTrendWindow;
 use projectatlas_core::toon::{
     encode_agent_payload, render_nodes, render_outline, render_overview, render_symbol_relations,
-    render_symbols, render_token_overview,
+    render_symbols, render_token_overview, render_token_trends,
 };
 use projectatlas_core::{
     NodeKind, PurposeSource, normalize_repo_path_prefix, validated_repo_node_key,
@@ -30,7 +32,7 @@ use projectatlas_service::{
     search_indexed_files,
 };
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
-use rmcp::model::{ServerCapabilities, ServerInfo};
+use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::schemars;
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::Deserialize;
@@ -216,6 +218,10 @@ struct AtlasSymbolsParams {
 struct AtlasTokenParams {
     /// Optional session id filter.
     session: Option<String>,
+    /// Include a readable ASCII chart in the MCP result.
+    include_chart: Option<bool>,
+    /// Optional trend grouping window: day, week, month, or year.
+    trend_window: Option<String>,
 }
 
 /// MCP parameter payload for bounded health finding lookup.
@@ -874,9 +880,32 @@ impl ProjectAtlasMcpServer {
     fn atlas_token_report(&self, Parameters(params): Parameters<AtlasTokenParams>) -> String {
         Self::as_mcp_text((|| {
             let store = self.open_store()?;
-            Ok(render_token_overview(
-                &store.token_overview(params.session.as_deref())?,
-            ))
+            let include_chart = params.include_chart.unwrap_or(false);
+            if let Some(window) = params.trend_window.as_deref() {
+                let window = TokenTrendWindow::parse(window).ok_or_else(|| {
+                    CliError::InvalidInput(format!(
+                        "unsupported token trend window {window:?}; expected day, week, month, or year"
+                    ))
+                })?;
+                let report = store.token_trends(params.session.as_deref(), window)?;
+                if include_chart {
+                    let chart = render_token_trend_dashboard(&report);
+                    return Ok(encode_agent_payload(&json!({
+                        "token_trends": &report,
+                        "chart": chart,
+                    })));
+                }
+                return Ok(render_token_trends(&report));
+            }
+            let overview = store.token_overview(params.session.as_deref())?;
+            if include_chart {
+                let chart = render_token_dashboard(&overview, params.session.as_deref());
+                return Ok(encode_agent_payload(&json!({
+                    "token_savings": &overview,
+                    "chart": chart,
+                })));
+            }
+            Ok(render_token_overview(&overview))
         })())
     }
 
@@ -1026,8 +1055,10 @@ impl ProjectAtlasMcpServer {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for ProjectAtlasMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "ProjectAtlas provides TOON-first repository orientation, folder/file ranking, structured file summaries, symbol graph lookup, exact slices, health checks, and token telemetry for coding agents.",
-        )
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("ProjectAtlas", env!("CARGO_PKG_VERSION")))
+            .with_instructions(
+                "ProjectAtlas provides TOON-first repository orientation, folder/file ranking, structured file summaries, symbol graph lookup, exact slices, health checks, and token telemetry for coding agents.",
+            )
     }
 }

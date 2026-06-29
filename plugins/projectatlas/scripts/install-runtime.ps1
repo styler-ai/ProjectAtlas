@@ -1,3 +1,5 @@
+# Purpose: Install or update the ProjectAtlas plugin runtime and Windows MCP configs.
+
 param(
     [string]$ProjectRoot,
     [string]$Repository = "https://github.com/styler-ai/ProjectAtlas",
@@ -92,6 +94,27 @@ function Test-ProjectAtlasRuntime {
     }
 }
 
+function Get-ProjectAtlasRuntimeVersion {
+    param(
+        [string]$FilePath
+    )
+    if (-not $FilePath -or -not (Test-Path -LiteralPath $FilePath)) {
+        return $null
+    }
+    try {
+        $runtimeJson = & $FilePath --format json runtime-info 2>$null | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            return $null
+        }
+        $payload = $runtimeJson | ConvertFrom-Json
+        $runtime = if ($payload.runtime) { $payload.runtime } else { $payload }
+        return $runtime.version
+    }
+    catch {
+        return $null
+    }
+}
+
 function Split-PathList {
     param(
         [string]$Value
@@ -179,6 +202,37 @@ function Find-ProjectAtlas {
         return $projectAtlasCommand.Source
     }
     return $null
+}
+
+function Write-ProjectAtlasPathShadowReport {
+    param(
+        [string]$VerifiedPath,
+        [string]$ExpectedVersion
+    )
+    if (-not $VerifiedPath) {
+        return
+    }
+    $verified = Get-NormalizedPathEntry $VerifiedPath
+    $candidates = @(where.exe projectatlas 2>$null | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($candidates.Count -eq 0) {
+        Write-Warning "Bare 'projectatlas' is not on PATH. Generated MCP configs use the verified absolute runtime: $VerifiedPath"
+        return
+    }
+    $first = Get-NormalizedPathEntry $candidates[0]
+    if ($first -ne $verified) {
+        $firstVersion = Get-ProjectAtlasRuntimeVersion $candidates[0]
+        Write-Warning "Bare 'projectatlas' resolves to $($candidates[0]) version '$firstVersion', not the verified runtime $VerifiedPath. Start a new shell, put $(Split-Path -Parent $VerifiedPath) first on PATH, or remove the obsolete shim."
+    }
+    foreach ($candidate in $candidates) {
+        $normalized = Get-NormalizedPathEntry $candidate
+        if ($normalized -eq $verified) {
+            continue
+        }
+        if (-not (Test-ProjectAtlasRuntime $candidate $ExpectedVersion)) {
+            $version = Get-ProjectAtlasRuntimeVersion $candidate
+            Write-Warning "Obsolete ProjectAtlas runtime or shim still exists on PATH: $candidate version '$version'. It was not removed automatically."
+        }
+    }
 }
 
 function Invoke-Checked {
@@ -300,6 +354,7 @@ else {
     Set-ProjectAtlasPathPrecedence $projectAtlas
 }
 Invoke-Checked $projectAtlas @("--format", "json", "runtime-info") | Out-Null
+Write-ProjectAtlasPathShadowReport $projectAtlas $ProjectAtlasVersion
 
 $atlasDir = Join-Path $ProjectRoot ".projectatlas"
 New-Item -ItemType Directory -Force -Path $atlasDir | Out-Null
@@ -340,6 +395,7 @@ Write-ProjectAtlasMcpConfig $claudeMcpConfigPath "claude-code"
 Write-ProjectAtlasMcpConfig $opencodeConfigPath "opencode"
 
 Write-Output "ProjectAtlas runtime installed and verified: $projectAtlas"
+Write-Output "ProjectAtlas update preserved project state under $atlasDir; use reset-index --apply for explicit state cleanup."
 Write-Output "Project-local MCP config written: $mcpConfigPath"
 Write-Output "Project-local Claude Code MCP config written: $claudeMcpConfigPath"
 Write-Output "Project-local OpenCode MCP config written: $opencodeConfigPath"

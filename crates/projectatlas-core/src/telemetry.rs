@@ -132,6 +132,87 @@ pub struct TokenOverview {
     pub buckets: Vec<TokenBucketOverview>,
 }
 
+/// Token trend grouping window.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenTrendWindow {
+    /// Group token telemetry by day.
+    Day,
+    /// Group token telemetry by week.
+    Week,
+    /// Group token telemetry by month.
+    Month,
+    /// Group token telemetry by year.
+    Year,
+}
+
+impl TokenTrendWindow {
+    /// Parse a stable window label.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "day" => Some(Self::Day),
+            "week" => Some(Self::Week),
+            "month" => Some(Self::Month),
+            "year" => Some(Self::Year),
+            _ => None,
+        }
+    }
+
+    /// Return the stable CLI/MCP label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Day => "day",
+            Self::Week => "week",
+            Self::Month => "month",
+            Self::Year => "year",
+        }
+    }
+}
+
+impl std::fmt::Display for TokenTrendWindow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Token trend aggregate for one period.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct TokenTrendPeriod {
+    /// Period label such as `2026-06-29`, `2026-W26`, `2026-06`, or `2026`.
+    pub period: String,
+    /// Number of tracked calls in the period.
+    pub calls: usize,
+    /// Total baseline estimate.
+    pub estimated_without_projectatlas: usize,
+    /// Total `ProjectAtlas` estimate.
+    pub estimated_with_projectatlas: usize,
+    /// Total saved tokens.
+    pub estimated_saved: isize,
+    /// Signed savings ratio, or `None` when the baseline estimate is zero.
+    pub savings_rate: Option<f64>,
+    /// Bucketed token savings grouped by baseline and accuracy semantics.
+    pub buckets: Vec<TokenBucketOverview>,
+}
+
+/// Token savings trend report.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct TokenTrendReport {
+    /// Counting mode for the reported numbers.
+    pub estimate_kind: String,
+    /// Estimator used to produce the reported numbers.
+    pub estimator: String,
+    /// Scope and accuracy boundary for the reported numbers.
+    pub estimate_scope: String,
+    /// Optional session filter.
+    pub session: Option<String>,
+    /// Grouping window.
+    pub window: TokenTrendWindow,
+    /// Period aggregates ordered oldest to newest.
+    pub periods: Vec<TokenTrendPeriod>,
+}
+
 impl TokenOverview {
     /// Build an overview from usage events.
     #[must_use]
@@ -240,6 +321,74 @@ impl TokenBucketOverview {
             estimated_with_projectatlas: saturating_u128_to_usize(with),
             estimated_saved,
             savings_rate,
+        }
+    }
+}
+
+impl TokenTrendPeriod {
+    /// Build a period aggregate from token totals.
+    #[must_use]
+    pub fn from_totals(period: String, calls: u128, without: u128, with: u128) -> Self {
+        let bucket = TokenBucketOverview::from_totals(
+            default_token_savings_bucket(),
+            default_token_provider(),
+            default_token_model(),
+            default_tokenizer_backend(),
+            default_token_accuracy(),
+            default_token_baseline_kind(),
+            default_token_confidence(),
+            calls,
+            without,
+            with,
+        );
+        Self::from_buckets(period, vec![bucket])
+    }
+
+    /// Build a period aggregate from pre-aggregated buckets.
+    #[must_use]
+    pub fn from_buckets(period: String, buckets: Vec<TokenBucketOverview>) -> Self {
+        let calls = buckets.iter().fold(0u128, |acc, bucket| {
+            acc.saturating_add(bucket.calls as u128)
+        });
+        let without = buckets.iter().fold(0u128, |acc, bucket| {
+            acc.saturating_add(bucket.estimated_without_projectatlas as u128)
+        });
+        let with = buckets.iter().fold(0u128, |acc, bucket| {
+            acc.saturating_add(bucket.estimated_with_projectatlas as u128)
+        });
+        let saved = aggregate_token_delta(without, with);
+        let savings_rate = if without == 0 {
+            None
+        } else {
+            Some((without as f64 - with as f64) / without as f64)
+        };
+        Self {
+            period,
+            calls: saturating_u128_to_usize(calls),
+            estimated_without_projectatlas: saturating_u128_to_usize(without),
+            estimated_with_projectatlas: saturating_u128_to_usize(with),
+            estimated_saved: saved,
+            savings_rate,
+            buckets,
+        }
+    }
+}
+
+impl TokenTrendReport {
+    /// Build a trend report from period aggregates.
+    #[must_use]
+    pub fn new(
+        session: Option<String>,
+        window: TokenTrendWindow,
+        periods: Vec<TokenTrendPeriod>,
+    ) -> Self {
+        Self {
+            estimate_kind: TOKEN_ESTIMATE_KIND.to_string(),
+            estimator: TOKEN_ESTIMATOR.to_string(),
+            estimate_scope: TOKEN_ESTIMATE_SCOPE.to_string(),
+            session,
+            window,
+            periods,
         }
     }
 }

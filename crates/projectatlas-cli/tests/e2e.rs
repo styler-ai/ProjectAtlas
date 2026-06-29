@@ -2,7 +2,10 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use projectatlas_core::PurposeSource;
 use projectatlas_core::language::{BROAD_SOURCE_EXTENSIONS, detect_language_for_path};
+use projectatlas_core::telemetry::usage_from_estimates;
+use projectatlas_db::{AtlasStore, HealthResolution};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -34,6 +37,9 @@ fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn E
     let runtime_json: Value = serde_json::from_slice(&output.stdout)?;
     require_json_string(&runtime_json, &["project"], "ProjectAtlas")?;
     require_json_usize(&runtime_json, &["major_version"], 3)?;
+    if runtime_json["executable"].as_str().is_none() {
+        return Err(io::Error::other("runtime-info executable path missing").into());
+    }
     if atlas_dir.exists() {
         return Err(io::Error::other("runtime-info created .projectatlas").into());
     }
@@ -200,47 +206,7 @@ fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> 
     )?;
     let workspace_root = workspace_root()?;
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
-    let output = if cfg!(windows) {
-        StdCommand::new("powershell")
-            .arg("-NoProfile")
-            .arg("-ExecutionPolicy")
-            .arg("Bypass")
-            .arg("-File")
-            .arg(
-                workspace_root
-                    .join("plugins")
-                    .join("projectatlas")
-                    .join("scripts")
-                    .join("install-runtime.ps1"),
-            )
-            .arg("-ProjectRoot")
-            .arg(&repo)
-            .arg("-RuntimePath")
-            .arg(&runtime)
-            .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
-            .output()?
-    } else {
-        StdCommand::new("bash")
-            .arg(
-                workspace_root
-                    .join("plugins")
-                    .join("projectatlas")
-                    .join("scripts")
-                    .join("install-runtime.sh"),
-            )
-            .arg(&repo)
-            .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
-            .env("PROJECTATLAS_RUNTIME_PATH", &runtime)
-            .output()?
-    };
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "plugin installer failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ))
-        .into());
-    }
+    run_projectatlas_plugin_installer(&workspace_root, &repo, &runtime)?;
 
     let atlas_dir = repo.join(".projectatlas");
     let codex_config = read_json_file(&atlas_dir.join("projectatlas.mcp.json"))?;
@@ -304,6 +270,232 @@ fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> 
         &repo,
         "opencode cwd",
     )?;
+
+    Ok(())
+}
+
+#[test]
+fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    let atlas_dir = repo.join(".projectatlas");
+    fs::create_dir_all(&atlas_dir)?;
+    fs::create_dir(repo.join("src"))?;
+    fs::write(repo.join("src").join("a.rs"), "pub fn a() {}\n")?;
+    fs::write(repo.join("src").join("b.rs"), "pub fn b() {}\n")?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    fs::write(
+        atlas_dir.join("projectatlas-nonsource-files.toon"),
+        "nonsource_files[]:\n  # path,summary\n",
+    )?;
+    fs::write(
+        atlas_dir.join("kept-state.txt"),
+        "existing project-local state must survive plugin updates\n",
+    )?;
+    let db = atlas_dir.join("projectatlas.db");
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .arg("--config")
+        .arg(atlas_dir.join("config.toml"))
+        .args(["scan", "."])
+        .assert()
+        .success();
+    let preserved_health_id = {
+        let store = AtlasStore::open(&db)?;
+        store.set_purpose(
+            "src/a.rs",
+            "Shared plugin update state",
+            PurposeSource::Agent,
+        )?;
+        store.set_purpose(
+            "src/b.rs",
+            "Shared plugin update state",
+            PurposeSource::Agent,
+        )?;
+        store.record_usage(&usage_from_estimates(
+            "plugin-update",
+            "summary",
+            Some("src/a.rs".to_string()),
+            None,
+            200,
+            50,
+        ))?;
+        let duplicate = store
+            .unresolved_health_findings(&[])?
+            .into_iter()
+            .find(|finding| finding.category == "duplicate-purpose")
+            .ok_or_else(|| io::Error::other("duplicate-purpose finding missing"))?;
+        let id = duplicate.id.clone();
+        store.resolve_health_finding(&HealthResolution {
+            finding_id: id.clone(),
+            category: duplicate.category,
+            path: duplicate.path,
+            related_path: duplicate.related_path,
+            rationale: "Plugin update preservation fixture.".to_string(),
+        })?;
+        id
+    };
+    let token_calls_before = AtlasStore::open(&db)?.token_overview(None)?.calls;
+    let stale_runtime_dir = temp.path().join("old-plugin");
+    let stale_runtime = stale_runtime_dir.join(if cfg!(windows) {
+        "projectatlas.cmd"
+    } else {
+        "projectatlas"
+    });
+    let stale_runtime_text = stale_runtime.to_string_lossy();
+    fs::create_dir_all(&stale_runtime_dir)?;
+    let stale_runtime_script = if cfg!(windows) {
+        "@echo off\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.0.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\n"
+    } else {
+        "#!/usr/bin/env sh\nprintf '%s\\n' '{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.0.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}'\n"
+    };
+    fs::write(&stale_runtime, stale_runtime_script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&stale_runtime)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&stale_runtime, permissions)?;
+    }
+    fs::write(
+        atlas_dir.join("projectatlas.mcp.json"),
+        format!(
+            r#"{{"mcpServers":{{"projectatlas":{{"command":{},"args":["--require-version","0.0.1","mcp"],"cwd":{}}}}}}}"#,
+            serde_json::to_string(&stale_runtime_text)?,
+            serde_json::to_string(&repo.to_string_lossy())?
+        ),
+    )?;
+    fs::write(
+        atlas_dir.join("projectatlas.claude.mcp.json"),
+        format!(
+            r#"{{"mcpServers":{{"projectatlas":{{"command":{},"args":["--require-version","0.0.1","mcp"]}}}}}}"#,
+            serde_json::to_string(&stale_runtime_text)?
+        ),
+    )?;
+    fs::write(
+        atlas_dir.join("projectatlas.opencode.json"),
+        format!(
+            r#"{{"$schema":"https://opencode.ai/config.json","mcp":{{"projectatlas":{{"type":"local","enabled":true,"command":[{},"--require-version","0.0.1","mcp"],"cwd":{}}}}}}}"#,
+            serde_json::to_string(&stale_runtime_text)?,
+            serde_json::to_string(&repo.to_string_lossy())?
+        ),
+    )?;
+
+    let workspace_root = workspace_root()?;
+    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let installer_output = run_projectatlas_plugin_installer_with_path_shadow(
+        &workspace_root,
+        &repo,
+        &runtime,
+        &stale_runtime_dir,
+    )?;
+    let installer_output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&installer_output.stdout),
+        String::from_utf8_lossy(&installer_output.stderr)
+    );
+    if !installer_output_text.contains("Obsolete ProjectAtlas runtime")
+        && !installer_output_text.contains("obsolete ProjectAtlas runtime")
+    {
+        return Err(io::Error::other(format!(
+            "plugin update did not report shadowed stale runtime:\n{installer_output_text}"
+        ))
+        .into());
+    }
+
+    let codex_config = read_json_file(&atlas_dir.join("projectatlas.mcp.json"))?;
+    let claude_config = read_json_file(&atlas_dir.join("projectatlas.claude.mcp.json"))?;
+    let opencode_config = read_json_file(&atlas_dir.join("projectatlas.opencode.json"))?;
+
+    require_same_executable(
+        json_string_at(&codex_config, &["mcpServers", "projectatlas", "command"])?,
+        &runtime,
+        "updated codex",
+    )?;
+    require_json_string(
+        &codex_config,
+        &["mcpServers", "projectatlas", "args", "1"],
+        env!("CARGO_PKG_VERSION"),
+    )?;
+    require_same_executable(
+        json_string_at(&claude_config, &["mcpServers", "projectatlas", "command"])?,
+        &runtime,
+        "updated claude",
+    )?;
+    require_json_string(
+        &claude_config,
+        &["mcpServers", "projectatlas", "args", "1"],
+        env!("CARGO_PKG_VERSION"),
+    )?;
+    require_same_executable(
+        json_string_at(&opencode_config, &["mcp", "projectatlas", "command", "0"])?,
+        &runtime,
+        "updated opencode",
+    )?;
+    require_json_string(
+        &opencode_config,
+        &["mcp", "projectatlas", "command", "2"],
+        env!("CARGO_PKG_VERSION"),
+    )?;
+    let codex_text = fs::read_to_string(atlas_dir.join("projectatlas.mcp.json"))?;
+    if codex_text.contains("0.0.1") || codex_text.contains(stale_runtime_text.as_ref()) {
+        return Err(
+            io::Error::other("updated plugin config still contains stale runtime data").into(),
+        );
+    }
+    if !atlas_dir.join("kept-state.txt").exists() {
+        return Err(io::Error::other("plugin update removed existing project-local state").into());
+    }
+    if fs::read_to_string(atlas_dir.join("projectatlas-nonsource-files.toon"))?
+        != "nonsource_files[]:\n  # path,summary\n"
+    {
+        return Err(io::Error::other("plugin update rewrote nonsource metadata").into());
+    }
+    let preserved_store = AtlasStore::open(&db)?;
+    let token_calls_after = preserved_store.token_overview(None)?.calls;
+    if token_calls_after < token_calls_before {
+        return Err(io::Error::other(format!(
+            "plugin update lost token telemetry: before {token_calls_before}, after {token_calls_after}"
+        ))
+        .into());
+    }
+    let nodes = preserved_store.load_nodes()?;
+    if !nodes.iter().any(|node| {
+        node.node.path == "src/a.rs"
+            && node.purpose.purpose.as_deref() == Some("Shared plugin update state")
+    }) {
+        return Err(io::Error::other("plugin update lost approved purpose metadata").into());
+    }
+    if !preserved_store
+        .resolved_health_ids()?
+        .contains(&preserved_health_id)
+    {
+        return Err(io::Error::other("plugin update lost health resolution metadata").into());
+    }
+
+    let (mcp_command, mcp_args) = mcp_command_and_args(&codex_config)?;
+    let messages = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-plugin-update-e2e","version":"0.1.0"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+    ];
+    let mcp_stdout = run_mcp_stdio(&mcp_command, &repo, &mcp_args, &messages)?;
+    let expected_server_info = format!(
+        r#""serverInfo":{{"name":"ProjectAtlas","version":"{}"}}"#,
+        env!("CARGO_PKG_VERSION")
+    );
+    if !mcp_stdout.contains(&expected_server_info) {
+        return Err(io::Error::other(format!(
+            "updated plugin MCP config did not launch current runtime: {mcp_stdout}"
+        ))
+        .into());
+    }
 
     Ok(())
 }
@@ -842,13 +1034,41 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .into());
     }
 
+    let raw_trends = Command::cargo_bin("projectatlas")?
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["token", "--trend", "month"])
+        .output()?;
+    if !raw_trends.status.success() {
+        return Err(io::Error::other("json token trend command failed").into());
+    }
+    let trends_json: Value = serde_json::from_slice(&raw_trends.stdout)?;
+    require_json_string(&trends_json, &["window"], "month")?;
+    let periods = trends_json["periods"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("trend periods missing"))?;
+    if periods.is_empty() {
+        return Err(io::Error::other("trend periods were empty").into());
+    }
+    if periods.iter().all(|period| {
+        period
+            .get("buckets")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    }) {
+        return Err(io::Error::other("trend periods did not expose token buckets").into());
+    }
+
     Command::cargo_bin("projectatlas")?
+        .env("COLUMNS", "80")
         .arg("--db")
         .arg(&db)
         .args(["token", "--view", "tui"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("ProjectAtlas Token Delta"))
+        .stdout(predicate::str::contains("ProjectAtlas Token Savings"))
         .stdout(predicate::str::contains("heuristic chars/bytes / 4"))
         .stdout(predicate::str::contains("not model billing tokens"))
         .stdout(predicate::str::contains("Without PA"))
@@ -856,8 +1076,125 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .stdout(predicate::str::contains("Saved"))
         .stdout(predicate::str::contains("Buckets"))
         .stdout(predicate::str::contains("heuristic_estimate"))
+        .stdout(predicate::str::contains("saved tokens"))
         .stdout(predicate::str::contains("wrong folders, wrong files"))
         .stdout(predicate::str::contains("unnecessary full reads"));
+    Command::cargo_bin("projectatlas")?
+        .arg("--db")
+        .arg(&db)
+        .args(["token", "--view", "tui", "--trend", "month"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ProjectAtlas Token Trends"))
+        .stdout(predicate::str::contains("Window    month"))
+        .stdout(predicate::str::contains("saved"));
+    Ok(())
+}
+
+#[test]
+fn root_and_metadata_validation_flow() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo)?;
+    fs::create_dir(repo.join("src"))?;
+    fs::write(repo.join("src").join("a.rs"), "pub fn a() {}\n")?;
+    fs::write(repo.join("src").join("b.rs"), "pub fn b() {}\n")?;
+
+    Command::cargo_bin("projectatlas")?
+        .arg("--format")
+        .arg("json")
+        .args(["root", "set"])
+        .arg(&repo)
+        .assert()
+        .success();
+
+    let db = repo.join(".projectatlas").join("projectatlas.db");
+    let config = repo.join(".projectatlas").join("config.toml");
+    let root_show = Command::cargo_bin("projectatlas")?
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .arg("--config")
+        .arg(&config)
+        .args(["root", "show"])
+        .output()?;
+    if !root_show.status.success() {
+        return Err(io::Error::other("root show failed").into());
+    }
+    let root_json: Value = serde_json::from_slice(&root_show.stdout)?;
+    require_json_bool(&root_json, &["verified"], true)?;
+    require_json_string(&root_json, &["detection_source"], "config")?;
+    Command::cargo_bin("projectatlas")?
+        .arg("--db")
+        .arg(&db)
+        .arg("--config")
+        .arg(&config)
+        .arg("root")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("root:"))
+        .stdout(predicate::str::contains("detection_source: config"));
+
+    Command::cargo_bin("projectatlas")?
+        .arg("--db")
+        .arg(&db)
+        .arg("--config")
+        .arg(&config)
+        .args(["scan"])
+        .assert()
+        .success();
+
+    Command::cargo_bin("projectatlas")?
+        .arg("--db")
+        .arg(&db)
+        .args(["purpose", "set", "no/such/file.rs", "Missing file"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not indexed"))
+        .stderr(predicate::str::contains("sqlite error").not());
+
+    for file in ["src/a.rs", "src/b.rs"] {
+        Command::cargo_bin("projectatlas")?
+            .arg("--db")
+            .arg(&db)
+            .args(["purpose", "set", file, "Shared purpose"])
+            .assert()
+            .success();
+    }
+    Command::cargo_bin("projectatlas")?
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "health",
+            "resolve",
+            "missing-id",
+            "duplicate-purpose",
+            "no/such/file.rs",
+            "--rationale",
+            "typo",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not active"));
+
+    let other_repo = temp.path().join("other-repo");
+    fs::create_dir(&other_repo)?;
+    Command::cargo_bin("projectatlas")?
+        .args(["root", "set"])
+        .arg(&other_repo)
+        .assert()
+        .success();
+    Command::cargo_bin("projectatlas")?
+        .arg("--db")
+        .arg(other_repo.join(".projectatlas").join("projectatlas.db"))
+        .arg("--config")
+        .arg(&config)
+        .args(["root", "verify"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("mismatches"));
+
     Ok(())
 }
 
@@ -1556,6 +1893,7 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_overview","arguments":{}}}"#,
         r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_files","arguments":{"file_pattern":"*.rs","limit":1}}}"#,
         r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"atlas_health","arguments":{"category":"missing-purpose","path_prefix":".","limit":1}}}"#,
+        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"atlas_token_report","arguments":{"include_chart":true}}}"#,
     ];
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let stdout = run_mcp_stdio(
@@ -1569,12 +1907,14 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         &messages,
     )?;
     if !stdout.contains(r#""id":1"#)
+        || !stdout.contains(r#""serverInfo":{"name":"ProjectAtlas","version":"#)
         || !stdout.contains(r#""name":"atlas_files""#)
         || !stdout.contains("overview:")
         || !stdout.contains("files[1]")
         || !stdout.contains("health:")
         || !stdout.contains("health_findings[1]")
         || !stdout.contains("next_start_index: 1")
+        || !stdout.contains("ProjectAtlas Token Savings")
         || !stdout.contains("src/lib.rs")
     {
         return Err(io::Error::other(format!(
@@ -4430,6 +4770,91 @@ fn workspace_root() -> Result<std::path::PathBuf, Box<dyn Error>> {
         .nth(2)
         .map(Path::to_path_buf)
         .ok_or_else(|| io::Error::other("workspace root not found").into())
+}
+
+/// Run the bundled plugin installer with an explicit runtime path.
+fn run_projectatlas_plugin_installer(
+    workspace_root: &Path,
+    repo: &Path,
+    runtime: &Path,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    run_projectatlas_plugin_installer_with_optional_path(workspace_root, repo, runtime, None)
+}
+
+/// Run the bundled plugin installer while shadowing PATH with a stale runtime.
+fn run_projectatlas_plugin_installer_with_path_shadow(
+    workspace_root: &Path,
+    repo: &Path,
+    runtime: &Path,
+    path_shadow: &Path,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    run_projectatlas_plugin_installer_with_optional_path(
+        workspace_root,
+        repo,
+        runtime,
+        Some(path_shadow),
+    )
+}
+
+/// Run the bundled plugin installer and return its process output.
+fn run_projectatlas_plugin_installer_with_optional_path(
+    workspace_root: &Path,
+    repo: &Path,
+    runtime: &Path,
+    path_shadow: Option<&Path>,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    let mut command = if cfg!(windows) {
+        let mut command = StdCommand::new("powershell");
+        command
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(
+                workspace_root
+                    .join("plugins")
+                    .join("projectatlas")
+                    .join("scripts")
+                    .join("install-runtime.ps1"),
+            )
+            .arg("-ProjectRoot")
+            .arg(repo)
+            .arg("-RuntimePath")
+            .arg(runtime);
+        command
+    } else {
+        let mut command = StdCommand::new("bash");
+        command
+            .arg(
+                workspace_root
+                    .join("plugins")
+                    .join("projectatlas")
+                    .join("scripts")
+                    .join("install-runtime.sh"),
+            )
+            .arg(repo);
+        command
+    };
+    command
+        .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
+        .env("PROJECTATLAS_RUNTIME_PATH", runtime);
+    if let Some(path_shadow) = path_shadow {
+        let current_path = std::env::var_os("PATH").unwrap_or_default();
+        let shadowed_path = std::env::join_paths(
+            std::iter::once(path_shadow.to_path_buf()).chain(std::env::split_paths(&current_path)),
+        )?;
+        command.env("PATH", shadowed_path);
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "plugin installer failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(output)
 }
 
 /// Generate one harness-specific MCP config document.

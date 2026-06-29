@@ -1,4 +1,5 @@
 #!/usr/bin/env sh
+# Purpose: Install or update the ProjectAtlas plugin runtime and POSIX MCP configs.
 set -eu
 
 repository=${PROJECTATLAS_REPOSITORY:-https://github.com/styler-ai/ProjectAtlas}
@@ -76,6 +77,46 @@ is_projectatlas_runtime() {
       return 1
       ;;
   esac
+}
+
+runtime_version() {
+  candidate=$1
+  runtime_info=$("$candidate" --format json runtime-info 2>/dev/null || true)
+  printf '%s\n' "$runtime_info" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+}
+
+canonical_file() {
+  file=$1
+  dir=$(CDPATH= cd -- "$(dirname -- "$file")" 2>/dev/null && pwd -P) || {
+    printf '%s\n' "$file"
+    return 0
+  }
+  printf '%s/%s\n' "$dir" "$(basename -- "$file")"
+}
+
+warn_path_shadow() {
+  verified=$1
+  verified_canonical=$(canonical_file "$verified")
+  first=$(command -v projectatlas 2>/dev/null || true)
+  if [ -z "$first" ]; then
+    printf '%s\n' "warning: bare 'projectatlas' is not on PATH. Generated MCP configs use the verified absolute runtime: $verified" >&2
+  elif [ "$(canonical_file "$first")" != "$verified_canonical" ]; then
+    first_version=$(runtime_version "$first")
+    printf '%s\n' "warning: bare 'projectatlas' resolves to $first version '$first_version', not the verified runtime $verified. Put $(dirname -- "$verified") first on PATH or remove the obsolete shim." >&2
+  fi
+  old_ifs=$IFS
+  IFS=:
+  for entry in $PATH; do
+    candidate=$entry/projectatlas
+    if [ ! -x "$candidate" ] || [ "$(canonical_file "$candidate")" = "$verified_canonical" ]; then
+      continue
+    fi
+    if ! is_projectatlas_runtime "$candidate"; then
+      version=$(runtime_version "$candidate")
+      printf '%s\n' "warning: obsolete ProjectAtlas runtime or shim still exists on PATH: $candidate version '$version'. It was not removed automatically." >&2
+    fi
+  done
+  IFS=$old_ifs
 }
 
 install_release_binary() {
@@ -171,6 +212,7 @@ else
 fi
 
 "$projectatlas_bin" --format json runtime-info >/dev/null
+warn_path_shadow "$projectatlas_bin"
 
 atlas_dir="$project_root/.projectatlas"
 mkdir -p "$atlas_dir"
@@ -201,6 +243,7 @@ write_mcp_config "$claude_mcp_config_path" claude-code
 write_mcp_config "$opencode_config_path" opencode
 
 printf 'ProjectAtlas runtime installed and verified: %s\n' "$projectatlas_bin"
+printf 'ProjectAtlas update preserved project state under %s; use reset-index --apply for explicit state cleanup.\n' "$atlas_dir"
 printf 'Project-local MCP config written: %s\n' "$mcp_config_path"
 printf 'Project-local Claude Code MCP config written: %s\n' "$claude_mcp_config_path"
 printf 'Project-local OpenCode MCP config written: %s\n' "$opencode_config_path"

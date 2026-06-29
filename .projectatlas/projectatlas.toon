@@ -1,6 +1,6 @@
 version: 1
-generated_at: unix:1782678970
-file_hash: "f745e5399abeb204de4845a5cf03c50715920e70234938ecc3585285b82c5b3b"
+generated_at: unix:1782711088
+file_hash: "e09dd4ce7388ddf15e41afb30f15f6a4a9dd57ee257fe3aab31dda7dc6160d22"
 folder_hash: "f5ec84a38eaa8b9ee18c1d22563973db7217f346e2815ff1fa6abb9273e95036"
 root: .
 overview: tracked_source_files=96 tracked_nonsource_files=37 tracked_files_total=133 tracked_folders=58 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
@@ -222,8 +222,8 @@ files[104]{path,summary,source}:
   crates/projectatlas-cli/Cargo.toml,CLI Rust crate manifest for ProjectAtlas 3,database
   crates/projectatlas-cli/src/atlas_map.rs,Generate and lint `ProjectAtlas` structure maps from Rust.,database
   crates/projectatlas-cli/src/main.rs,Provide the `ProjectAtlas` 3 command-line adapter.,database
-  crates/projectatlas-cli/src/mcp.rs,Provide the native MCP adapter that exposes ProjectAtlas atlas tools to agent harnesses.,database
-  crates/projectatlas-cli/src/runtime.rs,"Provide shared CLI and MCP runtime orchestration for scan policy, indexing, watching, settings, cleanup, and telemetry.",database
+  crates/projectatlas-cli/src/mcp.rs,Serve `ProjectAtlas` repository intelligence over MCP.,database
+  crates/projectatlas-cli/src/runtime.rs,Coordinate shared `ProjectAtlas` CLI and MCP runtime workflows.,database
   crates/projectatlas-cli/src/structural.rs,Create deterministic structural summaries for declaration light files,database
   crates/projectatlas-cli/tests/e2e.rs,Validate `ProjectAtlas` 3 CLI end-to-end behavior.,database
   crates/projectatlas-cli/tests/lint_diagnostics.rs,Validate lint diagnostics for source extension purpose styles.,database
@@ -251,7 +251,7 @@ files[104]{path,summary,source}:
   crates/projectatlas-symbols/src/lib.rs,Extract tree-sitter-backed `ProjectAtlas` symbol graphs.,database
   deny.toml,Cargo dependency and license policy for ProjectAtlas,database
   docs/adoption.md,Adoption checklist for ProjectAtlas,database
-  docs/agent-integration.md,Agent integration instructions for ProjectAtlas,database
+  docs/agent-integration.md,Document agent startup and MCP integration workflows for ProjectAtlas.,database
   docs/assets/agent-harness-funnel.svg,README diagram explaining the ProjectAtlas agent harness workflow from folder purpose to exact source slice,nonsource
   docs/assets/projectatlas-mascot.png,ProjectAtlas README mascot image,nonsource
   docs/assets/token-savings-bar.svg,README bar chart visualizing ProjectAtlas token savings benchmark results,nonsource
@@ -296,8 +296,8 @@ files[104]{path,summary,source}:
   plugins/projectatlas/.codex-plugin/plugin.json,ProjectAtlas Codex plugin manifest,database
   plugins/projectatlas/.mcp.json,Fallback MCP server configuration for the ProjectAtlas Codex plugin.,database
   plugins/projectatlas/opencode/opencode.json,OpenCode config template registering ProjectAtlas as a local MCP server.,database
-  plugins/projectatlas/scripts/install-runtime.ps1,Install and verify the ProjectAtlas native runtime on Windows.,database
-  plugins/projectatlas/scripts/install-runtime.sh,POSIX installer for the native ProjectAtlas runtime.,database
+  plugins/projectatlas/scripts/install-runtime.ps1,Install or update the ProjectAtlas plugin runtime and Windows MCP configs.,database
+  plugins/projectatlas/scripts/install-runtime.sh,Install or update the ProjectAtlas plugin runtime and POSIX MCP configs.,database
   plugins/projectatlas/skills/projectatlas/SKILL.md,ProjectAtlas installable Codex skill,database
   skills/claude/ProjectAtlas.md,Claude skill guidance for using ProjectAtlas as an atlas-first repository workflow.,database
   skills/codex/ProjectAtlas.md,Codex skill guidance for using ProjectAtlas as an atlas-first repository workflow.,database

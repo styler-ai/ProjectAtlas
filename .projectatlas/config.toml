@@ -21,6 +21,7 @@ default_style = "javadoc"
 line_comment_prefixes = ["//", "#", "--", ";"]
 
 [purpose.styles_by_extension]
+".md" = "line-comment"
 ".rs" = "line-comment"
 
 [summary_rules]

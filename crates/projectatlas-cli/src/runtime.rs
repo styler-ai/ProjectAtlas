@@ -1,3 +1,4 @@
+//! Purpose: Coordinate shared `ProjectAtlas` CLI and MCP runtime workflows.
 //! Shared runtime orchestration for the `ProjectAtlas` CLI and MCP adapters.
 
 use crate::atlas_map::{
@@ -674,6 +675,12 @@ pub(crate) struct SettingsReport {
     pub(crate) config_path: Option<String>,
     /// Repository root used by map/lint config.
     pub(crate) repo_root: String,
+    /// Source that selected the repository root.
+    pub(crate) root_detection_source: String,
+    /// Whether config and DB root metadata agree.
+    pub(crate) root_verified: bool,
+    /// Root mismatches that should be fixed before trusting the binding.
+    pub(crate) root_mismatches: Vec<String>,
     /// Generated map path.
     pub(crate) map_path: String,
     /// Non-source summary path.
@@ -783,6 +790,27 @@ pub(crate) fn build_settings_report(
     } else {
         None
     };
+    let repo_root = normalize_display_path(&config.root);
+    let db_project_root = index
+        .as_ref()
+        .and_then(|stats| stats.project_root.as_ref())
+        .cloned();
+    let mut root_mismatches = Vec::new();
+    if let Some(db_root) = db_project_root.as_ref()
+        && db_root != &repo_root
+    {
+        root_mismatches.push(format!(
+            "db root {db_root:?} does not match config root {repo_root:?}"
+        ));
+    }
+    let root_detection_source = if resolved_config.is_some() {
+        "config"
+    } else if db_project_root.is_some() {
+        "db"
+    } else {
+        "db-path-or-cwd"
+    }
+    .to_string();
     Ok(SettingsReport {
         cache_dir: path_status(&cache_dir)?,
         db: path_status(&absolute_db)?,
@@ -791,7 +819,10 @@ pub(crate) fn build_settings_report(
         db_journal: path_status(&db_sidecar_path(&absolute_db, "journal"))?,
         mcp_config: path_status(&mcp_config_path_for_db(&absolute_db))?,
         config_path: resolved_config.map(|path| normalize_display_path(&path)),
-        repo_root: normalize_display_path(&config.root),
+        repo_root,
+        root_detection_source,
+        root_verified: root_mismatches.is_empty(),
+        root_mismatches,
         map_path: normalize_display_path(&config.map_path),
         nonsource_files_path: normalize_display_path(&config.nonsource_files_path),
         default_format: format!("{format:?}").to_ascii_lowercase(),
