@@ -12,10 +12,13 @@ use atlas_map::{
 };
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use projectatlas_core::outline::build_outline;
-use projectatlas_core::telemetry::TokenOverview;
+use projectatlas_core::telemetry::{
+    TokenOverview, TokenTrendReport, TokenTrendWindow as CoreTokenTrendWindow,
+};
 use projectatlas_core::toon::{
     encode_agent_payload, render_health, render_node_rows, render_nodes, render_outline,
     render_overview, render_symbol_relations, render_symbols, render_token_overview,
+    render_token_trends,
 };
 use projectatlas_core::{NodeKind, PurposeSource, normalize_native_path_display};
 use projectatlas_db::{AtlasStore, DbError, HealthResolution};
@@ -26,7 +29,7 @@ use projectatlas_service::{
 use runtime::{
     MAX_SYMBOL_FILE_BYTES, ScanRuntimePlan, SettingsReport, SymbolBuildOptions, WatchStatusReport,
     absolute_path, build_settings_report, build_symbols_for_index, byte_count_to_tokens,
-    default_mcp_project_root, defaultable_cli_project_root,
+    canonical_project_root, default_mcp_project_root, defaultable_cli_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     file_summary_usage_baseline, lint_database_if_present, normalized_folder_filter,
     open_atlas_store, ranked_file_nodes, read_indexed_file_content,
@@ -37,6 +40,7 @@ use runtime::{
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -112,6 +116,30 @@ enum TokenView {
     Agent,
     /// Human terminal dashboard with a compact savings diagram.
     Tui,
+}
+
+/// Token trend grouping window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum TokenTrendWindow {
+    /// Group token telemetry by day.
+    Day,
+    /// Group token telemetry by week.
+    Week,
+    /// Group token telemetry by month.
+    Month,
+    /// Group token telemetry by year.
+    Year,
+}
+
+impl From<TokenTrendWindow> for CoreTokenTrendWindow {
+    fn from(window: TokenTrendWindow) -> Self {
+        match window {
+            TokenTrendWindow::Day => Self::Day,
+            TokenTrendWindow::Week => Self::Week,
+            TokenTrendWindow::Month => Self::Month,
+            TokenTrendWindow::Year => Self::Year,
+        }
+    }
 }
 
 /// Manual `ProjectAtlas` ignore entry kind for CLI input.
@@ -299,6 +327,12 @@ enum Command {
     },
     /// Print local `ProjectAtlas` settings and cache/index locations.
     Settings,
+    /// Show, verify, or bind the project-local root.
+    Root {
+        /// Root subcommand to run.
+        #[command(subcommand)]
+        command: Option<RootCommand>,
+    },
     /// Print the effective `ProjectAtlas` configuration.
     Config {
         /// Print the normalized configuration used by scan, map, lint, and watch.
@@ -365,6 +399,9 @@ enum Command {
         /// Presentation mode for the token report.
         #[arg(long, value_enum, default_value_t = TokenView::Agent)]
         view: TokenView,
+        /// Optional trend grouping window.
+        #[arg(long, value_enum)]
+        trend: Option<TokenTrendWindow>,
     },
     /// Check repository-intelligence parity readiness.
     Parity {
@@ -421,6 +458,20 @@ enum Command {
         #[command(subcommand)]
         command: PurposeCommand,
     },
+}
+
+/// Project root diagnostics and binding subcommands.
+#[derive(Debug, Subcommand)]
+enum RootCommand {
+    /// Bind a repository root and regenerate project-local MCP configs.
+    Set {
+        /// Repository root to bind.
+        path: PathBuf,
+    },
+    /// Show the root, DB, config, and runtime identity `ProjectAtlas` will use.
+    Show,
+    /// Verify DB/config/root identity agree.
+    Verify,
 }
 
 /// Manual ignore management subcommands.
@@ -890,6 +941,25 @@ fn run() -> Result<(), CliError> {
             let toon = render_settings_report(&report);
             print_output(cli.format, &toon, &report)?;
         }
+        Command::Root { command } => match command {
+            Some(RootCommand::Set { path }) => {
+                let root = canonical_project_root(path)?;
+                let report = bind_project_root(&root)?;
+                print_output(cli.format, &render_root_report(&report), &report)?;
+            }
+            None | Some(RootCommand::Show) => {
+                let report = build_root_report(&cli.db, cli.config.as_deref())?;
+                print_output(cli.format, &render_root_report(&report), &report)?;
+            }
+            Some(RootCommand::Verify) => {
+                let report = build_root_report(&cli.db, cli.config.as_deref())?;
+                let verified = report.verified;
+                print_output(cli.format, &render_root_report(&report), &report)?;
+                if !verified {
+                    std::process::exit(1);
+                }
+            }
+        },
         Command::Config { print: _ } => {
             let config = load_atlas_config(cli.config.as_deref())?;
             let report = effective_config_report(&config);
@@ -1046,15 +1116,31 @@ fn run() -> Result<(), CliError> {
                 std::process::exit(exit_code);
             }
         }
-        Command::Token { session, view } => {
+        Command::Token {
+            session,
+            view,
+            trend,
+        } => {
             let store = open_atlas_store(&cli.db)?;
-            let overview = store.token_overview(session.as_deref())?;
-            match view {
-                TokenView::Agent => {
-                    print_output(cli.format, &render_token_overview(&overview), &overview)?;
+            if let Some(window) = trend {
+                let report = store.token_trends(session.as_deref(), (*window).into())?;
+                match view {
+                    TokenView::Agent => {
+                        print_output(cli.format, &render_token_trends(&report), &report)?;
+                    }
+                    TokenView::Tui => {
+                        write_stdout(&render_token_trend_dashboard(&report))?;
+                    }
                 }
-                TokenView::Tui => {
-                    write_stdout(&render_token_dashboard(&overview, session.as_deref()))?;
+            } else {
+                let overview = store.token_overview(session.as_deref())?;
+                match view {
+                    TokenView::Agent => {
+                        print_output(cli.format, &render_token_overview(&overview), &overview)?;
+                    }
+                    TokenView::Tui => {
+                        write_stdout(&render_token_dashboard(&overview, session.as_deref()))?;
+                    }
                 }
             }
         }
@@ -1261,6 +1347,9 @@ fn build_runtime_info() -> RuntimeInfoReport {
         project: "ProjectAtlas".to_string(),
         major_version: PROJECTATLAS_MAJOR_VERSION,
         version: env!("CARGO_PKG_VERSION").to_string(),
+        executable: std::env::current_exe()
+            .ok()
+            .map(|path| normalize_native_path_display(&path)),
         repository: env!("CARGO_PKG_REPOSITORY").to_string(),
         capabilities: vec![
             "cli".to_string(),
@@ -1284,6 +1373,94 @@ fn build_runtime_info() -> RuntimeInfoReport {
 /// Render runtime information as compact TOON.
 fn render_runtime_info(report: &RuntimeInfoReport) -> String {
     encode_agent_payload(&json!({ "runtime": report }))
+}
+
+/// Bind a project root without creating any machine-global root state.
+fn bind_project_root(root: &Path) -> Result<RootReport, CliError> {
+    if !root.is_dir() {
+        return Err(CliError::InvalidInput(format!(
+            "project root {} is not a directory",
+            root.display()
+        )));
+    }
+    init_project(root, false)?;
+    let atlas_dir = root.join(".projectatlas");
+    let db_path = atlas_dir.join("projectatlas.db");
+    let config_path = atlas_dir.join("config.toml");
+    {
+        let store = open_atlas_store(&db_path)?;
+        store.set_project_root(root)?;
+    }
+    write_mcp_config_file(
+        &atlas_dir.join("projectatlas.mcp.json"),
+        HarnessConfig::McpJson,
+        &db_path,
+        &config_path,
+    )?;
+    write_mcp_config_file(
+        &atlas_dir.join("projectatlas.claude.mcp.json"),
+        HarnessConfig::ClaudeCode,
+        &db_path,
+        &config_path,
+    )?;
+    write_mcp_config_file(
+        &atlas_dir.join("projectatlas.opencode.json"),
+        HarnessConfig::OpenCode,
+        &db_path,
+        &config_path,
+    )?;
+    build_root_report(&db_path, Some(&config_path))
+}
+
+/// Write one generated MCP config document as pretty JSON.
+fn write_mcp_config_file(
+    path: &Path,
+    harness: HarnessConfig,
+    db_path: &Path,
+    config_path: &Path,
+) -> Result<(), CliError> {
+    let value =
+        build_harness_mcp_config_report(harness, "projectatlas", db_path, Some(config_path))?;
+    let text = format!("{}\n", serde_json::to_string_pretty(&value)?);
+    fs::write(path, text).map_err(|source| CliError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Build a project-local root identity report.
+fn build_root_report(db: &Path, config_path: Option<&Path>) -> Result<RootReport, CliError> {
+    let settings = build_settings_report(db, config_path, OutputFormat::Toon)?;
+    let db_project_root = settings
+        .index
+        .as_ref()
+        .and_then(|index| index.project_root.clone());
+    let atlas_dir = Path::new(&settings.db.path)
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let runtime = build_runtime_info();
+    Ok(RootReport {
+        root: settings.repo_root.clone(),
+        detection_source: settings.root_detection_source.clone(),
+        db_path: settings.db.path.clone(),
+        config_path: settings.config_path.clone(),
+        config_project_root: settings
+            .config_path
+            .as_ref()
+            .map(|_| settings.repo_root.clone()),
+        db_project_root,
+        mcp_config_path: settings.mcp_config.path.clone(),
+        claude_mcp_config_path: normalize_native_path_display(
+            atlas_dir.join("projectatlas.claude.mcp.json"),
+        ),
+        opencode_config_path: normalize_native_path_display(
+            atlas_dir.join("projectatlas.opencode.json"),
+        ),
+        runtime_executable: runtime.executable,
+        runtime_version: runtime.version,
+        verified: settings.root_verified,
+        mismatches: settings.root_mismatches,
+    })
 }
 
 /// Return whether an environment variable is set to a truthy value.
@@ -1491,6 +1668,8 @@ struct RuntimeInfoReport {
     major_version: u8,
     /// Cargo package version.
     version: String,
+    /// Exact executable path for this runtime process, when available.
+    executable: Option<String>,
     /// Repository URL embedded at build time.
     repository: String,
     /// Runtime capabilities available in this binary.
@@ -1501,6 +1680,37 @@ struct RuntimeInfoReport {
     output_formats: Vec<String>,
     /// Required MCP tool names compiled into the runtime.
     mcp_tools: Vec<String>,
+}
+
+/// Project-local root identity report.
+#[derive(Debug, Serialize)]
+struct RootReport {
+    /// Canonical project root `ProjectAtlas` will use.
+    root: String,
+    /// Detection source for the selected root.
+    detection_source: String,
+    /// Durable `SQLite` database path.
+    db_path: String,
+    /// Config path used for project policy.
+    config_path: Option<String>,
+    /// Root stored in config, when config exists.
+    config_project_root: Option<String>,
+    /// Root stored in the DB metadata, when the DB exists.
+    db_project_root: Option<String>,
+    /// Generated generic MCP config path.
+    mcp_config_path: String,
+    /// Generated Claude Code MCP config path.
+    claude_mcp_config_path: String,
+    /// Generated `OpenCode` MCP config path.
+    opencode_config_path: String,
+    /// Current runtime executable path, when available.
+    runtime_executable: Option<String>,
+    /// Current runtime version.
+    runtime_version: String,
+    /// Whether config and DB roots agree with the selected root.
+    verified: bool,
+    /// Root mismatches that must be fixed before trusting the binding.
+    mismatches: Vec<String>,
 }
 
 /// Render a search report as compact TOON.
@@ -1523,101 +1733,219 @@ fn render_settings_report(report: &SettingsReport) -> String {
     encode_agent_payload(&json!({ "settings": report }))
 }
 
+/// Render root diagnostics as compact TOON.
+fn render_root_report(report: &RootReport) -> String {
+    encode_agent_payload(&json!({ "root": report }))
+}
+
 /// Render watcher status as compact TOON.
 fn render_watch_status(report: &WatchStatusReport) -> String {
     encode_agent_payload(&json!({ "watch_status": report }))
 }
 
 /// Render a human-facing token savings dashboard for terminal use.
-fn render_token_dashboard(overview: &TokenOverview, session: Option<&str>) -> String {
+pub(crate) fn render_token_dashboard(overview: &TokenOverview, session: Option<&str>) -> String {
+    render_token_dashboard_with_width(overview, session, dashboard_width())
+}
+
+/// Render a human-facing token savings dashboard at a selected width.
+fn render_token_dashboard_with_width(
+    overview: &TokenOverview,
+    session: Option<&str>,
+    width: usize,
+) -> String {
     let session_label = session.unwrap_or("all sessions");
     let rate_label = overview.savings_rate.map_or_else(
         || "unknown".to_string(),
         |value| format!("{:.1}%", value * 100.0),
     );
+    let width = width.clamp(72, 140);
+    let rule = "-".repeat(width.saturating_sub(2));
+    let bar_width = width.saturating_sub(44).clamp(12, 64);
     let saved_label = signed_count(overview.estimated_saved);
     let without = overview.estimated_without_projectatlas;
     let with = overview.estimated_with_projectatlas;
     let saved = overview.estimated_saved.max(0).unsigned_abs();
     let max_tokens = without.max(with).max(saved).max(1);
-    let without_bar = token_dashboard_bar(without, max_tokens);
-    let with_bar = token_dashboard_bar(with, max_tokens);
-    let saved_bar = token_dashboard_bar(saved, max_tokens);
-    let bucket_lines = token_dashboard_bucket_lines(overview);
-    format!(
-        "\
-+----------------------------------------------------------------+\n\
-| ProjectAtlas Token Delta                                       |\n\
-+----------------------------------------------------------------+\n\
-| Session        {session_label}\n\
-| Calls          {calls}\n\
-| Estimate       heuristic chars/bytes / 4, not model billing tokens\n\
-| Saved          {saved_label} tokens ({rate_label})\n\
-+----------------------------------------------------------------+\n\
-| Without PA     [{without_bar}] {without_label:>14} tokens\n\
-| With PA        [{with_bar}] {with_label:>14} tokens\n\
-| Saved          [{saved_bar}] {saved_label:>14} tokens\n\
-+----------------------------------------------------------------+\n\
-{bucket_lines}\
-| Funnel         overview > folders > files > summary > slice\n\
-| Avoided        wrong folders, wrong files, unnecessary full reads\n\
-+----------------------------------------------------------------+\n",
-        calls = overview.calls,
-        without_label = grouped_count(without),
-        with_label = grouped_count(with),
-    )
+    let mut output = String::new();
+    push_dashboard_fmt(&mut output, format_args!("+{rule}+\n"));
+    output.push_str("| ProjectAtlas Token Savings\n");
+    push_dashboard_fmt(&mut output, format_args!("+{rule}+\n"));
+    push_dashboard_fmt(&mut output, format_args!("| Session   {session_label}\n"));
+    push_dashboard_fmt(
+        &mut output,
+        format_args!("| Calls     {}\n", overview.calls),
+    );
+    output.push_str("| Estimate  heuristic chars/bytes / 4, not model billing tokens\n");
+    push_dashboard_fmt(
+        &mut output,
+        format_args!("| Saved     {saved_label} tokens ({rate_label})\n"),
+    );
+    push_dashboard_fmt(&mut output, format_args!("+{rule}+\n"));
+    output.push_str(&token_dashboard_metric_line(
+        "Without PA",
+        without,
+        max_tokens,
+        bar_width,
+    ));
+    output.push_str(&token_dashboard_metric_line(
+        "With PA", with, max_tokens, bar_width,
+    ));
+    output.push_str(&token_dashboard_metric_line(
+        "Saved", saved, max_tokens, bar_width,
+    ));
+    push_dashboard_fmt(&mut output, format_args!("+{rule}+\n"));
+    output.push_str(&token_dashboard_bucket_lines(overview, width));
+    output.push_str("| Funnel    overview > folders > files > summary > slice\n");
+    output.push_str("| Avoided   wrong folders, wrong files, unnecessary full reads\n");
+    push_dashboard_fmt(&mut output, format_args!("+{rule}+\n"));
+    output
+}
+
+/// Render a human-facing trend dashboard for terminal or MCP use.
+pub(crate) fn render_token_trend_dashboard(report: &TokenTrendReport) -> String {
+    let width = dashboard_width().clamp(72, 140);
+    let rule = "-".repeat(width.saturating_sub(2));
+    let bar_width = width.saturating_sub(48).clamp(12, 64);
+    let max_saved = report
+        .periods
+        .iter()
+        .map(|period| period.estimated_saved.max(0).unsigned_abs())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let mut output = String::new();
+    push_dashboard_fmt(&mut output, format_args!("+{rule}+\n"));
+    output.push_str("| ProjectAtlas Token Trends\n");
+    push_dashboard_fmt(&mut output, format_args!("+{rule}+\n"));
+    push_dashboard_fmt(
+        &mut output,
+        format_args!(
+            "| Session   {}\n",
+            report.session.as_deref().unwrap_or("all sessions")
+        ),
+    );
+    push_dashboard_fmt(&mut output, format_args!("| Window    {}\n", report.window));
+    output.push_str("| Estimate  heuristic chars/bytes / 4, not model billing tokens\n");
+    push_dashboard_fmt(&mut output, format_args!("+{rule}+\n"));
+    if report.periods.is_empty() {
+        output.push_str("| No token telemetry rows for this filter\n");
+    }
+    for period in &report.periods {
+        let saved = period.estimated_saved.max(0).unsigned_abs();
+        let bar = token_dashboard_bar(saved, max_saved, bar_width);
+        let rate = period.savings_rate.map_or_else(
+            || "unknown".to_string(),
+            |value| format!("{:.1}%", value * 100.0),
+        );
+        push_dashboard_fmt(
+            &mut output,
+            format_args!(
+                "| {period:<10} [{bar}] {saved_tokens:>12} saved ({rate}), {calls} calls\n",
+                period = period.period.as_str(),
+                saved_tokens = signed_count(period.estimated_saved),
+                calls = period.calls,
+            ),
+        );
+    }
+    push_dashboard_fmt(&mut output, format_args!("+{rule}+\n"));
+    output
+}
+
+/// Append formatted dashboard text to a `String`.
+fn push_dashboard_fmt(output: &mut String, args: std::fmt::Arguments<'_>) {
+    if std::fmt::write(output, args).is_err() {
+        unreachable!("writing to a String cannot fail");
+    }
 }
 
 /// Render compact token bucket rows for the human dashboard.
-fn token_dashboard_bucket_lines(overview: &TokenOverview) -> String {
+fn token_dashboard_bucket_lines(overview: &TokenOverview, width: usize) -> String {
     if overview.buckets.is_empty() {
         return String::new();
     }
     let mut lines = String::from("| Buckets        kind / accuracy / confidence / saved tokens\n");
     for bucket in &overview.buckets {
-        lines.push_str("| - ");
-        lines.push_str(&dashboard_fit(&format!(
-            "{} / {} / {} / {}",
+        let row = format!(
+            "{} / {} / {} / {} saved tokens / {} calls",
             bucket.token_savings_bucket,
             bucket.accuracy,
             bucket.confidence,
-            signed_count(bucket.estimated_saved)
-        )));
-        lines.push('\n');
+            signed_count(bucket.estimated_saved),
+            bucket.calls
+        );
+        push_wrapped_dashboard_line(&mut lines, "| - ", "|   ", &row, width);
     }
-    lines.push_str("+----------------------------------------------------------------+\n");
     lines
 }
 
-/// Fit one dashboard row to the fixed-width ASCII frame.
-fn dashboard_fit(value: &str) -> String {
-    const WIDTH: usize = 60;
-    if value.chars().count() <= WIDTH {
-        return value.to_string();
-    }
-    let mut fitted = value
-        .chars()
-        .take(WIDTH.saturating_sub(3))
-        .collect::<String>();
-    fitted.push_str("...");
-    fitted
+/// Render one token comparison row.
+fn token_dashboard_metric_line(
+    label: &str,
+    value: usize,
+    max_tokens: usize,
+    bar_width: usize,
+) -> String {
+    format!(
+        "| {label:<10} [{bar}] {tokens:>14} tokens\n",
+        bar = token_dashboard_bar(value, max_tokens, bar_width),
+        tokens = grouped_count(value),
+    )
 }
 
-/// Render one fixed-width token comparison bar.
-fn token_dashboard_bar(value: usize, max_tokens: usize) -> String {
-    const BAR_WIDTH: usize = 36;
+/// Render one token comparison bar.
+fn token_dashboard_bar(value: usize, max_tokens: usize, bar_width: usize) -> String {
     let filled = if value == 0 {
         0
     } else {
-        ((value as f64 / max_tokens as f64) * BAR_WIDTH as f64)
+        ((value as f64 / max_tokens as f64) * bar_width as f64)
             .round()
-            .clamp(1.0, BAR_WIDTH as f64) as usize
+            .clamp(1.0, bar_width as f64) as usize
     };
     format!(
         "{}{}",
         "#".repeat(filled),
-        ".".repeat(BAR_WIDTH.saturating_sub(filled))
+        ".".repeat(bar_width.saturating_sub(filled))
     )
+}
+
+/// Append a wrapped dashboard row without clipping values.
+fn push_wrapped_dashboard_line(
+    output: &mut String,
+    first_prefix: &str,
+    continuation_prefix: &str,
+    text: &str,
+    width: usize,
+) {
+    let limit = width.saturating_sub(first_prefix.len()).max(24);
+    let mut prefix = first_prefix;
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.len() + 1 + word.len() > limit {
+            output.push_str(prefix);
+            output.push_str(&line);
+            output.push('\n');
+            prefix = continuation_prefix;
+            line.clear();
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        output.push_str(prefix);
+        output.push_str(&line);
+        output.push('\n');
+    }
+}
+
+/// Return the best available terminal width.
+fn dashboard_width() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(100)
 }
 
 /// Format an unsigned count with thousands separators.
@@ -2337,16 +2665,17 @@ mod tests {
             Some("session-a"),
         );
 
-        assert!(dashboard.contains("ProjectAtlas Token Delta"));
-        assert!(dashboard.contains("| Session        session-a"));
+        assert!(dashboard.contains("ProjectAtlas Token Savings"));
+        assert!(dashboard.contains("| Session   session-a"));
         assert!(dashboard.contains("heuristic chars/bytes / 4"));
         assert!(dashboard.contains("not model billing tokens"));
-        assert!(dashboard.contains("| Saved          9,000 tokens (75.0%)"));
-        assert!(dashboard.contains("| Without PA     [####################################]"));
-        assert!(dashboard.contains("| With PA        [#########...........................]"));
-        assert!(dashboard.contains("| Saved          [###########################.........]"));
+        assert!(dashboard.contains("| Saved     9,000 tokens (75.0%)"));
+        assert!(dashboard.contains("| Without PA ["));
+        assert!(dashboard.contains("| With PA    ["));
+        assert!(dashboard.contains("| Saved      ["));
         assert!(dashboard.contains("| Buckets        kind / accuracy / confidence / saved tokens"));
         assert!(dashboard.contains("navigation_avoidance / heuristic_estimate / inferred"));
+        assert!(dashboard.contains("saved tokens / 3 calls"));
         assert!(dashboard.contains("wrong folders, wrong files"));
         assert!(dashboard.contains("overview > folders > files > summary > slice"));
         assert!(dashboard.is_ascii());

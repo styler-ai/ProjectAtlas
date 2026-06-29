@@ -3,7 +3,7 @@
 use crate::health::{HealthFinding, Severity};
 use crate::outline::FileOutline;
 use crate::symbols::{CodeSymbol, SymbolRelation};
-use crate::telemetry::TokenOverview;
+use crate::telemetry::{TokenOverview, TokenTrendReport};
 use crate::{IndexedNode, Overview};
 use serde::Serialize;
 use serde_json::json;
@@ -124,6 +124,56 @@ pub fn render_token_overview(overview: &TokenOverview) -> String {
                 "savings_rate": savings_rate,
             },
             "buckets": buckets,
+        }
+    }))
+}
+
+/// Render token savings trends as standard TOON.
+#[must_use]
+pub fn render_token_trends(report: &TokenTrendReport) -> String {
+    let periods = report
+        .periods
+        .iter()
+        .map(|period| {
+            let buckets = period
+                .buckets
+                .iter()
+                .map(|bucket| {
+                    json!({
+                        "token_savings_bucket": bucket.token_savings_bucket,
+                        "provider": bucket.provider,
+                        "model": bucket.model,
+                        "tokenizer_backend": bucket.tokenizer_backend,
+                        "accuracy": bucket.accuracy,
+                        "baseline_kind": bucket.baseline_kind,
+                        "confidence": bucket.confidence,
+                        "calls": bucket.calls,
+                        "baseline_tokens": bucket.estimated_without_projectatlas,
+                        "emitted_tokens": bucket.estimated_with_projectatlas,
+                        "saved_tokens": bucket.estimated_saved,
+                        "savings_rate": percentage_label(bucket.savings_rate),
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "period": period.period,
+                "calls": period.calls,
+                "baseline_tokens": period.estimated_without_projectatlas,
+                "emitted_tokens": period.estimated_with_projectatlas,
+                "saved_tokens": period.estimated_saved,
+                "savings_rate": percentage_label(period.savings_rate),
+                "buckets": buckets,
+            })
+        })
+        .collect::<Vec<_>>();
+    encode_agent_payload(&json!({
+        "token_trends": {
+            "estimate_kind": report.estimate_kind,
+            "estimator": report.estimator,
+            "estimate_scope": report.estimate_scope,
+            "session": report.session.as_deref().unwrap_or("all sessions"),
+            "window": report.window,
+            "periods": periods,
         }
     }))
 }
