@@ -574,9 +574,11 @@ Required plugin contents for 3.0:
 
 - ProjectAtlas skill/instructions for Codex, OpenCode, Claude Code, and generic
   MCP-aware harnesses
-- `.mcp.json` that starts the native ProjectAtlas MCP server for compatible hosts
+- installer-generated project-local MCP configs that start the native ProjectAtlas
+  MCP server through absolute runtime paths on Windows, Linux, and macOS
 - Claude Code plugin metadata under `.claude-plugin/plugin.json`
-- OpenCode `opencode.json` MCP config template
+- disabled OpenCode `opencode.json` MCP config template with absolute-path
+  placeholders
 - `projectatlas mcp-config` support for generated per-project MCP configs with
   absolute executable and DB/config paths. Codex/OpenCode outputs include a
   `cwd` project-root hint where supported; Claude Code output avoids relying on

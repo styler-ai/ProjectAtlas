@@ -1,9 +1,9 @@
 version: 1
-generated_at: unix:1782715134
-file_hash: "b4e4a9aad88bce6245b10e432cb5a9ed202fffe36def1959593e9f5ddab63260"
+generated_at: unix:1782718500
+file_hash: "19adf1e8f7533ff5e0a386adc36ea57fb35a95afa88a3cd81e43b1b99e68fda3"
 folder_hash: "b88b72a9bca4a994c317ad6861ab4182cebbd93179a6a18c5ce6d184a8264407"
 root: .
-overview: tracked_source_files=97 tracked_nonsource_files=37 tracked_files_total=134 tracked_folders=59 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
+overview: tracked_source_files=96 tracked_nonsource_files=37 tracked_files_total=133 tracked_folders=59 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
 source_extensions[]:
   - .astro
   - .bash
@@ -198,7 +198,7 @@ folders[59]{path,summary,source}:
   skills/claude,Claude guidance for ProjectAtlas usage.,database
   skills/codex,Codex guidance for ProjectAtlas usage.,database
   templates,Reusable agent templates and snippets.,database
-files[105]{path,summary,source}:
+files[104]{path,summary,source}:
   .agents/plugins/marketplace.json,Codex plugin marketplace catalog for ProjectAtlas,database
   .gitattributes,Line-ending policy for ProjectAtlas repository fixtures,nonsource
   .githooks/commit-msg,Git hook to enforce issue references in commits,nonsource
@@ -296,8 +296,7 @@ files[105]{path,summary,source}:
   fixtures/languages/zig/runner.zig,Exercise Zig type and function summary extraction.,database
   plugins/projectatlas/.claude-plugin/plugin.json,Claude Code plugin manifest declaring ProjectAtlas metadata for Claude Code installation.,database
   plugins/projectatlas/.codex-plugin/plugin.json,ProjectAtlas Codex plugin manifest,database
-  plugins/projectatlas/.mcp.json,Fallback MCP server configuration for the ProjectAtlas Codex plugin.,database
-  plugins/projectatlas/opencode/opencode.json,OpenCode config template registering ProjectAtlas as a local MCP server.,database
+  plugins/projectatlas/opencode/opencode.json,Disabled OpenCode MCP config template with absolute-path placeholders,database
   plugins/projectatlas/scripts/install-runtime.ps1,Install or update the ProjectAtlas plugin runtime and Windows MCP configs.,database
   plugins/projectatlas/scripts/install-runtime.sh,Install or update the ProjectAtlas plugin runtime and POSIX MCP configs.,database
   plugins/projectatlas/skills/projectatlas/SKILL.md,ProjectAtlas installable Codex skill,database

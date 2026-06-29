@@ -64,7 +64,6 @@ messages, not LSP-style `Content-Length` framed messages. Tool result text is TO
 This skill is part of the ProjectAtlas plugin on purpose. Installing the plugin should give the agent:
 
 - this skill as the workflow and decision manual,
-- `plugins/projectatlas/.mcp.json` as a guarded fallback MCP server registration,
 - native runtime installer scripts under `plugins/projectatlas/scripts/`,
 - `projectatlas mcp-config` plus generated `.projectatlas/projectatlas.mcp.json`, `.projectatlas/projectatlas.claude.mcp.json`, and `.projectatlas/projectatlas.opencode.json` for absolute MCP paths,
 - `projectatlas mcp` as the executable MCP server,
@@ -92,7 +91,7 @@ This skill is part of the ProjectAtlas plugin on purpose. Installing the plugin 
    - Claude Code: `.projectatlas/projectatlas.claude.mcp.json`
    - OpenCode: `.projectatlas/projectatlas.opencode.json`
 
-   These generated files contain absolute runtime, DB, and config paths. Codex/OpenCode configs include a `cwd` project-root hint where supported; Claude Code config does not rely on `cwd` because the absolute DB/config arguments bind the project root. `mcp-config` discovers `.projectatlas/config.toml` and flat `projectatlas.toml` from the selected DB/project root. The MCP server also resolves path-less root-sensitive tools from config, indexed DB metadata, or the default `.projectatlas/projectatlas.db` parent, so hosts that ignore `cwd` still use the intended project. The fallback plugin `.mcp.json` starts `projectatlas --require-version <plugin-version> --db .projectatlas/projectatlas.db mcp` from PATH and fails closed if PATH resolves to a stale runtime.
+   These generated files contain absolute runtime, DB, and config paths. Codex/OpenCode configs include a `cwd` project-root hint where supported; Claude Code config does not rely on `cwd` because the absolute DB/config arguments bind the project root. `mcp-config` discovers `.projectatlas/config.toml` and flat `projectatlas.toml` from the selected DB/project root. The MCP server also resolves path-less root-sensitive tools from config, indexed DB metadata, or the default `.projectatlas/projectatlas.db` parent, so hosts that ignore `cwd` still use the intended project. The plugin does not ship a PATH-based fallback `.mcp.json`; generated project-local configs are the supported registration path on Windows, Linux, and macOS.
    Installer tests or release validation may pass an already-built runtime with PowerShell `-RuntimePath <path>` or POSIX `PROJECTATLAS_RUNTIME_PATH=<path>`. The installer must still verify that runtime with `projectatlas --format json runtime-info` before writing configs.
    MCP root-changing arguments such as `atlas_scan.path` and `atlas_watch_once.path` must resolve to this same project root. If you need a different repository, start or install a separate project-local ProjectAtlas MCP server for that repository.
 6. Initialize the target repo with `projectatlas init`.

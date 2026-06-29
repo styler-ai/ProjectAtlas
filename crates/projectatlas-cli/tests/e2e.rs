@@ -84,12 +84,10 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             .join("scripts")
             .join("install-runtime.sh"),
     )?;
-    let fallback_mcp = fs::read_to_string(
-        workspace_root
-            .join("plugins")
-            .join("projectatlas")
-            .join(".mcp.json"),
-    )?;
+    let codex_fallback_mcp = workspace_root
+        .join("plugins")
+        .join("projectatlas")
+        .join(".mcp.json");
     let claude_manifest = fs::read_to_string(
         workspace_root
             .join("plugins")
@@ -156,17 +154,12 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         )
         .into());
     }
-    let fallback_json: Value = serde_json::from_str(&fallback_mcp)?;
-    require_json_string(
-        &fallback_json,
-        &["mcpServers", "projectatlas", "args", "0"],
-        "--require-version",
-    )?;
-    require_json_string(
-        &fallback_json,
-        &["mcpServers", "projectatlas", "args", "1"],
-        env!("CARGO_PKG_VERSION"),
-    )?;
+    if codex_fallback_mcp.exists() {
+        return Err(io::Error::other(
+            "plugin must not ship a Codex fallback .mcp.json; generated project-local MCP configs use absolute runtime paths across supported operating systems",
+        )
+        .into());
+    }
     let claude_manifest_json: Value = serde_json::from_str(&claude_manifest)?;
     require_json_string(&claude_manifest_json, &["name"], "projectatlas")?;
     require_json_string(
@@ -181,6 +174,12 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "https://opencode.ai/config.json",
     )?;
     require_json_string(&opencode_json, &["mcp", "projectatlas", "type"], "local")?;
+    require_json_bool(&opencode_json, &["mcp", "projectatlas", "enabled"], false)?;
+    require_json_string(
+        &opencode_json,
+        &["mcp", "projectatlas", "command", "0"],
+        "/absolute/path/to/projectatlas",
+    )?;
     require_json_string(
         &opencode_json,
         &["mcp", "projectatlas", "command", "1"],
@@ -190,6 +189,16 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         &opencode_json,
         &["mcp", "projectatlas", "command", "2"],
         env!("CARGO_PKG_VERSION"),
+    )?;
+    require_json_string(
+        &opencode_json,
+        &["mcp", "projectatlas", "command", "4"],
+        "/absolute/path/to/project/.projectatlas/projectatlas.db",
+    )?;
+    require_json_string(
+        &opencode_json,
+        &["mcp", "projectatlas", "cwd"],
+        "/absolute/path/to/project",
     )?;
     Ok(())
 }
