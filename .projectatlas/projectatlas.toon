@@ -1,9 +1,9 @@
 version: 1
-generated_at: unix:1782711088
-file_hash: "e09dd4ce7388ddf15e41afb30f15f6a4a9dd57ee257fe3aab31dda7dc6160d22"
-folder_hash: "f5ec84a38eaa8b9ee18c1d22563973db7217f346e2815ff1fa6abb9273e95036"
+generated_at: unix:1782715134
+file_hash: "b4e4a9aad88bce6245b10e432cb5a9ed202fffe36def1959593e9f5ddab63260"
+folder_hash: "b88b72a9bca4a994c317ad6861ab4182cebbd93179a6a18c5ce6d184a8264407"
 root: .
-overview: tracked_source_files=96 tracked_nonsource_files=37 tracked_files_total=133 tracked_folders=58 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
+overview: tracked_source_files=97 tracked_nonsource_files=37 tracked_files_total=134 tracked_folders=59 source_extensions=122 exclude_dir_names=9 exclude_path_prefixes=0
 source_extensions[]:
   - .astro
   - .bash
@@ -138,13 +138,14 @@ exclude_dir_names[]:
   - node_modules
   - target
 exclude_path_prefixes[]:
-folders[58]{path,summary,source}:
+folders[59]{path,summary,source}:
   .,ProjectAtlas repository root.,database
   .agents,Agent marketplace metadata for ProjectAtlas.,database
   .agents/plugins,Codex plugin marketplace catalog for ProjectAtlas.,database
   .githooks,Git hook scripts for ProjectAtlas commits.,database
   .github,ProjectAtlas GitHub metadata and workflows.,database
   .github/ISSUE_TEMPLATE,GitHub issue forms for public bug reports and improvement requests.,database
+  .github/scripts,ProjectAtlas GitHub automation helper scripts.,database
   .github/workflows,ProjectAtlas CI and release workflows.,database
   crates,Rust workspace crates for ProjectAtlas 3.,database
   crates/projectatlas-cli,Command-line adapter for ProjectAtlas 3.,database
@@ -197,7 +198,7 @@ folders[58]{path,summary,source}:
   skills/claude,Claude guidance for ProjectAtlas usage.,database
   skills/codex,Codex guidance for ProjectAtlas usage.,database
   templates,Reusable agent templates and snippets.,database
-files[104]{path,summary,source}:
+files[105]{path,summary,source}:
   .agents/plugins/marketplace.json,Codex plugin marketplace catalog for ProjectAtlas,database
   .gitattributes,Line-ending policy for ProjectAtlas repository fixtures,nonsource
   .githooks/commit-msg,Git hook to enforce issue references in commits,nonsource
@@ -206,6 +207,7 @@ files[104]{path,summary,source}:
   .github/ISSUE_TEMPLATE/config.yml,GitHub issue template chooser configuration for ProjectAtlas.,database
   .github/ISSUE_TEMPLATE/improvement_request.yml,GitHub issue form for public ProjectAtlas improvement requests.,database
   .github/pull_request_template.md,Pull request checklist for ProjectAtlas,database
+  .github/scripts/release-notes.py,Generate ProjectAtlas release notes from merged PRs and linked issues.,database
   .github/workflows/03-auto-release.yml,ProjectAtlas auto release workflow,database
   .github/workflows/04-docs.yml,ProjectAtlas docs site workflow,database
   .github/workflows/ci.yml,ProjectAtlas CI workflow,database
@@ -311,6 +313,7 @@ folder_tree[]:
   - .githooks/ - Git hook scripts for ProjectAtlas commits.
   - .github/ - ProjectAtlas GitHub metadata and workflows.
   - "  ISSUE_TEMPLATE/ - GitHub issue forms for public bug reports and improvement requests."
+  - "  scripts/ - ProjectAtlas GitHub automation helper scripts."
   - "  workflows/ - ProjectAtlas CI and release workflows."
   - crates/ - Rust workspace crates for ProjectAtlas 3.
   - "  projectatlas-cli/ - Command-line adapter for ProjectAtlas 3."
