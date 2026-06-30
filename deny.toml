@@ -2,6 +2,7 @@
 targets = [
   { triple = "x86_64-pc-windows-msvc" },
   { triple = "x86_64-unknown-linux-gnu" },
+  { triple = "x86_64-apple-darwin" },
   { triple = "aarch64-apple-darwin" },
 ]
 
@@ -32,6 +33,10 @@ allow = [
 multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
+# Expected transitive duplicates as of 2026-06-30:
+# - hashbrown/hashlink split between rusqlite and yaml-rust2 dependency stacks.
+# - windows-sys split between notify and CLI/dev tooling stacks.
+# Keep these as warnings until normal upstream updates collapse them.
 
 [sources]
 unknown-registry = "deny"

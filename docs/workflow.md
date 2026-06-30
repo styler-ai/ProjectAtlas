@@ -70,6 +70,8 @@ cargo run -p projectatlas-cli -- lint --report-untracked --purpose-level strict
 - Update the Cargo workspace version in `Cargo.toml`.
 - Pushes to `main` create a GitHub release when the Cargo version is release-eligible.
 - The auto-release workflow generates GitHub release notes from merged PRs.
+- Release archives are published with a `SHA256SUMS` asset. Verify manually with `sha256sum -c SHA256SUMS` or `shasum -a 256 -c SHA256SUMS` from a directory containing the downloaded archives.
+- If a publish run fails after creating a tag or leaves a GitHub release with missing or stale assets, rerun the release workflow for the same version. The publish job recovers when the existing tag points at the current commit, creates the missing release when needed, and uploads release assets with replacement enabled for repair runs.
 
 ## CI behavior
 

@@ -293,6 +293,48 @@ update_codex_mcp_registry() {
   fi
 }
 
+download_release_file() {
+  url=$1
+  output=$2
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$output"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q "$url" -O "$output"
+  else
+    return 1
+  fi
+}
+
+archive_sha256() {
+  archive=$1
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$archive" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$archive" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+verify_release_checksum() {
+  archive=$1
+  asset=$2
+  checksums=$3
+  expected=$(awk -v asset="$asset" '$2 == asset || $2 == "./" asset { print tolower($1); exit }' "$checksums")
+  if [ -z "$expected" ]; then
+    printf '%s\n' "SHA256SUMS did not contain an entry for $asset" >&2
+    return 1
+  fi
+  actual=$(archive_sha256 "$archive") || {
+    printf '%s\n' "Could not calculate SHA-256 for $asset" >&2
+    return 1
+  }
+  if [ "$actual" != "$expected" ]; then
+    printf '%s\n' "Checksum mismatch for $asset: expected $expected, found $actual" >&2
+    return 1
+  fi
+}
+
 install_release_binary() {
   if [ -z "$projectatlas_version" ]; then
     return 1
@@ -317,17 +359,16 @@ install_release_binary() {
   url="$release_base_url/$projectatlas_version/$asset"
   tmp_dir=$(mktemp -d)
   archive="$tmp_dir/$asset"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$url" -o "$archive" || {
-      rm -rf "$tmp_dir"
-      return 1
-    }
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q "$url" -O "$archive" || {
-      rm -rf "$tmp_dir"
-      return 1
-    }
-  else
+  checksums="$tmp_dir/SHA256SUMS"
+  if ! download_release_file "$url" "$archive"; then
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+  if ! download_release_file "$release_base_url/$projectatlas_version/SHA256SUMS" "$checksums"; then
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+  if ! verify_release_checksum "$archive" "$asset" "$checksums"; then
     rm -rf "$tmp_dir"
     return 1
   fi

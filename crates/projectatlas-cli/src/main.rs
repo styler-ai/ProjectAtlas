@@ -4,6 +4,7 @@ mod atlas_map;
 mod mcp;
 mod runtime;
 mod structural;
+mod token_tui;
 
 use atlas_map::{
     IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report, init_gitignore,
@@ -13,7 +14,7 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
 use projectatlas_core::telemetry::{
-    TokenOverview, TokenTrendReport, TokenTrendWindow as CoreTokenTrendWindow,
+    TokenCalibrationOverview, TokenTrendWindow as CoreTokenTrendWindow,
 };
 use projectatlas_core::toon::{
     encode_agent_payload, render_node_rows, render_nodes, render_outline, render_overview,
@@ -47,6 +48,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+use token_tui::{render_token_dashboard, render_token_trend_dashboard};
 
 /// Default relative path for the `SQLite` index.
 const DEFAULT_DB_PATH: &str = ".projectatlas/projectatlas.db";
@@ -469,6 +471,9 @@ enum Command {
         /// Optional trend grouping window.
         #[arg(long, value_enum)]
         trend: Option<TokenTrendWindow>,
+        /// Optional local tokenizer calibration for indexed UTF-8 files.
+        #[arg(long, value_parser = ["o200k_base", "cl100k_base"])]
+        tokenizer: Option<String>,
     },
     /// Check repository-intelligence parity readiness.
     Parity {
@@ -1244,9 +1249,15 @@ fn run() -> Result<(), CliError> {
             session,
             view,
             trend,
+            tokenizer,
         } => {
             let store = open_atlas_store(&cli.db)?;
             if let Some(window) = trend {
+                if tokenizer.is_some() {
+                    return Err(CliError::InvalidInput(
+                        "--tokenizer is only supported for token overview reports".to_string(),
+                    ));
+                }
                 let report = store.token_trends(session.as_deref(), (*window).into())?;
                 match view {
                     TokenView::Agent => {
@@ -1257,7 +1268,10 @@ fn run() -> Result<(), CliError> {
                     }
                 }
             } else {
-                let overview = store.token_overview(session.as_deref())?;
+                let mut overview = store.token_overview(session.as_deref())?;
+                if let Some(tokenizer) = tokenizer.as_deref() {
+                    overview.set_calibration(build_token_calibration(&store, tokenizer)?);
+                }
                 match view {
                     TokenView::Agent => {
                         print_output(cli.format, &render_token_overview(&overview), &overview)?;
@@ -1954,6 +1968,45 @@ fn render_settings_report(report: &SettingsReport) -> String {
     encode_agent_payload(&json!({ "settings": report }))
 }
 
+/// Build an optional local tokenizer calibration over indexed UTF-8 files.
+fn build_token_calibration(
+    store: &AtlasStore,
+    tokenizer: &str,
+) -> Result<TokenCalibrationOverview, CliError> {
+    let encoding = tiktoken::get_encoding(tokenizer).ok_or_else(|| {
+        CliError::InvalidInput(format!(
+            "unsupported tokenizer {tokenizer:?}; use o200k_base or cl100k_base"
+        ))
+    })?;
+    let mut files = 0usize;
+    let mut bytes = 0usize;
+    let mut heuristic_tokens = 0usize;
+    let mut calibrated_tokens = 0usize;
+    store.visit_file_texts_for_search(None, false, |text| {
+        files = files.saturating_add(1);
+        bytes = bytes.saturating_add(text.byte_count);
+        heuristic_tokens = heuristic_tokens.saturating_add(byte_count_to_tokens(text.byte_count));
+        calibrated_tokens = calibrated_tokens.saturating_add(encoding.count(&text.content));
+        Ok(true)
+    })?;
+    Ok(TokenCalibrationOverview {
+        tokenizer: tokenizer.to_string(),
+        provider: "local_tiktoken".to_string(),
+        model: "tokenizer_calibration".to_string(),
+        tokenizer_backend: tokenizer.to_string(),
+        accuracy: "calibrated_local_tokenizer".to_string(),
+        files,
+        bytes,
+        heuristic_tokens,
+        calibrated_tokens,
+        heuristic_to_calibrated_ratio: if calibrated_tokens == 0 {
+            None
+        } else {
+            Some(heuristic_tokens as f64 / calibrated_tokens as f64)
+        },
+    })
+}
+
 /// Render root diagnostics as compact TOON.
 fn render_root_report(report: &RootReport) -> String {
     encode_agent_payload(&json!({ "root": report }))
@@ -1962,233 +2015,6 @@ fn render_root_report(report: &RootReport) -> String {
 /// Render watcher status as compact TOON.
 fn render_watch_status(report: &WatchStatusReport) -> String {
     encode_agent_payload(&json!({ "watch_status": report }))
-}
-
-/// Render a human-facing token savings dashboard for terminal use.
-pub(crate) fn render_token_dashboard(overview: &TokenOverview, session: Option<&str>) -> String {
-    render_token_dashboard_with_width(overview, session, dashboard_width())
-}
-
-/// Render a human-facing token savings dashboard at a selected width.
-fn render_token_dashboard_with_width(
-    overview: &TokenOverview,
-    session: Option<&str>,
-    width: usize,
-) -> String {
-    let session_label = session.unwrap_or("all sessions");
-    let rate_label = overview.savings_rate.map_or_else(
-        || "unknown".to_string(),
-        |value| format!("{:.1}%", value * 100.0),
-    );
-    let width = width.clamp(72, 140);
-    let rule = "-".repeat(width.saturating_sub(2));
-    let bar_width = width.saturating_sub(44).clamp(12, 64);
-    let saved_label = signed_count(overview.estimated_saved);
-    let without = overview.estimated_without_projectatlas;
-    let with = overview.estimated_with_projectatlas;
-    let saved = overview.estimated_saved.max(0).unsigned_abs();
-    let max_tokens = without.max(with).max(saved).max(1);
-    let mut output = String::new();
-    push_dashboard_fmt(&mut output, format_args!("+{rule}+\n"));
-    output.push_str("| ProjectAtlas Token Savings\n");
-    push_dashboard_fmt(&mut output, format_args!("+{rule}+\n"));
-    push_dashboard_fmt(&mut output, format_args!("| Session   {session_label}\n"));
-    push_dashboard_fmt(
-        &mut output,
-        format_args!("| Calls     {}\n", overview.calls),
-    );
-    output.push_str("| Estimate  heuristic chars/bytes / 4, not model billing tokens\n");
-    push_dashboard_fmt(
-        &mut output,
-        format_args!("| Saved     {saved_label} tokens ({rate_label})\n"),
-    );
-    push_dashboard_fmt(&mut output, format_args!("+{rule}+\n"));
-    output.push_str(&token_dashboard_metric_line(
-        "Without PA",
-        without,
-        max_tokens,
-        bar_width,
-    ));
-    output.push_str(&token_dashboard_metric_line(
-        "With PA", with, max_tokens, bar_width,
-    ));
-    output.push_str(&token_dashboard_metric_line(
-        "Saved", saved, max_tokens, bar_width,
-    ));
-    push_dashboard_fmt(&mut output, format_args!("+{rule}+\n"));
-    output.push_str(&token_dashboard_bucket_lines(overview, width));
-    output.push_str("| Funnel    overview > folders > files > summary > slice\n");
-    output.push_str("| Avoided   wrong folders, wrong files, unnecessary full reads\n");
-    push_dashboard_fmt(&mut output, format_args!("+{rule}+\n"));
-    output
-}
-
-/// Render a human-facing trend dashboard for terminal or MCP use.
-pub(crate) fn render_token_trend_dashboard(report: &TokenTrendReport) -> String {
-    let width = dashboard_width().clamp(72, 140);
-    let rule = "-".repeat(width.saturating_sub(2));
-    let bar_width = width.saturating_sub(48).clamp(12, 64);
-    let max_saved = report
-        .periods
-        .iter()
-        .map(|period| period.estimated_saved.max(0).unsigned_abs())
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    let mut output = String::new();
-    push_dashboard_fmt(&mut output, format_args!("+{rule}+\n"));
-    output.push_str("| ProjectAtlas Token Trends\n");
-    push_dashboard_fmt(&mut output, format_args!("+{rule}+\n"));
-    push_dashboard_fmt(
-        &mut output,
-        format_args!(
-            "| Session   {}\n",
-            report.session.as_deref().unwrap_or("all sessions")
-        ),
-    );
-    push_dashboard_fmt(&mut output, format_args!("| Window    {}\n", report.window));
-    output.push_str("| Estimate  heuristic chars/bytes / 4, not model billing tokens\n");
-    push_dashboard_fmt(&mut output, format_args!("+{rule}+\n"));
-    if report.periods.is_empty() {
-        output.push_str("| No token telemetry rows for this filter\n");
-    }
-    for period in &report.periods {
-        let saved = period.estimated_saved.max(0).unsigned_abs();
-        let bar = token_dashboard_bar(saved, max_saved, bar_width);
-        let rate = period.savings_rate.map_or_else(
-            || "unknown".to_string(),
-            |value| format!("{:.1}%", value * 100.0),
-        );
-        push_dashboard_fmt(
-            &mut output,
-            format_args!(
-                "| {period:<10} [{bar}] {saved_tokens:>12} saved ({rate}), {calls} calls\n",
-                period = period.period.as_str(),
-                saved_tokens = signed_count(period.estimated_saved),
-                calls = period.calls,
-            ),
-        );
-    }
-    push_dashboard_fmt(&mut output, format_args!("+{rule}+\n"));
-    output
-}
-
-/// Append formatted dashboard text to a `String`.
-fn push_dashboard_fmt(output: &mut String, args: std::fmt::Arguments<'_>) {
-    if std::fmt::write(output, args).is_err() {
-        unreachable!("writing to a String cannot fail");
-    }
-}
-
-/// Render compact token bucket rows for the human dashboard.
-fn token_dashboard_bucket_lines(overview: &TokenOverview, width: usize) -> String {
-    if overview.buckets.is_empty() {
-        return String::new();
-    }
-    let mut lines = String::from("| Buckets        kind / accuracy / confidence / saved tokens\n");
-    for bucket in &overview.buckets {
-        let row = format!(
-            "{} / {} / {} / {} saved tokens / {} calls",
-            bucket.token_savings_bucket,
-            bucket.accuracy,
-            bucket.confidence,
-            signed_count(bucket.estimated_saved),
-            bucket.calls
-        );
-        push_wrapped_dashboard_line(&mut lines, "| - ", "|   ", &row, width);
-    }
-    lines
-}
-
-/// Render one token comparison row.
-fn token_dashboard_metric_line(
-    label: &str,
-    value: usize,
-    max_tokens: usize,
-    bar_width: usize,
-) -> String {
-    format!(
-        "| {label:<10} [{bar}] {tokens:>14} tokens\n",
-        bar = token_dashboard_bar(value, max_tokens, bar_width),
-        tokens = grouped_count(value),
-    )
-}
-
-/// Render one token comparison bar.
-fn token_dashboard_bar(value: usize, max_tokens: usize, bar_width: usize) -> String {
-    let filled = if value == 0 {
-        0
-    } else {
-        ((value as f64 / max_tokens as f64) * bar_width as f64)
-            .round()
-            .clamp(1.0, bar_width as f64) as usize
-    };
-    format!(
-        "{}{}",
-        "#".repeat(filled),
-        ".".repeat(bar_width.saturating_sub(filled))
-    )
-}
-
-/// Append a wrapped dashboard row without clipping values.
-fn push_wrapped_dashboard_line(
-    output: &mut String,
-    first_prefix: &str,
-    continuation_prefix: &str,
-    text: &str,
-    width: usize,
-) {
-    let limit = width.saturating_sub(first_prefix.len()).max(24);
-    let mut prefix = first_prefix;
-    let mut line = String::new();
-    for word in text.split_whitespace() {
-        if !line.is_empty() && line.len() + 1 + word.len() > limit {
-            output.push_str(prefix);
-            output.push_str(&line);
-            output.push('\n');
-            prefix = continuation_prefix;
-            line.clear();
-        }
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        line.push_str(word);
-    }
-    if !line.is_empty() {
-        output.push_str(prefix);
-        output.push_str(&line);
-        output.push('\n');
-    }
-}
-
-/// Return the best available terminal width.
-fn dashboard_width() -> usize {
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(100)
-}
-
-/// Format an unsigned count with thousands separators.
-fn grouped_count(value: usize) -> String {
-    let raw = value.to_string();
-    let mut grouped = String::with_capacity(raw.len() + raw.len() / 3);
-    for (index, character) in raw.chars().enumerate() {
-        if index > 0 && (raw.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(character);
-    }
-    grouped
-}
-
-/// Format a signed count with thousands separators.
-fn signed_count(value: isize) -> String {
-    if value < 0 {
-        format!("-{}", grouped_count(value.unsigned_abs()))
-    } else {
-        grouped_count(usize::try_from(value).unwrap_or(usize::MAX))
-    }
 }
 
 /// Build the current repository-intelligence parity report.
@@ -2900,26 +2726,29 @@ mod tests {
     }
 
     #[test]
-    fn token_dashboard_is_human_readable_and_ascii() {
+    fn token_dashboard_is_human_readable_and_chart_backed() {
         let dashboard = render_token_dashboard(
             &TokenOverview::from_estimated_totals(3, 12_000, 3_000),
             Some("session-a"),
         );
 
-        assert!(dashboard.contains("ProjectAtlas Token Savings"));
-        assert!(dashboard.contains("| Session   session-a"));
-        assert!(dashboard.contains("heuristic chars/bytes / 4"));
-        assert!(dashboard.contains("not model billing tokens"));
-        assert!(dashboard.contains("| Saved     9,000 tokens (75.0%)"));
-        assert!(dashboard.contains("| Without PA ["));
-        assert!(dashboard.contains("| With PA    ["));
-        assert!(dashboard.contains("| Saved      ["));
-        assert!(dashboard.contains("| Buckets        kind / accuracy / confidence / saved tokens"));
-        assert!(dashboard.contains("navigation_avoidance / heuristic_estimate / inferred"));
-        assert!(dashboard.contains("saved tokens / 3 calls"));
-        assert!(dashboard.contains("wrong folders, wrong files"));
-        assert!(dashboard.contains("overview > folders > files > summary > slice"));
-        assert!(dashboard.is_ascii());
+        assert!(dashboard.contains("ProjectAtlas Token Dashboard"));
+        assert!(dashboard.contains("session-a"));
+        assert!(dashboard.contains("tokens avoided"));
+        assert!(dashboard.contains("measured saved"));
+        assert!(dashboard.contains("deduped modeled"));
+        assert!(dashboard.contains("Comparison"));
+        assert!(dashboard.contains("baseline"));
+        assert!(dashboard.contains("emitted"));
+        assert!(dashboard.contains("gross"));
+        assert!(dashboard.contains("avoided"));
+        assert!(dashboard.contains("Buckets"));
+        assert!(dashboard.contains("modeled_avoidance"));
+        assert!(dashboard.contains("navigation_avoidance"));
+        assert!(dashboard.contains("headline"));
+        assert!(dashboard.contains("deduped modeled"));
+        assert!(dashboard.contains("calibration"));
+        assert!(dashboard.contains("█") || dashboard.contains("▌") || dashboard.contains("▏"));
     }
 
     #[test]

@@ -7,7 +7,8 @@ use projectatlas_core::symbols::{
 };
 use projectatlas_core::telemetry::{
     TokenBucketOverview, TokenOverview, TokenTrendPeriod, TokenTrendReport, TokenTrendWindow,
-    UsageEvent,
+    UsageEvent, default_dedupe_scope, default_estimate_method, default_token_accuracy,
+    default_token_model, default_token_provider, default_token_trace, default_tokenizer_backend,
 };
 use projectatlas_core::{
     AGENT_REVIEWED_SOURCE_VALUES, HIGH_IMPACT_FILE_NAMES, HIGH_IMPACT_PATH_PREFIXES,
@@ -387,6 +388,12 @@ impl AtlasStore {
                 baseline_kind TEXT NOT NULL DEFAULT 'selected_candidates',
                 confidence TEXT NOT NULL DEFAULT 'inferred',
                 calculation_trace TEXT NOT NULL DEFAULT 'heuristic=ceil(chars_or_bytes/4)',
+                accounting_layer TEXT NOT NULL DEFAULT 'modeled_avoidance',
+                estimate_method TEXT NOT NULL DEFAULT 'heuristic_chars_or_bytes_div_ceil_4',
+                denominator_kind TEXT NOT NULL DEFAULT 'selected_candidates',
+                baseline_identity TEXT NOT NULL DEFAULT '',
+                baseline_fingerprint TEXT NOT NULL DEFAULT '',
+                dedupe_scope TEXT NOT NULL DEFAULT 'session',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -541,7 +548,48 @@ impl AtlasStore {
             "calculation_trace",
             "TEXT NOT NULL DEFAULT 'heuristic=ceil(chars_or_bytes/4)'",
         )?;
+        self.ensure_usage_event_column(
+            &columns,
+            "accounting_layer",
+            "TEXT NOT NULL DEFAULT 'modeled_avoidance'",
+        )?;
+        self.ensure_usage_event_column(
+            &columns,
+            "estimate_method",
+            "TEXT NOT NULL DEFAULT 'heuristic_chars_or_bytes_div_ceil_4'",
+        )?;
+        self.ensure_usage_event_column(
+            &columns,
+            "denominator_kind",
+            "TEXT NOT NULL DEFAULT 'selected_candidates'",
+        )?;
+        self.ensure_usage_event_column(&columns, "baseline_identity", "TEXT NOT NULL DEFAULT ''")?;
+        self.ensure_usage_event_column(
+            &columns,
+            "baseline_fingerprint",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        self.ensure_usage_event_column(
+            &columns,
+            "dedupe_scope",
+            "TEXT NOT NULL DEFAULT 'session'",
+        )?;
         self.ensure_usage_event_column(&columns, "created_at", "TEXT")?;
+        self.connection.execute(
+            "
+            UPDATE usage_events
+            SET accounting_layer = 'observed_delta',
+                denominator_kind = 'full_file',
+                dedupe_scope = 'event'
+            WHERE token_savings_bucket = 'full_file_compression'
+              AND (
+                accounting_layer != 'observed_delta'
+                OR denominator_kind != 'full_file'
+                OR dedupe_scope != 'event'
+              )
+            ",
+            [],
+        )?;
         self.connection.execute(
             "UPDATE usage_events SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL OR created_at = ''",
             [],
@@ -3283,9 +3331,15 @@ impl AtlasStore {
                 baseline_kind,
                 confidence,
                 calculation_trace,
+                accounting_layer,
+                estimate_method,
+                denominator_kind,
+                baseline_identity,
+                baseline_fingerprint,
+                dedupe_scope,
                 created_at
             )
-            VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, CURRENT_TIMESTAMP)
+            VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, CURRENT_TIMESTAMP)
             ",
             params![
                 event.session_id,
@@ -3302,7 +3356,13 @@ impl AtlasStore {
                 event.accuracy,
                 event.baseline_kind,
                 event.confidence,
-                event.calculation_trace
+                event.calculation_trace,
+                event.accounting_layer,
+                event.estimate_method,
+                event.denominator_kind,
+                event.baseline_identity,
+                event.baseline_fingerprint,
+                event.dedupe_scope
             ],
         )?;
         Ok(())
@@ -3319,7 +3379,9 @@ impl AtlasStore {
             SELECT session_id, command, path, query, estimated_tokens_without_projectatlas,
                    estimated_tokens_with_projectatlas, estimated_tokens_saved,
                    token_savings_bucket, provider, model, tokenizer_backend,
-                   accuracy, baseline_kind, confidence, calculation_trace
+                   accuracy, baseline_kind, confidence, calculation_trace,
+                   accounting_layer, estimate_method, denominator_kind,
+                   baseline_identity, baseline_fingerprint, dedupe_scope
             FROM usage_events
             WHERE session_id = ?1
             ORDER BY id
@@ -3329,7 +3391,9 @@ impl AtlasStore {
             SELECT session_id, command, path, query, estimated_tokens_without_projectatlas,
                    estimated_tokens_with_projectatlas, estimated_tokens_saved,
                    token_savings_bucket, provider, model, tokenizer_backend,
-                   accuracy, baseline_kind, confidence, calculation_trace
+                   accuracy, baseline_kind, confidence, calculation_trace,
+                   accounting_layer, estimate_method, denominator_kind,
+                   baseline_identity, baseline_fingerprint, dedupe_scope
             FROM usage_events
             ORDER BY id
             "
@@ -3352,6 +3416,80 @@ impl AtlasStore {
                 baseline_kind: row.get(12)?,
                 confidence: row.get(13)?,
                 calculation_trace: row.get(14)?,
+                accounting_layer: row.get(15)?,
+                estimate_method: row.get(16)?,
+                denominator_kind: row.get(17)?,
+                baseline_identity: row.get(18)?,
+                baseline_fingerprint: row.get(19)?,
+                dedupe_scope: row.get(20)?,
+            })
+        };
+        let rows = if let Some(session) = session_id {
+            statement.query_map([session], mapper)?
+        } else {
+            statement.query_map([], mapper)?
+        };
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+        Ok(events)
+    }
+
+    /// Load the narrow raw-event fields required for token accounting dedupe.
+    fn token_accounting_events(&self, session_id: Option<&str>) -> DbResult<Vec<UsageEvent>> {
+        let sql = if session_id.is_some() {
+            "
+            SELECT session_id, command, path, query,
+                   estimated_tokens_without_projectatlas,
+                   estimated_tokens_with_projectatlas,
+                   token_savings_bucket, baseline_kind, confidence,
+                   accounting_layer, denominator_kind,
+                   baseline_identity, baseline_fingerprint
+            FROM usage_events
+            WHERE session_id = ?1
+              AND estimated_tokens_without_projectatlas IS NOT NULL
+              AND estimated_tokens_with_projectatlas IS NOT NULL
+            ORDER BY id
+            "
+        } else {
+            "
+            SELECT session_id, command, path, query,
+                   estimated_tokens_without_projectatlas,
+                   estimated_tokens_with_projectatlas,
+                   token_savings_bucket, baseline_kind, confidence,
+                   accounting_layer, denominator_kind,
+                   baseline_identity, baseline_fingerprint
+            FROM usage_events
+            WHERE estimated_tokens_without_projectatlas IS NOT NULL
+              AND estimated_tokens_with_projectatlas IS NOT NULL
+            ORDER BY id
+            "
+        };
+        let mut statement = self.connection.prepare(sql)?;
+        let mapper = |row: &rusqlite::Row<'_>| {
+            Ok(UsageEvent {
+                session_id: row.get(0)?,
+                command: row.get(1)?,
+                path: row.get(2)?,
+                query: row.get(3)?,
+                estimated_tokens_without_projectatlas: row.get(4)?,
+                estimated_tokens_with_projectatlas: row.get(5)?,
+                estimated_tokens_saved: None,
+                token_savings_bucket: row.get(6)?,
+                provider: default_token_provider(),
+                model: default_token_model(),
+                tokenizer_backend: default_tokenizer_backend(),
+                accuracy: default_token_accuracy(),
+                baseline_kind: row.get(7)?,
+                confidence: row.get(8)?,
+                calculation_trace: default_token_trace(),
+                accounting_layer: row.get(9)?,
+                estimate_method: default_estimate_method(),
+                denominator_kind: row.get(10)?,
+                baseline_identity: row.get(11)?,
+                baseline_fingerprint: row.get(12)?,
+                dedupe_scope: default_dedupe_scope(),
             })
         };
         let rows = if let Some(session) = session_id {
@@ -3382,6 +3520,10 @@ impl AtlasStore {
                 accuracy,
                 baseline_kind,
                 confidence,
+                accounting_layer,
+                estimate_method,
+                denominator_kind,
+                dedupe_scope,
                 COUNT(*),
                 TOTAL(estimated_tokens_without_projectatlas),
                 TOTAL(estimated_tokens_with_projectatlas)
@@ -3390,8 +3532,10 @@ impl AtlasStore {
               AND estimated_tokens_without_projectatlas IS NOT NULL
               AND estimated_tokens_with_projectatlas IS NOT NULL
             GROUP BY token_savings_bucket, provider, model, tokenizer_backend,
-                     accuracy, baseline_kind, confidence
-            ORDER BY token_savings_bucket, accuracy, baseline_kind, confidence
+                     accuracy, baseline_kind, confidence, accounting_layer,
+                     estimate_method, denominator_kind, dedupe_scope
+            ORDER BY token_savings_bucket, accuracy, baseline_kind, confidence,
+                     accounting_layer, estimate_method, denominator_kind, dedupe_scope
             "
         } else {
             "
@@ -3403,6 +3547,10 @@ impl AtlasStore {
                 accuracy,
                 baseline_kind,
                 confidence,
+                accounting_layer,
+                estimate_method,
+                denominator_kind,
+                dedupe_scope,
                 COUNT(*),
                 TOTAL(estimated_tokens_without_projectatlas),
                 TOTAL(estimated_tokens_with_projectatlas)
@@ -3410,12 +3558,14 @@ impl AtlasStore {
             WHERE estimated_tokens_without_projectatlas IS NOT NULL
               AND estimated_tokens_with_projectatlas IS NOT NULL
             GROUP BY token_savings_bucket, provider, model, tokenizer_backend,
-                     accuracy, baseline_kind, confidence
-            ORDER BY token_savings_bucket, accuracy, baseline_kind, confidence
+                     accuracy, baseline_kind, confidence, accounting_layer,
+                     estimate_method, denominator_kind, dedupe_scope
+            ORDER BY token_savings_bucket, accuracy, baseline_kind, confidence,
+                     accounting_layer, estimate_method, denominator_kind, dedupe_scope
             "
         };
         let mapper = |row: &rusqlite::Row<'_>| {
-            let calls = row.get::<_, i64>(7)? as u128;
+            let calls = row.get::<_, i64>(11)?.max(0) as u128;
             Ok(TokenBucketOverview::from_totals(
                 row.get(0)?,
                 row.get(1)?,
@@ -3424,9 +3574,13 @@ impl AtlasStore {
                 row.get(4)?,
                 row.get(5)?,
                 row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
                 calls,
-                token_total_from_sql("estimated_tokens_without_projectatlas", row.get(8)?),
-                token_total_from_sql("estimated_tokens_with_projectatlas", row.get(9)?),
+                token_total_from_sql("estimated_tokens_without_projectatlas", row.get(12)?),
+                token_total_from_sql("estimated_tokens_with_projectatlas", row.get(13)?),
             ))
         };
         let mut statement = self.connection.prepare(sql)?;
@@ -3439,7 +3593,9 @@ impl AtlasStore {
         for row in rows {
             buckets.push(row?);
         }
-        Ok(token_overview_from_buckets(buckets))
+        let mut overview = TokenOverview::from_buckets(buckets);
+        overview.apply_accounting_from_events(&self.token_accounting_events(session_id)?);
+        Ok(overview)
     }
 
     /// Build token trend aggregates grouped by day, week, month, or year.
@@ -3465,6 +3621,10 @@ impl AtlasStore {
                 accuracy,
                 baseline_kind,
                 confidence,
+                accounting_layer,
+                estimate_method,
+                denominator_kind,
+                dedupe_scope,
                 COUNT(*),
                 TOTAL(estimated_tokens_without_projectatlas),
                 TOTAL(estimated_tokens_with_projectatlas)
@@ -3473,8 +3633,10 @@ impl AtlasStore {
               AND estimated_tokens_without_projectatlas IS NOT NULL
               AND estimated_tokens_with_projectatlas IS NOT NULL
             GROUP BY period, token_savings_bucket, provider, model, tokenizer_backend,
-                     accuracy, baseline_kind, confidence
-            ORDER BY period, token_savings_bucket, accuracy, baseline_kind, confidence
+                     accuracy, baseline_kind, confidence, accounting_layer, estimate_method,
+                     denominator_kind, dedupe_scope
+            ORDER BY period, token_savings_bucket, accuracy, baseline_kind, confidence,
+                     accounting_layer, estimate_method, denominator_kind, dedupe_scope
             "
             )
         } else {
@@ -3489,6 +3651,10 @@ impl AtlasStore {
                 accuracy,
                 baseline_kind,
                 confidence,
+                accounting_layer,
+                estimate_method,
+                denominator_kind,
+                dedupe_scope,
                 COUNT(*),
                 TOTAL(estimated_tokens_without_projectatlas),
                 TOTAL(estimated_tokens_with_projectatlas)
@@ -3496,14 +3662,16 @@ impl AtlasStore {
             WHERE estimated_tokens_without_projectatlas IS NOT NULL
               AND estimated_tokens_with_projectatlas IS NOT NULL
             GROUP BY period, token_savings_bucket, provider, model, tokenizer_backend,
-                     accuracy, baseline_kind, confidence
-            ORDER BY period, token_savings_bucket, accuracy, baseline_kind, confidence
+                     accuracy, baseline_kind, confidence, accounting_layer, estimate_method,
+                     denominator_kind, dedupe_scope
+            ORDER BY period, token_savings_bucket, accuracy, baseline_kind, confidence,
+                     accounting_layer, estimate_method, denominator_kind, dedupe_scope
             "
             )
         };
         let mapper = |row: &rusqlite::Row<'_>| {
             let period = row.get::<_, String>(0)?;
-            let calls = row.get::<_, i64>(8)?.max(0) as u128;
+            let calls = row.get::<_, i64>(12)?.max(0) as u128;
             let bucket = TokenBucketOverview::from_totals(
                 row.get(1)?,
                 row.get(2)?,
@@ -3512,9 +3680,13 @@ impl AtlasStore {
                 row.get(5)?,
                 row.get(6)?,
                 row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+                row.get(11)?,
                 calls,
-                token_total_from_sql("estimated_tokens_without_projectatlas", row.get(9)?),
-                token_total_from_sql("estimated_tokens_with_projectatlas", row.get(10)?),
+                token_total_from_sql("estimated_tokens_without_projectatlas", row.get(13)?),
+                token_total_from_sql("estimated_tokens_with_projectatlas", row.get(14)?),
             );
             Ok((period, bucket))
         };
@@ -4007,11 +4179,6 @@ fn token_trend_period_expression(window: TokenTrendWindow) -> &'static str {
         TokenTrendWindow::Month => "substr(COALESCE(created_at, CURRENT_TIMESTAMP), 1, 7)",
         TokenTrendWindow::Year => "substr(COALESCE(created_at, CURRENT_TIMESTAMP), 1, 4)",
     }
-}
-
-/// Build a token overview from Rust-side aggregate buckets.
-fn token_overview_from_buckets(buckets: Vec<TokenBucketOverview>) -> TokenOverview {
-    TokenOverview::from_buckets(buckets)
 }
 
 /// Convert a usize to i64 with saturation for database storage.
@@ -4563,6 +4730,57 @@ mod tests {
             &bucketed.buckets[1].token_savings_bucket,
             &TOKEN_BUCKET_NAVIGATION_AVOIDANCE.to_string(),
             "navigation bucket",
+        )?;
+
+        store.record_usage(&usage_from_text(
+            "deduped",
+            "summary",
+            Some("src/lib.rs".to_string()),
+            None,
+            "abcdabcd",
+            "ab",
+        ))?;
+        store.record_usage(&usage_from_estimates(
+            "deduped",
+            "folders",
+            None,
+            Some("token".to_string()),
+            400,
+            40,
+        ))?;
+        store.record_usage(&usage_from_estimates(
+            "deduped",
+            "folders",
+            None,
+            Some("token".to_string()),
+            400,
+            30,
+        ))?;
+        let deduped = store.token_overview(Some("deduped"))?;
+        require_eq(
+            &deduped.legacy_gross_estimated_saved,
+            &731,
+            "legacy gross saved tokens remains available",
+        )?;
+        require_eq(
+            &deduped.measured_tokens_saved,
+            &1,
+            "measured saved tokens remain separate",
+        )?;
+        require_eq(
+            &deduped.gross_modeled_tokens_avoided,
+            &730,
+            "gross modeled avoided tokens remains available",
+        )?;
+        require_eq(
+            &deduped.deduped_modeled_tokens_avoided,
+            &330,
+            "modeled avoided tokens are deduped by baseline",
+        )?;
+        require_eq(
+            &deduped.tokens_avoided,
+            &331,
+            "headline avoided tokens use measured plus deduped modeled",
         )?;
 
         let mut negative_event = usage_from_estimates("negative", "outline", None, None, 20, 50);

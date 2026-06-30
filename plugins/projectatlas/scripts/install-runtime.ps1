@@ -497,6 +497,53 @@ function Get-ReleaseRuntimeInstallPath {
     return Join-Path $installDir "projectatlas.exe"
 }
 
+function Get-ProjectAtlasSha256 {
+    param(
+        [string]$Archive
+    )
+    $stream = [System.IO.File]::OpenRead($Archive)
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hash = $sha256.ComputeHash($stream)
+            return ([System.BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant()
+        }
+        finally {
+            $sha256.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Confirm-ReleaseArchiveChecksum {
+    param(
+        [string]$Archive,
+        [string]$Asset,
+        [string]$Version,
+        [string]$BaseUrl,
+        [string]$TempDir
+    )
+    $checksums = Join-Path $TempDir "SHA256SUMS"
+    Invoke-WebRequest -Uri "$BaseUrl/$Version/SHA256SUMS" -OutFile $checksums
+    $expected = $null
+    foreach ($line in Get-Content -LiteralPath $checksums) {
+        $parts = $line.Trim() -split '\s+'
+        if ($parts.Count -ge 2 -and ($parts[1] -eq $Asset -or $parts[1] -eq "./$Asset")) {
+            $expected = $parts[0].ToLowerInvariant()
+            break
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($expected)) {
+        throw "SHA256SUMS did not contain an entry for $Asset"
+    }
+    $actual = Get-ProjectAtlasSha256 $Archive
+    if ($actual -ne $expected) {
+        throw "Checksum mismatch for ${Asset}: expected $expected, found $actual"
+    }
+}
+
 function Install-ReleaseBinary {
     param(
         [string]$Version,
@@ -516,6 +563,7 @@ function Install-ReleaseBinary {
     $archive = Join-Path $tempDir $asset
     try {
         Invoke-WebRequest -Uri $url -OutFile $archive
+        Confirm-ReleaseArchiveChecksum $archive $asset $Version $BaseUrl $tempDir
         Expand-Archive -LiteralPath $archive -DestinationPath $tempDir -Force
         $binary = Get-ChildItem -LiteralPath $tempDir -Filter "projectatlas.exe" -Recurse | Select-Object -First 1
         if (-not $binary) {
@@ -558,6 +606,7 @@ if ($RuntimePath) {
     if (-not (Test-ProjectAtlasRuntime $projectAtlas $ProjectAtlasVersion)) {
         throw "Provided ProjectAtlas runtime does not satisfy the ProjectAtlas runtime/version contract: $projectAtlas"
     }
+    Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion | Out-Null
     Set-ProjectAtlasProcessPathPrecedence $projectAtlas
 }
 else {
@@ -599,10 +648,7 @@ else {
     if (-not $projectAtlas) {
         throw "A ProjectAtlas runtime matching $ProjectAtlasVersion was not found. Install Rust/Cargo or provide the matching ProjectAtlas release binary on PATH."
     }
-    $mirroredProjectAtlas = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
-    if ($mirroredProjectAtlas) {
-        $projectAtlas = $mirroredProjectAtlas
-    }
+    Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion | Out-Null
 
     Set-ProjectAtlasPathPrecedence $projectAtlas
 }

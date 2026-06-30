@@ -36,6 +36,16 @@ pub const TOKEN_CONFIDENCE_INFERRED: &str = "inferred";
 pub const TOKEN_CONFIDENCE_POLICY_ESTIMATE: &str = "policy_estimate";
 /// Trace label for the default heuristic calculation.
 pub const TOKEN_TRACE_HEURISTIC: &str = "heuristic=ceil(chars_or_bytes/4)";
+/// Observed before/after accounting layer.
+pub const TOKEN_ACCOUNTING_OBSERVED_DELTA: &str = "observed_delta";
+/// Modeled counterfactual accounting layer.
+pub const TOKEN_ACCOUNTING_MODELED_AVOIDANCE: &str = "modeled_avoidance";
+/// Default method label for heuristic token estimates.
+pub const TOKEN_ESTIMATE_METHOD_HEURISTIC: &str = "heuristic_chars_or_bytes_div_ceil_4";
+/// Dedupe scope for measured one-off events.
+pub const TOKEN_DEDUPE_SCOPE_EVENT: &str = "event";
+/// Dedupe scope for repeated modeled workflow baselines in one session.
+pub const TOKEN_DEDUPE_SCOPE_SESSION: &str = "session";
 
 /// Token savings event for a funnel command.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -78,6 +88,24 @@ pub struct UsageEvent {
     /// Compact calculation trace.
     #[serde(default = "default_token_trace")]
     pub calculation_trace: String,
+    /// Accounting layer used to separate measured deltas from modeled avoidance.
+    #[serde(default = "default_accounting_layer")]
+    pub accounting_layer: String,
+    /// Token estimate method used for this event.
+    #[serde(default = "default_estimate_method")]
+    pub estimate_method: String,
+    /// Denominator represented by the baseline estimate.
+    #[serde(default = "default_denominator_kind")]
+    pub denominator_kind: String,
+    /// Stable modeled-baseline identity for deduplication.
+    #[serde(default)]
+    pub baseline_identity: String,
+    /// Stable modeled-baseline fingerprint for deduplication.
+    #[serde(default)]
+    pub baseline_fingerprint: String,
+    /// Scope used when deduplicating modeled avoidance.
+    #[serde(default = "default_dedupe_scope")]
+    pub dedupe_scope: String,
 }
 
 /// Aggregated token savings for one bucket and counting mode.
@@ -107,6 +135,39 @@ pub struct TokenBucketOverview {
     pub estimated_saved: isize,
     /// Signed savings ratio, or `None` when the baseline estimate is zero.
     pub savings_rate: Option<f64>,
+    /// Accounting layer used to separate measured deltas from modeled avoidance.
+    pub accounting_layer: String,
+    /// Token estimate method used for this bucket.
+    pub estimate_method: String,
+    /// Denominator represented by the baseline estimate.
+    pub denominator_kind: String,
+    /// Dedupe scope used by events in this bucket.
+    pub dedupe_scope: String,
+}
+
+/// Optional local tokenizer calibration for indexed UTF-8 files.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct TokenCalibrationOverview {
+    /// Tokenizer name.
+    pub tokenizer: String,
+    /// Provider label.
+    pub provider: String,
+    /// Model label.
+    pub model: String,
+    /// Tokenizer backend label.
+    pub tokenizer_backend: String,
+    /// Accuracy label.
+    pub accuracy: String,
+    /// Indexed UTF-8 file count.
+    pub files: usize,
+    /// Indexed UTF-8 byte count.
+    pub bytes: usize,
+    /// Existing heuristic estimate over indexed UTF-8 files.
+    pub heuristic_tokens: usize,
+    /// Local tokenizer count over indexed UTF-8 files.
+    pub calibrated_tokens: usize,
+    /// Heuristic-to-calibrated ratio, or `None` when calibrated count is zero.
+    pub heuristic_to_calibrated_ratio: Option<f64>,
 }
 
 /// Token savings overview.
@@ -130,6 +191,20 @@ pub struct TokenOverview {
     pub savings_rate: Option<f64>,
     /// Bucketed token savings grouped by baseline and accuracy semantics.
     pub buckets: Vec<TokenBucketOverview>,
+    /// Observed before/after saved tokens.
+    pub measured_tokens_saved: isize,
+    /// Gross modeled avoided-token estimate before dedupe.
+    pub gross_modeled_tokens_avoided: isize,
+    /// Deduped modeled avoided-token estimate.
+    pub deduped_modeled_tokens_avoided: isize,
+    /// Conservative headline tokens avoided estimate.
+    pub tokens_avoided: isize,
+    /// Legacy all-bucket gross estimate retained for migration diagnostics.
+    pub legacy_gross_estimated_saved: isize,
+    /// Number of duplicate modeled baseline events collapsed by dedupe.
+    pub repeated_baselines_deduped: usize,
+    /// Optional local tokenizer calibration for indexed UTF-8 files.
+    pub calibration: Option<TokenCalibrationOverview>,
 }
 
 /// Token trend grouping window.
@@ -234,7 +309,9 @@ impl TokenOverview {
             .into_iter()
             .map(|(key, (calls, without, with))| key.into_overview(calls, without, with))
             .collect();
-        Self::from_buckets(buckets)
+        let mut overview = Self::from_buckets(buckets);
+        overview.apply_accounting_from_events(events);
+        overview
     }
 
     /// Build an overview from aggregate heuristic token totals.
@@ -248,6 +325,10 @@ impl TokenOverview {
             default_token_accuracy(),
             default_token_baseline_kind(),
             default_token_confidence(),
+            default_accounting_layer(),
+            default_estimate_method(),
+            default_denominator_kind(),
+            default_dedupe_scope(),
             calls,
             without,
             with,
@@ -272,6 +353,10 @@ impl TokenOverview {
         } else {
             Some((without as f64 - with as f64) / without as f64)
         };
+        let measured_tokens_saved = measured_tokens_saved_from_buckets(&buckets);
+        let gross_modeled_tokens_avoided = modeled_tokens_saved_from_buckets(&buckets);
+        let tokens_avoided =
+            saturating_isize_add(measured_tokens_saved, gross_modeled_tokens_avoided);
         Self {
             estimate_kind: TOKEN_ESTIMATE_KIND.to_string(),
             estimator: TOKEN_ESTIMATOR.to_string(),
@@ -281,8 +366,30 @@ impl TokenOverview {
             estimated_with_projectatlas: saturating_u128_to_usize(with),
             estimated_saved: saved,
             savings_rate,
+            measured_tokens_saved,
+            gross_modeled_tokens_avoided,
+            deduped_modeled_tokens_avoided: gross_modeled_tokens_avoided,
+            tokens_avoided,
+            legacy_gross_estimated_saved: saved,
+            repeated_baselines_deduped: 0,
+            calibration: None,
             buckets,
         }
+    }
+
+    /// Attach a local tokenizer calibration section.
+    pub fn set_calibration(&mut self, calibration: TokenCalibrationOverview) {
+        self.calibration = Some(calibration);
+    }
+
+    /// Apply separated measured/modeled accounting totals from raw usage events.
+    pub fn apply_accounting_from_events(&mut self, events: &[UsageEvent]) {
+        let summary = TokenAccountingSummary::from_events(events);
+        self.measured_tokens_saved = summary.measured_tokens_saved;
+        self.gross_modeled_tokens_avoided = summary.gross_modeled_tokens_avoided;
+        self.deduped_modeled_tokens_avoided = summary.deduped_modeled_tokens_avoided;
+        self.tokens_avoided = summary.tokens_avoided;
+        self.repeated_baselines_deduped = summary.repeated_baselines_deduped;
     }
 }
 
@@ -298,6 +405,10 @@ impl TokenBucketOverview {
         accuracy: String,
         baseline_kind: String,
         confidence: String,
+        accounting_layer: String,
+        estimate_method: String,
+        denominator_kind: String,
+        dedupe_scope: String,
         calls: u128,
         without: u128,
         with: u128,
@@ -321,6 +432,10 @@ impl TokenBucketOverview {
             estimated_with_projectatlas: saturating_u128_to_usize(with),
             estimated_saved,
             savings_rate,
+            accounting_layer,
+            estimate_method,
+            denominator_kind,
+            dedupe_scope,
         }
     }
 }
@@ -337,6 +452,10 @@ impl TokenTrendPeriod {
             default_token_accuracy(),
             default_token_baseline_kind(),
             default_token_confidence(),
+            default_accounting_layer(),
+            default_estimate_method(),
+            default_denominator_kind(),
+            default_dedupe_scope(),
             calls,
             without,
             with,
@@ -410,11 +529,145 @@ struct TokenBucketKey {
     baseline_kind: String,
     /// Confidence level for the baseline scenario.
     confidence: String,
+    /// Accounting layer used to separate measured deltas from modeled avoidance.
+    accounting_layer: String,
+    /// Token estimate method used for this bucket.
+    estimate_method: String,
+    /// Denominator represented by the baseline estimate.
+    denominator_kind: String,
+    /// Dedupe scope used by events in this bucket.
+    dedupe_scope: String,
+}
+
+/// Stable key used to dedupe repeated modeled baselines within a session.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ModeledBaselineKey {
+    /// Session that emitted the modeled events.
+    session_id: String,
+    /// Human-readable baseline identity.
+    baseline_identity: String,
+    /// Stable fingerprint for the modeled baseline.
+    baseline_fingerprint: String,
+    /// Denominator kind represented by the baseline.
+    denominator_kind: String,
+}
+
+/// Accumulators for one modeled baseline dedupe group.
+#[derive(Default)]
+struct ModeledBaselineTotals {
+    /// Number of modeled events in the group.
+    calls: usize,
+    /// Single baseline token count retained for the group.
+    baseline_without_projectatlas: usize,
+    /// Sum of all `ProjectAtlas` payload tokens emitted for the group.
+    emitted_with_projectatlas: u128,
+}
+
+/// Final separated accounting totals derived from raw usage events.
+#[derive(Default)]
+struct TokenAccountingSummary {
+    /// Observed before/after saved tokens.
+    measured_tokens_saved: isize,
+    /// Gross modeled avoided tokens before dedupe.
+    gross_modeled_tokens_avoided: isize,
+    /// Modeled avoided tokens after repeated baseline dedupe.
+    deduped_modeled_tokens_avoided: isize,
+    /// Conservative headline tokens avoided.
+    tokens_avoided: isize,
+    /// Number of duplicate modeled baseline events collapsed by dedupe.
+    repeated_baselines_deduped: usize,
+}
+
+impl TokenAccountingSummary {
+    /// Build separated accounting totals from raw usage events.
+    fn from_events(events: &[UsageEvent]) -> Self {
+        let mut measured_tokens_saved = 0isize;
+        let mut gross_modeled_tokens_avoided = 0isize;
+        let mut modeled_baselines = BTreeMap::<ModeledBaselineKey, ModeledBaselineTotals>::new();
+
+        for event in events {
+            let (Some(without), Some(with)) = (
+                event.estimated_tokens_without_projectatlas,
+                event.estimated_tokens_with_projectatlas,
+            ) else {
+                continue;
+            };
+            let delta = token_delta(without, with);
+            if is_observed_event(event) {
+                measured_tokens_saved = saturating_isize_add(measured_tokens_saved, delta);
+                continue;
+            }
+            if !is_modeled_event(event) {
+                continue;
+            }
+            gross_modeled_tokens_avoided =
+                saturating_isize_add(gross_modeled_tokens_avoided, delta);
+            let entry = modeled_baselines
+                .entry(ModeledBaselineKey::from_event(event))
+                .or_default();
+            entry.calls = entry.calls.saturating_add(1);
+            entry.baseline_without_projectatlas = entry.baseline_without_projectatlas.max(without);
+            entry.emitted_with_projectatlas =
+                entry.emitted_with_projectatlas.saturating_add(with as u128);
+        }
+
+        let mut deduped_modeled_tokens_avoided = 0isize;
+        let mut repeated_baselines_deduped = 0usize;
+        for totals in modeled_baselines.values() {
+            if totals.calls > 1 {
+                repeated_baselines_deduped =
+                    repeated_baselines_deduped.saturating_add(totals.calls.saturating_sub(1));
+            }
+            let delta = aggregate_token_delta(
+                totals.baseline_without_projectatlas as u128,
+                totals.emitted_with_projectatlas,
+            );
+            deduped_modeled_tokens_avoided =
+                saturating_isize_add(deduped_modeled_tokens_avoided, delta);
+        }
+        let tokens_avoided =
+            saturating_isize_add(measured_tokens_saved, deduped_modeled_tokens_avoided);
+        Self {
+            measured_tokens_saved,
+            gross_modeled_tokens_avoided,
+            deduped_modeled_tokens_avoided,
+            tokens_avoided,
+            repeated_baselines_deduped,
+        }
+    }
+}
+
+impl ModeledBaselineKey {
+    /// Build a dedupe key from persisted event metadata with legacy fallback.
+    fn from_event(event: &UsageEvent) -> Self {
+        let identity = if event.baseline_identity.is_empty() {
+            default_baseline_identity(
+                &event.command,
+                event.path.as_deref(),
+                event.query.as_deref(),
+                &event.baseline_kind,
+            )
+        } else {
+            event.baseline_identity.clone()
+        };
+        let fingerprint = if event.baseline_fingerprint.is_empty() {
+            identity.clone()
+        } else {
+            event.baseline_fingerprint.clone()
+        };
+        Self {
+            session_id: event.session_id.clone(),
+            baseline_identity: identity,
+            baseline_fingerprint: fingerprint,
+            denominator_kind: event.denominator_kind.clone(),
+        }
+    }
 }
 
 impl TokenBucketKey {
     /// Build a grouping key from one usage event.
     fn from(event: &UsageEvent) -> Self {
+        let observed = is_observed_event(event);
         Self {
             token_savings_bucket: event.token_savings_bucket.clone(),
             provider: event.provider.clone(),
@@ -423,6 +676,22 @@ impl TokenBucketKey {
             accuracy: event.accuracy.clone(),
             baseline_kind: event.baseline_kind.clone(),
             confidence: event.confidence.clone(),
+            accounting_layer: if observed {
+                TOKEN_ACCOUNTING_OBSERVED_DELTA.to_string()
+            } else {
+                event.accounting_layer.clone()
+            },
+            estimate_method: event.estimate_method.clone(),
+            denominator_kind: if observed {
+                TOKEN_BASELINE_FULL_FILE.to_string()
+            } else {
+                event.denominator_kind.clone()
+            },
+            dedupe_scope: if observed {
+                TOKEN_DEDUPE_SCOPE_EVENT.to_string()
+            } else {
+                event.dedupe_scope.clone()
+            },
         }
     }
 
@@ -436,6 +705,10 @@ impl TokenBucketKey {
             self.accuracy,
             self.baseline_kind,
             self.confidence,
+            self.accounting_layer,
+            self.estimate_method,
+            self.denominator_kind,
+            self.dedupe_scope,
             calls,
             without,
             with,
@@ -455,7 +728,7 @@ pub fn usage_from_text(
 ) -> UsageEvent {
     let without = estimate_tokens(baseline_text);
     let with = estimate_tokens(projectatlas_text);
-    usage_from_estimates_with_context(
+    usage_from_estimates_with_accounting(
         session_id,
         command,
         path,
@@ -465,6 +738,9 @@ pub fn usage_from_text(
         TOKEN_BUCKET_FULL_FILE_COMPRESSION,
         TOKEN_BASELINE_FULL_FILE,
         TOKEN_CONFIDENCE_OBSERVED,
+        TOKEN_ACCOUNTING_OBSERVED_DELTA,
+        TOKEN_BASELINE_FULL_FILE,
+        TOKEN_DEDUPE_SCOPE_EVENT,
     )
 }
 
@@ -478,7 +754,7 @@ pub fn usage_from_estimates(
     estimated_without_projectatlas: usize,
     estimated_with_projectatlas: usize,
 ) -> UsageEvent {
-    usage_from_estimates_with_context(
+    usage_from_estimates_with_accounting(
         session_id,
         command,
         path,
@@ -488,6 +764,9 @@ pub fn usage_from_estimates(
         TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
         TOKEN_BASELINE_SELECTED_CANDIDATES,
         TOKEN_CONFIDENCE_INFERRED,
+        TOKEN_ACCOUNTING_MODELED_AVOIDANCE,
+        TOKEN_BASELINE_SELECTED_CANDIDATES,
+        TOKEN_DEDUPE_SCOPE_SESSION,
     )
 }
 
@@ -505,6 +784,50 @@ pub fn usage_from_estimates_with_context(
     baseline_kind: &str,
     confidence: &str,
 ) -> UsageEvent {
+    usage_from_estimates_with_accounting(
+        session_id,
+        command,
+        path,
+        query,
+        estimated_without_projectatlas,
+        estimated_with_projectatlas,
+        token_savings_bucket,
+        baseline_kind,
+        confidence,
+        if token_savings_bucket == TOKEN_BUCKET_FULL_FILE_COMPRESSION {
+            TOKEN_ACCOUNTING_OBSERVED_DELTA
+        } else {
+            TOKEN_ACCOUNTING_MODELED_AVOIDANCE
+        },
+        baseline_kind,
+        if token_savings_bucket == TOKEN_BUCKET_FULL_FILE_COMPRESSION {
+            TOKEN_DEDUPE_SCOPE_EVENT
+        } else {
+            TOKEN_DEDUPE_SCOPE_SESSION
+        },
+    )
+}
+
+/// Create a usage event from token estimates and explicit accounting semantics.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn usage_from_estimates_with_accounting(
+    session_id: &str,
+    command: &str,
+    path: Option<String>,
+    query: Option<String>,
+    estimated_without_projectatlas: usize,
+    estimated_with_projectatlas: usize,
+    token_savings_bucket: &str,
+    baseline_kind: &str,
+    confidence: &str,
+    accounting_layer: &str,
+    denominator_kind: &str,
+    dedupe_scope: &str,
+) -> UsageEvent {
+    let baseline_identity =
+        default_baseline_identity(command, path.as_deref(), query.as_deref(), baseline_kind);
+    let baseline_fingerprint = baseline_identity.clone();
     UsageEvent {
         session_id: session_id.to_string(),
         command: command.to_string(),
@@ -524,6 +847,12 @@ pub fn usage_from_estimates_with_context(
         baseline_kind: baseline_kind.to_string(),
         confidence: confidence.to_string(),
         calculation_trace: default_token_trace(),
+        accounting_layer: accounting_layer.to_string(),
+        estimate_method: default_estimate_method(),
+        denominator_kind: denominator_kind.to_string(),
+        baseline_identity,
+        baseline_fingerprint,
+        dedupe_scope: dedupe_scope.to_string(),
     }
 }
 
@@ -575,6 +904,45 @@ pub fn default_token_trace() -> String {
     TOKEN_TRACE_HEURISTIC.to_string()
 }
 
+/// Default accounting layer for legacy usage events.
+#[must_use]
+pub fn default_accounting_layer() -> String {
+    TOKEN_ACCOUNTING_MODELED_AVOIDANCE.to_string()
+}
+
+/// Default estimate method for legacy usage events.
+#[must_use]
+pub fn default_estimate_method() -> String {
+    TOKEN_ESTIMATE_METHOD_HEURISTIC.to_string()
+}
+
+/// Default denominator kind for legacy usage events.
+#[must_use]
+pub fn default_denominator_kind() -> String {
+    TOKEN_BASELINE_SELECTED_CANDIDATES.to_string()
+}
+
+/// Default dedupe scope for legacy usage events.
+#[must_use]
+pub fn default_dedupe_scope() -> String {
+    TOKEN_DEDUPE_SCOPE_SESSION.to_string()
+}
+
+/// Build a stable baseline identity from existing event context.
+#[must_use]
+pub fn default_baseline_identity(
+    command: &str,
+    path: Option<&str>,
+    query: Option<&str>,
+    baseline_kind: &str,
+) -> String {
+    format!(
+        "{baseline_kind}:command={command}:path={path}:query={query}",
+        path = path.unwrap_or("*"),
+        query = query.unwrap_or("*")
+    )
+}
+
 /// Return a saturating signed token delta.
 fn token_delta(without: usize, with: usize) -> isize {
     let without = isize::try_from(without).unwrap_or(isize::MAX);
@@ -608,6 +976,55 @@ fn saturating_u128_to_usize(value: u128) -> usize {
     } else {
         value as usize
     }
+}
+
+/// Add signed token totals without overflowing.
+fn saturating_isize_add(left: isize, right: isize) -> isize {
+    left.saturating_add(right)
+}
+
+/// Sum observed saved-token buckets.
+fn measured_tokens_saved_from_buckets(buckets: &[TokenBucketOverview]) -> isize {
+    buckets
+        .iter()
+        .filter(|bucket| is_observed_bucket(bucket))
+        .fold(0isize, |acc, bucket| {
+            saturating_isize_add(acc, bucket.estimated_saved)
+        })
+}
+
+/// Sum modeled avoided-token buckets.
+fn modeled_tokens_saved_from_buckets(buckets: &[TokenBucketOverview]) -> isize {
+    buckets
+        .iter()
+        .filter(|bucket| is_modeled_bucket(bucket))
+        .fold(0isize, |acc, bucket| {
+            saturating_isize_add(acc, bucket.estimated_saved)
+        })
+}
+
+/// Whether an event represents observed before/after source compression.
+fn is_observed_event(event: &UsageEvent) -> bool {
+    event.accounting_layer == TOKEN_ACCOUNTING_OBSERVED_DELTA
+        || event.token_savings_bucket == TOKEN_BUCKET_FULL_FILE_COMPRESSION
+        || event.confidence == TOKEN_CONFIDENCE_OBSERVED
+}
+
+/// Whether an event represents modeled counterfactual navigation avoidance.
+fn is_modeled_event(event: &UsageEvent) -> bool {
+    event.accounting_layer == TOKEN_ACCOUNTING_MODELED_AVOIDANCE || !is_observed_event(event)
+}
+
+/// Whether a bucket represents observed before/after source compression.
+fn is_observed_bucket(bucket: &TokenBucketOverview) -> bool {
+    bucket.accounting_layer == TOKEN_ACCOUNTING_OBSERVED_DELTA
+        || bucket.token_savings_bucket == TOKEN_BUCKET_FULL_FILE_COMPRESSION
+        || bucket.confidence == TOKEN_CONFIDENCE_OBSERVED
+}
+
+/// Whether a bucket represents modeled counterfactual navigation avoidance.
+fn is_modeled_bucket(bucket: &TokenBucketOverview) -> bool {
+    bucket.accounting_layer == TOKEN_ACCOUNTING_MODELED_AVOIDANCE || !is_observed_bucket(bucket)
 }
 
 #[cfg(test)]
@@ -670,5 +1087,30 @@ mod tests {
             overview.buckets[1].token_savings_bucket,
             TOKEN_BUCKET_NAVIGATION_AVOIDANCE
         );
+    }
+
+    #[test]
+    fn overview_dedupes_repeated_modeled_baselines_without_hiding_measured_savings() {
+        let overview = TokenOverview::from_events(&[
+            usage_from_text(
+                "s",
+                "summary",
+                Some("src/lib.rs".to_string()),
+                None,
+                "abcdabcd",
+                "ab",
+            ),
+            usage_from_estimates("s", "folders", None, Some("token".to_string()), 400, 40),
+            usage_from_estimates("s", "folders", None, Some("token".to_string()), 400, 30),
+            usage_from_estimates("s", "folders", None, Some("token".to_string()), 400, 20),
+        ]);
+
+        assert_eq!(overview.estimated_saved, 1111);
+        assert_eq!(overview.legacy_gross_estimated_saved, 1111);
+        assert_eq!(overview.measured_tokens_saved, 1);
+        assert_eq!(overview.gross_modeled_tokens_avoided, 1110);
+        assert_eq!(overview.deduped_modeled_tokens_avoided, 310);
+        assert_eq!(overview.tokens_avoided, 311);
+        assert_eq!(overview.repeated_baselines_deduped, 2);
     }
 }

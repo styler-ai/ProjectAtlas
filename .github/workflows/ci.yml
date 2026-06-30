@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Setup Rust
         run: |
@@ -31,7 +31,7 @@ jobs:
           rustup default stable
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2
         with:
           tool: cargo-deny
 
@@ -99,7 +99,7 @@ jobs:
     needs: verify
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Setup Rust
         run: |
@@ -146,7 +146,7 @@ jobs:
             os: macos-14
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Setup Rust
         shell: bash
@@ -166,6 +166,11 @@ jobs:
         if: matrix.label == 'windows'
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is_locked --test e2e
+
+      - name: Windows stale MCP registry update E2E
+        if: matrix.label == 'windows'
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_repairs_stale_mirror_without_registering_it --test e2e
 
       - name: MCP project binding E2E
         timeout-minutes: 5
