@@ -800,6 +800,13 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
     fs::create_dir_all(&app_data)?;
     fs::create_dir_all(&local_app_data)?;
 
+    let fake_codex_log = isolated_home.join("fake-codex.log");
+    let fake_codex = isolated_home.join("codex.cmd");
+    fs::write(
+        &fake_codex,
+        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  echo projectatlas\r\n  echo   command: %LOCALAPPDATA%\\ProjectAtlas\\bin\\projectatlas.exe\r\n  echo   args: --require-version 0.3.15 --db C:\\old\\.projectatlas\\projectatlas.db mcp\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n",
+    )?;
+
     let stable_runtime = local_app_data
         .join("ProjectAtlas")
         .join("bin")
@@ -858,7 +865,8 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             .env("APPDATA", &app_data)
             .env("LOCALAPPDATA", &local_app_data)
             .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
-            .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+            .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
+            .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
             .env("PROJECTATLAS_NO_TELEMETRY", "1")
             .output()?;
         let server_result = release_server.join().map_err(|panic_payload| {
@@ -883,11 +891,22 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             ))
             .into());
         }
-        if !installer_output_text.contains("ProjectAtlas LocalAppData mirror skipped") {
-            return Err(io::Error::other(format!(
-                "installer did not report the locked LocalAppData mirror\n{installer_output_text}"
-            ))
-            .into());
+        let normalized_installer_output = installer_output_text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for required in [
+            "ProjectAtlas LocalAppData mirror skipped",
+            "Close any running ProjectAtlas or Codex session using that file",
+            "then rerun this installer",
+            "Codex MCP and generated configs continue to use verified",
+        ] {
+            if !normalized_installer_output.contains(required) {
+                return Err(io::Error::other(format!(
+                    "installer did not provide locked LocalAppData mirror guidance {required:?}\n{installer_output_text}"
+                ))
+                .into());
+            }
         }
         if !installer_output_text
             .contains("Active process resolves bare projectatlas to verified runtime")
@@ -908,6 +927,22 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             return Err(io::Error::other(format!(
                 "release binary was not installed to the versioned runtime path: {}",
                 versioned_runtime.display()
+            ))
+            .into());
+        }
+        let fake_codex_calls = fs::read_to_string(&fake_codex_log)?;
+        if !fake_codex_calls.contains("mcp add projectatlas --")
+            || !fake_codex_calls.contains(versioned_runtime.to_string_lossy().as_ref())
+            || fake_codex_calls.contains(stable_runtime.to_string_lossy().as_ref())
+        {
+            return Err(io::Error::other(format!(
+                "locked mirror Codex MCP registry was not repaired to the versioned runtime:\n{fake_codex_calls}"
+            ))
+            .into());
+        }
+        if !installer_output_text.contains("Codex MCP registry updated to ProjectAtlas runtime") {
+            return Err(io::Error::other(format!(
+                "installer did not report locked mirror Codex registry repair\n{installer_output_text}"
             ))
             .into());
         }

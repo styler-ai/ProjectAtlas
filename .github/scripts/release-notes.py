@@ -28,6 +28,23 @@ def note_title(text):
 SECTIONS = ("New Features", "Bug Fixes", "Chores")
 
 
+def semver_key(tag):
+    match = re.fullmatch(r"v([0-9]+)\.([0-9]+)\.([0-9]+)", tag or "")
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def previous_tag_from(tags, version):
+    current = semver_key(version)
+    if current is None:
+        return ""
+    candidates = []
+    for tag in tags:
+        key = semver_key(tag)
+        if key and key < current:
+            candidates.append((key, tag))
+    return max(candidates)[1] if candidates else ""
+
+
 def pr_summary(body, fallback):
     lines = (body or "").splitlines()
     in_summary = False
@@ -88,8 +105,8 @@ def gh_json(endpoint):
 
 
 def previous_tag(version):
-    process = run(["git", "describe", "--tags", "--abbrev=0", f"{version}^"], False)
-    return process.stdout.strip() if process.returncode == 0 else ""
+    process = run(["git", "tag", "--merged", "HEAD"], False)
+    return previous_tag_from(process.stdout.splitlines(), version) if process.returncode == 0 else ""
 
 
 def merged_prs(repo, start_tag):
@@ -178,6 +195,8 @@ def self_test():
     assert note_title("bug: stale runtime remains") == "Stale runtime remains"
     assert section_for("fix(db): reject stale paths") == "Bug Fixes"
     assert section_for("feat(cli): add root diagnostics") == "New Features"
+    assert previous_tag_from(["v0.3.15", "v0.3.16"], "v0.3.17") == "v0.3.16"
+    assert previous_tag_from(["v0.3.15", "v0.3.16", "v0.3.17"], "v0.3.17") == "v0.3.16"
     print("release notes self-test passed")
 
 
