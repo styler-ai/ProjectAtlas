@@ -637,11 +637,21 @@ Token accounting model:
   `--format json`; MCP telemetry measures TOON tool text inside the JSON-RPC
   envelope.
 - Save the raw estimates, per-event delta, bucket, provider, model, tokenizer
-  backend, accuracy, baseline kind, confidence, and calculation trace in
-  `usage_events`.
+  backend, accuracy, baseline kind, confidence, calculation trace, accounting
+  layer, estimate method, denominator kind, baseline identity/fingerprint, and
+  dedupe scope in `usage_events`.
 - Compute aggregate `saved = estimated_tokens_without_projectatlas -
   estimated_tokens_with_projectatlas` from the stored raw estimates instead of
-  trusting historical per-row saved values.
+  trusting historical per-row saved values. Keep this as the legacy gross
+  compatibility number.
+- Compute headline `tokens_avoided` as `measured_tokens_saved +
+  deduped_modeled_tokens_avoided`. `measured_tokens_saved` is observed
+  before/after source-compression evidence. `gross_modeled_tokens_avoided` is
+  counterfactual navigation avoidance before dedupe. `deduped_modeled_tokens_avoided`
+  counts repeated modeled baselines once per session/baseline identity/fingerprint
+  and subtracts every ProjectAtlas payload emitted for that repeated baseline.
+  `repeated_baselines_deduped` counts duplicate modeled events collapsed, not
+  unique baseline groups.
 - Compute `savings_rate = saved / estimated_tokens_without_projectatlas` only
   when the baseline is greater than zero. A zero baseline yields an unknown rate
   instead of a fake percentage.
@@ -649,14 +659,17 @@ Token accounting model:
   long-lived projects do not produce overflowing token reports.
 - Report per session and all-time totals.
 - Prefer TOON output for usage reports shown to agents. A human terminal
-  dashboard is allowed only as an explicit view.
+  Ratatui dashboard is allowed only as an explicit `--view tui` view.
 - The default estimator is an offline text-size heuristic: emitted text uses
   `ceil(chars / 4)` and file-size baselines use `ceil(bytes / 4)`. It is
   workflow telemetry for avoided wrong-folder exploration, wrong-file opens,
   and unnecessary full-code reads; it is not provider billing telemetry. Future
   model-aware calibration should be opt-in, label the provider/model/tokenizer,
   cache the calibration source, and never require network access for ordinary
-  `projectatlas token` reports.
+  `projectatlas token` reports. Local tokenizer calibration currently supports
+  `projectatlas token --tokenizer o200k_base` and
+  `projectatlas token --tokenizer cl100k_base`; it attaches a calibration
+  section for indexed UTF-8 files without rewriting historical usage rows.
 - Report buckets separately:
   - `full_file_compression`: observed comparison between selected full-file
     text and emitted summary/outline/slice/search context.
@@ -688,6 +701,7 @@ Canonical commands:
 projectatlas token
 projectatlas token --session <session-id>
 projectatlas token --view tui
+projectatlas token --tokenizer o200k_base
 ```
 
 Canonical MCP tools:
@@ -718,10 +732,16 @@ token_savings:
   estimated_without_projectatlas: 118000
   estimated_with_projectatlas: 9200
   estimated_saved: 108800
+  legacy_gross_estimated_saved: 108800
+  measured_tokens_saved: 42000
+  gross_modeled_tokens_avoided: 66800
+  deduped_modeled_tokens_avoided: 50000
+  tokens_avoided: 92000
+  repeated_baselines_deduped: 1
   savings_rate: 92.2%
-  buckets[2]{token_savings_bucket,accuracy,baseline_kind,confidence,saved_tokens}:
-    full_file_compression,heuristic_estimate,full_file,observed,42000
-    navigation_avoidance,heuristic_estimate,directory_walk,policy_estimate,66800
+  buckets[2]{token_savings_bucket,accounting_layer,accuracy,baseline_kind,confidence,saved_tokens}:
+    full_file_compression,observed_delta,heuristic_estimate,full_file,observed,42000
+    navigation_avoidance,modeled_avoidance,heuristic_estimate,directory_walk,policy_estimate,66800
 ```
 
 Every funnel command should record telemetry when it can estimate a baseline.

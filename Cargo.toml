@@ -10,7 +10,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.3.15"
+version = "0.3.16"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/styler-ai/ProjectAtlas"
@@ -68,11 +68,11 @@ must_use_candidate = "allow"
 missing_inline_in_public_items = "allow"
 
 [workspace.dependencies]
-projectatlas-core = { path = "crates/projectatlas-core", version = "0.3.15" }
-projectatlas-db = { path = "crates/projectatlas-db", version = "0.3.15" }
-projectatlas-fs = { path = "crates/projectatlas-fs", version = "0.3.15" }
-projectatlas-service = { path = "crates/projectatlas-service", version = "0.3.15" }
-projectatlas-symbols = { path = "crates/projectatlas-symbols", version = "0.3.15" }
+projectatlas-core = { path = "crates/projectatlas-core", version = "0.3.16" }
+projectatlas-db = { path = "crates/projectatlas-db", version = "0.3.16" }
+projectatlas-fs = { path = "crates/projectatlas-fs", version = "0.3.16" }
+projectatlas-service = { path = "crates/projectatlas-service", version = "0.3.16" }
+projectatlas-symbols = { path = "crates/projectatlas-symbols", version = "0.3.16" }
 blake3 = "1.5"
 clap = { version = "4.5", features = ["derive"] }
 cssparser = "0.37"
@@ -83,13 +83,16 @@ notify = "8.2"
 pulldown-cmark = "0.13"
 regex = "1.11"
 rayon = "1.10"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 rmcp = { version = "1.8.0", default-features = false, features = ["server", "transport-io", "macros"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 scraper = "0.27"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 tempfile = "3.14"
 thiserror = "2.0"
+tiktoken = "3.5.1"
 tokio = { version = "1.48", features = ["io-std", "macros", "rt-multi-thread", "time"] }
 toml = "0.8"
 toml_edit = "0.22"

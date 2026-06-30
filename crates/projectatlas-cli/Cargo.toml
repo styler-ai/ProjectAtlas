@@ -23,12 +23,14 @@ jsonc-parser.workspace = true
 notify.workspace = true
 pulldown-cmark.workspace = true
 rayon.workspace = true
+ratatui.workspace = true
 regex.workspace = true
 rmcp.workspace = true
 scraper.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tiktoken.workspace = true
 tokio.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
@@ -40,6 +42,7 @@ assert_cmd = "2.0"
 predicates = "3.1"
 rmcp = { workspace = true, features = ["client"] }
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 
 [lints]

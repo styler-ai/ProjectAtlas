@@ -9,5 +9,5 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo test --doc --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
-cargo run -p projectatlas-cli -- map --force
-cargo run -p projectatlas-cli -- lint --strict-folders --report-untracked
+cargo run -p projectatlas-cli -- --format json scan .
+cargo run -p projectatlas-cli -- lint --report-untracked --purpose-level low

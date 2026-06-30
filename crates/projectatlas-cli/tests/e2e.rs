@@ -7,6 +7,7 @@ use projectatlas_core::language::{BROAD_SOURCE_EXTENSIONS, detect_language_for_p
 use projectatlas_core::telemetry::usage_from_estimates;
 use projectatlas_db::{AtlasStore, HealthResolution};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::Write as _;
@@ -167,6 +168,11 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "PROJECTATLAS_RUNTIME_PATH",
         "Find-ProjectAtlas $ProjectAtlasVersion",
         "System.Text.UTF8Encoding",
+        "Confirm-ReleaseArchiveChecksum",
+        "Get-ProjectAtlasSha256",
+        "SHA256SUMS",
+        "[System.Security.Cryptography.SHA256]::Create()",
+        "Checksum mismatch for ${Asset}",
         r#"$installArgs += @("projectatlas-cli", "--locked", "--force")"#,
         "projectatlas.claude.mcp.json",
         "projectatlas.opencode.json",
@@ -215,6 +221,11 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "runtime_override=${PROJECTATLAS_RUNTIME_PATH:-}",
         "runtime_version=$(printf",
         "[ \"$runtime_version\" = \"$expected_version\" ]",
+        "download_release_file()",
+        "archive_sha256()",
+        "verify_release_checksum()",
+        "SHA256SUMS did not contain an entry for $asset",
+        "Checksum mismatch for $asset",
         "cargo install --git \"$repository\" --tag \"$projectatlas_version\" projectatlas-cli --locked --force",
         "projectatlas.claude.mcp.json",
         "projectatlas.opencode.json",
@@ -276,6 +287,14 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
     ) {
         return Err(io::Error::other(
             "Windows CI smoke must run the locked stable mirror release-binary regression",
+        )
+        .into());
+    }
+    if !e2e_smoke
+        .contains("windows_release_binary_installer_repairs_stale_mirror_without_registering_it")
+    {
+        return Err(io::Error::other(
+            "Windows CI smoke must run the stale Codex MCP registry repair regression",
         )
         .into());
     }
@@ -448,6 +467,7 @@ fn repository_guidance_keeps_legacy_toon_export_optional() -> Result<(), Box<dyn
             .join("workflows")
             .join("release.yml"),
     )?;
+    let pre_push = fs::read_to_string(workspace_root.join(".githooks").join("pre-push"))?;
     let readme = fs::read_to_string(workspace_root.join("README.md"))?;
     let gitignore = fs::read_to_string(workspace_root.join(".gitignore"))?;
     for required in [
@@ -578,6 +598,105 @@ fn repository_guidance_keeps_legacy_toon_export_optional() -> Result<(), Box<dyn
         return Err(
             io::Error::other("legacy ProjectAtlas TOON map artifact must stay ignored").into(),
         );
+    }
+    if pre_push.contains("map --force") || pre_push.contains("--strict-folders") {
+        return Err(io::Error::other(
+            "pre-push hook must use the SQLite-first scan/lint flow, not legacy map or strict-folder lint",
+        )
+        .into());
+    }
+    for required in [
+        "--format json scan .",
+        "lint --report-untracked --purpose-level low",
+    ] {
+        if !pre_push.contains(required) {
+            return Err(io::Error::other(format!(
+                "pre-push hook is missing SQLite-first ProjectAtlas command {required:?}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn release_and_actions_policy_is_hardened() -> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
+    let workflow_dir = workspace_root.join(".github").join("workflows");
+    let release_workflow = fs::read_to_string(workflow_dir.join("release.yml"))?;
+    let auto_release_workflow = fs::read_to_string(workflow_dir.join("03-auto-release.yml"))?;
+    let ci_workflow = fs::read_to_string(workflow_dir.join("ci.yml"))?;
+    let docs_workflow = fs::read_to_string(workflow_dir.join("04-docs.yml"))?;
+    let dependabot = fs::read_to_string(workspace_root.join(".github").join("dependabot.yml"))?;
+    let deny = fs::read_to_string(workspace_root.join("deny.toml"))?;
+    for (name, workflow) in [
+        ("release.yml", &release_workflow),
+        ("03-auto-release.yml", &auto_release_workflow),
+        ("ci.yml", &ci_workflow),
+        ("04-docs.yml", &docs_workflow),
+    ] {
+        assert_actions_are_sha_pinned(name, workflow)?;
+    }
+    if !dependabot.contains("package-ecosystem: github-actions")
+        && !dependabot.contains("package-ecosystem: \"github-actions\"")
+    {
+        return Err(
+            io::Error::other("Dependabot must keep pinned GitHub Actions SHAs up to date").into(),
+        );
+    }
+    if !deny.contains(r#"triple = "x86_64-apple-darwin""#) {
+        return Err(io::Error::other(
+            "cargo-deny target graph must include Intel macOS release target",
+        )
+        .into());
+    }
+    if !deny.contains("hashbrown") || !deny.contains("windows-sys") {
+        return Err(io::Error::other(
+            "cargo-deny duplicate warnings must be documented before remaining at warn",
+        )
+        .into());
+    }
+    if release_workflow.contains("git push origin") {
+        return Err(io::Error::other(
+            "release workflow must not push tags before creating the release",
+        )
+        .into());
+    }
+    for required in [
+        "gh release create \"$RELEASE_VERSION\"",
+        "gh release upload \"$RELEASE_VERSION\" release-assets/* --clobber",
+        "--target \"$GITHUB_SHA\"",
+        "PROJECTATLAS_RELEASE_EXISTS",
+        "SHA256SUMS",
+        "No release archives matched projectatlas-${RELEASE_VERSION}-*",
+        "already points to",
+        "exists without a GitHub release; continuing recovery publish",
+        "continuing asset repair publish",
+    ] {
+        if !release_workflow.contains(required) {
+            return Err(io::Error::other(format!(
+                "release workflow is missing recoverable publish/checksum guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    if !release_workflow.contains("permissions:\n  contents: read") {
+        return Err(io::Error::other("release workflow must default to contents: read").into());
+    }
+    let publish = workflow_job_block(&release_workflow, "publish")?;
+    for required in ["contents: write", "issues: read", "pull-requests: read"] {
+        if !publish.contains(required) {
+            return Err(io::Error::other(format!(
+                "release publish job is missing scoped permission {required:?}"
+            ))
+            .into());
+        }
+    }
+    if !auto_release_workflow.contains("permissions:\n  contents: read\n  actions: write") {
+        return Err(io::Error::other(
+            "auto-release workflow must narrow permissions to contents read and actions write",
+        )
+        .into());
     }
     Ok(())
 }
@@ -714,8 +833,7 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
 
     let test_result = (|| -> Result<(), Box<dyn Error>> {
         let release_archive = create_windows_release_archive(temp.path(), &runtime)?;
-        let (release_base_url, release_server) =
-            serve_single_release_asset(fs::read(&release_archive)?)?;
+        let (release_base_url, release_server) = serve_release_assets(&release_archive, None)?;
         let workspace_root = workspace_root()?;
         let installer = workspace_root
             .join("plugins")
@@ -1261,6 +1379,304 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
 }
 
 #[test]
+#[cfg(windows)]
+fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    let atlas_dir = repo.join(".projectatlas");
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    let isolated_home = temp.path().join("isolated-home");
+    let app_data = isolated_home.join("AppData").join("Roaming");
+    let local_app_data = isolated_home.join("AppData").join("Local");
+    fs::create_dir_all(&app_data)?;
+    fs::create_dir_all(&local_app_data)?;
+
+    let stable_runtime = local_app_data
+        .join("ProjectAtlas")
+        .join("bin")
+        .join("projectatlas.exe");
+    fs::create_dir_all(
+        stable_runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("stable runtime parent missing"))?,
+    )?;
+    fs::write(&stable_runtime, b"stale 0.3.10 stable mirror")?;
+
+    let fake_codex_log = isolated_home.join("fake-codex.log");
+    let fake_codex = isolated_home.join("codex.cmd");
+    fs::write(
+        &fake_codex,
+        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  echo projectatlas\r\n  echo   command: C:\\Users\\shaun_tyler\\AppData\\Local\\ProjectAtlas\\bin\\projectatlas.exe\r\n  echo   args: --require-version 0.3.10 --db C:\\projects\\io.pasx.kai\\.projectatlas\\projectatlas.db mcp\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n",
+    )?;
+
+    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let release_archive = create_windows_release_archive(temp.path(), &runtime)?;
+    let (release_base_url, release_server) = serve_release_assets(&release_archive, None)?;
+    let workspace_root = workspace_root()?;
+    let installer = workspace_root
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.ps1");
+    let output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(installer)
+        .arg("-ProjectRoot")
+        .arg(&repo)
+        .arg("-ProjectAtlasVersion")
+        .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+        .arg("-ReleaseBaseUrl")
+        .arg(&release_base_url)
+        .arg("-ReleaseBinaryOnly")
+        .env("HOME", &isolated_home)
+        .env("USERPROFILE", &isolated_home)
+        .env("APPDATA", &app_data)
+        .env("LOCALAPPDATA", &local_app_data)
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
+        .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .output()?;
+    let server_result = release_server.join().map_err(|panic_payload| {
+        let message = if let Some(message) = panic_payload.downcast_ref::<&str>() {
+            *message
+        } else if let Some(message) = panic_payload.downcast_ref::<String>() {
+            message.as_str()
+        } else {
+            "unknown panic payload"
+        };
+        io::Error::other(format!("release asset test server panicked: {message}"))
+    })?;
+    server_result?;
+    let installer_output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "release-binary installer failed\n{installer_output_text}"
+        ))
+        .into());
+    }
+
+    let versioned_runtime = local_app_data
+        .join("ProjectAtlas")
+        .join("runtimes")
+        .join(env!("CARGO_PKG_VERSION"))
+        .join("x86_64-pc-windows-msvc")
+        .join("projectatlas.exe");
+    if !versioned_runtime.exists() {
+        return Err(io::Error::other(format!(
+            "release binary was not installed to the versioned runtime path: {}",
+            versioned_runtime.display()
+        ))
+        .into());
+    }
+    for runtime_path in [&versioned_runtime, &stable_runtime] {
+        let runtime_info = StdCommand::new(runtime_path)
+            .arg("--require-version")
+            .arg(env!("CARGO_PKG_VERSION"))
+            .arg("--format")
+            .arg("json")
+            .arg("runtime-info")
+            .output()?;
+        if !runtime_info.status.success() {
+            return Err(io::Error::other(format!(
+                "runtime failed runtime-info after install: {}\n{}",
+                runtime_path.display(),
+                String::from_utf8_lossy(&runtime_info.stderr)
+            ))
+            .into());
+        }
+    }
+
+    let codex_config = read_json_file(&atlas_dir.join("projectatlas.mcp.json"))?;
+    require_same_executable(
+        json_string_at(&codex_config, &["mcpServers", "projectatlas", "command"])?,
+        &versioned_runtime,
+        "repaired mirror codex",
+    )?;
+    let fake_codex_calls = fs::read_to_string(&fake_codex_log)?;
+    if !fake_codex_calls.contains("mcp add projectatlas --")
+        || !fake_codex_calls.contains(versioned_runtime.to_string_lossy().as_ref())
+        || fake_codex_calls.contains(stable_runtime.to_string_lossy().as_ref())
+    {
+        return Err(io::Error::other(format!(
+            "Codex MCP registry was not repaired to the versioned runtime:\n{fake_codex_calls}"
+        ))
+        .into());
+    }
+    if !installer_output_text.contains("Codex MCP registry updated to ProjectAtlas runtime") {
+        return Err(io::Error::other(format!(
+            "installer did not report Codex registry repair:\n{installer_output_text}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    let atlas_dir = repo.join(".projectatlas");
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    let isolated_home = temp.path().join("isolated-home");
+    let app_data = isolated_home.join("AppData").join("Roaming");
+    let local_app_data = isolated_home.join("AppData").join("Local");
+    fs::create_dir_all(&app_data)?;
+    fs::create_dir_all(&local_app_data)?;
+
+    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let release_archive = create_windows_release_archive(temp.path(), &runtime)?;
+    let wrong_hash = "0".repeat(64);
+    let (release_base_url, release_server) =
+        serve_release_assets(&release_archive, Some(wrong_hash.as_str()))?;
+    let workspace_root = workspace_root()?;
+    let installer = workspace_root
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.ps1");
+    let output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(installer)
+        .arg("-ProjectRoot")
+        .arg(&repo)
+        .arg("-ProjectAtlasVersion")
+        .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+        .arg("-ReleaseBaseUrl")
+        .arg(&release_base_url)
+        .arg("-ReleaseBinaryOnly")
+        .env("HOME", &isolated_home)
+        .env("USERPROFILE", &isolated_home)
+        .env("APPDATA", &app_data)
+        .env("LOCALAPPDATA", &local_app_data)
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .output()?;
+    let server_result = release_server.join().map_err(|panic_payload| {
+        let message = if let Some(message) = panic_payload.downcast_ref::<&str>() {
+            *message
+        } else if let Some(message) = panic_payload.downcast_ref::<String>() {
+            message.as_str()
+        } else {
+            "unknown panic payload"
+        };
+        io::Error::other(format!("release asset test server panicked: {message}"))
+    })?;
+    server_result?;
+    let installer_output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if output.status.success() {
+        return Err(io::Error::other(format!(
+            "release-binary installer accepted a checksum mismatch\n{installer_output_text}"
+        ))
+        .into());
+    }
+    if !installer_output_text.contains("Checksum mismatch") {
+        return Err(io::Error::other(format!(
+            "installer failure did not report checksum mismatch\n{installer_output_text}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn posix_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Box<dyn Error>> {
+    let Some(_suffix) = posix_release_suffix() else {
+        return Ok(());
+    };
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    let atlas_dir = repo.join(".projectatlas");
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    let isolated_home = temp.path().join("isolated-home");
+    fs::create_dir_all(&isolated_home)?;
+
+    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let release_archive = create_posix_release_archive(temp.path(), &runtime)?;
+    let wrong_hash = "0".repeat(64);
+    let (release_base_url, release_server) =
+        serve_release_assets(&release_archive, Some(wrong_hash.as_str()))?;
+    let workspace_root = workspace_root()?;
+    let installer = workspace_root
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.sh");
+    let output = StdCommand::new("bash")
+        .arg(installer)
+        .arg(&repo)
+        .env(
+            "PROJECTATLAS_VERSION",
+            format!("v{}", env!("CARGO_PKG_VERSION")),
+        )
+        .env("PROJECTATLAS_RELEASE_BASE_URL", &release_base_url)
+        .env("PROJECTATLAS_RELEASE_BINARY_ONLY", "1")
+        .env("HOME", &isolated_home)
+        .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .output()?;
+    let server_result = release_server.join().map_err(|panic_payload| {
+        let message = if let Some(message) = panic_payload.downcast_ref::<&str>() {
+            *message
+        } else if let Some(message) = panic_payload.downcast_ref::<String>() {
+            message.as_str()
+        } else {
+            "unknown panic payload"
+        };
+        io::Error::other(format!("release asset test server panicked: {message}"))
+    })?;
+    server_result?;
+    let installer_output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if output.status.success() {
+        return Err(io::Error::other(format!(
+            "release-binary installer accepted a checksum mismatch\n{installer_output_text}"
+        ))
+        .into());
+    }
+    if !installer_output_text.contains("Checksum mismatch") {
+        return Err(io::Error::other(format!(
+            "installer failure did not report checksum mismatch\n{installer_output_text}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn bare_relative_projectatlas_config_path_drives_scan_map_and_lint() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("repo");
@@ -1786,6 +2202,11 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
     require_json_usize_greater_than(&token_json, &["estimated_without_projectatlas"], 0)?;
     require_json_usize_greater_than(&token_json, &["estimated_with_projectatlas"], 0)?;
     require_json_i64_greater_than(&token_json, &["estimated_saved"], 0)?;
+    require_json_i64_greater_than(&token_json, &["legacy_gross_estimated_saved"], 0)?;
+    require_json_i64_greater_than(&token_json, &["measured_tokens_saved"], 0)?;
+    require_json_i64_greater_than(&token_json, &["gross_modeled_tokens_avoided"], 0)?;
+    require_json_i64_greater_than(&token_json, &["deduped_modeled_tokens_avoided"], 0)?;
+    require_json_i64_greater_than(&token_json, &["tokens_avoided"], 0)?;
     let buckets = token_json["buckets"]
         .as_array()
         .ok_or_else(|| io::Error::other("token buckets missing from json report"))?;
@@ -1794,6 +2215,7 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
             && bucket["accuracy"] == "heuristic_estimate"
             && bucket["baseline_kind"] == "full_file"
             && bucket["confidence"] == "observed"
+            && bucket["accounting_layer"] == "observed_delta"
     }) {
         return Err(io::Error::other("full-file compression token bucket missing").into());
     }
@@ -1802,6 +2224,7 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
             && bucket["accuracy"] == "heuristic_estimate"
             && bucket["baseline_kind"] == "directory_walk"
             && bucket["confidence"] == "policy_estimate"
+            && bucket["accounting_layer"] == "modeled_avoidance"
     }) {
         return Err(io::Error::other("directory-walk navigation token bucket missing").into());
     }
@@ -1810,9 +2233,28 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
             && bucket["accuracy"] == "heuristic_estimate"
             && bucket["baseline_kind"] == "selected_candidates"
             && bucket["confidence"] == "inferred"
+            && bucket["accounting_layer"] == "modeled_avoidance"
     }) {
         return Err(io::Error::other("selected-candidates navigation token bucket missing").into());
     }
+    let calibrated_token = Command::cargo_bin("projectatlas")?
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["token", "--tokenizer", "o200k_base"])
+        .output()?;
+    if !calibrated_token.status.success() {
+        return Err(io::Error::other("json token calibration command failed").into());
+    }
+    let calibrated_json: Value = serde_json::from_slice(&calibrated_token.stdout)?;
+    require_json_string(
+        &calibrated_json,
+        &["calibration", "tokenizer"],
+        "o200k_base",
+    )?;
+    require_json_usize_greater_than(&calibrated_json, &["calibration", "files"], 0)?;
+    require_json_usize_greater_than(&calibrated_json, &["calibration", "calibrated_tokens"], 0)?;
     let calls_before = token_json["calls"]
         .as_u64()
         .ok_or_else(|| io::Error::other("token calls missing before no-telemetry check"))?;
@@ -1879,17 +2321,28 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .args(["token", "--view", "tui"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("ProjectAtlas Token Savings"))
-        .stdout(predicate::str::contains("heuristic chars/bytes / 4"))
-        .stdout(predicate::str::contains("not model billing tokens"))
-        .stdout(predicate::str::contains("Without PA"))
-        .stdout(predicate::str::contains("With PA"))
-        .stdout(predicate::str::contains("Saved"))
+        .stdout(predicate::str::contains("ProjectAtlas Token Dashboard"))
+        .stdout(predicate::str::contains("tokens avoided"))
+        .stdout(predicate::str::contains("measured saved"))
+        .stdout(predicate::str::contains("deduped modeled"))
+        .stdout(predicate::str::contains("Comparison"))
+        .stdout(predicate::str::contains("baseline"))
+        .stdout(predicate::str::contains("emitted"))
+        .stdout(predicate::str::contains("gross"))
+        .stdout(predicate::str::contains("avoided"))
         .stdout(predicate::str::contains("Buckets"))
-        .stdout(predicate::str::contains("heuristic_estimate"))
-        .stdout(predicate::str::contains("saved tokens"))
-        .stdout(predicate::str::contains("wrong folders, wrong files"))
-        .stdout(predicate::str::contains("unnecessary full reads"));
+        .stdout(predicate::str::contains("modeled_avoidance"))
+        .stdout(predicate::str::contains("Accounting"));
+    Command::cargo_bin("projectatlas")?
+        .env("COLUMNS", "100")
+        .arg("--db")
+        .arg(&db)
+        .args(["token", "--view", "tui", "--tokenizer", "cl100k_base"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ProjectAtlas Token Dashboard"))
+        .stdout(predicate::str::contains("calibration"))
+        .stdout(predicate::str::contains("cl100k_base"));
     Command::cargo_bin("projectatlas")?
         .arg("--db")
         .arg(&db)
@@ -1897,8 +2350,18 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .assert()
         .success()
         .stdout(predicate::str::contains("ProjectAtlas Token Trends"))
-        .stdout(predicate::str::contains("Window    month"))
+        .stdout(predicate::str::contains("Saved Tokens Trend"))
+        .stdout(predicate::str::contains("period"))
         .stdout(predicate::str::contains("saved"));
+    Command::cargo_bin("projectatlas")?
+        .arg("--db")
+        .arg(&db)
+        .args(["token", "--trend", "month", "--tokenizer", "o200k_base"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--tokenizer is only supported for token overview reports",
+        ));
     Ok(())
 }
 
@@ -2738,7 +3201,8 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !stdout.contains("health:")
         || !stdout.contains("health_findings[1]")
         || !stdout.contains("next_start_index: 1")
-        || !stdout.contains("ProjectAtlas Token Savings")
+        || !stdout.contains("ProjectAtlas Token Dashboard")
+        || !stdout.contains("tokens avoided")
         || !stdout.contains("purpose_review:")
         || !stdout.contains("failed: 0")
         || !stdout.contains("src/lib.rs")
@@ -6604,6 +7068,35 @@ fn workflow_job_block(workflow: &str, job: &str) -> Result<String, Box<dyn Error
     }
 }
 
+/// Require every GitHub Actions `uses:` reference to pin an immutable 40-char SHA.
+fn assert_actions_are_sha_pinned(name: &str, workflow: &str) -> Result<(), Box<dyn Error>> {
+    for (index, line) in workflow.lines().enumerate() {
+        let Some((_, reference)) = line.split_once("uses:") else {
+            continue;
+        };
+        let reference = reference.split('#').next().unwrap_or("").trim();
+        let Some((_, revision)) = reference.rsplit_once('@') else {
+            return Err(io::Error::other(format!(
+                "{name}:{} uses reference {reference:?} without an @revision",
+                index + 1
+            ))
+            .into());
+        };
+        if revision.len() != 40
+            || !revision
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        {
+            return Err(io::Error::other(format!(
+                "{name}:{} uses reference {reference:?} is not pinned to a 40-character SHA",
+                index + 1
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// Return the deterministic quarantine path for a fixture stale shim.
 fn stale_shim_quarantine_path(path: &Path, version: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(format!(
@@ -6646,18 +7139,80 @@ fn create_windows_release_archive(
     Ok(archive)
 }
 
-/// Serve a single local release asset request for a `PowerShell` installer smoke test.
-#[cfg(windows)]
-fn serve_single_release_asset(
-    asset: Vec<u8>,
+/// Return the release suffix supported by the POSIX installer on this host.
+#[cfg(unix)]
+fn posix_release_suffix() -> Option<&'static str> {
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Some("x86_64-unknown-linux-gnu")
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        Some("x86_64-apple-darwin")
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Some("aarch64-apple-darwin")
+    } else {
+        None
+    }
+}
+
+/// Build a local POSIX release archive containing the current test runtime.
+#[cfg(unix)]
+fn create_posix_release_archive(
+    temp_root: &Path,
+    runtime: &Path,
+) -> Result<std::path::PathBuf, Box<dyn Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let suffix = posix_release_suffix()
+        .ok_or_else(|| io::Error::other("host is not supported by POSIX release installer"))?;
+    let asset_root = temp_root.join("release-asset-posix");
+    let asset_dir = asset_root.join("projectatlas");
+    fs::create_dir_all(&asset_dir)?;
+    let release_runtime = asset_dir.join("projectatlas");
+    fs::copy(runtime, &release_runtime)?;
+    fs::set_permissions(&release_runtime, fs::Permissions::from_mode(0o755))?;
+    let archive = temp_root.join(format!(
+        "projectatlas-v{}-{suffix}.tar.gz",
+        env!("CARGO_PKG_VERSION")
+    ));
+    let output = StdCommand::new("tar")
+        .arg("-czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&asset_root)
+        .arg("projectatlas")
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "failed to create local POSIX release archive\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(archive)
+}
+
+/// Serve local release archive and checksum requests for installer smoke tests.
+fn serve_release_assets(
+    archive: &Path,
+    override_hash: Option<&str>,
 ) -> Result<(String, thread::JoinHandle<Result<(), io::Error>>), Box<dyn Error>> {
     use std::io::Read as _;
 
+    let asset_name = archive
+        .file_name()
+        .ok_or_else(|| io::Error::other("release archive file name missing"))?
+        .to_string_lossy()
+        .to_string();
+    let asset = fs::read(archive)?;
+    let checksum = override_hash.map_or_else(|| sha256_hex(&asset), ToString::to_string);
+    let checksums = format!("{checksum}  {asset_name}\n").into_bytes();
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     listener.set_nonblocking(true)?;
     let base_url = format!("http://{}", listener.local_addr()?);
     let handle = thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(20);
+        let mut served_archive = false;
+        let mut served_checksums = false;
         loop {
             match listener.accept() {
                 Ok((mut stream, _)) => {
@@ -6671,13 +7226,41 @@ fn serve_single_release_asset(
                             "release asset request was empty",
                         ));
                     }
+                    let request_text = String::from_utf8_lossy(&request[..bytes_read]);
+                    let request_path = request_text
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("");
+                    let (body, content_type) = if request_path.ends_with(&format!("/{asset_name}"))
+                    {
+                        served_archive = true;
+                        let content_type = if Path::new(&asset_name)
+                            .extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+                        {
+                            "application/zip"
+                        } else {
+                            "application/gzip"
+                        };
+                        (asset.as_slice(), content_type)
+                    } else if request_path.ends_with("/SHA256SUMS") {
+                        served_checksums = true;
+                        (checksums.as_slice(), "text/plain; charset=utf-8")
+                    } else {
+                        return Err(io::Error::other(format!(
+                            "unexpected release asset request path {request_path:?}"
+                        )));
+                    };
                     write!(
                         stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        asset.len()
+                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
                     )?;
-                    stream.write_all(&asset)?;
-                    return Ok(());
+                    stream.write_all(body)?;
+                    if served_archive && served_checksums {
+                        return Ok(());
+                    }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     if Instant::now() >= deadline {
@@ -6693,6 +7276,10 @@ fn serve_single_release_asset(
         }
     });
     Ok((base_url, handle))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 /// Run the bundled plugin installer with an explicit runtime path.

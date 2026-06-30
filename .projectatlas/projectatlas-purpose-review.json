@@ -273,6 +273,10 @@
       "purpose": "GitHub issue form for public ProjectAtlas improvement requests."
     },
     {
+      "path": ".github/dependabot.yml",
+      "purpose": "Dependabot configuration that keeps pinned GitHub Actions dependencies current."
+    },
+    {
       "path": ".github/pull_request_template.md",
       "purpose": "Pull request checklist for ProjectAtlas changes, verification gates, issue links, purpose queue review, and release-note hygiene."
     },
@@ -355,6 +359,10 @@
     {
       "path": "crates/projectatlas-cli/src/structural.rs",
       "purpose": "Create deterministic structural summaries for declaration light files"
+    },
+    {
+      "path": "crates/projectatlas-cli/src/token_tui.rs",
+      "purpose": "Render ProjectAtlas token telemetry and trends as Ratatui terminal dashboards with fixed-column comparison charts."
     },
     {
       "path": "crates/projectatlas-cli/tests/e2e.rs",

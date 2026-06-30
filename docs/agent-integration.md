@@ -159,7 +159,10 @@ When `codex` is available, installers also inspect `codex mcp get projectatlas`.
 If a global Codex MCP server named `projectatlas` exists but points to a stale
 runtime version or another project's DB/config, the installer removes and
 re-adds that registry entry with the verified absolute runtime, current project
-database, current config, and matching `--require-version`. Set
+database, current config, and matching `--require-version`. On Windows, the
+LocalAppData stable mirror is repaired for bare `projectatlas` PATH use, but
+MCP configs and Codex registry entries stay pinned to the verified runtime path.
+Set
 `PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1` only when a managed environment
 intentionally owns the global Codex MCP registry. After plugin/runtime updates,
 agents should verify `codex mcp get projectatlas` or `codex mcp list`; stale
@@ -259,14 +262,13 @@ Default sequence for coding tasks:
 
 Token savings estimate context that ProjectAtlas prevented the agent from wasting: wrong-folder exploration,
 wrong-file opens, and unnecessary full-code reads avoided by the overview -> folders -> files -> summary/outline
--> exact-slice funnel. Agent and MCP surfaces stay structured TOON; terminal decoration belongs only to the
+-> exact-slice funnel. Agent and MCP surfaces stay structured TOON; Ratatui terminal charts belong only to the
 explicit `projectatlas token --view tui` view.
 
 The default token report is a fast offline heuristic, not provider billing telemetry. It estimates emitted
 ProjectAtlas payload text with `ceil(chars / 4)` and file-size baselines with `ceil(bytes / 4)`. Reports expose
-bucket, baseline kind, confidence, provider, model, tokenizer backend, and accuracy labels so agents can separate
-observed full-file compression from modeled navigation savings. Provider/model-aware counting belongs behind an
-explicit calibration command or config; normal orientation and `atlas_token_report` must stay local and fast.
+bucket, baseline kind, confidence, accounting layer, provider, model, tokenizer backend, and accuracy labels so agents can separate
+observed full-file compression from modeled navigation savings. Use `tokens_avoided` for the conservative headline because repeated modeled baselines are deduped there; `estimated_saved` remains the legacy gross compatibility value. Local tokenizer calibration is explicit with `projectatlas token --tokenizer o200k_base` or `projectatlas token --tokenizer cl100k_base`; normal orientation and `atlas_token_report` must stay local and fast.
 
 For freshness, treat `projectatlas watch` as the steady-state updater for local editing sessions. Line slices
 validate against SQLite and then read the current file from disk. Symbol slices also read current disk content,

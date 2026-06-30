@@ -7,7 +7,7 @@ The positive finding recorded in issue #153 was a 99.8% token-savings observatio
 - Start with repository overview and folder purpose.
 - Narrow to likely files with file purpose and content summary.
 - Escalate to symbol summaries and exact slices only after choosing the right target.
-- Track saved tokens as avoided broad source reads, avoided wrong-file reads, and avoided unnecessary full-file reads.
+- Track avoided-token estimates for broad source reads, wrong-file reads, and unnecessary full-file reads, while keeping measured source-compression deltas separate from modeled navigation avoidance.
 
 ## Corpus Scale
 
@@ -27,7 +27,7 @@ The positive finding recorded in issue #153 was a 99.8% token-savings observatio
 - Average ProjectAtlas payload per call: 2,997 tokens.
 - Estimated without ProjectAtlas: 221,114,448 tokens.
 - Estimated with ProjectAtlas: 425,622 tokens.
-- Estimated saved: 220,688,826 tokens.
+- Legacy gross estimated saved: 220,688,826 tokens.
 - Savings rate: 99.8%.
 
 Formula:
@@ -35,9 +35,18 @@ Formula:
 ```text
 without ProjectAtlas = avoided candidate files, directory walks, and full-file reads
 with ProjectAtlas    = compact TOON payloads returned by atlas commands
-saved                = without ProjectAtlas - with ProjectAtlas
-savings rate         = saved / without ProjectAtlas
+legacy gross saved   = without ProjectAtlas - with ProjectAtlas
+savings rate         = legacy gross saved / without ProjectAtlas
+tokens avoided       = measured saved + deduped modeled avoided
 ```
+
+Current reports preserve the historical `estimated_saved`/`legacy_gross_estimated_saved` value for compatibility, but the headline claim should use `tokens_avoided` when repeated modeled baselines exist. The split is:
+
+- `measured_tokens_saved`: observed full-file/source-compression before/after deltas.
+- `gross_modeled_tokens_avoided`: modeled navigation avoidance before dedupe.
+- `deduped_modeled_tokens_avoided`: modeled navigation avoidance after retaining one repeated session baseline per identity and subtracting every ProjectAtlas payload emitted for it.
+- `repeated_baselines_deduped`: duplicate modeled events collapsed by that repeated-baseline dedupe.
+- `tokens_avoided`: conservative headline value, equal to measured saved plus deduped modeled avoided.
 
 ## Responsiveness Sample
 
@@ -50,4 +59,4 @@ Representative warm CLI reads from the same audit stayed around 160-166 ms after
 
 For a comparable large application, warm orientation commands are expected to stay comfortably sub-second. If `overview`, `folders`, `files`, `summary`, or `token` drift into multi-second reads on a warmed index, treat that as a performance issue and inspect database query plans, text-index size, symbol candidate counts, and telemetry aggregation.
 
-ProjectAtlas token telemetry reports this through `projectatlas token` and `projectatlas token --view tui`. The telemetry is estimate-based; the default estimator is the offline `chars/bytes / 4` workflow heuristic, not provider or model billing-token accounting. It is designed for trend and workflow validation rather than billing reconciliation.
+ProjectAtlas token telemetry reports this through `projectatlas token` and the Ratatui-backed `projectatlas token --view tui` terminal dashboard. The telemetry is estimate-based; the default estimator is the offline `chars/bytes / 4` workflow heuristic, not provider or model billing-token accounting. It is designed for trend and workflow validation rather than billing reconciliation. Use `projectatlas token --tokenizer o200k_base` or `projectatlas token --tokenizer cl100k_base` for a local tokenizer calibration of the current indexed UTF-8 files; calibration is reported separately and does not rewrite historical event rows.

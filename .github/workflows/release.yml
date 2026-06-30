@@ -15,9 +15,7 @@ on:
         type: string
 
 permissions:
-  contents: write
-  issues: read
-  pull-requests: read
+  contents: read
 
 env:
   RELEASE_VERSION: ${{ inputs.version }}
@@ -28,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Setup Rust
         run: |
@@ -36,7 +34,7 @@ jobs:
           rustup default stable
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2
         with:
           tool: cargo-deny
 
@@ -123,7 +121,7 @@ jobs:
             suffix: aarch64-apple-darwin
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Setup Rust
         run: |
@@ -144,7 +142,7 @@ jobs:
           mv "$archive" release-assets/
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: projectatlas-${{ matrix.suffix }}
           path: release-assets/*
@@ -156,7 +154,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Setup Rust
         shell: pwsh
@@ -185,7 +183,7 @@ jobs:
           Move-Item -LiteralPath $archive -Destination "release-assets/"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: projectatlas-x86_64-pc-windows-msvc
           path: release-assets/*
@@ -210,10 +208,10 @@ jobs:
             suffix: aarch64-apple-darwin
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Download packaged runtime
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: projectatlas-${{ matrix.suffix }}
           path: release-assets
@@ -282,10 +280,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Download packaged runtime
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: projectatlas-x86_64-pc-windows-msvc
           path: release-assets
@@ -360,40 +358,77 @@ jobs:
     name: publish
     needs: [prepublish-installer-smoke-unix, prepublish-installer-smoke-windows]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: read
+      pull-requests: read
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
 
       - name: Download artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: release-assets
           merge-multiple: true
 
-      - name: Create tag
+      - name: Prepare release assets
         run: |
           if [[ ! "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Release version must match vMAJOR.MINOR.PATCH" >&2
             exit 1
           fi
           git fetch --tags
-          if git tag -l "$RELEASE_VERSION" | grep -q .; then
-            echo "Tag $RELEASE_VERSION already exists" >&2
+          release_exists=false
+          if gh release view "$RELEASE_VERSION" >/dev/null 2>&1; then
+            release_exists=true
+            echo "Release $RELEASE_VERSION already exists; continuing asset repair publish."
+          fi
+          if git rev-parse "$RELEASE_VERSION^{commit}" >/dev/null 2>&1; then
+            tag_commit="$(git rev-parse "$RELEASE_VERSION^{commit}")"
+            head_commit="$(git rev-parse HEAD)"
+            if [[ "$tag_commit" != "$head_commit" ]]; then
+              echo "Tag $RELEASE_VERSION already points to $tag_commit, not $head_commit" >&2
+              exit 1
+            fi
+            if [[ "$release_exists" == "true" ]]; then
+              echo "Tag $RELEASE_VERSION matches the workflow commit; continuing asset repair publish."
+            else
+              echo "Tag $RELEASE_VERSION exists without a GitHub release; continuing recovery publish."
+            fi
+          elif [[ "$release_exists" == "true" ]]; then
+            echo "Release $RELEASE_VERSION exists, but its tag was not found after fetching tags" >&2
             exit 1
           fi
-          git tag "$RELEASE_VERSION"
-          git push origin "$RELEASE_VERSION"
+          echo "PROJECTATLAS_RELEASE_EXISTS=$release_exists" >> "$GITHUB_ENV"
+          (
+            cd release-assets
+            mapfile -d '' assets < <(find . -maxdepth 1 -type f -name "projectatlas-${RELEASE_VERSION}-*" -printf '%f\0' | sort -z)
+            if [[ ${#assets[@]} -eq 0 ]]; then
+              echo "No release archives matched projectatlas-${RELEASE_VERSION}-*" >&2
+              exit 1
+            fi
+            : > SHA256SUMS
+            for asset in "${assets[@]}"; do
+              sha256sum "$asset" >> SHA256SUMS
+            done
+          )
 
       - name: Create GitHub release
         run: |
           python3 .github/scripts/release-notes.py > release-notes.md
-          gh release create "$RELEASE_VERSION" release-assets/* \
-            --title "$RELEASE_VERSION" \
-            --notes-file release-notes.md
+          if [[ "${PROJECTATLAS_RELEASE_EXISTS:-false}" == "true" ]]; then
+            gh release upload "$RELEASE_VERSION" release-assets/* --clobber
+          else
+            gh release create "$RELEASE_VERSION" release-assets/* \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_VERSION" \
+              --notes-file release-notes.md
+          fi
 
   installer-smoke-unix:
     name: installer smoke ${{ matrix.label }}
@@ -414,7 +449,7 @@ jobs:
             suffix: aarch64-apple-darwin
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Install release runtime through plugin
         timeout-minutes: 5
@@ -474,7 +509,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Install release runtime through plugin
         timeout-minutes: 5

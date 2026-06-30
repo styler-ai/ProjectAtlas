@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.3.15"><img alt="release" src="https://img.shields.io/badge/release-v0.3.15-blue"></a>
+  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.3.16"><img alt="release" src="https://img.shields.io/badge/release-v0.3.16-blue"></a>
   <img alt="rust" src="https://img.shields.io/badge/Rust-2024-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
@@ -25,7 +25,7 @@ No required `.purpose` files. No source-header tax. No hosted index. The project
 ## Quickstart
 
 ```bash
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.15
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.16
 codex plugin add projectatlas --marketplace projectatlas
 ```
 
@@ -44,7 +44,7 @@ correctly keeps that pinned ref. In that case, replace only the dedicated `style
 
 ```bash
 codex plugin marketplace remove projectatlas
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.15
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.16
 ```
 
 Then tell Codex: "Use ProjectAtlas for this repo."
@@ -78,11 +78,12 @@ The estimate is:
 ```text
 without ProjectAtlas = avoided candidate files, directory walks, and full-file reads
 with ProjectAtlas    = compact TOON payloads returned by overview, folders, files, summaries, search, symbols, and slices
-saved                = without ProjectAtlas - with ProjectAtlas
-savings rate         = saved / without ProjectAtlas
+legacy gross saved   = without ProjectAtlas - with ProjectAtlas
+savings rate         = legacy gross saved / without ProjectAtlas
+tokens avoided       = measured saved + deduped modeled avoided
 ```
 
-The default estimator is deliberately simple and local: `ceil(chars_or_bytes / 4)`. It is a workflow estimate, not provider billing telemetry.
+The default estimator is deliberately simple and local: `ceil(chars_or_bytes / 4)`. It is a workflow estimate, not provider billing telemetry. Reports preserve the legacy gross saved number for continuity and also expose `measured_tokens_saved`, `gross_modeled_tokens_avoided`, `deduped_modeled_tokens_avoided`, and conservative headline `tokens_avoided`.
 
 | Signal | Result |
 | --- | ---: |
@@ -97,7 +98,7 @@ The default estimator is deliberately simple and local: `ceil(chars_or_bytes / 4
 | Average ProjectAtlas payload per call | 2,997 tokens |
 | Total estimated without ProjectAtlas | 221,114,448 tokens |
 | Total estimated with ProjectAtlas | 425,622 tokens |
-| Estimated saved | 220,688,826 tokens |
+| Legacy gross estimated saved | 220,688,826 tokens |
 | Observed savings rate for this workload | 99.8% |
 
 <p align="center">
@@ -176,7 +177,7 @@ Most users can stop at the plugin install. The CLI is here for local debugging, 
 Only need the CLI yourself? Install it from the released tag:
 
 ```bash
-cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.15 projectatlas-cli --locked
+cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.16 projectatlas-cli --locked
 ```
 
 From this checkout:
@@ -216,6 +217,8 @@ For a human token dashboard:
 ```bash
 projectatlas token --view tui
 ```
+
+For a local tokenizer calibration of indexed UTF-8 files, add `--tokenizer o200k_base` or `--tokenizer cl100k_base`.
 
 ## Agent And MCP Setup
 
@@ -273,7 +276,7 @@ ProjectAtlas scans with `.gitignore` awareness, hashes files with BLAKE3, stores
 
 ## Release Quality
 
-`v0.3.15` ships through the full release matrix:
+`v0.3.16` ships through the full release matrix:
 
 - Rust format, check, clippy, dependency policy, tests, doctests, and rustdoc.
 - ProjectAtlas scan, parity, database-backed purpose lint, and health checks.
