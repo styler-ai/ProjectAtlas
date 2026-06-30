@@ -51,6 +51,8 @@ pub type FsResult<T> = Result<T, FsError>;
 pub struct ScanOptions {
     /// Additional directory names to exclude.
     pub exclude_dir_names: Vec<String>,
+    /// Additional directory suffixes to exclude.
+    pub exclude_dir_suffixes: Vec<String>,
     /// Repository-relative path prefixes to exclude.
     pub exclude_path_prefixes: Vec<String>,
 }
@@ -68,6 +70,7 @@ impl Default for ScanOptions {
                 "build".to_string(),
                 "target".to_string(),
             ],
+            exclude_dir_suffixes: Vec::new(),
             exclude_path_prefixes: Vec::new(),
         }
     }
@@ -411,6 +414,10 @@ fn has_excluded_directory_component(relative_path: &str, options: &ScanOptions) 
             .exclude_dir_names
             .iter()
             .any(|excluded| excluded == name)
+            || options
+                .exclude_dir_suffixes
+                .iter()
+                .any(|suffix| !suffix.is_empty() && name.ends_with(suffix))
     })
 }
 
@@ -594,6 +601,41 @@ mod tests {
         require_path(&nodes, "docs")?;
         require_path(&nodes, "src/api")?;
         require_path(&nodes, "src/api/live.rs")?;
+        Ok(())
+    }
+
+    #[test]
+    fn excludes_configured_directory_suffixes_for_full_and_single_path_scans()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join("vendor.egg-info"))?;
+        fs::create_dir_all(repo.join("src").join("live"))?;
+        fs::write(repo.join("vendor.egg-info").join("PKG-INFO"), "metadata\n")?;
+        fs::write(
+            repo.join("src").join("live").join("main.rs"),
+            "fn main() {}\n",
+        )?;
+        let options = ScanOptions {
+            exclude_dir_suffixes: vec![".egg-info".to_string()],
+            ..ScanOptions::default()
+        };
+
+        let nodes = scan_repo(&repo, &options)?;
+        reject_path(&nodes, "vendor.egg-info")?;
+        reject_path(&nodes, "vendor.egg-info/PKG-INFO")?;
+        require_path(&nodes, "src/live/main.rs")?;
+
+        let single = scan_path(
+            &repo,
+            &repo.join("vendor.egg-info").join("PKG-INFO"),
+            &options,
+        )?;
+        if single.is_some() {
+            return Err(
+                io::Error::other("single-path refresh indexed suffix-excluded file").into(),
+            );
+        }
         Ok(())
     }
 

@@ -11,6 +11,8 @@ use crate::{
 
 /// Import relations inspected per module term for alias-based caller lookup.
 const IMPORT_RELATION_LIMIT_PER_TERM: usize = 500;
+/// Relations inspected per caller file after a target import is found.
+const IMPORT_RELATION_LIMIT_PER_CALLER: usize = 1_000;
 
 /// Import-derived call target for one caller file.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -45,7 +47,37 @@ fn load_import_relations_for_symbols(
         .collect::<Vec<_>>();
     terms.sort();
     terms.dedup();
-    Ok(store.load_import_relations_matching_targets(&terms, IMPORT_RELATION_LIMIT_PER_TERM)?)
+    let mut relations =
+        store.load_import_relations_matching_targets(&terms, IMPORT_RELATION_LIMIT_PER_TERM)?;
+    let mut caller_paths = relations
+        .iter()
+        .map(|relation| relation.path.clone())
+        .collect::<Vec<_>>();
+    caller_paths.sort();
+    caller_paths.dedup();
+    for caller_path in caller_paths {
+        relations.extend(
+            store
+                .load_symbol_relations(Some(&caller_path), None, IMPORT_RELATION_LIMIT_PER_CALLER)?
+                .into_iter()
+                .filter(|relation| relation.kind == RelationKind::Imports),
+        );
+    }
+    relations.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.line.cmp(&right.line))
+            .then_with(|| left.source_name.cmp(&right.source_name))
+            .then_with(|| left.target_name.cmp(&right.target_name))
+    });
+    relations.dedup_by(|left, right| {
+        left.path == right.path
+            && left.source_name == right.source_name
+            && left.target_name == right.target_name
+            && left.kind == right.kind
+            && left.line == right.line
+    });
+    Ok(relations)
 }
 
 /// Build deterministic import-alias call targets from already loaded imports.
@@ -381,12 +413,11 @@ fn typescript_module_matches_symbol(
         return source_stems_for_path(&symbol.path)
             .iter()
             .any(|stem| stem == &relative_path)
-            && module_symbol_alias_is_unique(
-                symbol,
-                &module_name_from_path(&relative_path),
-                ".",
-                alias_counts,
-            );
+            && module_aliases_for_path(&relative_path)
+                .iter()
+                .any(|module_alias| {
+                    module_symbol_alias_is_unique(symbol, module_alias, ".", alias_counts)
+                });
     }
     module_matches_symbol(module_spec, ".", symbol, alias_counts)
 }
@@ -488,9 +519,4 @@ fn resolve_relative_module_path(caller_path: &str, module_spec: &str) -> Option<
         }
     }
     Some(strip_known_source_extension(&components.join("/")))
-}
-
-/// Return a dotted module name from a repository stem path.
-fn module_name_from_path(path: &str) -> String {
-    path.trim_start_matches("src/").replace('/', ".")
 }

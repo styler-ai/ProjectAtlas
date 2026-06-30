@@ -683,6 +683,15 @@ fn release_and_actions_policy_is_hardened() -> Result<(), Box<dyn Error>> {
     if !release_workflow.contains("permissions:\n  contents: read") {
         return Err(io::Error::other("release workflow must default to contents: read").into());
     }
+    for job in ["package-unix", "package-windows"] {
+        let package_job = workflow_job_block(&release_workflow, job)?;
+        if !package_job.contains("timeout-minutes: 30") {
+            return Err(io::Error::other(format!(
+                "release package job {job} must have a bounded timeout"
+            ))
+            .into());
+        }
+    }
     let publish = workflow_job_block(&release_workflow, "publish")?;
     for required in ["contents: write", "issues: read", "pull-requests: read"] {
         if !publish.contains(required) {
@@ -1633,6 +1642,101 @@ fn windows_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Bo
     if !installer_output_text.contains("Checksum mismatch") {
         return Err(io::Error::other(format!(
             "installer failure did not report checksum mismatch\n{installer_output_text}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_release_binary_only_rejects_invalid_runtime_without_fallback()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    let atlas_dir = repo.join(".projectatlas");
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    let isolated_home = temp.path().join("isolated-home");
+    let app_data = isolated_home.join("AppData").join("Roaming");
+    let local_app_data = isolated_home.join("AppData").join("Local");
+    fs::create_dir_all(&app_data)?;
+    fs::create_dir_all(&local_app_data)?;
+
+    let stable_runtime = local_app_data
+        .join("ProjectAtlas")
+        .join("bin")
+        .join("projectatlas.exe");
+    fs::create_dir_all(
+        stable_runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("stable runtime parent missing"))?,
+    )?;
+    let valid_runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    fs::copy(&valid_runtime, &stable_runtime)?;
+
+    let invalid_runtime = temp.path().join("invalid-projectatlas.exe");
+    fs::write(
+        &invalid_runtime,
+        b"this is not a valid ProjectAtlas Windows executable",
+    )?;
+    let release_archive = create_windows_release_archive(temp.path(), &invalid_runtime)?;
+    let (release_base_url, release_server) = serve_release_assets(&release_archive, None)?;
+    let workspace_root = workspace_root()?;
+    let installer = workspace_root
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.ps1");
+    let output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(installer)
+        .arg("-ProjectRoot")
+        .arg(&repo)
+        .arg("-ProjectAtlasVersion")
+        .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+        .arg("-ReleaseBaseUrl")
+        .arg(&release_base_url)
+        .arg("-ReleaseBinaryOnly")
+        .env("HOME", &isolated_home)
+        .env("USERPROFILE", &isolated_home)
+        .env("APPDATA", &app_data)
+        .env("LOCALAPPDATA", &local_app_data)
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .output()?;
+    let server_result = release_server.join().map_err(|panic_payload| {
+        let message = if let Some(message) = panic_payload.downcast_ref::<&str>() {
+            *message
+        } else if let Some(message) = panic_payload.downcast_ref::<String>() {
+            message.as_str()
+        } else {
+            "unknown panic payload"
+        };
+        io::Error::other(format!("release asset test server panicked: {message}"))
+    })?;
+    server_result?;
+    let installer_output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if output.status.success() {
+        return Err(io::Error::other(format!(
+            "release-binary installer fell back to an ambient runtime after installing an invalid asset\n{installer_output_text}"
+        ))
+        .into());
+    }
+    if !installer_output_text.contains("produced an invalid runtime") {
+        return Err(io::Error::other(format!(
+            "installer failure did not report invalid release runtime\n{installer_output_text}"
         ))
         .into());
     }

@@ -4473,12 +4473,12 @@ fn purpose_default_queue_node_expression(
     } else {
         String::new()
     };
-    let reviewed_sources = sql_string_literals(AGENT_REVIEWED_SOURCE_VALUES);
+    let stale_queue_sources = sql_string_literals(STALE_FILE_PURPOSE_QUEUE_SOURCE_VALUES);
     format!(
         "({node_alias}.kind = 'folder' \
           OR ({node_alias}.kind = 'file' \
               AND {purpose_alias}.status = 'stale' \
-              AND {purpose_alias}.source IN ({reviewed_sources})) \
+              AND {purpose_alias}.source IN ({stale_queue_sources})) \
           OR ({node_alias}.kind = 'file' AND {}){source_file_clause}{all_file_clause}{asset_clause})",
         high_impact_file_path_expression(&format!("lower({node_alias}.path)")),
     )
@@ -4509,19 +4509,22 @@ fn purpose_default_queue_finding_expression(scope: HealthScope) -> String {
 
 /// SQL ORDER BY expression that keeps folder-purpose work ahead of file cleanup.
 fn purpose_default_queue_order_expression(node_alias: &str, purpose_alias: &str) -> String {
-    let reviewed_sources = sql_string_literals(AGENT_REVIEWED_SOURCE_VALUES);
+    let stale_queue_sources = sql_string_literals(STALE_FILE_PURPOSE_QUEUE_SOURCE_VALUES);
     format!(
         "CASE \
             WHEN {node_alias}.kind = 'folder' THEN 0 \
             WHEN {node_alias}.kind = 'file' \
                 AND {purpose_alias}.status = 'stale' \
-                AND {purpose_alias}.source IN ({reviewed_sources}) THEN 1 \
+                AND {purpose_alias}.source IN ({stale_queue_sources}) THEN 1 \
             WHEN {node_alias}.kind = 'file' AND {} THEN 2 \
             ELSE 3 \
         END, {node_alias}.path",
         high_impact_file_path_expression(&format!("lower({node_alias}.path)"))
     )
 }
+
+/// Purpose sources whose stale file purposes stay in the default queue.
+const STALE_FILE_PURPOSE_QUEUE_SOURCE_VALUES: &[&str] = &["agent", "human", "imported"];
 
 /// Return whether `source_only` should run before queue-specific folder/file selection.
 fn source_filter_applies_before_queue(scope: HealthScope) -> bool {
@@ -5792,6 +5795,54 @@ mod tests {
             &page.findings[0].path,
             &"src/helper.rs".to_string(),
             "legacy reviewed stale file",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn stale_imported_files_remain_in_default_queue() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_file_node("src/imported.rs", "hash-a"),
+            test_file_node("Cargo.toml", "hash-cargo"),
+        ])?;
+        store.set_purpose(
+            "src/imported.rs",
+            "Imported helper implementation.",
+            PurposeSource::Imported,
+        )?;
+        store.replace_scan(&[
+            test_file_node("src/imported.rs", "hash-b"),
+            test_file_node("Cargo.toml", "hash-cargo"),
+        ])?;
+
+        let page = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                start_index: 0,
+                limit: 10,
+                category: None,
+                severity: Some(Severity::Warning),
+                path_prefix: Some(".".to_string()),
+                summary_only: false,
+                scope: HealthScope::purpose_default(),
+            },
+        )?;
+
+        require_eq(
+            &page.total,
+            &2,
+            "default queue includes stale imported file",
+        )?;
+        require_eq(
+            &health_paths(&page),
+            &vec!["src/imported.rs", "Cargo.toml"],
+            "stale imported file is queued before high-impact files",
+        )?;
+        require_eq(
+            &page.findings[0].category,
+            &"stale-purpose".to_string(),
+            "stale imported finding category",
         )?;
         Ok(())
     }

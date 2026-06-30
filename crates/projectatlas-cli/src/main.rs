@@ -2421,6 +2421,7 @@ mod tests {
                 "target".to_string(),
                 "generated".to_string(),
             ],
+            exclude_dir_suffixes: Vec::new(),
             exclude_path_prefixes: vec!["docs/api".to_string()],
         };
         require_condition(

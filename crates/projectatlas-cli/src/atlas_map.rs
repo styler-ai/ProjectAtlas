@@ -268,6 +268,7 @@ impl AtlasMapConfig {
     pub(crate) fn scan_options(&self) -> ScanOptions {
         ScanOptions {
             exclude_dir_names: self.exclude_dir_names.iter().cloned().collect(),
+            exclude_dir_suffixes: self.exclude_dir_suffixes.iter().cloned().collect(),
             exclude_path_prefixes: self.exclude_path_prefixes.iter().cloned().collect(),
         }
     }
@@ -1224,7 +1225,7 @@ fn collect_repo_paths(config: &AtlasMapConfig) -> AtlasMapResult<RepoPaths> {
                 folders.push(node.path);
             }
             NodeKind::File => {
-                if is_durable_projectatlas_input(&node.path) {
+                if is_durable_projectatlas_input(&node.path, config) {
                     continue;
                 }
                 if is_source_node(
@@ -1266,8 +1267,18 @@ fn is_legacy_map_metadata_folder(path: &str) -> bool {
 }
 
 /// Return whether a file is a durable `ProjectAtlas` input outside legacy map/lint.
-fn is_durable_projectatlas_input(path: &str) -> bool {
+fn is_durable_projectatlas_input(path: &str, config: &AtlasMapConfig) -> bool {
     DURABLE_PROJECTATLAS_INPUT_PATHS.contains(&path)
+        || configured_nonsource_registry_path(config).as_deref() == Some(path)
+}
+
+/// Return the configured non-source registry as a repository-relative path.
+fn configured_nonsource_registry_path(config: &AtlasMapConfig) -> Option<String> {
+    let relative = config
+        .nonsource_files_path
+        .strip_prefix(&config.root)
+        .ok()?;
+    validated_repo_file_key(relative).ok()
 }
 
 /// Return whether a scanned file should be treated as source.
@@ -1683,7 +1694,8 @@ fn skip_yaml_frontmatter(lines: &[String]) -> &[String] {
 fn first_content_line(lines: &[String]) -> Option<usize> {
     lines.iter().enumerate().find_map(|(index, line)| {
         let trimmed = line.trim();
-        (!trimmed.is_empty() && !trimmed.starts_with("#!")).then_some(index)
+        (!trimmed.is_empty() && !trimmed.starts_with("#!") && !is_php_open_tag_line(trimmed))
+            .then_some(index)
     })
 }
 
@@ -1702,6 +1714,14 @@ fn first_python_doc_line(lines: &[String]) -> Option<usize> {
             Some(index)
         }
     })
+}
+
+/// Return whether a line is only a PHP open tag or declaration before comments.
+fn is_php_open_tag_line(trimmed: &str) -> bool {
+    trimmed
+        .strip_prefix("<?php")
+        .map(str::trim)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with("declare("))
 }
 
 /// Collect lines until a marker appears.
@@ -2542,9 +2562,10 @@ impl From<serde_json::Error> for AtlasMapError {
 mod tests {
     use super::{
         AtlasMapConfig, DEFAULT_TEXT_INDEX_MAX_BYTES, MapRecord,
-        append_existing_map_purpose_records, append_record_rows, exclude_dir_name_set,
-        extract_line_comment_purpose, normalize_repo_string, project_root_for_projectatlas_config,
-        split_record_cells, stable_generated_at, toon_cell,
+        append_existing_map_purpose_records, append_record_rows, collect_repo_paths,
+        exclude_dir_name_set, extract_block_comment_purpose, extract_line_comment_purpose,
+        normalize_repo_string, project_root_for_projectatlas_config, split_record_cells,
+        stable_generated_at, toon_cell,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -2660,6 +2681,65 @@ mod tests {
                 "frontmatter purpose mismatch: {purpose:?}"
             ))
             .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn block_comment_purpose_skips_php_open_tag() -> Result<(), Box<dyn std::error::Error>> {
+        let lines = ["<?php", "/*", "Purpose: Render legacy PHP page.", "*/"]
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        let (purpose, issues) = extract_block_comment_purpose(&lines, 80);
+
+        if !issues.is_empty() {
+            return Err(
+                std::io::Error::other(format!("unexpected purpose issues: {issues:?}")).into(),
+            );
+        }
+        if purpose.as_deref() != Some("Render legacy PHP page.") {
+            return Err(
+                std::io::Error::other(format!("PHP block purpose mismatch: {purpose:?}")).into(),
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn custom_nonsource_registry_is_not_classified_as_source()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        std::fs::create_dir(root.join("src"))?;
+        std::fs::write(
+            root.join("src").join("live.toon"),
+            "Purpose: Live TOON source.\n",
+        )?;
+        std::fs::write(
+            root.join("src").join("projectatlas-nonsource-files.toon"),
+            "nonsource_files[]:\n",
+        )?;
+        let mut config = test_config(root.join("projectatlas.toon"));
+        config.nonsource_files_path = root.join("src").join("projectatlas-nonsource-files.toon");
+        config.source_extensions.insert(".toon".to_string());
+
+        let paths = collect_repo_paths(&config)?;
+
+        if paths
+            .source_files
+            .iter()
+            .any(|path| path == "src/projectatlas-nonsource-files.toon")
+        {
+            return Err(std::io::Error::other("custom non-source registry was source").into());
+        }
+        if !paths
+            .source_files
+            .iter()
+            .any(|path| path == "src/live.toon")
+        {
+            return Err(std::io::Error::other("sibling TOON source was skipped").into());
         }
         Ok(())
     }

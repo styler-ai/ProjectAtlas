@@ -619,6 +619,9 @@ else {
         if (-not $installedBinary) {
             throw "ProjectAtlas release-binary install was required but failed for $ProjectAtlasVersion."
         }
+        if (-not (Test-ProjectAtlasRuntime $installedBinary $ProjectAtlasVersion)) {
+            throw "ProjectAtlas release-binary install produced an invalid runtime for ${ProjectAtlasVersion}: $installedBinary"
+        }
     }
     elseif ($cargo -and (Test-Path -LiteralPath $sourceManifest)) {
         Push-Location $ProjectRoot

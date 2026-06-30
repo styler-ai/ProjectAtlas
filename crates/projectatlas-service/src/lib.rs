@@ -428,11 +428,11 @@ fn summary_parser_kind(
     parser_kinds: &[ParserKind],
     parse_metadata: Option<&SourceParseMetadata>,
 ) -> &'static str {
+    if symbol_count > 0 && !parser_kinds.is_empty() {
+        return symbol_parser_kind(parser_kinds);
+    }
     if let Some(metadata) = parse_metadata {
         return parser_kind_label(metadata.parser);
-    }
-    if symbol_count > 0 {
-        return symbol_parser_kind(parser_kinds);
     }
     if is_symbol_graph_empty_summary(summary) {
         "symbol-graph"
@@ -1687,6 +1687,51 @@ mod tests {
     }
 
     #[test]
+    fn file_summary_reports_mixed_vue_symbol_graph_with_structural_metadata()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir(root.join("src"))?;
+        fs::write(
+            root.join("src").join("component.vue"),
+            "<script lang=\"ts\">export function submitOrder() {}</script>\n<script setup>const selected = ref(false)</script>",
+        )?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        store.replace_scan(&[test_node("src/component.vue", "hash-vue")])?;
+        store.set_node_summary(
+            "src/component.vue",
+            "vue source defining values selected and function submitOrder.",
+        )?;
+        let mut structural_symbol = test_symbol("src/component.vue", SymbolKind::Value, "selected");
+        structural_symbol.parser = ParserKind::Structural;
+        structural_symbol.detail = Some("vue-composition-binding".to_string());
+        let mut fallback_symbol =
+            test_symbol("src/component.vue", SymbolKind::Function, "submitOrder");
+        fallback_symbol.parser = ParserKind::Fallback;
+        fallback_symbol.detail = Some("fallback-js-function".to_string());
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/component.vue".to_string(),
+            language: Some("vue".to_string()),
+            parser: ParserKind::Structural,
+            symbols: vec![structural_symbol, fallback_symbol],
+            relations: Vec::new(),
+        })?;
+
+        let report = build_file_summary(&store, Path::new("src/component.vue"), 10)?;
+        require_eq(
+            &report.parser_kind,
+            &"mixed-symbol-graph".to_string(),
+            "mixed parser kind",
+        )?;
+        require_eq(
+            &report.summary_status,
+            &"ok".to_string(),
+            "mixed summary status",
+        )
+    }
+
+    #[test]
     fn module_aliases_include_package_entries_and_compound_extensions() -> Result<(), Box<dyn Error>>
     {
         require_eq(
@@ -2049,6 +2094,145 @@ mod tests {
             &build_file_summary(&store, Path::new("src/service.ts"), 10)?,
             "run",
             "src/main.ts::main",
+        )
+    }
+
+    #[test]
+    fn file_summary_resolves_typescript_explicit_index_import_called_by()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src/api"))?;
+        fs::write(root.join("src/api/index.ts"), "export function run() {}\n")?;
+        fs::write(
+            root.join("src/main.ts"),
+            "import { run as apiRun } from \"./api/index\";\napiRun();\n",
+        )?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        store.replace_scan(&[
+            test_node("src/api/index.ts", "hash-api"),
+            test_node("src/main.ts", "hash-main"),
+        ])?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/api/index.ts".to_string(),
+            language: Some("typescript".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![test_symbol("src/api/index.ts", SymbolKind::Function, "run")],
+            relations: Vec::new(),
+        })?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/main.ts".to_string(),
+            language: Some("typescript".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![test_symbol("src/main.ts", SymbolKind::Function, "main")],
+            relations: vec![
+                SymbolRelation {
+                    path: "src/main.ts".to_string(),
+                    source_name: "<module>".to_string(),
+                    target_name: "import { run as apiRun } from \"./api/index\";".to_string(),
+                    kind: RelationKind::Imports,
+                    line: 1,
+                    context: "import { run as apiRun } from \"./api/index\";".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+                SymbolRelation {
+                    path: "src/main.ts".to_string(),
+                    source_name: "main".to_string(),
+                    target_name: "apiRun".to_string(),
+                    kind: RelationKind::Calls,
+                    line: 2,
+                    context: "apiRun();".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+            ],
+        })?;
+
+        assert_single_called_by(
+            &build_file_summary(&store, Path::new("src/api/index.ts"), 10)?,
+            "run",
+            "src/main.ts::main",
+        )
+    }
+
+    #[test]
+    fn file_summary_rejects_unrelated_typescript_alias_collision() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(root.join("src/service.ts"), "export function run() {}\n")?;
+        fs::write(root.join("src/format.ts"), "export function format() {}\n")?;
+        fs::write(
+            root.join("src/main.ts"),
+            "import { run as call } from \"./service\";\nimport { format as call } from \"./format\";\ncall();\n",
+        )?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        store.replace_scan(&[
+            test_node("src/service.ts", "hash-service"),
+            test_node("src/format.ts", "hash-format"),
+            test_node("src/main.ts", "hash-main"),
+        ])?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/service.ts".to_string(),
+            language: Some("typescript".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![test_symbol("src/service.ts", SymbolKind::Function, "run")],
+            relations: Vec::new(),
+        })?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/format.ts".to_string(),
+            language: Some("typescript".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![test_symbol("src/format.ts", SymbolKind::Function, "format")],
+            relations: Vec::new(),
+        })?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/main.ts".to_string(),
+            language: Some("typescript".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![test_symbol("src/main.ts", SymbolKind::Function, "main")],
+            relations: vec![
+                SymbolRelation {
+                    path: "src/main.ts".to_string(),
+                    source_name: "<module>".to_string(),
+                    target_name: "import { run as call } from \"./service\";".to_string(),
+                    kind: RelationKind::Imports,
+                    line: 1,
+                    context: "import { run as call } from \"./service\";".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+                SymbolRelation {
+                    path: "src/main.ts".to_string(),
+                    source_name: "<module>".to_string(),
+                    target_name: "import { format as call } from \"./format\";".to_string(),
+                    kind: RelationKind::Imports,
+                    line: 2,
+                    context: "import { format as call } from \"./format\";".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+                SymbolRelation {
+                    path: "src/main.ts".to_string(),
+                    source_name: "main".to_string(),
+                    target_name: "call".to_string(),
+                    kind: RelationKind::Calls,
+                    line: 3,
+                    context: "call();".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+            ],
+        })?;
+
+        let report = build_file_summary(&store, Path::new("src/service.ts"), 10)?;
+        let run = report
+            .functions
+            .iter()
+            .find(|symbol| symbol.name == "run")
+            .ok_or_else(|| io::Error::other("run summary missing"))?;
+        require_eq(
+            &run.called_by,
+            &Vec::<String>::new(),
+            "unrelated alias collision called-by",
         )
     }
 
