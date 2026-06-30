@@ -3498,9 +3498,10 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
     fs::create_dir_all(repo.join("src").join("api"))?;
     fs::create_dir_all(repo.join("docs").join("api"))?;
     fs::create_dir_all(repo.join("generated"))?;
+    fs::create_dir_all(repo.join("metadata.egg-info"))?;
     fs::write(
         repo.join(".projectatlas").join("config.toml"),
-        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\", \"generated\"]\nexclude_path_prefixes = [\"docs/api\"]\n",
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\", \"generated\"]\nexclude_dir_suffixes = [\".egg-info\"]\nexclude_path_prefixes = [\"docs/api\"]\n",
     )?;
     fs::write(
         repo.join("src").join("engine.rs"),
@@ -3517,6 +3518,10 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
     fs::write(
         repo.join("generated").join("noise.rs"),
         "pub fn generated_noise() {}\n",
+    )?;
+    fs::write(
+        repo.join("metadata.egg-info").join("PKG-INFO"),
+        "suffix_excluded_package_metadata\n",
     )?;
     let db = temp.path().join("projectatlas.db");
 
@@ -3579,6 +3584,20 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
     }
     let excluded_search_json: Value = serde_json::from_slice(&raw_excluded_search.stdout)?;
     require_json_usize(&excluded_search_json, &["returned"], 0)?;
+
+    let raw_suffix_search = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["search", "suffix_excluded_package_metadata"])
+        .output()?;
+    if !raw_suffix_search.status.success() {
+        return Err(io::Error::other("excluded-suffix search command failed").into());
+    }
+    let suffix_search_json: Value = serde_json::from_slice(&raw_suffix_search.stdout)?;
+    require_json_usize(&suffix_search_json, &["returned"], 0)?;
 
     let raw_search = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -6726,6 +6745,10 @@ fn search_and_symbol_slice_are_bounded_and_identity_safe() -> Result<(), Box<dyn
     fs::write(repo.join("src").join("a.rs"), "needle one\n")?;
     fs::write(repo.join("src").join("b.rs"), "needle two\n")?;
     fs::write(
+        repo.join("Cargo.lock"),
+        "[[package]]\nname = \"windows-sys\"\nversion = \"0.59.0\"\n\n[[package]]\nname = \"windows-sys\"\nversion = \"0.60.0\"\n",
+    )?;
+    fs::write(
         repo.join("src").join("lib.rs"),
         "struct A;\nimpl A {\n    fn run(&self) {\n        a();\n    }\n}\nstruct B;\nimpl B {\n    fn run(&self) {\n        b();\n    }\n}\n",
     )?;
@@ -6782,6 +6805,28 @@ fn search_and_symbol_slice_are_bounded_and_identity_safe() -> Result<(), Box<dyn
         .success()
         .stdout(predicate::str::contains("b();"))
         .stdout(predicate::str::contains("a();").not());
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "symbols",
+            "slice",
+            "Cargo.lock",
+            "windows-sys",
+            "--symbol-kind",
+            "dependency",
+            "--symbol-line",
+            "6",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("start_line: 6"))
+        .stdout(predicate::str::contains(
+            "content: \"name = \\\"windows-sys\\\"\"",
+        ))
+        .stdout(predicate::str::contains("start_line: 2").not());
 
     Ok(())
 }

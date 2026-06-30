@@ -570,6 +570,9 @@ function Install-ReleaseBinary {
             throw "Release archive did not contain projectatlas.exe"
         }
         Copy-Item -LiteralPath $binary.FullName -Destination $target -Force
+        if (-not (Test-ProjectAtlasRuntime $target $Version)) {
+            throw "Release archive produced an invalid runtime for ProjectAtlas ${Version}: $target"
+        }
         return $target
     }
     catch {

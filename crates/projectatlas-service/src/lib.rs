@@ -1651,6 +1651,57 @@ mod tests {
     }
 
     #[test]
+    fn file_summary_uses_metadata_parser_for_empty_nonfallback_graphs() -> Result<(), Box<dyn Error>>
+    {
+        for (path, language, parser, expected) in [
+            (
+                "src/empty.rs",
+                "rust",
+                ParserKind::TreeSitter,
+                "tree-sitter-symbol-graph",
+            ),
+            (
+                "src/component.vue",
+                "vue",
+                ParserKind::Structural,
+                "structural-symbol-graph",
+            ),
+            (
+                "Cargo.toml",
+                "cargo-manifest",
+                ParserKind::Manifest,
+                "manifest-symbol-graph",
+            ),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path();
+            if let Some(parent) = Path::new(path).parent() {
+                fs::create_dir_all(root.join(parent))?;
+            }
+            fs::write(root.join(path), "\n")?;
+            let mut store = AtlasStore::in_memory()?;
+            store.set_project_root(root)?;
+            store.replace_scan(&[test_node(path, "hash-empty")])?;
+            store.set_node_summary(path, "source file with no declarations found.")?;
+            store.replace_symbol_graph(&SymbolGraph {
+                path: path.to_string(),
+                language: Some(language.to_string()),
+                parser,
+                symbols: Vec::new(),
+                relations: Vec::new(),
+            })?;
+
+            let report = build_file_summary(&store, Path::new(path), 10)?;
+            require_eq(
+                &report.parser_kind,
+                &expected.to_string(),
+                "empty nonfallback parser kind",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn file_summary_marks_structural_symbol_graph_as_ok() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
