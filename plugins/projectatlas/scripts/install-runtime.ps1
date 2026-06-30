@@ -313,7 +313,7 @@ function Sync-ProjectAtlasRuntimeToLocalAppData {
             Copy-Item -LiteralPath $FilePath -Destination $target -Force
         }
         catch {
-            Write-Warning "ProjectAtlas LocalAppData mirror skipped because ${target} is locked: $($_.Exception.Message)"
+            Write-Warning "ProjectAtlas LocalAppData mirror skipped because ${target} is locked: $($_.Exception.Message) Close any running ProjectAtlas or Codex session using that file, then rerun this installer. Codex MCP and generated configs continue to use verified runtime $FilePath."
             return $FilePath
         }
     }
@@ -369,7 +369,7 @@ function Write-ProjectAtlasPathShadowReport {
         }
         if (-not (Test-ProjectAtlasRuntime $candidate $ExpectedVersion)) {
             $version = Get-ProjectAtlasRuntimeVersion $candidate
-            Write-Warning "Obsolete ProjectAtlas runtime or shim still exists on PATH: $candidate version '$version'. It was not removed automatically."
+            Write-Warning "Obsolete ProjectAtlas runtime or shim still exists on PATH: $candidate version '$version'. It was not removed automatically. Close any process using that file, then rerun this installer or remove the shim manually; generated MCP configs use the verified runtime $VerifiedPath."
         }
     }
 }
