@@ -328,6 +328,7 @@ fn extract_cargo_lock_packages(graph: &mut SymbolGraph, content: &str) {
     let Some(packages) = lockfile.get("package").and_then(TomlValue::as_array) else {
         return;
     };
+    let mut next_package_line = 0;
     for package in packages {
         let Some(name) = package
             .as_table()
@@ -336,7 +337,11 @@ fn extract_cargo_lock_packages(graph: &mut SymbolGraph, content: &str) {
         else {
             continue;
         };
-        let line = cargo_lock_name_line(content, name).unwrap_or(1);
+        let line = cargo_lock_name_line(content, name, next_package_line);
+        if let Some(found_line) = line {
+            next_package_line = found_line;
+        }
+        let line = line.unwrap_or(1);
         push_symbol(
             graph,
             name,
@@ -351,9 +356,9 @@ fn extract_cargo_lock_packages(graph: &mut SymbolGraph, content: &str) {
 }
 
 /// Return the one-based source line for a package name in a Cargo.lock file.
-fn cargo_lock_name_line(content: &str, package_name: &str) -> Option<usize> {
+fn cargo_lock_name_line(content: &str, package_name: &str, start_line: usize) -> Option<usize> {
     let mut in_package = false;
-    for (index, raw_line) in content.lines().enumerate() {
+    for (index, raw_line) in content.lines().enumerate().skip(start_line) {
         let line = raw_line.trim();
         if line == "[[package]]" {
             in_package = true;
@@ -2815,6 +2820,26 @@ windows-sys = "0.60"
         assert!(graph.symbols.iter().any(|symbol| {
             symbol.kind == SymbolKind::Dependency && symbol.name == "windows-sys"
         }));
+    }
+
+    #[test]
+    fn cargo_lock_duplicate_package_names_keep_distinct_lines() {
+        let source = r#"[[package]]
+name = "windows-sys"
+version = "0.59.0"
+
+[[package]]
+name = "windows-sys"
+version = "0.60.0"
+"#;
+        let graph = extract_symbol_graph("Cargo.lock", Some("cargo-lock"), source);
+        let lines = graph
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.kind == SymbolKind::Dependency && symbol.name == "windows-sys")
+            .map(|symbol| symbol.line_start)
+            .collect::<Vec<_>>();
+        assert_eq!(lines, vec![2, 6]);
     }
 
     #[test]

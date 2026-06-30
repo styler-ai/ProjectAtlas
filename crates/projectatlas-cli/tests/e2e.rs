@@ -683,6 +683,15 @@ fn release_and_actions_policy_is_hardened() -> Result<(), Box<dyn Error>> {
     if !release_workflow.contains("permissions:\n  contents: read") {
         return Err(io::Error::other("release workflow must default to contents: read").into());
     }
+    for job in ["package-unix", "package-windows"] {
+        let package_job = workflow_job_block(&release_workflow, job)?;
+        if !package_job.contains("timeout-minutes: 30") {
+            return Err(io::Error::other(format!(
+                "release package job {job} must have a bounded timeout"
+            ))
+            .into());
+        }
+    }
     let publish = workflow_job_block(&release_workflow, "publish")?;
     for required in ["contents: write", "issues: read", "pull-requests: read"] {
         if !publish.contains(required) {
@@ -1633,6 +1642,101 @@ fn windows_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Bo
     if !installer_output_text.contains("Checksum mismatch") {
         return Err(io::Error::other(format!(
             "installer failure did not report checksum mismatch\n{installer_output_text}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_release_binary_only_rejects_invalid_runtime_without_fallback()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    let atlas_dir = repo.join(".projectatlas");
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    let isolated_home = temp.path().join("isolated-home");
+    let app_data = isolated_home.join("AppData").join("Roaming");
+    let local_app_data = isolated_home.join("AppData").join("Local");
+    fs::create_dir_all(&app_data)?;
+    fs::create_dir_all(&local_app_data)?;
+
+    let stable_runtime = local_app_data
+        .join("ProjectAtlas")
+        .join("bin")
+        .join("projectatlas.exe");
+    fs::create_dir_all(
+        stable_runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("stable runtime parent missing"))?,
+    )?;
+    let valid_runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    fs::copy(&valid_runtime, &stable_runtime)?;
+
+    let invalid_runtime = temp.path().join("invalid-projectatlas.exe");
+    fs::write(
+        &invalid_runtime,
+        b"this is not a valid ProjectAtlas Windows executable",
+    )?;
+    let release_archive = create_windows_release_archive(temp.path(), &invalid_runtime)?;
+    let (release_base_url, release_server) = serve_release_assets(&release_archive, None)?;
+    let workspace_root = workspace_root()?;
+    let installer = workspace_root
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join("install-runtime.ps1");
+    let output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(installer)
+        .arg("-ProjectRoot")
+        .arg(&repo)
+        .arg("-ProjectAtlasVersion")
+        .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+        .arg("-ReleaseBaseUrl")
+        .arg(&release_base_url)
+        .arg("-ReleaseBinaryOnly")
+        .env("HOME", &isolated_home)
+        .env("USERPROFILE", &isolated_home)
+        .env("APPDATA", &app_data)
+        .env("LOCALAPPDATA", &local_app_data)
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .output()?;
+    let server_result = release_server.join().map_err(|panic_payload| {
+        let message = if let Some(message) = panic_payload.downcast_ref::<&str>() {
+            *message
+        } else if let Some(message) = panic_payload.downcast_ref::<String>() {
+            message.as_str()
+        } else {
+            "unknown panic payload"
+        };
+        io::Error::other(format!("release asset test server panicked: {message}"))
+    })?;
+    server_result?;
+    let installer_output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if output.status.success() {
+        return Err(io::Error::other(format!(
+            "release-binary installer fell back to an ambient runtime after installing an invalid asset\n{installer_output_text}"
+        ))
+        .into());
+    }
+    if !installer_output_text.contains("produced an invalid runtime") {
+        return Err(io::Error::other(format!(
+            "installer failure did not report invalid release runtime\n{installer_output_text}"
         ))
         .into());
     }
@@ -3394,9 +3498,10 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
     fs::create_dir_all(repo.join("src").join("api"))?;
     fs::create_dir_all(repo.join("docs").join("api"))?;
     fs::create_dir_all(repo.join("generated"))?;
+    fs::create_dir_all(repo.join("metadata.egg-info"))?;
     fs::write(
         repo.join(".projectatlas").join("config.toml"),
-        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\", \"generated\"]\nexclude_path_prefixes = [\"docs/api\"]\n",
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\", \"generated\"]\nexclude_dir_suffixes = [\".egg-info\"]\nexclude_path_prefixes = [\"docs/api\"]\n",
     )?;
     fs::write(
         repo.join("src").join("engine.rs"),
@@ -3413,6 +3518,10 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
     fs::write(
         repo.join("generated").join("noise.rs"),
         "pub fn generated_noise() {}\n",
+    )?;
+    fs::write(
+        repo.join("metadata.egg-info").join("PKG-INFO"),
+        "suffix_excluded_package_metadata\n",
     )?;
     let db = temp.path().join("projectatlas.db");
 
@@ -3475,6 +3584,20 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
     }
     let excluded_search_json: Value = serde_json::from_slice(&raw_excluded_search.stdout)?;
     require_json_usize(&excluded_search_json, &["returned"], 0)?;
+
+    let raw_suffix_search = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["search", "suffix_excluded_package_metadata"])
+        .output()?;
+    if !raw_suffix_search.status.success() {
+        return Err(io::Error::other("excluded-suffix search command failed").into());
+    }
+    let suffix_search_json: Value = serde_json::from_slice(&raw_suffix_search.stdout)?;
+    require_json_usize(&suffix_search_json, &["returned"], 0)?;
 
     let raw_search = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -6622,6 +6745,10 @@ fn search_and_symbol_slice_are_bounded_and_identity_safe() -> Result<(), Box<dyn
     fs::write(repo.join("src").join("a.rs"), "needle one\n")?;
     fs::write(repo.join("src").join("b.rs"), "needle two\n")?;
     fs::write(
+        repo.join("Cargo.lock"),
+        "[[package]]\nname = \"windows-sys\"\nversion = \"0.59.0\"\n\n[[package]]\nname = \"windows-sys\"\nversion = \"0.60.0\"\n",
+    )?;
+    fs::write(
         repo.join("src").join("lib.rs"),
         "struct A;\nimpl A {\n    fn run(&self) {\n        a();\n    }\n}\nstruct B;\nimpl B {\n    fn run(&self) {\n        b();\n    }\n}\n",
     )?;
@@ -6678,6 +6805,28 @@ fn search_and_symbol_slice_are_bounded_and_identity_safe() -> Result<(), Box<dyn
         .success()
         .stdout(predicate::str::contains("b();"))
         .stdout(predicate::str::contains("a();").not());
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "symbols",
+            "slice",
+            "Cargo.lock",
+            "windows-sys",
+            "--symbol-kind",
+            "dependency",
+            "--symbol-line",
+            "6",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("start_line: 6"))
+        .stdout(predicate::str::contains(
+            "content: \"name = \\\"windows-sys\\\"\"",
+        ))
+        .stdout(predicate::str::contains("start_line: 2").not());
 
     Ok(())
 }
