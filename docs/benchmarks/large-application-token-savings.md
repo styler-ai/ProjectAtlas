@@ -44,8 +44,8 @@ Current reports preserve the historical `estimated_saved`/`legacy_gross_estimate
 
 - `measured_tokens_saved`: observed full-file/source-compression before/after deltas.
 - `gross_modeled_tokens_avoided`: modeled navigation avoidance before dedupe.
-- `deduped_modeled_tokens_avoided`: modeled navigation avoidance after retaining one repeated session baseline per identity and subtracting every ProjectAtlas payload emitted for it.
-- `repeated_baselines_deduped`: duplicate modeled events collapsed by that repeated-baseline dedupe.
+- `deduped_modeled_tokens_avoided`: modeled navigation avoidance after retaining one repeated session-scoped baseline per identity and subtracting every ProjectAtlas payload emitted for it; modeled rows with `dedupe_scope = "event"` are kept as individual events.
+- `repeated_baselines_deduped`: duplicate session-scoped modeled events collapsed by that repeated-baseline dedupe.
 - `tokens_avoided`: conservative headline value, equal to measured saved plus deduped modeled avoided.
 
 ## Responsiveness Sample
