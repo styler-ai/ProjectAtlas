@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.3.17"><img alt="release" src="https://img.shields.io/badge/release-v0.3.17-blue"></a>
+  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.3.18"><img alt="release" src="https://img.shields.io/badge/release-v0.3.18-blue"></a>
   <img alt="rust" src="https://img.shields.io/badge/Rust-2024-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
@@ -25,7 +25,7 @@ No required `.purpose` files. No source-header tax. No hosted index. The project
 ## Quickstart
 
 ```bash
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.17
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.18
 codex plugin add projectatlas --marketplace projectatlas
 ```
 
@@ -44,7 +44,7 @@ correctly keeps that pinned ref. In that case, replace only the dedicated `style
 
 ```bash
 codex plugin marketplace remove projectatlas
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.17
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.18
 ```
 
 Then tell Codex: "Use ProjectAtlas for this repo."
@@ -177,7 +177,7 @@ Most users can stop at the plugin install. The CLI is here for local debugging, 
 Only need the CLI yourself? Install it from the released tag:
 
 ```bash
-cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.17 projectatlas-cli --locked
+cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.18 projectatlas-cli --locked
 ```
 
 From this checkout:
@@ -276,7 +276,7 @@ ProjectAtlas scans with `.gitignore` awareness, hashes files with BLAKE3, stores
 
 ## Release Quality
 
-`v0.3.17` ships through the full release matrix:
+`v0.3.18` ships through the full release matrix:
 
 - Rust format, check, clippy, dependency policy, tests, doctests, and rustdoc.
 - ProjectAtlas scan, parity, database-backed purpose lint, and health checks.

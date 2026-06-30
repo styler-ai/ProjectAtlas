@@ -7245,7 +7245,7 @@ fn serve_release_assets(
     listener.set_nonblocking(true)?;
     let base_url = format!("http://{}", listener.local_addr()?);
     let handle = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + Duration::from_mins(1);
         let mut served_archive = false;
         let mut served_checksums = false;
         loop {

@@ -648,10 +648,11 @@ Token accounting model:
   deduped_modeled_tokens_avoided`. `measured_tokens_saved` is observed
   before/after source-compression evidence. `gross_modeled_tokens_avoided` is
   counterfactual navigation avoidance before dedupe. `deduped_modeled_tokens_avoided`
-  counts repeated modeled baselines once per session/baseline identity/fingerprint
-  and subtracts every ProjectAtlas payload emitted for that repeated baseline.
-  `repeated_baselines_deduped` counts duplicate modeled events collapsed, not
-  unique baseline groups.
+  counts session-scoped repeated modeled baselines once per session/baseline
+  identity/fingerprint and subtracts every ProjectAtlas payload emitted for
+  that repeated baseline. Modeled rows with `dedupe_scope = "event"` are kept
+  as individual events. `repeated_baselines_deduped` counts duplicate
+  session-scoped modeled events collapsed, not unique baseline groups.
 - Compute `savings_rate = saved / estimated_tokens_without_projectatlas` only
   when the baseline is greater than zero. A zero baseline yields an unknown rate
   instead of a fake percentage.

@@ -7,8 +7,8 @@ use projectatlas_core::symbols::{
 };
 use projectatlas_core::telemetry::{
     TokenBucketOverview, TokenOverview, TokenTrendPeriod, TokenTrendReport, TokenTrendWindow,
-    UsageEvent, default_dedupe_scope, default_estimate_method, default_token_accuracy,
-    default_token_model, default_token_provider, default_token_trace, default_tokenizer_backend,
+    UsageEvent, default_estimate_method, default_token_accuracy, default_token_model,
+    default_token_provider, default_token_trace, default_tokenizer_backend,
 };
 use projectatlas_core::{
     AGENT_REVIEWED_SOURCE_VALUES, HIGH_IMPACT_FILE_NAMES, HIGH_IMPACT_PATH_PREFIXES,
@@ -3445,7 +3445,7 @@ impl AtlasStore {
                    estimated_tokens_with_projectatlas,
                    token_savings_bucket, baseline_kind, confidence,
                    accounting_layer, denominator_kind,
-                   baseline_identity, baseline_fingerprint
+                   baseline_identity, baseline_fingerprint, dedupe_scope
             FROM usage_events
             WHERE session_id = ?1
               AND estimated_tokens_without_projectatlas IS NOT NULL
@@ -3459,7 +3459,7 @@ impl AtlasStore {
                    estimated_tokens_with_projectatlas,
                    token_savings_bucket, baseline_kind, confidence,
                    accounting_layer, denominator_kind,
-                   baseline_identity, baseline_fingerprint
+                   baseline_identity, baseline_fingerprint, dedupe_scope
             FROM usage_events
             WHERE estimated_tokens_without_projectatlas IS NOT NULL
               AND estimated_tokens_with_projectatlas IS NOT NULL
@@ -3489,7 +3489,7 @@ impl AtlasStore {
                 denominator_kind: row.get(10)?,
                 baseline_identity: row.get(11)?,
                 baseline_fingerprint: row.get(12)?,
-                dedupe_scope: default_dedupe_scope(),
+                dedupe_scope: row.get(13)?,
             })
         };
         let rows = if let Some(session) = session_id {
@@ -4603,8 +4603,10 @@ fn resolved_ids_for_category(resolved_ids: &[String], category: &str) -> Vec<Str
 mod tests {
     use super::*;
     use projectatlas_core::telemetry::{
-        TOKEN_ACCURACY_HEURISTIC, TOKEN_BUCKET_FULL_FILE_COMPRESSION,
-        TOKEN_BUCKET_NAVIGATION_AVOIDANCE, usage_from_estimates, usage_from_text,
+        TOKEN_ACCOUNTING_MODELED_AVOIDANCE, TOKEN_ACCURACY_HEURISTIC,
+        TOKEN_BASELINE_SELECTED_CANDIDATES, TOKEN_BUCKET_FULL_FILE_COMPRESSION,
+        TOKEN_BUCKET_NAVIGATION_AVOIDANCE, TOKEN_CONFIDENCE_INFERRED, TOKEN_DEDUPE_SCOPE_EVENT,
+        usage_from_estimates, usage_from_estimates_with_accounting, usage_from_text,
     };
     use projectatlas_core::{NodeKind, normalized_parent};
     use std::error::Error;
@@ -4781,6 +4783,51 @@ mod tests {
             &deduped.tokens_avoided,
             &331,
             "headline avoided tokens use measured plus deduped modeled",
+        )?;
+
+        store.record_usage(&usage_from_estimates_with_accounting(
+            "event-scoped",
+            "folders",
+            None,
+            Some("token".to_string()),
+            400,
+            40,
+            TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
+            TOKEN_BASELINE_SELECTED_CANDIDATES,
+            TOKEN_CONFIDENCE_INFERRED,
+            TOKEN_ACCOUNTING_MODELED_AVOIDANCE,
+            TOKEN_BASELINE_SELECTED_CANDIDATES,
+            TOKEN_DEDUPE_SCOPE_EVENT,
+        ))?;
+        store.record_usage(&usage_from_estimates_with_accounting(
+            "event-scoped",
+            "folders",
+            None,
+            Some("token".to_string()),
+            400,
+            30,
+            TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
+            TOKEN_BASELINE_SELECTED_CANDIDATES,
+            TOKEN_CONFIDENCE_INFERRED,
+            TOKEN_ACCOUNTING_MODELED_AVOIDANCE,
+            TOKEN_BASELINE_SELECTED_CANDIDATES,
+            TOKEN_DEDUPE_SCOPE_EVENT,
+        ))?;
+        let event_scoped = store.token_overview(Some("event-scoped"))?;
+        require_eq(
+            &event_scoped.gross_modeled_tokens_avoided,
+            &730,
+            "event-scoped gross modeled avoided tokens",
+        )?;
+        require_eq(
+            &event_scoped.deduped_modeled_tokens_avoided,
+            &730,
+            "event-scoped modeled events are not collapsed",
+        )?;
+        require_eq(
+            &event_scoped.repeated_baselines_deduped,
+            &0,
+            "event-scoped modeled events do not count as deduped repeats",
         )?;
 
         let mut negative_event = usage_from_estimates("negative", "outline", None, None, 20, 50);

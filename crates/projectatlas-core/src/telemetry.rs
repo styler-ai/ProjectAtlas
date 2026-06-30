@@ -583,6 +583,7 @@ impl TokenAccountingSummary {
     fn from_events(events: &[UsageEvent]) -> Self {
         let mut measured_tokens_saved = 0isize;
         let mut gross_modeled_tokens_avoided = 0isize;
+        let mut event_scoped_modeled_tokens_avoided = 0isize;
         let mut modeled_baselines = BTreeMap::<ModeledBaselineKey, ModeledBaselineTotals>::new();
 
         for event in events {
@@ -602,6 +603,11 @@ impl TokenAccountingSummary {
             }
             gross_modeled_tokens_avoided =
                 saturating_isize_add(gross_modeled_tokens_avoided, delta);
+            if event.dedupe_scope == TOKEN_DEDUPE_SCOPE_EVENT {
+                event_scoped_modeled_tokens_avoided =
+                    saturating_isize_add(event_scoped_modeled_tokens_avoided, delta);
+                continue;
+            }
             let entry = modeled_baselines
                 .entry(ModeledBaselineKey::from_event(event))
                 .or_default();
@@ -611,7 +617,7 @@ impl TokenAccountingSummary {
                 entry.emitted_with_projectatlas.saturating_add(with as u128);
         }
 
-        let mut deduped_modeled_tokens_avoided = 0isize;
+        let mut deduped_modeled_tokens_avoided = event_scoped_modeled_tokens_avoided;
         let mut repeated_baselines_deduped = 0usize;
         for totals in modeled_baselines.values() {
             if totals.calls > 1 {
