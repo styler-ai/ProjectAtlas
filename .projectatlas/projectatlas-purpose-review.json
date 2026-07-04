@@ -549,6 +549,10 @@
       "purpose": "Document ProjectAtlas v0.3.22 pre-mortem, issue triage, edge cases, and release test plan."
     },
     {
+      "path": "docs/projectatlas-v0.3.23-premortem-spec.md",
+      "purpose": "Document the ProjectAtlas v0.3.23 pre-mortem, issue scope, token TUI accounting, installer drift fix, and release plan."
+    },
+    {
       "path": "docs/projectatlas-3-v0.3.2-hardening-spec.md",
       "purpose": "Historical v0.3.2 hardening specification covering symbol modules, path normalization, import aliases, and release gates."
     },
@@ -719,6 +723,22 @@
     {
       "path": "skills/codex/ProjectAtlas.md",
       "purpose": "Codex-oriented ProjectAtlas skill instructions for atlas-first repository navigation."
+    },
+    {
+      "path": "skills/codex-coding-plugin",
+      "purpose": "Reusable Codex skill package for engineering stable Codex plugins, manifests, installers, and cache-drift checks."
+    },
+    {
+      "path": "skills/codex-coding-plugin/agents",
+      "purpose": "Agent manifest folder for loading the codex-coding-plugin workflow in OpenAI and Codex contexts."
+    },
+    {
+      "path": "skills/codex-coding-plugin/SKILL.md",
+      "purpose": "Workflow guidance for building stable Codex plugins, plugin manifests, installers, MCP configs, and cache-drift checks."
+    },
+    {
+      "path": "skills/codex-coding-plugin/agents/openai.yaml",
+      "purpose": "OpenAI agent manifest that exposes the codex-coding-plugin skill to Codex skill discovery."
     },
     {
       "path": "templates/AGENTS.md",
