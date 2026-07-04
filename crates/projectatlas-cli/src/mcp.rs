@@ -7,8 +7,9 @@ use crate::runtime::{
     ScanRuntimePlan, SymbolBuildOptions, build_settings_report, build_symbols_for_index,
     byte_count_to_tokens, canonical_project_root, config_root_mismatch_error,
     default_mcp_project_root, estimated_source_tokens_for_indexed_files,
-    estimated_source_tokens_for_paths, file_summary_usage_baseline, normalized_folder_filter,
-    open_atlas_store, purpose_curation_page, ranked_file_nodes, read_indexed_file_content,
+    estimated_source_tokens_for_paths, file_summary_usage_baseline, next_step_report,
+    next_step_report_payload, normalized_folder_filter, open_atlas_store, purpose_curation_page,
+    ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
     record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
     render_health_page, render_purpose_curation_page, render_purpose_review_report,
     reset_index_files, review_purposes, run_scan_pipeline, run_watch_loop, strip_legacy_purpose,
@@ -23,11 +24,11 @@ use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
 use projectatlas_core::telemetry::TokenTrendWindow;
 use projectatlas_core::toon::{
-    encode_agent_payload, render_nodes, render_outline, render_overview, render_symbol_relations,
-    render_symbols, render_token_overview, render_token_trends,
+    encode_agent_payload, render_outline, render_overview, render_ranked_nodes,
+    render_symbol_relations, render_symbols, render_token_overview, render_token_trends,
 };
 use projectatlas_core::{
-    NodeKind, PurposeSource, PurposeStatus, normalize_repo_path_prefix, validated_repo_node_key,
+    PurposeSource, PurposeStatus, normalize_repo_path_prefix, validated_repo_node_key,
 };
 use projectatlas_db::{AtlasStore, HealthQuery, HealthResolution, HealthScope};
 use projectatlas_service::{
@@ -49,6 +50,7 @@ pub(crate) const REQUIRED_MCP_TOOL_NAMES: &[&str] = &[
     MCP_TOOL_ATLAS_OVERVIEW,
     MCP_TOOL_ATLAS_FOLDERS,
     MCP_TOOL_ATLAS_FILES,
+    MCP_TOOL_ATLAS_NEXT,
     MCP_TOOL_ATLAS_OUTLINE,
     MCP_TOOL_ATLAS_FILE_SUMMARY,
     MCP_TOOL_ATLAS_SEARCH,
@@ -80,6 +82,8 @@ const MCP_TOOL_ATLAS_OVERVIEW: &str = "atlas_overview";
 const MCP_TOOL_ATLAS_FOLDERS: &str = "atlas_folders";
 /// MCP tool name for file ranking.
 const MCP_TOOL_ATLAS_FILES: &str = "atlas_files";
+/// MCP tool name for next-step recommendations.
+const MCP_TOOL_ATLAS_NEXT: &str = "atlas_next";
 /// MCP tool name for file outlines.
 const MCP_TOOL_ATLAS_OUTLINE: &str = "atlas_outline";
 /// MCP tool name for file summaries.
@@ -159,12 +163,16 @@ const MCP_PAYLOAD_WATCH: &str = "watch";
 const MCP_PAYLOAD_LEGACY_PURPOSE_MIGRATION: &str = "legacy_purpose_migration";
 /// MCP payload key for reset-index reports.
 const MCP_PAYLOAD_RESET_INDEX: &str = "reset_index";
+/// MCP payload key for next-step recommendation reports.
+const MCP_PAYLOAD_NEXT: &str = "next";
 /// MCP telemetry event for overview calls.
 const MCP_EVENT_ATLAS_OVERVIEW: &str = "mcp.atlas_overview";
 /// MCP telemetry event for folder calls.
 const MCP_EVENT_ATLAS_FOLDERS: &str = "mcp.atlas_folders";
 /// MCP telemetry event for file calls.
 const MCP_EVENT_ATLAS_FILES: &str = "mcp.atlas_files";
+/// MCP telemetry event for next-step recommendation calls.
+const MCP_EVENT_ATLAS_NEXT: &str = "mcp.atlas_next";
 /// MCP telemetry event for outline calls.
 const MCP_EVENT_ATLAS_OUTLINE: &str = "mcp.atlas_outline";
 /// MCP telemetry event for file-summary calls.
@@ -1092,14 +1100,9 @@ impl ProjectAtlasMcpServer {
             let state = self.state_for_project_path(params.project_path)?;
             let store = Self::open_store(&state)?;
             let query = Self::query_or_empty(params.query);
-            let selected = store.load_ranked_nodes(
-                &query,
-                NodeKind::Folder,
-                None,
-                params.limit.unwrap_or(10),
-                0,
-            )?;
-            let toon = render_nodes(NODE_LABEL_FOLDERS, &selected);
+            let selected =
+                ranked_folder_nodes_with_reasons(&store, &query, params.limit.unwrap_or(10))?;
+            let toon = render_ranked_nodes(NODE_LABEL_FOLDERS, &selected);
             record_directory_walk_usage_estimate(
                 &store,
                 &self.session,
@@ -1128,7 +1131,7 @@ impl ProjectAtlasMcpServer {
                 .as_deref()
                 .map(normalized_folder_filter)
                 .transpose()?;
-            let selected = ranked_file_nodes(
+            let selected = ranked_file_nodes_with_reasons(
                 &store,
                 &query,
                 folder_filter.as_deref(),
@@ -1141,7 +1144,7 @@ impl ProjectAtlasMcpServer {
                 folder_filter.as_deref(),
                 params.file_pattern.as_deref(),
             )?;
-            let toon = render_nodes(NODE_LABEL_FILES, &selected);
+            let toon = render_ranked_nodes(NODE_LABEL_FILES, &selected);
             record_usage_estimate(
                 &store,
                 &self.session,
@@ -1149,6 +1152,32 @@ impl ProjectAtlasMcpServer {
                 params.file_pattern.or(folder_filter),
                 Some(query),
                 baseline_tokens,
+                &toon,
+            )?;
+            Ok(toon)
+        })())
+    }
+
+    /// Recommend the next indexed folders, files, and inspection commands.
+    #[tool(
+        name = "atlas_next",
+        description = "Recommend top indexed folders/files with reasons and deterministic follow-up commands for a task query."
+    )]
+    fn atlas_next(&self, Parameters(params): Parameters<AtlasQueryParams>) -> String {
+        Self::as_mcp_text((|| {
+            let state = self.state_for_project_path(params.project_path)?;
+            let store = Self::open_store(&state)?;
+            let query = Self::query_or_empty(params.query);
+            let report = next_step_report(&store, &query, params.limit)?;
+            let payload = next_step_report_payload(&report);
+            let toon = Self::encode_named_payload(MCP_PAYLOAD_NEXT, &payload)?;
+            record_directory_walk_usage_estimate(
+                &store,
+                &self.session,
+                MCP_EVENT_ATLAS_NEXT,
+                None,
+                Some(query),
+                estimated_source_tokens_for_indexed_files(&store, None, None)?,
                 &toon,
             )?;
             Ok(toon)

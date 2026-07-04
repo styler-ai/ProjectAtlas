@@ -17,12 +17,12 @@ use projectatlas_core::telemetry::{
     TokenCalibrationOverview, TokenTrendWindow as CoreTokenTrendWindow,
 };
 use projectatlas_core::toon::{
-    encode_agent_payload, render_node_rows, render_nodes, render_outline, render_overview,
-    render_symbol_relations, render_symbols, render_token_overview, render_token_trends,
+    encode_agent_payload, render_outline, render_overview, render_ranked_node_rows,
+    render_ranked_nodes, render_symbol_relations, render_symbols, render_token_overview,
+    render_token_trends,
 };
 use projectatlas_core::{
-    NodeKind, PurposeSource, PurposeStatus, normalize_native_path_display,
-    normalize_repo_path_prefix,
+    PurposeSource, PurposeStatus, normalize_native_path_display, normalize_repo_path_prefix,
 };
 use projectatlas_db::{AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope};
 use projectatlas_service::{
@@ -35,8 +35,9 @@ use runtime::{
     absolute_path, build_settings_report, build_symbols_for_index, byte_count_to_tokens,
     canonical_project_root, default_mcp_project_root, defaultable_cli_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
-    file_summary_usage_baseline, lint_database_if_present, normalized_folder_filter,
-    open_atlas_store, purpose_curation_page, ranked_file_nodes, read_indexed_file_content,
+    file_summary_usage_baseline, lint_database_if_present, next_step_report,
+    next_step_report_payload, normalized_folder_filter, open_atlas_store, purpose_curation_page,
+    ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
     record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
     render_health_page, render_purpose_curation_page, render_purpose_review_report,
     reset_index_files, resolved_mcp_config_path, review_purposes, run_scan_pipeline,
@@ -299,6 +300,14 @@ enum Command {
         include_content: bool,
         /// Maximum number of files to return.
         #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+    /// Recommend the next indexed folders, files, and inspection commands.
+    Next {
+        /// Task or navigation query.
+        query: String,
+        /// Maximum number of folders and files to return.
+        #[arg(long, default_value_t = 3)]
         limit: usize,
     },
     /// Build a compact outline for a chosen file.
@@ -780,9 +789,9 @@ fn run() -> Result<(), CliError> {
         }
         Command::Folders { query, limit } => {
             let store = open_atlas_store(&cli.db)?;
-            let selected = store.load_ranked_nodes(query, NodeKind::Folder, None, *limit, 0)?;
-            let toon = render_nodes("folders", &selected);
-            let payload = render_node_rows("folders", &selected);
+            let selected = ranked_folder_nodes_with_reasons(&store, query, *limit)?;
+            let toon = render_ranked_nodes("folders", &selected);
+            let payload = render_ranked_node_rows("folders", &selected);
             print_tracked_directory_output_estimate(
                 cli.format,
                 &store,
@@ -808,7 +817,12 @@ fn run() -> Result<(), CliError> {
                 .as_deref()
                 .map(normalized_folder_filter)
                 .transpose()?;
-            let selected = ranked_file_nodes(
+            let baseline_tokens = estimated_source_tokens_for_indexed_files(
+                &store,
+                folder_filter.as_deref(),
+                file_pattern.as_deref(),
+            )?;
+            let selected = ranked_file_nodes_with_reasons(
                 &store,
                 query_text,
                 folder_filter.as_deref(),
@@ -816,13 +830,8 @@ fn run() -> Result<(), CliError> {
                 *limit,
                 *include_content,
             )?;
-            let baseline_tokens = estimated_source_tokens_for_indexed_files(
-                &store,
-                folder_filter.as_deref(),
-                file_pattern.as_deref(),
-            )?;
-            let toon = render_nodes("files", &selected);
-            let payload = render_node_rows("files", &selected);
+            let toon = render_ranked_nodes("files", &selected);
+            let payload = render_ranked_node_rows("files", &selected);
             print_tracked_output_estimate(
                 cli.format,
                 &store,
@@ -831,6 +840,23 @@ fn run() -> Result<(), CliError> {
                 file_pattern.clone().or(folder_filter),
                 query.clone(),
                 baseline_tokens,
+                &toon,
+                &payload,
+            )?;
+        }
+        Command::Next { query, limit } => {
+            let store = open_atlas_store(&cli.db)?;
+            let report = next_step_report(&store, query, Some(*limit))?;
+            let payload = next_step_report_payload(&report);
+            let toon = encode_agent_payload(&json!({ "next": payload }));
+            print_tracked_directory_output_estimate(
+                cli.format,
+                &store,
+                &cli.session,
+                "next",
+                None,
+                Some(query.clone()),
+                estimated_source_tokens_for_indexed_files(&store, None, None)?,
                 &toon,
                 &payload,
             )?;

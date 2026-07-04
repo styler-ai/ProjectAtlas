@@ -4,7 +4,7 @@ use crate::health::{HealthFinding, Severity};
 use crate::outline::FileOutline;
 use crate::symbols::{CodeSymbol, SymbolRelation};
 use crate::telemetry::{TokenOverview, TokenTrendReport};
-use crate::{IndexedNode, Overview};
+use crate::{IndexedNode, Overview, RankedNode};
 use serde::Serialize;
 use serde_json::json;
 
@@ -50,10 +50,35 @@ pub fn render_node_rows(label: &str, nodes: &[IndexedNode]) -> Vec<serde_json::V
         .collect()
 }
 
+/// Build the agent-facing ranked row projection with bounded reasons.
+#[must_use]
+pub fn render_ranked_node_rows(label: &str, nodes: &[RankedNode]) -> Vec<serde_json::Value> {
+    nodes
+        .iter()
+        .map(|ranked| {
+            let mut row = render_node_rows(label, std::slice::from_ref(&ranked.node))
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| json!({}));
+            if let Some(object) = row.as_object_mut() {
+                object.insert("reasons".to_string(), json!(ranked.reasons));
+            }
+            row
+        })
+        .collect()
+}
+
 /// Render indexed nodes as standard TOON.
 #[must_use]
 pub fn render_nodes(label: &str, nodes: &[IndexedNode]) -> String {
     let rows = render_node_rows(label, nodes);
+    encode_agent_payload(&json!({ label: rows }))
+}
+
+/// Render ranked indexed nodes as standard TOON.
+#[must_use]
+pub fn render_ranked_nodes(label: &str, nodes: &[RankedNode]) -> String {
+    let rows = render_ranked_node_rows(label, nodes);
     encode_agent_payload(&json!({ label: rows }))
 }
 
