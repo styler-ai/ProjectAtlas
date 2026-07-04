@@ -18,12 +18,24 @@ use std::process::{Command as StdCommand, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+const TEST_REPO_DIR: &str = "repo";
+const SRC_DIR_NAME: &str = "src";
+const ATLAS_DIR_NAME: &str = ".projectatlas";
+const CODEX_CONFIG_DIR: &str = ".codex";
+const FAKE_CODEX_LOG_FILE: &str = "fake-codex.log";
+const FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_FILE: &str = "plugin-add-failed.marker";
+const FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_ENV: &str = "PROJECTATLAS_FAKE_FAILURE_MARKER";
+const FAKE_PATH_DIR: &str = "fake-path";
+const ISOLATED_HOME_DIR: &str = "isolated-home";
+#[cfg(windows)]
+const PROJECTATLAS_LOCAL_APPDATA_DIR: &str = "ProjectAtlas";
+
 #[test]
 fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    let atlas_dir = repo.join(".projectatlas");
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
     let output = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .args(["--format", "json", "runtime-info"])
@@ -155,6 +167,11 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "Confirm-ProjectAtlasBareCommandResolution",
         "Active process resolves bare projectatlas to verified runtime",
         "Restart Codex or the shell",
+        "Resolve-ProjectAtlasCodexCommand",
+        "Update-ProjectAtlasCodexPlugin",
+        "PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE",
+        "Codex ProjectAtlas plugin marketplace updated",
+        "plugin marketplace add styler-ai/ProjectAtlas --ref",
         "Update-ProjectAtlasCodexMcpRegistry",
         "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE",
         "PROJECTATLAS_CODEX_COMMAND",
@@ -213,6 +230,11 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "confirm_bare_projectatlas_resolution",
         "Active process resolves bare projectatlas to verified runtime",
         "restart the host shell",
+        "resolve_codex_command",
+        "update_codex_plugin",
+        "PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE",
+        "Codex ProjectAtlas plugin marketplace updated",
+        "plugin marketplace add styler-ai/ProjectAtlas --ref",
         "update_codex_mcp_registry",
         "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE",
         "PROJECTATLAS_CODEX_COMMAND",
@@ -281,6 +303,18 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             "multi-OS CI smoke must run the plugin update stale-shim regression",
         )
         .into());
+    }
+    for required in [
+        "plugin_update_skips_non_official_codex_marketplace",
+        "plugin_update_leaves_current_codex_marketplace_untouched",
+        "plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails",
+    ] {
+        if !e2e_smoke.contains(required) {
+            return Err(io::Error::other(format!(
+                "multi-OS CI smoke must run the Codex plugin update regression {required}"
+            ))
+            .into());
+        }
     }
     if !e2e_smoke.contains(
         "windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is_locked",
@@ -719,18 +753,18 @@ fn release_and_actions_policy_is_hardened() -> Result<(), Box<dyn Error>> {
 #[test]
 fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir_all(repo.join(".projectatlas"))?;
+    fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
     fs::write(
-        repo.join(".projectatlas").join("config.toml"),
+        repo.join(ATLAS_DIR_NAME).join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
     )?;
     let workspace_root = workspace_root()?;
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
     run_projectatlas_plugin_installer(&workspace_root, &repo, &runtime)?;
 
-    let atlas_dir = repo.join(".projectatlas");
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
     let codex_config = read_json_file(&atlas_dir.join("projectatlas.mcp.json"))?;
     let claude_config = read_json_file(&atlas_dir.join("projectatlas.claude.mcp.json"))?;
     let opencode_config = read_json_file(&atlas_dir.join("projectatlas.opencode.json"))?;
@@ -801,21 +835,21 @@ fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> 
 fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is_locked()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
-    let atlas_dir = repo.join(".projectatlas");
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
     fs::create_dir_all(&atlas_dir)?;
     fs::write(
         atlas_dir.join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
     )?;
 
-    let isolated_home = temp.path().join("isolated-home");
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
     let app_data = isolated_home.join("AppData").join("Roaming");
     let local_app_data = isolated_home.join("AppData").join("Local");
     fs::create_dir_all(&app_data)?;
     fs::create_dir_all(&local_app_data)?;
 
-    let fake_codex_log = isolated_home.join("fake-codex.log");
+    let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
     let fake_codex = isolated_home.join("codex.cmd");
     fs::write(
         &fake_codex,
@@ -823,7 +857,7 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
     )?;
 
     let stable_runtime = local_app_data
-        .join("ProjectAtlas")
+        .join(PROJECTATLAS_LOCAL_APPDATA_DIR)
         .join("bin")
         .join("projectatlas.exe");
     fs::create_dir_all(
@@ -933,7 +967,7 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
         }
 
         let versioned_runtime = local_app_data
-            .join("ProjectAtlas")
+            .join(PROJECTATLAS_LOCAL_APPDATA_DIR)
             .join("runtimes")
             .join(env!("CARGO_PKG_VERSION"))
             .join("x86_64-pc-windows-msvc")
@@ -1061,13 +1095,13 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
 fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result<(), Box<dyn Error>>
 {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    let atlas_dir = repo.join(".projectatlas");
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
     fs::create_dir_all(&atlas_dir)?;
-    fs::create_dir(repo.join("src"))?;
-    fs::write(repo.join("src").join("a.rs"), "pub fn a() {}\n")?;
-    fs::write(repo.join("src").join("b.rs"), "pub fn b() {}\n")?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::write(repo.join(SRC_DIR_NAME).join("a.rs"), "pub fn a() {}\n")?;
+    fs::write(repo.join(SRC_DIR_NAME).join("b.rs"), "pub fn b() {}\n")?;
     fs::write(
         atlas_dir.join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
@@ -1147,22 +1181,23 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         permissions.set_mode(0o755);
         fs::set_permissions(&stale_runtime, permissions)?;
     }
-    let isolated_home = temp.path().join("isolated-home");
-    let fake_codex_log = isolated_home.join("fake-codex.log");
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
     let fake_codex = stale_runtime_dir.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+    let plugin_list_json = format!(
+        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}"}}],"available":[]}}"#,
+        env!("CARGO_PKG_VERSION")
+    );
     let fake_codex_script = if cfg!(windows) {
-        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  echo projectatlas\r\n  echo   command: C:\\stale\\ProjectAtlas\\bin\\projectatlas.exe\r\n  echo   args: --require-version 0.0.1 --db C:\\stale-repo\\.projectatlas\\projectatlas.db mcp\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n"
+        format!(
+            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"marketplace\" if \"%3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  echo {plugin_list_json}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  echo projectatlas\r\n  echo   command: C:\\stale\\ProjectAtlas\\bin\\projectatlas.exe\r\n  echo   args: --require-version 0.0.1 --db C:\\stale-repo\\.projectatlas\\projectatlas.db mcp\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n"
+        )
     } else {
-        "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${1:-}\" = \"mcp\" ] && [ \"${2:-}\" = \"get\" ]; then\n  printf '%s\\n' 'projectatlas'\n  printf '%s\\n' '  command: /stale/ProjectAtlas/bin/projectatlas'\n  printf '%s\\n' '  args: --require-version 0.0.1 --db /stale-repo/.projectatlas/projectatlas.db mcp'\n  exit 0\nfi\nexit 0\n"
+        format!(
+            "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{plugin_list_json}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then\n  printf '%s\\n' 'projectatlas'\n  printf '%s\\n' '  command: /stale/ProjectAtlas/bin/projectatlas'\n  printf '%s\\n' '  args: --require-version 0.0.1 --db /stale-repo/.projectatlas/projectatlas.db mcp'\n  exit 0\nfi\nexit 0\n"
+        )
     };
-    fs::write(&fake_codex, fake_codex_script)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&fake_codex)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&fake_codex, permissions)?;
-    }
+    write_executable_script(&fake_codex, &fake_codex_script)?;
     let safe_stale_runtime = if cfg!(windows) {
         isolated_home
             .join("AppData")
@@ -1266,8 +1301,25 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         ))
         .into());
     }
+    let expected_release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    if !installer_output_text.contains(&format!(
+        "Codex ProjectAtlas plugin marketplace updated to {expected_release_tag}."
+    )) {
+        return Err(io::Error::other(format!(
+            "plugin update installer did not repair stale Codex ProjectAtlas plugin marketplace:\n{installer_output_text}"
+        ))
+        .into());
+    }
     let fake_codex_calls = fs::read_to_string(&fake_codex_log)?;
     let required_codex_call_fragments = vec![
+        "plugin marketplace list --json".to_string(),
+        "plugin list --marketplace projectatlas --json".to_string(),
+        "plugin marketplace remove projectatlas --json".to_string(),
+        format!(
+            "plugin marketplace add styler-ai/ProjectAtlas --ref {expected_release_tag} --json"
+        ),
+        "plugin remove projectatlas --marketplace projectatlas --json".to_string(),
+        "plugin add projectatlas --marketplace projectatlas --json".to_string(),
         "mcp get projectatlas".to_string(),
         "mcp remove projectatlas".to_string(),
         "mcp add projectatlas --".to_string(),
@@ -1429,25 +1481,244 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
 }
 
 #[test]
+fn plugin_update_skips_non_official_codex_marketplace() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    fs::create_dir(&fake_path)?;
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+    let stale_plugin_json = r#"{"installed":[{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"0.0.1"}],"available":[]}"#;
+    let fake_codex_script = if cfg!(windows) {
+        format!(
+            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"marketplace\" if \"%3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://internal.example/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  echo {stale_plugin_json}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" exit /b 1\r\nexit /b 0\r\n"
+        )
+    } else {
+        format!(
+            "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://internal.example/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{stale_plugin_json}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then\n  exit 1\nfi\nexit 0\n"
+        )
+    };
+    write_executable_script(&fake_codex, &fake_codex_script)?;
+
+    let workspace_root = workspace_root()?;
+    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let installer_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+        &workspace_root,
+        &repo,
+        &runtime,
+        &fake_path,
+        &isolated_home,
+    )?;
+    let installer_output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&installer_output.stdout),
+        String::from_utf8_lossy(&installer_output.stderr)
+    );
+    if !installer_output_text
+        .contains("projectatlas marketplace is not the official styler-ai/ProjectAtlas source")
+    {
+        return Err(io::Error::other(format!(
+            "installer did not explain the non-official marketplace skip:\n{installer_output_text}"
+        ))
+        .into());
+    }
+    let fake_codex_calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
+    for forbidden in [
+        "plugin marketplace remove projectatlas",
+        "plugin marketplace add styler-ai/ProjectAtlas",
+        "plugin remove projectatlas",
+        "plugin add projectatlas",
+    ] {
+        if fake_codex_calls.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "non-official Codex marketplace was mutated by forbidden call {forbidden:?}:\n{fake_codex_calls}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn plugin_update_leaves_current_codex_marketplace_untouched() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    fs::create_dir(&fake_path)?;
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    let codex_dir = isolated_home.join(CODEX_CONFIG_DIR);
+    fs::create_dir_all(&codex_dir)?;
+    let expected_release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    fs::write(
+        codex_dir.join("config.toml"),
+        format!(
+            "[marketplaces.projectatlas]\nsource_type = \"git\"\nsource = \"https://github.com/styler-ai/ProjectAtlas.git\"\nref = \"{expected_release_tag}\"\n"
+        ),
+    )?;
+    let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+    let plugin_list_json = format!(
+        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}"}}],"available":[]}}"#,
+        env!("CARGO_PKG_VERSION")
+    );
+    let fake_codex_script = if cfg!(windows) {
+        format!(
+            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"marketplace\" if \"%3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  echo {plugin_list_json}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" exit /b 1\r\nexit /b 0\r\n"
+        )
+    } else {
+        format!(
+            "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{plugin_list_json}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then\n  exit 1\nfi\nexit 0\n"
+        )
+    };
+    write_executable_script(&fake_codex, &fake_codex_script)?;
+
+    let workspace_root = workspace_root()?;
+    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let installer_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+        &workspace_root,
+        &repo,
+        &runtime,
+        &fake_path,
+        &isolated_home,
+    )?;
+    let installer_output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&installer_output.stdout),
+        String::from_utf8_lossy(&installer_output.stderr)
+    );
+    if !installer_output_text.contains(&format!(
+        "Codex ProjectAtlas plugin marketplace already points to {expected_release_tag}."
+    )) {
+        return Err(io::Error::other(format!(
+            "installer did not report the already-current marketplace/plugin state:\n{installer_output_text}"
+        ))
+        .into());
+    }
+    let fake_codex_calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
+    for forbidden in [
+        "plugin marketplace remove projectatlas",
+        "plugin marketplace add styler-ai/ProjectAtlas",
+        "plugin remove projectatlas",
+        "plugin add projectatlas",
+    ] {
+        if fake_codex_calls.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "current Codex marketplace/plugin state was mutated by forbidden call {forbidden:?}:\n{fake_codex_calls}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    fs::create_dir(&fake_path)?;
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    let codex_dir = isolated_home.join(CODEX_CONFIG_DIR);
+    fs::create_dir_all(&codex_dir)?;
+    let expected_release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    fs::write(
+        codex_dir.join("config.toml"),
+        format!(
+            "[marketplaces.projectatlas]\nsource_type = \"git\"\nsource = \"https://github.com/styler-ai/ProjectAtlas.git\"\nref = \"{expected_release_tag}\"\n"
+        ),
+    )?;
+    let failure_marker = isolated_home.join(FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_FILE);
+    let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+    let stale_plugin_json = r#"{"installed":[{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"0.0.1"}],"available":[]}"#;
+    let fake_codex_script = if cfg!(windows) {
+        format!(
+            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"list\" (\r\n  echo {stale_plugin_json}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"add\" (\r\n  if not exist \"%PROJECTATLAS_FAKE_FAILURE_MARKER%\" (\r\n    echo failed>\"%PROJECTATLAS_FAKE_FAILURE_MARKER%\"\r\n    exit /b 1\r\n  )\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"mcp\" if \"%~2\"==\"get\" exit /b 1\r\nexit /b 0\r\n"
+        )
+    } else {
+        format!(
+            "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{stale_plugin_json}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"add\" ]; then\n  if [ ! -f \"$PROJECTATLAS_FAKE_FAILURE_MARKER\" ]; then\n    printf '%s\\n' failed > \"$PROJECTATLAS_FAKE_FAILURE_MARKER\"\n    exit 1\n  fi\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then\n  exit 1\nfi\nexit 0\n"
+        )
+    };
+    write_executable_script(&fake_codex, &fake_codex_script)?;
+
+    let workspace_root = workspace_root()?;
+    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let installer_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+        &workspace_root,
+        &repo,
+        &runtime,
+        &fake_path,
+        &isolated_home,
+    )?;
+    let installer_output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&installer_output.stdout),
+        String::from_utf8_lossy(&installer_output.stderr)
+    );
+    let reported_install_failure = installer_output_text
+        .contains("Codex ProjectAtlas plugin update failed: could not install projectatlas plugin");
+    let reported_version_mismatch = installer_output_text
+        .contains("Codex ProjectAtlas plugin update failed: installed projectatlas plugin version");
+    if !reported_install_failure && !reported_version_mismatch {
+        return Err(io::Error::other(format!(
+            "installer did not report the failed plugin reinstall:\n{installer_output_text}"
+        ))
+        .into());
+    }
+    if reported_install_failure && !failure_marker.exists() {
+        return Err(io::Error::other("fake Codex plugin add failure was not exercised").into());
+    }
+    let fake_codex_calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
+    if fake_codex_calls
+        .matches("plugin add projectatlas --marketplace projectatlas --json")
+        .count()
+        < 2
+    {
+        return Err(io::Error::other(format!(
+            "installer did not retry plugin add during restore:\n{fake_codex_calls}"
+        ))
+        .into());
+    }
+    let restore_marketplace_call = format!(
+        "plugin marketplace add https://github.com/styler-ai/ProjectAtlas.git --ref {expected_release_tag} --json"
+    );
+    for required in [
+        "plugin marketplace remove projectatlas --json",
+        restore_marketplace_call.as_str(),
+    ] {
+        if !fake_codex_calls.contains(required) {
+            return Err(io::Error::other(format!(
+                "installer did not restore marketplace with call {required:?}:\n{fake_codex_calls}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 #[cfg(windows)]
 fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
-    let atlas_dir = repo.join(".projectatlas");
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
     fs::create_dir_all(&atlas_dir)?;
     fs::write(
         atlas_dir.join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
     )?;
-    let isolated_home = temp.path().join("isolated-home");
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
     let app_data = isolated_home.join("AppData").join("Roaming");
     let local_app_data = isolated_home.join("AppData").join("Local");
     fs::create_dir_all(&app_data)?;
     fs::create_dir_all(&local_app_data)?;
 
     let stable_runtime = local_app_data
-        .join("ProjectAtlas")
+        .join(PROJECTATLAS_LOCAL_APPDATA_DIR)
         .join("bin")
         .join("projectatlas.exe");
     fs::create_dir_all(
@@ -1457,7 +1728,7 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
     )?;
     fs::write(&stable_runtime, b"stale 0.3.10 stable mirror")?;
 
-    let fake_codex_log = isolated_home.join("fake-codex.log");
+    let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
     let fake_codex = isolated_home.join("codex.cmd");
     fs::write(
         &fake_codex,
@@ -1519,7 +1790,7 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
     }
 
     let versioned_runtime = local_app_data
-        .join("ProjectAtlas")
+        .join(PROJECTATLAS_LOCAL_APPDATA_DIR)
         .join("runtimes")
         .join(env!("CARGO_PKG_VERSION"))
         .join("x86_64-pc-windows-msvc")
@@ -1578,14 +1849,14 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
 #[cfg(windows)]
 fn windows_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
-    let atlas_dir = repo.join(".projectatlas");
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
     fs::create_dir_all(&atlas_dir)?;
     fs::write(
         atlas_dir.join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
     )?;
-    let isolated_home = temp.path().join("isolated-home");
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
     let app_data = isolated_home.join("AppData").join("Roaming");
     let local_app_data = isolated_home.join("AppData").join("Local");
     fs::create_dir_all(&app_data)?;
@@ -1659,21 +1930,21 @@ fn windows_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Bo
 fn windows_release_binary_only_rejects_invalid_runtime_without_fallback()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
-    let atlas_dir = repo.join(".projectatlas");
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
     fs::create_dir_all(&atlas_dir)?;
     fs::write(
         atlas_dir.join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
     )?;
-    let isolated_home = temp.path().join("isolated-home");
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
     let app_data = isolated_home.join("AppData").join("Roaming");
     let local_app_data = isolated_home.join("AppData").join("Local");
     fs::create_dir_all(&app_data)?;
     fs::create_dir_all(&local_app_data)?;
 
     let stable_runtime = local_app_data
-        .join("ProjectAtlas")
+        .join(PROJECTATLAS_LOCAL_APPDATA_DIR)
         .join("bin")
         .join("projectatlas.exe");
     fs::create_dir_all(
@@ -1756,14 +2027,14 @@ fn posix_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Box<
         return Ok(());
     };
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
-    let atlas_dir = repo.join(".projectatlas");
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
     fs::create_dir_all(&atlas_dir)?;
     fs::write(
         atlas_dir.join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
     )?;
-    let isolated_home = temp.path().join("isolated-home");
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
     fs::create_dir_all(&isolated_home)?;
 
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
@@ -1824,16 +2095,16 @@ fn posix_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Box<
 #[test]
 fn bare_relative_projectatlas_config_path_drives_scan_map_and_lint() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir_all(repo.join(".projectatlas"))?;
-    fs::create_dir(repo.join("src"))?;
+    fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
     fs::write(
-        repo.join(".projectatlas").join("config.toml"),
+        repo.join(ATLAS_DIR_NAME).join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\"]\n",
     )?;
     fs::write(
-        repo.join(".projectatlas")
+        repo.join(ATLAS_DIR_NAME)
             .join("projectatlas-nonsource-files.toon"),
         "nonsource_files[]:\n",
     )?;
@@ -1842,11 +2113,11 @@ fn bare_relative_projectatlas_config_path_drives_scan_map_and_lint() -> Result<(
         "Repository root for bare config path regression tests\n",
     )?;
     fs::write(
-        repo.join("src").join(".purpose"),
+        repo.join(SRC_DIR_NAME).join(".purpose"),
         "Rust source folder for bare config path regression tests\n",
     )?;
     fs::write(
-        repo.join("src").join("main.rs"),
+        repo.join(SRC_DIR_NAME).join("main.rs"),
         "// Purpose: Rust entry point for bare config path regression tests.\nfn main() {}\n",
     )?;
 
@@ -1877,15 +2148,15 @@ fn bare_relative_projectatlas_config_path_drives_scan_map_and_lint() -> Result<(
         .success()
         .stdout(predicate::str::contains("\"files\": 3"));
 
-    let store = AtlasStore::open(&repo.join(".projectatlas").join("projectatlas.db"))?;
+    let store = AtlasStore::open(&repo.join(ATLAS_DIR_NAME).join("projectatlas.db"))?;
     for (path, purpose) in [
         (".", "Agent-reviewed bare config regression root"),
         (
-            ".projectatlas",
+            ATLAS_DIR_NAME,
             "Agent-reviewed ProjectAtlas metadata folder for bare config tests",
         ),
         (
-            "src",
+            SRC_DIR_NAME,
             "Agent-reviewed Rust source folder for bare config tests",
         ),
         (
@@ -1912,7 +2183,7 @@ fn bare_relative_projectatlas_config_path_drives_scan_map_and_lint() -> Result<(
         .stderr(predicate::str::contains("Atlas map missing").not());
 
     fs::write(
-        repo.join(".projectatlas").join("projectatlas.toon"),
+        repo.join(ATLAS_DIR_NAME).join("projectatlas.toon"),
         "version: 1\noverview: tracked_source_files=0 tracked_nonsource_files=0 tracked_files_total=0 tracked_folders=0 source_extensions=0 exclude_dir_names=0 exclude_path_prefixes=0\nfile_hash: \"stale\"\nfolder_hash: \"stale\"\n",
     )?;
     Command::cargo_bin("projectatlas")?
@@ -1934,7 +2205,7 @@ fn bare_relative_projectatlas_config_path_drives_scan_map_and_lint() -> Result<(
         .assert()
         .success()
         .stderr(predicate::str::contains("io error for \"\"").not());
-    let map = fs::read_to_string(repo.join(".projectatlas").join("projectatlas.toon"))?;
+    let map = fs::read_to_string(repo.join(ATLAS_DIR_NAME).join("projectatlas.toon"))?;
     if !map.contains("src/main.rs") {
         return Err(io::Error::other("bare-config map omitted src/main.rs").into());
     }
@@ -1957,9 +2228,9 @@ fn bare_relative_projectatlas_config_path_drives_scan_map_and_lint() -> Result<(
 #[test]
 fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join("src"))?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
     let mut source = "fn main() {\n    println!(\"hello\");\n}\n".to_string();
     for index in 0..120 {
         writeln!(
@@ -1967,7 +2238,7 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
             "fn helper_{index}() {{ println!(\"helper {index}\"); }}"
         )?;
     }
-    fs::write(repo.join("src").join("main.rs"), source)?;
+    fs::write(repo.join(SRC_DIR_NAME).join("main.rs"), source)?;
     let db = temp.path().join("projectatlas.db");
     let outside_cwd = temp.path().join("outside-cwd");
     fs::create_dir(&outside_cwd)?;
@@ -2004,7 +2275,7 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
     Command::cargo_bin("projectatlas")?
         .arg("--db")
         .arg(&db)
-        .args(["folders", "src"])
+        .args(["folders", SRC_DIR_NAME])
         .assert()
         .success()
         .stdout(predicate::str::contains("folders["));
@@ -2514,11 +2785,11 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
 #[test]
 fn root_and_metadata_validation_flow() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join("src"))?;
-    fs::write(repo.join("src").join("a.rs"), "pub fn a() {}\n")?;
-    fs::write(repo.join("src").join("b.rs"), "pub fn b() {}\n")?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::write(repo.join(SRC_DIR_NAME).join("a.rs"), "pub fn a() {}\n")?;
+    fs::write(repo.join(SRC_DIR_NAME).join("b.rs"), "pub fn b() {}\n")?;
 
     Command::cargo_bin("projectatlas")?
         .arg("--format")
@@ -2528,8 +2799,8 @@ fn root_and_metadata_validation_flow() -> Result<(), Box<dyn Error>> {
         .assert()
         .success();
 
-    let db = repo.join(".projectatlas").join("projectatlas.db");
-    let config = repo.join(".projectatlas").join("config.toml");
+    let db = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let config = repo.join(ATLAS_DIR_NAME).join("config.toml");
     let root_show = Command::cargo_bin("projectatlas")?
         .arg("--format")
         .arg("json")
@@ -2607,7 +2878,7 @@ fn root_and_metadata_validation_flow() -> Result<(), Box<dyn Error>> {
         .success();
     Command::cargo_bin("projectatlas")?
         .arg("--db")
-        .arg(other_repo.join(".projectatlas").join("projectatlas.db"))
+        .arg(other_repo.join(ATLAS_DIR_NAME).join("projectatlas.db"))
         .arg("--config")
         .arg(&config)
         .args(["root", "verify"])
@@ -2626,9 +2897,9 @@ fn mcp_server_stays_bound_to_one_project_database() -> Result<(), Box<dyn Error>
     let db_a = temp.path().join("repo-a.db");
     let db_b = temp.path().join("repo-b.db");
     for (repo, marker) in [(&repo_a, "alpha_marker"), (&repo_b, "beta_marker")] {
-        fs::create_dir_all(repo.join("src"))?;
+        fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
         fs::write(
-            repo.join("src").join("main.rs"),
+            repo.join(SRC_DIR_NAME).join("main.rs"),
             format!("pub fn {marker}() -> &'static str {{\n    \"{marker}\"\n}}\n"),
         )?;
     }
@@ -2647,7 +2918,7 @@ fn mcp_server_stays_bound_to_one_project_database() -> Result<(), Box<dyn Error>
     let (command_a, args_a) = mcp_command_and_args(&config_a)?;
     let outside_purpose = format!(
         r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"atlas_purpose_set","arguments":{{"path":{},"purpose":"Wrong repository file."}}}}}}"#,
-        serde_json::to_string(&repo_b.join("src").join("main.rs").to_string_lossy())?
+        serde_json::to_string(&repo_b.join(SRC_DIR_NAME).join("main.rs").to_string_lossy())?
     );
     let messages_a = [
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#,
@@ -2723,11 +2994,11 @@ fn mcp_server_stays_bound_to_one_project_database() -> Result<(), Box<dyn Error>
 #[test]
 fn no_telemetry_readonly_cli_smoke() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join("src"))?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
     fs::write(
-        repo.join("src").join("main.rs"),
+        repo.join(SRC_DIR_NAME).join("main.rs"),
         "pub fn main_entry() -> &'static str {\n    \"atlas\"\n}\n",
     )?;
     let db = temp.path().join("projectatlas.db");
@@ -2742,7 +3013,10 @@ fn no_telemetry_readonly_cli_smoke() -> Result<(), Box<dyn Error>> {
 
     for (path, purpose) in [
         (".", "Repository root for no-telemetry CLI smoke."),
-        ("src", "Rust source folder for no-telemetry CLI smoke."),
+        (
+            SRC_DIR_NAME,
+            "Rust source folder for no-telemetry CLI smoke.",
+        ),
         (
             "src/main.rs",
             "Rust source file for no-telemetry CLI smoke.",
@@ -2760,8 +3034,8 @@ fn no_telemetry_readonly_cli_smoke() -> Result<(), Box<dyn Error>> {
     let calls_before = token_call_count(&repo, &db)?;
     for args in [
         vec!["overview"],
-        vec!["folders", "src", "--limit", "5"],
-        vec!["files", "main", "--folder", "src", "--limit", "5"],
+        vec!["folders", SRC_DIR_NAME, "--limit", "5"],
+        vec!["files", "main", "--folder", SRC_DIR_NAME, "--limit", "5"],
         vec!["summary", "src/main.rs", "--limit", "5"],
         vec![
             "search",
@@ -2808,9 +3082,9 @@ fn large_repository_agent_funnel_stays_bounded() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("large-repo");
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join("src"))?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
     for module in 0..MODULES {
-        let module_dir = repo.join("src").join(format!("module_{module:02}"));
+        let module_dir = repo.join(SRC_DIR_NAME).join(format!("module_{module:02}"));
         fs::create_dir(&module_dir)?;
         for file in 0..FILES_PER_MODULE {
             let mut source = String::from("//! Generated large repository fixture.\n\n");
@@ -2966,14 +3240,17 @@ fn large_repository_agent_funnel_stays_bounded() -> Result<(), Box<dyn Error>> {
 #[test]
 fn symbols_watch_and_legacy_cleanup_flow() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join("src"))?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
     fs::write(
-        repo.join("src").join("lib.rs"),
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
         "pub struct Atlas;\n\nimpl Atlas {\n    pub fn sail(&self) {\n        helper();\n    }\n}\n\nfn helper() {}\n",
     )?;
-    fs::write(repo.join("src").join(".purpose"), "Rust source folder\n")?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join(".purpose"),
+        "Rust source folder\n",
+    )?;
     fs::create_dir_all(repo.join("node_modules").join("pkg"))?;
     fs::write(
         repo.join("node_modules").join("pkg").join(".purpose"),
@@ -3063,7 +3340,7 @@ fn symbols_watch_and_legacy_cleanup_flow() -> Result<(), Box<dyn Error>> {
         .assert()
         .success()
         .stdout(predicate::str::contains("purpose_files_removed: 1"));
-    if repo.join("src").join(".purpose").exists() {
+    if repo.join(SRC_DIR_NAME).join(".purpose").exists() {
         return Err(io::Error::other("legacy .purpose file was not removed").into());
     }
     if !repo
@@ -3080,130 +3357,139 @@ fn symbols_watch_and_legacy_cleanup_flow() -> Result<(), Box<dyn Error>> {
 #[test]
 fn real_scan_resolves_import_alias_called_by_across_core_languages() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir_all(repo.join("src").join("rust").join("no_alias"))?;
-    fs::create_dir_all(repo.join("src").join("rust").join("module_alias"))?;
-    fs::create_dir_all(repo.join("src").join("rust").join("function_alias"))?;
-    fs::create_dir_all(repo.join("src").join("ts").join("no_alias"))?;
-    fs::create_dir_all(repo.join("src").join("ts").join("named_alias"))?;
-    fs::create_dir_all(repo.join("src").join("ts").join("api"))?;
-    fs::create_dir_all(repo.join("src").join("py").join("package"))?;
-    fs::create_dir_all(repo.join("src").join("py").join("package_entry"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME).join("rust").join("no_alias"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME).join("rust").join("module_alias"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME).join("rust").join("function_alias"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME).join("ts").join("no_alias"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME).join("ts").join("named_alias"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME).join("ts").join("api"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME).join("py").join("package"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME).join("py").join("package_entry"))?;
     fs::write(
-        repo.join("src")
+        repo.join(SRC_DIR_NAME)
             .join("rust")
             .join("no_alias")
             .join("service.rs"),
         "pub fn run_no_alias() -> &'static str {\n    \"rust-no-alias\"\n}\n",
     )?;
     fs::write(
-        repo.join("src")
+        repo.join(SRC_DIR_NAME)
             .join("rust")
             .join("no_alias")
             .join("main.rs"),
         "use crate::rust::no_alias::service;\n\nfn start_rust_no_alias() {\n    service::run_no_alias();\n}\n",
     )?;
     fs::write(
-        repo.join("src")
+        repo.join(SRC_DIR_NAME)
             .join("rust")
             .join("module_alias")
             .join("service.rs"),
         "pub fn run_module_alias() -> &'static str {\n    \"rust-module-alias\"\n}\n",
     )?;
     fs::write(
-        repo.join("src")
+        repo.join(SRC_DIR_NAME)
             .join("rust")
             .join("module_alias")
             .join("main.rs"),
         "use crate::rust::module_alias::service as rust_service;\n\nfn start_rust_module_alias() {\n    rust_service::run_module_alias();\n}\n",
     )?;
     fs::write(
-        repo.join("src")
+        repo.join(SRC_DIR_NAME)
             .join("rust")
             .join("function_alias")
             .join("service.rs"),
         "pub fn run_function_alias() -> &'static str {\n    \"rust-function-alias\"\n}\n",
     )?;
     fs::write(
-        repo.join("src")
+        repo.join(SRC_DIR_NAME)
             .join("rust")
             .join("function_alias")
             .join("main.rs"),
         "use crate::rust::function_alias::service::run_function_alias as run_rust_function;\n\nfn start_rust_function_alias() {\n    run_rust_function();\n}\n",
     )?;
     fs::write(
-        repo.join("src")
+        repo.join(SRC_DIR_NAME)
             .join("ts")
             .join("no_alias")
             .join("service.ts"),
         "export function runTsNoAlias(): string {\n  return \"typescript-no-alias\";\n}\n",
     )?;
     fs::write(
-        repo.join("src").join("ts").join("no_alias_main.ts"),
+        repo.join(SRC_DIR_NAME).join("ts").join("no_alias_main.ts"),
         "import { runTsNoAlias } from \"./no_alias/service\";\n\nexport function startTsNoAlias(): string {\n  return runTsNoAlias();\n}\n",
     )?;
     fs::write(
-        repo.join("src")
+        repo.join(SRC_DIR_NAME)
             .join("ts")
             .join("named_alias")
             .join("service.ts"),
         "export function runTsNamedAlias(): string {\n  return \"typescript-named-alias\";\n}\n",
     )?;
     fs::write(
-        repo.join("src").join("ts").join("named_alias_main.ts"),
+        repo.join(SRC_DIR_NAME)
+            .join("ts")
+            .join("named_alias_main.ts"),
         "import { runTsNamedAlias as runAlias } from \"./named_alias/service\";\n\nexport function startTsNamedAlias(): string {\n  return runAlias();\n}\n",
     )?;
     fs::write(
-        repo.join("src").join("ts").join("api").join("index.ts"),
+        repo.join(SRC_DIR_NAME)
+            .join("ts")
+            .join("api")
+            .join("index.ts"),
         "export function runTsNamespace(): string {\n  return \"typescript-namespace\";\n}\n",
     )?;
     fs::write(
-        repo.join("src").join("ts").join("namespace_main.ts"),
+        repo.join(SRC_DIR_NAME).join("ts").join("namespace_main.ts"),
         "import * as api from \"./api\";\n\nexport function startTsNamespace(): string {\n  return api.runTsNamespace();\n}\n",
     )?;
     fs::write(
-        repo.join("src")
+        repo.join(SRC_DIR_NAME)
             .join("py")
             .join("package")
             .join("no_alias.py"),
         "def run_py_no_alias():\n    return \"python-no-alias\"\n",
     )?;
     fs::write(
-        repo.join("src").join("py").join("no_alias_main.py"),
+        repo.join(SRC_DIR_NAME).join("py").join("no_alias_main.py"),
         "from py.package.no_alias import run_py_no_alias\n\n\ndef start_py_no_alias():\n    return run_py_no_alias()\n",
     )?;
     fs::write(
-        repo.join("src")
+        repo.join(SRC_DIR_NAME)
             .join("py")
             .join("package")
             .join("named_alias.py"),
         "def run_py_named_alias():\n    return \"python-named-alias\"\n",
     )?;
     fs::write(
-        repo.join("src").join("py").join("named_alias_main.py"),
+        repo.join(SRC_DIR_NAME)
+            .join("py")
+            .join("named_alias_main.py"),
         "from py.package.named_alias import run_py_named_alias as run_alias\n\n\ndef start_py_named_alias():\n    return run_alias()\n",
     )?;
     fs::write(
-        repo.join("src")
+        repo.join(SRC_DIR_NAME)
             .join("py")
             .join("package")
             .join("module_alias.py"),
         "def run_py_module_alias():\n    return \"python-module-alias\"\n",
     )?;
     fs::write(
-        repo.join("src").join("py").join("module_alias_main.py"),
+        repo.join(SRC_DIR_NAME)
+            .join("py")
+            .join("module_alias_main.py"),
         "import py.package.module_alias as py_service\n\n\ndef start_py_module_alias():\n    return py_service.run_py_module_alias()\n",
     )?;
     fs::write(
-        repo.join("src")
+        repo.join(SRC_DIR_NAME)
             .join("py")
             .join("package_entry")
             .join("__init__.py"),
         "def run_py_entry():\n    return \"python-entry\"\n",
     )?;
     fs::write(
-        repo.join("src").join("py").join("entry_main.py"),
+        repo.join(SRC_DIR_NAME).join("py").join("entry_main.py"),
         "import py.package_entry as package_entry\n\n\ndef start_py_entry():\n    return package_entry.run_py_entry()\n",
     )?;
     let db = temp.path().join("projectatlas.db");
@@ -3293,11 +3579,11 @@ fn real_scan_resolves_import_alias_called_by_across_core_languages() -> Result<(
 #[test]
 fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join("src"))?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
     fs::write(
-        repo.join("src").join("lib.rs"),
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
         "pub fn indexed() {\n    helper();\n}\n\nfn helper() {}\n",
     )?;
     let db = temp.path().join("projectatlas.db");
@@ -3372,19 +3658,19 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
 #[test]
 fn indexed_reads_use_scanned_project_root_from_any_cwd() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     let outside = temp.path().join("outside");
     let unrelated = temp.path().join("unrelated");
     fs::create_dir(&repo)?;
     fs::create_dir(&outside)?;
     fs::create_dir(&unrelated)?;
-    fs::create_dir(repo.join("src"))?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
     fs::write(
         outside.join("projectatlas.toml"),
         "[project]\nroot = \"../unrelated\"\n\n[scan]\nexclude_dir_names = [\"src\"]\n",
     )?;
     fs::write(
-        repo.join("src").join("lib.rs"),
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
         "/// Demo API.\npub fn from_scanned_root() {\n    helper();\n}\n\nfn helper() {}\n",
     )?;
     let db = temp.path().join("projectatlas.db");
@@ -3450,7 +3736,7 @@ fn indexed_reads_use_scanned_project_root_from_any_cwd() -> Result<(), Box<dyn E
         .stdout(predicate::str::contains("symbols_build:"));
 
     fs::write(
-        repo.join("src").join("lib.rs"),
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
         "/// Demo API.\npub fn from_scanned_root() {\n    helper();\n}\n\npub fn after_outside_watch() {}\n\nfn helper() {}\n",
     )?;
     Command::cargo_bin("projectatlas")?
@@ -3498,24 +3784,24 @@ fn indexed_reads_use_scanned_project_root_from_any_cwd() -> Result<(), Box<dyn E
 #[test]
 fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir_all(repo.join(".projectatlas"))?;
-    fs::create_dir(repo.join("src"))?;
-    fs::create_dir_all(repo.join("src").join("api"))?;
+    fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME).join("api"))?;
     fs::create_dir_all(repo.join("docs").join("api"))?;
     fs::create_dir_all(repo.join("generated"))?;
     fs::create_dir_all(repo.join("metadata.egg-info"))?;
     fs::write(
-        repo.join(".projectatlas").join("config.toml"),
+        repo.join(ATLAS_DIR_NAME).join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\", \"generated\"]\nexclude_dir_suffixes = [\".egg-info\"]\nexclude_path_prefixes = [\"docs/api\"]\n",
     )?;
     fs::write(
-        repo.join("src").join("engine.rs"),
+        repo.join(SRC_DIR_NAME).join("engine.rs"),
         "pub fn build_project_atlas() {}\n",
     )?;
     fs::write(
-        repo.join("src").join("api").join("live.rs"),
+        repo.join(SRC_DIR_NAME).join("api").join("live.rs"),
         "pub fn live_api() {}\n",
     )?;
     fs::write(
@@ -3628,13 +3914,13 @@ fn scan_honors_configured_excludes_and_cli_fuzzy_search() -> Result<(), Box<dyn 
 fn ignore_commands_preserve_manual_layer_while_gitignore_updates_apply()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir_all(repo.join("src"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
     fs::create_dir_all(repo.join("generated"))?;
     fs::create_dir_all(repo.join("docs").join("api"))?;
     fs::create_dir_all(repo.join("local-cache"))?;
-    fs::write(repo.join("src").join("main.rs"), "fn main() {}\n")?;
+    fs::write(repo.join(SRC_DIR_NAME).join("main.rs"), "fn main() {}\n")?;
     fs::write(
         repo.join("generated").join("noise.rs"),
         "fn generated_noise() {}\n",
@@ -3749,7 +4035,7 @@ fn ignore_commands_preserve_manual_layer_while_gitignore_updates_apply()
     require_json_string(&add_prefix_json, &["value"], "docs/api")?;
     require_json_bool(&add_prefix_json, &["changed"], true)?;
 
-    let config_text = fs::read_to_string(repo.join(".projectatlas").join("config.toml"))?;
+    let config_text = fs::read_to_string(repo.join(ATLAS_DIR_NAME).join("config.toml"))?;
     if !config_text.contains(r"exclude_dir_names = [")
         || !config_text.contains(r#""generated""#)
         || !config_text.contains(r#""docs/api""#)
@@ -3806,10 +4092,10 @@ fn ignore_commands_preserve_manual_layer_while_gitignore_updates_apply()
     let nested_add_json: Value = serde_json::from_slice(&raw_nested_add.stdout)?;
     require_json_string(&nested_add_json, &["value"], "nested-generated")?;
     require_json_bool(&nested_add_json, &["changed"], true)?;
-    if nested.join(".projectatlas").join("config.toml").exists() {
+    if nested.join(ATLAS_DIR_NAME).join("config.toml").exists() {
         return Err(io::Error::other("nested ignore command created a nested config").into());
     }
-    let nested_config_text = fs::read_to_string(repo.join(".projectatlas").join("config.toml"))?;
+    let nested_config_text = fs::read_to_string(repo.join(ATLAS_DIR_NAME).join("config.toml"))?;
     if !nested_config_text.contains(r#""nested-generated""#) {
         return Err(io::Error::other("nested ignore command did not edit project config").into());
     }
@@ -3840,8 +4126,9 @@ fn ignore_commands_preserve_manual_layer_while_gitignore_updates_apply()
         .stdout(predicate::str::contains("docs/api/noise.rs").not())
         .stdout(predicate::str::contains("local-cache/noise.rs").not());
 
-    let updated_config_text = fs::read_to_string(repo.join(".projectatlas").join("config.toml"))?;
-    if updated_config_text.contains("local-cache") || updated_config_text.contains(r#""src""#) {
+    let updated_config_text = fs::read_to_string(repo.join(ATLAS_DIR_NAME).join("config.toml"))?;
+    if updated_config_text.contains("local-cache") || updated_config_text.contains(r"SRC_DIR_NAME")
+    {
         return Err(
             io::Error::other(".gitignore update was copied into ProjectAtlas config").into(),
         );
@@ -3881,7 +4168,7 @@ fn ignore_commands_preserve_manual_layer_while_gitignore_updates_apply()
     require_json_bool(&remove_prefix_json, &["changed"], true)?;
     require_json_string(&remove_prefix_json, &["kind"], "path-prefix")?;
     require_json_string(&remove_prefix_json, &["value"], "docs/api")?;
-    let removed_config_text = fs::read_to_string(repo.join(".projectatlas").join("config.toml"))?;
+    let removed_config_text = fs::read_to_string(repo.join(ATLAS_DIR_NAME).join("config.toml"))?;
     if !removed_config_text.contains(r#""generated""#)
         || removed_config_text.contains(r#""docs/api""#)
     {
@@ -3896,7 +4183,7 @@ fn ignore_commands_preserve_manual_layer_while_gitignore_updates_apply()
         "exclude_path_prefixes = ['docs\\api']",
     );
     fs::write(
-        repo.join(".projectatlas").join("config.toml"),
+        repo.join(ATLAS_DIR_NAME).join("config.toml"),
         windows_prefix_config,
     )?;
     let raw_remove_windows_prefix = Command::cargo_bin("projectatlas")?
@@ -3914,7 +4201,7 @@ fn ignore_commands_preserve_manual_layer_while_gitignore_updates_apply()
         serde_json::from_slice(&raw_remove_windows_prefix.stdout)?;
     require_json_bool(&remove_windows_prefix_json, &["changed"], true)?;
     let normalized_removed_config_text =
-        fs::read_to_string(repo.join(".projectatlas").join("config.toml"))?;
+        fs::read_to_string(repo.join(ATLAS_DIR_NAME).join("config.toml"))?;
     if normalized_removed_config_text.contains("docs\\api")
         || normalized_removed_config_text.contains("docs/api")
     {
@@ -3940,17 +4227,17 @@ fn ignore_commands_preserve_manual_layer_while_gitignore_updates_apply()
 fn default_scan_drops_stale_nodes_after_prefix_exclude_config_change() -> Result<(), Box<dyn Error>>
 {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir_all(repo.join(".projectatlas"))?;
-    fs::create_dir_all(repo.join("src").join("api"))?;
+    fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME).join("api"))?;
     fs::create_dir_all(repo.join("docs").join("api"))?;
     fs::write(
-        repo.join("src").join("engine.rs"),
+        repo.join(SRC_DIR_NAME).join("engine.rs"),
         "pub fn active_engine() {}\n",
     )?;
     fs::write(
-        repo.join("src").join("api").join("live.rs"),
+        repo.join(SRC_DIR_NAME).join("api").join("live.rs"),
         "pub fn live_api() {}\n",
     )?;
     fs::write(
@@ -3966,7 +4253,7 @@ fn default_scan_drops_stale_nodes_after_prefix_exclude_config_change() -> Result
         .stdout(predicate::str::contains("files: 3"));
 
     fs::write(
-        repo.join(".projectatlas").join("config.toml"),
+        repo.join(ATLAS_DIR_NAME).join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\"]\nexclude_path_prefixes = [\"docs/api\"]\n",
     )?;
 
@@ -4016,11 +4303,11 @@ fn default_scan_drops_stale_nodes_after_prefix_exclude_config_change() -> Result
 #[test]
 fn vue_composition_api_summary_uses_bindings() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir_all(repo.join("src"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
     fs::write(
-        repo.join("src").join("ProductPanel.vue"),
+        repo.join(SRC_DIR_NAME).join("ProductPanel.vue"),
         r#"
 <template><article>{{ currentPriceLabel }}</article></template>
 <script setup lang="ts">
@@ -4056,7 +4343,7 @@ const retryCount = ref(0);
 
     let summary_json = json_summary_command(
         &repo,
-        &repo.join(".projectatlas").join("projectatlas.db"),
+        &repo.join(ATLAS_DIR_NAME).join("projectatlas.db"),
         "src/ProductPanel.vue",
     )?;
     require_json_string(&summary_json, &["parser_kind"], "structural-symbol-graph")?;
@@ -4067,7 +4354,7 @@ const retryCount = ref(0);
 #[test]
 fn javascript_summary_ignores_locals_and_object_stub_methods() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
     fs::create_dir_all(repo.join("app").join("scripts"))?;
     fs::write(
@@ -4173,30 +4460,30 @@ async function main() {
 fn structural_summaries_cover_declarative_files_and_projectatlas_inputs()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir_all(repo.join(".projectatlas"))?;
+    fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
     fs::create_dir_all(repo.join(".github").join("workflows"))?;
     fs::create_dir_all(repo.join("app").join("styles"))?;
     fs::create_dir_all(repo.join("app").join("public").join("data"))?;
     fs::create_dir_all(repo.join("public"))?;
-    fs::create_dir_all(repo.join("src"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
     fs::write(
-        repo.join(".projectatlas").join("config.toml"),
+        repo.join(ATLAS_DIR_NAME).join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\"]\nexclude_path_prefixes = [\"docs/api\"]\n",
     )?;
     fs::write(
-        repo.join(".projectatlas")
+        repo.join(ATLAS_DIR_NAME)
             .join("projectatlas-nonsource-files.toon"),
         "nonsource_files[]:\n  # path,summary\n",
     )?;
-    fs::write(repo.join(".projectatlas").join("projectatlas.db"), b"db")?;
+    fs::write(repo.join(ATLAS_DIR_NAME).join("projectatlas.db"), b"db")?;
     fs::write(
-        repo.join(".projectatlas").join("projectatlas.toon"),
+        repo.join(ATLAS_DIR_NAME).join("projectatlas.toon"),
         "generated map\n",
     )?;
     fs::write(
-        repo.join(".projectatlas").join("projectatlas.mcp.json"),
+        repo.join(ATLAS_DIR_NAME).join("projectatlas.mcp.json"),
         "{}\n",
     )?;
     fs::write(
@@ -4235,7 +4522,7 @@ fn structural_summaries_cover_declarative_files_and_projectatlas_inputs()
         "<html><head><title>Home</title><meta name=\"description\" content=\"Welcome page\"><link rel=\"canonical\" href=\"https://example.test/\"><link rel=\"manifest\" href=\"/site.webmanifest\"><link rel=\"alternate\" href=\"/de/\"></head><body><h1>Hello</h1><script type=\"application/ld+json\">{}</script></body></html>",
     )?;
     fs::write(
-        repo.join("src").join("empty.rs"),
+        repo.join(SRC_DIR_NAME).join("empty.rs"),
         "// no declarations yet\n",
     )?;
     let db = temp.path().join("projectatlas.db");
@@ -4365,7 +4652,7 @@ fn structural_summaries_cover_declarative_files_and_projectatlas_inputs()
 #[test]
 fn scan_indexes_every_supported_language_extension() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     let fixture_root = repo.join("all");
     fs::create_dir_all(&fixture_root)?;
     let db = temp.path().join("projectatlas.db");
@@ -4521,7 +4808,7 @@ fn language_fixture_summaries_match_baselines() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| io::Error::other("workspace root not found"))?;
     let fixture_source = workspace_root.join("fixtures").join("languages");
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     copy_directory_tree(&fixture_source, &repo)?;
     fs::create_dir_all(repo.join("python"))?;
     fs::write(
@@ -4572,17 +4859,17 @@ fn language_fixture_summaries_match_baselines() -> Result<(), Box<dyn Error>> {
 #[test]
 fn map_and_lint_honor_configured_exclude_path_prefixes() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir_all(repo.join(".projectatlas"))?;
-    fs::create_dir(repo.join("src"))?;
+    fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
     fs::create_dir_all(repo.join("docs").join("api"))?;
     fs::write(
-        repo.join(".projectatlas").join("config.toml"),
+        repo.join(ATLAS_DIR_NAME).join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\"]\nexclude_path_prefixes = [\"docs/api\"]\n",
     )?;
     fs::write(
-        repo.join(".projectatlas")
+        repo.join(ATLAS_DIR_NAME)
             .join("projectatlas-nonsource-files.toon"),
         "nonsource_files[]:\n",
     )?;
@@ -4591,7 +4878,7 @@ fn map_and_lint_honor_configured_exclude_path_prefixes() -> Result<(), Box<dyn E
         "Repository root for prefix map tests\n",
     )?;
     fs::write(
-        repo.join("src").join(".purpose"),
+        repo.join(SRC_DIR_NAME).join(".purpose"),
         "Rust source folder for prefix map tests\n",
     )?;
     fs::write(
@@ -4599,7 +4886,7 @@ fn map_and_lint_honor_configured_exclude_path_prefixes() -> Result<(), Box<dyn E
         "Documentation folder for prefix map tests\n",
     )?;
     fs::write(
-        repo.join("src").join("engine.rs"),
+        repo.join(SRC_DIR_NAME).join("engine.rs"),
         "// Purpose: Active Rust source for prefix map tests.\npub fn indexed_engine() {}\n",
     )?;
     fs::write(
@@ -4613,7 +4900,7 @@ fn map_and_lint_honor_configured_exclude_path_prefixes() -> Result<(), Box<dyn E
         .assert()
         .success();
 
-    let map = fs::read_to_string(repo.join(".projectatlas").join("projectatlas.toon"))?;
+    let map = fs::read_to_string(repo.join(ATLAS_DIR_NAME).join("projectatlas.toon"))?;
     if !map.contains("src/engine.rs") {
         return Err(io::Error::other("map omitted indexed source file").into());
     }
@@ -4633,16 +4920,16 @@ fn map_and_lint_honor_configured_exclude_path_prefixes() -> Result<(), Box<dyn E
 #[test]
 fn first_default_scan_skips_stale_legacy_map_purposes() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir_all(repo.join(".projectatlas"))?;
-    fs::create_dir(repo.join("src"))?;
+    fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
     fs::write(
-        repo.join(".projectatlas").join("config.toml"),
+        repo.join(ATLAS_DIR_NAME).join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\"]\n",
     )?;
     fs::write(
-        repo.join(".projectatlas").join("projectatlas.toon"),
+        repo.join(ATLAS_DIR_NAME).join("projectatlas.toon"),
         "version: 1\n\
 generated_at: 2026-06-28T00:00:00Z\n\
 root: .\n\
@@ -4653,7 +4940,7 @@ files[2]{path,summary,source}:\n\
   src/main.rs,Rust entrypoint,file\n\
   stale/deleted.rs,Deleted legacy file,file\n",
     )?;
-    fs::write(repo.join("src").join("main.rs"), "fn main() {}\n")?;
+    fs::write(repo.join(SRC_DIR_NAME).join("main.rs"), "fn main() {}\n")?;
     let db = temp.path().join("projectatlas.db");
 
     Command::cargo_bin("projectatlas")?
@@ -4689,16 +4976,16 @@ files[2]{path,summary,source}:\n\
 #[test]
 fn scan_does_not_overwrite_agent_purpose_with_legacy_header() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir_all(repo.join(".projectatlas"))?;
-    fs::create_dir(repo.join("src"))?;
+    fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
     fs::write(
-        repo.join(".projectatlas").join("config.toml"),
+        repo.join(ATLAS_DIR_NAME).join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
     )?;
     fs::write(
-        repo.join("src").join("main.rs"),
+        repo.join(SRC_DIR_NAME).join("main.rs"),
         "// Purpose: Legacy header purpose that should only seed empty rows.\nfn main() {}\n",
     )?;
     let db = temp.path().join("projectatlas.db");
@@ -4708,7 +4995,7 @@ fn scan_does_not_overwrite_agent_purpose_with_legacy_header() -> Result<(), Box<
         .arg("--db")
         .arg(&db)
         .arg("--config")
-        .arg(repo.join(".projectatlas").join("config.toml"))
+        .arg(repo.join(ATLAS_DIR_NAME).join("config.toml"))
         .args(["scan", "."])
         .assert()
         .success()
@@ -4728,7 +5015,7 @@ fn scan_does_not_overwrite_agent_purpose_with_legacy_header() -> Result<(), Box<
         .arg("--db")
         .arg(&db)
         .arg("--config")
-        .arg(repo.join(".projectatlas").join("config.toml"))
+        .arg(repo.join(ATLAS_DIR_NAME).join("config.toml"))
         .args(["scan", "."])
         .assert()
         .success()
@@ -4753,13 +5040,13 @@ fn scan_does_not_overwrite_agent_purpose_with_legacy_header() -> Result<(), Box<
 #[test]
 fn mcp_config_discovers_flat_config_from_db_root() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     let outside = temp.path().join("outside");
     let unrelated = temp.path().join("unrelated");
     fs::create_dir(&repo)?;
     fs::create_dir(&outside)?;
     fs::create_dir(&unrelated)?;
-    fs::create_dir(repo.join("src"))?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
     fs::create_dir_all(repo.join("generated"))?;
     fs::write(
         outside.join("projectatlas.toml"),
@@ -4770,14 +5057,14 @@ fn mcp_config_discovers_flat_config_from_db_root() -> Result<(), Box<dyn Error>>
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"generated\"]\n",
     )?;
     fs::write(
-        repo.join("src").join("engine.rs"),
+        repo.join(SRC_DIR_NAME).join("engine.rs"),
         "pub fn flat_config_engine() {}\n",
     )?;
     fs::write(
         repo.join("generated").join("noise.rs"),
         "pub fn flat_config_noise() {}\n",
     )?;
-    let atlas_dir = repo.join(".projectatlas");
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
     fs::create_dir(&atlas_dir)?;
     let db = atlas_dir.join("projectatlas.db");
 
@@ -4833,11 +5120,11 @@ fn mcp_config_discovers_flat_config_from_db_root() -> Result<(), Box<dyn Error>>
 #[test]
 fn files_command_normalizes_windows_style_folder_filters() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir_all(repo.join("src").join("nested"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME).join("nested"))?;
     fs::write(
-        repo.join("src").join("nested").join("handler.rs"),
+        repo.join(SRC_DIR_NAME).join("nested").join("handler.rs"),
         "fn handler() {}\n",
     )?;
     let db = temp.path().join("projectatlas.db");
@@ -4863,9 +5150,12 @@ fn files_command_normalizes_windows_style_folder_filters() -> Result<(), Box<dyn
 #[test]
 fn scan_does_not_exclude_repository_under_excluded_parent_name() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("target").join("repo");
-    fs::create_dir_all(repo.join("src"))?;
-    fs::write(repo.join("src").join("main.rs"), "pub fn main_entry() {}\n")?;
+    let repo = temp.path().join("target").join(TEST_REPO_DIR);
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("main.rs"),
+        "pub fn main_entry() {}\n",
+    )?;
     let db = temp.path().join("projectatlas.db");
 
     let raw_scan = Command::cargo_bin("projectatlas")?
@@ -4896,10 +5186,13 @@ fn scan_does_not_exclude_repository_under_excluded_parent_name() -> Result<(), B
 #[test]
 fn notify_watch_refreshes_symbols_after_file_change() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join("src"))?;
-    fs::write(repo.join("src").join("lib.rs"), "pub fn initial() {}\n")?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn initial() {}\n",
+    )?;
     let db = temp.path().join("projectatlas.db");
 
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
@@ -4913,7 +5206,7 @@ fn notify_watch_refreshes_symbols_after_file_change() -> Result<(), Box<dyn Erro
         .spawn()?;
     thread::sleep(Duration::from_millis(750));
     fs::write(
-        repo.join("src").join("lib.rs"),
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
         "pub fn changed() {\n    initial();\n}\n\npub fn initial() {}\n",
     )?;
 
@@ -4968,11 +5261,11 @@ fn notify_watch_refreshes_symbols_after_file_change() -> Result<(), Box<dyn Erro
 #[test]
 fn watch_once_preserves_unchanged_deep_summary_and_text_index() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join("src"))?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
     fs::write(
-        repo.join("src").join("main.rs"),
+        repo.join(SRC_DIR_NAME).join("main.rs"),
         "use std::fs;\npub fn helper() {}\npub fn main() { helper(); }\n",
     )?;
     let db = temp.path().join("projectatlas.db");
@@ -4995,7 +5288,7 @@ fn watch_once_preserves_unchanged_deep_summary_and_text_index() -> Result<(), Bo
             PurposeSource::Agent,
         )?;
         store.set_purpose(
-            "src",
+            SRC_DIR_NAME,
             "Reviewed source folder for deep refresh preservation tests.",
             PurposeSource::Agent,
         )?;
@@ -5102,7 +5395,7 @@ fn watch_once_preserves_unchanged_deep_summary_and_text_index() -> Result<(), Bo
             "Reviewed repository root for deep refresh preservation tests.",
         ),
         (
-            "src",
+            SRC_DIR_NAME,
             "Reviewed source folder for deep refresh preservation tests.",
         ),
     ] {
@@ -5126,10 +5419,13 @@ fn watch_once_preserves_unchanged_deep_summary_and_text_index() -> Result<(), Bo
 #[test]
 fn watch_once_skips_unchanged_empty_native_parse() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join("src"))?;
-    fs::write(repo.join("src").join("empty.rs"), "// comment only\n")?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("empty.rs"),
+        "// comment only\n",
+    )?;
     let db = temp.path().join("projectatlas.db");
 
     Command::cargo_bin("projectatlas")?
@@ -5169,7 +5465,7 @@ fn watch_once_skips_unchanged_empty_native_parse() -> Result<(), Box<dyn Error>>
 #[test]
 fn watch_once_preserves_manifest_symbol_summary() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
     fs::write(
         repo.join("Cargo.toml"),
@@ -5218,10 +5514,13 @@ fn watch_once_preserves_manifest_symbol_summary() -> Result<(), Box<dyn Error>> 
 #[test]
 fn watch_once_detects_new_files_folders_text_and_symbols() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join("src"))?;
-    fs::write(repo.join("src").join("lib.rs"), "pub fn existing() {}\n")?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn existing() {}\n",
+    )?;
     let db = temp.path().join("projectatlas.db");
 
     Command::cargo_bin("projectatlas")?
@@ -5232,9 +5531,9 @@ fn watch_once_detects_new_files_folders_text_and_symbols() -> Result<(), Box<dyn
         .assert()
         .success();
 
-    fs::create_dir_all(repo.join("src").join("feature"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME).join("feature"))?;
     fs::write(
-        repo.join("src").join("feature").join("new_file.rs"),
+        repo.join(SRC_DIR_NAME).join("feature").join("new_file.rs"),
         "pub fn auto_detected_new_file() {}\n",
     )?;
 
@@ -5280,10 +5579,10 @@ fn watch_once_detects_new_files_folders_text_and_symbols() -> Result<(), Box<dyn
 #[test]
 fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join("src"))?;
-    fs::create_dir_all(repo.join("crates").join("atlas_core").join("src"))?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(repo.join("crates").join("atlas_core").join(SRC_DIR_NAME))?;
     fs::create_dir_all(repo.join("tmp"))?;
     fs::create_dir_all(repo.join("target"))?;
     fs::write(
@@ -5295,17 +5594,17 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         "fn main() {\n    println!(\"cargo:rerun-if-changed=build.rs\");\n}\n",
     )?;
     fs::write(
-        repo.join("src").join("main.rs"),
+        repo.join(SRC_DIR_NAME).join("main.rs"),
         "mod service;\nconst CONTENT_ONLY_ROUTE: &str = \"contentOnlyRoute\";\nfn main() {\n    service::run();\n}\n",
     )?;
     fs::write(
-        repo.join("src").join("service.rs"),
+        repo.join(SRC_DIR_NAME).join("service.rs"),
         "pub struct Runner;\n\nimpl Runner {\n    pub fn execute(&self) {\n        helper();\n    }\n}\n\npub fn run() {\n    Runner.execute();\n}\n\nfn helper() {}\n",
     )?;
     fs::write(
         repo.join("crates")
             .join("atlas_core")
-            .join("src")
+            .join(SRC_DIR_NAME)
             .join("lib.rs"),
         "pub fn library_entry() -> &'static str {\n    \"atlas\"\n}\n",
     )?;
@@ -5339,7 +5638,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
-        .args(["files", "service", "--folder", "src", "--limit", "5"])
+        .args(["files", "service", "--folder", SRC_DIR_NAME, "--limit", "5"])
         .assert()
         .success()
         .stdout(predicate::str::contains("src/service.rs"));
@@ -5352,7 +5651,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
             "files",
             "contentOnlyRoute",
             "--folder",
-            "src",
+            SRC_DIR_NAME,
             "--file-pattern",
             "*.rs",
             "--include-content",
@@ -5510,7 +5809,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
 #[test]
 fn gradle_dsl_tasks_are_symbols_and_file_ranking_signals() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
     fs::write(
         repo.join("build.gradle.kts"),
@@ -5652,11 +5951,11 @@ tasks {
 #[test]
 fn parity_alias_passes_clean_repository() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join("src"))?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
     fs::write(
-        repo.join("src").join("lib.rs"),
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
         "pub fn library_entry() -> &'static str {\n    \"atlas\"\n}\n",
     )?;
     let db = temp.path().join("projectatlas.db");
@@ -5671,7 +5970,10 @@ fn parity_alias_passes_clean_repository() -> Result<(), Box<dyn Error>> {
 
     for (path, purpose) in [
         (".", "Repository root for clean parity alias tests."),
-        ("src", "Rust source folder for clean parity alias tests."),
+        (
+            SRC_DIR_NAME,
+            "Rust source folder for clean parity alias tests.",
+        ),
         (
             "src/lib.rs",
             "Rust library source file for clean parity alias tests.",
@@ -5715,11 +6017,11 @@ fn parity_alias_passes_clean_repository() -> Result<(), Box<dyn Error>> {
 #[test]
 fn agent_purpose_and_health_resolution_gate_flow() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join("src"))?;
-    fs::write(repo.join("src").join("a.rs"), "pub fn alpha() {}\n")?;
-    fs::write(repo.join("src").join("b.rs"), "pub fn beta() {}\n")?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::write(repo.join(SRC_DIR_NAME).join("a.rs"), "pub fn alpha() {}\n")?;
+    fs::write(repo.join(SRC_DIR_NAME).join("b.rs"), "pub fn beta() {}\n")?;
     let db = temp.path().join("projectatlas.db");
 
     Command::cargo_bin("projectatlas")?
@@ -5743,7 +6045,7 @@ fn agent_purpose_and_health_resolution_gate_flow() -> Result<(), Box<dyn Error>>
 
     for (path, purpose) in [
         (".", "Repository root for agent purpose gate tests."),
-        ("src", "Rust source folder for purpose gate tests."),
+        (SRC_DIR_NAME, "Rust source folder for purpose gate tests."),
         (
             "src/a.rs",
             "Alpha test module for duplicate purpose handling.",
@@ -5811,7 +6113,7 @@ fn agent_purpose_and_health_resolution_gate_flow() -> Result<(), Box<dyn Error>>
         .stdout(predicate::str::contains("health_findings[0]"));
 
     fs::write(
-        repo.join("src").join("a.rs"),
+        repo.join(SRC_DIR_NAME).join("a.rs"),
         "pub fn alpha() {}\npub fn changed_alpha() {}\n",
     )?;
     Command::cargo_bin("projectatlas")?
@@ -5847,11 +6149,11 @@ fn agent_purpose_and_health_resolution_gate_flow() -> Result<(), Box<dyn Error>>
 #[test]
 fn generated_file_purpose_suggestions_require_agent_approval() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join("src"))?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
     fs::write(
-        repo.join("src").join("service.rs"),
+        repo.join(SRC_DIR_NAME).join("service.rs"),
         "//! Service module docs.\n/// Service API for tests.\npub struct Service;\n\nimpl Service {\n    /// Run the service.\n    pub fn run(&self) {}\n}\n",
     )?;
     let db = temp.path().join("projectatlas.db");
@@ -6035,7 +6337,7 @@ fn generated_file_purpose_suggestions_require_agent_approval() -> Result<(), Box
     for (path, purpose) in [
         (".", "Repository root for file purpose suggestion tests."),
         (
-            "src",
+            SRC_DIR_NAME,
             "Rust source folder for file purpose suggestion tests.",
         ),
         (
@@ -6125,15 +6427,15 @@ fn generated_file_purpose_suggestions_require_agent_approval() -> Result<(), Box
 #[test]
 fn purpose_review_batch_applies_agent_review_without_raw_sql() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join("src"))?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
     fs::write(
-        repo.join("src").join("detail.rs"),
+        repo.join(SRC_DIR_NAME).join("detail.rs"),
         "pub fn trusted_detail() {}\n",
     )?;
     fs::write(
-        repo.join("src").join("service.rs"),
+        repo.join(SRC_DIR_NAME).join("service.rs"),
         "//! Service module docs.\n/// Service API for tests.\npub struct Service;\n\nimpl Service {\n    /// Run the service.\n    pub fn run(&self) {}\n}\n",
     )?;
     let db = temp.path().join("projectatlas.db");
@@ -6290,7 +6592,7 @@ fn purpose_review_batch_applies_agent_review_without_raw_sql() -> Result<(), Box
 #[test]
 fn powershell_summary_preserves_hyphenated_function_names() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
     fs::create_dir(repo.join("scripts"))?;
     fs::write(
@@ -6345,17 +6647,17 @@ fn powershell_summary_preserves_hyphenated_function_names() -> Result<(), Box<dy
 #[test]
 fn generated_purpose_queue_avoids_generic_and_asset_noise() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir_all(repo.join("src").join("customers"))?;
-    fs::create_dir_all(repo.join("src").join("settings"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME).join("customers"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME).join("settings"))?;
     fs::create_dir(repo.join("assets"))?;
     fs::write(
-        repo.join("src").join("customers").join("service.rs"),
+        repo.join(SRC_DIR_NAME).join("customers").join("service.rs"),
         "pub struct CustomerService;\n\nimpl CustomerService {\n    pub fn reconcile(&self) {}\n}\n",
     )?;
     fs::write(
-        repo.join("src").join("settings").join("service.rs"),
+        repo.join(SRC_DIR_NAME).join("settings").join("service.rs"),
         "pub struct SettingsService;\n\nimpl SettingsService {\n    pub fn load(&self) {}\n}\n",
     )?;
     fs::write(
@@ -6550,17 +6852,17 @@ fn generated_purpose_queue_avoids_generic_and_asset_noise() -> Result<(), Box<dy
 #[test]
 fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join(".projectatlas"))?;
-    fs::create_dir(repo.join("src"))?;
+    fs::create_dir(repo.join(ATLAS_DIR_NAME))?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
     fs::create_dir(repo.join("assets"))?;
     fs::write(
-        repo.join(".projectatlas").join("config.toml"),
+        repo.join(ATLAS_DIR_NAME).join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n\n[purpose.styles_by_extension]\n\".toml\" = \"line-comment\"\n",
     )?;
     fs::write(
-        repo.join(".projectatlas")
+        repo.join(ATLAS_DIR_NAME)
             .join("projectatlas-nonsource-files.toon"),
         "nonsource_files[]:\n  # path,summary\n  assets/logo.svg,SVG brand asset for purpose lint strictness tests\n",
     )?;
@@ -6570,7 +6872,7 @@ fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), 
         "# Purpose: Rust manifest for purpose lint strictness tests.\n[package]\nname = \"purpose-lint-demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
     )?;
     fs::write(
-        repo.join("src").join("detail.rs"),
+        repo.join(SRC_DIR_NAME).join("detail.rs"),
         "// Purpose: Rust implementation detail for purpose lint strictness tests.\npub fn detail() {}\n",
     )?;
     fs::write(
@@ -6578,7 +6880,7 @@ fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), 
         "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
     )?;
     let db = temp.path().join("projectatlas.db");
-    let config = repo.join(".projectatlas").join("config.toml");
+    let config = repo.join(ATLAS_DIR_NAME).join("config.toml");
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -6635,7 +6937,7 @@ fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), 
     for (path, purpose) in [
         (".", "Imported repository root purpose"),
         ("assets", "Imported asset folder purpose"),
-        ("src", "Imported source folder purpose"),
+        (SRC_DIR_NAME, "Imported source folder purpose"),
         ("Cargo.toml", "Imported Rust manifest purpose"),
         ("src/detail.rs", "Imported implementation detail purpose"),
         ("assets/logo.svg", "Imported SVG brand asset purpose"),
@@ -6719,7 +7021,7 @@ fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), 
     for (path, purpose) in [
         (".", "Agent-reviewed repository root purpose"),
         ("assets", "Agent-reviewed asset folder purpose"),
-        ("src", "Agent-reviewed source folder purpose"),
+        (SRC_DIR_NAME, "Agent-reviewed source folder purpose"),
         ("Cargo.toml", "Agent-reviewed Rust manifest purpose"),
         (
             "src/detail.rs",
@@ -6746,17 +7048,17 @@ fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), 
 #[test]
 fn search_and_symbol_slice_are_bounded_and_identity_safe() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join("src"))?;
-    fs::write(repo.join("src").join("a.rs"), "needle one\n")?;
-    fs::write(repo.join("src").join("b.rs"), "needle two\n")?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::write(repo.join(SRC_DIR_NAME).join("a.rs"), "needle one\n")?;
+    fs::write(repo.join(SRC_DIR_NAME).join("b.rs"), "needle two\n")?;
     fs::write(
         repo.join("Cargo.lock"),
         "[[package]]\nname = \"windows-sys\"\nversion = \"0.59.0\"\n\n[[package]]\nname = \"windows-sys\"\nversion = \"0.60.0\"\n",
     )?;
     fs::write(
-        repo.join("src").join("lib.rs"),
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
         "struct A;\nimpl A {\n    fn run(&self) {\n        a();\n    }\n}\nstruct B;\nimpl B {\n    fn run(&self) {\n        b();\n    }\n}\n",
     )?;
     let db = temp.path().join("projectatlas.db");
@@ -6841,10 +7143,10 @@ fn search_and_symbol_slice_are_bounded_and_identity_safe() -> Result<(), Box<dyn
 #[test]
 fn skipped_symbol_builds_invalidate_stale_symbols() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join("src"))?;
-    let source = repo.join("src").join("main.rs");
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    let source = repo.join(SRC_DIR_NAME).join("main.rs");
     fs::write(&source, "pub fn old_too_large_symbol() {}\n")?;
     fs::write(
         repo.join("Cargo.toml"),
@@ -7473,6 +7775,18 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+fn write_executable_script(path: &Path, script: &str) -> Result<(), Box<dyn Error>> {
+    fs::write(path, script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
+}
+
 /// Run the bundled plugin installer with an explicit runtime path.
 fn run_projectatlas_plugin_installer(
     workspace_root: &Path,
@@ -7558,6 +7872,7 @@ fn run_projectatlas_plugin_installer_with_optional_path_and_home(
     command
         .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
         .env("PROJECTATLAS_RUNTIME_PATH", runtime)
+        .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
         .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1");
     if let Some(path_shadow) = path_shadow {
         let current_path = std::env::var_os("PATH").unwrap_or_default();
@@ -7569,6 +7884,7 @@ fn run_projectatlas_plugin_installer_with_optional_path_and_home(
         if fake_codex.exists() {
             command
                 .env("PROJECTATLAS_CODEX_COMMAND", fake_codex)
+                .env_remove("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE")
                 .env_remove("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE");
         }
     }
@@ -7582,7 +7898,14 @@ fn run_projectatlas_plugin_installer_with_optional_path_and_home(
             .env("USERPROFILE", home)
             .env("APPDATA", app_data)
             .env("LOCALAPPDATA", local_app_data)
-            .env("PROJECTATLAS_FAKE_CODEX_LOG", home.join("fake-codex.log"));
+            .env(
+                "PROJECTATLAS_FAKE_CODEX_LOG",
+                home.join(FAKE_CODEX_LOG_FILE),
+            )
+            .env(
+                FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_ENV,
+                home.join(FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_FILE),
+            );
     }
     let output = command.output()?;
     if !output.status.success() {
@@ -7889,7 +8212,7 @@ fn json_at<'a>(value: &'a Value, path: &[&str]) -> Result<&'a Value, Box<dyn Err
 #[test]
 fn health_check_reports_duplicate_temp_folders() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
     fs::create_dir_all(repo.join("a").join("tmp"))?;
     fs::create_dir_all(repo.join("b").join("tmp"))?;
@@ -7931,10 +8254,10 @@ fn purpose_file_seed_command_surface_is_removed() -> Result<(), Box<dyn Error>> 
 #[test]
 fn init_map_and_lint_flow_uses_rust_implementation() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir(repo.join("src"))?;
-    fs::write(repo.join("src").join("main.rs"), "fn main() {}\n")?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::write(repo.join(SRC_DIR_NAME).join("main.rs"), "fn main() {}\n")?;
     fs::write(
         repo.join("README.md"),
         "# Demo readme for Rust map lint tests\n",
@@ -7946,18 +8269,18 @@ fn init_map_and_lint_flow_uses_rust_implementation() -> Result<(), Box<dyn Error
         .arg("init")
         .assert()
         .success();
-    let generated_config = fs::read_to_string(repo.join(".projectatlas").join("config.toml"))?;
+    let generated_config = fs::read_to_string(repo.join(ATLAS_DIR_NAME).join("config.toml"))?;
     if generated_config.contains("purpose_filename") || generated_config.contains(".purpose") {
         return Err(io::Error::other(format!(
             "init config advertised legacy purpose files: {generated_config}"
         ))
         .into());
     }
-    if repo.join(".purpose").exists() || repo.join("src").join(".purpose").exists() {
+    if repo.join(".purpose").exists() || repo.join(SRC_DIR_NAME).join(".purpose").exists() {
         return Err(io::Error::other("init created legacy .purpose files").into());
     }
     fs::write(
-        repo.join(".projectatlas")
+        repo.join(ATLAS_DIR_NAME)
             .join("projectatlas-nonsource-files.toon"),
         "nonsource_files[]:\n  # path,summary\n  logo.png,Demo asset for Rust map lint tests\n",
     )?;
@@ -7969,7 +8292,7 @@ fn init_map_and_lint_flow_uses_rust_implementation() -> Result<(), Box<dyn Error
         .success();
     for (path, purpose) in [
         (".", "Demo repository for Rust map lint tests"),
-        ("src", "Rust source folder for CLI integration tests"),
+        (SRC_DIR_NAME, "Rust source folder for CLI integration tests"),
         ("README.md", "Demo readme for Rust map lint tests"),
         (
             "src/main.rs",
@@ -7982,13 +8305,13 @@ fn init_map_and_lint_flow_uses_rust_implementation() -> Result<(), Box<dyn Error
             .assert()
             .success();
     }
-    let store = AtlasStore::open(&repo.join(".projectatlas").join("projectatlas.db"))?;
+    let store = AtlasStore::open(&repo.join(ATLAS_DIR_NAME).join("projectatlas.db"))?;
     if !store
-        .load_nodes_by_paths(&[".projectatlas".to_string()])?
+        .load_nodes_by_paths(&[ATLAS_DIR_NAME.to_string()])?
         .is_empty()
     {
         store.set_purpose(
-            ".projectatlas",
+            ATLAS_DIR_NAME,
             "Agent-reviewed ProjectAtlas metadata folder for CLI integration tests",
             PurposeSource::Agent,
         )?;
@@ -8000,7 +8323,7 @@ fn init_map_and_lint_flow_uses_rust_implementation() -> Result<(), Box<dyn Error
         .assert()
         .success();
 
-    let map = fs::read_to_string(repo.join(".projectatlas").join("projectatlas.toon"))?;
+    let map = fs::read_to_string(repo.join(ATLAS_DIR_NAME).join("projectatlas.toon"))?;
     if !map.contains("src/main.rs") {
         return Err(io::Error::other("generated atlas did not include src/main.rs").into());
     }

@@ -407,6 +407,230 @@ function Get-ProjectAtlasMcpLaunchArguments {
     return $launchArgs
 }
 
+function Resolve-ProjectAtlasCodexCommand {
+    param(
+        [string]$Operation
+    )
+    $codexCommandPath = $null
+    if (-not [string]::IsNullOrWhiteSpace($env:PROJECTATLAS_CODEX_COMMAND)) {
+        $codexCommandPath = (Resolve-Path $env:PROJECTATLAS_CODEX_COMMAND -ErrorAction SilentlyContinue).Path
+        if (-not $codexCommandPath) {
+            $codexCommand = Get-Command $env:PROJECTATLAS_CODEX_COMMAND -ErrorAction SilentlyContinue
+            if ($codexCommand) {
+                $codexCommandPath = $codexCommand.Source
+            }
+        }
+        if (-not $codexCommandPath) {
+            Write-Warning "${Operation} skipped: PROJECTATLAS_CODEX_COMMAND does not resolve."
+            return $null
+        }
+    }
+    else {
+        $codexCommand = Get-Command codex -ErrorAction SilentlyContinue
+        if ($codexCommand) {
+            $codexCommandPath = $codexCommand.Source
+        }
+    }
+    if (-not $codexCommandPath) {
+        Write-Output "${Operation} skipped: codex command not found."
+        return $null
+    }
+    return $codexCommandPath
+}
+
+function Test-ProjectAtlasOfficialMarketplaceSource {
+    param(
+        [string]$Source
+    )
+    if ([string]::IsNullOrWhiteSpace($Source)) {
+        return $false
+    }
+    $normalized = $Source.Trim().TrimEnd("/")
+    $allowedSources = @(
+        "styler-ai/ProjectAtlas",
+        "styler-ai/ProjectAtlas.git",
+        "https://github.com/styler-ai/ProjectAtlas",
+        "https://github.com/styler-ai/ProjectAtlas.git",
+        "git@github.com:styler-ai/ProjectAtlas",
+        "git@github.com:styler-ai/ProjectAtlas.git",
+        "ssh://git@github.com/styler-ai/ProjectAtlas",
+        "ssh://git@github.com/styler-ai/ProjectAtlas.git"
+    )
+    foreach ($allowed in $allowedSources) {
+        if ([string]::Equals($allowed, $normalized, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Get-ProjectAtlasCodexConfigPath {
+    if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
+        return Join-Path $env:CODEX_HOME "config.toml"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        return Join-Path $env:USERPROFILE ".codex\config.toml"
+    }
+    return $null
+}
+
+function Get-ProjectAtlasCodexMarketplaceRef {
+    $configPath = Get-ProjectAtlasCodexConfigPath
+    if (-not $configPath -or -not (Test-Path -LiteralPath $configPath)) {
+        return $null
+    }
+    $inProjectAtlasMarketplace = $false
+    foreach ($line in Get-Content -LiteralPath $configPath) {
+        if ($line -match '^\s*\[marketplaces\.projectatlas\]\s*$') {
+            $inProjectAtlasMarketplace = $true
+            continue
+        }
+        if ($inProjectAtlasMarketplace -and $line -match '^\s*\[') {
+            break
+        }
+        if ($inProjectAtlasMarketplace -and $line -match '^\s*ref\s*=\s*["'']([^"'']+)["'']') {
+            return $Matches[1]
+        }
+    }
+    return $null
+}
+
+function Restore-ProjectAtlasCodexMarketplace {
+    param(
+        [string]$CodexCommandPath,
+        [string]$PreviousSource,
+        [string]$PreviousRef
+    )
+    if ([string]::IsNullOrWhiteSpace($PreviousSource)) {
+        return
+    }
+    & $CodexCommandPath plugin marketplace remove projectatlas --json | Out-Null
+    $restoreArgs = @("plugin", "marketplace", "add", $PreviousSource)
+    if (-not [string]::IsNullOrWhiteSpace($PreviousRef)) {
+        $restoreArgs += @("--ref", $PreviousRef)
+    }
+    $restoreArgs += "--json"
+    & $CodexCommandPath @restoreArgs | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        & $CodexCommandPath plugin add projectatlas --marketplace projectatlas --json | Out-Null
+    }
+}
+
+function Get-ProjectAtlasCodexPluginVersion {
+    param(
+        [string]$CodexCommandPath
+    )
+    $pluginsText = & $CodexCommandPath plugin list --marketplace projectatlas --json 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        return $null
+    }
+    try {
+        $plugins = $pluginsText | ConvertFrom-Json
+        $installed = @($plugins.installed)
+        $projectAtlasPlugin = @($installed | Where-Object {
+                $_.pluginId -eq "projectatlas@projectatlas" -or ($_.name -eq "projectatlas" -and $_.marketplaceName -eq "projectatlas")
+            }) | Select-Object -First 1
+        if ($projectAtlasPlugin -and $projectAtlasPlugin.version) {
+            return $projectAtlasPlugin.version
+        }
+    }
+    catch {
+        return $null
+    }
+    return $null
+}
+
+function Update-ProjectAtlasCodexPlugin {
+    param(
+        [string]$ExpectedVersion
+    )
+    if (Test-Truthy $env:PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE) {
+        Write-Output "Codex ProjectAtlas plugin update skipped by PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE."
+        return
+    }
+    $runtimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
+    if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
+        Write-Output "Codex ProjectAtlas plugin update skipped: ProjectAtlas version is unknown."
+        return
+    }
+    $codexCommandPath = Resolve-ProjectAtlasCodexCommand "Codex ProjectAtlas plugin update"
+    if (-not $codexCommandPath) {
+        return
+    }
+    try {
+        $marketplacesText = & $codexCommandPath plugin marketplace list --json 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            Write-Output "Codex ProjectAtlas plugin update skipped: could not list Codex plugin marketplaces."
+            return
+        }
+        $marketplaces = ($marketplacesText | ConvertFrom-Json).marketplaces
+        $projectAtlasMarketplace = @($marketplaces | Where-Object { $_.name -eq "projectatlas" }) | Select-Object -First 1
+        if (-not $projectAtlasMarketplace) {
+            Write-Output "Codex ProjectAtlas plugin update skipped: projectatlas marketplace is not configured."
+            return
+        }
+        $source = if ($projectAtlasMarketplace.marketplaceSource) { $projectAtlasMarketplace.marketplaceSource.source } else { $null }
+        if (-not (Test-ProjectAtlasOfficialMarketplaceSource $source)) {
+            Write-Output "Codex ProjectAtlas plugin update skipped: projectatlas marketplace is not the official styler-ai/ProjectAtlas source."
+            return
+        }
+
+        $releaseTag = "v$runtimeVersion"
+        $previousRef = Get-ProjectAtlasCodexMarketplaceRef
+        $currentPluginVersion = Get-ProjectAtlasCodexPluginVersion $codexCommandPath
+        if ($previousRef -eq $releaseTag -and $currentPluginVersion -eq $runtimeVersion) {
+            Write-Output "Codex ProjectAtlas plugin marketplace already points to $releaseTag."
+            return
+        }
+        if ($previousRef -eq $releaseTag) {
+            & $codexCommandPath plugin remove projectatlas --marketplace projectatlas --json | Out-Null
+            & $codexCommandPath plugin add projectatlas --marketplace projectatlas --json | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Codex ProjectAtlas plugin update failed: could not install projectatlas plugin at $releaseTag."
+                Restore-ProjectAtlasCodexMarketplace $codexCommandPath $source $previousRef
+                return
+            }
+            $installedVersion = Get-ProjectAtlasCodexPluginVersion $codexCommandPath
+            if ($installedVersion -ne $runtimeVersion) {
+                Write-Warning "Codex ProjectAtlas plugin update failed: installed projectatlas plugin version '$installedVersion' does not match $runtimeVersion."
+                Restore-ProjectAtlasCodexMarketplace $codexCommandPath $source $previousRef
+                return
+            }
+            Write-Output "Codex ProjectAtlas plugin marketplace updated to $releaseTag."
+            return
+        }
+
+        & $codexCommandPath plugin marketplace remove projectatlas --json | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Codex ProjectAtlas plugin update failed: could not remove stale projectatlas marketplace."
+            return
+        }
+        & $codexCommandPath plugin marketplace add styler-ai/ProjectAtlas --ref $releaseTag --json | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Codex ProjectAtlas plugin update failed: could not add projectatlas marketplace at $releaseTag."
+            Restore-ProjectAtlasCodexMarketplace $codexCommandPath $source $previousRef
+            return
+        }
+        & $codexCommandPath plugin remove projectatlas --marketplace projectatlas --json | Out-Null
+        & $codexCommandPath plugin add projectatlas --marketplace projectatlas --json | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Codex ProjectAtlas plugin update failed: could not install projectatlas plugin at $releaseTag."
+            Restore-ProjectAtlasCodexMarketplace $codexCommandPath $source $previousRef
+            return
+        }
+        $installedVersion = Get-ProjectAtlasCodexPluginVersion $codexCommandPath
+        if ($installedVersion -ne $runtimeVersion) {
+            Write-Warning "Codex ProjectAtlas plugin update failed: installed projectatlas plugin version '$installedVersion' does not match $runtimeVersion."
+            Restore-ProjectAtlasCodexMarketplace $codexCommandPath $source $previousRef
+            return
+        }
+        Write-Output "Codex ProjectAtlas plugin marketplace updated to $releaseTag."
+    }
+    catch {
+        Write-Warning "Codex ProjectAtlas plugin update failed: $($_.Exception.Message)"
+    }
+}
+
 function Update-ProjectAtlasCodexMcpRegistry {
     param(
         [string]$VerifiedPath,
@@ -419,28 +643,8 @@ function Update-ProjectAtlasCodexMcpRegistry {
         Write-Output "Codex MCP registry update skipped by PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE."
         return
     }
-    $codexCommandPath = $null
-    if (-not [string]::IsNullOrWhiteSpace($env:PROJECTATLAS_CODEX_COMMAND)) {
-        $codexCommandPath = (Resolve-Path $env:PROJECTATLAS_CODEX_COMMAND -ErrorAction SilentlyContinue).Path
-        if (-not $codexCommandPath) {
-            $codexCommand = Get-Command $env:PROJECTATLAS_CODEX_COMMAND -ErrorAction SilentlyContinue
-            if ($codexCommand) {
-                $codexCommandPath = $codexCommand.Source
-            }
-        }
-        if (-not $codexCommandPath) {
-            Write-Warning "Codex MCP registry update skipped: PROJECTATLAS_CODEX_COMMAND does not resolve."
-            return
-        }
-    }
-    else {
-        $codexCommand = Get-Command codex -ErrorAction SilentlyContinue
-        if ($codexCommand) {
-            $codexCommandPath = $codexCommand.Source
-        }
-    }
+    $codexCommandPath = Resolve-ProjectAtlasCodexCommand "Codex MCP registry update"
     if (-not $codexCommandPath) {
-        Write-Output "Codex MCP registry update skipped: codex command not found."
         return
     }
     $runtimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
@@ -700,6 +904,7 @@ function Write-ProjectAtlasMcpConfig {
 Write-ProjectAtlasMcpConfig $mcpConfigPath $null
 Write-ProjectAtlasMcpConfig $claudeMcpConfigPath "claude-code"
 Write-ProjectAtlasMcpConfig $opencodeConfigPath "opencode"
+Update-ProjectAtlasCodexPlugin $ProjectAtlasVersion
 Update-ProjectAtlasCodexMcpRegistry $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath
 
 Write-Output "ProjectAtlas runtime installed and verified: $projectAtlas"

@@ -239,19 +239,200 @@ warn_path_shadow() {
   IFS=$old_ifs
 }
 
-update_codex_mcp_registry() {
-  if truthy "${PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE:-}"; then
-    printf '%s\n' "Codex MCP registry update skipped by PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE."
-    return 0
-  fi
+resolve_codex_command() {
+  operation=$1
   codex_bin=${PROJECTATLAS_CODEX_COMMAND:-}
   if [ -z "$codex_bin" ]; then
     codex_bin=$(command -v codex 2>/dev/null || true)
   fi
   if [ -z "$codex_bin" ]; then
-    printf '%s\n' "Codex MCP registry update skipped: codex command not found."
+    printf '%s\n' "$operation skipped: codex command not found."
+    return 1
+  fi
+  return 0
+}
+
+codex_projectatlas_marketplace_source() {
+  marketplaces=$1
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s\n' "$marketplaces" | jq -r '.marketplaces[]? | select(.name == "projectatlas") | .marketplaceSource.source // empty' | head -n 1
     return 0
   fi
+  printf '%s\n' "$marketplaces" | awk '
+    /"name"[[:space:]]*:[[:space:]]*"projectatlas"/ {
+      line = $0
+      if (line ~ /"source"[[:space:]]*:/) {
+        sub(/.*"source"[[:space:]]*:[[:space:]]*"/, "", line)
+        sub(/".*/, "", line)
+        print line
+        exit
+      }
+      in_projectatlas = 1
+      next
+    }
+    in_projectatlas && /"name"[[:space:]]*:/ { in_projectatlas = 0 }
+    in_projectatlas && /"source"[[:space:]]*:/ {
+      line = $0
+      sub(/.*"source"[[:space:]]*:[[:space:]]*"/, "", line)
+      sub(/".*/, "", line)
+      print line
+      exit
+    }
+  '
+}
+
+official_projectatlas_marketplace_source() {
+  source=$(printf '%s' "${1:-}" | sed 's#/*$##')
+  case "$source" in
+    styler-ai/ProjectAtlas | styler-ai/ProjectAtlas.git | \
+      https://github.com/styler-ai/ProjectAtlas | https://github.com/styler-ai/ProjectAtlas.git | \
+      git@github.com:styler-ai/ProjectAtlas | git@github.com:styler-ai/ProjectAtlas.git | \
+      ssh://git@github.com/styler-ai/ProjectAtlas | ssh://git@github.com/styler-ai/ProjectAtlas.git)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+codex_config_path() {
+  if [ -n "${CODEX_HOME:-}" ]; then
+    printf '%s\n' "$CODEX_HOME/config.toml"
+  elif [ -n "${HOME:-}" ]; then
+    printf '%s\n' "$HOME/.codex/config.toml"
+  fi
+}
+
+codex_projectatlas_marketplace_ref() {
+  config_path=$(codex_config_path)
+  if [ -z "$config_path" ] || [ ! -f "$config_path" ]; then
+    return 0
+  fi
+  awk '
+    /^[[:space:]]*\[marketplaces\.projectatlas\][[:space:]]*$/ { in_projectatlas = 1; next }
+    in_projectatlas && /^[[:space:]]*\[/ { exit }
+    in_projectatlas && /^[[:space:]]*ref[[:space:]]*=/ {
+      line = $0
+      sub(/^[^=]*=[[:space:]]*["'\'']/, "", line)
+      sub(/["'\''].*/, "", line)
+      print line
+      exit
+    }
+  ' "$config_path"
+}
+
+restore_codex_projectatlas_marketplace() {
+  previous_source=${1:-}
+  previous_ref=${2:-}
+  if [ -z "$previous_source" ]; then
+    return 0
+  fi
+  "$codex_bin" plugin marketplace remove projectatlas --json >/dev/null 2>&1 || true
+  if [ -n "$previous_ref" ]; then
+    "$codex_bin" plugin marketplace add "$previous_source" --ref "$previous_ref" --json >/dev/null 2>&1 || return 0
+  else
+    "$codex_bin" plugin marketplace add "$previous_source" --json >/dev/null 2>&1 || return 0
+  fi
+  "$codex_bin" plugin add projectatlas --marketplace projectatlas --json >/dev/null 2>&1 || true
+}
+
+codex_projectatlas_plugin_version() {
+  plugins=$("$codex_bin" plugin list --marketplace projectatlas --json 2>/dev/null) || return 0
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s\n' "$plugins" | jq -r '.installed[]? | select(.pluginId == "projectatlas@projectatlas" or (.name == "projectatlas" and .marketplaceName == "projectatlas")) | .version // empty' | head -n 1
+    return 0
+  fi
+  compact=$(printf '%s' "$plugins" | tr -d '\r\n')
+  printf '%s\n' "$compact" |
+    sed 's/},{/}\n{/g' |
+    grep -E '"pluginId"[[:space:]]*:[[:space:]]*"projectatlas@projectatlas"|"name"[[:space:]]*:[[:space:]]*"projectatlas".*"marketplaceName"[[:space:]]*:[[:space:]]*"projectatlas"' |
+    sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+    head -n 1
+}
+
+update_codex_plugin() {
+  if truthy "${PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE:-}"; then
+    printf '%s\n' "Codex ProjectAtlas plugin update skipped by PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE."
+    return 0
+  fi
+  runtime_version=$(expected_runtime_version)
+  if [ -z "$runtime_version" ]; then
+    runtime_version=$(runtime_version "$projectatlas_bin")
+  fi
+  if [ -z "$runtime_version" ]; then
+    printf '%s\n' "Codex ProjectAtlas plugin update skipped: ProjectAtlas version is unknown."
+    return 0
+  fi
+  resolve_codex_command "Codex ProjectAtlas plugin update" || return 0
+  marketplaces=$("$codex_bin" plugin marketplace list --json 2>&1) || {
+    printf '%s\n' "Codex ProjectAtlas plugin update skipped: could not list Codex plugin marketplaces."
+    return 0
+  }
+  if ! printf '%s\n' "$marketplaces" | grep -E '"name"[[:space:]]*:[[:space:]]*"projectatlas"' >/dev/null; then
+    printf '%s\n' "Codex ProjectAtlas plugin update skipped: projectatlas marketplace is not configured."
+    return 0
+  fi
+  marketplace_source=$(codex_projectatlas_marketplace_source "$marketplaces")
+  if ! official_projectatlas_marketplace_source "$marketplace_source"; then
+    printf '%s\n' "Codex ProjectAtlas plugin update skipped: projectatlas marketplace is not the official styler-ai/ProjectAtlas source."
+    return 0
+  fi
+  previous_ref=$(codex_projectatlas_marketplace_ref)
+
+  release_tag=v$runtime_version
+  current_plugin_version=$(codex_projectatlas_plugin_version)
+  if [ "$previous_ref" = "$release_tag" ] && [ "$current_plugin_version" = "$runtime_version" ]; then
+    printf 'Codex ProjectAtlas plugin marketplace already points to %s.\n' "$release_tag"
+    return 0
+  fi
+  if [ "$previous_ref" = "$release_tag" ]; then
+    "$codex_bin" plugin remove projectatlas --marketplace projectatlas --json >/dev/null 2>&1 || true
+    if "$codex_bin" plugin add projectatlas --marketplace projectatlas --json >/dev/null 2>&1; then
+      installed_version=$(codex_projectatlas_plugin_version)
+      if [ "$installed_version" = "$runtime_version" ]; then
+        printf 'Codex ProjectAtlas plugin marketplace updated to %s.\n' "$release_tag"
+      else
+        printf "warning: Codex ProjectAtlas plugin update failed: installed projectatlas plugin version '%s' does not match %s.\n" "$installed_version" "$runtime_version" >&2
+        restore_codex_projectatlas_marketplace "$marketplace_source" "$previous_ref"
+      fi
+    else
+      printf 'warning: Codex ProjectAtlas plugin update failed: could not install projectatlas plugin at %s.\n' "$release_tag" >&2
+      restore_codex_projectatlas_marketplace "$marketplace_source" "$previous_ref"
+    fi
+    return 0
+  fi
+
+  if ! "$codex_bin" plugin marketplace remove projectatlas --json >/dev/null 2>&1; then
+    printf '%s\n' "warning: Codex ProjectAtlas plugin update failed: could not remove stale projectatlas marketplace." >&2
+    return 0
+  fi
+  if ! "$codex_bin" plugin marketplace add styler-ai/ProjectAtlas --ref "$release_tag" --json >/dev/null 2>&1; then
+    printf 'warning: Codex ProjectAtlas plugin update failed: could not add projectatlas marketplace at %s.\n' "$release_tag" >&2
+    restore_codex_projectatlas_marketplace "$marketplace_source" "$previous_ref"
+    return 0
+  fi
+  "$codex_bin" plugin remove projectatlas --marketplace projectatlas --json >/dev/null 2>&1 || true
+  if "$codex_bin" plugin add projectatlas --marketplace projectatlas --json >/dev/null 2>&1; then
+    installed_version=$(codex_projectatlas_plugin_version)
+    if [ "$installed_version" = "$runtime_version" ]; then
+      printf 'Codex ProjectAtlas plugin marketplace updated to %s.\n' "$release_tag"
+    else
+      printf "warning: Codex ProjectAtlas plugin update failed: installed projectatlas plugin version '%s' does not match %s.\n" "$installed_version" "$runtime_version" >&2
+      restore_codex_projectatlas_marketplace "$marketplace_source" "$previous_ref"
+    fi
+  else
+    printf 'warning: Codex ProjectAtlas plugin update failed: could not install projectatlas plugin at %s.\n' "$release_tag" >&2
+    restore_codex_projectatlas_marketplace "$marketplace_source" "$previous_ref"
+  fi
+}
+
+update_codex_mcp_registry() {
+  if truthy "${PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE:-}"; then
+    printf '%s\n' "Codex MCP registry update skipped by PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE."
+    return 0
+  fi
+  resolve_codex_command "Codex MCP registry update" || return 0
   runtime_version=$(expected_runtime_version)
   if [ -z "$runtime_version" ]; then
     runtime_version=$(runtime_version "$projectatlas_bin")
@@ -459,6 +640,7 @@ write_mcp_config() {
 write_mcp_config "$mcp_config_path"
 write_mcp_config "$claude_mcp_config_path" claude-code
 write_mcp_config "$opencode_config_path" opencode
+update_codex_plugin
 update_codex_mcp_registry
 
 printf 'ProjectAtlas runtime installed and verified: %s\n' "$projectatlas_bin"

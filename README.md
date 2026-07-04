@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.3.20"><img alt="release" src="https://img.shields.io/badge/release-v0.3.20-blue"></a>
+  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.3.21"><img alt="release" src="https://img.shields.io/badge/release-v0.3.21-blue"></a>
   <img alt="rust" src="https://img.shields.io/badge/Rust-2024-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
@@ -25,7 +25,7 @@ No required `.purpose` files. No source-header tax. No hosted index. The project
 ## Quickstart
 
 ```bash
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.20
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.21
 codex plugin add projectatlas --marketplace projectatlas
 ```
 
@@ -44,7 +44,7 @@ correctly keeps that pinned ref. In that case, replace only the dedicated `style
 
 ```bash
 codex plugin marketplace remove projectatlas
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.20
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.21
 ```
 
 Then tell Codex: "Use ProjectAtlas for this repo."
@@ -177,7 +177,7 @@ Most users can stop at the plugin install. The CLI is here for local debugging, 
 Only need the CLI yourself? Install it from the released tag:
 
 ```bash
-cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.20 projectatlas-cli --locked
+cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.21 projectatlas-cli --locked
 ```
 
 From this checkout:
@@ -243,11 +243,15 @@ bash plugins/projectatlas/scripts/install-runtime.sh
 ```
 
 The generated configs pin the runtime version, project database, config path, and working directory where the host supports it.
-When `codex` is available, the installer also repairs a stale global `codex mcp`
-registry entry named `projectatlas` so it uses the verified runtime and this
-project's `.projectatlas` DB/config. Set
+When `codex` is available, the installer also repairs a stale official Codex
+`projectatlas` marketplace/plugin cache to the runtime release tag, then repairs
+a stale global `codex mcp` registry entry named `projectatlas` so it uses the
+verified runtime and this project's `.projectatlas` DB/config. Set
+`PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE=1` only if you intentionally manage the
+Codex ProjectAtlas plugin marketplace yourself, and
 `PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1` only if you intentionally manage
 that global Codex MCP entry yourself. After updates, agents should verify with
+`codex plugin list --marketplace projectatlas --json` and
 `codex mcp get projectatlas` or `codex mcp list`.
 
 ## What The Agent Gets
@@ -277,7 +281,7 @@ ProjectAtlas scans with `.gitignore` awareness, hashes files with BLAKE3, stores
 
 ## Release Quality
 
-`v0.3.20` ships through the full release matrix:
+`v0.3.21` ships through the full release matrix:
 
 - Rust format, check, clippy, dependency policy, tests, doctests, and rustdoc.
 - ProjectAtlas scan, parity, database-backed purpose lint, and health checks.
