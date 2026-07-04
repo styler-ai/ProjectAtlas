@@ -56,8 +56,8 @@ drift in one stability model.
 
 - Keep token telemetry data structures and JSON/TOON output schemas unchanged.
 - Keep installer behavior conservative for non-official Codex marketplaces.
-- Use Ratatui widgets for the TUI where they fit: `BarChart`, `Gauge`,
-  `Sparkline`, and `Table`.
+- Use Ratatui widgets for the TUI where they fit: `Chart`, `Gauge`, and
+  `Table`.
 - Keep `projectatlas token --view tui --trend day|week|month|year` as the
   detailed trend mode; do not add interactive click/keyboard selection in this
   patch release.
@@ -125,12 +125,12 @@ Ratatui widgets.
 
 - `estimated_without_projectatlas - estimated_with_projectatlas =
   legacy_gross_estimated_saved`
-- The with/without/saved comparison chart uses
-  `legacy_gross_estimated_saved`, not conservative `tokens_avoided`.
-- Conservative `tokens_avoided` remains visible in the accounting section, where
+- `legacy_gross_estimated_saved` remains a telemetry compatibility value, but
+  the human overview does not render it as a competing saved-token headline.
+- Conservative `tokens_avoided` is the visible TUI saved-token total, where
   `measured_tokens_saved + deduped_modeled_tokens_avoided = tokens_avoided`.
 - The file-handling section shows the same conservative saved-token equation as
-  `Saved/avoided tokens = measured_tokens_saved + deduped_modeled_tokens_avoided`
+  `Tokens avoided = measured_tokens_saved + deduped_modeled_tokens_avoided`
   so avoided navigation tokens are visibly included alongside observed
   summary/slice savings.
 - `observed_file_read_replacements + modeled_file_reads_avoided =
@@ -143,28 +143,21 @@ Ratatui widgets.
 
 - The overview still shows:
   - lookup count,
-  - estimated tokens without and with ProjectAtlas,
-  - gross saved estimate,
-  - with/without/saved comparison,
   - tokens avoided,
-  - measured summaries,
-  - narrowed navigation,
   - likely file reads avoided,
   - observed summaries/slices,
   - search-modeled narrowing,
   - confidence,
-  - bucket rows and plain meanings,
+  - source rows and plain meanings,
   - repeated baseline dedupe note,
   - tokenizer calibration guidance.
-- The comparison section uses Ratatui `BarChart` plus a totals `Table`.
 - The trend section shows compact `day`, `week`, `month`, and `year`
-  saved-token `Sparkline`s directly in the overview.
+  signed saved-token `Chart`s directly in the overview.
 - The file section is titled `File Handling Optimization Overview` and uses a
-  `Gauge` plus a `Table`; it shows `Saved/avoided tokens`, `File reads
-  avoided`, `Source`, `reads`, `saved tokens`, and `meaning`.
-- `Where the savings came from` uses a `Table` header with visible separation
-  before the first data row and compact labels (`How it helped`, `steps`,
-  `tokens`, `meaning`) that remain readable at 80 columns.
+  `Gauge` plus a `Table`; it shows `Tokens avoided`, `File reads avoided`,
+  source labels, read counts, token totals, and meaning.
+- The source table uses a `Table` header with visible separation before the
+  first data row and compact labels that remain readable at 80 columns.
 
 ### Non-Goals
 
@@ -175,11 +168,13 @@ Ratatui widgets.
 ### Test Plan
 
 - Unit test data where gross saved and conservative avoided differ.
-- Assert gross comparison chart values and conservative accounting values both
-  appear and correlate correctly.
+- Assert the gross compatibility value does not appear as a competing TUI
+  saved-token total when it differs from conservative avoided tokens.
 - Assert the file-read equation and bucket equations.
 - Assert rendered dashboard contains the new trend windows and file-handling
   panel.
+- Assert negative saved-token periods and operands remain visibly signed in the
+  trend charts and token-mix label.
 - Assert rendered buffer cells use Ratatui styles for key headers.
 - Run CLI smoke for:
   - `projectatlas token --view tui`

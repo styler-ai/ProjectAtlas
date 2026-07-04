@@ -297,6 +297,10 @@
       "purpose": "Generate ProjectAtlas release notes from merged PRs and linked issues."
     },
     {
+      "path": ".github/scripts/issue-checklists.py",
+      "purpose": "Validate that GitHub issue checklists mirror OpenSpec tasks and completed release milestones before CI or release proceeds."
+    },
+    {
       "path": ".github/workflows/03-auto-release.yml",
       "purpose": "Workflow that automates ProjectAtlas release publication after validated version changes."
     },
@@ -306,11 +310,11 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "purpose": "Workflow that verifies ProjectAtlas Rust gates plus multi-OS installer, update, locked-runtime, and MCP smoke tests."
+      "purpose": "Verify ProjectAtlas PR/push quality gates, OpenSpec issue checklist drift, and multi-OS installer/MCP smoke tests."
     },
     {
       "path": ".github/workflows/release.yml",
-      "purpose": "Workflow that packages ProjectAtlas releases, validates cross-platform installers including locked Windows runtime updates, and publishes release artifacts and notes."
+      "purpose": "Validate release checklist state, build packages, smoke installers, and publish ProjectAtlas release artifacts and notes."
     },
     {
       "path": ".gitignore",
@@ -378,7 +382,7 @@
     },
     {
       "path": "crates/projectatlas-cli/src/token_tui.rs",
-      "purpose": "Render ProjectAtlas token telemetry and trends as Ratatui terminal dashboards with fixed-column comparison charts."
+      "purpose": "Render ProjectAtlas token telemetry and signed saved-token trends as Ratatui terminal dashboards."
     },
     {
       "path": "crates/projectatlas-cli/tests/e2e.rs",
@@ -550,7 +554,7 @@
     },
     {
       "path": "docs/projectatlas-v0.3.23-premortem-spec.md",
-      "purpose": "Document the ProjectAtlas v0.3.23 pre-mortem, issue scope, token TUI accounting, installer drift fix, and release plan."
+      "purpose": "Document the ProjectAtlas next-version pre-mortem, issue scope, token TUI accounting, installer drift fix, and release plan."
     },
     {
       "path": "docs/projectatlas-3-v0.3.2-hardening-spec.md",
@@ -739,6 +743,242 @@
     {
       "path": "skills/codex-coding-plugin/agents/openai.yaml",
       "purpose": "OpenAI agent manifest that exposes the codex-coding-plugin skill to Codex skill discovery."
+    },
+    {
+      "path": "openspec",
+      "purpose": "OpenSpec workspace for ProjectAtlas change proposals, specs, designs, and task checklists."
+    },
+    {
+      "path": "openspec/issue-map.json",
+      "purpose": "Map active OpenSpec change directories to their GitHub issue numbers for checklist validation gates."
+    },
+    {
+      "path": "openspec/changes",
+      "purpose": "Active ProjectAtlas OpenSpec change packages for scheduled and backlog work."
+    },
+    {
+      "path": "openspec/changes/add-agent-session-brief",
+      "purpose": "Backlog OpenSpec package for an agent session brief MCP tool."
+    },
+    {
+      "path": "openspec/changes/add-agent-session-brief/specs",
+      "purpose": "OpenSpec requirement specs for the agent session brief change package."
+    },
+    {
+      "path": "openspec/changes/add-agent-session-brief/specs/agent-session-brief",
+      "purpose": "Agent session brief capability spec directory."
+    },
+    {
+      "path": "openspec/changes/add-mcp-task-progress-model",
+      "purpose": "Backlog OpenSpec package for a bounded MCP task progress model."
+    },
+    {
+      "path": "openspec/changes/add-mcp-task-progress-model/specs",
+      "purpose": "OpenSpec requirement specs for the MCP task progress model change package."
+    },
+    {
+      "path": "openspec/changes/add-mcp-task-progress-model/specs/mcp-task-progress",
+      "purpose": "MCP task progress capability spec directory."
+    },
+    {
+      "path": "openspec/changes/add-nearest-project-routing",
+      "purpose": "OpenSpec package for opt-in nearest ProjectAtlas project routing."
+    },
+    {
+      "path": "openspec/changes/add-nearest-project-routing/specs",
+      "purpose": "OpenSpec requirement specs for the nearest ProjectAtlas project routing change package."
+    },
+    {
+      "path": "openspec/changes/add-nearest-project-routing/specs/nearest-project-routing",
+      "purpose": "Nearest ProjectAtlas project routing capability spec directory."
+    },
+    {
+      "path": "openspec/changes/close-mcp-cli-parity",
+      "purpose": "OpenSpec package for closing safe CLI-to-MCP parity gaps."
+    },
+    {
+      "path": "openspec/changes/close-mcp-cli-parity/specs",
+      "purpose": "OpenSpec requirement specs for the MCP CLI parity change package."
+    },
+    {
+      "path": "openspec/changes/close-mcp-cli-parity/specs/mcp-cli-parity",
+      "purpose": "MCP CLI parity capability spec directory."
+    },
+    {
+      "path": "openspec/changes/expose-mcp-capabilities-settings",
+      "purpose": "Backlog OpenSpec package for a typed MCP capability and settings contract."
+    },
+    {
+      "path": "openspec/changes/expose-mcp-capabilities-settings/specs",
+      "purpose": "OpenSpec requirement specs for the typed MCP capability and settings contract change package."
+    },
+    {
+      "path": "openspec/changes/expose-mcp-capabilities-settings/specs/mcp-capability-settings",
+      "purpose": "MCP capability and settings contract spec directory."
+    },
+    {
+      "path": "openspec/changes/harden-project-path-types",
+      "purpose": "OpenSpec package for typed project path routing hardening."
+    },
+    {
+      "path": "openspec/changes/harden-project-path-types/specs",
+      "purpose": "OpenSpec requirement specs for the typed project path routing hardening change package."
+    },
+    {
+      "path": "openspec/changes/harden-project-path-types/specs/typed-project-path-routing",
+      "purpose": "Typed ProjectAtlas project path routing spec directory."
+    },
+    {
+      "path": "openspec/changes/simplify-token-tui-dashboard",
+      "purpose": "OpenSpec package for simplifying and polishing the token TUI dashboard."
+    },
+    {
+      "path": "openspec/changes/simplify-token-tui-dashboard/specs",
+      "purpose": "OpenSpec requirement specs for the token TUI dashboard change package."
+    },
+    {
+      "path": "openspec/changes/simplify-token-tui-dashboard/specs/token-tui-dashboard",
+      "purpose": "Token TUI dashboard spec directory."
+    },
+    {
+      "path": "openspec/changes/add-agent-session-brief/.openspec.yaml",
+      "purpose": "OpenSpec change metadata for the backlog agent session brief proposal."
+    },
+    {
+      "path": "openspec/changes/add-agent-session-brief/design.md",
+      "purpose": "Design rationale and risk analysis for the backlog agent session brief MCP tool."
+    },
+    {
+      "path": "openspec/changes/add-agent-session-brief/proposal.md",
+      "purpose": "Proposal for adding a backlog agent session brief MCP tool."
+    },
+    {
+      "path": "openspec/changes/add-agent-session-brief/specs/agent-session-brief/spec.md",
+      "purpose": "Specifies backlog requirements for the agent session brief MCP tool."
+    },
+    {
+      "path": "openspec/changes/add-agent-session-brief/tasks.md",
+      "purpose": "Backlog task checklist for the agent session brief OpenSpec change."
+    },
+    {
+      "path": "openspec/changes/add-mcp-task-progress-model/.openspec.yaml",
+      "purpose": "OpenSpec change metadata for the backlog MCP task progress model proposal."
+    },
+    {
+      "path": "openspec/changes/add-mcp-task-progress-model/design.md",
+      "purpose": "Design rationale and risk analysis for the backlog MCP task progress model."
+    },
+    {
+      "path": "openspec/changes/add-mcp-task-progress-model/proposal.md",
+      "purpose": "Proposal for adding a backlog MCP task progress model."
+    },
+    {
+      "path": "openspec/changes/add-mcp-task-progress-model/specs/mcp-task-progress/spec.md",
+      "purpose": "Specifies backlog requirements for the MCP task progress model."
+    },
+    {
+      "path": "openspec/changes/add-mcp-task-progress-model/tasks.md",
+      "purpose": "Backlog task checklist for the MCP task progress model OpenSpec change."
+    },
+    {
+      "path": "openspec/changes/add-nearest-project-routing/.openspec.yaml",
+      "purpose": "OpenSpec change metadata for opt-in nearest ProjectAtlas project routing."
+    },
+    {
+      "path": "openspec/changes/add-nearest-project-routing/design.md",
+      "purpose": "Design notes for opt-in nearest ProjectAtlas project routing and audit metadata."
+    },
+    {
+      "path": "openspec/changes/add-nearest-project-routing/proposal.md",
+      "purpose": "Proposal for opt-in nearest ProjectAtlas project routing in MCP startup and calls."
+    },
+    {
+      "path": "openspec/changes/add-nearest-project-routing/specs/nearest-project-routing/spec.md",
+      "purpose": "Specifies nearest ProjectAtlas project routing requirements and edge-case behavior."
+    },
+    {
+      "path": "openspec/changes/add-nearest-project-routing/tasks.md",
+      "purpose": "Implementation and verification checklist for opt-in nearest ProjectAtlas project routing."
+    },
+    {
+      "path": "openspec/changes/close-mcp-cli-parity/design.md",
+      "purpose": "Design notes for closing safe ProjectAtlas CLI-to-MCP parity gaps."
+    },
+    {
+      "path": "openspec/changes/close-mcp-cli-parity/proposal.md",
+      "purpose": "Proposal for closing safe ProjectAtlas CLI-to-MCP parity gaps."
+    },
+    {
+      "path": "openspec/changes/close-mcp-cli-parity/specs/mcp-cli-parity/spec.md",
+      "purpose": "Specifies MCP parity requirements for safe ProjectAtlas CLI command coverage."
+    },
+    {
+      "path": "openspec/changes/close-mcp-cli-parity/tasks.md",
+      "purpose": "Implementation and verification checklist for ProjectAtlas CLI-to-MCP parity."
+    },
+    {
+      "path": "openspec/changes/expose-mcp-capabilities-settings/.openspec.yaml",
+      "purpose": "OpenSpec change metadata for the backlog typed MCP capability and settings contract."
+    },
+    {
+      "path": "openspec/changes/expose-mcp-capabilities-settings/design.md",
+      "purpose": "Design rationale and risks for the backlog typed MCP capability and settings contract."
+    },
+    {
+      "path": "openspec/changes/expose-mcp-capabilities-settings/proposal.md",
+      "purpose": "Proposal for a backlog typed MCP capability and settings contract."
+    },
+    {
+      "path": "openspec/changes/expose-mcp-capabilities-settings/specs/mcp-capability-settings/spec.md",
+      "purpose": "Specifies backlog requirements for the typed MCP capability and settings contract."
+    },
+    {
+      "path": "openspec/changes/expose-mcp-capabilities-settings/tasks.md",
+      "purpose": "Backlog task checklist for the typed MCP capability and settings OpenSpec change."
+    },
+    {
+      "path": "openspec/changes/harden-project-path-types/.openspec.yaml",
+      "purpose": "OpenSpec change metadata for typed ProjectAtlas project path routing hardening."
+    },
+    {
+      "path": "openspec/changes/harden-project-path-types/design.md",
+      "purpose": "Design rationale and risks for typed ProjectAtlas project path routing hardening."
+    },
+    {
+      "path": "openspec/changes/harden-project-path-types/proposal.md",
+      "purpose": "Proposal for typed ProjectAtlas project path routing hardening."
+    },
+    {
+      "path": "openspec/changes/harden-project-path-types/specs/typed-project-path-routing/spec.md",
+      "purpose": "Specifies typed ProjectAtlas project path routing hardening requirements."
+    },
+    {
+      "path": "openspec/changes/harden-project-path-types/tasks.md",
+      "purpose": "Implementation and verification checklist for typed ProjectAtlas project path routing hardening."
+    },
+    {
+      "path": "openspec/changes/simplify-token-tui-dashboard/.openspec.yaml",
+      "purpose": "OpenSpec change metadata for simplifying and polishing the token TUI dashboard."
+    },
+    {
+      "path": "openspec/changes/simplify-token-tui-dashboard/design.md",
+      "purpose": "Design notes for the simplified token TUI dashboard layout and accounting rules."
+    },
+    {
+      "path": "openspec/changes/simplify-token-tui-dashboard/proposal.md",
+      "purpose": "Proposal for simplifying and polishing the ProjectAtlas token TUI dashboard."
+    },
+    {
+      "path": "openspec/changes/simplify-token-tui-dashboard/specs/token-tui-dashboard/spec.md",
+      "purpose": "Specifies simplified token TUI dashboard requirements and accounting constraints."
+    },
+    {
+      "path": "openspec/changes/simplify-token-tui-dashboard/tasks.md",
+      "purpose": "Implementation and verification checklist for the simplified token TUI dashboard."
+    },
+    {
+      "path": "openspec/config.yaml",
+      "purpose": "OpenSpec workspace configuration defining ProjectAtlas spec rules, context, and schema expectations."
     },
     {
       "path": "templates/AGENTS.md",

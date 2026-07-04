@@ -63,6 +63,9 @@ fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn E
     if runtime_json["executable"].as_str().is_none() {
         return Err(io::Error::other("runtime-info executable path missing").into());
     }
+    if runtime_json.get("mcp_nearest_project").is_some() {
+        return Err(io::Error::other("CLI runtime-info leaked MCP startup policy").into());
+    }
     if atlas_dir.exists() {
         return Err(io::Error::other("runtime-info created .projectatlas").into());
     }
@@ -2666,6 +2669,15 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
     let mcp_args = mcp_config_json["mcpServers"]["projectatlas"]["args"]
         .as_array()
         .ok_or_else(|| io::Error::other("mcp args missing"))?;
+    if mcp_args
+        .iter()
+        .any(|value| value.as_str() == Some("--nearest-project"))
+    {
+        return Err(io::Error::other(
+            "default mcp-config unexpectedly enabled nearest-project routing",
+        )
+        .into());
+    }
     let expected_root = repo.canonicalize()?;
     let config_path = mcp_args
         .get(5)
@@ -2690,6 +2702,54 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         ))
         .into());
     }
+
+    let raw_nearest_mcp_config = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .arg("mcp-config")
+        .arg("--nearest-project")
+        .output()?;
+    if !raw_nearest_mcp_config.status.success() {
+        return Err(io::Error::other("mcp-config --nearest-project command failed").into());
+    }
+    let nearest_mcp_config_json: Value = serde_json::from_slice(&raw_nearest_mcp_config.stdout)?;
+    let nearest_args = nearest_mcp_config_json["mcpServers"]["projectatlas"]["args"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("nearest mcp args missing"))?;
+    if nearest_args.last().and_then(Value::as_str) != Some("--nearest-project")
+        || !nearest_args
+            .iter()
+            .any(|value| value.as_str() == Some("mcp"))
+    {
+        return Err(io::Error::other(
+            "mcp-config --nearest-project did not persist startup routing flag",
+        )
+        .into());
+    }
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("root")
+        .arg("set")
+        .arg(&repo)
+        .arg("--nearest-project")
+        .assert()
+        .success();
+    let root_set_mcp_config_text =
+        fs::read_to_string(repo.join(ATLAS_DIR_NAME).join("projectatlas.mcp.json"))?;
+    let root_set_mcp_config_json: Value = serde_json::from_str(&root_set_mcp_config_text)?;
+    let root_set_args = root_set_mcp_config_json["mcpServers"]["projectatlas"]["args"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("root set mcp args missing"))?;
+    if root_set_args.last().and_then(Value::as_str) != Some("--nearest-project") {
+        return Err(io::Error::other(
+            "root set --nearest-project did not persist startup routing flag",
+        )
+        .into());
+    }
+
     let claude_mcp_config = mcp_config_for_harness(&repo, &db, "claude-code")?;
     let claude_server = &claude_mcp_config["mcpServers"]["projectatlas"];
     let claude_command = claude_server["command"]
@@ -2741,6 +2801,26 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
     )?;
     if opencode_config["mcp"]["projectatlas"]["enabled"] != Value::Bool(true) {
         return Err(io::Error::other("opencode mcp server is not enabled").into());
+    }
+    let nearest_claude_config = mcp_config_for_harness_with_nearest(&repo, &db, "claude-code")?;
+    let nearest_claude_args = nearest_claude_config["mcpServers"]["projectatlas"]["args"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("nearest claude args missing"))?;
+    if nearest_claude_args.last().and_then(Value::as_str) != Some("--nearest-project") {
+        return Err(io::Error::other(
+            "claude mcp-config --nearest-project did not persist startup routing flag",
+        )
+        .into());
+    }
+    let nearest_opencode_config = mcp_config_for_harness_with_nearest(&repo, &db, "opencode")?;
+    let nearest_opencode_command = nearest_opencode_config["mcp"]["projectatlas"]["command"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("nearest opencode command array missing"))?;
+    if nearest_opencode_command.last().and_then(Value::as_str) != Some("--nearest-project") {
+        return Err(io::Error::other(
+            "opencode mcp-config --nearest-project did not persist startup routing flag",
+        )
+        .into());
     }
     let mut settings_args = vec!["--format".to_string(), "json".to_string()];
     for value in &mcp_args[..mcp_args.len().saturating_sub(1)] {
@@ -2984,26 +3064,28 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .success()
         .stdout(predicate::str::contains("ProjectAtlas Savings Overview"))
         .stdout(predicate::str::contains("Conservative tokens avoided"))
-        .stdout(predicate::str::contains("Measured summaries"))
-        .stdout(predicate::str::contains("Narrowed files"))
-        .stdout(predicate::str::contains(
-            "Gross tokens: without vs with ProjectAtlas",
-        ))
-        .stdout(predicate::str::contains("Without ProjectAtlas"))
-        .stdout(predicate::str::contains("With ProjectAtlas"))
-        .stdout(predicate::str::contains("Saved/avoided tokens"))
-        .stdout(predicate::str::contains("File reads avoided"))
-        .stdout(predicate::str::contains("saved tokens"))
-        .stdout(predicate::str::contains("search-modeled"))
+        .stdout(predicate::str::contains("Avoided reads"))
+        .stdout(predicate::str::contains("Tokens"))
+        .stdout(predicate::str::contains("Reads"))
+        .stdout(predicate::str::contains("Modeled search"))
         .stdout(predicate::str::contains("Saved-token trends"))
-        .stdout(predicate::str::contains("day | latest"))
-        .stdout(predicate::str::contains("week | latest"))
-        .stdout(predicate::str::contains("month | latest"))
-        .stdout(predicate::str::contains("year | latest"))
+        .stdout(predicate::str::contains("day trend"))
+        .stdout(predicate::str::contains("week trend"))
+        .stdout(predicate::str::contains("month trend"))
+        .stdout(predicate::str::contains("year trend"))
         .stdout(predicate::str::contains(
             "File Handling Optimization Overview",
         ))
-        .stdout(predicate::str::contains("Where the savings came from"))
+        .stdout(predicate::str::contains("Impact source"))
+        .stdout(predicate::str::contains("reads"))
+        .stdout(predicate::str::contains("Observed reads"))
+        .stdout(predicate::str::contains("Modeled search"))
+        .stdout(predicate::str::contains("Gross tokens: without").not())
+        .stdout(predicate::str::contains("latest").not())
+        .stdout(predicate::str::contains("Without ProjectAtlas").not())
+        .stdout(predicate::str::contains("With ProjectAtlas").not())
+        .stdout(predicate::str::contains("Saved by ProjectAtlas").not())
+        .stdout(predicate::str::contains("Where the savings came from").not())
         .stdout(predicate::str::contains("What this means"));
     Command::cargo_bin("projectatlas")?
         .env("COLUMNS", "100")
@@ -3013,7 +3095,7 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .assert()
         .success()
         .stdout(predicate::str::contains("ProjectAtlas Savings Overview"))
-        .stdout(predicate::str::contains("calibration"))
+        .stdout(predicate::str::contains("Tokenizer check"))
         .stdout(predicate::str::contains("cl100k_base"));
     Command::cargo_bin("projectatlas")?
         .arg("--db")
@@ -3863,16 +3945,26 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         )?;
     }
 
-    let messages = [
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#,
-        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
-        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_overview","arguments":{}}}"#,
-        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_files","arguments":{"file_pattern":"*.rs","limit":1}}}"#,
-        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"atlas_health","arguments":{"category":"missing-purpose","path_prefix":".","limit":1}}}"#,
-        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"atlas_token_report","arguments":{"include_chart":true}}}"#,
-        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"atlas_purpose_review","arguments":{"apply":true,"items":[{"path":"src/lib.rs","confirm_existing":true}]}}}"#,
-        r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"atlas_next","arguments":{"query":"indexed","limit":1}}}"#,
+    let repo_argument = repo.to_string_lossy().to_string();
+    let messages = vec![
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#.to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_init","arguments":{"project_path":repo_argument}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_config","arguments":{"project_path":repo_argument}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"atlas_root","arguments":{"project_path":repo_argument,"verify":true}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"atlas_mcp_config","arguments":{"project_path":repo_argument,"nearest_project":true}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"atlas_ignore_list","arguments":{"project_path":repo_argument}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"atlas_ignore_add","arguments":{"project_path":repo_argument,"kind":"dir-name","value":"generated-cache"}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"atlas_ignore_remove","arguments":{"project_path":repo_argument,"kind":"dir-name","value":"generated-cache"}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"atlas_lint","arguments":{"project_path":repo_argument,"purpose_level":"low"}}}).to_string(),
+        r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"atlas_runtime_info","arguments":{}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"atlas_overview","arguments":{}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"atlas_files","arguments":{"file_pattern":"*.rs","limit":1}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"atlas_health","arguments":{"category":"missing-purpose","path_prefix":".","limit":1}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"atlas_token_report","arguments":{"include_chart":true}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"atlas_purpose_review","arguments":{"apply":true,"items":[{"path":"src/lib.rs","confirm_existing":true}]}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"atlas_next","arguments":{"query":"indexed","limit":1}}}"#.to_string(),
     ];
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let stdout = run_mcp_stdio(
@@ -7832,9 +7924,16 @@ fn run_mcp_stdio(
     executable: &std::path::Path,
     cwd: &std::path::Path,
     args: &[String],
-    messages: &[&str],
+    messages: &[impl AsRef<str>],
 ) -> Result<String, Box<dyn Error>> {
-    let input = format!("{}\n", messages.join("\n"));
+    let input = format!(
+        "{}\n",
+        messages
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     let mut child = StdCommand::new(executable)
         .current_dir(cwd)
         .args(args)
@@ -8371,6 +8470,33 @@ fn mcp_config_for_harness(repo: &Path, db: &Path, harness: &str) -> Result<Value
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "mcp-config --harness {harness} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+/// Generate one harness-specific MCP config document with nearest-project startup routing.
+fn mcp_config_for_harness_with_nearest(
+    repo: &Path,
+    db: &Path,
+    harness: &str,
+) -> Result<Value, Box<dyn Error>> {
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(db)
+        .arg("mcp-config")
+        .arg("--harness")
+        .arg(harness)
+        .arg("--nearest-project")
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "mcp-config --harness {harness} --nearest-project failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ))
         .into());

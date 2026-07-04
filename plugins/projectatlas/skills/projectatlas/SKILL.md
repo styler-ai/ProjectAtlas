@@ -118,7 +118,7 @@ This skill is part of the ProjectAtlas plugin on purpose. Installing the plugin 
 
 ## MCP Tool Workflow
 
-Use the MCP tools when the harness exposes them. Normal agent navigation, search, summary, health, purpose, and slice calls should be MCP-first because they keep the agent in the atlas-first path and return TOON text payloads directly. Use the CLI for bootstrap/install/update/release/CI, MCP config generation, MCP startup debugging, human terminal workflows, or when MCP tools are unavailable.
+Use the MCP tools when the harness exposes them. Normal ProjectAtlas command families should be MCP-first because they keep the agent in the atlas-first path and return TOON text payloads directly. Use the CLI for plugin install/update/release/CI workflows, MCP server startup/debugging, continuous `watch`, terminal TUI views, or when an MCP tool is unavailable.
 
 0. `atlas_set_project_path` or per-call `project_path` when one MCP server may serve multiple repositories; prefer per-call `project_path` for shared or concurrent hosts.
 1. `atlas_scan` when the index may be stale or after file/folder changes.
@@ -140,10 +140,12 @@ Use the MCP tools when the harness exposes them. Normal agent navigation, search
 17. `atlas_purpose_set` when an agent-approved purpose should be written to the durable index.
 18. `atlas_purpose_review` when a reviewed batch should be previewed or applied to SQLite through the ProjectAtlas MCP surface.
 19. `atlas_health_resolve` when a deterministic conflict is intentionally correct and should not be repeated.
+20. `atlas_init`, `atlas_runtime_info`, `atlas_root`/`atlas_root_set`, `atlas_config`, `atlas_ignore_list`/`atlas_ignore_init_gitignore`/`atlas_ignore_add`/`atlas_ignore_remove`, `atlas_lint`, `atlas_mcp_config`, and `atlas_map` for CLI parity admin/reporting workflows when those tools are exposed.
 
 ## Command Decision Rules
 
-- If MCP tools are available, use `atlas_*` tools for normal ProjectAtlas calls. Do not shell out to `projectatlas` for routine overview/folders/files/search/summary/slice/health/purpose work unless you are testing the CLI itself or the MCP surface is unavailable.
+- If MCP tools are available, use `atlas_*` tools for normal ProjectAtlas calls. Do not shell out to `projectatlas` for routine setup, overview, folders, files, search, summary, slice, health, purpose, config, ignore, lint, runtime-info, MCP config, or map work unless you are testing the CLI itself, using a reviewed CLI-only exception, or the MCP surface is unavailable.
+- When a GitHub issue has an OpenSpec change, mirror `openspec/changes/<id>/tasks.md` into the issue as a visible checklist and update checked items before status updates, closure, or release. Treat local/GitHub checklist drift as a check-in blocker; do not leave issue task state only in local OpenSpec files.
 - Start of any non-trivial repo task: call `atlas_scan` if the index may be stale, otherwise call `atlas_overview`.
 - New session after scan: call `atlas_overview`, then `atlas_folders` with the task terms.
 - Choosing where to work: call `atlas_folders` before `atlas_files`; do not jump directly to broad source reads.
@@ -160,13 +162,13 @@ Use the MCP tools when the harness exposes them. Normal agent navigation, search
 - Purpose curation: call `atlas_purpose_queue` before writing purposes; then inspect enough context and call `atlas_purpose_set` for one path or `atlas_purpose_review` for a reviewed batch.
 - Intentional health conflict after inspection: call `atlas_health_resolve` with a rationale.
 - User asks about saved tokens: call `atlas_token_report`.
-- Runtime looks wrong: call `projectatlas --format json runtime-info`, then `atlas_settings` and `atlas_watch_status`.
+- Runtime looks wrong: call `atlas_runtime_info` when exposed, then `atlas_settings` and `atlas_watch_status`; fall back to `projectatlas --format json runtime-info` when MCP parity tools are unavailable.
 - Local index/cache is corrupt or intentionally discarded: call `atlas_reset_index` dry-run first; apply only when rebuilding from source is acceptable.
 - Read-only review or CI smoke must not mutate telemetry: set `PROJECTATLAS_NO_TELEMETRY=1` before running ProjectAtlas CLI commands or launching the MCP server.
 - Migrating old metadata: call `atlas_scan` first, then `atlas_strip_legacy_purpose` with dry-run; apply only on explicit user request.
 - If scan reports skipped stale purpose imports, treat them as legacy TOON rows for paths that are deleted or excluded by current scan policy. Confirm the current index is correct with `atlas_overview`, `atlas_files`, and `atlas_health`; do not recreate stale paths just to preserve old map rows.
 
-When MCP registration files are needed from the CLI, generate them with:
+When MCP registration files are needed, prefer `atlas_mcp_config` when exposed. If MCP config generation is unavailable from the current server or the server itself is being bootstrapped, generate them with:
 
 ```bash
 projectatlas --format json --db .projectatlas/projectatlas.db mcp-config
@@ -174,12 +176,15 @@ projectatlas --format json --db .projectatlas/projectatlas.db mcp-config --harne
 projectatlas --format json --db .projectatlas/projectatlas.db mcp-config --harness opencode
 ```
 
-This emits harness-specific MCP config with the absolute `projectatlas` executable path, selected project database, and optional config path. `projectatlas --format json runtime-info` is the read-only compatibility probe; it must not create `.projectatlas` by itself.
+This emits harness-specific MCP config with the absolute `projectatlas` executable path, selected project database, and optional config path. `atlas_runtime_info` is the preferred read-only compatibility probe when exposed; `projectatlas --format json runtime-info` is the CLI fallback and must not create `.projectatlas` by itself.
 
 If MCP tools are unavailable, use the equivalent CLI sequence:
 
 | Situation | CLI command |
 | --- | --- |
+| First-time setup | `projectatlas init` |
+| Runtime identity | `projectatlas --format json runtime-info` |
+| Root diagnostics/binding | `projectatlas root show`, `projectatlas root verify`, or `projectatlas root set <path>` |
 | Refresh state | `projectatlas scan` |
 | Overview | `projectatlas overview` |
 | Folder selection | `projectatlas folders <query>` |
@@ -202,6 +207,8 @@ If MCP tools are unavailable, use the equivalent CLI sequence:
 | Human token dashboard | `projectatlas token --view tui` |
 | Diagnostics | `projectatlas settings`, `projectatlas config --print`, and `projectatlas watch-status` |
 | Ignore policy | `projectatlas ignore list`, `projectatlas ignore init-gitignore`, `projectatlas ignore add --kind dir-name <name>`, and `projectatlas ignore add --kind path-prefix <path>` |
+| Harness MCP config | `projectatlas --format json --db .projectatlas/projectatlas.db mcp-config` |
+| Legacy TOON map export | `projectatlas map --force` |
 | Reset local index/cache | `projectatlas reset-index --dry-run` then `projectatlas reset-index --apply` |
 
 ## Startup Workflow
