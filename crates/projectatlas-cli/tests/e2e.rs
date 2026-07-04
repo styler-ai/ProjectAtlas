@@ -7430,6 +7430,48 @@ fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), 
         .assert()
         .success();
 
+    fs::write(
+        repo.join("Cargo.toml"),
+        "# Purpose: Rust manifest for purpose lint strictness tests.\n[package]\nname = \"purpose-lint-demo\"\nversion = \"0.1.1\"\nedition = \"2024\"\n",
+    )?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("detail.rs"),
+        "// Purpose: Rust implementation detail for purpose lint strictness tests.\npub fn detail_changed() {}\n",
+    )?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--config")
+        .arg(&config)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+    let stale_low = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--config")
+        .arg(&config)
+        .arg("--db")
+        .arg(&db)
+        .args(["lint", "--purpose-level", "low"])
+        .output()?;
+    if stale_low.status.success() {
+        return Err(io::Error::other("low purpose lint missed stale high-impact file").into());
+    }
+    let stale_low_stderr = String::from_utf8(stale_low.stderr)?;
+    if !stale_low_stderr.contains("[stale-purpose] Cargo.toml:") {
+        return Err(io::Error::other(format!(
+            "low purpose lint missed stale high-impact file:\n{stale_low_stderr}"
+        ))
+        .into());
+    }
+    if stale_low_stderr.contains("src/detail.rs") {
+        return Err(io::Error::other(format!(
+            "low purpose lint included low-value stale source file:\n{stale_low_stderr}"
+        ))
+        .into());
+    }
+
     Ok(())
 }
 

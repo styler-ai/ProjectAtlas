@@ -4519,16 +4519,17 @@ fn purpose_default_queue_order_expression(node_alias: &str, purpose_alias: &str)
             WHEN {node_alias}.kind = 'folder' THEN 0 \
             WHEN {node_alias}.kind = 'file' \
                 AND {purpose_alias}.status = 'stale' \
-                AND {purpose_alias}.source IN ({stale_queue_sources}) THEN 1 \
+                AND ({purpose_alias}.source IN ({stale_queue_sources}) OR {}) THEN 1 \
             WHEN {node_alias}.kind = 'file' AND {} THEN 2 \
             ELSE 3 \
         END, {node_alias}.path",
+        high_impact_file_path_expression(&format!("lower({node_alias}.path)")),
         high_impact_file_path_expression(&format!("lower({node_alias}.path)"))
     )
 }
 
-/// Purpose sources whose stale file purposes stay in the default queue.
-const STALE_FILE_PURPOSE_QUEUE_SOURCE_VALUES: &[&str] = &["agent", "human", "imported"];
+/// Purpose sources whose stale file purposes stay in the default queue regardless of path impact.
+const STALE_FILE_PURPOSE_QUEUE_SOURCE_VALUES: &[&str] = &["human", "imported"];
 
 /// Return whether `source_only` should run before queue-specific folder/file selection.
 fn source_filter_applies_before_queue(scope: HealthScope) -> bool {
@@ -5724,8 +5725,7 @@ mod tests {
     }
 
     #[test]
-    fn high_impact_purpose_queue_pages_stale_reviewed_files_before_high_impact_files()
-    -> Result<(), Box<dyn Error>> {
+    fn high_impact_purpose_queue_omits_low_value_stale_files() -> Result<(), Box<dyn Error>> {
         let mut store = AtlasStore::in_memory()?;
         store.replace_scan(&[
             test_file_node("src/helper.rs", "hash-a"),
@@ -5737,9 +5737,14 @@ mod tests {
             "Reviewed helper implementation.",
             PurposeSource::Agent,
         )?;
+        store.set_purpose(
+            "Cargo.toml",
+            "Reviewed Cargo manifest.",
+            PurposeSource::Agent,
+        )?;
         store.replace_scan(&[
             test_file_node("src/helper.rs", "hash-b"),
-            test_file_node("Cargo.toml", "hash-cargo"),
+            test_file_node("Cargo.toml", "hash-cargo-new"),
             test_file_node("package.json", "hash-package"),
         ])?;
 
@@ -5756,17 +5761,36 @@ mod tests {
             },
         )?;
 
-        require_eq(&page.total, &3, "default actionable total")?;
+        require_eq(&page.total, &2, "default actionable total")?;
         require_eq(&page.returned, &1, "small page returned")?;
         require_eq(
             &page.findings[0].category,
             &"stale-purpose".to_string(),
-            "stale reviewed file is globally prioritized",
+            "stale high-impact file is still prioritized",
         )?;
         require_eq(
             &page.findings[0].path,
-            &"src/helper.rs".to_string(),
-            "stale reviewed file path",
+            &"Cargo.toml".to_string(),
+            "stale high-impact file path",
+        )?;
+
+        let broad_page = store.unresolved_health_findings_page(
+            &[],
+            &HealthQuery {
+                start_index: 0,
+                limit: 10,
+                category: Some(CATEGORY_STALE_PURPOSE.to_string()),
+                severity: Some(Severity::Warning),
+                path_prefix: Some(".".to_string()),
+                summary_only: false,
+                scope: HealthScope::purpose_with_source_files(),
+            },
+        )?;
+        require_eq(&broad_page.total, &2, "broad source stale rows")?;
+        require_eq(
+            &health_paths(&broad_page),
+            &vec!["Cargo.toml", "src/helper.rs"],
+            "broad scope includes low-value stale source files",
         )?;
         Ok(())
     }
