@@ -173,9 +173,10 @@ A nontechnical user should be able to open the token dashboard and understand:
 - Call `atlas_token_report` through the MCP smoke path and assert the same
   fields are present.
 - Run `projectatlas token --view tui` and assert the dashboard includes:
-  `Total tokens avoided`, `Tokens: with vs without ProjectAtlas`,
-  `File reads avoided`, `Measured from summaries`, and
-  `Narrowed to right files`.
+  `Tokens: without vs with ProjectAtlas`, `File reads avoided`,
+  `Likely file reads avoided`, `Measured from summaries`, and
+  `Narrowed to right files`, with the token comparison before the file-read
+  section.
 
 ### Acceptance Criteria
 

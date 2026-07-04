@@ -2833,12 +2833,12 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .stdout(predicate::str::contains("Measured from summaries"))
         .stdout(predicate::str::contains("Narrowed to right files"))
         .stdout(predicate::str::contains(
-            "Tokens: with vs without ProjectAtlas",
+            "Tokens: without vs with ProjectAtlas",
         ))
         .stdout(predicate::str::contains("Without ProjectAtlas"))
         .stdout(predicate::str::contains("With ProjectAtlas"))
         .stdout(predicate::str::contains("File reads avoided"))
-        .stdout(predicate::str::contains("Total likely avoided"))
+        .stdout(predicate::str::contains("Likely file reads avoided"))
         .stdout(predicate::str::contains("Search-modeled narrowing"))
         .stdout(predicate::str::contains("Where the savings came from"))
         .stdout(predicate::str::contains("What this means"));

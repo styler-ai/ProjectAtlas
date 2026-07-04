@@ -2780,7 +2780,7 @@ mod tests {
         assert!(dashboard.contains("Total tokens avoided"));
         assert!(dashboard.contains("Measured from summaries"));
         assert!(dashboard.contains("Narrowed to right files"));
-        assert!(dashboard.contains("Tokens: with vs without ProjectAtlas"));
+        assert!(dashboard.contains("Tokens: without vs with ProjectAtlas"));
         assert!(dashboard.contains("Without ProjectAtlas"));
         assert!(dashboard.contains("With ProjectAtlas"));
         assert!(dashboard.contains("File reads avoided"));

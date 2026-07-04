@@ -18,6 +18,8 @@ const DASHBOARD_HEIGHT: u16 = 47;
 const TREND_DASHBOARD_HEIGHT: u16 = 30;
 /// Fixed character width for each vertical token comparison column.
 const TOKEN_COMPARE_COLUMN_WIDTH: usize = 24;
+/// Fixed visual width for each filled token comparison bar.
+const TOKEN_COMPARE_BAR_WIDTH: usize = 12;
 /// Number of glyph cells in the file-read avoidance cake chart.
 const READ_AVOIDANCE_CAKE_SLOTS: usize = 12;
 
@@ -72,18 +74,18 @@ fn render_overview_frame(frame: &mut Frame<'_>, overview: &TokenOverview, sessio
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(4),
-            Constraint::Length(6),
             Constraint::Length(10),
-            Constraint::Length(7),
+            Constraint::Length(8),
+            Constraint::Length(6),
             Constraint::Min(8),
             Constraint::Length(8),
         ])
         .split(inner);
 
     render_overview_summary(frame, sections[0], overview);
-    render_overview_gauges(frame, sections[1], overview);
-    render_overview_bars(frame, sections[2], overview);
-    render_file_read_avoidance_chart(frame, sections[3], overview);
+    render_overview_bars(frame, sections[1], overview);
+    render_file_read_avoidance_chart(frame, sections[2], overview);
+    render_overview_gauges(frame, sections[3], overview);
     render_bucket_table(frame, sections[4], overview);
     render_overview_notes(frame, sections[5], overview);
 }
@@ -181,7 +183,7 @@ fn render_overview_bars(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverv
         .max(overview.estimated_with_projectatlas)
         .max(overview.tokens_avoided.max(0).unsigned_abs())
         .max(1);
-    let block = Block::bordered().title("Tokens: with vs without ProjectAtlas");
+    let block = Block::bordered().title("Tokens: without vs with ProjectAtlas");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let chart_height = usize::from(inner.height).saturating_sub(3).clamp(3, 6);
@@ -216,7 +218,7 @@ fn vertical_token_comparison_lines(
             Color::Cyan,
         ),
         (
-            "Tokens avoided",
+            "Saved by ProjectAtlas",
             signed_count(overview.tokens_avoided),
             overview.tokens_avoided.max(0).unsigned_abs(),
             Color::Green,
@@ -231,7 +233,11 @@ fn vertical_token_comparison_lines(
                 spans.push(Span::raw("  "));
             }
             let filled = vertical_column_height(*value, max_value, chart_height);
-            let marker = if filled >= level { "█" } else { " " };
+            let marker = if filled >= level {
+                "█".repeat(TOKEN_COMPARE_BAR_WIDTH)
+            } else {
+                " ".repeat(TOKEN_COMPARE_BAR_WIDTH)
+            };
             spans.push(Span::styled(
                 format!("{marker:^TOKEN_COMPARE_COLUMN_WIDTH$}"),
                 Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -314,43 +320,58 @@ fn read_avoidance_cake_lines(overview: &TokenOverview) -> Vec<Line<'static>> {
     let top = cells.iter().take(4).collect::<String>();
     let middle = cells.iter().skip(4).take(4).collect::<String>();
     let bottom = cells.iter().skip(8).take(4).collect::<String>();
+    let cell_row = cells.iter().collect::<String>();
 
     vec![
         Line::from(vec![
             Span::styled(
-                format!("      ◜{top}◝      "),
+                format!("      ╭{cell_row}╮   "),
                 Style::default().fg(Color::Green),
             ),
-            label("Total likely avoided"),
+            label("Likely file reads avoided"),
             Span::raw(format!("{} file reads", grouped_count(total))),
         ]),
         Line::from(vec![
             Span::styled(
-                format!("       {middle}       "),
+                format!("      │{top}{middle}{bottom}│   "),
                 Style::default().fg(Color::Green),
             ),
             label("Observed summaries/slices"),
-            value(overview.observed_file_read_replacements),
+            Span::raw(format!(
+                "{} ({})",
+                percentage_label(overview.observed_file_read_replacements, total),
+                grouped_count(overview.observed_file_read_replacements)
+            )),
         ]),
         Line::from(vec![
             Span::styled(
-                format!("      ◟{bottom}◞      "),
+                format!("      │{cell_row}│   "),
                 Style::default().fg(Color::Magenta),
             ),
             label("Search-modeled narrowing"),
-            value(overview.modeled_file_reads_avoided),
+            Span::raw(format!(
+                "{} ({})",
+                percentage_label(overview.modeled_file_reads_avoided, total),
+                grouped_count(overview.modeled_file_reads_avoided)
+            )),
         ]),
         Line::from(vec![
             Span::styled(
-                "      █ observed  ".to_string(),
-                Style::default().fg(Color::Green),
-            ),
-            Span::styled(
-                "▓ search-modeled  ".to_string(),
-                Style::default().fg(Color::Magenta),
+                format!("      ╰{cell_row}╯   "),
+                Style::default().fg(Color::DarkGray),
             ),
             label("confidence"),
             Span::raw(overview.read_avoidance_confidence.clone()),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "      █ observed summaries/slices  ".to_string(),
+                Style::default().fg(Color::Green),
+            ),
+            Span::styled(
+                "▓ search-modeled narrowing".to_string(),
+                Style::default().fg(Color::Magenta),
+            ),
         ]),
     ]
 }
@@ -686,6 +707,15 @@ fn rate_label(value: Option<f64>) -> String {
     )
 }
 
+/// Format one part of a whole as a nearest integer percentage.
+fn percentage_label(part: usize, total: usize) -> String {
+    if total == 0 {
+        "0%".to_string()
+    } else {
+        format!("{:.0}%", (part as f64 / total as f64) * 100.0)
+    }
+}
+
 /// Return the preferred dashboard width.
 fn dashboard_width() -> usize {
     std::env::var("COLUMNS")
@@ -749,12 +779,12 @@ mod tests {
         assert!(dashboard.contains("Total tokens avoided"));
         assert!(dashboard.contains("Measured from summaries"));
         assert!(dashboard.contains("Narrowed to right files"));
-        assert!(dashboard.contains("Tokens: with vs without ProjectAtlas"));
+        assert!(dashboard.contains("Tokens: without vs with ProjectAtlas"));
         assert!(dashboard.contains("Without ProjectAtlas"));
         assert!(dashboard.contains("With ProjectAtlas"));
-        assert!(dashboard.contains("Tokens avoided"));
+        assert!(dashboard.contains("Saved by ProjectAtlas"));
         assert!(dashboard.contains("File reads avoided"));
-        assert!(dashboard.contains("Total likely avoided"));
+        assert!(dashboard.contains("Likely file reads avoided"));
         assert!(dashboard.contains("Observed summaries/slices"));
         assert!(dashboard.contains("Search-modeled narrowing"));
         assert!(dashboard.contains("File reads avoided"));
@@ -764,6 +794,18 @@ mod tests {
         assert!(dashboard.contains("search-modeled"));
         assert!(dashboard.contains("duplicate navigation baselines collapsed"));
         assert!(dashboard.contains("█") || dashboard.contains("▌") || dashboard.contains("▏"));
+
+        let compare = dashboard
+            .find("Tokens: without vs with ProjectAtlas")
+            .unwrap_or(usize::MAX);
+        let file_reads = dashboard.find("File reads avoided").unwrap_or(usize::MAX);
+        let buckets = dashboard
+            .find("Where the savings came from")
+            .unwrap_or(usize::MAX);
+        let notes = dashboard.find("What this means").unwrap_or(usize::MAX);
+        assert!(compare < file_reads);
+        assert!(file_reads < buckets);
+        assert!(buckets < notes);
     }
 
     #[test]
