@@ -234,6 +234,7 @@ pub fn purpose_review_signal(node: &Node, purpose: &Purpose) -> PurposeReviewSig
     if node.kind == NodeKind::File
         && purpose.status == PurposeStatus::Stale
         && purpose.source == PurposeSource::Agent
+        && is_high_impact_file_path(&node.path)
     {
         return PurposeReviewSignal {
             priority: PurposeReviewPriority::High,
@@ -609,6 +610,12 @@ mod tests {
             source: PurposeSource::Agent,
             status: PurposeStatus::Approved,
         };
+        let stale = Purpose {
+            path: "src/helper.rs".to_string(),
+            purpose: Some("Reviewed helper implementation".to_string()),
+            source: PurposeSource::Agent,
+            status: PurposeStatus::Stale,
+        };
 
         let folder_signal = purpose_review_signal(&folder, &approved);
         assert_eq!(folder_signal.priority, PurposeReviewPriority::High);
@@ -621,6 +628,14 @@ mod tests {
         let build_signal = purpose_review_signal(&build_file, &suggested);
         assert_eq!(build_signal.priority, PurposeReviewPriority::High);
         assert_eq!(build_signal.reason, "high_impact_file");
+
+        let low_stale_signal = purpose_review_signal(&file, &stale);
+        assert_eq!(low_stale_signal.priority, PurposeReviewPriority::Low);
+        assert_eq!(low_stale_signal.reason, "selective_file_review");
+
+        let high_stale_signal = purpose_review_signal(&build_file, &stale);
+        assert_eq!(high_stale_signal.priority, PurposeReviewPriority::High);
+        assert_eq!(high_stale_signal.reason, "stale_agent_reviewed_file");
         assert!(is_high_impact_file_path(".github/workflows/release.yml"));
     }
 
