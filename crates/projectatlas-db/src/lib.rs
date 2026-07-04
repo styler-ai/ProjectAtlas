@@ -4610,9 +4610,11 @@ fn resolved_ids_for_category(resolved_ids: &[String], category: &str) -> Vec<Str
 mod tests {
     use super::*;
     use projectatlas_core::telemetry::{
-        TOKEN_ACCOUNTING_MODELED_AVOIDANCE, TOKEN_ACCURACY_HEURISTIC,
-        TOKEN_BASELINE_SELECTED_CANDIDATES, TOKEN_BUCKET_FULL_FILE_COMPRESSION,
-        TOKEN_BUCKET_NAVIGATION_AVOIDANCE, TOKEN_CONFIDENCE_INFERRED, TOKEN_DEDUPE_SCOPE_EVENT,
+        READ_AVOIDANCE_CONFIDENCE_MODELED, READ_AVOIDANCE_CONFIDENCE_NOT_RECORDED,
+        READ_AVOIDANCE_CONFIDENCE_OBSERVED, TOKEN_ACCOUNTING_MODELED_AVOIDANCE,
+        TOKEN_ACCURACY_HEURISTIC, TOKEN_BASELINE_SELECTED_CANDIDATES,
+        TOKEN_BUCKET_FULL_FILE_COMPRESSION, TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
+        TOKEN_COMMAND_SEARCH, TOKEN_CONFIDENCE_INFERRED, TOKEN_DEDUPE_SCOPE_EVENT,
         usage_from_estimates, usage_from_estimates_with_accounting, usage_from_text,
     };
     use projectatlas_core::{NodeKind, normalized_parent};
@@ -4716,6 +4718,16 @@ mod tests {
             &230,
             "all-session saved tokens",
         )?;
+        require_eq(
+            &all_sessions.likely_file_reads_avoided,
+            &0,
+            "non-search estimate events do not count as avoided file reads",
+        )?;
+        require_eq(
+            &all_sessions.read_avoidance_confidence,
+            &READ_AVOIDANCE_CONFIDENCE_NOT_RECORDED.to_string(),
+            "non-search estimate read avoidance confidence",
+        )?;
 
         store.record_usage(&usage_from_text(
             "bucketed",
@@ -4740,6 +4752,26 @@ mod tests {
             &TOKEN_BUCKET_NAVIGATION_AVOIDANCE.to_string(),
             "navigation bucket",
         )?;
+        require_eq(
+            &bucketed.observed_file_read_replacements,
+            &1,
+            "observed read replacement count",
+        )?;
+        require_eq(
+            &bucketed.modeled_file_reads_avoided,
+            &0,
+            "folder navigation does not count as modeled file-read avoidance",
+        )?;
+        require_eq(
+            &bucketed.likely_file_reads_avoided,
+            &1,
+            "observed-only likely file reads avoided",
+        )?;
+        require_eq(
+            &bucketed.read_avoidance_confidence,
+            &READ_AVOIDANCE_CONFIDENCE_OBSERVED.to_string(),
+            "observed-only read avoidance confidence",
+        )?;
 
         store.record_usage(&usage_from_text(
             "deduped",
@@ -4751,7 +4783,7 @@ mod tests {
         ))?;
         store.record_usage(&usage_from_estimates(
             "deduped",
-            "folders",
+            TOKEN_COMMAND_SEARCH,
             None,
             Some("token".to_string()),
             400,
@@ -4759,7 +4791,7 @@ mod tests {
         ))?;
         store.record_usage(&usage_from_estimates(
             "deduped",
-            "folders",
+            TOKEN_COMMAND_SEARCH,
             None,
             Some("token".to_string()),
             400,
@@ -4790,6 +4822,26 @@ mod tests {
             &deduped.tokens_avoided,
             &331,
             "headline avoided tokens use measured plus deduped modeled",
+        )?;
+        require_eq(
+            &deduped.observed_file_read_replacements,
+            &1,
+            "deduped observed read replacements",
+        )?;
+        require_eq(
+            &deduped.modeled_file_reads_avoided,
+            &2,
+            "deduped raw search events remain likely file reads avoided",
+        )?;
+        require_eq(
+            &deduped.likely_file_reads_avoided,
+            &3,
+            "deduped likely file reads avoided",
+        )?;
+        require_eq(
+            &deduped.read_avoidance_confidence,
+            &READ_AVOIDANCE_CONFIDENCE_MODELED.to_string(),
+            "deduped read avoidance confidence",
         )?;
 
         store.record_usage(&usage_from_estimates_with_accounting(
@@ -4835,6 +4887,16 @@ mod tests {
             &event_scoped.repeated_baselines_deduped,
             &0,
             "event-scoped modeled events do not count as deduped repeats",
+        )?;
+        require_eq(
+            &event_scoped.likely_file_reads_avoided,
+            &0,
+            "folder navigation events do not count as likely file reads avoided",
+        )?;
+        require_eq(
+            &event_scoped.read_avoidance_confidence,
+            &READ_AVOIDANCE_CONFIDENCE_NOT_RECORDED.to_string(),
+            "folder navigation read avoidance confidence",
         )?;
 
         let mut negative_event = usage_from_estimates("negative", "outline", None, None, 20, 50);

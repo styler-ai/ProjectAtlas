@@ -166,7 +166,10 @@ bare command, restart that host or use the generated absolute MCP config.
 When `codex` is available, installers also inspect the official
 `projectatlas` Codex marketplace and `codex mcp get projectatlas`. If the
 official marketplace is stale, the installer replaces that marketplace ref with
-the runtime release tag and reinstalls the `projectatlas` Codex plugin. If a
+the runtime release tag and reinstalls the `projectatlas` Codex plugin. When
+Codex exposes the installed plugin source path, the installer verifies the
+ProjectAtlas skill artifact and manifest version; if the running host still has
+older in-process skill metadata, restart the host after installation. If a
 global Codex MCP server named `projectatlas` exists but points to a stale runtime
 version or another project's DB/config, the installer removes and re-adds that
 registry entry with the verified absolute runtime, current project database,
@@ -181,6 +184,11 @@ verify `codex plugin list --marketplace projectatlas --json` and
 `codex mcp get projectatlas` or `codex mcp list`; stale entries should be
 repaired by rerunning the ProjectAtlas installer instead of left for the next
 Codex restart.
+
+The installers report Claude Code/OpenCode generated-config status and warn on
+stale official ProjectAtlas release URLs in downstream `.github/workflows`
+files. These workflow-pin warnings are intentionally non-mutating: update the
+workflow pin deliberately or keep the warning as an explicit migration decision.
 
 Harness-specific config can also be generated directly:
 
@@ -284,6 +292,11 @@ The default token report is a fast offline heuristic, not provider billing telem
 ProjectAtlas payload text with `ceil(chars / 4)` and file-size baselines with `ceil(bytes / 4)`. Reports expose
 bucket, baseline kind, confidence, accounting layer, provider, model, tokenizer backend, and accuracy labels so agents can separate
 observed full-file compression from modeled navigation savings. Use `tokens_avoided` for the conservative headline because repeated modeled baselines are deduped there; `estimated_saved` remains the legacy gross compatibility value. Local tokenizer calibration is explicit with `projectatlas token --tokenizer o200k_base` or `projectatlas token --tokenizer cl100k_base`; normal orientation and `atlas_token_report` must stay local and fast.
+
+Read-avoidance counters are also local workflow estimates. Observed
+summary/outline/slice replacements are stronger evidence than search-modeled
+file reads avoided; aggregate bucket-only reports must stay `not_recorded`
+instead of inventing whole-file-read counts.
 
 For freshness, treat `projectatlas watch` as the steady-state updater for local editing sessions. Line slices
 validate against SQLite and then read the current file from disk. Symbol slices also read current disk content,

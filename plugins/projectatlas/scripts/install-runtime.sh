@@ -351,6 +351,61 @@ codex_projectatlas_plugin_version() {
     head -n 1
 }
 
+codex_projectatlas_plugin_source_path() {
+  plugins=$("$codex_bin" plugin list --marketplace projectatlas --json 2>/dev/null) || return 0
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s\n' "$plugins" | jq -r '.installed[]? | select(.pluginId == "projectatlas@projectatlas" or (.name == "projectatlas" and .marketplaceName == "projectatlas")) | (.source.path // .path // .root // .location // empty)' | head -n 1
+    return 0
+  fi
+  compact=$(printf '%s' "$plugins" | tr -d '\r\n')
+  printf '%s\n' "$compact" |
+    sed 's/},{/}\n{/g' |
+    grep -E '"pluginId"[[:space:]]*:[[:space:]]*"projectatlas@projectatlas"|"name"[[:space:]]*:[[:space:]]*"projectatlas".*"marketplaceName"[[:space:]]*:[[:space:]]*"projectatlas"' |
+    sed -n 's/.*"path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+    head -n 1
+}
+
+verify_codex_projectatlas_skill_artifact() {
+  runtime_version=$(expected_runtime_version)
+  if [ -z "$runtime_version" ]; then
+    runtime_version=$(runtime_version "$projectatlas_bin")
+  fi
+  if [ -z "$runtime_version" ]; then
+    printf '%s\n' "Codex ProjectAtlas plugin skill verification skipped: ProjectAtlas version is unknown."
+    return 0
+  fi
+  installed_version=$(codex_projectatlas_plugin_version)
+  if [ -z "$installed_version" ]; then
+    printf '%s\n' "warning: Codex ProjectAtlas plugin skill verification skipped: projectatlas plugin is not installed." >&2
+    return 0
+  fi
+  if [ "$installed_version" != "$runtime_version" ]; then
+    printf "warning: Codex ProjectAtlas plugin skill verification failed: installed projectatlas plugin version '%s' does not match %s.\n" "$installed_version" "$runtime_version" >&2
+    return 0
+  fi
+  plugin_source_path=$(codex_projectatlas_plugin_source_path)
+  if [ -z "$plugin_source_path" ]; then
+    printf 'Codex ProjectAtlas plugin skill version %s is installed; Codex does not expose the active in-process ProjectAtlas skill path. Restart Codex if this session still advertises an older ProjectAtlas skill.\n' "$runtime_version"
+    return 0
+  fi
+  manifest_path=$plugin_source_path/.codex-plugin/plugin.json
+  skill_path=$plugin_source_path/skills/projectatlas/SKILL.md
+  if [ ! -f "$manifest_path" ]; then
+    printf 'warning: Codex ProjectAtlas plugin skill verification failed: plugin manifest was not found at %s.\n' "$manifest_path" >&2
+    return 0
+  fi
+  if [ ! -f "$skill_path" ]; then
+    printf 'warning: Codex ProjectAtlas plugin skill verification failed: ProjectAtlas skill was not found at %s.\n' "$skill_path" >&2
+    return 0
+  fi
+  if ! grep -E '"version"[[:space:]]*:[[:space:]]*"'"$runtime_version"'"' "$manifest_path" >/dev/null; then
+    printf 'warning: Codex ProjectAtlas plugin skill verification failed: manifest version does not match %s.\n' "$runtime_version" >&2
+    return 0
+  fi
+  printf 'Codex ProjectAtlas plugin skill verified at %s for %s.\n' "$skill_path" "$runtime_version"
+  printf '%s\n' "Codex does not expose the active in-process ProjectAtlas skill path; restart Codex if this session still advertises an older ProjectAtlas skill."
+}
+
 update_codex_plugin() {
   if truthy "${PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE:-}"; then
     printf '%s\n' "Codex ProjectAtlas plugin update skipped by PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE."
@@ -384,6 +439,7 @@ update_codex_plugin() {
   current_plugin_version=$(codex_projectatlas_plugin_version)
   if [ "$previous_ref" = "$release_tag" ] && [ "$current_plugin_version" = "$runtime_version" ]; then
     printf 'Codex ProjectAtlas plugin marketplace already points to %s.\n' "$release_tag"
+    verify_codex_projectatlas_skill_artifact
     return 0
   fi
   if [ "$previous_ref" = "$release_tag" ]; then
@@ -392,6 +448,7 @@ update_codex_plugin() {
       installed_version=$(codex_projectatlas_plugin_version)
       if [ "$installed_version" = "$runtime_version" ]; then
         printf 'Codex ProjectAtlas plugin marketplace updated to %s.\n' "$release_tag"
+        verify_codex_projectatlas_skill_artifact
       else
         printf "warning: Codex ProjectAtlas plugin update failed: installed projectatlas plugin version '%s' does not match %s.\n" "$installed_version" "$runtime_version" >&2
         restore_codex_projectatlas_marketplace "$marketplace_source" "$previous_ref"
@@ -417,6 +474,7 @@ update_codex_plugin() {
     installed_version=$(codex_projectatlas_plugin_version)
     if [ "$installed_version" = "$runtime_version" ]; then
       printf 'Codex ProjectAtlas plugin marketplace updated to %s.\n' "$release_tag"
+      verify_codex_projectatlas_skill_artifact
     else
       printf "warning: Codex ProjectAtlas plugin update failed: installed projectatlas plugin version '%s' does not match %s.\n" "$installed_version" "$runtime_version" >&2
       restore_codex_projectatlas_marketplace "$marketplace_source" "$previous_ref"
@@ -472,6 +530,40 @@ update_codex_mcp_registry() {
   else
     printf '%s\n' "warning: Codex MCP registry update failed: could not add verified global projectatlas server." >&2
   fi
+}
+
+report_projectatlas_workflow_pins() {
+  runtime_version=$(expected_runtime_version)
+  if [ -z "$runtime_version" ]; then
+    runtime_version=$(runtime_version "$projectatlas_bin")
+  fi
+  if [ -z "$runtime_version" ]; then
+    return 0
+  fi
+  workflow_dir=$project_root/.github/workflows
+  if [ ! -d "$workflow_dir" ]; then
+    return 0
+  fi
+  release_tag=v$runtime_version
+  find "$workflow_dir" -type f \( -name '*.yml' -o -name '*.yaml' \) | while IFS= read -r workflow_file; do
+    line_number=0
+    while IFS= read -r line || [ -n "$line" ]; do
+      line_number=$((line_number + 1))
+      case "$line" in
+        *github.com/styler-ai/ProjectAtlas/releases/download/v*)
+          printf '%s\n' "$line" |
+            grep -Eo 'v[0-9]+\.[0-9]+\.[0-9]+' |
+            sort -u |
+            while IFS= read -r found_tag; do
+              if [ "$found_tag" != "$release_tag" ]; then
+                relative_path=${workflow_file#"$project_root"/}
+                printf 'warning: Stale ProjectAtlas workflow release pin in %s:%s uses %s; expected %s.\n' "$relative_path" "$line_number" "$found_tag" "$release_tag" >&2
+              fi
+            done
+          ;;
+      esac
+    done < "$workflow_file"
+  done
 }
 
 download_release_file() {
@@ -642,9 +734,12 @@ write_mcp_config "$claude_mcp_config_path" claude-code
 write_mcp_config "$opencode_config_path" opencode
 update_codex_plugin
 update_codex_mcp_registry
+report_projectatlas_workflow_pins
 
 printf 'ProjectAtlas runtime installed and verified: %s\n' "$projectatlas_bin"
 printf 'ProjectAtlas update preserved project state under %s; use reset-index --apply for explicit state cleanup.\n' "$atlas_dir"
 printf 'Project-local MCP config written: %s\n' "$mcp_config_path"
 printf 'Project-local Claude Code MCP config written: %s\n' "$claude_mcp_config_path"
 printf 'Project-local OpenCode MCP config written: %s\n' "$opencode_config_path"
+printf '%s\n' "Claude Code ProjectAtlas integration verified through generated MCP config; restart Claude Code if an older session cached previous instructions."
+printf '%s\n' "OpenCode ProjectAtlas integration verified through generated MCP config; restart OpenCode if an older session cached previous instructions."

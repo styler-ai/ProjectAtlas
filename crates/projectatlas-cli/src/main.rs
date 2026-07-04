@@ -2775,21 +2775,18 @@ mod tests {
             Some("session-a"),
         );
 
-        assert!(dashboard.contains("ProjectAtlas Token Dashboard"));
+        assert!(dashboard.contains("ProjectAtlas Savings Overview"));
         assert!(dashboard.contains("session-a"));
-        assert!(dashboard.contains("tokens avoided"));
-        assert!(dashboard.contains("measured saved"));
-        assert!(dashboard.contains("deduped modeled"));
-        assert!(dashboard.contains("Comparison"));
-        assert!(dashboard.contains("baseline"));
-        assert!(dashboard.contains("emitted"));
-        assert!(dashboard.contains("gross"));
-        assert!(dashboard.contains("avoided"));
-        assert!(dashboard.contains("Buckets"));
-        assert!(dashboard.contains("modeled_avoidance"));
-        assert!(dashboard.contains("navigation_avoidance"));
-        assert!(dashboard.contains("headline"));
-        assert!(dashboard.contains("deduped modeled"));
+        assert!(dashboard.contains("Total tokens avoided"));
+        assert!(dashboard.contains("Measured from summaries"));
+        assert!(dashboard.contains("Narrowed to right files"));
+        assert!(dashboard.contains("Tokens: with vs without ProjectAtlas"));
+        assert!(dashboard.contains("Without ProjectAtlas"));
+        assert!(dashboard.contains("With ProjectAtlas"));
+        assert!(dashboard.contains("File reads avoided"));
+        assert!(dashboard.contains("Where the savings came from"));
+        assert!(dashboard.contains("What this means"));
+        assert!(dashboard.contains("not_recorded"));
         assert!(dashboard.contains("calibration"));
         assert!(dashboard.contains("█") || dashboard.contains("▌") || dashboard.contains("▏"));
     }

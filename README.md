@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.3.21"><img alt="release" src="https://img.shields.io/badge/release-v0.3.21-blue"></a>
+  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.3.22"><img alt="release" src="https://img.shields.io/badge/release-v0.3.22-blue"></a>
   <img alt="rust" src="https://img.shields.io/badge/Rust-2024-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
@@ -25,7 +25,7 @@ No required `.purpose` files. No source-header tax. No hosted index. The project
 ## Quickstart
 
 ```bash
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.21
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.22
 codex plugin add projectatlas --marketplace projectatlas
 ```
 
@@ -44,7 +44,7 @@ correctly keeps that pinned ref. In that case, replace only the dedicated `style
 
 ```bash
 codex plugin marketplace remove projectatlas
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.21
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.22
 ```
 
 Then tell Codex: "Use ProjectAtlas for this repo."
@@ -81,9 +81,10 @@ with ProjectAtlas    = compact TOON payloads returned by overview, folders, file
 legacy gross saved   = without ProjectAtlas - with ProjectAtlas
 savings rate         = legacy gross saved / without ProjectAtlas
 tokens avoided       = measured saved + deduped modeled avoided
+file reads avoided   = observed summary/slice replacements + search-modeled narrowing
 ```
 
-The default estimator is deliberately simple and local: `ceil(chars_or_bytes / 4)`. It is a workflow estimate, not provider billing telemetry. Reports preserve the legacy gross saved number for continuity and also expose `measured_tokens_saved`, `gross_modeled_tokens_avoided`, `deduped_modeled_tokens_avoided`, and conservative headline `tokens_avoided`.
+The default estimator is deliberately simple and local: `ceil(chars_or_bytes / 4)`. It is a workflow estimate, not provider billing telemetry. Reports preserve the legacy gross saved number for continuity and also expose `measured_tokens_saved`, `gross_modeled_tokens_avoided`, `deduped_modeled_tokens_avoided`, conservative headline `tokens_avoided`, and likely file reads avoided split into observed summary/slice replacements versus search-modeled narrowing.
 
 | Signal | Result |
 | --- | ---: |
@@ -177,7 +178,7 @@ Most users can stop at the plugin install. The CLI is here for local debugging, 
 Only need the CLI yourself? Install it from the released tag:
 
 ```bash
-cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.21 projectatlas-cli --locked
+cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.22 projectatlas-cli --locked
 ```
 
 From this checkout:
@@ -246,7 +247,10 @@ The generated configs pin the runtime version, project database, config path, an
 When `codex` is available, the installer also repairs a stale official Codex
 `projectatlas` marketplace/plugin cache to the runtime release tag, then repairs
 a stale global `codex mcp` registry entry named `projectatlas` so it uses the
-verified runtime and this project's `.projectatlas` DB/config. Set
+verified runtime and this project's `.projectatlas` DB/config. It verifies the
+Codex ProjectAtlas skill artifact when Codex exposes the plugin source path,
+reports Claude Code/OpenCode generated-config status, and warns on stale
+official ProjectAtlas release pins in downstream `.github/workflows` files. Set
 `PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE=1` only if you intentionally manage the
 Codex ProjectAtlas plugin marketplace yourself, and
 `PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1` only if you intentionally manage
@@ -281,7 +285,7 @@ ProjectAtlas scans with `.gitignore` awareness, hashes files with BLAKE3, stores
 
 ## Release Quality
 
-`v0.3.21` ships through the full release matrix:
+`v0.3.22` ships through the full release matrix:
 
 - Rust format, check, clippy, dependency policy, tests, doctests, and rustdoc.
 - ProjectAtlas scan, parity, database-backed purpose lint, and health checks.

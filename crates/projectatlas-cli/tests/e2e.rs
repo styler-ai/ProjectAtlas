@@ -4,7 +4,9 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use projectatlas_core::PurposeSource;
 use projectatlas_core::language::{BROAD_SOURCE_EXTENSIONS, detect_language_for_path};
-use projectatlas_core::telemetry::usage_from_estimates;
+use projectatlas_core::telemetry::{
+    READ_AVOIDANCE_CONFIDENCE_MODELED, READ_AVOIDANCE_SCOPE, usage_from_estimates,
+};
 use projectatlas_db::{AtlasStore, HealthResolution};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -22,11 +24,17 @@ const TEST_REPO_DIR: &str = "repo";
 const SRC_DIR_NAME: &str = "src";
 const ATLAS_DIR_NAME: &str = ".projectatlas";
 const CODEX_CONFIG_DIR: &str = ".codex";
+const CODEX_PLUGIN_MANIFEST_DIR: &str = ".codex-plugin";
 const FAKE_CODEX_LOG_FILE: &str = "fake-codex.log";
+const FAKE_CODEX_PLUGIN_CACHE_DIR: &str = "plugin-cache";
 const FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_FILE: &str = "plugin-add-failed.marker";
 const FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_ENV: &str = "PROJECTATLAS_FAKE_FAILURE_MARKER";
+const FAKE_CODEX_SKILL_CONTENT: &str = "# ProjectAtlas\n";
 const FAKE_PATH_DIR: &str = "fake-path";
 const ISOLATED_HOME_DIR: &str = "isolated-home";
+const PROJECTATLAS_SKILL_DIR: &str = "skills";
+const PROJECTATLAS_SKILL_NAME: &str = "projectatlas";
+const SKILL_FILE_NAME: &str = "SKILL.md";
 #[cfg(windows)]
 const PROJECTATLAS_LOCAL_APPDATA_DIR: &str = "ProjectAtlas";
 
@@ -121,9 +129,9 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         workspace_root
             .join("plugins")
             .join("projectatlas")
-            .join("skills")
-            .join("projectatlas")
-            .join("SKILL.md"),
+            .join(PROJECTATLAS_SKILL_DIR)
+            .join(PROJECTATLAS_SKILL_NAME)
+            .join(SKILL_FILE_NAME),
     )?;
     let codex_fallback_mcp = workspace_root
         .join("plugins")
@@ -140,7 +148,7 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         workspace_root
             .join("plugins")
             .join("projectatlas")
-            .join(".codex-plugin")
+            .join(CODEX_PLUGIN_MANIFEST_DIR)
             .join("plugin.json"),
     )?;
     let opencode_template = fs::read_to_string(
@@ -171,6 +179,9 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "Update-ProjectAtlasCodexPlugin",
         "PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE",
         "Codex ProjectAtlas plugin marketplace updated",
+        "Confirm-ProjectAtlasCodexSkillArtifact",
+        "Codex ProjectAtlas plugin skill verified",
+        "Codex does not expose the active in-process ProjectAtlas skill path",
         "plugin marketplace add styler-ai/ProjectAtlas --ref",
         "Update-ProjectAtlasCodexMcpRegistry",
         "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE",
@@ -195,6 +206,10 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "projectatlas.opencode.json",
         r#"Write-ProjectAtlasMcpConfig $claudeMcpConfigPath "claude-code""#,
         r#"Write-ProjectAtlasMcpConfig $opencodeConfigPath "opencode""#,
+        "Write-ProjectAtlasWorkflowPinReport",
+        "Stale ProjectAtlas workflow release pin",
+        "Claude Code ProjectAtlas integration verified through generated MCP config",
+        "OpenCode ProjectAtlas integration verified through generated MCP config",
     ] {
         if !powershell_installer.contains(required) {
             return Err(io::Error::other(format!(
@@ -234,6 +249,9 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "update_codex_plugin",
         "PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE",
         "Codex ProjectAtlas plugin marketplace updated",
+        "verify_codex_projectatlas_skill_artifact",
+        "Codex ProjectAtlas plugin skill verified",
+        "Codex does not expose the active in-process ProjectAtlas skill path",
         "plugin marketplace add styler-ai/ProjectAtlas --ref",
         "update_codex_mcp_registry",
         "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE",
@@ -253,6 +271,10 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "projectatlas.opencode.json",
         "write_mcp_config \"$claude_mcp_config_path\" claude-code",
         "write_mcp_config \"$opencode_config_path\" opencode",
+        "report_projectatlas_workflow_pins",
+        "Stale ProjectAtlas workflow release pin",
+        "Claude Code ProjectAtlas integration verified through generated MCP config",
+        "OpenCode ProjectAtlas integration verified through generated MCP config",
     ] {
         if !posix_installer.contains(required) {
             return Err(io::Error::other(format!(
@@ -1110,6 +1132,15 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         atlas_dir.join("projectatlas-nonsource-files.toon"),
         "nonsource_files[]:\n  # path,summary\n",
     )?;
+    let expected_release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let workflow_dir = repo.join(".github").join("workflows");
+    fs::create_dir_all(&workflow_dir)?;
+    fs::write(
+        workflow_dir.join("ci.yml"),
+        format!(
+            "jobs:\n  smoke:\n    steps:\n      - run: curl -fsSL https://github.com/styler-ai/ProjectAtlas/releases/download/v0.0.1/projectatlas-v0.0.1-x86_64-unknown-linux-gnu.tar.gz -o projectatlas.tar.gz\n      - run: curl -fsSL https://github.com/styler-ai/ProjectAtlas/releases/download/{expected_release_tag}/projectatlas-{expected_release_tag}-x86_64-unknown-linux-gnu.tar.gz -o projectatlas-current.tar.gz\n      - run: curl -fsSL https://github.com/example/ProjectAtlas/releases/download/v9.9.9/projectatlas-v9.9.9-x86_64-unknown-linux-gnu.tar.gz -o projectatlas-fork.tar.gz\n"
+        ),
+    )?;
     fs::write(
         atlas_dir.join("kept-state.txt"),
         "existing project-local state must survive plugin updates\n",
@@ -1184,9 +1215,37 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
     let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
     let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
     let fake_codex = stale_runtime_dir.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+    let fake_plugin_cache = isolated_home
+        .join(FAKE_CODEX_PLUGIN_CACHE_DIR)
+        .join("projectatlas");
+    fs::create_dir_all(fake_plugin_cache.join(CODEX_PLUGIN_MANIFEST_DIR))?;
+    fs::create_dir_all(
+        fake_plugin_cache
+            .join(PROJECTATLAS_SKILL_DIR)
+            .join(PROJECTATLAS_SKILL_NAME),
+    )?;
+    fs::write(
+        fake_plugin_cache
+            .join(CODEX_PLUGIN_MANIFEST_DIR)
+            .join("plugin.json"),
+        format!(
+            r#"{{"name":"projectatlas","version":"{}"}}"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    )?;
+    fs::write(
+        fake_plugin_cache
+            .join(PROJECTATLAS_SKILL_DIR)
+            .join(PROJECTATLAS_SKILL_NAME)
+            .join(SKILL_FILE_NAME),
+        FAKE_CODEX_SKILL_CONTENT,
+    )?;
+    let fake_plugin_cache_json =
+        serde_json::to_string(&fake_plugin_cache.to_string_lossy().to_string())?;
     let plugin_list_json = format!(
-        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}"}}],"available":[]}}"#,
-        env!("CARGO_PKG_VERSION")
+        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}","source":{{"path":{}}}}}],"available":[]}}"#,
+        env!("CARGO_PKG_VERSION"),
+        fake_plugin_cache_json
     );
     let fake_codex_script = if cfg!(windows) {
         format!(
@@ -1301,12 +1360,32 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         ))
         .into());
     }
-    let expected_release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
     if !installer_output_text.contains(&format!(
         "Codex ProjectAtlas plugin marketplace updated to {expected_release_tag}."
     )) {
         return Err(io::Error::other(format!(
             "plugin update installer did not repair stale Codex ProjectAtlas plugin marketplace:\n{installer_output_text}"
+        ))
+        .into());
+    }
+    if !installer_output_text.contains("Codex ProjectAtlas plugin skill verified at") {
+        return Err(io::Error::other(format!(
+            "plugin update installer did not verify the refreshed Codex ProjectAtlas skill artifact:\n{installer_output_text}"
+        ))
+        .into());
+    }
+    if !installer_output_text.contains("Stale ProjectAtlas workflow release pin")
+        || !installer_output_text.contains("v0.0.1")
+        || !installer_output_text.contains(&expected_release_tag)
+    {
+        return Err(io::Error::other(format!(
+            "plugin update installer did not report stale downstream workflow release pins:\n{installer_output_text}"
+        ))
+        .into());
+    }
+    if installer_output_text.contains("v9.9.9") {
+        return Err(io::Error::other(format!(
+            "plugin update installer reported a non-official fork workflow release pin:\n{installer_output_text}"
         ))
         .into());
     }
@@ -2596,7 +2675,9 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .arg("token")
         .assert()
         .success()
-        .stdout(predicate::str::contains("token_savings:"));
+        .stdout(predicate::str::contains("token_savings:"))
+        .stdout(predicate::str::contains("read_avoidance:"))
+        .stdout(predicate::str::contains("likely_file_reads_avoided"));
     let raw_token = Command::cargo_bin("projectatlas")?
         .arg("--format")
         .arg("json")
@@ -2624,6 +2705,15 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
     require_json_i64_greater_than(&token_json, &["gross_modeled_tokens_avoided"], 0)?;
     require_json_i64_greater_than(&token_json, &["deduped_modeled_tokens_avoided"], 0)?;
     require_json_i64_greater_than(&token_json, &["tokens_avoided"], 0)?;
+    require_json_usize_greater_than(&token_json, &["observed_file_read_replacements"], 0)?;
+    require_json_usize_greater_than(&token_json, &["modeled_file_reads_avoided"], 0)?;
+    require_json_usize_greater_than(&token_json, &["likely_file_reads_avoided"], 0)?;
+    require_json_string(&token_json, &["read_avoidance_scope"], READ_AVOIDANCE_SCOPE)?;
+    require_json_string(
+        &token_json,
+        &["read_avoidance_confidence"],
+        READ_AVOIDANCE_CONFIDENCE_MODELED,
+    )?;
     let buckets = token_json["buckets"]
         .as_array()
         .ok_or_else(|| io::Error::other("token buckets missing from json report"))?;
@@ -2738,18 +2828,20 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .args(["token", "--view", "tui"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("ProjectAtlas Token Dashboard"))
-        .stdout(predicate::str::contains("tokens avoided"))
-        .stdout(predicate::str::contains("measured saved"))
-        .stdout(predicate::str::contains("deduped modeled"))
-        .stdout(predicate::str::contains("Comparison"))
-        .stdout(predicate::str::contains("baseline"))
-        .stdout(predicate::str::contains("emitted"))
-        .stdout(predicate::str::contains("gross"))
-        .stdout(predicate::str::contains("avoided"))
-        .stdout(predicate::str::contains("Buckets"))
-        .stdout(predicate::str::contains("modeled_avoidance"))
-        .stdout(predicate::str::contains("Accounting"));
+        .stdout(predicate::str::contains("ProjectAtlas Savings Overview"))
+        .stdout(predicate::str::contains("Total tokens avoided"))
+        .stdout(predicate::str::contains("Measured from summaries"))
+        .stdout(predicate::str::contains("Narrowed to right files"))
+        .stdout(predicate::str::contains(
+            "Tokens: with vs without ProjectAtlas",
+        ))
+        .stdout(predicate::str::contains("Without ProjectAtlas"))
+        .stdout(predicate::str::contains("With ProjectAtlas"))
+        .stdout(predicate::str::contains("File reads avoided"))
+        .stdout(predicate::str::contains("Total likely avoided"))
+        .stdout(predicate::str::contains("Search-modeled narrowing"))
+        .stdout(predicate::str::contains("Where the savings came from"))
+        .stdout(predicate::str::contains("What this means"));
     Command::cargo_bin("projectatlas")?
         .env("COLUMNS", "100")
         .arg("--db")
@@ -2757,7 +2849,7 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .args(["token", "--view", "tui", "--tokenizer", "cl100k_base"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("ProjectAtlas Token Dashboard"))
+        .stdout(predicate::str::contains("ProjectAtlas Savings Overview"))
         .stdout(predicate::str::contains("calibration"))
         .stdout(predicate::str::contains("cl100k_base"));
     Command::cargo_bin("projectatlas")?
@@ -2943,9 +3035,13 @@ fn mcp_server_stays_bound_to_one_project_database() -> Result<(), Box<dyn Error>
             io::Error::other(format!("repo A MCP server leaked repo B data: {output_a}")).into(),
         );
     }
-    if !output_a.contains("token_savings:") || !output_a.contains("estimate_kind: heuristic") {
+    if !output_a.contains("token_savings:")
+        || !output_a.contains("estimate_kind: heuristic")
+        || !output_a.contains("read_avoidance:")
+        || !output_a.contains("likely_file_reads_avoided")
+    {
         return Err(io::Error::other(format!(
-            "repo A MCP token report did not include heuristic token telemetry: {output_a}"
+            "repo A MCP token report did not include heuristic read-avoidance telemetry: {output_a}"
         ))
         .into());
     }
@@ -3633,8 +3729,9 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !stdout.contains("health:")
         || !stdout.contains("health_findings[1]")
         || !stdout.contains("next_start_index: 1")
-        || !stdout.contains("ProjectAtlas Token Dashboard")
-        || !stdout.contains("tokens avoided")
+        || !stdout.contains("ProjectAtlas Savings Overview")
+        || !stdout.contains("Total tokens avoided")
+        || !stdout.contains("File reads avoided")
         || !stdout.contains("purpose_review:")
         || !stdout.contains("failed: 0")
         || !stdout.contains("src/lib.rs")
