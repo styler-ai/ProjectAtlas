@@ -3192,7 +3192,9 @@ mod tests {
         )?;
 
         let db_a = repo_a.join(".projectatlas").join("projectatlas.db");
-        let server = ProjectAtlasMcpServer::new(db_a, None, "mcp-multi-project-test".to_string());
+        let db_b = repo_b.join(".projectatlas").join("projectatlas.db");
+        let server =
+            ProjectAtlasMcpServer::new(db_a.clone(), None, "mcp-multi-project-test".to_string());
         let (server_transport, client_transport) = tokio::io::duplex(16_384);
         let server_handle = tokio::spawn(async move {
             server
@@ -3227,6 +3229,9 @@ mod tests {
         if !scan_a.contains("scan:") {
             return Err("default atlas_scan did not scan the startup project".into());
         }
+        let db_a_before_repo_b_scan = fs::read(&db_a)?;
+        let db_a_hash_before_repo_b_scan = blake3::hash(&db_a_before_repo_b_scan);
+        let db_a_metadata_before_repo_b_scan = fs::metadata(&db_a)?;
 
         let mut wrong_path_scan_args = Map::new();
         wrong_path_scan_args.insert(
@@ -3250,6 +3255,19 @@ mod tests {
         let scan_b = call_text!("atlas_scan", scan_b_args);
         if !scan_b.contains("scan:") {
             return Err("project_path-selected atlas_scan did not scan repo B".into());
+        }
+        let db_a_after_repo_b_scan = fs::read(&db_a)?;
+        let db_a_hash_after_repo_b_scan = blake3::hash(&db_a_after_repo_b_scan);
+        let db_a_metadata_after_repo_b_scan = fs::metadata(&db_a)?;
+        if db_a_hash_after_repo_b_scan != db_a_hash_before_repo_b_scan
+            || db_a_metadata_after_repo_b_scan.len() != db_a_metadata_before_repo_b_scan.len()
+        {
+            return Err(
+                "project_path-selected atlas_scan mutated the startup project database".into(),
+            );
+        }
+        if !db_b.exists() {
+            return Err("project_path-selected atlas_scan did not create repo B database".into());
         }
 
         let mut indexed_path_scan_b_args = Map::new();
