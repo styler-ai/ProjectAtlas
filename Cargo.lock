@@ -1414,6 +1414,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "projectatlas-lints"
+version = "0.3.19"
+dependencies = [
+ "proc-macro2",
+ "syn",
+]
+
+[[package]]
 name = "projectatlas-service"
 version = "0.3.19"
 dependencies = [

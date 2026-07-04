@@ -269,11 +269,7 @@ pub fn encode_error_text(value: &str) -> String {
 
 /// Render a severity enum as a stable TOON value.
 fn render_severity(severity: Severity) -> &'static str {
-    match severity {
-        Severity::Info => "info",
-        Severity::Warning => "warning",
-        Severity::Error => "error",
-    }
+    severity.as_str()
 }
 
 /// Format an optional savings rate as a stable display label.

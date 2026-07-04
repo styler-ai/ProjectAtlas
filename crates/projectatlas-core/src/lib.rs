@@ -89,24 +89,30 @@ pub enum PurposeStatus {
 
 impl fmt::Display for PurposeStatus {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing => formatter.write_str("missing"),
-            Self::Suggested => formatter.write_str("suggested"),
-            Self::Approved => formatter.write_str("approved"),
-            Self::Stale => formatter.write_str("stale"),
-        }
+        formatter.write_str(self.as_str())
     }
 }
 
 impl PurposeStatus {
+    /// Return the stable database and payload value for this purpose status.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Suggested => "suggested",
+            Self::Approved => "approved",
+            Self::Stale => "stale",
+        }
+    }
+
     /// Parse a database string into a purpose status.
     #[must_use]
     pub fn from_db(value: &str) -> Option<Self> {
         match value {
-            "missing" => Some(Self::Missing),
-            "suggested" => Some(Self::Suggested),
-            "approved" => Some(Self::Approved),
-            "stale" => Some(Self::Stale),
+            value if value == Self::Missing.as_str() => Some(Self::Missing),
+            value if value == Self::Suggested.as_str() => Some(Self::Suggested),
+            value if value == Self::Approved.as_str() => Some(Self::Approved),
+            value if value == Self::Stale.as_str() => Some(Self::Stale),
             _ => None,
         }
     }
@@ -128,11 +134,19 @@ pub enum PurposeSource {
 
 impl fmt::Display for PurposeSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl PurposeSource {
+    /// Return the stable database and payload value for this purpose source.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Missing => formatter.write_str("missing"),
-            Self::Imported => formatter.write_str("imported"),
-            Self::Generated => formatter.write_str("generated"),
-            Self::Agent => formatter.write_str("agent"),
+            Self::Missing => "missing",
+            Self::Imported => "imported",
+            Self::Generated => "generated",
+            Self::Agent => "agent",
         }
     }
 }
@@ -294,8 +308,12 @@ pub const HIGH_IMPACT_PATH_PREFIXES: &[&str] = &[".github/workflows/"];
 /// Path segments that belong in default file-purpose curation.
 pub const HIGH_IMPACT_PATH_SEGMENTS: &[&str] = &["/migrations/", "/routes/", "/commands/", "/mcp"];
 
+/// Legacy stored source value used by older approved human-curated purposes.
+pub const LEGACY_HUMAN_PURPOSE_SOURCE: &str = "human";
+
 /// Stored purpose source values that represent reviewed agent-owned purposes.
-pub const AGENT_REVIEWED_SOURCE_VALUES: &[&str] = &["agent", "human"];
+pub const AGENT_REVIEWED_SOURCE_VALUES: &[&str] =
+    &[PurposeSource::Agent.as_str(), LEGACY_HUMAN_PURPOSE_SOURCE];
 
 /// A node with attached purpose state.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

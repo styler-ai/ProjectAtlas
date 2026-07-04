@@ -256,6 +256,7 @@ ProjectAtlas exposes the same workflow through CLI and MCP:
 
 | Need | CLI | MCP |
 | --- | --- | --- |
+| Select project | `projectatlas --db <repo>/.projectatlas/projectatlas.db ...` | `atlas_set_project_path` / per-call `project_path` |
 | Refresh state | `projectatlas scan` / `projectatlas watch --once` | `atlas_scan` / `atlas_watch_once` |
 | Understand shape | `projectatlas overview` | `atlas_overview` |
 | Pick an area | `projectatlas folders <query>` | `atlas_folders` |

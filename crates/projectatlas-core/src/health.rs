@@ -2,7 +2,63 @@
 
 use crate::{IndexedNode, NodeKind, PurposeStatus, is_high_impact_file_path, normalized_parent};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt, str::FromStr};
+
+/// Health category for paths without purpose metadata.
+pub const CATEGORY_MISSING_PURPOSE: &str = "missing-purpose";
+/// Health category for generated purpose suggestions awaiting review.
+pub const CATEGORY_SUGGESTED_PURPOSE_REVIEW: &str = "suggested-purpose-review";
+/// Health category for approved purposes whose content changed.
+pub const CATEGORY_STALE_PURPOSE: &str = "stale-purpose";
+/// Health category for approved purposes that still need agent review.
+pub const CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED: &str = "purpose-agent-review-required";
+/// Health category for duplicated purpose text.
+pub const CATEGORY_DUPLICATE_PURPOSE: &str = "duplicate-purpose";
+/// Health category for repeated temporary/generated-output folders.
+pub const CATEGORY_REPEATED_TEMPORARY_FOLDER: &str = "repeated-temporary-folder";
+/// Structural categories that are not simple purpose lifecycle states.
+pub const STRUCTURAL_HEALTH_CATEGORIES: [&str; 3] = [
+    CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
+    CATEGORY_DUPLICATE_PURPOSE,
+    CATEGORY_REPEATED_TEMPORARY_FOLDER,
+];
+/// Folder names treated as repeated temporary/generated-output buckets.
+pub const TEMP_FOLDER_BUCKETS: [&str; 6] = ["tmp", "temp", "cache", "generated", "out", "output"];
+
+/// Finding message for missing-purpose rows.
+pub const MESSAGE_MISSING_PURPOSE: &str = "Path is indexed but has no approved purpose.";
+/// Finding recommendation for missing-purpose rows.
+pub const RECOMMENDATION_MISSING_PURPOSE: &str =
+    "Set or approve a one-line purpose in the ProjectAtlas index.";
+/// Queue recommendation for missing-purpose rows.
+pub const RECOMMENDATION_MISSING_PURPOSE_QUEUE: &str =
+    "Set an agent-reviewed one-line purpose in the ProjectAtlas index.";
+/// Finding message for suggested-purpose-review rows.
+pub const MESSAGE_SUGGESTED_PURPOSE_REVIEW: &str =
+    "Path has a generated purpose suggestion but no agent-approved purpose.";
+/// Finding recommendation for suggested-purpose-review rows.
+pub const RECOMMENDATION_SUGGESTED_PURPOSE_REVIEW: &str =
+    "Inspect the folder/file summary and approve or correct the purpose in SQLite.";
+/// Queue recommendation for suggested-purpose-review rows.
+pub const RECOMMENDATION_SUGGESTED_PURPOSE_REVIEW_QUEUE: &str =
+    "Inspect enough context and approve or correct the purpose in SQLite.";
+/// Finding message for stale-purpose rows.
+pub const MESSAGE_STALE_PURPOSE: &str = "Path changed after its purpose was approved.";
+/// Finding recommendation for stale-purpose rows.
+pub const RECOMMENDATION_STALE_PURPOSE: &str =
+    "Inspect the current summary and approve or correct the one-line purpose.";
+/// Finding message for purpose-agent-review-required rows.
+pub const MESSAGE_PURPOSE_AGENT_REVIEW_REQUIRED: &str =
+    "Purpose is approved but has not been reviewed by an agent.";
+/// Finding recommendation for purpose-agent-review-required rows.
+pub const RECOMMENDATION_PURPOSE_AGENT_REVIEW_REQUIRED: &str =
+    "Inspect current context and approve or correct the purpose with purpose set.";
+/// Finding recommendation for duplicate-purpose rows.
+pub const RECOMMENDATION_DUPLICATE_PURPOSE: &str =
+    "Review whether these paths duplicate responsibility or need clearer purposes.";
+/// Finding recommendation for repeated-temporary-folder rows.
+pub const RECOMMENDATION_REPEATED_TEMPORARY_FOLDER: &str =
+    "Consolidate temporary/generated output roots or add an allowlist rationale.";
 
 /// Health finding severity.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -14,6 +70,49 @@ pub enum Severity {
     Warning,
     /// Error finding.
     Error,
+}
+
+impl Severity {
+    /// Return the stable lowercase database and payload value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl fmt::Display for Severity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Error returned when a health severity string is unknown.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseSeverityError;
+
+impl fmt::Display for ParseSeverityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("invalid health severity")
+    }
+}
+
+impl std::error::Error for ParseSeverityError {}
+
+impl FromStr for Severity {
+    type Err = ParseSeverityError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            value if value == Self::Info.as_str() => Ok(Self::Info),
+            value if value == Self::Warning.as_str() => Ok(Self::Warning),
+            value if value == Self::Error.as_str() => Ok(Self::Error),
+            _ => Err(ParseSeverityError),
+        }
+    }
 }
 
 /// Health finding emitted by `ProjectAtlas`.
@@ -76,14 +175,13 @@ fn missing_purpose_findings(nodes: &[IndexedNode]) -> Vec<HealthFinding> {
         .iter()
         .filter(|node| node.purpose.status == PurposeStatus::Missing)
         .map(|node| HealthFinding {
-            id: finding_id("missing-purpose", &node.node.path, None),
+            id: finding_id(CATEGORY_MISSING_PURPOSE, &node.node.path, None),
             severity: Severity::Warning,
-            category: "missing-purpose".to_string(),
+            category: CATEGORY_MISSING_PURPOSE.to_string(),
             path: node.node.path.clone(),
             related_path: None,
-            message: "Path is indexed but has no approved purpose.".to_string(),
-            recommendation: "Set or approve a one-line purpose in the ProjectAtlas index."
-                .to_string(),
+            message: MESSAGE_MISSING_PURPOSE.to_string(),
+            recommendation: RECOMMENDATION_MISSING_PURPOSE.to_string(),
         })
         .collect()
 }
@@ -94,16 +192,13 @@ fn suggested_purpose_findings(nodes: &[IndexedNode]) -> Vec<HealthFinding> {
         .iter()
         .filter(|node| node.purpose.status == PurposeStatus::Suggested)
         .map(|node| HealthFinding {
-            id: finding_id("suggested-purpose-review", &node.node.path, None),
+            id: finding_id(CATEGORY_SUGGESTED_PURPOSE_REVIEW, &node.node.path, None),
             severity: Severity::Warning,
-            category: "suggested-purpose-review".to_string(),
+            category: CATEGORY_SUGGESTED_PURPOSE_REVIEW.to_string(),
             path: node.node.path.clone(),
             related_path: None,
-            message: "Path has a generated purpose suggestion but no agent-approved purpose."
-                .to_string(),
-            recommendation:
-                "Inspect the folder/file summary and approve or correct the purpose in SQLite."
-                    .to_string(),
+            message: MESSAGE_SUGGESTED_PURPOSE_REVIEW.to_string(),
+            recommendation: RECOMMENDATION_SUGGESTED_PURPOSE_REVIEW.to_string(),
         })
         .collect()
 }
@@ -114,15 +209,13 @@ fn stale_purpose_findings(nodes: &[IndexedNode]) -> Vec<HealthFinding> {
         .iter()
         .filter(|node| node.purpose.status == PurposeStatus::Stale)
         .map(|node| HealthFinding {
-            id: finding_id("stale-purpose", &node.node.path, None),
+            id: finding_id(CATEGORY_STALE_PURPOSE, &node.node.path, None),
             severity: Severity::Warning,
-            category: "stale-purpose".to_string(),
+            category: CATEGORY_STALE_PURPOSE.to_string(),
             path: node.node.path.clone(),
             related_path: None,
-            message: "Path changed after its purpose was approved.".to_string(),
-            recommendation:
-                "Inspect the current summary and approve or correct the one-line purpose."
-                    .to_string(),
+            message: MESSAGE_STALE_PURPOSE.to_string(),
+            recommendation: RECOMMENDATION_STALE_PURPOSE.to_string(),
         })
         .collect()
 }
@@ -138,15 +231,17 @@ fn agent_review_required_findings(nodes: &[IndexedNode]) -> Vec<HealthFinding> {
                 || (node.node.kind == NodeKind::File && is_high_impact_file_path(&node.node.path))
         })
         .map(|node| HealthFinding {
-            id: finding_id("purpose-agent-review-required", &node.node.path, None),
+            id: finding_id(
+                CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
+                &node.node.path,
+                None,
+            ),
             severity: Severity::Warning,
-            category: "purpose-agent-review-required".to_string(),
+            category: CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED.to_string(),
             path: node.node.path.clone(),
             related_path: None,
-            message: "Purpose is approved but has not been reviewed by an agent.".to_string(),
-            recommendation:
-                "Inspect current context and approve or correct the purpose with purpose set."
-                    .to_string(),
+            message: MESSAGE_PURPOSE_AGENT_REVIEW_REQUIRED.to_string(),
+            recommendation: RECOMMENDATION_PURPOSE_AGENT_REVIEW_REQUIRED.to_string(),
         })
         .collect()
 }
@@ -179,18 +274,16 @@ fn duplicate_purpose_findings(nodes: &[IndexedNode]) -> Vec<HealthFinding> {
         for duplicate in matches.iter().skip(1) {
             findings.push(HealthFinding {
                 id: finding_id(
-                    "duplicate-purpose",
+                    CATEGORY_DUPLICATE_PURPOSE,
                     &duplicate.node.path,
                     Some(&first.node.path),
                 ),
                 severity: Severity::Warning,
-                category: "duplicate-purpose".to_string(),
+                category: CATEGORY_DUPLICATE_PURPOSE.to_string(),
                 path: duplicate.node.path.clone(),
                 related_path: Some(first.node.path.clone()),
                 message: format!("Multiple {kind} nodes share the same purpose."),
-                recommendation:
-                    "Review whether these paths duplicate responsibility or need clearer purposes."
-                        .to_string(),
+                recommendation: RECOMMENDATION_DUPLICATE_PURPOSE.to_string(),
             });
         }
     }
@@ -208,7 +301,6 @@ fn duplicate_context_key(node: &IndexedNode) -> String {
 
 /// Find repeated temporary or generated-output folders.
 fn temp_folder_findings(nodes: &[IndexedNode]) -> Vec<HealthFinding> {
-    let suspicious = ["tmp", "temp", "cache", "generated", "out", "output"];
     let mut buckets: HashMap<&str, Vec<&IndexedNode>> = HashMap::new();
     for node in nodes
         .iter()
@@ -218,7 +310,7 @@ fn temp_folder_findings(nodes: &[IndexedNode]) -> Vec<HealthFinding> {
             continue;
         };
         let normalized = name.to_lowercase();
-        if let Some(bucket) = suspicious
+        if let Some(bucket) = TEMP_FOLDER_BUCKETS
             .iter()
             .find(|candidate| **candidate == normalized)
         {
@@ -234,18 +326,16 @@ fn temp_folder_findings(nodes: &[IndexedNode]) -> Vec<HealthFinding> {
         for duplicate in matches.iter().skip(1) {
             findings.push(HealthFinding {
                 id: finding_id(
-                    "repeated-temporary-folder",
+                    CATEGORY_REPEATED_TEMPORARY_FOLDER,
                     &duplicate.node.path,
                     Some(&first.node.path),
                 ),
                 severity: Severity::Warning,
-                category: "repeated-temporary-folder".to_string(),
+                category: CATEGORY_REPEATED_TEMPORARY_FOLDER.to_string(),
                 path: duplicate.node.path.clone(),
                 related_path: Some(first.node.path.clone()),
                 message: format!("Repeated temporary/generated folder name `{bucket}` found."),
-                recommendation:
-                    "Consolidate temporary/generated output roots or add an allowlist rationale."
-                        .to_string(),
+                recommendation: RECOMMENDATION_REPEATED_TEMPORARY_FOLDER.to_string(),
             });
         }
     }
@@ -277,8 +367,8 @@ mod tests {
         ];
 
         let findings = health_check(&nodes);
-        require_category(&findings, "suggested-purpose-review")?;
-        reject_category(&findings, "duplicate-purpose")?;
+        require_category(&findings, CATEGORY_SUGGESTED_PURPOSE_REVIEW)?;
+        reject_category(&findings, CATEGORY_DUPLICATE_PURPOSE)?;
         Ok(())
     }
 
@@ -309,10 +399,18 @@ mod tests {
         ];
 
         let findings = health_check(&nodes);
-        require_category(&findings, "purpose-agent-review-required")?;
-        require_path(&findings, "purpose-agent-review-required", ".")?;
-        require_path(&findings, "purpose-agent-review-required", "Cargo.toml")?;
-        reject_path(&findings, "purpose-agent-review-required", "src/detail.rs")?;
+        require_category(&findings, CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED)?;
+        require_path(&findings, CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED, ".")?;
+        require_path(
+            &findings,
+            CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
+            "Cargo.toml",
+        )?;
+        reject_path(
+            &findings,
+            CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
+            "src/detail.rs",
+        )?;
         Ok(())
     }
 
@@ -334,8 +432,8 @@ mod tests {
         ];
 
         let findings = health_check(&nodes);
-        require_category(&findings, "duplicate-purpose")?;
-        reject_category(&findings, "suggested-purpose-review")?;
+        require_category(&findings, CATEGORY_DUPLICATE_PURPOSE)?;
+        reject_category(&findings, CATEGORY_SUGGESTED_PURPOSE_REVIEW)?;
         Ok(())
     }
 
@@ -357,7 +455,7 @@ mod tests {
         ];
 
         let findings = health_check(&nodes);
-        reject_category(&findings, "duplicate-purpose")?;
+        reject_category(&findings, CATEGORY_DUPLICATE_PURPOSE)?;
         Ok(())
     }
 

@@ -1,0 +1,2 @@
+[alias]
+projectatlas-lints = "run --locked --package projectatlas-lints --bin cargo-projectatlas-lints --"

@@ -21,7 +21,8 @@ use projectatlas_core::toon::{
     render_symbol_relations, render_symbols, render_token_overview, render_token_trends,
 };
 use projectatlas_core::{
-    NodeKind, PurposeSource, normalize_native_path_display, normalize_repo_path_prefix,
+    NodeKind, PurposeSource, PurposeStatus, normalize_native_path_display,
+    normalize_repo_path_prefix,
 };
 use projectatlas_db::{AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope};
 use projectatlas_service::{
@@ -64,6 +65,8 @@ const WATCH_MODE_ONCE: &str = "single-refresh";
 const WATCH_MODE_NOTIFY: &str = "notify";
 /// Portable fallback watcher mode.
 const WATCH_MODE_POLLING: &str = "portable-polling";
+/// Default parity profile for repository-intelligence checks.
+pub(crate) const REPOSITORY_INTELLIGENCE_PROFILE: &str = "repository-intelligence";
 
 /// Error type for CLI boundary failures.
 #[derive(Debug, Error)]
@@ -481,7 +484,7 @@ enum Command {
         #[command(subcommand)]
         command: Option<ParityCommand>,
         /// Parity profile to evaluate when omitting the `report` subcommand.
-        #[arg(long, default_value = "repository-intelligence")]
+        #[arg(long, default_value = REPOSITORY_INTELLIGENCE_PROFILE)]
         profile: String,
     },
     /// Dry-run or apply cleanup of legacy `.purpose` metadata files.
@@ -625,7 +628,7 @@ enum ParityCommand {
     /// Report whether the current index satisfies a parity profile.
     Report {
         /// Parity profile to evaluate.
-        #[arg(long, default_value = "repository-intelligence")]
+        #[arg(long, default_value = REPOSITORY_INTELLIGENCE_PROFILE)]
         profile: String,
     },
 }
@@ -1350,14 +1353,14 @@ fn run() -> Result<(), CliError> {
             PurposeCommand::Set { path, purpose } => {
                 let store = open_atlas_store(&cli.db)?;
                 store.set_purpose(path, purpose, PurposeSource::Agent)?;
-                let report = json!({
-                    "purpose_set": {
-                        "path": path,
-                        "status": "approved",
-                        "source": "agent",
-                        "agent_reviewed": true
-                    }
-                });
+                let report = PurposeSetReport {
+                    purpose_set: PurposeSetPayload {
+                        path: path.clone(),
+                        status: PurposeStatus::Approved,
+                        source: PurposeSource::Agent,
+                        agent_reviewed: true,
+                    },
+                };
                 print_output(cli.format, &encode_agent_payload(&report), &report)?;
             }
             PurposeCommand::Review { from_file, apply } => {
@@ -1796,6 +1799,26 @@ fn print_tracked_output_text<T: serde::Serialize>(
     write_stdout(&output)
 }
 
+/// Agent-facing payload for a CLI purpose update.
+#[derive(Debug, Serialize)]
+struct PurposeSetReport {
+    /// Purpose update result details.
+    purpose_set: PurposeSetPayload,
+}
+
+/// Stable serialized schema for a CLI purpose update.
+#[derive(Debug, Serialize)]
+struct PurposeSetPayload {
+    /// Indexed repository-relative path whose purpose was updated.
+    path: String,
+    /// Durable purpose status after the update.
+    status: PurposeStatus,
+    /// Source of the durable purpose after the update.
+    source: PurposeSource,
+    /// Whether the purpose has been agent-reviewed.
+    agent_reviewed: bool,
+}
+
 /// Repository-intelligence parity report.
 #[derive(Debug, Serialize)]
 struct ParityReport {
@@ -1828,10 +1851,27 @@ struct ParityReport {
 struct ParityCheck {
     /// Stable check name.
     name: String,
-    /// `pass` or `fail`.
-    status: String,
+    /// Stable check status.
+    status: ParityCheckStatus,
     /// Concrete evidence for this check.
     detail: String,
+}
+
+/// Stable status values for repository-intelligence parity checks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ParityCheckStatus {
+    /// The parity check passed.
+    Pass,
+    /// The parity check failed.
+    Fail,
+}
+
+impl ParityCheckStatus {
+    /// Return a check status from a boolean predicate.
+    fn from_passed(passed: bool) -> Self {
+        if passed { Self::Pass } else { Self::Fail }
+    }
 }
 
 /// `.mcp.json` compatible server configuration document.
@@ -2019,7 +2059,7 @@ fn render_watch_status(report: &WatchStatusReport) -> String {
 
 /// Build the current repository-intelligence parity report.
 fn build_parity_report(store: &AtlasStore, profile: &str) -> Result<ParityReport, CliError> {
-    if profile != "repository-intelligence" {
+    if profile != REPOSITORY_INTELLIGENCE_PROFILE {
         return Err(CliError::InvalidInput(format!(
             "unsupported parity profile {profile:?}"
         )));
@@ -2109,7 +2149,9 @@ fn build_parity_report(store: &AtlasStore, profile: &str) -> Result<ParityReport
         mcp::required_mcp_surface_present(),
         "atlas_* tools cover scan, overview, folders, files, summary, outline, search, slice, symbols, health, token, settings, watch, parity, and reset-index",
     );
-    let ok = checks.iter().all(|check| check.status == "pass");
+    let ok = checks
+        .iter()
+        .all(|check| check.status == ParityCheckStatus::Pass);
     Ok(ParityReport {
         profile: profile.to_string(),
         ok,
@@ -2129,7 +2171,7 @@ fn build_parity_report(store: &AtlasStore, profile: &str) -> Result<ParityReport
 fn push_check(checks: &mut Vec<ParityCheck>, name: &str, passed: bool, detail: &str) {
     checks.push(ParityCheck {
         name: name.to_string(),
-        status: if passed { "pass" } else { "fail" }.to_string(),
+        status: ParityCheckStatus::from_passed(passed),
         detail: detail.to_string(),
     });
 }
@@ -3124,6 +3166,190 @@ mod tests {
                 "atlas_purpose_queue include_low_priority_files missed low-priority file payload: {broad_purpose_queue_text}"
             )
             .into());
+        }
+
+        client.cancel().await?;
+        server_handle.await?.map_err(std::io::Error::other)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mcp_project_path_overrides_keep_projects_isolated() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo_a = temp.path().join("repo-a");
+        let repo_b = temp.path().join("repo-b");
+        for repo in [&repo_a, &repo_b] {
+            fs::create_dir(repo)?;
+            fs::create_dir(repo.join("src"))?;
+        }
+        fs::write(
+            repo_a.join("src").join("lib.rs"),
+            "pub fn alpha_project_a_marker() {}\n",
+        )?;
+        fs::write(
+            repo_b.join("src").join("lib.rs"),
+            "pub fn beta_project_b_marker() {}\n",
+        )?;
+
+        let db_a = repo_a.join(".projectatlas").join("projectatlas.db");
+        let server = ProjectAtlasMcpServer::new(db_a, None, "mcp-multi-project-test".to_string());
+        let (server_transport, client_transport) = tokio::io::duplex(16_384);
+        let server_handle = tokio::spawn(async move {
+            server
+                .serve(server_transport)
+                .await
+                .map_err(|error| error.to_string())?
+                .waiting()
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok::<(), String>(())
+        });
+        let client = TestMcpClient.serve(client_transport).await?;
+
+        macro_rules! call_text {
+            ($tool:literal, $args:expr) => {{
+                let result = client
+                    .peer()
+                    .call_tool(CallToolRequestParams::new($tool).with_arguments($args))
+                    .await?;
+                result
+                    .content
+                    .first()
+                    .and_then(|content| content.raw.as_text())
+                    .map(|text| text.text.clone())
+                    .ok_or_else(|| {
+                        std::io::Error::other(format!("{} result did not contain text", $tool))
+                    })?
+            }};
+        }
+
+        let scan_a = call_text!("atlas_scan", Map::new());
+        if !scan_a.contains("scan:") {
+            return Err("default atlas_scan did not scan the startup project".into());
+        }
+
+        let mut wrong_path_scan_args = Map::new();
+        wrong_path_scan_args.insert(
+            "path".to_string(),
+            json!(repo_b.to_string_lossy().to_string()),
+        );
+        let wrong_path_scan = call_text!("atlas_scan", wrong_path_scan_args);
+        if !wrong_path_scan.contains("outside the selected project root")
+            || !wrong_path_scan.contains("normal filesystem tools")
+        {
+            return Err(
+                "atlas_scan allowed unindexed path-based access outside the active project".into(),
+            );
+        }
+
+        let mut scan_b_args = Map::new();
+        scan_b_args.insert(
+            "project_path".to_string(),
+            json!(repo_b.to_string_lossy().to_string()),
+        );
+        let scan_b = call_text!("atlas_scan", scan_b_args);
+        if !scan_b.contains("scan:") {
+            return Err("project_path-selected atlas_scan did not scan repo B".into());
+        }
+
+        let mut indexed_path_scan_b_args = Map::new();
+        indexed_path_scan_b_args.insert(
+            "path".to_string(),
+            json!(repo_b.to_string_lossy().to_string()),
+        );
+        let indexed_path_scan_b = call_text!("atlas_scan", indexed_path_scan_b_args);
+        if !indexed_path_scan_b.contains("scan:") {
+            return Err("atlas_scan did not auto-route to an already indexed project path".into());
+        }
+
+        let mut search_b_args = Map::new();
+        search_b_args.insert(
+            "project_path".to_string(),
+            json!(repo_b.to_string_lossy().to_string()),
+        );
+        search_b_args.insert("pattern".to_string(), json!("beta_project_b_marker"));
+        let search_b = call_text!("atlas_search", search_b_args);
+        if !search_b.contains("beta_project_b_marker") {
+            return Err("per-call project_path search did not read repo B".into());
+        }
+
+        let mut default_search_a_args = Map::new();
+        default_search_a_args.insert("pattern".to_string(), json!("alpha_project_a_marker"));
+        let default_search_a = call_text!("atlas_search", default_search_a_args);
+        if !default_search_a.contains("alpha_project_a_marker")
+            || default_search_a.contains("beta_project_b_marker")
+        {
+            return Err("project_path-selected scan leaked into the active project".into());
+        }
+
+        let mut set_b_args = Map::new();
+        set_b_args.insert(
+            "project_path".to_string(),
+            json!(repo_b.to_string_lossy().to_string()),
+        );
+        let set_b = call_text!("atlas_set_project_path", set_b_args);
+        if !set_b.contains("project:") || !set_b.contains("status: active") {
+            return Err("atlas_set_project_path did not report active project state".into());
+        }
+
+        let mut default_search_b_args = Map::new();
+        default_search_b_args.insert("pattern".to_string(), json!("beta_project_b_marker"));
+        let default_search_b = call_text!("atlas_search", default_search_b_args);
+        if !default_search_b.contains("beta_project_b_marker")
+            || default_search_b.contains("alpha_project_a_marker")
+        {
+            return Err("atlas_set_project_path did not switch the active project".into());
+        }
+
+        let mut override_search_a_args = Map::new();
+        override_search_a_args.insert(
+            "project_path".to_string(),
+            json!(repo_a.to_string_lossy().to_string()),
+        );
+        override_search_a_args.insert("pattern".to_string(), json!("alpha_project_a_marker"));
+        let override_search_a = call_text!("atlas_search", override_search_a_args);
+        if !override_search_a.contains("alpha_project_a_marker") {
+            return Err("per-call project_path search did not read repo A".into());
+        }
+
+        let empty_repo = temp.path().join("repo-empty");
+        fs::create_dir(&empty_repo)?;
+        let mut missing_index_args = Map::new();
+        missing_index_args.insert(
+            "project_path".to_string(),
+            json!(empty_repo.to_string_lossy().to_string()),
+        );
+        let missing_index_overview = call_text!("atlas_overview", missing_index_args);
+        if !missing_index_overview.contains("index")
+            || !missing_index_overview.contains("atlas_scan")
+            || empty_repo.join(".projectatlas").exists()
+        {
+            return Err(
+                "read-only per-call project_path did not fail cleanly for a missing index".into(),
+            );
+        }
+
+        let mut still_default_b_args = Map::new();
+        still_default_b_args.insert("pattern".to_string(), json!("beta_project_b_marker"));
+        let still_default_b = call_text!("atlas_search", still_default_b_args);
+        if !still_default_b.contains("beta_project_b_marker")
+            || still_default_b.contains("alpha_project_a_marker")
+        {
+            return Err("per-call project_path override mutated active project state".into());
+        }
+
+        let mut mismatched_scan_args = Map::new();
+        mismatched_scan_args.insert(
+            "project_path".to_string(),
+            json!(repo_b.to_string_lossy().to_string()),
+        );
+        mismatched_scan_args.insert(
+            "path".to_string(),
+            json!(repo_a.to_string_lossy().to_string()),
+        );
+        let mismatched_scan = call_text!("atlas_scan", mismatched_scan_args);
+        if !mismatched_scan.contains("outside the selected project root") {
+            return Err("atlas_scan did not reject mismatched project_path/path roots".into());
         }
 
         client.cancel().await?;

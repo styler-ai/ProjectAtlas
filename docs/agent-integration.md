@@ -83,9 +83,17 @@ also resolves path-less root-sensitive tools from config, indexed DB metadata, o
 `.projectatlas/projectatlas.db` location so clients that ignore `cwd` still use the intended project
 root.
 
-MCP root-changing tool arguments such as `atlas_scan.path` and `atlas_watch_once.path` are constrained
-to that bound project root. Start a separate project-local MCP server instead of pointing one
-project's DB/config at another repository.
+One MCP server can serve multiple repositories. Use `atlas_set_project_path` to change the active
+process default for later calls in a single-client stdio session, or pass per-call `project_path`
+on normal `atlas_*` tools when a host knows the workspace root and needs request-level or shared
+server isolation. Do not use the active default as a concurrency boundary. Root-level compatibility arguments
+such as `atlas_scan.path` and `atlas_watch_once.path` are selected-root assertions first. If they
+resolve outside the active project and the addressed root already has
+`.projectatlas/projectatlas.db`, ProjectAtlas may route that call to the addressed indexed project.
+If the addressed root is not already indexed, the tool returns a clear error and the agent must
+switch with `atlas_set_project_path`, pass the correct `project_path`, or use ordinary filesystem
+tools instead of ProjectAtlas for out-of-project files. File, folder, slice, purpose, health, and
+search paths remain repository-relative inside the selected project.
 
 The plugin no longer ships a PATH-based fallback `.mcp.json`. Registering a plugin-level MCP file with
 `command = "projectatlas"` is not portable across Windows, Linux, and macOS because an already-running
@@ -195,6 +203,7 @@ and the expected release `version` when a plugin manifest or `PROJECTATLAS_VERSI
 
 Prefer MCP tools when the harness exposes them:
 
+0. `atlas_set_project_path` or per-call `project_path`: select the repository when one MCP server may serve multiple projects; prefer per-call `project_path` for shared or concurrent hosts.
 1. `atlas_scan`: refresh repository, purpose, and symbol state.
 2. `atlas_overview`: inspect repository scale and purpose coverage.
 3. `atlas_folders`: choose the work area from folder purpose and path.
@@ -223,6 +232,7 @@ This preserves normal atlas reads while preventing usage telemetry writes to `.p
 
 | Situation | Preferred MCP tool | CLI fallback |
 | --- | --- | --- |
+| One MCP server may serve another repository | `atlas_set_project_path` or per-call `project_path` | `projectatlas --db <repo>/.projectatlas/projectatlas.db ...` |
 | Start a non-trivial repo task | `atlas_scan` if stale, then `atlas_overview` | `projectatlas scan`, then `projectatlas overview` |
 | Choose the work area | `atlas_folders` | `projectatlas folders <query>` |
 | Choose files inside a work area | `atlas_files` | `projectatlas files <query> --folder <path>` |

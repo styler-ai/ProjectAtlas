@@ -11,7 +11,11 @@ use crate::{
     CliError, OutputFormat, WATCH_MODE_NOTIFY, WATCH_MODE_ONCE, WATCH_MODE_POLLING, truthy_env,
 };
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use projectatlas_core::health::Severity;
+use projectatlas_core::health::{
+    CATEGORY_DUPLICATE_PURPOSE, CATEGORY_MISSING_PURPOSE, CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
+    CATEGORY_REPEATED_TEMPORARY_FOLDER, CATEGORY_STALE_PURPOSE, CATEGORY_SUGGESTED_PURPOSE_REVIEW,
+    Severity,
+};
 use projectatlas_core::language::{LanguageParserSupport, language_spec};
 use projectatlas_core::outline::estimate_tokens;
 use projectatlas_core::symbols::{RelationKind, SymbolGraph, SymbolKind};
@@ -180,6 +184,20 @@ pub(crate) fn ensure_parent_dir(path: &Path) -> Result<(), CliError> {
     })
 }
 
+/// Build the standard config/root mismatch error.
+pub(crate) fn config_root_mismatch_error(
+    config_path: &Path,
+    config_root: &Path,
+    selected_root: &Path,
+) -> CliError {
+    CliError::InvalidInput(format!(
+        "ProjectAtlas config '{}' resolves project root '{}' outside selected project root '{}'",
+        config_path.display(),
+        config_root.display(),
+        selected_root.display()
+    ))
+}
+
 /// Resolve the default MCP project root without trusting the process cwd.
 pub(crate) fn default_mcp_project_root(
     db: &Path,
@@ -187,7 +205,18 @@ pub(crate) fn default_mcp_project_root(
 ) -> Result<PathBuf, CliError> {
     if let Some(config_path) = config_path {
         let config = load_atlas_config(Some(config_path))?;
-        return canonical_project_root(&config.root);
+        let config_root = canonical_project_root(&config.root)?;
+        if let Some(db_root) = project_root_from_db_path(db) {
+            let db_root = canonical_project_root(&db_root)?;
+            if config_root != db_root {
+                return Err(config_root_mismatch_error(
+                    config_path,
+                    &config_root,
+                    &db_root,
+                ));
+            }
+        }
+        return Ok(config_root);
     }
     if db.exists() {
         let store = AtlasStore::open(db)?;
@@ -588,7 +617,7 @@ pub(crate) struct PurposeReviewItem {
     /// Indexed repository-relative path.
     pub(crate) path: String,
     /// Action selected for this path.
-    pub(crate) action: String,
+    pub(crate) action: PurposeReviewAction,
     /// Current purpose lifecycle status.
     pub(crate) current_status: String,
     /// Current purpose source.
@@ -597,6 +626,20 @@ pub(crate) struct PurposeReviewItem {
     pub(crate) purpose: String,
     /// Validation or persistence error.
     pub(crate) error: String,
+}
+
+/// Stable purpose-review action values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum PurposeReviewAction {
+    /// The item failed validation.
+    Error,
+    /// The existing reviewed purpose already matches.
+    Skip,
+    /// The reviewed purpose was applied.
+    Review,
+    /// The reviewed purpose would be applied in preview mode.
+    WouldReview,
 }
 
 /// Validate and optionally apply a batch of agent-reviewed purpose records.
@@ -611,9 +654,12 @@ pub(crate) fn review_purposes(
     }
     let changed = items
         .iter()
-        .filter(|item| item.error.is_empty() && item.action != "skip")
+        .filter(|item| item.error.is_empty() && item.action != PurposeReviewAction::Skip)
         .count();
-    let skipped = items.iter().filter(|item| item.action == "skip").count();
+    let skipped = items
+        .iter()
+        .filter(|item| item.action == PurposeReviewAction::Skip)
+        .count();
     let failed = items.iter().filter(|item| !item.error.is_empty()).count();
     Ok(PurposeReviewReport {
         applied: apply,
@@ -640,7 +686,7 @@ fn review_purpose_request(
     let Some(indexed) = store.load_node_by_path(&path)? else {
         return Ok(PurposeReviewItem {
             path,
-            action: "error".to_string(),
+            action: PurposeReviewAction::Error,
             current_status: String::new(),
             current_source: String::new(),
             purpose: request.purpose.clone().unwrap_or_default(),
@@ -663,7 +709,7 @@ fn review_purpose_request(
     }) else {
         return Ok(PurposeReviewItem {
             path,
-            action: "error".to_string(),
+            action: PurposeReviewAction::Error,
             current_status,
             current_source,
             purpose: String::new(),
@@ -678,7 +724,7 @@ fn review_purpose_request(
     {
         return Ok(PurposeReviewItem {
             path,
-            action: "error".to_string(),
+            action: PurposeReviewAction::Error,
             current_status,
             current_source,
             purpose: current_purpose,
@@ -688,16 +734,16 @@ fn review_purpose_request(
 
     let reviewed_purpose = reviewed_purpose.trim().to_string();
     let action = if indexed.purpose.agent_reviewed() && current_purpose == reviewed_purpose {
-        "skip"
+        PurposeReviewAction::Skip
     } else if apply {
         store.set_purpose(&path, &reviewed_purpose, PurposeSource::Agent)?;
-        "review"
+        PurposeReviewAction::Review
     } else {
-        "would-review"
+        PurposeReviewAction::WouldReview
     };
     Ok(PurposeReviewItem {
         path,
-        action: action.to_string(),
+        action,
         current_status,
         current_source,
         purpose: reviewed_purpose,
@@ -879,11 +925,7 @@ fn purpose_queue_file_scope(query: &HealthQuery) -> &'static str {
 
 /// Return a stable lowercase severity name.
 pub(crate) fn health_severity_name(severity: Severity) -> &'static str {
-    match severity {
-        Severity::Info => "info",
-        Severity::Warning => "warning",
-        Severity::Error => "error",
-    }
+    severity.as_str()
 }
 
 /// Return the next start index for a bounded health page.
@@ -1529,10 +1571,12 @@ impl PurposeLintLevel {
     /// Return whether a category should make lint fail at this strictness.
     fn blocks_category(self, category: &str) -> bool {
         match category {
-            "stale-purpose" | "duplicate-purpose" | "repeated-temporary-folder" => true,
-            "missing-purpose" | "suggested-purpose-review" | "purpose-agent-review-required" => {
-                self != Self::Low
-            }
+            CATEGORY_STALE_PURPOSE
+            | CATEGORY_DUPLICATE_PURPOSE
+            | CATEGORY_REPEATED_TEMPORARY_FOLDER => true,
+            CATEGORY_MISSING_PURPOSE
+            | CATEGORY_SUGGESTED_PURPOSE_REVIEW
+            | CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED => self != Self::Low,
             _ => false,
         }
     }
