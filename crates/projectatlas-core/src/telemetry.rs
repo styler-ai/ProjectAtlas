@@ -46,6 +46,33 @@ pub const TOKEN_ESTIMATE_METHOD_HEURISTIC: &str = "heuristic_chars_or_bytes_div_
 pub const TOKEN_DEDUPE_SCOPE_EVENT: &str = "event";
 /// Dedupe scope for repeated modeled workflow baselines in one session.
 pub const TOKEN_DEDUPE_SCOPE_SESSION: &str = "session";
+/// Read-avoidance confidence for directly observed full-file compression events.
+pub const READ_AVOIDANCE_CONFIDENCE_OBSERVED: &str = "observed";
+/// Read-avoidance confidence for modeled navigation events.
+pub const READ_AVOIDANCE_CONFIDENCE_MODELED: &str = "modeled";
+/// Read-avoidance confidence when raw command evidence is unavailable.
+pub const READ_AVOIDANCE_CONFIDENCE_NOT_RECORDED: &str = "not_recorded";
+/// Human-facing explanation for likely read-avoidance counters.
+pub const READ_AVOIDANCE_SCOPE: &str =
+    "summary_search_slice_calls_that_likely_replaced_whole_file_reads";
+/// CLI command label for file summaries.
+pub const TOKEN_COMMAND_SUMMARY: &str = "summary";
+/// CLI command label for file outlines.
+pub const TOKEN_COMMAND_OUTLINE: &str = "outline";
+/// CLI command label for source slices.
+pub const TOKEN_COMMAND_SLICE: &str = "slice";
+/// CLI command label for symbol slices.
+pub const TOKEN_COMMAND_SYMBOL_SLICE: &str = "symbol-slice";
+/// CLI command label for indexed search.
+pub const TOKEN_COMMAND_SEARCH: &str = "search";
+/// MCP event label for file summaries.
+pub const TOKEN_COMMAND_MCP_FILE_SUMMARY: &str = "mcp.atlas_file_summary";
+/// MCP event label for file outlines.
+pub const TOKEN_COMMAND_MCP_OUTLINE: &str = "mcp.atlas_outline";
+/// MCP event label for source slices.
+pub const TOKEN_COMMAND_MCP_SLICE: &str = "mcp.atlas_slice";
+/// MCP event label for indexed search.
+pub const TOKEN_COMMAND_MCP_SEARCH: &str = "mcp.atlas_search";
 
 /// Token savings event for a funnel command.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -203,6 +230,21 @@ pub struct TokenOverview {
     pub legacy_gross_estimated_saved: isize,
     /// Number of duplicate modeled baseline events collapsed by dedupe.
     pub repeated_baselines_deduped: usize,
+    /// Observed `ProjectAtlas` summary/search/slice calls compared with whole-file reads.
+    #[serde(default)]
+    pub observed_file_read_replacements: usize,
+    /// Modeled `ProjectAtlas` navigation calls that likely avoided whole-file reads.
+    #[serde(default)]
+    pub modeled_file_reads_avoided: usize,
+    /// Total likely whole-file reads avoided.
+    #[serde(default)]
+    pub likely_file_reads_avoided: usize,
+    /// Scope label for read-avoidance counters.
+    #[serde(default = "default_read_avoidance_scope")]
+    pub read_avoidance_scope: String,
+    /// Confidence label for read-avoidance counters.
+    #[serde(default = "default_read_avoidance_confidence")]
+    pub read_avoidance_confidence: String,
     /// Optional local tokenizer calibration for indexed UTF-8 files.
     pub calibration: Option<TokenCalibrationOverview>,
 }
@@ -372,6 +414,11 @@ impl TokenOverview {
             tokens_avoided,
             legacy_gross_estimated_saved: saved,
             repeated_baselines_deduped: 0,
+            observed_file_read_replacements: 0,
+            modeled_file_reads_avoided: 0,
+            likely_file_reads_avoided: 0,
+            read_avoidance_scope: READ_AVOIDANCE_SCOPE.to_string(),
+            read_avoidance_confidence: READ_AVOIDANCE_CONFIDENCE_NOT_RECORDED.to_string(),
             calibration: None,
             buckets,
         }
@@ -390,6 +437,14 @@ impl TokenOverview {
         self.deduped_modeled_tokens_avoided = summary.deduped_modeled_tokens_avoided;
         self.tokens_avoided = summary.tokens_avoided;
         self.repeated_baselines_deduped = summary.repeated_baselines_deduped;
+        self.observed_file_read_replacements = summary.observed_file_read_replacements;
+        self.modeled_file_reads_avoided = summary.modeled_file_reads_avoided;
+        self.likely_file_reads_avoided = summary.likely_file_reads_avoided;
+        self.read_avoidance_confidence = read_avoidance_confidence_for(
+            self.observed_file_read_replacements,
+            self.modeled_file_reads_avoided,
+        )
+        .to_string();
     }
 }
 
@@ -576,6 +631,12 @@ struct TokenAccountingSummary {
     tokens_avoided: isize,
     /// Number of duplicate modeled baseline events collapsed by dedupe.
     repeated_baselines_deduped: usize,
+    /// Observed `ProjectAtlas` calls compared with full-file reads.
+    observed_file_read_replacements: usize,
+    /// Modeled `ProjectAtlas` calls that likely avoided whole-file reads.
+    modeled_file_reads_avoided: usize,
+    /// Total likely whole-file reads avoided.
+    likely_file_reads_avoided: usize,
 }
 
 impl TokenAccountingSummary {
@@ -584,6 +645,8 @@ impl TokenAccountingSummary {
         let mut measured_tokens_saved = 0isize;
         let mut gross_modeled_tokens_avoided = 0isize;
         let mut event_scoped_modeled_tokens_avoided = 0isize;
+        let mut observed_file_read_replacements = 0usize;
+        let mut modeled_file_reads_avoided = 0usize;
         let mut modeled_baselines = BTreeMap::<ModeledBaselineKey, ModeledBaselineTotals>::new();
 
         for event in events {
@@ -596,10 +659,17 @@ impl TokenAccountingSummary {
             let delta = token_delta(without, with);
             if is_observed_event(event) {
                 measured_tokens_saved = saturating_isize_add(measured_tokens_saved, delta);
+                if is_observed_read_replacement_event(event, without) {
+                    observed_file_read_replacements =
+                        observed_file_read_replacements.saturating_add(1);
+                }
                 continue;
             }
             if !is_modeled_event(event) {
                 continue;
+            }
+            if is_modeled_read_avoidance_event(event, without) {
+                modeled_file_reads_avoided = modeled_file_reads_avoided.saturating_add(1);
             }
             gross_modeled_tokens_avoided =
                 saturating_isize_add(gross_modeled_tokens_avoided, delta);
@@ -633,12 +703,17 @@ impl TokenAccountingSummary {
         }
         let tokens_avoided =
             saturating_isize_add(measured_tokens_saved, deduped_modeled_tokens_avoided);
+        let likely_file_reads_avoided =
+            observed_file_read_replacements.saturating_add(modeled_file_reads_avoided);
         Self {
             measured_tokens_saved,
             gross_modeled_tokens_avoided,
             deduped_modeled_tokens_avoided,
             tokens_avoided,
             repeated_baselines_deduped,
+            observed_file_read_replacements,
+            modeled_file_reads_avoided,
+            likely_file_reads_avoided,
         }
     }
 }
@@ -934,6 +1009,18 @@ pub fn default_dedupe_scope() -> String {
     TOKEN_DEDUPE_SCOPE_SESSION.to_string()
 }
 
+/// Default read-avoidance scope for legacy serialized overviews.
+#[must_use]
+pub fn default_read_avoidance_scope() -> String {
+    READ_AVOIDANCE_SCOPE.to_string()
+}
+
+/// Default read-avoidance confidence for legacy serialized overviews.
+#[must_use]
+pub fn default_read_avoidance_confidence() -> String {
+    READ_AVOIDANCE_CONFIDENCE_NOT_RECORDED.to_string()
+}
+
 /// Build a stable baseline identity from existing event context.
 #[must_use]
 pub fn default_baseline_identity(
@@ -1021,6 +1108,45 @@ fn is_modeled_event(event: &UsageEvent) -> bool {
     event.accounting_layer == TOKEN_ACCOUNTING_MODELED_AVOIDANCE || !is_observed_event(event)
 }
 
+/// Whether a raw observed event is strong evidence for replacing a whole-file read.
+fn is_observed_read_replacement_event(event: &UsageEvent, baseline_tokens: usize) -> bool {
+    baseline_tokens > 0
+        && matches!(
+            event.command.as_str(),
+            TOKEN_COMMAND_SUMMARY
+                | TOKEN_COMMAND_OUTLINE
+                | TOKEN_COMMAND_SLICE
+                | TOKEN_COMMAND_SYMBOL_SLICE
+                | TOKEN_COMMAND_MCP_FILE_SUMMARY
+                | TOKEN_COMMAND_MCP_OUTLINE
+                | TOKEN_COMMAND_MCP_SLICE
+        )
+}
+
+/// Whether a raw modeled event is strong evidence for avoiding a broad file read.
+fn is_modeled_read_avoidance_event(event: &UsageEvent, baseline_tokens: usize) -> bool {
+    baseline_tokens > 0
+        && matches!(
+            event.command.as_str(),
+            TOKEN_COMMAND_SEARCH | TOKEN_COMMAND_MCP_SEARCH
+        )
+        && event.denominator_kind == TOKEN_BASELINE_SELECTED_CANDIDATES
+}
+
+/// Return the confidence label for read-avoidance counters.
+fn read_avoidance_confidence_for(
+    observed_file_read_replacements: usize,
+    modeled_file_reads_avoided: usize,
+) -> &'static str {
+    if observed_file_read_replacements == 0 && modeled_file_reads_avoided == 0 {
+        READ_AVOIDANCE_CONFIDENCE_NOT_RECORDED
+    } else if modeled_file_reads_avoided == 0 {
+        READ_AVOIDANCE_CONFIDENCE_OBSERVED
+    } else {
+        READ_AVOIDANCE_CONFIDENCE_MODELED
+    }
+}
+
 /// Whether a bucket represents observed before/after source compression.
 fn is_observed_bucket(bucket: &TokenBucketOverview) -> bool {
     bucket.accounting_layer == TOKEN_ACCOUNTING_OBSERVED_DELTA
@@ -1036,6 +1162,8 @@ fn is_modeled_bucket(bucket: &TokenBucketOverview) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
+        READ_AVOIDANCE_CONFIDENCE_MODELED, READ_AVOIDANCE_CONFIDENCE_NOT_RECORDED,
+        READ_AVOIDANCE_CONFIDENCE_OBSERVED, READ_AVOIDANCE_SCOPE,
         TOKEN_BUCKET_FULL_FILE_COMPRESSION, TOKEN_BUCKET_NAVIGATION_AVOIDANCE, TOKEN_ESTIMATE_KIND,
         TOKEN_ESTIMATE_SCOPE, TOKEN_ESTIMATOR, TokenOverview, usage_from_estimates,
         usage_from_text,
@@ -1080,7 +1208,7 @@ mod tests {
     fn overview_keeps_source_compression_and_navigation_buckets_separate() {
         let overview = TokenOverview::from_events(&[
             usage_from_text("s", "summary", None, None, "abcdefghijkl", "abcd"),
-            usage_from_estimates("s", "folders", None, None, 100, 20),
+            usage_from_estimates("s", "search", None, None, 100, 20),
         ]);
 
         assert_eq!(overview.calls, 2);
@@ -1093,6 +1221,77 @@ mod tests {
             overview.buckets[1].token_savings_bucket,
             TOKEN_BUCKET_NAVIGATION_AVOIDANCE
         );
+        assert_eq!(overview.observed_file_read_replacements, 1);
+        assert_eq!(overview.modeled_file_reads_avoided, 1);
+        assert_eq!(overview.likely_file_reads_avoided, 2);
+        assert_eq!(
+            overview.read_avoidance_confidence,
+            READ_AVOIDANCE_CONFIDENCE_MODELED
+        );
+        assert_eq!(overview.read_avoidance_scope, READ_AVOIDANCE_SCOPE);
+    }
+
+    #[test]
+    fn observed_only_overview_reports_observed_read_avoidance_confidence() {
+        let overview = TokenOverview::from_events(&[usage_from_text(
+            "s",
+            "summary",
+            None,
+            None,
+            "abcdefghijkl",
+            "abcd",
+        )]);
+
+        assert_eq!(overview.observed_file_read_replacements, 1);
+        assert_eq!(overview.modeled_file_reads_avoided, 0);
+        assert_eq!(overview.likely_file_reads_avoided, 1);
+        assert_eq!(
+            overview.read_avoidance_confidence,
+            READ_AVOIDANCE_CONFIDENCE_OBSERVED
+        );
+    }
+
+    #[test]
+    fn bucket_overview_does_not_infer_read_avoidance_without_raw_events() {
+        let event_overview = TokenOverview::from_events(&[
+            usage_from_text("s", "summary", None, None, "abcdefghijkl", "abcd"),
+            usage_from_estimates("s", "search", None, None, 100, 20),
+        ]);
+        let bucket_overview = TokenOverview::from_buckets(event_overview.buckets);
+
+        assert_eq!(bucket_overview.observed_file_read_replacements, 0);
+        assert_eq!(bucket_overview.modeled_file_reads_avoided, 0);
+        assert_eq!(bucket_overview.likely_file_reads_avoided, 0);
+        assert_eq!(
+            bucket_overview.read_avoidance_confidence,
+            READ_AVOIDANCE_CONFIDENCE_NOT_RECORDED
+        );
+    }
+
+    #[test]
+    fn non_file_read_navigation_events_do_not_increment_read_avoidance() {
+        let overview = TokenOverview::from_events(&[
+            usage_from_estimates("s", "overview", None, None, 100, 20),
+            usage_from_estimates("s", "folders", None, None, 100, 20),
+            usage_from_estimates("s", "files", None, None, 100, 20),
+            usage_from_estimates("s", "mcp.atlas_health", None, None, 100, 20),
+            usage_from_estimates("s", "mcp.atlas_purpose_queue", None, None, 100, 20),
+        ]);
+
+        assert_eq!(overview.modeled_file_reads_avoided, 0);
+        assert_eq!(overview.likely_file_reads_avoided, 0);
+    }
+
+    #[test]
+    fn zero_baseline_events_do_not_increment_read_avoidance() {
+        let overview = TokenOverview::from_events(&[
+            usage_from_estimates("s", "search", None, None, 0, 20),
+            usage_from_text("s", "summary", None, None, "", "summary"),
+        ]);
+
+        assert_eq!(overview.observed_file_read_replacements, 0);
+        assert_eq!(overview.modeled_file_reads_avoided, 0);
+        assert_eq!(overview.likely_file_reads_avoided, 0);
     }
 
     #[test]
@@ -1106,9 +1305,9 @@ mod tests {
                 "abcdabcd",
                 "ab",
             ),
-            usage_from_estimates("s", "folders", None, Some("token".to_string()), 400, 40),
-            usage_from_estimates("s", "folders", None, Some("token".to_string()), 400, 30),
-            usage_from_estimates("s", "folders", None, Some("token".to_string()), 400, 20),
+            usage_from_estimates("s", "search", None, Some("token".to_string()), 400, 40),
+            usage_from_estimates("s", "search", None, Some("token".to_string()), 400, 30),
+            usage_from_estimates("s", "search", None, Some("token".to_string()), 400, 20),
         ]);
 
         assert_eq!(overview.estimated_saved, 1111);
@@ -1118,5 +1317,8 @@ mod tests {
         assert_eq!(overview.deduped_modeled_tokens_avoided, 310);
         assert_eq!(overview.tokens_avoided, 311);
         assert_eq!(overview.repeated_baselines_deduped, 2);
+        assert_eq!(overview.observed_file_read_replacements, 1);
+        assert_eq!(overview.modeled_file_reads_avoided, 3);
+        assert_eq!(overview.likely_file_reads_avoided, 4);
     }
 }

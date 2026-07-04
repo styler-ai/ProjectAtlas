@@ -516,7 +516,7 @@ function Restore-ProjectAtlasCodexMarketplace {
     }
 }
 
-function Get-ProjectAtlasCodexPluginVersion {
+function Get-ProjectAtlasCodexPlugin {
     param(
         [string]$CodexCommandPath
     )
@@ -530,14 +530,87 @@ function Get-ProjectAtlasCodexPluginVersion {
         $projectAtlasPlugin = @($installed | Where-Object {
                 $_.pluginId -eq "projectatlas@projectatlas" -or ($_.name -eq "projectatlas" -and $_.marketplaceName -eq "projectatlas")
             }) | Select-Object -First 1
-        if ($projectAtlasPlugin -and $projectAtlasPlugin.version) {
-            return $projectAtlasPlugin.version
-        }
+        return $projectAtlasPlugin
     }
     catch {
         return $null
     }
     return $null
+}
+
+function Get-ProjectAtlasCodexPluginVersion {
+    param(
+        [string]$CodexCommandPath
+    )
+    $projectAtlasPlugin = Get-ProjectAtlasCodexPlugin $CodexCommandPath
+    if ($projectAtlasPlugin -and $projectAtlasPlugin.version) {
+        return $projectAtlasPlugin.version
+    }
+    return $null
+}
+
+function Get-ProjectAtlasCodexPluginSourcePath {
+    param(
+        [object]$ProjectAtlasPlugin
+    )
+    if (-not $ProjectAtlasPlugin) {
+        return $null
+    }
+    foreach ($candidate in @($ProjectAtlasPlugin.source.path, $ProjectAtlasPlugin.path, $ProjectAtlasPlugin.root, $ProjectAtlasPlugin.location)) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
+function Confirm-ProjectAtlasCodexSkillArtifact {
+    param(
+        [string]$CodexCommandPath,
+        [string]$ExpectedVersion
+    )
+    $runtimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
+    if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
+        Write-Output "Codex ProjectAtlas plugin skill verification skipped: ProjectAtlas version is unknown."
+        return
+    }
+    $projectAtlasPlugin = Get-ProjectAtlasCodexPlugin $CodexCommandPath
+    if (-not $projectAtlasPlugin) {
+        Write-Warning "Codex ProjectAtlas plugin skill verification skipped: projectatlas plugin is not installed."
+        return
+    }
+    if ($projectAtlasPlugin.version -ne $runtimeVersion) {
+        Write-Warning "Codex ProjectAtlas plugin skill verification failed: installed projectatlas plugin version '$($projectAtlasPlugin.version)' does not match $runtimeVersion."
+        return
+    }
+    $pluginSourcePath = Get-ProjectAtlasCodexPluginSourcePath $projectAtlasPlugin
+    if ([string]::IsNullOrWhiteSpace($pluginSourcePath)) {
+        Write-Output "Codex ProjectAtlas plugin skill version $runtimeVersion is installed; Codex does not expose the active in-process ProjectAtlas skill path. Restart Codex if this session still advertises an older ProjectAtlas skill."
+        return
+    }
+    $manifestPath = Join-Path $pluginSourcePath ".codex-plugin\plugin.json"
+    $skillPath = Join-Path $pluginSourcePath "skills\projectatlas\SKILL.md"
+    if (-not (Test-Path -LiteralPath $manifestPath)) {
+        Write-Warning "Codex ProjectAtlas plugin skill verification failed: plugin manifest was not found at $manifestPath."
+        return
+    }
+    if (-not (Test-Path -LiteralPath $skillPath)) {
+        Write-Warning "Codex ProjectAtlas plugin skill verification failed: ProjectAtlas skill was not found at $skillPath."
+        return
+    }
+    try {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        if ($manifest.version -ne $runtimeVersion) {
+            Write-Warning "Codex ProjectAtlas plugin skill verification failed: manifest version '$($manifest.version)' does not match $runtimeVersion."
+            return
+        }
+    }
+    catch {
+        Write-Warning "Codex ProjectAtlas plugin skill verification failed: could not read $manifestPath."
+        return
+    }
+    Write-Output "Codex ProjectAtlas plugin skill verified at $skillPath for $runtimeVersion."
+    Write-Output "Codex does not expose the active in-process ProjectAtlas skill path; restart Codex if this session still advertises an older ProjectAtlas skill."
 }
 
 function Update-ProjectAtlasCodexPlugin {
@@ -580,6 +653,7 @@ function Update-ProjectAtlasCodexPlugin {
         $currentPluginVersion = Get-ProjectAtlasCodexPluginVersion $codexCommandPath
         if ($previousRef -eq $releaseTag -and $currentPluginVersion -eq $runtimeVersion) {
             Write-Output "Codex ProjectAtlas plugin marketplace already points to $releaseTag."
+            Confirm-ProjectAtlasCodexSkillArtifact $codexCommandPath $ExpectedVersion
             return
         }
         if ($previousRef -eq $releaseTag) {
@@ -597,6 +671,7 @@ function Update-ProjectAtlasCodexPlugin {
                 return
             }
             Write-Output "Codex ProjectAtlas plugin marketplace updated to $releaseTag."
+            Confirm-ProjectAtlasCodexSkillArtifact $codexCommandPath $ExpectedVersion
             return
         }
 
@@ -625,6 +700,7 @@ function Update-ProjectAtlasCodexPlugin {
             return
         }
         Write-Output "Codex ProjectAtlas plugin marketplace updated to $releaseTag."
+        Confirm-ProjectAtlasCodexSkillArtifact $codexCommandPath $ExpectedVersion
     }
     catch {
         Write-Warning "Codex ProjectAtlas plugin update failed: $($_.Exception.Message)"
@@ -684,6 +760,45 @@ function Update-ProjectAtlasCodexMcpRegistry {
     }
     catch {
         Write-Warning "Codex MCP registry update failed: $($_.Exception.Message)"
+    }
+}
+
+function Write-ProjectAtlasWorkflowPinReport {
+    param(
+        [string]$Root,
+        [string]$ExpectedVersion
+    )
+    $runtimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
+    if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
+        return
+    }
+    $workflowDir = Join-Path $Root ".github\workflows"
+    if (-not (Test-Path -LiteralPath $workflowDir)) {
+        return
+    }
+    $releaseTag = "v$runtimeVersion"
+    $rootPath = (Resolve-Path -LiteralPath $Root).Path.TrimEnd('\', '/')
+    $workflowFiles = Get-ChildItem -LiteralPath $workflowDir -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Extension -eq ".yml" -or $_.Extension -eq ".yaml" }
+    foreach ($file in $workflowFiles) {
+        $lineNumber = 0
+        foreach ($line in Get-Content -LiteralPath $file.FullName) {
+            $lineNumber += 1
+            if ($line -notmatch 'github\.com/styler-ai/ProjectAtlas/releases/download/') {
+                continue
+            }
+            $pinMatches = [System.Text.RegularExpressions.Regex]::Matches($line, 'v[0-9]+\.[0-9]+\.[0-9]+')
+            foreach ($match in $pinMatches) {
+                $foundTag = $match.Value
+                if ($foundTag -and $foundTag -ne $releaseTag) {
+                    $relativePath = $file.FullName
+                    if ($relativePath.StartsWith($rootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $relativePath = $relativePath.Substring($rootPath.Length).TrimStart('\', '/')
+                    }
+                    Write-Warning "Stale ProjectAtlas workflow release pin in ${relativePath}:${lineNumber} uses $foundTag; expected $releaseTag."
+                }
+            }
+        }
     }
 }
 
@@ -906,9 +1021,12 @@ Write-ProjectAtlasMcpConfig $claudeMcpConfigPath "claude-code"
 Write-ProjectAtlasMcpConfig $opencodeConfigPath "opencode"
 Update-ProjectAtlasCodexPlugin $ProjectAtlasVersion
 Update-ProjectAtlasCodexMcpRegistry $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath
+Write-ProjectAtlasWorkflowPinReport $ProjectRoot $ProjectAtlasVersion
 
 Write-Output "ProjectAtlas runtime installed and verified: $projectAtlas"
 Write-Output "ProjectAtlas update preserved project state under $atlasDir; use reset-index --apply for explicit state cleanup."
 Write-Output "Project-local MCP config written: $mcpConfigPath"
 Write-Output "Project-local Claude Code MCP config written: $claudeMcpConfigPath"
 Write-Output "Project-local OpenCode MCP config written: $opencodeConfigPath"
+Write-Output "Claude Code ProjectAtlas integration verified through generated MCP config; restart Claude Code if an older session cached previous instructions."
+Write-Output "OpenCode ProjectAtlas integration verified through generated MCP config; restart OpenCode if an older session cached previous instructions."

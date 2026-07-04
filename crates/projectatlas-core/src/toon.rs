@@ -126,6 +126,15 @@ pub fn render_token_overview(overview: &TokenOverview) -> String {
             "deduped_modeled_tokens_avoided": overview.deduped_modeled_tokens_avoided,
             "tokens_avoided": overview.tokens_avoided,
             "repeated_baselines_deduped": overview.repeated_baselines_deduped,
+            "likely_file_reads_avoided": overview.likely_file_reads_avoided,
+            "read_avoidance": {
+                "likely_file_reads_avoided": overview.likely_file_reads_avoided,
+                "observed_file_read_replacements": overview.observed_file_read_replacements,
+                "modeled_file_reads_avoided": overview.modeled_file_reads_avoided,
+                "scope": overview.read_avoidance_scope,
+                "confidence": overview.read_avoidance_confidence,
+                "plain_language": "ProjectAtlas summaries, search results, and slices were used instead of opening likely whole files.",
+            },
             "calibration": overview.calibration,
             "savings_rate": savings_rate,
             "totals": {
@@ -137,6 +146,7 @@ pub fn render_token_overview(overview: &TokenOverview) -> String {
                 "gross_modeled_avoided_tokens": overview.gross_modeled_tokens_avoided,
                 "deduped_modeled_avoided_tokens": overview.deduped_modeled_tokens_avoided,
                 "tokens_avoided": overview.tokens_avoided,
+                "likely_file_reads_avoided": overview.likely_file_reads_avoided,
                 "savings_rate": savings_rate,
             },
             "buckets": buckets,
@@ -293,9 +303,10 @@ fn quoted_fallback(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_agent_payload, render_symbols};
+    use super::{encode_agent_payload, render_symbols, render_token_overview};
     use crate::symbols::{CodeSymbol, ParserKind, SymbolKind};
-    use serde_json::Value;
+    use crate::telemetry::{TokenOverview, usage_from_estimates, usage_from_text};
+    use serde_json::{Value, json};
 
     #[test]
     fn renders_round_trippable_toon_with_standard_decoder() -> Result<(), Box<dyn std::error::Error>>
@@ -335,5 +346,63 @@ mod tests {
         assert!(toon.contains(
             "symbols[1]{path,kind,name,start,end,parent,parser,signature,exported,documentation}:"
         ));
+    }
+
+    #[test]
+    fn renders_token_overview_with_read_avoidance_section() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let overview = TokenOverview::from_events(&[
+            usage_from_text("s", "summary", None, None, "abcdefghijkl", "abcd"),
+            usage_from_estimates("s", "search", None, None, 100, 20),
+        ]);
+        let toon = render_token_overview(&overview);
+        let decoded: Value = toon_format::decode_default(&toon)?;
+        let token_savings = &decoded["token_savings"];
+
+        require_json_eq(
+            &token_savings["likely_file_reads_avoided"],
+            &json!(2),
+            "top-level read avoidance",
+        )?;
+        require_json_eq(
+            &token_savings["read_avoidance"]["likely_file_reads_avoided"],
+            &json!(2),
+            "section read avoidance",
+        )?;
+        require_json_eq(
+            &token_savings["read_avoidance"]["observed_file_read_replacements"],
+            &json!(1),
+            "observed read replacements",
+        )?;
+        require_json_eq(
+            &token_savings["read_avoidance"]["modeled_file_reads_avoided"],
+            &json!(1),
+            "modeled read avoidance",
+        )?;
+        require_json_eq(
+            &token_savings["totals"]["likely_file_reads_avoided"],
+            &json!(2),
+            "total read avoidance",
+        )?;
+        require_json_eq(
+            &token_savings["read_avoidance"]["plain_language"],
+            &json!(
+                "ProjectAtlas summaries, search results, and slices were used instead of opening likely whole files."
+            ),
+            "plain language read avoidance",
+        )?;
+        Ok(())
+    }
+
+    fn require_json_eq(
+        actual: &Value,
+        expected: &Value,
+        label: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("{label}: expected {expected}, got {actual}").into())
+        }
     }
 }

@@ -545,6 +545,10 @@
       "purpose": "Specify ProjectAtlas MCP multi-project routing path scoping fallback behavior and string linting."
     },
     {
+      "path": "docs/projectatlas-v0.3.22-premortem-spec.md",
+      "purpose": "Document ProjectAtlas v0.3.22 pre-mortem, issue triage, edge cases, and release test plan."
+    },
+    {
       "path": "docs/projectatlas-3-v0.3.2-hardening-spec.md",
       "purpose": "Historical v0.3.2 hardening specification covering symbol modules, path normalization, import aliases, and release gates."
     },
