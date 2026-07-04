@@ -163,19 +163,24 @@ The installer makes its own active process prefer the verified runtime on
 Windows, Linux, and macOS; if a parent host process still cannot resolve the
 bare command, restart that host or use the generated absolute MCP config.
 
-When `codex` is available, installers also inspect `codex mcp get projectatlas`.
-If a global Codex MCP server named `projectatlas` exists but points to a stale
-runtime version or another project's DB/config, the installer removes and
-re-adds that registry entry with the verified absolute runtime, current project
-database, current config, and matching `--require-version`. On Windows, the
-LocalAppData stable mirror is repaired for bare `projectatlas` PATH use, but
-MCP configs and Codex registry entries stay pinned to the verified runtime path.
-Set
-`PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1` only when a managed environment
-intentionally owns the global Codex MCP registry. After plugin/runtime updates,
-agents should verify `codex mcp get projectatlas` or `codex mcp list`; stale
-entries should be repaired by rerunning the ProjectAtlas installer instead of
-left for the next Codex restart.
+When `codex` is available, installers also inspect the official
+`projectatlas` Codex marketplace and `codex mcp get projectatlas`. If the
+official marketplace is stale, the installer replaces that marketplace ref with
+the runtime release tag and reinstalls the `projectatlas` Codex plugin. If a
+global Codex MCP server named `projectatlas` exists but points to a stale runtime
+version or another project's DB/config, the installer removes and re-adds that
+registry entry with the verified absolute runtime, current project database,
+current config, and matching `--require-version`. On Windows, the LocalAppData
+stable mirror is repaired for bare `projectatlas` PATH use, but MCP configs and
+Codex registry entries stay pinned to the verified runtime path. Set
+`PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE=1` only when a managed environment
+intentionally owns the Codex ProjectAtlas plugin marketplace, and set
+`PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1` only when it intentionally owns
+the global Codex MCP registry. After plugin/runtime updates, agents should
+verify `codex plugin list --marketplace projectatlas --json` and
+`codex mcp get projectatlas` or `codex mcp list`; stale entries should be
+repaired by rerunning the ProjectAtlas installer instead of left for the next
+Codex restart.
 
 Harness-specific config can also be generated directly:
 

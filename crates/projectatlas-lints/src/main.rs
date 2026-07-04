@@ -2,6 +2,7 @@
 //! Cargo-adjacent lint gate for `ProjectAtlas`-specific Rust contracts.
 
 use proc_macro2::{TokenStream, TokenTree};
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;
 use std::fmt::{self, Display};
@@ -13,7 +14,8 @@ use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{
-    ExprLit, ImplItemFn, ItemConst, ItemFn, ItemMod, ItemStatic, Lit, LitStr, Macro, Meta, Token,
+    Expr, ExprLit, ExprMethodCall, ImplItemFn, ItemConst, ItemFn, ItemMod, ItemStatic, Lit, LitStr,
+    Macro, Meta, Token,
 };
 
 /// Subcommand that runs strict string-contract linting.
@@ -45,6 +47,102 @@ const DOMAIN_CONTRACT_LITERALS: &[&str] = &[
     "info",
     "warning",
     "error",
+];
+
+/// Reused e2e fixture path segments that should stay centralized.
+const E2E_FIXTURE_PATH_LITERALS: &[&str] = &[
+    "repo",
+    "src",
+    ".projectatlas",
+    ".codex",
+    "fake-codex.log",
+    "fake-path",
+    "isolated-home",
+];
+
+/// Existing repeated e2e path joins reviewed as ordinary fixture structure.
+const E2E_ALLOWED_REPEATED_PATH_JOIN_LITERALS: &[&str] = &[
+    ".cargo",
+    ".github",
+    ".gitignore",
+    ".purpose",
+    "AppData",
+    "Cargo.toml",
+    "Local",
+    "README.md",
+    "Roaming",
+    "a.rs",
+    "api",
+    "app",
+    "assets",
+    "atlas_core",
+    "b.rs",
+    "bin",
+    "build.gradle.kts",
+    "ci.yml",
+    "codex.cmd",
+    "config.toml",
+    "crates",
+    "customers",
+    "data",
+    "detail.rs",
+    "docs",
+    "empty.rs",
+    "engine.rs",
+    "feature",
+    "fixtures",
+    "function_alias",
+    "generated",
+    "install-runtime.ps1",
+    "install-runtime.sh",
+    "kept-state.txt",
+    "languages",
+    "lib.rs",
+    "live.rs",
+    "local-cache",
+    "logo.svg",
+    "main.rs",
+    "metadata.egg-info",
+    "module_alias",
+    "named_alias",
+    "nested",
+    "no_alias",
+    "node_modules",
+    "noise.rs",
+    "outside",
+    "package",
+    "package_entry",
+    "pkg",
+    "plugin.json",
+    "plugins",
+    "projectatlas",
+    "projectatlas-nonsource-files.toon",
+    "projectatlas.claude.mcp.json",
+    "projectatlas.cmd",
+    "projectatlas.db",
+    "projectatlas.exe",
+    "projectatlas.mcp.json",
+    "projectatlas.opencode.json",
+    "projectatlas.toml",
+    "projectatlas.toon",
+    "public",
+    "py",
+    "python",
+    "release.yml",
+    "rogue",
+    "runtimes",
+    "rust",
+    "scripts",
+    "service.rs",
+    "service.ts",
+    "settings",
+    "styles",
+    "target",
+    "tmp",
+    "ts",
+    "unrelated",
+    "workflows",
+    "x86_64-pc-windows-msvc",
 ];
 
 /// Reviewed diagnostic format templates that must stay inline for Rust format macros.
@@ -85,7 +183,23 @@ const STRICT_STRING_RULES: &[StringLiteralRule] = &[
         literals: DOMAIN_CONTRACT_LITERALS,
         allowed_literals: &[],
     },
+    StringLiteralRule {
+        id: "e2e-fixture-path-inline-strings",
+        description: "Repeated e2e fixture path segments must live in local constants instead of being repeated inline.",
+        paths: &["crates/projectatlas-cli/tests/e2e.rs"],
+        ban_unlisted: false,
+        literals: E2E_FIXTURE_PATH_LITERALS,
+        allowed_literals: &[],
+    },
 ];
+
+/// Repeated path-join rules enabled for this repository.
+const REPEATED_PATH_JOIN_RULES: &[PathJoinLiteralRule] = &[PathJoinLiteralRule {
+    id: "repeated-path-join-inline-strings",
+    description: "Repeated path join string literals must be centralized as constants or reviewed into the fixture allowlist.",
+    paths: &["crates/projectatlas-cli/tests/e2e.rs"],
+    allowed_repeated_literals: E2E_ALLOWED_REPEATED_PATH_JOIN_LITERALS,
+}];
 
 /// Run the cargo-adjacent `ProjectAtlas` lint command.
 fn main() -> ExitCode {
@@ -169,6 +283,20 @@ fn run_strict_strings(root: &Path) -> Result<(), LintError> {
             violations.extend(lint_source(relative_path, rule, &source)?);
         }
     }
+    for rule in REPEATED_PATH_JOIN_RULES {
+        for relative_path in rule.paths {
+            let path = root.join(relative_path);
+            let source = fs::read_to_string(&path).map_err(|source| LintError::ReadFile {
+                path: path.clone(),
+                source,
+            })?;
+            violations.extend(lint_repeated_path_join_literals(
+                relative_path,
+                rule,
+                &source,
+            )?);
+        }
+    }
     if violations.is_empty() {
         let mut stdout = io::stdout().lock();
         writeln!(stdout, "projectatlas-lints: strict string contracts passed")
@@ -198,6 +326,50 @@ fn lint_source(
     Ok(visitor.violations)
 }
 
+/// Parse one Rust source file and return repeated path-join literal violations.
+fn lint_repeated_path_join_literals(
+    relative_path: &str,
+    rule: &'static PathJoinLiteralRule,
+    source: &str,
+) -> Result<Vec<StringLiteralViolation>, LintError> {
+    let file = syn::parse_file(source).map_err(|source| LintError::Parse {
+        path: relative_path.to_string(),
+        source,
+    })?;
+    let mut visitor = PathJoinLiteralVisitor {
+        occurrences: Vec::new(),
+    };
+    visitor.visit_file(&file);
+
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for occurrence in &visitor.occurrences {
+        *counts.entry(occurrence.literal.clone()).or_default() += 1;
+    }
+
+    let violations = visitor
+        .occurrences
+        .into_iter()
+        .filter(|occurrence| {
+            counts
+                .get(occurrence.literal.as_str())
+                .is_some_and(|count| *count > 1)
+                && !rule
+                    .allowed_repeated_literals
+                    .iter()
+                    .any(|allowed| *allowed == occurrence.literal)
+        })
+        .map(|occurrence| StringLiteralViolation {
+            path: relative_path.to_string(),
+            line: occurrence.line,
+            column: occurrence.column,
+            rule_id: rule.id,
+            literal: occurrence.literal,
+            description: rule.description,
+        })
+        .collect();
+    Ok(violations)
+}
+
 /// Path-scoped rule for protected exact string literals.
 #[derive(Clone, Copy, Debug)]
 struct StringLiteralRule {
@@ -213,6 +385,19 @@ struct StringLiteralRule {
     ban_unlisted: bool,
     /// Exact string literal values explicitly allowed inline.
     allowed_literals: &'static [&'static str],
+}
+
+/// Path-scoped rule for repeated `.join("...")` string literals.
+#[derive(Clone, Copy, Debug)]
+struct PathJoinLiteralRule {
+    /// Stable rule identifier printed in diagnostics.
+    id: &'static str,
+    /// Human-readable rule description printed in diagnostics.
+    description: &'static str,
+    /// Repository-relative Rust source files protected by this rule.
+    paths: &'static [&'static str],
+    /// Repeated path-join literals reviewed as acceptable inline fixtures.
+    allowed_repeated_literals: &'static [&'static str],
 }
 
 /// One source-aware string-contract violation.
@@ -252,6 +437,61 @@ struct StringLiteralVisitor<'a> {
     centralized_depth: usize,
     /// Collected violations.
     violations: Vec<StringLiteralViolation>,
+}
+
+/// One `.join("literal")` occurrence found by the path-join rule.
+#[derive(Debug)]
+struct PathJoinLiteralOccurrence {
+    /// Exact path segment literal.
+    literal: String,
+    /// One-based source line.
+    line: usize,
+    /// One-based source column.
+    column: usize,
+}
+
+/// Syntax visitor that records direct `.join("...")` calls.
+struct PathJoinLiteralVisitor {
+    /// Collected path-join literal occurrences.
+    occurrences: Vec<PathJoinLiteralOccurrence>,
+}
+
+impl PathJoinLiteralVisitor {
+    /// Record a direct path join literal.
+    fn record_join_literal(&mut self, literal: &LitStr) {
+        if !is_path_join_literal(&literal.value()) {
+            return;
+        }
+        let location = literal.span().start();
+        self.occurrences.push(PathJoinLiteralOccurrence {
+            literal: literal.value(),
+            line: location.line,
+            column: location.column + 1,
+        });
+    }
+}
+
+/// Return whether a method-call `join` literal looks like a path segment, not a collection separator.
+fn is_path_join_literal(literal: &str) -> bool {
+    !matches!(
+        literal,
+        "" | " " | "\n" | "\r\n" | "\t" | "," | ", " | "; " | ": "
+    )
+}
+
+impl<'ast> Visit<'ast> for PathJoinLiteralVisitor {
+    /// Record only direct `.join("...")` calls; constants are the desired form.
+    fn visit_expr_method_call(&mut self, expr: &'ast ExprMethodCall) {
+        if expr.method == "join"
+            && let Some(Expr::Lit(ExprLit {
+                lit: Lit::Str(literal),
+                ..
+            })) = expr.args.first()
+        {
+            self.record_join_literal(literal);
+        }
+        visit::visit_expr_method_call(self, expr);
+    }
 }
 
 impl StringLiteralVisitor<'_> {
@@ -483,7 +723,10 @@ fn write_violations(
 
 #[cfg(test)]
 mod tests {
-    use super::{MCP_PROJECT_SCHEMA_LITERALS, StringLiteralRule, lint_source};
+    use super::{
+        E2E_FIXTURE_PATH_LITERALS, MCP_PROJECT_SCHEMA_LITERALS, PathJoinLiteralRule,
+        StringLiteralRule, lint_repeated_path_join_literals, lint_source,
+    };
     use std::io;
 
     /// Rule used by parser-focused unit tests.
@@ -504,6 +747,24 @@ mod tests {
         ban_unlisted: true,
         literals: MCP_PROJECT_SCHEMA_LITERALS,
         allowed_literals: &["allowed inline format {value}"],
+    };
+
+    /// Rule used by e2e fixture path centralization tests.
+    const E2E_FIXTURE_TEST_RULE: StringLiteralRule = StringLiteralRule {
+        id: "test-e2e-fixture-path-rule",
+        description: "test e2e fixture path string rule",
+        paths: &["demo.rs"],
+        ban_unlisted: false,
+        literals: E2E_FIXTURE_PATH_LITERALS,
+        allowed_literals: &[],
+    };
+
+    /// Rule used by repeated path-join tests.
+    const PATH_JOIN_TEST_RULE: PathJoinLiteralRule = PathJoinLiteralRule {
+        id: "test-path-join-rule",
+        description: "test repeated path join rule",
+        paths: &["demo.rs"],
+        allowed_repeated_literals: &["reviewed-existing"],
     };
 
     /// Return a test error instead of panicking on a failed condition.
@@ -548,6 +809,128 @@ mod tests {
             r#"const STATUS_FIELD: &str = "status"; fn payload() { let _ = STATUS_FIELD; }"#,
         )?;
         require(violations.is_empty(), "constant declaration was flagged")?;
+        Ok(())
+    }
+
+    /// E2E fixture path segments must be centralized just like production contracts.
+    #[test]
+    fn strict_string_lint_flags_inline_e2e_fixture_paths() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let violations = lint_source(
+            "demo.rs",
+            &E2E_FIXTURE_TEST_RULE,
+            r#"fn fixture(temp: &std::path::Path) { let _ = temp.join("fake-codex.log"); }"#,
+        )?;
+        require(
+            violations.len() == 1,
+            "expected one e2e fixture path violation",
+        )?;
+        let violation = violations
+            .first()
+            .ok_or_else(|| io::Error::other("missing e2e fixture path violation"))?;
+        require(
+            violation.literal == "fake-codex.log",
+            "e2e fixture path violation had the wrong value",
+        )?;
+        Ok(())
+    }
+
+    /// Constants remain the expected centralization point for e2e fixture paths.
+    #[test]
+    fn strict_string_lint_allows_e2e_fixture_path_constants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let violations = lint_source(
+            "demo.rs",
+            &E2E_FIXTURE_TEST_RULE,
+            r#"const FAKE_CODEX_LOG_FILE: &str = "fake-codex.log"; fn fixture(temp: &std::path::Path) { let _ = temp.join(FAKE_CODEX_LOG_FILE); }"#,
+        )?;
+        require(
+            violations.is_empty(),
+            "e2e fixture path constant was flagged",
+        )?;
+        Ok(())
+    }
+
+    /// Repeated unreviewed `.join("...")` path literals are reported.
+    #[test]
+    fn strict_string_lint_flags_repeated_path_join_literals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let violations = lint_repeated_path_join_literals(
+            "demo.rs",
+            &PATH_JOIN_TEST_RULE,
+            r#"
+fn fixture(root: &std::path::Path) {
+    let _ = root.join("future-fixture");
+    let _ = root.join("future-fixture").join("leaf");
+}
+"#,
+        )?;
+        require(
+            violations.len() == 2,
+            "expected both repeated path joins to be flagged",
+        )?;
+        require(
+            violations
+                .iter()
+                .all(|violation| violation.literal == "future-fixture"),
+            "unexpected repeated path join literal was flagged",
+        )?;
+        Ok(())
+    }
+
+    /// One-off path joins are allowed to avoid fixture noise.
+    #[test]
+    fn strict_string_lint_allows_one_off_path_join_literals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let violations = lint_repeated_path_join_literals(
+            "demo.rs",
+            &PATH_JOIN_TEST_RULE,
+            r#"fn fixture(root: &std::path::Path) { let _ = root.join("one-off"); }"#,
+        )?;
+        require(violations.is_empty(), "one-off path join was flagged")?;
+        Ok(())
+    }
+
+    /// Collection/string join separators are not path fragments.
+    #[test]
+    fn strict_string_lint_ignores_repeated_join_separators()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let violations = lint_repeated_path_join_literals(
+            "demo.rs",
+            &PATH_JOIN_TEST_RULE,
+            r#"
+fn format_messages(messages: &[&str]) -> String {
+    let first = messages.join("\n");
+    let second = messages.join("\n");
+    format!("{first}{second}")
+}
+"#,
+        )?;
+        require(
+            violations.is_empty(),
+            "collection join separator was flagged as a path literal",
+        )?;
+        Ok(())
+    }
+
+    /// Reviewed repeated path joins stay available for existing broad fixtures.
+    #[test]
+    fn strict_string_lint_allows_reviewed_repeated_path_join_literals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let violations = lint_repeated_path_join_literals(
+            "demo.rs",
+            &PATH_JOIN_TEST_RULE,
+            r#"
+fn fixture(root: &std::path::Path) {
+    let _ = root.join("reviewed-existing");
+    let _ = root.join("reviewed-existing");
+}
+"#,
+        )?;
+        require(
+            violations.is_empty(),
+            "reviewed repeated path joins were flagged",
+        )?;
         Ok(())
     }
 
