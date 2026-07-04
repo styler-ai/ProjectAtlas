@@ -564,6 +564,42 @@ function Get-ProjectAtlasCodexPluginSourcePath {
     return $null
 }
 
+function Get-ProjectAtlasCodexPluginSourceManifestVersion {
+    param(
+        [object]$ProjectAtlasPlugin
+    )
+    $pluginSourcePath = Get-ProjectAtlasCodexPluginSourcePath $ProjectAtlasPlugin
+    if ([string]::IsNullOrWhiteSpace($pluginSourcePath)) {
+        return $null
+    }
+    $manifestPath = Join-Path $pluginSourcePath ".codex-plugin\plugin.json"
+    if (-not (Test-Path -LiteralPath $manifestPath)) {
+        return ""
+    }
+    try {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        if ($manifest.version) {
+            return [string]$manifest.version
+        }
+    }
+    catch {
+        return ""
+    }
+    return ""
+}
+
+function Test-ProjectAtlasCodexPluginSourceManifest {
+    param(
+        [object]$ProjectAtlasPlugin,
+        [string]$ExpectedVersion
+    )
+    $pluginSourcePath = Get-ProjectAtlasCodexPluginSourcePath $ProjectAtlasPlugin
+    if ([string]::IsNullOrWhiteSpace($pluginSourcePath)) {
+        return $true
+    }
+    return (Get-ProjectAtlasCodexPluginSourceManifestVersion $ProjectAtlasPlugin) -eq $ExpectedVersion
+}
+
 function Confirm-ProjectAtlasCodexSkillArtifact {
     param(
         [string]$CodexCommandPath,
@@ -650,13 +686,19 @@ function Update-ProjectAtlasCodexPlugin {
 
         $releaseTag = "v$runtimeVersion"
         $previousRef = Get-ProjectAtlasCodexMarketplaceRef
-        $currentPluginVersion = Get-ProjectAtlasCodexPluginVersion $codexCommandPath
-        if ($previousRef -eq $releaseTag -and $currentPluginVersion -eq $runtimeVersion) {
+        $projectAtlasPlugin = Get-ProjectAtlasCodexPlugin $codexCommandPath
+        $currentPluginVersion = if ($projectAtlasPlugin -and $projectAtlasPlugin.version) { $projectAtlasPlugin.version } else { $null }
+        $currentSourceManifestMatches = Test-ProjectAtlasCodexPluginSourceManifest $projectAtlasPlugin $runtimeVersion
+        if ($previousRef -eq $releaseTag -and $currentPluginVersion -eq $runtimeVersion -and $currentSourceManifestMatches) {
             Write-Output "Codex ProjectAtlas plugin marketplace already points to $releaseTag."
             Confirm-ProjectAtlasCodexSkillArtifact $codexCommandPath $ExpectedVersion
             return
         }
         if ($previousRef -eq $releaseTag) {
+            if ($currentPluginVersion -eq $runtimeVersion -and -not $currentSourceManifestMatches) {
+                $sourceManifestVersion = Get-ProjectAtlasCodexPluginSourceManifestVersion $projectAtlasPlugin
+                Write-Output "Codex ProjectAtlas plugin source manifest version '$sourceManifestVersion' does not match $runtimeVersion; refreshing official projectatlas plugin cache."
+            }
             & $codexCommandPath plugin remove projectatlas --marketplace projectatlas --json | Out-Null
             & $codexCommandPath plugin add projectatlas --marketplace projectatlas --json | Out-Null
             if ($LASTEXITCODE -ne 0) {
@@ -667,6 +709,13 @@ function Update-ProjectAtlasCodexPlugin {
             $installedVersion = Get-ProjectAtlasCodexPluginVersion $codexCommandPath
             if ($installedVersion -ne $runtimeVersion) {
                 Write-Warning "Codex ProjectAtlas plugin update failed: installed projectatlas plugin version '$installedVersion' does not match $runtimeVersion."
+                Restore-ProjectAtlasCodexMarketplace $codexCommandPath $source $previousRef
+                return
+            }
+            $installedPlugin = Get-ProjectAtlasCodexPlugin $codexCommandPath
+            if (-not (Test-ProjectAtlasCodexPluginSourceManifest $installedPlugin $runtimeVersion)) {
+                $sourceManifestVersion = Get-ProjectAtlasCodexPluginSourceManifestVersion $installedPlugin
+                Write-Warning "Codex ProjectAtlas plugin update failed: source manifest version '$sourceManifestVersion' does not match $runtimeVersion after refresh."
                 Restore-ProjectAtlasCodexMarketplace $codexCommandPath $source $previousRef
                 return
             }
@@ -696,6 +745,13 @@ function Update-ProjectAtlasCodexPlugin {
         $installedVersion = Get-ProjectAtlasCodexPluginVersion $codexCommandPath
         if ($installedVersion -ne $runtimeVersion) {
             Write-Warning "Codex ProjectAtlas plugin update failed: installed projectatlas plugin version '$installedVersion' does not match $runtimeVersion."
+            Restore-ProjectAtlasCodexMarketplace $codexCommandPath $source $previousRef
+            return
+        }
+        $installedPlugin = Get-ProjectAtlasCodexPlugin $codexCommandPath
+        if (-not (Test-ProjectAtlasCodexPluginSourceManifest $installedPlugin $runtimeVersion)) {
+            $sourceManifestVersion = Get-ProjectAtlasCodexPluginSourceManifestVersion $installedPlugin
+            Write-Warning "Codex ProjectAtlas plugin update failed: source manifest version '$sourceManifestVersion' does not match $runtimeVersion after refresh."
             Restore-ProjectAtlasCodexMarketplace $codexCommandPath $source $previousRef
             return
         }

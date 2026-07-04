@@ -365,6 +365,24 @@ codex_projectatlas_plugin_source_path() {
     head -n 1
 }
 
+codex_projectatlas_plugin_source_manifest_version() {
+  plugin_source_path=$(codex_projectatlas_plugin_source_path)
+  [ -n "$plugin_source_path" ] || return 0
+  manifest_path=$plugin_source_path/.codex-plugin/plugin.json
+  if [ ! -f "$manifest_path" ]; then
+    printf '%s\n' ""
+    return 0
+  fi
+  sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest_path" | head -n 1
+}
+
+codex_projectatlas_plugin_source_manifest_matches() {
+  expected_version=$1
+  plugin_source_path=$(codex_projectatlas_plugin_source_path)
+  [ -n "$plugin_source_path" ] || return 0
+  [ "$(codex_projectatlas_plugin_source_manifest_version)" = "$expected_version" ]
+}
+
 verify_codex_projectatlas_skill_artifact() {
   runtime_version=$(expected_runtime_version)
   if [ -z "$runtime_version" ]; then
@@ -437,18 +455,31 @@ update_codex_plugin() {
 
   release_tag=v$runtime_version
   current_plugin_version=$(codex_projectatlas_plugin_version)
-  if [ "$previous_ref" = "$release_tag" ] && [ "$current_plugin_version" = "$runtime_version" ]; then
+  if [ "$previous_ref" = "$release_tag" ] &&
+    [ "$current_plugin_version" = "$runtime_version" ] &&
+    codex_projectatlas_plugin_source_manifest_matches "$runtime_version"; then
     printf 'Codex ProjectAtlas plugin marketplace already points to %s.\n' "$release_tag"
     verify_codex_projectatlas_skill_artifact
     return 0
   fi
   if [ "$previous_ref" = "$release_tag" ]; then
+    if [ "$current_plugin_version" = "$runtime_version" ] &&
+      ! codex_projectatlas_plugin_source_manifest_matches "$runtime_version"; then
+      source_manifest_version=$(codex_projectatlas_plugin_source_manifest_version)
+      printf "Codex ProjectAtlas plugin source manifest version '%s' does not match %s; refreshing official projectatlas plugin cache.\n" "$source_manifest_version" "$runtime_version"
+    fi
     "$codex_bin" plugin remove projectatlas --marketplace projectatlas --json >/dev/null 2>&1 || true
     if "$codex_bin" plugin add projectatlas --marketplace projectatlas --json >/dev/null 2>&1; then
       installed_version=$(codex_projectatlas_plugin_version)
       if [ "$installed_version" = "$runtime_version" ]; then
-        printf 'Codex ProjectAtlas plugin marketplace updated to %s.\n' "$release_tag"
-        verify_codex_projectatlas_skill_artifact
+        if codex_projectatlas_plugin_source_manifest_matches "$runtime_version"; then
+          printf 'Codex ProjectAtlas plugin marketplace updated to %s.\n' "$release_tag"
+          verify_codex_projectatlas_skill_artifact
+        else
+          source_manifest_version=$(codex_projectatlas_plugin_source_manifest_version)
+          printf "warning: Codex ProjectAtlas plugin update failed: source manifest version '%s' does not match %s after refresh.\n" "$source_manifest_version" "$runtime_version" >&2
+          restore_codex_projectatlas_marketplace "$marketplace_source" "$previous_ref"
+        fi
       else
         printf "warning: Codex ProjectAtlas plugin update failed: installed projectatlas plugin version '%s' does not match %s.\n" "$installed_version" "$runtime_version" >&2
         restore_codex_projectatlas_marketplace "$marketplace_source" "$previous_ref"
@@ -473,8 +504,14 @@ update_codex_plugin() {
   if "$codex_bin" plugin add projectatlas --marketplace projectatlas --json >/dev/null 2>&1; then
     installed_version=$(codex_projectatlas_plugin_version)
     if [ "$installed_version" = "$runtime_version" ]; then
-      printf 'Codex ProjectAtlas plugin marketplace updated to %s.\n' "$release_tag"
-      verify_codex_projectatlas_skill_artifact
+      if codex_projectatlas_plugin_source_manifest_matches "$runtime_version"; then
+        printf 'Codex ProjectAtlas plugin marketplace updated to %s.\n' "$release_tag"
+        verify_codex_projectatlas_skill_artifact
+      else
+        source_manifest_version=$(codex_projectatlas_plugin_source_manifest_version)
+        printf "warning: Codex ProjectAtlas plugin update failed: source manifest version '%s' does not match %s after refresh.\n" "$source_manifest_version" "$runtime_version" >&2
+        restore_codex_projectatlas_marketplace "$marketplace_source" "$previous_ref"
+      fi
     else
       printf "warning: Codex ProjectAtlas plugin update failed: installed projectatlas plugin version '%s' does not match %s.\n" "$installed_version" "$runtime_version" >&2
       restore_codex_projectatlas_marketplace "$marketplace_source" "$previous_ref"

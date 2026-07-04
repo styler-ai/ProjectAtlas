@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Plugin Coding"
+  short_description: "Build stable Codex plugins and installers"
+  default_prompt: "Use $codex-coding-plugin to design or review a Codex plugin runtime, installer, MCP config, or marketplace update flow."
