@@ -24,7 +24,7 @@ use projectatlas_core::telemetry::{
     TOKEN_BUCKET_NAVIGATION_AVOIDANCE, TOKEN_CONFIDENCE_INFERRED, TOKEN_CONFIDENCE_POLICY_ESTIMATE,
     usage_from_estimates_with_context, usage_from_text,
 };
-use projectatlas_core::toon::encode_agent_payload;
+use projectatlas_core::toon::{encode_agent_payload, render_ranked_node_rows};
 use projectatlas_core::{
     Node, NodeKind, Overview, PurposeSource, PurposeStatus, normalize_native_path_display,
     normalize_native_path_display_str, normalize_repo_path, purpose_review_signal,
@@ -33,13 +33,15 @@ use projectatlas_core::{
 use projectatlas_db::{AtlasStore, HealthFindingsPage, HealthQuery, HealthScope, IndexedFileText};
 use projectatlas_fs::{ScanOptions, gitignore_excludes_path, scan_path, scan_repo};
 use projectatlas_service::{
-    FilePathMatcher, FileSummaryReport, file_summary_baseline_text, load_ranked_file_nodes,
+    FilePathMatcher, FileSummaryReport, NextStepReport, build_next_report,
+    file_summary_baseline_text, load_ranked_file_nodes_with_reasons,
+    load_ranked_folder_nodes_with_reasons,
 };
 use projectatlas_symbols::extract_symbol_graph;
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
@@ -490,16 +492,25 @@ pub(crate) fn byte_count_to_tokens(bytes: usize) -> usize {
     if bytes == 0 { 0 } else { bytes.div_ceil(4) }
 }
 
-/// Load ranked file nodes in bounded pages and apply exact glob semantics.
-pub(crate) fn ranked_file_nodes(
+/// Load ranked folder nodes with concise reasons.
+pub(crate) fn ranked_folder_nodes_with_reasons(
+    store: &AtlasStore,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<projectatlas_core::RankedNode>, CliError> {
+    Ok(load_ranked_folder_nodes_with_reasons(store, query, limit)?)
+}
+
+/// Load ranked file nodes with concise reasons.
+pub(crate) fn ranked_file_nodes_with_reasons(
     store: &AtlasStore,
     query: &str,
     folder: Option<&str>,
     file_pattern: Option<&str>,
     limit: usize,
     include_content: bool,
-) -> Result<Vec<projectatlas_core::IndexedNode>, CliError> {
-    Ok(load_ranked_file_nodes(
+) -> Result<Vec<projectatlas_core::RankedNode>, CliError> {
+    Ok(load_ranked_file_nodes_with_reasons(
         store,
         query,
         folder,
@@ -507,6 +518,25 @@ pub(crate) fn ranked_file_nodes(
         limit,
         include_content,
     )?)
+}
+
+/// Build a next-step recommendation report from indexed metadata.
+pub(crate) fn next_step_report(
+    store: &AtlasStore,
+    query: &str,
+    limit: Option<usize>,
+) -> Result<NextStepReport, CliError> {
+    Ok(build_next_report(store, query, limit)?)
+}
+
+/// Build the flattened agent-facing next-step payload.
+pub(crate) fn next_step_report_payload(report: &NextStepReport) -> Value {
+    json!({
+        "query": &report.query,
+        "folders": render_ranked_node_rows("folders", &report.folders),
+        "files": render_ranked_node_rows("files", &report.files),
+        "suggestions": &report.suggestions,
+    })
 }
 
 /// Agent-facing purpose curation queue with bounded health metadata.

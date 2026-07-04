@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 
 const TEST_REPO_DIR: &str = "repo";
 const SRC_DIR_NAME: &str = "src";
+const TESTS_DIR_NAME: &str = "tests";
+const INSTALLER_RS_FILE_NAME: &str = "installer.rs";
 const ATLAS_DIR_NAME: &str = ".projectatlas";
 const CODEX_CONFIG_DIR: &str = ".codex";
 const CODEX_PLUGIN_MANIFEST_DIR: &str = ".codex-plugin";
@@ -3870,6 +3872,7 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"atlas_health","arguments":{"category":"missing-purpose","path_prefix":".","limit":1}}}"#,
         r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"atlas_token_report","arguments":{"include_chart":true}}}"#,
         r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"atlas_purpose_review","arguments":{"apply":true,"items":[{"path":"src/lib.rs","confirm_existing":true}]}}}"#,
+        r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"atlas_next","arguments":{"query":"indexed","limit":1}}}"#,
     ];
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let stdout = run_mcp_stdio(
@@ -3885,8 +3888,10 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
     if !stdout.contains(r#""id":1"#)
         || !stdout.contains(r#""serverInfo":{"name":"ProjectAtlas","version":"#)
         || !stdout.contains(r#""name":"atlas_files""#)
+        || !stdout.contains(r#""name":"atlas_next""#)
         || !stdout.contains("overview:")
         || !stdout.contains("files[1]")
+        || !stdout.contains("next:")
         || !stdout.contains("health:")
         || !stdout.contains("health_findings[1]")
         || !stdout.contains("next_start_index: 1")
@@ -3910,6 +3915,131 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         &["file_purpose"],
         "Imported Rust library purpose for MCP review.",
     )?;
+    Ok(())
+}
+
+#[test]
+fn ranked_files_and_next_include_bounded_reasons() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::create_dir(repo.join(TESTS_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join(INSTALLER_RS_FILE_NAME),
+        "pub fn install_runtime() { let _marker = \"hiddenNeedle\"; }\n",
+    )?;
+    fs::write(
+        repo.join(TESTS_DIR_NAME).join(INSTALLER_RS_FILE_NAME),
+        "#[test]\nfn installer_pair() {}\n",
+    )?;
+    let db = temp.path().join("projectatlas.db");
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+    {
+        let store = AtlasStore::open(&db)?;
+        store.set_purpose(
+            SRC_DIR_NAME,
+            "Installer runtime source folder for navigation tests.",
+            PurposeSource::Agent,
+        )?;
+        store.set_purpose(
+            "src/installer.rs",
+            "Installer runtime implementation for navigation tests.",
+            PurposeSource::Agent,
+        )?;
+    }
+
+    let raw_files = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "files",
+            "installer runtime hiddenNeedle",
+            "--include-content",
+            "--limit",
+            "2",
+        ])
+        .output()?;
+    if !raw_files.status.success() {
+        return Err(io::Error::other(format!(
+            "json files command with reasons failed: {}",
+            String::from_utf8_lossy(&raw_files.stderr)
+        ))
+        .into());
+    }
+    let files_json: Value = serde_json::from_slice(&raw_files.stdout)?;
+    let file_entry = files_json
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["path"] == "src/installer.rs")
+        })
+        .ok_or_else(|| io::Error::other("reasoned installer file entry was missing"))?;
+    require_json_string(
+        file_entry,
+        &["file_purpose"],
+        "Installer runtime implementation for navigation tests.",
+    )?;
+    require_json_contains(file_entry, &["reasons", "0"], "path matched")?;
+    let file_reasons = json_at(file_entry, &["reasons"])?
+        .as_array()
+        .ok_or_else(|| io::Error::other("file reasons were not an array"))?;
+    if file_reasons.len() > 6
+        || !file_reasons.iter().any(|reason| {
+            reason
+                .as_str()
+                .is_some_and(|text| text.contains("indexed text matched"))
+        })
+    {
+        return Err(io::Error::other(format!(
+            "file reasons did not stay bounded or include indexed text: {file_reasons:?}"
+        ))
+        .into());
+    }
+
+    let raw_next = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["next", "installer runtime hiddenNeedle", "--limit", "2"])
+        .output()?;
+    if !raw_next.status.success() {
+        return Err(io::Error::other(format!(
+            "json next command failed: {}",
+            String::from_utf8_lossy(&raw_next.stderr)
+        ))
+        .into());
+    }
+    let next_json: Value = serde_json::from_slice(&raw_next.stdout)?;
+    require_json_string(&next_json, &["query"], "installer runtime hiddenNeedle")?;
+    require_json_string(&next_json, &["files", "0", "path"], "src/installer.rs")?;
+    require_json_contains(&next_json, &["files", "0", "reasons", "0"], "path matched")?;
+    let suggestions = json_at(&next_json, &["suggestions"])?
+        .as_array()
+        .ok_or_else(|| io::Error::other("next suggestions were not an array"))?;
+    if !suggestions.iter().any(|suggestion| {
+        suggestion
+            .as_str()
+            .is_some_and(|text| text == "projectatlas summary src/installer.rs --limit 25")
+    }) {
+        return Err(io::Error::other(format!(
+            "next suggestions did not include top-file summary command: {suggestions:?}"
+        ))
+        .into());
+    }
     Ok(())
 }
 

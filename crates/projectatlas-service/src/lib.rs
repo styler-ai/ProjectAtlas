@@ -8,7 +8,9 @@ use projectatlas_core::outline::estimate_tokens;
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SourceParseMetadata, SymbolKind, SymbolRelation,
 };
-use projectatlas_core::{IndexedNode, NodeKind, repo_path_to_native, validated_repo_file_key};
+use projectatlas_core::{
+    IndexedNode, NodeKind, RankedNode, repo_path_to_native, validated_repo_file_key,
+};
 use projectatlas_db::{AtlasStore, DbError, IndexedFileText};
 use regex::RegexBuilder;
 use serde::Serialize;
@@ -23,6 +25,14 @@ const CALLERS_PER_SYMBOL_LIMIT: usize = 20;
 const CALLER_RELATION_LIMIT_PER_TARGET: usize = 20;
 /// Maximum package/module symbols read for file-level metadata.
 const FILE_METADATA_SYMBOL_LIMIT: usize = 20;
+/// Maximum concise reasons attached to one ranked result.
+const RANKED_REASON_LIMIT: usize = 6;
+/// Maximum selected candidates considered when service-side ranking enriches DB output.
+const RANKED_CANDIDATE_LIMIT: usize = 100;
+/// Default number of folders and files returned by `next`.
+const NEXT_REPORT_DEFAULT_LIMIT: usize = 3;
+/// Maximum number of folders and files returned by `next`.
+const NEXT_REPORT_MAX_LIMIT: usize = 10;
 /// Status emitted when live source was read successfully.
 const SOURCE_STATUS_LIVE: &str = "live-source";
 /// Status emitted when indexed metadata had to stand in for live source.
@@ -202,6 +212,19 @@ pub struct SearchReport {
     pub truncated: bool,
     /// Search matches.
     pub results: Vec<SearchMatch>,
+}
+
+/// Agent-facing next-step recommendation report built from indexed metadata.
+#[derive(Debug, Serialize)]
+pub struct NextStepReport {
+    /// Task/navigation query.
+    pub query: String,
+    /// Top matching folders with concise ranking evidence.
+    pub folders: Vec<RankedNode>,
+    /// Top matching files with concise ranking evidence.
+    pub files: Vec<RankedNode>,
+    /// Deterministic follow-up commands for the selected index targets.
+    pub suggestions: Vec<String>,
 }
 
 /// Exact code slice returned after orientation.
@@ -646,15 +669,438 @@ pub fn load_ranked_file_nodes(
 ) -> ServiceResult<Vec<IndexedNode>> {
     let matcher = FilePathMatcher::new(file_pattern)?;
     let target = limit.max(1);
+    let candidate_target = ranked_candidate_target(query, target);
     let mut selected = if matcher.filters() {
-        load_ranked_file_nodes_matching_glob(store, query, folder, &matcher, target)?
+        load_ranked_file_nodes_matching_glob(store, query, folder, &matcher, candidate_target)?
     } else {
-        store.load_ranked_nodes(query, NodeKind::File, folder, target, 0)?
+        store.load_ranked_nodes(query, NodeKind::File, folder, candidate_target, 0)?
     };
-    if include_content && !query.trim().is_empty() && selected.len() < target {
-        append_content_ranked_file_nodes(store, query, folder, &matcher, target, &mut selected)?;
+    if include_content && !query.trim().is_empty() && selected.len() < candidate_target {
+        append_content_ranked_file_nodes(
+            store,
+            query,
+            folder,
+            &matcher,
+            candidate_target,
+            &mut selected,
+        )?;
     }
+    append_paired_file_nodes(store, &matcher, candidate_target, &mut selected)?;
+    selected = sort_ranked_file_nodes(store, query, selected)?;
+    selected.truncate(target);
     Ok(selected)
+}
+
+/// Load ranked folders with concise reasons.
+///
+/// # Errors
+///
+/// Returns an error when indexed folder metadata cannot be loaded.
+pub fn load_ranked_folder_nodes_with_reasons(
+    store: &AtlasStore,
+    query: &str,
+    limit: usize,
+) -> ServiceResult<Vec<RankedNode>> {
+    let selected = store.load_ranked_nodes(query, NodeKind::Folder, None, limit.max(1), 0)?;
+    ranked_nodes_with_reasons(store, query, selected)
+}
+
+/// Load ranked files with concise reasons.
+///
+/// # Errors
+///
+/// Returns an error when indexed file metadata cannot be loaded or filters are invalid.
+pub fn load_ranked_file_nodes_with_reasons(
+    store: &AtlasStore,
+    query: &str,
+    folder: Option<&str>,
+    file_pattern: Option<&str>,
+    limit: usize,
+    include_content: bool,
+) -> ServiceResult<Vec<RankedNode>> {
+    let selected =
+        load_ranked_file_nodes(store, query, folder, file_pattern, limit, include_content)?;
+    ranked_nodes_with_reasons(store, query, selected)
+}
+
+/// Build an indexed-metadata recommendation report for the next inspection step.
+///
+/// # Errors
+///
+/// Returns an error when indexed folder or file metadata cannot be loaded.
+pub fn build_next_report(
+    store: &AtlasStore,
+    query: &str,
+    limit: Option<usize>,
+) -> ServiceResult<NextStepReport> {
+    let target = limit
+        .unwrap_or(NEXT_REPORT_DEFAULT_LIMIT)
+        .clamp(1, NEXT_REPORT_MAX_LIMIT);
+    let folders = load_ranked_folder_nodes_with_reasons(store, query, target)?;
+    let files = load_ranked_file_nodes_with_reasons(store, query, None, None, target, true)?;
+    let suggestions = next_report_suggestions(query, &folders, &files);
+    Ok(NextStepReport {
+        query: query.to_string(),
+        folders,
+        files,
+        suggestions,
+    })
+}
+
+#[derive(Debug)]
+/// Score and evidence computed for one ranked node.
+struct RankedEvidence {
+    /// Additive deterministic score for ordering a bounded candidate set.
+    score: usize,
+    /// Concise evidence strings emitted to the agent-facing result.
+    reasons: Vec<String>,
+}
+
+/// Return the bounded candidate count used before final ranking truncation.
+fn ranked_candidate_target(query: &str, target: usize) -> usize {
+    if query.trim().is_empty() {
+        target
+    } else {
+        target
+            .saturating_mul(3)
+            .clamp(target, RANKED_CANDIDATE_LIMIT)
+    }
+}
+
+/// Attach reasons to a ranked node list without changing its order.
+fn ranked_nodes_with_reasons(
+    store: &AtlasStore,
+    query: &str,
+    selected: Vec<IndexedNode>,
+) -> ServiceResult<Vec<RankedNode>> {
+    let terms = normalize_ranking_terms(query);
+    let text_hit_paths = indexed_text_hit_paths(store, &selected, &terms)?;
+    selected
+        .into_iter()
+        .map(|node| {
+            let evidence = ranked_node_evidence(store, &node, &terms, &text_hit_paths)?;
+            Ok(RankedNode {
+                node,
+                reasons: evidence.reasons,
+            })
+        })
+        .collect()
+}
+
+/// Sort a bounded file candidate list by service-level ranking evidence.
+fn sort_ranked_file_nodes(
+    store: &AtlasStore,
+    query: &str,
+    selected: Vec<IndexedNode>,
+) -> ServiceResult<Vec<IndexedNode>> {
+    if query.trim().is_empty() || selected.len() <= 1 {
+        return Ok(selected);
+    }
+    let terms = normalize_ranking_terms(query);
+    let text_hit_paths = indexed_text_hit_paths(store, &selected, &terms)?;
+    let mut scored = selected
+        .into_iter()
+        .enumerate()
+        .map(|(index, node)| {
+            let evidence = ranked_node_evidence(store, &node, &terms, &text_hit_paths)?;
+            Ok((index, evidence.score, node))
+        })
+        .collect::<ServiceResult<Vec<_>>>()?;
+    scored.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+            .then_with(|| left.2.node.path.cmp(&right.2.node.path))
+    });
+    Ok(scored.into_iter().map(|(_, _, node)| node).collect())
+}
+
+/// Compute score and reasons for one node from indexed metadata.
+fn ranked_node_evidence(
+    store: &AtlasStore,
+    node: &IndexedNode,
+    terms: &[String],
+    text_hit_paths: &HashSet<String>,
+) -> ServiceResult<RankedEvidence> {
+    let mut score = 0usize;
+    let mut reasons = Vec::new();
+    if terms.is_empty() {
+        return Ok(RankedEvidence { score, reasons });
+    }
+
+    if let Some(term) = first_matching_term(&node.node.path, terms) {
+        score = score.saturating_add(40);
+        push_ranked_reason(&mut reasons, format!("path matched {term}"));
+    }
+    if let Some(term) = node
+        .purpose
+        .purpose
+        .as_deref()
+        .and_then(|purpose| first_matching_term(purpose, terms))
+    {
+        score = score.saturating_add(50);
+        push_ranked_reason(&mut reasons, format!("purpose matched {term}"));
+    }
+    if let Some(term) = node
+        .summary
+        .as_deref()
+        .and_then(|summary| first_matching_term(summary, terms))
+    {
+        score = score.saturating_add(20);
+        push_ranked_reason(&mut reasons, format!("summary matched {term}"));
+    }
+    if node.node.kind == NodeKind::File {
+        if let Some((symbol_name, term)) = first_symbol_match(store, &node.node.path, terms)? {
+            score = score.saturating_add(35);
+            push_ranked_reason(&mut reasons, format!("symbol {symbol_name} matched {term}"));
+        }
+        if text_hit_paths.contains(&node.node.path)
+            && let Some(term) = indexed_text_match_term(store, &node.node.path, terms)?
+        {
+            score = score.saturating_add(15);
+            push_ranked_reason(&mut reasons, format!("indexed text matched {term}"));
+        }
+        if let Some(reason) = paired_path_reason(store, &node.node.path)? {
+            score = score.saturating_add(10);
+            push_ranked_reason(&mut reasons, reason);
+        }
+    }
+
+    Ok(RankedEvidence { score, reasons })
+}
+
+/// Split a query into unique lowercase terms used by ranking evidence.
+fn normalize_ranking_terms(query: &str) -> Vec<String> {
+    let mut terms = query
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>();
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+/// Return the first normalized query term contained in a text field.
+fn first_matching_term(text: &str, terms: &[String]) -> Option<String> {
+    let haystack = normalized_search_text(text, false);
+    terms
+        .iter()
+        .find(|term| haystack.contains(term.as_str()))
+        .cloned()
+}
+
+/// Append a reason when it is unique and the per-result cap allows it.
+fn push_ranked_reason(reasons: &mut Vec<String>, reason: String) {
+    if reasons.len() < RANKED_REASON_LIMIT && !reasons.contains(&reason) {
+        reasons.push(reason);
+    }
+}
+
+/// Return selected file paths whose persisted indexed text matches any term.
+fn indexed_text_hit_paths(
+    store: &AtlasStore,
+    selected: &[IndexedNode],
+    terms: &[String],
+) -> ServiceResult<HashSet<String>> {
+    let mut hits = HashSet::new();
+    if terms.is_empty() {
+        return Ok(hits);
+    }
+    for node in selected
+        .iter()
+        .filter(|node| node.node.kind == NodeKind::File)
+    {
+        if indexed_text_match_term(store, &node.node.path, terms)?.is_some() {
+            hits.insert(node.node.path.clone());
+        }
+    }
+    Ok(hits)
+}
+
+/// Return the first query term found in one file's persisted indexed text.
+fn indexed_text_match_term(
+    store: &AtlasStore,
+    path: &str,
+    terms: &[String],
+) -> ServiceResult<Option<String>> {
+    let Some(text) = store.load_file_text(path)? else {
+        return Ok(None);
+    };
+    Ok(first_matching_term(&text.content, terms))
+}
+
+/// Return the first indexed symbol match for one file and query term set.
+fn first_symbol_match(
+    store: &AtlasStore,
+    path: &str,
+    terms: &[String],
+) -> ServiceResult<Option<(String, String)>> {
+    const RANKING_SYMBOL_KINDS: &[SymbolKind] = &[
+        SymbolKind::Function,
+        SymbolKind::Method,
+        SymbolKind::Class,
+        SymbolKind::Struct,
+        SymbolKind::Enum,
+        SymbolKind::Trait,
+        SymbolKind::Interface,
+        SymbolKind::Type,
+        SymbolKind::Module,
+        SymbolKind::Value,
+    ];
+    for symbol in store.load_symbols_by_kinds(path, RANKING_SYMBOL_KINDS, 50)? {
+        if let Some(term) = first_matching_term(&symbol.name, terms)
+            .or_else(|| first_matching_term(&symbol.signature, terms))
+        {
+            return Ok(Some((symbol.name, term)));
+        }
+    }
+    Ok(None)
+}
+
+/// Append conventional source/test counterpart files to a candidate set.
+fn append_paired_file_nodes(
+    store: &AtlasStore,
+    matcher: &FilePathMatcher,
+    target: usize,
+    selected: &mut Vec<IndexedNode>,
+) -> ServiceResult<()> {
+    if selected.len() >= target {
+        return Ok(());
+    }
+    let mut seen = selected
+        .iter()
+        .map(|node| node.node.path.clone())
+        .collect::<HashSet<_>>();
+    let seed_paths = selected
+        .iter()
+        .map(|node| node.node.path.clone())
+        .collect::<Vec<_>>();
+    for path in seed_paths {
+        for candidate in paired_path_candidates(&path) {
+            if selected.len() >= target {
+                return Ok(());
+            }
+            if seen.contains(&candidate) || !matcher.is_match(&candidate) {
+                continue;
+            }
+            if let Some(node) = store.load_node_by_path(&candidate)? {
+                seen.insert(candidate);
+                selected.push(node);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Build a concise reason when a source/test counterpart is indexed.
+fn paired_path_reason(store: &AtlasStore, path: &str) -> ServiceResult<Option<String>> {
+    for candidate in paired_path_candidates(path) {
+        if store.load_node_by_path(&candidate)?.is_some() {
+            let relation = if is_test_path(path) {
+                "paired source file"
+            } else {
+                "paired test file"
+            };
+            return Ok(Some(format!("{relation} {candidate}")));
+        }
+    }
+    Ok(None)
+}
+
+/// Return conventional source/test counterpart path candidates.
+fn paired_path_candidates(path: &str) -> Vec<String> {
+    let Some((stem_path, extension)) = path.rsplit_once('.') else {
+        return Vec::new();
+    };
+    let extension = format!(".{extension}");
+    let file_stem = stem_path.rsplit('/').next().unwrap_or(stem_path);
+    let mut candidates = Vec::new();
+    if let Some(source_name) = file_stem.strip_suffix("_test") {
+        let prefix = stem_path
+            .strip_suffix(file_stem)
+            .unwrap_or("")
+            .trim_end_matches('/');
+        candidates.push(join_repo_path(prefix, &format!("{source_name}{extension}")));
+    } else if let Some(source_name) = file_stem.strip_suffix(".test") {
+        let prefix = stem_path
+            .strip_suffix(file_stem)
+            .unwrap_or("")
+            .trim_end_matches('/');
+        candidates.push(join_repo_path(prefix, &format!("{source_name}{extension}")));
+    }
+    if let Some(test_name) = stem_path.strip_prefix("tests/") {
+        candidates.push(format!("src/{test_name}{extension}"));
+    } else if let Some(source_name) = stem_path.strip_prefix("src/") {
+        candidates.push(format!("tests/{source_name}{extension}"));
+        candidates.push(format!("src/{source_name}_test{extension}"));
+    } else {
+        candidates.push(format!("tests/{file_stem}{extension}"));
+    }
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+/// Return whether a path is conventionally test-owned.
+fn is_test_path(path: &str) -> bool {
+    path.starts_with("tests/")
+        || path.contains("/tests/")
+        || path.contains("_test.")
+        || path.contains(".test.")
+}
+
+/// Join repository path segments without introducing platform separators.
+fn join_repo_path(prefix: &str, leaf: &str) -> String {
+    if prefix.is_empty() {
+        leaf.to_string()
+    } else {
+        format!("{prefix}/{leaf}")
+    }
+}
+
+/// Build deterministic follow-up commands for a next-step report.
+fn next_report_suggestions(
+    query: &str,
+    folders: &[RankedNode],
+    files: &[RankedNode],
+) -> Vec<String> {
+    let mut suggestions = Vec::new();
+    if let Some(file) = files.first() {
+        let path = quoted_command_arg(&file.node.node.path);
+        suggestions.push(format!("projectatlas summary {path} --limit 25"));
+        suggestions.push(format!("projectatlas outline {path}"));
+    }
+    if let Some(folder) = folders.first() {
+        let query_arg = quoted_command_arg(query);
+        let folder_arg = quoted_command_arg(&folder.node.node.path);
+        suggestions.push(format!(
+            "projectatlas files {query_arg} --folder {folder_arg} --limit 5"
+        ));
+    }
+    if !query.trim().is_empty() {
+        let query_arg = quoted_command_arg(query);
+        suggestions.push(format!(
+            "projectatlas search {query_arg} --file-pattern **/* --context-lines 2"
+        ));
+    }
+    suggestions.truncate(4);
+    suggestions
+}
+
+/// Quote a command argument when whitespace or quotes require it.
+fn quoted_command_arg(value: &str) -> String {
+    if value.is_empty() {
+        "\"\"".to_string()
+    } else if value
+        .chars()
+        .any(|character| character.is_whitespace() || matches!(character, '"' | '\''))
+    {
+        format!("\"{}\"", value.replace('"', "\\\""))
+    } else {
+        value.to_string()
+    }
 }
 
 /// Load ranked files while applying a compiled repository-relative glob.
@@ -698,19 +1144,23 @@ fn append_content_ranked_file_nodes(
     target: usize,
     selected: &mut Vec<IndexedNode>,
 ) -> ServiceResult<()> {
-    let needle = normalized_search_text(query, false);
+    let terms = normalize_ranking_terms(query);
+    if terms.is_empty() {
+        return Ok(());
+    }
     let mut seen = selected
         .iter()
         .map(|node| node.node.path.clone())
         .collect::<HashSet<_>>();
-    store.visit_file_texts_for_search(Some(query), false, |text| {
+    store.visit_file_texts_for_search(None, false, |text| {
         if selected.len() >= target {
             return Ok(false);
         }
+        let indexed_text = normalized_search_text(&text.content, false);
         if !seen.contains(&text.path)
             && path_is_inside_folder(&text.path, folder)
             && matcher.is_match(&text.path)
-            && normalized_search_text(&text.content, false).contains(&needle)
+            && terms.iter().any(|term| indexed_text.contains(term))
             && let Some(node) = store.load_node_by_path(&text.path)?
         {
             seen.insert(text.path);
@@ -2677,6 +3127,81 @@ mod tests {
     }
 
     #[test]
+    fn ranked_file_reasons_match_indexed_ranking_signals() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src"))?;
+        fs::create_dir_all(root.join("tests"))?;
+        fs::write(
+            root.join("src").join("installer.rs"),
+            "pub fn install_runtime() { let _marker = \"hiddenNeedle\"; }\n",
+        )?;
+        fs::write(
+            root.join("tests").join("installer.rs"),
+            "#[test]\nfn installer_pair() {}\n",
+        )?;
+        fs::write(root.join("src").join("noise.rs"), "pub fn unrelated() {}\n")?;
+
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        let nodes = [
+            test_node("src/installer.rs", "hash-installer"),
+            test_node("tests/installer.rs", "hash-installer-test"),
+            test_node("src/noise.rs", "hash-noise"),
+        ];
+        store.replace_scan(&nodes)?;
+        store.set_purpose(
+            "src/installer.rs",
+            "Installer runtime release target",
+            PurposeSource::Agent,
+        )?;
+        store.set_node_summary("src/installer.rs", "Release installer summary")?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/installer.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![test_symbol(
+                "src/installer.rs",
+                SymbolKind::Function,
+                "install_runtime",
+            )],
+            relations: Vec::new(),
+        })?;
+        index_test_file_texts(&mut store, root, &nodes)?;
+
+        let ranked = load_ranked_file_nodes_with_reasons(
+            &store,
+            "installer runtime release hiddenNeedle install_runtime",
+            None,
+            Some("*.rs"),
+            2,
+            true,
+        )?;
+        require_eq(&ranked.len(), &2, "ranked source/test pair count")?;
+        require_eq(
+            &ranked[0].node.node.path,
+            &"src/installer.rs".to_string(),
+            "strong indexed signal ranks first",
+        )?;
+        require_reason(&ranked[0].reasons, "path matched install")?;
+        require_reason(&ranked[0].reasons, "purpose matched install")?;
+        require_reason(&ranked[0].reasons, "summary matched install")?;
+        require_reason(&ranked[0].reasons, "symbol install_runtime matched install")?;
+        require_reason(&ranked[0].reasons, "indexed text matched hiddenneedle")?;
+        require_reason(&ranked[0].reasons, "paired test file tests/installer.rs")?;
+        if !ranked.iter().any(|node| {
+            node.node.node.path == "tests/installer.rs"
+                && node
+                    .reasons
+                    .iter()
+                    .any(|reason| reason == "paired source file src/installer.rs")
+        }) {
+            return Err(io::Error::other("paired test result/reason was missing").into());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn fuzzy_search_matches_approximate_line_terms() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
@@ -2888,6 +3413,15 @@ mod tests {
                 "{label} mismatch: expected {expected:?}, got {actual:?}"
             ))
             .into())
+        }
+    }
+
+    /// Require a ranked reason to contain a stable phrase.
+    fn require_reason(reasons: &[String], expected: &str) -> Result<(), Box<dyn Error>> {
+        if reasons.iter().any(|reason| reason.contains(expected)) {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("reason {expected:?} missing from {reasons:?}")).into())
         }
     }
 }

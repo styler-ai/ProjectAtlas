@@ -326,6 +326,15 @@ pub struct IndexedNode {
     pub summary: Option<String>,
 }
 
+/// A ranked node with concise evidence for why it was selected.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RankedNode {
+    /// Selected indexed node.
+    pub node: IndexedNode,
+    /// Bounded human-readable ranking signals.
+    pub reasons: Vec<String>,
+}
+
 /// Overview returned by startup/overview commands.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Overview {
