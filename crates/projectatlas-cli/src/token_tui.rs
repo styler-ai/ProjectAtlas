@@ -2,32 +2,30 @@
 
 use projectatlas_core::telemetry::{
     TOKEN_ACCOUNTING_OBSERVED_DELTA, TOKEN_BASELINE_DIRECTORY_WALK, TokenBucketOverview,
-    TokenOverview, TokenTrendReport,
+    TokenOverview, TokenTrendReport, TokenTrendWindow,
 };
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Gauge, Paragraph, Row, Sparkline, Table, Wrap};
+use ratatui::widgets::{Bar, BarChart, Block, Cell, Gauge, Paragraph, Row, Sparkline, Table, Wrap};
 use ratatui::{Frame, Terminal};
 
 /// Fixed terminal height for the token overview dashboard snapshot.
-const DASHBOARD_HEIGHT: u16 = 47;
+const DASHBOARD_HEIGHT: u16 = 55;
 /// Fixed terminal height for the token trend dashboard snapshot.
 const TREND_DASHBOARD_HEIGHT: u16 = 30;
-/// Fixed character width for each vertical token comparison column.
-const TOKEN_COMPARE_COLUMN_WIDTH: usize = 24;
-/// Fixed visual width for each filled token comparison bar.
-const TOKEN_COMPARE_BAR_WIDTH: usize = 12;
-/// Number of glyph cells in the file-read avoidance cake chart.
-const READ_AVOIDANCE_CAKE_SLOTS: usize = 12;
 
 /// Render the token overview as a human terminal dashboard.
-pub(crate) fn render_token_dashboard(overview: &TokenOverview, session: Option<&str>) -> String {
+pub(crate) fn render_token_dashboard(
+    overview: &TokenOverview,
+    session: Option<&str>,
+    trends: &[TokenTrendReport],
+) -> String {
     let width = dashboard_width().clamp(80, 140) as u16;
     render_dashboard_to_string(width, DASHBOARD_HEIGHT, |frame| {
-        render_overview_frame(frame, overview, session);
+        render_overview_frame(frame, overview, session, trends);
     })
 }
 
@@ -54,7 +52,12 @@ where
 }
 
 /// Draw the full overview dashboard frame.
-fn render_overview_frame(frame: &mut Frame<'_>, overview: &TokenOverview, session: Option<&str>) {
+fn render_overview_frame(
+    frame: &mut Frame<'_>,
+    overview: &TokenOverview,
+    session: Option<&str>,
+    trends: &[TokenTrendReport],
+) {
     let area = frame.area();
     let outer = Block::bordered()
         .title(Line::from(vec![
@@ -75,6 +78,7 @@ fn render_overview_frame(frame: &mut Frame<'_>, overview: &TokenOverview, sessio
         .constraints([
             Constraint::Length(4),
             Constraint::Length(10),
+            Constraint::Length(9),
             Constraint::Length(8),
             Constraint::Length(6),
             Constraint::Min(8),
@@ -84,10 +88,11 @@ fn render_overview_frame(frame: &mut Frame<'_>, overview: &TokenOverview, sessio
 
     render_overview_summary(frame, sections[0], overview);
     render_overview_bars(frame, sections[1], overview);
-    render_file_read_avoidance_chart(frame, sections[2], overview);
-    render_overview_gauges(frame, sections[3], overview);
-    render_bucket_table(frame, sections[4], overview);
-    render_overview_notes(frame, sections[5], overview);
+    render_overview_trends(frame, sections[2], trends);
+    render_file_handling_optimization_overview(frame, sections[3], overview);
+    render_overview_gauges(frame, sections[4], overview);
+    render_bucket_table(frame, sections[5], overview);
+    render_overview_notes(frame, sections[6], overview);
 }
 
 /// Draw the top overview metadata block.
@@ -97,14 +102,14 @@ fn render_overview_summary(frame: &mut Frame<'_>, area: Rect, overview: &TokenOv
             label("Lookups"),
             value(overview.calls),
             Span::raw("   "),
-            label("Estimated tokens"),
+            label("Gross estimate"),
             Span::raw("without "),
             value(overview.estimated_without_projectatlas),
             Span::raw(" / with "),
             value(overview.estimated_with_projectatlas),
         ]),
         Line::from(vec![
-            label("Saved estimate"),
+            label("Gross saved (without - with)"),
             signed_value(overview.legacy_gross_estimated_saved),
             Span::raw("   "),
             Span::raw(format!(
@@ -134,7 +139,7 @@ fn render_overview_gauges(frame: &mut Frame<'_>, area: Rect, overview: &TokenOve
     render_gauge(
         frame,
         chunks[0],
-        "Total tokens avoided",
+        "Saved/avoided tokens",
         overview.tokens_avoided,
         max_positive,
         Color::Green,
@@ -142,7 +147,7 @@ fn render_overview_gauges(frame: &mut Frame<'_>, area: Rect, overview: &TokenOve
     render_gauge(
         frame,
         chunks[1],
-        "Measured from summaries",
+        "Measured summaries",
         overview.measured_tokens_saved,
         max_positive,
         Color::Yellow,
@@ -150,7 +155,7 @@ fn render_overview_gauges(frame: &mut Frame<'_>, area: Rect, overview: &TokenOve
     render_gauge(
         frame,
         chunks[2],
-        "Narrowed to right files",
+        "Narrowed files",
         overview.deduped_modeled_tokens_avoided,
         max_positive,
         Color::Magenta,
@@ -181,30 +186,47 @@ fn render_overview_bars(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverv
     let max_value = overview
         .estimated_without_projectatlas
         .max(overview.estimated_with_projectatlas)
-        .max(overview.tokens_avoided.max(0).unsigned_abs())
+        .max(overview.legacy_gross_estimated_saved.max(0).unsigned_abs())
         .max(1);
-    let block = Block::bordered().title("Tokens: without vs with ProjectAtlas");
+    let block = Block::bordered().title("Gross tokens: without vs with ProjectAtlas");
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let chart_height = usize::from(inner.height).saturating_sub(3).clamp(3, 6);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(5), Constraint::Min(3)])
+        .split(inner);
+    let bars = token_comparison_columns(overview)
+        .into_iter()
+        .map(|(label, _value_text, value, color)| {
+            Bar::with_label(
+                token_comparison_short_label(label),
+                saturating_usize_to_u64(value),
+            )
+            .text_value("")
+            .style(Style::default().fg(color))
+            .value_style(Style::default().fg(color).add_modifier(Modifier::BOLD))
+        })
+        .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(vertical_token_comparison_lines(
-            overview,
-            max_value,
-            chart_height,
-        ))
-        .alignment(Alignment::Center),
-        inner,
+        BarChart::vertical(bars)
+            .max(saturating_usize_to_u64(max_value))
+            .bar_width(12)
+            .bar_gap(6)
+            .label_style(Style::default().fg(Color::DarkGray))
+            .value_style(
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        sections[0],
     );
+    render_token_comparison_totals(frame, sections[1], overview);
 }
 
-/// Return fixed-width vertical bars for the main token comparison.
-fn vertical_token_comparison_lines(
-    overview: &TokenOverview,
-    max_value: usize,
-    chart_height: usize,
-) -> Vec<Line<'static>> {
-    let columns = [
+/// Return the values used by the with/without/saved comparison chart.
+fn token_comparison_columns(overview: &TokenOverview) -> [(&'static str, String, usize, Color); 3] {
+    [
         (
             "Without ProjectAtlas",
             grouped_count(overview.estimated_without_projectatlas),
@@ -219,178 +241,251 @@ fn vertical_token_comparison_lines(
         ),
         (
             "Saved by ProjectAtlas",
-            signed_count(overview.tokens_avoided),
-            overview.tokens_avoided.max(0).unsigned_abs(),
+            signed_count(overview.legacy_gross_estimated_saved),
+            overview.legacy_gross_estimated_saved.max(0).unsigned_abs(),
             Color::Green,
         ),
-    ];
+    ]
+}
 
-    let mut lines = Vec::with_capacity(chart_height + 2);
-    for level in (1..=chart_height).rev() {
-        let mut spans = Vec::with_capacity(columns.len() * 2);
-        for (index, (_, _, value, color)) in columns.iter().enumerate() {
-            if index > 0 {
-                spans.push(Span::raw("  "));
-            }
-            let filled = vertical_column_height(*value, max_value, chart_height);
-            let marker = if filled >= level {
-                "█".repeat(TOKEN_COMPARE_BAR_WIDTH)
-            } else {
-                " ".repeat(TOKEN_COMPARE_BAR_WIDTH)
-            };
-            spans.push(Span::styled(
-                format!("{marker:^TOKEN_COMPARE_COLUMN_WIDTH$}"),
-                Style::default().fg(*color).add_modifier(Modifier::BOLD),
-            ));
-        }
-        lines.push(Line::from(spans));
+/// Return a short label that fits under a compact `BarChart` bar.
+fn token_comparison_short_label(label: &str) -> &'static str {
+    match label {
+        "Without ProjectAtlas" => "Without",
+        "With ProjectAtlas" => "With",
+        "Saved by ProjectAtlas" => "Saved",
+        _ => "Value",
     }
+}
 
-    lines.push(Line::from(
-        columns
-            .iter()
-            .enumerate()
-            .flat_map(|(index, (label, _, _, _))| {
-                [
-                    if index > 0 { "  " } else { "" }.to_string(),
-                    format!("{label:^TOKEN_COMPARE_COLUMN_WIDTH$}"),
-                ]
-            })
-            .map(|cell| {
-                Span::styled(
-                    cell,
+/// Draw exact totals below the compact token comparison chart.
+fn render_token_comparison_totals(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
+    let columns = token_comparison_columns(overview);
+    let table = Table::new(
+        [
+            Row::new([
+                Cell::from(columns[0].0),
+                Cell::from(columns[1].0),
+                Cell::from(columns[2].0),
+            ])
+            .style(
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Row::new([
+                Cell::from(columns[0].1.clone()).style(
                     Style::default()
-                        .fg(Color::Gray)
+                        .fg(columns[0].3)
                         .add_modifier(Modifier::BOLD),
-                )
-            })
-            .collect::<Vec<_>>(),
-    ));
-    lines.push(Line::from(
-        columns
-            .iter()
-            .enumerate()
-            .flat_map(|(index, (_, value_text, _, color))| {
-                [
-                    if index > 0 { "  " } else { "" }.to_string(),
-                    format!("{value_text:^TOKEN_COMPARE_COLUMN_WIDTH$}"),
-                ]
-                .map(|text| (text, *color))
-            })
-            .map(|(cell, color)| {
-                Span::styled(
-                    cell,
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                )
-            })
-            .collect::<Vec<_>>(),
-    ));
-    lines
+                ),
+                Cell::from(columns[1].1.clone()).style(
+                    Style::default()
+                        .fg(columns[1].3)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Cell::from(columns[2].1.clone()).style(
+                    Style::default()
+                        .fg(columns[2].3)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+        ],
+        [
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ],
+    )
+    .column_spacing(2);
+    frame.render_widget(table, area);
 }
 
-/// Return how many rows should be filled for one vertical comparison column.
-fn vertical_column_height(value: usize, max_value: usize, chart_height: usize) -> usize {
-    if value == 0 || max_value == 0 || chart_height == 0 {
-        0
-    } else {
-        (((value as f64 / max_value as f64) * chart_height as f64).ceil() as usize)
-            .max(1)
-            .min(chart_height)
+/// Draw compact saved-token trends for the standard reporting windows.
+fn render_overview_trends(frame: &mut Frame<'_>, area: Rect, trends: &[TokenTrendReport]) {
+    let block = Block::bordered().title("Saved-token trends");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(inner);
+    let areas = [
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(rows[0]),
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(rows[1]),
+    ];
+    let windows = [
+        TokenTrendWindow::Day,
+        TokenTrendWindow::Week,
+        TokenTrendWindow::Month,
+        TokenTrendWindow::Year,
+    ];
+    for (index, window) in windows.into_iter().enumerate() {
+        let trend = trends.iter().find(|report| report.window == window);
+        let area = areas[index / 2][index % 2];
+        render_trend_sparkline(frame, area, window, trend);
     }
 }
 
-/// Draw a compact cake-style file-read avoidance mix.
-fn render_file_read_avoidance_chart(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
+/// Draw one compact saved-token trend strip.
+fn render_trend_sparkline(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    window: TokenTrendWindow,
+    trend: Option<&TokenTrendReport>,
+) {
+    let periods = trend.map_or(0, |report| report.periods.len());
+    let latest = trend.and_then(|report| report.periods.last()).map_or_else(
+        || "no data".to_string(),
+        |period| signed_count(period.estimated_saved),
+    );
+    let data = trend
+        .map(|report| {
+            report
+                .periods
+                .iter()
+                .map(|period| saturating_usize_to_u64(period.estimated_saved.max(0).unsigned_abs()))
+                .collect::<Vec<_>>()
+        })
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| vec![0]);
     frame.render_widget(
-        Paragraph::new(read_avoidance_cake_lines(overview))
-            .block(Block::bordered().title("File reads avoided"))
-            .wrap(Wrap { trim: false }),
+        Sparkline::default()
+            .block(Block::bordered().title(format!("{window} | latest {latest} | {periods}p")))
+            .data(data)
+            .style(
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
         area,
     );
 }
 
-/// Return cake-style lines for observed and modeled file-read avoidance.
-fn read_avoidance_cake_lines(overview: &TokenOverview) -> Vec<Line<'static>> {
-    let total = overview.likely_file_reads_avoided;
-    let cells = read_avoidance_cake_cells(
-        overview.observed_file_read_replacements,
-        overview.modeled_file_reads_avoided,
-        READ_AVOIDANCE_CAKE_SLOTS,
+/// Draw a compact table-style file-handling optimization overview.
+fn render_file_handling_optimization_overview(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    overview: &TokenOverview,
+) {
+    let block = Block::bordered().title("File Handling Optimization Overview");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(4),
+        ])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(file_handling_saved_tokens_line(overview)).wrap(Wrap { trim: true }),
+        sections[0],
     );
-    let top = cells.iter().take(4).collect::<String>();
-    let middle = cells.iter().skip(4).take(4).collect::<String>();
-    let bottom = cells.iter().skip(8).take(4).collect::<String>();
-    let cell_row = cells.iter().collect::<String>();
-
-    vec![
-        Line::from(vec![
-            Span::styled(
-                format!("      ╭{cell_row}╮   "),
-                Style::default().fg(Color::Green),
-            ),
-            label("Likely file reads avoided"),
-            Span::raw(format!("{} file reads", grouped_count(total))),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                format!("      │{top}{middle}{bottom}│   "),
-                Style::default().fg(Color::Green),
-            ),
-            label("Observed summaries/slices"),
-            Span::raw(format!(
-                "{} ({})",
-                percentage_label(overview.observed_file_read_replacements, total),
-                grouped_count(overview.observed_file_read_replacements)
+    frame.render_widget(
+        Paragraph::new(file_handling_reads_line(overview)).wrap(Wrap { trim: true }),
+        sections[1],
+    );
+    let observed_ratio = ratio(
+        overview.observed_file_read_replacements,
+        overview.likely_file_reads_avoided,
+    );
+    frame.render_widget(
+        Gauge::default()
+            .gauge_style(
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .ratio(observed_ratio)
+            .label(format!(
+                "observed {} / modeled {}",
+                percentage_label(
+                    overview.observed_file_read_replacements,
+                    overview.likely_file_reads_avoided
+                ),
+                percentage_label(
+                    overview.modeled_file_reads_avoided,
+                    overview.likely_file_reads_avoided
+                )
             )),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                format!("      │{cell_row}│   "),
-                Style::default().fg(Color::Magenta),
-            ),
-            label("Search-modeled narrowing"),
-            Span::raw(format!(
-                "{} ({})",
-                percentage_label(overview.modeled_file_reads_avoided, total),
-                grouped_count(overview.modeled_file_reads_avoided)
-            )),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                format!("      ╰{cell_row}╯   "),
-                Style::default().fg(Color::DarkGray),
-            ),
-            label("confidence"),
-            Span::raw(overview.read_avoidance_confidence.clone()),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "      █ observed summaries/slices  ".to_string(),
-                Style::default().fg(Color::Green),
-            ),
-            Span::styled(
-                "▓ search-modeled narrowing".to_string(),
-                Style::default().fg(Color::Magenta),
-            ),
-        ]),
-    ]
+        sections[2],
+    );
+    render_file_handling_table(frame, sections[3], overview);
 }
 
-/// Return the cake cell mix for observed and modeled avoided file reads.
-fn read_avoidance_cake_cells(observed: usize, modeled: usize, slots: usize) -> Vec<char> {
-    let slots = slots.max(1);
-    let total = observed.saturating_add(modeled);
-    if total == 0 {
-        return vec!['○'; slots];
-    }
-    let observed_slots = (((observed as f64 / total as f64) * slots as f64).round() as usize)
-        .min(slots)
-        .max(usize::from(observed > 0));
-    let modeled_slots = slots.saturating_sub(observed_slots);
-    let mut cells = vec!['█'; observed_slots];
-    cells.extend(std::iter::repeat_n('▓', modeled_slots));
-    cells.resize(slots, '○');
-    cells
+/// Return the conservative saved-token equation for file handling.
+fn file_handling_saved_tokens_line(overview: &TokenOverview) -> Line<'static> {
+    Line::from(vec![
+        label("Saved/avoided tokens"),
+        signed_value(overview.tokens_avoided),
+        Span::raw(" = "),
+        signed_value(overview.measured_tokens_saved),
+        Span::raw(" observed + "),
+        signed_value(overview.deduped_modeled_tokens_avoided),
+        Span::raw(" avoided"),
+    ])
+}
+
+/// Return the headline file-read-avoidance equation.
+fn file_handling_reads_line(overview: &TokenOverview) -> Line<'static> {
+    Line::from(vec![
+        label("File reads avoided"),
+        value(overview.likely_file_reads_avoided),
+        Span::raw(" = observed "),
+        value(overview.observed_file_read_replacements),
+        Span::raw(" + search-modeled "),
+        value(overview.modeled_file_reads_avoided),
+        Span::raw(format!(" ({})", overview.read_avoidance_confidence)),
+    ])
+}
+
+/// Draw observed and modeled file-handling rows.
+fn render_file_handling_table(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
+    let rows = [
+        Row::new(vec![
+            Cell::from("Observed summary/slices"),
+            Cell::from(grouped_count(overview.observed_file_read_replacements)),
+            Cell::from(signed_count(overview.measured_tokens_saved)),
+            Cell::from("replaced reads"),
+        ])
+        .style(Style::default().fg(Color::Green)),
+        Row::new(vec![
+            Cell::from("Search-modeled narrowing"),
+            Cell::from(grouped_count(overview.modeled_file_reads_avoided)),
+            Cell::from(signed_count(overview.deduped_modeled_tokens_avoided)),
+            Cell::from("avoided opens"),
+        ])
+        .style(Style::default().fg(Color::Magenta)),
+    ];
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(24),
+            Constraint::Length(8),
+            Constraint::Length(18),
+            Constraint::Min(18),
+        ],
+    )
+    .header(
+        Row::new(vec!["Source", "reads", "saved tokens", "meaning"])
+            .bottom_margin(1)
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+    )
+    .column_spacing(2);
+    frame.render_widget(table, area);
 }
 
 /// Draw the bucket table.
@@ -419,26 +514,23 @@ fn render_bucket_table(frame: &mut Frame<'_>, area: Rect, overview: &TokenOvervi
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(30),
-            Constraint::Percentage(10),
-            Constraint::Percentage(16),
-            Constraint::Percentage(44),
+            Constraint::Length(18),
+            Constraint::Length(7),
+            Constraint::Length(16),
+            Constraint::Min(20),
         ],
     )
     .header(
-        Row::new(vec![
-            "How ProjectAtlas helped",
-            "steps",
-            "tokens",
-            "plain meaning",
-        ])
-        .style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Row::new(vec!["How it helped", "steps", "tokens", "meaning"])
+            .bottom_margin(1)
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
     )
     .block(Block::bordered().title("Where the savings came from"))
+    .column_spacing(2)
     .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_widget(table, area);
 }
@@ -446,22 +538,22 @@ fn render_bucket_table(frame: &mut Frame<'_>, area: Rect, overview: &TokenOvervi
 /// Return a plain label for one token-savings bucket.
 fn bucket_display_name(bucket: &TokenBucketOverview) -> String {
     if bucket.accounting_layer == TOKEN_ACCOUNTING_OBSERVED_DELTA {
-        "Summaries and slices".to_string()
+        "Summaries/slices".to_string()
     } else if bucket.denominator_kind == TOKEN_BASELINE_DIRECTORY_WALK {
-        "Skipped broad folder walk".to_string()
+        "Skipped folders".to_string()
     } else {
-        "Opened fewer candidates".to_string()
+        "Fewer candidates".to_string()
     }
 }
 
 /// Explain one token-savings bucket without exposing accounting jargon first.
 fn bucket_plain_meaning(bucket: &TokenBucketOverview) -> String {
     if bucket.accounting_layer == TOKEN_ACCOUNTING_OBSERVED_DELTA {
-        "compact output replaced file reads".to_string()
+        "replaced reads".to_string()
     } else if bucket.denominator_kind == TOKEN_BASELINE_DIRECTORY_WALK {
-        "ranking skipped broad folders".to_string()
+        "skipped folders".to_string()
     } else {
-        "search/ranking narrowed files".to_string()
+        "narrowed files".to_string()
     }
 }
 
@@ -469,7 +561,7 @@ fn bucket_plain_meaning(bucket: &TokenBucketOverview) -> String {
 fn render_overview_notes(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
     let mut lines = vec![
         Line::from(vec![
-            label("Tokens avoided"),
+            label("Conservative tokens avoided"),
             signed_value(overview.tokens_avoided),
         ]),
         Line::from(vec![
@@ -510,9 +602,7 @@ fn render_overview_notes(frame: &mut Frame<'_>, area: Rect, overview: &TokenOver
     } else {
         lines.push(Line::from(vec![
             label("calibration"),
-            Span::raw(
-                "optional: add --tokenizer o200k_base or cl100k_base for a local tokenizer audit",
-            ),
+            Span::raw("optional tokenizer audit: --tokenizer o200k_base or cl100k_base"),
         ]));
     }
     frame.render_widget(
@@ -716,6 +806,15 @@ fn percentage_label(part: usize, total: usize) -> String {
     }
 }
 
+/// Return a stable ratio for Ratatui gauges.
+fn ratio(part: usize, total: usize) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        (part as f64 / total as f64).clamp(0.0, 1.0)
+    }
+}
+
 /// Return the preferred dashboard width.
 fn dashboard_width() -> usize {
     std::env::var("COLUMNS")
@@ -753,11 +852,18 @@ fn saturating_usize_to_u64(value: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_token_dashboard, render_token_trend_dashboard};
+    use super::{
+        DASHBOARD_HEIGHT, dashboard_width, render_overview_frame, render_token_dashboard,
+        render_token_trend_dashboard, signed_count, token_comparison_columns,
+    };
     use projectatlas_core::telemetry::{
         TokenOverview, TokenTrendPeriod, TokenTrendReport, TokenTrendWindow, usage_from_estimates,
         usage_from_text,
     };
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::{Color, Modifier};
 
     #[test]
     fn overview_dashboard_renders_plain_language_savings_and_read_avoidance() {
@@ -773,39 +879,147 @@ mod tests {
             usage_from_estimates("s", "search", None, Some("token".to_string()), 400, 40),
             usage_from_estimates("s", "search", None, Some("token".to_string()), 400, 30),
         ];
-        let dashboard = render_token_dashboard(&TokenOverview::from_events(&events), Some("s"));
+        let trends = sample_trends();
+        let dashboard =
+            render_token_dashboard(&TokenOverview::from_events(&events), Some("s"), &trends);
 
         assert!(dashboard.contains("ProjectAtlas Savings Overview"));
-        assert!(dashboard.contains("Total tokens avoided"));
-        assert!(dashboard.contains("Measured from summaries"));
-        assert!(dashboard.contains("Narrowed to right files"));
-        assert!(dashboard.contains("Tokens: without vs with ProjectAtlas"));
+        assert!(dashboard.contains("Conservative tokens avoided"));
+        assert!(dashboard.contains("Measured summaries"));
+        assert!(dashboard.contains("Narrowed files"));
+        assert!(dashboard.contains("Gross tokens: without vs with ProjectAtlas"));
+        assert!(dashboard.contains("Saved-token trends"));
+        assert!(dashboard.contains("day | latest"));
+        assert!(dashboard.contains("week | latest"));
+        assert!(dashboard.contains("month | latest"));
+        assert!(dashboard.contains("year | latest"));
         assert!(dashboard.contains("Without ProjectAtlas"));
         assert!(dashboard.contains("With ProjectAtlas"));
         assert!(dashboard.contains("Saved by ProjectAtlas"));
+        assert!(dashboard.contains("File Handling Optimization Overview"));
+        assert!(dashboard.contains("Saved/avoided tokens"));
         assert!(dashboard.contains("File reads avoided"));
-        assert!(dashboard.contains("Likely file reads avoided"));
-        assert!(dashboard.contains("Observed summaries/slices"));
+        assert!(dashboard.contains("saved tokens"));
+        assert!(dashboard.contains("Observed summary/slices"));
         assert!(dashboard.contains("Search-modeled narrowing"));
-        assert!(dashboard.contains("File reads avoided"));
         assert!(dashboard.contains("Where the savings came from"));
-        assert!(dashboard.contains("Summaries and slices"));
-        assert!(dashboard.contains("Opened fewer candidates"));
+        assert!(dashboard.contains("Summaries/slices"));
+        assert!(dashboard.contains("Fewer candidates"));
         assert!(dashboard.contains("search-modeled"));
         assert!(dashboard.contains("duplicate navigation baselines collapsed"));
         assert!(dashboard.contains("█") || dashboard.contains("▌") || dashboard.contains("▏"));
 
         let compare = dashboard
-            .find("Tokens: without vs with ProjectAtlas")
+            .find("Gross tokens: without vs with ProjectAtlas")
             .unwrap_or(usize::MAX);
-        let file_reads = dashboard.find("File reads avoided").unwrap_or(usize::MAX);
+        let trend = dashboard.find("Saved-token trends").unwrap_or(usize::MAX);
+        let file_reads = dashboard
+            .find("File Handling Optimization Overview")
+            .unwrap_or(usize::MAX);
         let buckets = dashboard
             .find("Where the savings came from")
             .unwrap_or(usize::MAX);
         let notes = dashboard.find("What this means").unwrap_or(usize::MAX);
-        assert!(compare < file_reads);
+        assert!(compare < trend);
+        assert!(trend < file_reads);
         assert!(file_reads < buckets);
         assert!(buckets < notes);
+
+        assert_header_margin(&dashboard, "Source", "Observed summary/slices");
+        assert_header_margin(&dashboard, "How it helped", "Summaries/slices");
+    }
+
+    #[test]
+    fn overview_dashboard_uses_ratatui_widget_styles_for_key_headers() {
+        let events = [
+            usage_from_text(
+                "s",
+                "summary",
+                Some("src/lib.rs".to_string()),
+                None,
+                "abcdabcd",
+                "ab",
+            ),
+            usage_from_estimates("s", "search", None, Some("token".to_string()), 400, 40),
+            usage_from_estimates("s", "search", None, Some("token".to_string()), 400, 30),
+        ];
+        let overview = TokenOverview::from_events(&events);
+        let trends = sample_trends();
+        let buffer = render_overview_buffer(&overview, Some("s"), &trends);
+
+        assert_cell_style(&buffer, "Source", Color::Cyan, Modifier::BOLD);
+        assert_cell_style(&buffer, "saved tokens", Color::Cyan, Modifier::BOLD);
+        assert_cell_style(&buffer, "How it helped", Color::Cyan, Modifier::BOLD);
+        assert_cell_style(
+            &buffer,
+            "Saved by ProjectAtlas",
+            Color::DarkGray,
+            Modifier::BOLD,
+        );
+    }
+
+    #[test]
+    fn overview_dashboard_fields_use_consistent_accounting_layers() {
+        let overview = TokenOverview::from_events(&[
+            usage_from_text(
+                "s",
+                "summary",
+                Some("src/lib.rs".to_string()),
+                None,
+                "abcdabcd",
+                "ab",
+            ),
+            usage_from_estimates("s", "search", None, Some("token".to_string()), 400, 40),
+            usage_from_estimates("s", "search", None, Some("token".to_string()), 400, 30),
+            usage_from_estimates("s", "search", None, Some("token".to_string()), 400, 20),
+        ]);
+        let gross_saved = overview.legacy_gross_estimated_saved;
+        let conservative_avoided = overview.tokens_avoided;
+
+        assert_eq!(
+            overview.estimated_without_projectatlas as isize
+                - overview.estimated_with_projectatlas as isize,
+            gross_saved
+        );
+        assert_eq!(overview.estimated_saved, gross_saved);
+        assert_eq!(
+            overview.measured_tokens_saved + overview.deduped_modeled_tokens_avoided,
+            conservative_avoided
+        );
+        assert_ne!(gross_saved, conservative_avoided);
+        assert_eq!(
+            overview.observed_file_read_replacements + overview.modeled_file_reads_avoided,
+            overview.likely_file_reads_avoided
+        );
+        for bucket in &overview.buckets {
+            assert_eq!(
+                bucket.estimated_without_projectatlas as isize
+                    - bucket.estimated_with_projectatlas as isize,
+                bucket.estimated_saved
+            );
+        }
+
+        let columns = token_comparison_columns(&overview);
+        assert_eq!(columns[0].0, "Without ProjectAtlas");
+        assert_eq!(columns[0].2, overview.estimated_without_projectatlas);
+        assert_eq!(columns[1].0, "With ProjectAtlas");
+        assert_eq!(columns[1].2, overview.estimated_with_projectatlas);
+        assert_eq!(columns[2].0, "Saved by ProjectAtlas");
+        assert_eq!(columns[2].1, signed_count(gross_saved));
+        assert_eq!(columns[2].2 as isize, gross_saved);
+        assert_ne!(columns[2].1, signed_count(conservative_avoided));
+
+        let trends = sample_trends();
+        let dashboard = render_token_dashboard(&overview, Some("s"), &trends);
+        assert!(dashboard.contains(&signed_count(gross_saved)));
+        assert!(dashboard.contains(&signed_count(conservative_avoided)));
+        assert!(dashboard.contains(&format!(
+            "{} = {} observed + {} avoided",
+            signed_count(conservative_avoided),
+            signed_count(overview.measured_tokens_saved),
+            signed_count(overview.deduped_modeled_tokens_avoided)
+        )));
+        assert!(dashboard.contains("observed 1 + search-modeled 3"));
     }
 
     #[test]
@@ -826,5 +1040,99 @@ mod tests {
         assert!(dashboard.contains("2026-07"));
         assert!(dashboard.contains("period"));
         assert!(dashboard.contains("█") || dashboard.contains("▅") || dashboard.contains("▁"));
+    }
+
+    fn sample_trends() -> Vec<TokenTrendReport> {
+        [
+            TokenTrendWindow::Day,
+            TokenTrendWindow::Week,
+            TokenTrendWindow::Month,
+            TokenTrendWindow::Year,
+        ]
+        .into_iter()
+        .map(|window| {
+            TokenTrendReport::new(
+                Some("s".to_string()),
+                window,
+                vec![
+                    TokenTrendPeriod::from_totals(format!("2026-07-01-{window}"), 2, 200, 120),
+                    TokenTrendPeriod::from_totals(format!("2026-07-02-{window}"), 3, 500, 125),
+                    TokenTrendPeriod::from_totals(format!("2026-07-03-{window}"), 1, 100, 80),
+                ],
+            )
+        })
+        .collect()
+    }
+
+    fn render_overview_buffer(
+        overview: &TokenOverview,
+        session: Option<&str>,
+        trends: &[TokenTrendReport],
+    ) -> Buffer {
+        let width = dashboard_width().clamp(80, 140) as u16;
+        let backend = TestBackend::new(width, DASHBOARD_HEIGHT);
+        let mut terminal =
+            Terminal::new(backend).expect("in-memory token dashboard backend should initialize");
+        let frame = terminal
+            .draw(|frame| render_overview_frame(frame, overview, session, trends))
+            .expect("in-memory token dashboard should render");
+        frame.buffer.clone()
+    }
+
+    fn assert_header_margin(dashboard: &str, header: &str, first_row: &str) {
+        let header_index = dashboard.lines().position(|line| line.contains(header));
+        assert!(
+            header_index.is_some(),
+            "dashboard should contain table header {header:?}"
+        );
+        let Some(header_index) = header_index else {
+            return;
+        };
+        let row_index = dashboard.lines().position(|line| line.contains(first_row));
+        assert!(
+            row_index.is_some(),
+            "dashboard should contain first table row {first_row:?}"
+        );
+        let Some(row_index) = row_index else {
+            return;
+        };
+        assert!(
+            row_index >= header_index + 2,
+            "expected a visible separator row between {header:?} and {first_row:?}"
+        );
+    }
+
+    fn assert_cell_style(buffer: &Buffer, text: &str, color: Color, modifier: Modifier) {
+        let found = find_text(buffer, text);
+        assert!(found.is_some(), "rendered buffer should contain {text:?}");
+        let Some((x, y)) = found else {
+            return;
+        };
+        let cell = buffer.cell((x, y));
+        assert!(
+            cell.is_some(),
+            "located text should resolve to a buffer cell"
+        );
+        let Some(cell) = cell else {
+            return;
+        };
+        assert_eq!(cell.fg, color, "unexpected foreground color for {text:?}");
+        assert!(
+            cell.modifier.contains(modifier),
+            "missing modifier {modifier:?} for {text:?}"
+        );
+    }
+
+    fn find_text(buffer: &Buffer, text: &str) -> Option<(u16, u16)> {
+        for y in 0..buffer.area.height {
+            let mut line = String::new();
+            for x in 0..buffer.area.width {
+                line.push_str(buffer.cell((x, y))?.symbol());
+            }
+            if let Some(index) = line.find(text) {
+                return Some((u16::try_from(index).ok()?, y));
+            }
+        }
+        None
     }
 }

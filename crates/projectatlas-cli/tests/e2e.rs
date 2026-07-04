@@ -329,6 +329,7 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
     for required in [
         "plugin_update_skips_non_official_codex_marketplace",
         "plugin_update_leaves_current_codex_marketplace_untouched",
+        "plugin_update_repairs_current_codex_plugin_with_stale_source_manifest",
         "plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails",
     ] {
         if !e2e_smoke.contains(required) {
@@ -1636,10 +1637,38 @@ fn plugin_update_leaves_current_codex_marketplace_untouched() -> Result<(), Box<
             "[marketplaces.projectatlas]\nsource_type = \"git\"\nsource = \"https://github.com/styler-ai/ProjectAtlas.git\"\nref = \"{expected_release_tag}\"\n"
         ),
     )?;
+    let fake_plugin_cache = isolated_home
+        .join(FAKE_CODEX_PLUGIN_CACHE_DIR)
+        .join("projectatlas");
+    fs::create_dir_all(fake_plugin_cache.join(CODEX_PLUGIN_MANIFEST_DIR))?;
+    fs::create_dir_all(
+        fake_plugin_cache
+            .join(PROJECTATLAS_SKILL_DIR)
+            .join(PROJECTATLAS_SKILL_NAME),
+    )?;
+    fs::write(
+        fake_plugin_cache
+            .join(CODEX_PLUGIN_MANIFEST_DIR)
+            .join("plugin.json"),
+        format!(
+            r#"{{"name":"projectatlas","version":"{}"}}"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    )?;
+    fs::write(
+        fake_plugin_cache
+            .join(PROJECTATLAS_SKILL_DIR)
+            .join(PROJECTATLAS_SKILL_NAME)
+            .join(SKILL_FILE_NAME),
+        FAKE_CODEX_SKILL_CONTENT,
+    )?;
+    let fake_plugin_cache_json =
+        serde_json::to_string(&fake_plugin_cache.to_string_lossy().to_string())?;
     let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
     let plugin_list_json = format!(
-        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}"}}],"available":[]}}"#,
-        env!("CARGO_PKG_VERSION")
+        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}","source":{{"path":{}}}}}],"available":[]}}"#,
+        env!("CARGO_PKG_VERSION"),
+        fake_plugin_cache_json
     );
     let fake_codex_script = if cfg!(windows) {
         format!(
@@ -1684,6 +1713,129 @@ fn plugin_update_leaves_current_codex_marketplace_untouched() -> Result<(), Box<
         if fake_codex_calls.contains(forbidden) {
             return Err(io::Error::other(format!(
                 "current Codex marketplace/plugin state was mutated by forbidden call {forbidden:?}:\n{fake_codex_calls}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn plugin_update_repairs_current_codex_plugin_with_stale_source_manifest()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    fs::create_dir(&fake_path)?;
+    let isolated_home = temp.path().join(ISOLATED_HOME_DIR);
+    let codex_dir = isolated_home.join(CODEX_CONFIG_DIR);
+    fs::create_dir_all(&codex_dir)?;
+    let expected_release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    fs::write(
+        codex_dir.join("config.toml"),
+        format!(
+            "[marketplaces.projectatlas]\nsource_type = \"git\"\nsource = \"https://github.com/styler-ai/ProjectAtlas.git\"\nref = \"{expected_release_tag}\"\n"
+        ),
+    )?;
+    let fake_plugin_cache = isolated_home
+        .join(FAKE_CODEX_PLUGIN_CACHE_DIR)
+        .join("projectatlas");
+    fs::create_dir_all(fake_plugin_cache.join(CODEX_PLUGIN_MANIFEST_DIR))?;
+    fs::create_dir_all(
+        fake_plugin_cache
+            .join(PROJECTATLAS_SKILL_DIR)
+            .join(PROJECTATLAS_SKILL_NAME),
+    )?;
+    let manifest_path = fake_plugin_cache
+        .join(CODEX_PLUGIN_MANIFEST_DIR)
+        .join("plugin.json");
+    fs::write(
+        &manifest_path,
+        r#"{"name":"projectatlas","version":"0.0.1"}"#,
+    )?;
+    fs::write(
+        fake_plugin_cache
+            .join(PROJECTATLAS_SKILL_DIR)
+            .join(PROJECTATLAS_SKILL_NAME)
+            .join(SKILL_FILE_NAME),
+        FAKE_CODEX_SKILL_CONTENT,
+    )?;
+    let fake_plugin_cache_json =
+        serde_json::to_string(&fake_plugin_cache.to_string_lossy().to_string())?;
+    let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+    let plugin_list_json = format!(
+        r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}","source":{{"path":{}}}}}],"available":[]}}"#,
+        env!("CARGO_PKG_VERSION"),
+        fake_plugin_cache_json
+    );
+    let current_manifest_json = format!(
+        r#"{{"name":"projectatlas","version":"{}"}}"#,
+        env!("CARGO_PKG_VERSION")
+    );
+    let fake_codex_script = if cfg!(windows) {
+        format!(
+            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"marketplace\" if \"%3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  echo {plugin_list_json}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"add\" (\r\n  >\"%PROJECTATLAS_FAKE_PLUGIN_MANIFEST%\" echo {current_manifest_json}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" exit /b 1\r\nexit /b 0\r\n"
+        )
+    } else {
+        format!(
+            "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{plugin_list_json}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"add\" ]; then\n  printf '%s\\n' '{current_manifest_json}' > \"$PROJECTATLAS_FAKE_PLUGIN_MANIFEST\"\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then\n  exit 1\nfi\nexit 0\n"
+        )
+    };
+    write_executable_script(&fake_codex, &fake_codex_script)?;
+
+    let workspace_root = workspace_root()?;
+    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let installer_output = run_projectatlas_plugin_installer_with_path_shadow_and_home(
+        &workspace_root,
+        &repo,
+        &runtime,
+        &fake_path,
+        &isolated_home,
+    )?;
+    let installer_output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&installer_output.stdout),
+        String::from_utf8_lossy(&installer_output.stderr)
+    );
+    if !installer_output_text
+        .contains("Codex ProjectAtlas plugin source manifest version '0.0.1' does not match")
+        || !installer_output_text.contains(&format!(
+            "Codex ProjectAtlas plugin marketplace updated to {expected_release_tag}."
+        ))
+        || !installer_output_text.contains("Codex ProjectAtlas plugin skill verified at")
+    {
+        return Err(io::Error::other(format!(
+            "installer did not repair stale reported Codex plugin source manifest:\n{installer_output_text}"
+        ))
+        .into());
+    }
+    let manifest_after = fs::read_to_string(&manifest_path)?;
+    if !manifest_after.contains(env!("CARGO_PKG_VERSION")) {
+        return Err(io::Error::other(format!(
+            "fake Codex plugin source manifest was not refreshed:\n{manifest_after}"
+        ))
+        .into());
+    }
+    let fake_codex_calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
+    for required in [
+        "plugin remove projectatlas --marketplace projectatlas",
+        "plugin add projectatlas --marketplace projectatlas",
+    ] {
+        if !fake_codex_calls.contains(required) {
+            return Err(io::Error::other(format!(
+                "installer did not repair current-ref plugin source manifest with call {required:?}:\n{fake_codex_calls}"
+            ))
+            .into());
+        }
+    }
+    for forbidden in [
+        "plugin marketplace remove projectatlas",
+        "plugin marketplace add styler-ai/ProjectAtlas",
+    ] {
+        if fake_codex_calls.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "current-ref source manifest repair mutated marketplace by forbidden call {forbidden:?}:\n{fake_codex_calls}"
             ))
             .into());
         }
@@ -2829,17 +2981,26 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .assert()
         .success()
         .stdout(predicate::str::contains("ProjectAtlas Savings Overview"))
-        .stdout(predicate::str::contains("Total tokens avoided"))
-        .stdout(predicate::str::contains("Measured from summaries"))
-        .stdout(predicate::str::contains("Narrowed to right files"))
+        .stdout(predicate::str::contains("Conservative tokens avoided"))
+        .stdout(predicate::str::contains("Measured summaries"))
+        .stdout(predicate::str::contains("Narrowed files"))
         .stdout(predicate::str::contains(
-            "Tokens: without vs with ProjectAtlas",
+            "Gross tokens: without vs with ProjectAtlas",
         ))
         .stdout(predicate::str::contains("Without ProjectAtlas"))
         .stdout(predicate::str::contains("With ProjectAtlas"))
+        .stdout(predicate::str::contains("Saved/avoided tokens"))
         .stdout(predicate::str::contains("File reads avoided"))
-        .stdout(predicate::str::contains("Likely file reads avoided"))
-        .stdout(predicate::str::contains("Search-modeled narrowing"))
+        .stdout(predicate::str::contains("saved tokens"))
+        .stdout(predicate::str::contains("search-modeled"))
+        .stdout(predicate::str::contains("Saved-token trends"))
+        .stdout(predicate::str::contains("day | latest"))
+        .stdout(predicate::str::contains("week | latest"))
+        .stdout(predicate::str::contains("month | latest"))
+        .stdout(predicate::str::contains("year | latest"))
+        .stdout(predicate::str::contains(
+            "File Handling Optimization Overview",
+        ))
         .stdout(predicate::str::contains("Where the savings came from"))
         .stdout(predicate::str::contains("What this means"));
     Command::cargo_bin("projectatlas")?
@@ -3730,7 +3891,7 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !stdout.contains("health_findings[1]")
         || !stdout.contains("next_start_index: 1")
         || !stdout.contains("ProjectAtlas Savings Overview")
-        || !stdout.contains("Total tokens avoided")
+        || !stdout.contains("Conservative tokens avoided")
         || !stdout.contains("File reads avoided")
         || !stdout.contains("purpose_review:")
         || !stdout.contains("failed: 0")
@@ -8002,6 +8163,13 @@ fn run_projectatlas_plugin_installer_with_optional_path_and_home(
             .env(
                 FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_ENV,
                 home.join(FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_FILE),
+            )
+            .env(
+                "PROJECTATLAS_FAKE_PLUGIN_MANIFEST",
+                home.join(FAKE_CODEX_PLUGIN_CACHE_DIR)
+                    .join("projectatlas")
+                    .join(CODEX_PLUGIN_MANIFEST_DIR)
+                    .join("plugin.json"),
             );
     }
     let output = command.output()?;
