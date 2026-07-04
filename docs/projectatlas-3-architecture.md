@@ -230,13 +230,14 @@ indexing tool. Public and semi-public surfaces use atlas/funnel vocabulary:
 
 - CLI nouns: `scan`, `overview`, `folders`, `files`, `summary`, `outline`,
   `slice`, `symbols`, `health-check`, `lint`, `token`.
-- MCP tools: `atlas_scan`, `atlas_overview`, `atlas_folders`, `atlas_files`,
-  `atlas_outline`, `atlas_file_summary`, `atlas_search`, `atlas_slice`,
+- MCP tools: `atlas_set_project_path`, `atlas_scan`, `atlas_overview`,
+  `atlas_folders`, `atlas_files`, `atlas_outline`, `atlas_file_summary`,
+  `atlas_search`, `atlas_slice`,
   `atlas_symbols_build`, `atlas_symbols`, `atlas_symbol_relations`,
   `atlas_health`, `atlas_health_resolve`, `atlas_token_report`,
   `atlas_settings`, `atlas_watch_status`, `atlas_watch_once`,
-  `atlas_strip_legacy_purpose`, `atlas_purpose_queue`, and
-  `atlas_purpose_set`.
+  `atlas_strip_legacy_purpose`, `atlas_reset_index`, `atlas_purpose_queue`,
+  `atlas_purpose_set`, and `atlas_purpose_review`.
 - Crates/modules: `projectatlas-core`, `projectatlas-db`, `projectatlas-fs`,
   `projectatlas-service`, `projectatlas-symbols`, `projectatlas-query`,
   `projectatlas-mcp`.
@@ -544,6 +545,7 @@ configuration diagnostics should call that helper instead of carrying their own
 Preferred MCP tools use an `atlas_*` namespace so the public API is
 ProjectAtlas-native:
 
+- `atlas_set_project_path`
 - `atlas_scan`
 - `atlas_overview`
 - `atlas_folders`
@@ -562,8 +564,10 @@ ProjectAtlas-native:
 - `atlas_watch_status`
 - `atlas_watch_once`
 - `atlas_strip_legacy_purpose`
+- `atlas_reset_index`
 - `atlas_purpose_queue`
 - `atlas_purpose_set`
+- `atlas_purpose_review`
 
 The tool descriptions must bias agents toward the funnel:
 
@@ -620,6 +624,9 @@ process current directory for path-less tools. Root-sensitive MCP tools resolve
 their default project root from the explicit config path, indexed DB metadata,
 or the default `.projectatlas/projectatlas.db` parent before falling back to
 process cwd.
+MCP tools also accept per-call `project_path` for request-level multi-project
+routing, and `atlas_set_project_path` changes the active default project for
+later calls that omit `project_path`.
 
 ## Token Savings Telemetry
 

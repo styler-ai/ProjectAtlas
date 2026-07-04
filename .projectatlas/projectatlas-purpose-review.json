@@ -37,8 +37,20 @@
       "purpose": "Store project-local ProjectAtlas configuration, reviewed-purpose replay input, non-source summaries, and runtime state."
     },
     {
+      "path": ".cargo",
+      "purpose": "Cargo configuration directory for ProjectAtlas workspace command aliases and local cargo behavior."
+    },
+    {
       "path": "crates",
       "purpose": "Rust workspace crates that implement ProjectAtlas scanning, storage, CLI, MCP, symbols, and services."
+    },
+    {
+      "path": "crates/projectatlas-lints",
+      "purpose": "Custom Rust lint crate that enforces ProjectAtlas repository source policies outside Clippy."
+    },
+    {
+      "path": "crates/projectatlas-lints/src",
+      "purpose": "Rust source for ProjectAtlas custom repository lint binaries."
     },
     {
       "path": "crates/projectatlas-cli",
@@ -317,6 +329,10 @@
       "purpose": "Replay agent-reviewed ProjectAtlas purpose records into the local SQLite index."
     },
     {
+      "path": ".cargo/config.toml",
+      "purpose": "Cargo configuration that defines ProjectAtlas workspace aliases for custom source lint commands."
+    },
+    {
       "path": "AGENTS.md",
       "purpose": "Repository-specific Codex startup rules for atlas-first ProjectAtlas development, purpose linting, and release-grade Rust workflow."
     },
@@ -371,6 +387,14 @@
     {
       "path": "crates/projectatlas-cli/tests/lint_diagnostics.rs",
       "purpose": "Regression test ensuring ProjectAtlas lint no longer requires legacy source purpose headers."
+    },
+    {
+      "path": "crates/projectatlas-lints/Cargo.toml",
+      "purpose": "Cargo manifest for the ProjectAtlas custom source lint binary crate."
+    },
+    {
+      "path": "crates/projectatlas-lints/src/main.rs",
+      "purpose": "Implements strict ProjectAtlas source lints including centralized string-contract enforcement."
     },
     {
       "path": "crates/projectatlas-core/Cargo.toml",
@@ -515,6 +539,10 @@
     {
       "path": "docs/projectatlas-3-architecture.md",
       "purpose": "Architecture specification for Rust-native, SQLite-first ProjectAtlas 3 and its release gates."
+    },
+    {
+      "path": "docs/projectatlas-mcp-multi-project-routing-spec.md",
+      "purpose": "Specify ProjectAtlas MCP multi-project routing path scoping fallback behavior and string linting."
     },
     {
       "path": "docs/projectatlas-3-v0.3.2-hardening-spec.md",

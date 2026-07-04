@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/projectatlas-lints",
     "crates/projectatlas-cli",
     "crates/projectatlas-core",
     "crates/projectatlas-db",
@@ -10,7 +11,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.3.19"
+version = "0.3.20"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/styler-ai/ProjectAtlas"
@@ -68,11 +69,11 @@ must_use_candidate = "allow"
 missing_inline_in_public_items = "allow"
 
 [workspace.dependencies]
-projectatlas-core = { path = "crates/projectatlas-core", version = "0.3.19" }
-projectatlas-db = { path = "crates/projectatlas-db", version = "0.3.19" }
-projectatlas-fs = { path = "crates/projectatlas-fs", version = "0.3.19" }
-projectatlas-service = { path = "crates/projectatlas-service", version = "0.3.19" }
-projectatlas-symbols = { path = "crates/projectatlas-symbols", version = "0.3.19" }
+projectatlas-core = { path = "crates/projectatlas-core", version = "0.3.20" }
+projectatlas-db = { path = "crates/projectatlas-db", version = "0.3.20" }
+projectatlas-fs = { path = "crates/projectatlas-fs", version = "0.3.20" }
+projectatlas-service = { path = "crates/projectatlas-service", version = "0.3.20" }
+projectatlas-symbols = { path = "crates/projectatlas-symbols", version = "0.3.20" }
 blake3 = "1.5"
 clap = { version = "4.5", features = ["derive"] }
 cssparser = "0.37"
@@ -81,6 +82,7 @@ ignore = "0.4"
 jsonc-parser = { version = "0.32", features = ["serde"] }
 notify = "8.2"
 pulldown-cmark = "0.13"
+proc-macro2 = { version = "1.0", features = ["span-locations"] }
 regex = "1.11"
 rayon = "1.10"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
@@ -90,6 +92,7 @@ scraper = "0.27"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
+syn = { version = "2.0", features = ["full", "visit"] }
 tempfile = "3.14"
 thiserror = "2.0"
 tiktoken = "3.5.1"

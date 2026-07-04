@@ -1,0 +1,18 @@
+[package]
+name = "projectatlas-lints"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "cargo-projectatlas-lints"
+path = "src/main.rs"
+
+[dependencies]
+proc-macro2.workspace = true
+syn.workspace = true
+
+[lints]
+workspace = true

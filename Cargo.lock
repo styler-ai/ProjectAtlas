@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "projectatlas-cli"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "assert_cmd",
  "blake3",
@@ -1381,7 +1381,7 @@ dependencies = [
 
 [[package]]
 name = "projectatlas-core"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "regex",
  "serde",
@@ -1392,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "projectatlas-db"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "projectatlas-core",
  "rusqlite",
@@ -1404,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "projectatlas-fs"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "blake3",
  "ignore",
@@ -1414,8 +1414,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "projectatlas-lints"
+version = "0.3.20"
+dependencies = [
+ "proc-macro2",
+ "syn",
+]
+
+[[package]]
 name = "projectatlas-service"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "globset",
  "projectatlas-core",
@@ -1429,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "projectatlas-symbols"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "projectatlas-core",
  "regex",

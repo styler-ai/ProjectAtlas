@@ -1,6 +1,15 @@
 //! Purpose: Persist `ProjectAtlas` 3 indexes in `SQLite`.
 
-use projectatlas_core::health::{HealthFinding, Severity, finding_id};
+use projectatlas_core::health::{
+    CATEGORY_DUPLICATE_PURPOSE, CATEGORY_MISSING_PURPOSE, CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
+    CATEGORY_REPEATED_TEMPORARY_FOLDER, CATEGORY_STALE_PURPOSE, CATEGORY_SUGGESTED_PURPOSE_REVIEW,
+    HealthFinding, MESSAGE_MISSING_PURPOSE, MESSAGE_PURPOSE_AGENT_REVIEW_REQUIRED,
+    MESSAGE_STALE_PURPOSE, MESSAGE_SUGGESTED_PURPOSE_REVIEW, RECOMMENDATION_DUPLICATE_PURPOSE,
+    RECOMMENDATION_MISSING_PURPOSE_QUEUE, RECOMMENDATION_PURPOSE_AGENT_REVIEW_REQUIRED,
+    RECOMMENDATION_REPEATED_TEMPORARY_FOLDER, RECOMMENDATION_STALE_PURPOSE,
+    RECOMMENDATION_SUGGESTED_PURPOSE_REVIEW_QUEUE, STRUCTURAL_HEALTH_CATEGORIES, Severity,
+    TEMP_FOLDER_BUCKETS, finding_id,
+};
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SourceParseMetadata, SymbolGraph, SymbolKind,
     SymbolRelation,
@@ -12,8 +21,9 @@ use projectatlas_core::telemetry::{
 };
 use projectatlas_core::{
     AGENT_REVIEWED_SOURCE_VALUES, HIGH_IMPACT_FILE_NAMES, HIGH_IMPACT_PATH_PREFIXES,
-    HIGH_IMPACT_PATH_SEGMENTS, IndexedNode, Node, NodeKind, Overview, Purpose, PurposeSource,
-    PurposeStatus, normalize_native_path_display, normalize_repo_path_prefix,
+    HIGH_IMPACT_PATH_SEGMENTS, IndexedNode, LEGACY_HUMAN_PURPOSE_SOURCE, Node, NodeKind, Overview,
+    Purpose, PurposeSource, PurposeStatus, normalize_native_path_display,
+    normalize_repo_path_prefix,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
@@ -264,35 +274,24 @@ struct PurposeHealthSpec {
 /// Purpose lifecycle health categories that can be paged directly in `SQLite`.
 const PURPOSE_HEALTH_SPECS: [PurposeHealthSpec; 3] = [
     PurposeHealthSpec {
-        status: "missing",
-        category: "missing-purpose",
-        message: "Path is indexed but has no approved purpose.",
-        recommendation: "Set an agent-reviewed one-line purpose in the ProjectAtlas index.",
+        status: PurposeStatus::Missing.as_str(),
+        category: CATEGORY_MISSING_PURPOSE,
+        message: MESSAGE_MISSING_PURPOSE,
+        recommendation: RECOMMENDATION_MISSING_PURPOSE_QUEUE,
     },
     PurposeHealthSpec {
-        status: "suggested",
-        category: "suggested-purpose-review",
-        message: "Path has a generated purpose suggestion but no agent-approved purpose.",
-        recommendation: "Inspect enough context and approve or correct the purpose in SQLite.",
+        status: PurposeStatus::Suggested.as_str(),
+        category: CATEGORY_SUGGESTED_PURPOSE_REVIEW,
+        message: MESSAGE_SUGGESTED_PURPOSE_REVIEW,
+        recommendation: RECOMMENDATION_SUGGESTED_PURPOSE_REVIEW_QUEUE,
     },
     PurposeHealthSpec {
-        status: "stale",
-        category: "stale-purpose",
-        message: "Path changed after its purpose was approved.",
-        recommendation: "Inspect current context and approve or correct the one-line purpose.",
+        status: PurposeStatus::Stale.as_str(),
+        category: CATEGORY_STALE_PURPOSE,
+        message: MESSAGE_STALE_PURPOSE,
+        recommendation: RECOMMENDATION_STALE_PURPOSE,
     },
 ];
-/// Health category for approved purpose rows that still need agent review.
-const AGENT_REVIEW_REQUIRED_CATEGORY: &str = "purpose-agent-review-required";
-/// Health message for approved purpose rows that still need agent review.
-const AGENT_REVIEW_REQUIRED_MESSAGE: &str =
-    "Purpose is approved but has not been reviewed by an agent.";
-/// Health recommendation for approved purpose rows that still need agent review.
-const AGENT_REVIEW_REQUIRED_RECOMMENDATION: &str =
-    "Inspect current context and approve or correct the purpose with purpose set.";
-
-/// Folder names treated as repeated temporary/generated-output buckets.
-const TEMP_FOLDER_BUCKETS: [&str; 6] = ["tmp", "temp", "cache", "generated", "out", "output"];
 
 impl AtlasStore {
     /// Open or create an index store.
@@ -2318,12 +2317,8 @@ impl AtlasStore {
             }
         }
 
-        for category in [
-            AGENT_REVIEW_REQUIRED_CATEGORY,
-            "duplicate-purpose",
-            "repeated-temporary-folder",
-        ] {
-            let unfiltered_scope = if category == AGENT_REVIEW_REQUIRED_CATEGORY {
+        for category in STRUCTURAL_HEALTH_CATEGORIES {
+            let unfiltered_scope = if category == CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED {
                 HealthScope::purpose_strict()
             } else {
                 HealthScope::all()
@@ -2611,13 +2606,13 @@ impl AtlasStore {
         scope: HealthScope,
     ) -> DbResult<usize> {
         match category {
-            AGENT_REVIEW_REQUIRED_CATEGORY => {
+            CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED => {
                 self.count_agent_review_required_findings(path_prefix, resolved_ids, scope)
             }
-            "duplicate-purpose" => {
+            CATEGORY_DUPLICATE_PURPOSE => {
                 self.count_duplicate_purpose_findings(path_prefix, resolved_ids, scope)
             }
-            "repeated-temporary-folder" => {
+            CATEGORY_REPEATED_TEMPORARY_FOLDER => {
                 self.count_repeated_temp_folder_findings(path_prefix, resolved_ids, scope)
             }
             _ => Ok(0),
@@ -2635,21 +2630,22 @@ impl AtlasStore {
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
         match category {
-            AGENT_REVIEW_REQUIRED_CATEGORY => self.load_agent_review_required_findings_page(
+            CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED => self
+                .load_agent_review_required_findings_page(
+                    path_prefix,
+                    resolved_ids,
+                    scope,
+                    start_index,
+                    limit,
+                ),
+            CATEGORY_DUPLICATE_PURPOSE => self.load_duplicate_purpose_findings_page(
                 path_prefix,
                 resolved_ids,
                 scope,
                 start_index,
                 limit,
             ),
-            "duplicate-purpose" => self.load_duplicate_purpose_findings_page(
-                path_prefix,
-                resolved_ids,
-                scope,
-                start_index,
-                limit,
-            ),
-            "repeated-temporary-folder" => self.load_repeated_temp_folder_findings_page(
+            CATEGORY_REPEATED_TEMPORARY_FOLDER => self.load_repeated_temp_folder_findings_page(
                 path_prefix,
                 resolved_ids,
                 scope,
@@ -2671,13 +2667,14 @@ impl AtlasStore {
     {
         let reviewed_sources = sql_string_literals(AGENT_REVIEWED_SOURCE_VALUES);
         let high_impact = high_impact_file_path_expression("lower(n.path)");
+        let approved_status = PurposeStatus::Approved.as_str();
         let sql = format!(
             "
             SELECT n.path
             FROM nodes n
             JOIN purposes p ON p.node_id = n.id
             WHERE n.exists_now = 1
-              AND p.status = 'approved'
+              AND p.status = '{approved_status}'
               AND p.source NOT IN ({reviewed_sources})
               AND (n.kind = 'folder' OR (n.kind = 'file' AND {high_impact}))
             ORDER BY CASE WHEN n.kind = 'folder' THEN 0 ELSE 1 END, n.path
@@ -2702,7 +2699,7 @@ impl AtlasStore {
         scope: HealthScope,
     ) -> DbResult<usize> {
         let (where_clause, values) = structural_finding_where_clause(
-            AGENT_REVIEW_REQUIRED_CATEGORY,
+            CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
             path_prefix,
             resolved_ids,
             scope,
@@ -2711,6 +2708,7 @@ impl AtlasStore {
         let source_relevant = source_relevant_node_expression("n");
         let reviewed_sources = sql_string_literals(AGENT_REVIEWED_SOURCE_VALUES);
         let review_candidate = purpose_review_candidate_expression("n", scope);
+        let approved_status = PurposeStatus::Approved.as_str();
         let sql = format!(
             "
             WITH findings AS (
@@ -2722,7 +2720,7 @@ impl AtlasStore {
                 FROM nodes n
                 JOIN purposes p ON p.node_id = n.id
                 WHERE n.exists_now = 1
-                  AND p.status = 'approved'
+                  AND p.status = '{approved_status}'
                   AND p.source NOT IN ({reviewed_sources})
                   AND {review_candidate}
             )
@@ -2750,7 +2748,7 @@ impl AtlasStore {
             return Ok(Vec::new());
         }
         let (where_clause, mut values) = structural_finding_where_clause(
-            AGENT_REVIEW_REQUIRED_CATEGORY,
+            CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
             path_prefix,
             resolved_ids,
             scope,
@@ -2759,6 +2757,7 @@ impl AtlasStore {
         let source_relevant = source_relevant_node_expression("n");
         let reviewed_sources = sql_string_literals(AGENT_REVIEWED_SOURCE_VALUES);
         let review_candidate = purpose_review_candidate_expression("n", scope);
+        let approved_status = PurposeStatus::Approved.as_str();
         let limit_placeholder = values.len() + 1;
         let offset_placeholder = values.len() + 2;
         values.push(Value::from(usize_to_i64(limit)));
@@ -2774,7 +2773,7 @@ impl AtlasStore {
                 FROM nodes n
                 JOIN purposes p ON p.node_id = n.id
                 WHERE n.exists_now = 1
-                  AND p.status = 'approved'
+                  AND p.status = '{approved_status}'
                   AND p.source NOT IN ({reviewed_sources})
                   AND {review_candidate}
             )
@@ -2802,7 +2801,7 @@ impl AtlasStore {
         scope: HealthScope,
     ) -> DbResult<usize> {
         let (where_clause, values) = structural_finding_where_clause(
-            "duplicate-purpose",
+            CATEGORY_DUPLICATE_PURPOSE,
             path_prefix,
             resolved_ids,
             scope,
@@ -2811,6 +2810,7 @@ impl AtlasStore {
         let source_relevant = source_relevant_node_expression("n");
         let duplicate_scope =
             "CASE WHEN n.kind = 'folder' THEN COALESCE(n.parent_path, '') ELSE '' END";
+        let approved_status = PurposeStatus::Approved.as_str();
         let sql = format!(
             "
             WITH duplicate_rows AS (
@@ -2833,7 +2833,7 @@ impl AtlasStore {
                 FROM nodes n
                 JOIN purposes p ON p.node_id = n.id
                 WHERE n.exists_now = 1
-                  AND p.status = 'approved'
+                  AND p.status = '{approved_status}'
                   AND p.purpose IS NOT NULL
             ),
             findings AS (
@@ -2866,7 +2866,7 @@ impl AtlasStore {
             return Ok(Vec::new());
         }
         let (where_clause, mut values) = structural_finding_where_clause(
-            "duplicate-purpose",
+            CATEGORY_DUPLICATE_PURPOSE,
             path_prefix,
             resolved_ids,
             scope,
@@ -2875,6 +2875,7 @@ impl AtlasStore {
         let source_relevant = source_relevant_node_expression("n");
         let duplicate_scope =
             "CASE WHEN n.kind = 'folder' THEN COALESCE(n.parent_path, '') ELSE '' END";
+        let approved_status = PurposeStatus::Approved.as_str();
         let limit_placeholder = values.len() + 1;
         let offset_placeholder = values.len() + 2;
         values.push(Value::from(usize_to_i64(limit)));
@@ -2901,7 +2902,7 @@ impl AtlasStore {
                 FROM nodes n
                 JOIN purposes p ON p.node_id = n.id
                 WHERE n.exists_now = 1
-                  AND p.status = 'approved'
+                  AND p.status = '{approved_status}'
                   AND p.purpose IS NOT NULL
             ),
             findings AS (
@@ -2933,15 +2934,13 @@ impl AtlasStore {
                 value: kind_value,
             })?;
             findings.push(HealthFinding {
-                id: finding_id("duplicate-purpose", &path, Some(&related_path)),
+                id: finding_id(CATEGORY_DUPLICATE_PURPOSE, &path, Some(&related_path)),
                 severity: Severity::Warning,
-                category: "duplicate-purpose".to_string(),
+                category: CATEGORY_DUPLICATE_PURPOSE.to_string(),
                 path,
                 related_path: Some(related_path),
                 message: format!("Multiple {kind} nodes share the same purpose."),
-                recommendation:
-                    "Review whether these paths duplicate responsibility or need clearer purposes."
-                        .to_string(),
+                recommendation: RECOMMENDATION_DUPLICATE_PURPOSE.to_string(),
             });
         }
         Ok(findings)
@@ -2977,7 +2976,7 @@ impl AtlasStore {
         let exact = bucket.to_string();
         let suffix = format!("%/{bucket}");
         let (where_clause, mut filter_values) = structural_finding_where_clause(
-            "repeated-temporary-folder",
+            CATEGORY_REPEATED_TEMPORARY_FOLDER,
             path_prefix,
             resolved_ids,
             scope,
@@ -3075,7 +3074,7 @@ impl AtlasStore {
         let exact = bucket.to_string();
         let suffix = format!("%/{bucket}");
         let (where_clause, mut filter_values) = structural_finding_where_clause(
-            "repeated-temporary-folder",
+            CATEGORY_REPEATED_TEMPORARY_FOLDER,
             path_prefix,
             resolved_ids,
             scope,
@@ -3124,15 +3123,17 @@ impl AtlasStore {
         for row in rows {
             let (path, related_path) = row?;
             findings.push(HealthFinding {
-                id: finding_id("repeated-temporary-folder", &path, Some(&related_path)),
+                id: finding_id(
+                    CATEGORY_REPEATED_TEMPORARY_FOLDER,
+                    &path,
+                    Some(&related_path),
+                ),
                 severity: Severity::Warning,
-                category: "repeated-temporary-folder".to_string(),
+                category: CATEGORY_REPEATED_TEMPORARY_FOLDER.to_string(),
                 path,
                 related_path: Some(related_path),
                 message: format!("Repeated temporary/generated folder name `{bucket}` found."),
-                recommendation:
-                    "Consolidate temporary/generated output roots or add an allowlist rationale."
-                        .to_string(),
+                recommendation: RECOMMENDATION_REPEATED_TEMPORARY_FOLDER.to_string(),
             });
         }
         Ok(findings)
@@ -3149,6 +3150,7 @@ impl AtlasStore {
     {
         let duplicate_scope =
             "CASE WHEN n.kind = 'folder' THEN COALESCE(n.parent_path, '') ELSE '' END";
+        let approved_status = PurposeStatus::Approved.as_str();
         let sql = format!(
             "
             WITH duplicate_rows AS (
@@ -3169,7 +3171,7 @@ impl AtlasStore {
                 FROM nodes n
                 JOIN purposes p ON p.node_id = n.id
                 WHERE n.exists_now = 1
-                  AND p.status = 'approved'
+                  AND p.status = '{approved_status}'
                   AND p.purpose IS NOT NULL
             )
             SELECT path, kind, purpose, related_path
@@ -3195,15 +3197,13 @@ impl AtlasStore {
                 value: kind_value.clone(),
             })?;
             let finding = HealthFinding {
-                id: finding_id("duplicate-purpose", &path, Some(&related_path)),
+                id: finding_id(CATEGORY_DUPLICATE_PURPOSE, &path, Some(&related_path)),
                 severity: Severity::Warning,
-                category: "duplicate-purpose".to_string(),
+                category: CATEGORY_DUPLICATE_PURPOSE.to_string(),
                 path,
                 related_path: Some(related_path),
                 message: format!("Multiple {kind} nodes share the same purpose."),
-                recommendation:
-                    "Review whether these paths duplicate responsibility or need clearer purposes."
-                        .to_string(),
+                recommendation: RECOMMENDATION_DUPLICATE_PURPOSE.to_string(),
             };
             if !emit_unresolved_finding(finding, resolved_ids, visitor)? {
                 return Ok(false);
@@ -3245,18 +3245,16 @@ impl AtlasStore {
                 };
                 let finding = HealthFinding {
                     id: finding_id(
-                        "repeated-temporary-folder",
+                        CATEGORY_REPEATED_TEMPORARY_FOLDER,
                         &path,
                         Some(first_path.as_str()),
                     ),
                     severity: Severity::Warning,
-                    category: "repeated-temporary-folder".to_string(),
+                    category: CATEGORY_REPEATED_TEMPORARY_FOLDER.to_string(),
                     path,
                     related_path: Some(first_path.clone()),
                     message: format!("Repeated temporary/generated folder name `{bucket}` found."),
-                    recommendation:
-                        "Consolidate temporary/generated output roots or add an allowlist rationale."
-                            .to_string(),
+                    recommendation: RECOMMENDATION_REPEATED_TEMPORARY_FOLDER.to_string(),
                 };
                 if !emit_unresolved_finding(finding, resolved_ids, visitor)? {
                     return Ok(false);
@@ -3272,31 +3270,34 @@ impl AtlasStore {
     ///
     /// Returns an error if the aggregate query fails or a count is invalid.
     pub fn overview(&self) -> DbResult<Overview> {
-        let counts = self.connection.query_row(
+        let missing_status = PurposeStatus::Missing.as_str();
+        let stale_status = PurposeStatus::Stale.as_str();
+        let approved_status = PurposeStatus::Approved.as_str();
+        let suggested_status = PurposeStatus::Suggested.as_str();
+        let sql = format!(
             "
             SELECT
                 COALESCE(SUM(CASE WHEN n.kind = 'file' THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN n.kind = 'folder' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN p.status = 'missing' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN p.status = 'stale' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN p.status = 'approved' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN p.status = 'suggested' THEN 1 ELSE 0 END), 0)
+                COALESCE(SUM(CASE WHEN p.status = '{missing_status}' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN p.status = '{stale_status}' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN p.status = '{approved_status}' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN p.status = '{suggested_status}' THEN 1 ELSE 0 END), 0)
             FROM nodes n
             JOIN purposes p ON p.node_id = n.id
             WHERE n.exists_now = 1
-            ",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                ))
-            },
-        )?;
+            "
+        );
+        let counts = self.connection.query_row(&sql, [], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?;
         Ok(Overview {
             files: count_to_usize("files", counts.0)?,
             folders: count_to_usize("folders", counts.1)?,
@@ -3842,7 +3843,8 @@ fn upsert_node(transaction: &Transaction<'_>, node: &Node) -> DbResult<()> {
             && old_hash != &node.content_hash
     });
     let should_mark_stale = content_changed
-        && existing.as_ref().and_then(|(_, status)| status.as_deref()) == Some("approved");
+        && existing.as_ref().and_then(|(_, status)| status.as_deref())
+            == Some(PurposeStatus::Approved.as_str());
     transaction.execute(
         "
         INSERT INTO nodes(path, kind, parent_path, extension, language, size_bytes, mtime_ns, content_hash, exists_now)
@@ -4135,12 +4137,14 @@ fn truncate_summary_chars(value: &str, max_chars: usize) -> String {
 /// Parse a stored purpose source value into the domain enum.
 fn parse_source(value: &str) -> DbResult<PurposeSource> {
     let source = match value {
-        "missing" => PurposeSource::Missing,
-        "imported" => PurposeSource::Imported,
-        "generated" => PurposeSource::Generated,
+        value if value == PurposeSource::Missing.as_str() => PurposeSource::Missing,
+        value if value == PurposeSource::Imported.as_str() => PurposeSource::Imported,
+        value if value == PurposeSource::Generated.as_str() => PurposeSource::Generated,
         // Older databases could contain `human`; ProjectAtlas now treats
         // explicit approval as agent-owned and serializes new writes as `agent`.
-        "agent" | "human" => PurposeSource::Agent,
+        value if value == PurposeSource::Agent.as_str() || value == LEGACY_HUMAN_PURPOSE_SOURCE => {
+            PurposeSource::Agent
+        }
         _ => {
             return Err(DbError::InvalidEnum {
                 field: "source",
@@ -4282,13 +4286,13 @@ fn purpose_health_spec_for_status(status: &str) -> DbResult<PurposeHealthSpec> {
 /// Build the health finding for an approved purpose that still needs agent review.
 fn agent_review_required_finding(path: String) -> HealthFinding {
     HealthFinding {
-        id: finding_id(AGENT_REVIEW_REQUIRED_CATEGORY, &path, None),
+        id: finding_id(CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED, &path, None),
         severity: Severity::Warning,
-        category: AGENT_REVIEW_REQUIRED_CATEGORY.to_string(),
+        category: CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED.to_string(),
         path,
         related_path: None,
-        message: AGENT_REVIEW_REQUIRED_MESSAGE.to_string(),
-        recommendation: AGENT_REVIEW_REQUIRED_RECOMMENDATION.to_string(),
+        message: MESSAGE_PURPOSE_AGENT_REVIEW_REQUIRED.to_string(),
+        recommendation: RECOMMENDATION_PURPOSE_AGENT_REVIEW_REQUIRED.to_string(),
     }
 }
 
@@ -5989,7 +5993,7 @@ mod tests {
             &HealthQuery {
                 start_index: 0,
                 limit: 20,
-                category: Some(AGENT_REVIEW_REQUIRED_CATEGORY.to_string()),
+                category: Some(CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED.to_string()),
                 severity: Some(Severity::Warning),
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
@@ -6544,7 +6548,7 @@ mod tests {
             &HealthQuery {
                 start_index: 0,
                 limit: 20,
-                category: Some(AGENT_REVIEW_REQUIRED_CATEGORY.to_string()),
+                category: Some(CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED.to_string()),
                 severity: Some(Severity::Warning),
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
@@ -6570,7 +6574,7 @@ mod tests {
             &HealthQuery {
                 start_index: 0,
                 limit: 20,
-                category: Some(AGENT_REVIEW_REQUIRED_CATEGORY.to_string()),
+                category: Some(CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED.to_string()),
                 severity: Some(Severity::Warning),
                 path_prefix: Some(".".to_string()),
                 summary_only: false,
@@ -6676,7 +6680,7 @@ mod tests {
         HealthQuery {
             start_index: 0,
             limit: 20,
-            category: Some(AGENT_REVIEW_REQUIRED_CATEGORY.to_string()),
+            category: Some(CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED.to_string()),
             severity: Some(Severity::Warning),
             path_prefix: Some(".".to_string()),
             summary_only: false,

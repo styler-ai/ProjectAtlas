@@ -508,6 +508,12 @@ fn repository_guidance_keeps_legacy_toon_export_optional() -> Result<(), Box<dyn
             ))
             .into());
         }
+        if !verify.contains("projectatlas-lints") || !verify.contains("strict-strings") {
+            return Err(io::Error::other(format!(
+                "{workflow_name} verify job must run strict ProjectAtlas source string lints"
+            ))
+            .into());
+        }
         if !verify.contains(
             "purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply",
         ) {
@@ -2270,7 +2276,8 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     let outside_scan_message = format!(
-        r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"atlas_scan","arguments":{{"path":{}}}}}}}"#,
+        r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"atlas_scan","arguments":{{"project_path":{},"path":{}}}}}}}"#,
+        serde_json::to_string(&expected_root.to_string_lossy().to_string())?,
         serde_json::to_string(&rogue_repo.to_string_lossy())?
     );
     let messages = [
@@ -2298,9 +2305,9 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         ))
         .into());
     }
-    if !mcp_stdout.contains("outside the MCP-bound project root") {
+    if !mcp_stdout.contains("outside the selected project root") {
         return Err(io::Error::other(format!(
-            "generated mcp config allowed an outside repository path: {mcp_stdout}"
+            "generated mcp config allowed conflicting project_path/path roots: {mcp_stdout}"
         ))
         .into());
     }

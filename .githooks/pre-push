@@ -6,6 +6,7 @@ set -e
 cargo fmt --check
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo run -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 cargo test --workspace --all-features
 cargo test --doc --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features

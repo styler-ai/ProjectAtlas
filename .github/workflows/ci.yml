@@ -63,6 +63,10 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
+      - name: ProjectAtlas source lints
+        timeout-minutes: 2
+        run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
+
       - name: Dependency policy
         run: cargo deny check
 
