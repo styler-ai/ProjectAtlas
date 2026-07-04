@@ -373,7 +373,7 @@ codex_projectatlas_plugin_source_manifest_version() {
     printf '%s\n' ""
     return 0
   fi
-  sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest_path" | head -n 1
+  sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest_path" | head -n 1
 }
 
 codex_projectatlas_plugin_source_manifest_matches() {
