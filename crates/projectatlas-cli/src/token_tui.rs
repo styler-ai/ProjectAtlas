@@ -13,7 +13,7 @@ use ratatui::widgets::{Bar, BarChart, Block, Cell, Gauge, Paragraph, Row, Sparkl
 use ratatui::{Frame, Terminal};
 
 /// Fixed terminal height for the token overview dashboard snapshot.
-const DASHBOARD_HEIGHT: u16 = 55;
+const DASHBOARD_HEIGHT: u16 = 56;
 /// Fixed terminal height for the token trend dashboard snapshot.
 const TREND_DASHBOARD_HEIGHT: u16 = 30;
 
@@ -79,7 +79,7 @@ fn render_overview_frame(
             Constraint::Length(4),
             Constraint::Length(10),
             Constraint::Length(9),
-            Constraint::Length(8),
+            Constraint::Length(9),
             Constraint::Length(6),
             Constraint::Min(8),
             Constraint::Length(8),
@@ -394,10 +394,8 @@ fn render_file_handling_optimization_overview(
         Paragraph::new(file_handling_reads_line(overview)).wrap(Wrap { trim: true }),
         sections[1],
     );
-    let observed_ratio = ratio(
-        overview.observed_file_read_replacements,
-        overview.likely_file_reads_avoided,
-    );
+    let (observed_tokens, modeled_tokens, total_tokens) = file_handling_token_mix(overview);
+    let observed_ratio = ratio(observed_tokens, total_tokens);
     frame.render_widget(
         Gauge::default()
             .gauge_style(
@@ -407,15 +405,9 @@ fn render_file_handling_optimization_overview(
             )
             .ratio(observed_ratio)
             .label(format!(
-                "observed {} / modeled {}",
-                percentage_label(
-                    overview.observed_file_read_replacements,
-                    overview.likely_file_reads_avoided
-                ),
-                percentage_label(
-                    overview.modeled_file_reads_avoided,
-                    overview.likely_file_reads_avoided
-                )
+                "observed tokens {} / modeled tokens {}",
+                percentage_label(observed_tokens, total_tokens),
+                percentage_label(modeled_tokens, total_tokens)
             )),
         sections[2],
     );
@@ -446,6 +438,19 @@ fn file_handling_reads_line(overview: &TokenOverview) -> Line<'static> {
         value(overview.modeled_file_reads_avoided),
         Span::raw(format!(" ({})", overview.read_avoidance_confidence)),
     ])
+}
+
+/// Return the token operands that back the file-handling contribution gauge.
+fn file_handling_token_mix(overview: &TokenOverview) -> (usize, usize, usize) {
+    let observed = positive_token_value(overview.measured_tokens_saved);
+    let modeled = positive_token_value(overview.deduped_modeled_tokens_avoided);
+    let total = observed.saturating_add(modeled);
+    (observed, modeled, total)
+}
+
+/// Convert signed token savings into the positive contribution shown in gauges.
+fn positive_token_value(value: isize) -> usize {
+    value.max(0).unsigned_abs()
 }
 
 /// Draw observed and modeled file-handling rows.
@@ -1020,6 +1025,35 @@ mod tests {
             signed_count(overview.deduped_modeled_tokens_avoided)
         )));
         assert!(dashboard.contains("observed 1 + search-modeled 3"));
+    }
+
+    #[test]
+    fn overview_dashboard_token_mix_percentages_follow_saved_token_operands() {
+        let full_file = "x".repeat(400);
+        let atlas_summary = "x".repeat(320);
+        let overview = TokenOverview::from_events(&[
+            usage_from_text(
+                "s",
+                "summary",
+                Some("src/lib.rs".to_string()),
+                None,
+                &full_file,
+                &atlas_summary,
+            ),
+            usage_from_estimates("s", "search", None, Some("token".to_string()), 100, 20),
+        ]);
+
+        assert_eq!(overview.measured_tokens_saved, 20);
+        assert_eq!(overview.deduped_modeled_tokens_avoided, 80);
+        assert_eq!(overview.tokens_avoided, 100);
+        assert_eq!(overview.observed_file_read_replacements, 1);
+        assert_eq!(overview.modeled_file_reads_avoided, 1);
+
+        let dashboard = render_token_dashboard(&overview, Some("s"), &sample_trends());
+        assert!(dashboard.contains("100 = 20 observed + 80 avoided"));
+        assert!(dashboard.contains("File reads avoided"));
+        assert!(dashboard.contains("2 = observed 1 + search-modeled 1"));
+        assert!(dashboard.contains("observed tokens 20% / modeled tokens 80%"));
     }
 
     #[test]
