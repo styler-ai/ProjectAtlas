@@ -18,13 +18,13 @@ use crate::runtime::{
     record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
     render_health_page, render_purpose_curation_page, render_purpose_review_report,
     reset_index_files, review_purposes, run_scan_pipeline, run_watch_loop, strip_legacy_purpose,
-    validated_indexed_file_key, watcher_status_report,
+    telemetry_disabled, validated_indexed_file_key, watcher_status_report,
 };
 use crate::{
-    CliError, DEFAULT_FILE_SUMMARY_LIMIT, HarnessConfig, OutputFormat,
+    CliError, DEFAULT_FILE_SUMMARY_LIMIT, HarnessConfig, OutputFormat, RuntimeInfoReport,
     build_harness_mcp_config_report, build_parity_report, build_root_report, build_runtime_info,
     render_code_slice, render_file_summary, render_parity_report, render_root_report,
-    render_runtime_info, render_search_report, render_settings_report, render_token_dashboard,
+    render_runtime_info, render_search_report, render_token_dashboard,
     render_token_trend_dashboard, render_watch_status,
 };
 use projectatlas_core::health::Severity;
@@ -35,8 +35,8 @@ use projectatlas_core::toon::{
     render_symbol_relations, render_symbols, render_token_overview, render_token_trends,
 };
 use projectatlas_core::{
-    PurposeSource, PurposeStatus, normalize_native_path_display, normalize_repo_path,
-    normalize_repo_path_prefix, validated_repo_node_key,
+    Overview, PurposeSource, PurposeStatus, RankedNode, normalize_native_path_display,
+    normalize_repo_path, normalize_repo_path_prefix, validated_repo_node_key,
 };
 use projectatlas_db::{
     AtlasStore, HealthQuery, HealthResolution, HealthScope, read_project_root_read_only,
@@ -50,9 +50,11 @@ use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::schemars;
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// MCP tools required for the agent-first repository-intelligence surface.
 pub(crate) const REQUIRED_MCP_TOOL_NAMES: &[&str] = &[
@@ -90,6 +92,9 @@ pub(crate) const REQUIRED_MCP_TOOL_NAMES: &[&str] = &[
     MCP_TOOL_ATLAS_RESET_INDEX,
     MCP_TOOL_ATLAS_MCP_CONFIG,
     MCP_TOOL_ATLAS_RUNTIME_INFO,
+    MCP_TOOL_ATLAS_SESSION_BRIEF,
+    MCP_TOOL_ATLAS_TASK_STATUS,
+    MCP_TOOL_ATLAS_TASK_CANCEL,
     MCP_TOOL_ATLAS_PURPOSE_QUEUE,
     MCP_TOOL_ATLAS_PURPOSE_SET,
     MCP_TOOL_ATLAS_PURPOSE_REVIEW,
@@ -163,6 +168,12 @@ const MCP_TOOL_ATLAS_RESET_INDEX: &str = "atlas_reset_index";
 const MCP_TOOL_ATLAS_MCP_CONFIG: &str = "atlas_mcp_config";
 /// MCP tool name for runtime identity reports.
 const MCP_TOOL_ATLAS_RUNTIME_INFO: &str = "atlas_runtime_info";
+/// MCP tool name for compact agent startup briefs.
+const MCP_TOOL_ATLAS_SESSION_BRIEF: &str = "atlas_session_brief";
+/// MCP tool name for task-progress status lookup.
+const MCP_TOOL_ATLAS_TASK_STATUS: &str = "atlas_task_status";
+/// MCP tool name for task-progress cancellation.
+const MCP_TOOL_ATLAS_TASK_CANCEL: &str = "atlas_task_cancel";
 /// MCP tool name for purpose queue lookup.
 const MCP_TOOL_ATLAS_PURPOSE_QUEUE: &str = "atlas_purpose_queue";
 /// MCP tool name for purpose updates.
@@ -232,6 +243,37 @@ const MCP_PAYLOAD_MCP_CONFIG: &str = "mcp_config";
 const MCP_PAYLOAD_NEXT: &str = "next";
 /// MCP payload key for selected-project audit metadata on routed reads.
 const MCP_PAYLOAD_SELECTED_PROJECT: &str = "selected_project";
+/// MCP payload key for settings reports.
+const MCP_PAYLOAD_SETTINGS: &str = "settings";
+/// MCP payload key for agent startup briefs.
+const MCP_PAYLOAD_SESSION_BRIEF: &str = "session_brief";
+/// MCP payload key for task status lookups.
+const MCP_PAYLOAD_TASK_STATUS: &str = "task_status";
+/// MCP payload key for task cancellation responses.
+const MCP_PAYLOAD_TASK_CANCEL: &str = "task_cancel";
+/// MCP session capability payload key.
+const MCP_PAYLOAD_SESSION_CAPABILITIES: &str = "mcp_session";
+/// Session-brief argument key for per-call project roots.
+const MCP_BRIEF_ARG_PROJECT_PATH: &str = "project_path";
+/// Session-brief argument key for ranked query text.
+const MCP_BRIEF_ARG_QUERY: &str = "query";
+/// Session-brief argument key for row limits.
+const MCP_BRIEF_ARG_LIMIT: &str = "limit";
+/// Session-brief recommendation target for normal filesystem reads.
+const MCP_BRIEF_TARGET_FILESYSTEM_TOOLS: &str = "filesystem_tools";
+/// Session-brief reason for missing selected indexes.
+const MCP_BRIEF_REASON_SELECTED_INDEX_MISSING: &str = "selected_index_missing";
+/// Session-brief reason for filesystem fallback before an index exists.
+const MCP_BRIEF_REASON_FILESYSTEM_UNTIL_INDEX: &str =
+    "use_filesystem_until_projectatlas_index_exists";
+/// Session-brief reason for choosing folders first.
+const MCP_BRIEF_REASON_CHOOSE_WORK_AREA: &str = "choose_work_area_before_source_reads";
+/// Session-brief reason for choosing files before details.
+const MCP_BRIEF_REASON_CHOOSE_FILES: &str = "choose_files_before_summary_or_slice";
+/// Session-brief reason for health follow-up.
+const MCP_BRIEF_REASON_HEALTH_BLOCKERS: &str = "unresolved_health_blockers_present";
+/// Built-in task-progress contract message.
+const MCP_TASK_PROGRESS_CONTRACT_MESSAGE: &str = "task progress contract available";
 /// MCP telemetry event for overview calls.
 const MCP_EVENT_ATLAS_OVERVIEW: &str = "mcp.atlas_overview";
 /// MCP telemetry event for folder calls.
@@ -342,6 +384,14 @@ const TOKEN_TREND_WINDOW_ERROR_SUFFIX: &str = "expected day, week, month, or yea
 /// Watch-status recommendation when no index exists.
 const WATCH_STATUS_SCAN_RECOMMENDATION: &str =
     " Run `atlas_scan` first when no ProjectAtlas index exists for this project.";
+/// Default number of rows in an agent startup brief section.
+const SESSION_BRIEF_DEFAULT_LIMIT: usize = 5;
+/// Maximum number of rows in an agent startup brief section.
+const SESSION_BRIEF_MAX_LIMIT: usize = 8;
+/// Bounded MCP task registry capacity.
+const MCP_TASK_REGISTRY_CAPACITY: usize = 32;
+/// Built-in task id that exposes the task-progress contract itself.
+const MCP_TASK_CONTRACT_ID: &str = "task-progress-contract";
 /// Agent-facing MCP server instructions.
 const MCP_SERVER_INSTRUCTIONS: &str = "ProjectAtlas provides TOON-first repository orientation, folder/file ranking, structured file summaries, symbol graph lookup, exact slices, health checks, and token telemetry for coding agents.";
 
@@ -350,6 +400,28 @@ const MCP_SERVER_INSTRUCTIONS: &str = "ProjectAtlas provides TOON-first reposito
 struct AtlasProjectParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+}
+
+/// MCP parameter payload for compact agent startup briefs.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AtlasSessionBriefParams {
+    /// Optional project root for this call. Defaults to the active MCP project.
+    project_path: Option<String>,
+    /// Optional task query used for folder and file ranking.
+    query: Option<String>,
+    /// Maximum folder candidates to return.
+    folder_limit: Option<usize>,
+    /// Maximum file candidates to return.
+    file_limit: Option<usize>,
+    /// Maximum health blockers to return.
+    blocker_limit: Option<usize>,
+}
+
+/// MCP parameter payload for task-progress tools.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AtlasTaskParams {
+    /// Opaque MCP-session-local task id.
+    task_id: String,
 }
 
 /// MCP parameter payload for selecting the active project.
@@ -939,6 +1011,397 @@ struct McpPurposeSetPayload {
     agent_reviewed: bool,
 }
 
+/// MCP-session capability/settings payload.
+#[derive(Debug, Serialize)]
+struct McpSessionCapabilities {
+    /// Runtime identity and compiled tool surface.
+    runtime: RuntimeInfoReport,
+    /// Selected project identity and index status.
+    selected_project: McpSelectedProjectCapability,
+    /// Route-affecting startup policy.
+    startup_policy: McpStartupPolicy,
+    /// Absolute-path routing scope.
+    path_scope: McpPathScope,
+    /// Scan behavior visible to harnesses.
+    scan_policy: McpScanPolicy,
+    /// Token telemetry write mode for this process.
+    telemetry: McpTelemetryPolicy,
+    /// Privacy guarantees for this payload.
+    privacy: McpPrivacyPolicy,
+}
+
+/// Selected project identity inside capability/settings payloads.
+#[derive(Debug, Serialize)]
+struct McpSelectedProjectCapability {
+    /// Canonical repository root.
+    root: String,
+    /// Selected durable `SQLite` index path.
+    db: String,
+    /// Selected configuration path when present.
+    config: Option<String>,
+    /// Whether the selected durable index exists.
+    index_status: McpIndexStatus,
+}
+
+/// Startup policy fields for MCP sessions.
+#[derive(Debug, Serialize)]
+struct McpStartupPolicy {
+    /// Whether nearest indexed project routing is enabled by default.
+    nearest_project: McpPolicyState,
+}
+
+/// Scan policy fields relevant before source reads.
+#[derive(Debug, Serialize)]
+struct McpScanPolicy {
+    /// Settings calls and session briefs never scan implicitly.
+    implicit_scan: McpPolicyState,
+    /// Maximum `UTF-8` file size persisted into `SQLite` text search.
+    text_index_max_bytes: u64,
+}
+
+/// Telemetry write policy for this MCP process.
+#[derive(Debug, Serialize)]
+struct McpTelemetryPolicy {
+    /// Whether token telemetry writes are enabled.
+    mode: McpPolicyState,
+}
+
+/// Privacy contract for capability/settings payloads.
+#[derive(Debug, Serialize)]
+struct McpPrivacyPolicy {
+    /// No arbitrary process environment dump is included.
+    environment_dump: bool,
+    /// No secret or token values are included.
+    secret_values: bool,
+    /// Host paths are limited to `ProjectAtlas` runtime/root/DB/config paths.
+    projectatlas_paths_only: bool,
+}
+
+/// Two-state policy enum serialized for MCP contracts.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpPolicyState {
+    /// Policy is enabled.
+    Enabled,
+    /// Policy is disabled.
+    Disabled,
+}
+
+/// Selected index availability.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpIndexStatus {
+    /// The selected index file exists.
+    Available,
+    /// The selected index file is missing.
+    Missing,
+}
+
+/// Absolute path routing scope.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpPathScope {
+    /// Calls stay within the selected project.
+    SelectedProject,
+    /// Absolute paths may route to the nearest indexed project.
+    NearestIndexedProject,
+}
+
+/// Agent startup brief payload.
+#[derive(Debug, Serialize)]
+struct McpSessionBrief {
+    /// Selected project and index identity.
+    project: McpSelectedProjectCapability,
+    /// Route-affecting startup policy.
+    policy: McpBriefPolicy,
+    /// Overview counts when an index exists.
+    overview: Option<Overview>,
+    /// Indexed candidate folder rows.
+    folders: Vec<McpBriefCandidate>,
+    /// Indexed candidate file rows.
+    files: Vec<McpBriefCandidate>,
+    /// Bounded health blockers.
+    blockers: McpBriefBlockers,
+    /// Recommended next calls.
+    recommendations: Vec<McpBriefRecommendation>,
+    /// Effective limits and truncation metadata.
+    limits: McpBriefLimits,
+}
+
+/// Brief policy fields.
+#[derive(Debug, Serialize)]
+struct McpBriefPolicy {
+    /// Whether nearest indexed project routing is enabled by default.
+    nearest_project: McpPolicyState,
+    /// Absolute-path routing scope.
+    path_scope: McpPathScope,
+}
+
+/// Bounded ranked candidate row for startup briefs.
+#[derive(Debug, Serialize)]
+struct McpBriefCandidate {
+    /// Repository-relative path.
+    path: String,
+    /// Indexed node kind.
+    kind: String,
+    /// Purpose lifecycle status.
+    purpose_status: PurposeStatus,
+    /// Purpose source.
+    purpose_source: PurposeSource,
+    /// Purpose one-liner when present.
+    purpose: Option<String>,
+    /// Observed content summary when present.
+    summary: Option<String>,
+    /// Bounded ranking reasons.
+    reasons: Vec<String>,
+}
+
+/// Bounded health blocker section.
+#[derive(Debug, Serialize)]
+struct McpBriefBlockers {
+    /// Findings after filters are applied.
+    total: usize,
+    /// Findings returned in this brief.
+    returned: usize,
+    /// Whether more blockers exist.
+    truncated: bool,
+    /// Blocker rows.
+    items: Vec<McpBriefBlocker>,
+}
+
+/// One health blocker row for startup briefs.
+#[derive(Debug, Serialize)]
+struct McpBriefBlocker {
+    /// Stable finding id.
+    id: String,
+    /// Finding severity.
+    severity: Severity,
+    /// Finding category.
+    category: String,
+    /// Primary path.
+    path: String,
+    /// Related path when applicable.
+    related_path: Option<String>,
+    /// Health message.
+    message: String,
+    /// Recommended agent action.
+    recommendation: String,
+}
+
+/// One typed startup recommendation.
+#[derive(Debug, Serialize)]
+struct McpBriefRecommendation {
+    /// Stable recommendation kind.
+    kind: McpBriefRecommendationKind,
+    /// MCP tool name or filesystem/tool family.
+    target: String,
+    /// Concise machine-readable reason.
+    reason: String,
+    /// Suggested arguments for the target.
+    arguments: serde_json::Value,
+}
+
+/// Startup recommendation kinds.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpBriefRecommendationKind {
+    /// Refresh or create the `ProjectAtlas` index.
+    Scan,
+    /// Rank folders.
+    Folders,
+    /// Rank files.
+    Files,
+    /// Inspect structural health.
+    Health,
+    /// Read exact source or non-indexed files with normal filesystem tools.
+    FilesystemTools,
+}
+
+/// Effective startup brief row limits.
+#[derive(Debug, Serialize)]
+struct McpBriefLimits {
+    /// Effective folder row limit.
+    folder_limit: usize,
+    /// Effective file row limit.
+    file_limit: usize,
+    /// Effective blocker row limit.
+    blocker_limit: usize,
+    /// Whether folder candidates were truncated.
+    folders_truncated: bool,
+    /// Whether file candidates were truncated.
+    files_truncated: bool,
+}
+
+/// Bounded in-memory registry for MCP task-progress records.
+#[derive(Debug, Clone)]
+struct McpTaskRegistry {
+    /// Session-local task records.
+    records: VecDeque<McpTaskRecord>,
+}
+
+impl McpTaskRegistry {
+    /// Create a registry with the built-in task-progress contract record.
+    fn new() -> Self {
+        let now = mcp_unix_time_ms();
+        let mut records = VecDeque::new();
+        records.push_back(McpTaskRecord {
+            task_id: MCP_TASK_CONTRACT_ID.to_string(),
+            operation: McpTaskOperation::Contract,
+            state: McpTaskState::Complete,
+            created_at_ms: now,
+            updated_at_ms: now,
+            progress: Some(McpTaskProgress {
+                current: Some(1),
+                total: Some(1),
+                message: Some(MCP_TASK_PROGRESS_CONTRACT_MESSAGE.to_string()),
+            }),
+            error: None,
+            result_ref: Some(MCP_TOOL_ATLAS_TASK_STATUS.to_string()),
+            cancelable: false,
+        });
+        Self { records }
+    }
+
+    /// Return a task record by id.
+    fn get(&self, task_id: &str) -> Option<McpTaskRecord> {
+        self.records
+            .iter()
+            .find(|record| record.task_id == task_id)
+            .cloned()
+    }
+
+    /// Update a matching task through a bounded mutable pass.
+    fn update<F>(&mut self, task_id: &str, update: F) -> Option<McpTaskRecord>
+    where
+        F: FnOnce(&mut McpTaskRecord),
+    {
+        let record = self
+            .records
+            .iter_mut()
+            .find(|record| record.task_id == task_id)?;
+        update(record);
+        Some(record.clone())
+    }
+}
+
+/// One MCP task-progress record.
+#[derive(Debug, Clone, Serialize)]
+struct McpTaskRecord {
+    /// Opaque session-local task id.
+    task_id: String,
+    /// Operation family.
+    operation: McpTaskOperation,
+    /// Current task state.
+    state: McpTaskState,
+    /// Creation timestamp in Unix milliseconds.
+    created_at_ms: u128,
+    /// Last update timestamp in Unix milliseconds.
+    updated_at_ms: u128,
+    /// Optional progress counters/message.
+    progress: Option<McpTaskProgress>,
+    /// Concise failure diagnostic when present.
+    error: Option<String>,
+    /// Result reference or follow-up tool when present.
+    result_ref: Option<String>,
+    /// Whether this task can be canceled by the current server.
+    cancelable: bool,
+}
+
+/// MCP task operation kind.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpTaskOperation {
+    /// Contract/schema marker task.
+    Contract,
+    /// Future scan operation.
+    Scan,
+    /// Future one-shot watch refresh operation.
+    WatchOnce,
+    /// Future search operation.
+    Search,
+}
+
+/// MCP task lifecycle state.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpTaskState {
+    /// Task has not started.
+    Pending,
+    /// Task is running.
+    Running,
+    /// Task completed successfully.
+    Complete,
+    /// Task failed.
+    Failed,
+    /// Task was canceled.
+    Canceled,
+}
+
+/// Optional task progress fields.
+#[derive(Debug, Clone, Serialize)]
+struct McpTaskProgress {
+    /// Completed unit count when known.
+    current: Option<u64>,
+    /// Total unit count when known.
+    total: Option<u64>,
+    /// Concise progress message.
+    message: Option<String>,
+}
+
+/// Task status lookup response.
+#[derive(Debug, Serialize)]
+struct McpTaskStatusResponse {
+    /// Requested task id.
+    task_id: String,
+    /// Lookup outcome.
+    lookup: McpTaskLookupStatus,
+    /// Supported task states in this contract.
+    states: Vec<McpTaskState>,
+    /// Supported operation families in this contract.
+    operations: Vec<McpTaskOperation>,
+    /// Registry capacity.
+    registry_capacity: usize,
+    /// Task record when found.
+    task: Option<McpTaskRecord>,
+}
+
+/// Task lookup outcome.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpTaskLookupStatus {
+    /// The task was found.
+    Found,
+    /// The task id is unknown to this MCP session.
+    NotFound,
+}
+
+/// Task cancellation response.
+#[derive(Debug, Serialize)]
+struct McpTaskCancelResponse {
+    /// Requested task id.
+    task_id: String,
+    /// Cancellation outcome.
+    result: McpTaskCancelResult,
+    /// Registry capacity.
+    registry_capacity: usize,
+    /// Task record when found.
+    task: Option<McpTaskRecord>,
+}
+
+/// Task cancellation outcome.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpTaskCancelResult {
+    /// The task was canceled.
+    Canceled,
+    /// The task id is unknown to this MCP session.
+    NotFound,
+    /// The task was already finished.
+    AlreadyFinished,
+    /// The task exists but cannot currently be canceled.
+    NotCancelable,
+}
+
 /// Native `ProjectAtlas` MCP server backed by the same services as the CLI.
 #[derive(Debug, Clone)]
 pub(crate) struct ProjectAtlasMcpServer {
@@ -948,6 +1411,8 @@ pub(crate) struct ProjectAtlasMcpServer {
     session: String,
     /// Whether absolute path arguments may select the nearest indexed project by default.
     allow_nearest_project: bool,
+    /// Bounded MCP task-progress records for this server session.
+    task_registry: Arc<RwLock<McpTaskRegistry>>,
     /// Official RMCP tool router.
     tool_router: ToolRouter<Self>,
 }
@@ -967,6 +1432,7 @@ impl ProjectAtlasMcpServer {
             ))),
             session,
             allow_nearest_project,
+            task_registry: Arc::new(RwLock::new(McpTaskRegistry::new())),
             tool_router: Self::tool_router(),
         }
     }
@@ -1114,6 +1580,421 @@ impl ProjectAtlasMcpServer {
             written: skipped_reason.is_none(),
             json,
             skipped_reason,
+        })
+    }
+
+    /// Build typed MCP session capabilities from active server state.
+    fn session_capabilities(
+        &self,
+        state: &McpProjectState,
+        text_index_max_bytes: u64,
+    ) -> McpSessionCapabilities {
+        McpSessionCapabilities {
+            runtime: build_runtime_info(),
+            selected_project: Self::selected_project_capability(state),
+            startup_policy: McpStartupPolicy {
+                nearest_project: Self::policy_state(self.allow_nearest_project),
+            },
+            path_scope: self.path_scope(),
+            scan_policy: McpScanPolicy {
+                implicit_scan: McpPolicyState::Disabled,
+                text_index_max_bytes,
+            },
+            telemetry: McpTelemetryPolicy {
+                mode: Self::policy_state(!telemetry_disabled()),
+            },
+            privacy: McpPrivacyPolicy {
+                environment_dump: false,
+                secret_values: false,
+                projectatlas_paths_only: true,
+            },
+        }
+    }
+
+    /// Encode settings plus additive MCP-session capability fields.
+    fn render_settings_with_capabilities(
+        &self,
+        state: &McpProjectState,
+    ) -> Result<String, CliError> {
+        let report = build_settings_report(
+            &state.db_path,
+            state.config_path.as_deref(),
+            OutputFormat::Toon,
+        )?;
+        let capabilities = self.session_capabilities(state, report.text_index_max_bytes);
+        Self::encode_two_named_payloads(
+            MCP_PAYLOAD_SETTINGS,
+            &report,
+            MCP_PAYLOAD_SESSION_CAPABILITIES,
+            &capabilities,
+        )
+    }
+
+    /// Build the selected-project capability row.
+    fn selected_project_capability(state: &McpProjectState) -> McpSelectedProjectCapability {
+        McpSelectedProjectCapability {
+            root: normalize_native_path_display(&state.root),
+            db: normalize_native_path_display(&state.db_path),
+            config: state
+                .config_path
+                .as_ref()
+                .map(normalize_native_path_display),
+            index_status: if state.db_path.exists() {
+                McpIndexStatus::Available
+            } else {
+                McpIndexStatus::Missing
+            },
+        }
+    }
+
+    /// Return the path scope for this MCP server.
+    fn path_scope(&self) -> McpPathScope {
+        if self.allow_nearest_project {
+            McpPathScope::NearestIndexedProject
+        } else {
+            McpPathScope::SelectedProject
+        }
+    }
+
+    /// Convert a bool into a serialized policy state.
+    fn policy_state(enabled: bool) -> McpPolicyState {
+        if enabled {
+            McpPolicyState::Enabled
+        } else {
+            McpPolicyState::Disabled
+        }
+    }
+
+    /// Clamp a caller-provided brief limit to the supported range.
+    fn brief_limit(value: Option<usize>) -> usize {
+        value
+            .unwrap_or(SESSION_BRIEF_DEFAULT_LIMIT)
+            .clamp(1, SESSION_BRIEF_MAX_LIMIT)
+    }
+
+    /// Build a read-only agent startup brief.
+    fn build_session_brief(
+        &self,
+        params: AtlasSessionBriefParams,
+    ) -> Result<McpSessionBrief, CliError> {
+        let selected_project_path = params.project_path.clone();
+        let state = self.state_for_project_path(selected_project_path.clone())?;
+        let query = Self::query_or_empty(params.query);
+        let folder_limit = Self::brief_limit(params.folder_limit);
+        let file_limit = Self::brief_limit(params.file_limit);
+        let blocker_limit = Self::brief_limit(params.blocker_limit);
+        let project = Self::selected_project_capability(&state);
+        if !state.db_path.exists() {
+            return Ok(McpSessionBrief {
+                project,
+                policy: self.brief_policy(),
+                overview: None,
+                folders: Vec::new(),
+                files: Vec::new(),
+                blockers: McpBriefBlockers {
+                    total: 0,
+                    returned: 0,
+                    truncated: false,
+                    items: Vec::new(),
+                },
+                recommendations: Self::missing_index_recommendations(params.project_path),
+                limits: McpBriefLimits {
+                    folder_limit,
+                    file_limit,
+                    blocker_limit,
+                    folders_truncated: false,
+                    files_truncated: false,
+                },
+            });
+        }
+        let store = Self::open_store(&state)?;
+        let overview = store.overview()?;
+        let folder_rows =
+            ranked_folder_nodes_with_reasons(&store, &query, folder_limit.saturating_add(1))?;
+        let file_rows = ranked_file_nodes_with_reasons(
+            &store,
+            &query,
+            None,
+            None,
+            file_limit.saturating_add(1),
+            false,
+        )?;
+        let blockers = Self::brief_blockers(&store, blocker_limit)?;
+        let folders_truncated = folder_rows.len() > folder_limit;
+        let files_truncated = file_rows.len() > file_limit;
+        Ok(McpSessionBrief {
+            project,
+            policy: self.brief_policy(),
+            overview: Some(overview),
+            folders: folder_rows
+                .into_iter()
+                .take(folder_limit)
+                .map(Self::brief_candidate)
+                .collect(),
+            files: file_rows
+                .into_iter()
+                .take(file_limit)
+                .map(Self::brief_candidate)
+                .collect(),
+            recommendations: Self::indexed_project_recommendations(
+                &query,
+                blockers.total,
+                selected_project_path,
+            ),
+            blockers,
+            limits: McpBriefLimits {
+                folder_limit,
+                file_limit,
+                blocker_limit,
+                folders_truncated,
+                files_truncated,
+            },
+        })
+    }
+
+    /// Build brief policy fields.
+    fn brief_policy(&self) -> McpBriefPolicy {
+        McpBriefPolicy {
+            nearest_project: Self::policy_state(self.allow_nearest_project),
+            path_scope: self.path_scope(),
+        }
+    }
+
+    /// Convert a ranked node into a compact startup candidate.
+    fn brief_candidate(row: RankedNode) -> McpBriefCandidate {
+        McpBriefCandidate {
+            path: row.node.node.path,
+            kind: row.node.node.kind.to_string(),
+            purpose_status: row.node.purpose.status,
+            purpose_source: row.node.purpose.source,
+            purpose: row.node.purpose.purpose,
+            summary: row.node.summary,
+            reasons: row.reasons,
+        }
+    }
+
+    /// Build bounded health blockers for a session brief.
+    fn brief_blockers(
+        store: &AtlasStore,
+        blocker_limit: usize,
+    ) -> Result<McpBriefBlockers, CliError> {
+        let query = HealthQuery {
+            start_index: 0,
+            limit: blocker_limit,
+            category: None,
+            severity: None,
+            path_prefix: None,
+            summary_only: false,
+            scope: HealthScope::all(),
+        };
+        let page = store.unresolved_health_findings_page(&store.resolved_health_ids()?, &query)?;
+        let total = page.total;
+        let returned = page.returned;
+        Ok(McpBriefBlockers {
+            total,
+            returned,
+            truncated: returned < total,
+            items: page
+                .findings
+                .into_iter()
+                .map(|finding| McpBriefBlocker {
+                    id: finding.id,
+                    severity: finding.severity,
+                    category: finding.category,
+                    path: finding.path,
+                    related_path: finding.related_path,
+                    message: finding.message,
+                    recommendation: finding.recommendation,
+                })
+                .collect(),
+        })
+    }
+
+    /// Recommend next calls for a missing index.
+    fn missing_index_recommendations(project_path: Option<String>) -> Vec<McpBriefRecommendation> {
+        vec![
+            McpBriefRecommendation {
+                kind: McpBriefRecommendationKind::Scan,
+                target: MCP_TOOL_ATLAS_SCAN.to_string(),
+                reason: MCP_BRIEF_REASON_SELECTED_INDEX_MISSING.to_string(),
+                arguments: Self::project_path_arguments(project_path.clone()),
+            },
+            McpBriefRecommendation {
+                kind: McpBriefRecommendationKind::FilesystemTools,
+                target: MCP_BRIEF_TARGET_FILESYSTEM_TOOLS.to_string(),
+                reason: MCP_BRIEF_REASON_FILESYSTEM_UNTIL_INDEX.to_string(),
+                arguments: Self::project_path_arguments(project_path),
+            },
+        ]
+    }
+
+    /// Recommend next calls for an indexed project.
+    fn indexed_project_recommendations(
+        query: &str,
+        blocker_total: usize,
+        project_path: Option<String>,
+    ) -> Vec<McpBriefRecommendation> {
+        let mut recommendations = vec![
+            McpBriefRecommendation {
+                kind: McpBriefRecommendationKind::Folders,
+                target: MCP_TOOL_ATLAS_FOLDERS.to_string(),
+                reason: MCP_BRIEF_REASON_CHOOSE_WORK_AREA.to_string(),
+                arguments: Self::brief_call_arguments(
+                    project_path.clone(),
+                    Some((MCP_BRIEF_ARG_QUERY, query)),
+                    None,
+                ),
+            },
+            McpBriefRecommendation {
+                kind: McpBriefRecommendationKind::Files,
+                target: MCP_TOOL_ATLAS_FILES.to_string(),
+                reason: MCP_BRIEF_REASON_CHOOSE_FILES.to_string(),
+                arguments: Self::brief_call_arguments(
+                    project_path.clone(),
+                    Some((MCP_BRIEF_ARG_QUERY, query)),
+                    None,
+                ),
+            },
+        ];
+        if blocker_total > 0 {
+            recommendations.push(McpBriefRecommendation {
+                kind: McpBriefRecommendationKind::Health,
+                target: MCP_TOOL_ATLAS_HEALTH.to_string(),
+                reason: MCP_BRIEF_REASON_HEALTH_BLOCKERS.to_string(),
+                arguments: Self::brief_call_arguments(
+                    project_path,
+                    None,
+                    Some((MCP_BRIEF_ARG_LIMIT, SESSION_BRIEF_DEFAULT_LIMIT)),
+                ),
+            });
+        }
+        recommendations
+    }
+
+    /// Build a `JSON` object containing `project_path` when present.
+    fn project_path_arguments(project_path: Option<String>) -> serde_json::Value {
+        project_path.map_or_else(
+            || serde_json::Value::Object(serde_json::Map::new()),
+            |path| Self::string_argument(MCP_BRIEF_ARG_PROJECT_PATH, path),
+        )
+    }
+
+    /// Build recommendation call arguments with optional project path and one payload argument.
+    fn brief_call_arguments(
+        project_path: Option<String>,
+        string_arg: Option<(&'static str, &str)>,
+        usize_arg: Option<(&'static str, usize)>,
+    ) -> serde_json::Value {
+        let mut arguments = serde_json::Map::new();
+        if let Some(path) = project_path {
+            arguments.insert(
+                MCP_BRIEF_ARG_PROJECT_PATH.to_string(),
+                serde_json::Value::String(path),
+            );
+        }
+        if let Some((key, value)) = string_arg {
+            arguments.insert(
+                key.to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
+        }
+        if let Some((key, value)) = usize_arg {
+            arguments.insert(key.to_string(), serde_json::json!(value));
+        }
+        serde_json::Value::Object(arguments)
+    }
+
+    /// Build a one-field string argument object for typed recommendations.
+    fn string_argument(key: &'static str, value: impl Into<String>) -> serde_json::Value {
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(key.to_string(), serde_json::Value::String(value.into()));
+        serde_json::Value::Object(arguments)
+    }
+
+    /// Return all task model states for contract discovery.
+    fn task_state_values() -> Vec<McpTaskState> {
+        vec![
+            McpTaskState::Pending,
+            McpTaskState::Running,
+            McpTaskState::Complete,
+            McpTaskState::Failed,
+            McpTaskState::Canceled,
+        ]
+    }
+
+    /// Return all task operation values for contract discovery.
+    fn task_operation_values() -> Vec<McpTaskOperation> {
+        vec![
+            McpTaskOperation::Contract,
+            McpTaskOperation::Scan,
+            McpTaskOperation::WatchOnce,
+            McpTaskOperation::Search,
+        ]
+    }
+
+    /// Look up one MCP task status.
+    fn task_status(&self, task_id: String) -> Result<McpTaskStatusResponse, CliError> {
+        let registry = self
+            .task_registry
+            .read()
+            .map_err(|_poisoned| CliError::Mcp(MCP_PROJECT_STATE_LOCK_POISONED.to_string()))?;
+        let task = registry.get(&task_id);
+        Ok(McpTaskStatusResponse {
+            task_id,
+            lookup: if task.is_some() {
+                McpTaskLookupStatus::Found
+            } else {
+                McpTaskLookupStatus::NotFound
+            },
+            states: Self::task_state_values(),
+            operations: Self::task_operation_values(),
+            registry_capacity: MCP_TASK_REGISTRY_CAPACITY,
+            task,
+        })
+    }
+
+    /// Cancel one MCP task when cancellation is supported.
+    fn task_cancel(&self, task_id: String) -> Result<McpTaskCancelResponse, CliError> {
+        let mut registry = self
+            .task_registry
+            .write()
+            .map_err(|_poisoned| CliError::Mcp(MCP_PROJECT_STATE_LOCK_POISONED.to_string()))?;
+        let Some(record) = registry.get(&task_id) else {
+            return Ok(McpTaskCancelResponse {
+                task_id,
+                result: McpTaskCancelResult::NotFound,
+                registry_capacity: MCP_TASK_REGISTRY_CAPACITY,
+                task: None,
+            });
+        };
+        if matches!(
+            record.state,
+            McpTaskState::Complete | McpTaskState::Failed | McpTaskState::Canceled
+        ) {
+            return Ok(McpTaskCancelResponse {
+                task_id,
+                result: McpTaskCancelResult::AlreadyFinished,
+                registry_capacity: MCP_TASK_REGISTRY_CAPACITY,
+                task: Some(record),
+            });
+        }
+        if !record.cancelable {
+            return Ok(McpTaskCancelResponse {
+                task_id,
+                result: McpTaskCancelResult::NotCancelable,
+                registry_capacity: MCP_TASK_REGISTRY_CAPACITY,
+                task: Some(record),
+            });
+        }
+        let task = registry.update(&task_id, |record| {
+            record.state = McpTaskState::Canceled;
+            record.updated_at_ms = mcp_unix_time_ms();
+        });
+        Ok(McpTaskCancelResponse {
+            task_id,
+            result: McpTaskCancelResult::Canceled,
+            registry_capacity: MCP_TASK_REGISTRY_CAPACITY,
+            task,
         })
     }
 
@@ -2703,12 +3584,7 @@ impl ProjectAtlasMcpServer {
     fn atlas_settings(&self, Parameters(params): Parameters<AtlasProjectParams>) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
-            let report = build_settings_report(
-                &state.db_path,
-                state.config_path.as_deref(),
-                OutputFormat::Toon,
-            )?;
-            Ok(render_settings_report(&report))
+            self.render_settings_with_capabilities(&state)
         })())
     }
 
@@ -2843,6 +3719,45 @@ impl ProjectAtlasMcpServer {
         Self::as_mcp_text(Ok(render_runtime_info(&build_runtime_info())))
     }
 
+    /// Return a compact startup brief for agents.
+    #[tool(
+        name = "atlas_session_brief",
+        description = "Return selected project identity, index state, ranked candidates, blockers, and typed next-call recommendations for agent startup."
+    )]
+    fn atlas_session_brief(
+        &self,
+        Parameters(params): Parameters<AtlasSessionBriefParams>,
+    ) -> String {
+        Self::as_mcp_text((|| {
+            let brief = self.build_session_brief(params)?;
+            Self::encode_named_payload(MCP_PAYLOAD_SESSION_BRIEF, &brief)
+        })())
+    }
+
+    /// Return typed status for one MCP task-progress record.
+    #[tool(
+        name = "atlas_task_status",
+        description = "Return typed status for a bounded MCP task-progress record."
+    )]
+    fn atlas_task_status(&self, Parameters(params): Parameters<AtlasTaskParams>) -> String {
+        Self::as_mcp_text((|| {
+            let status = self.task_status(params.task_id)?;
+            Self::encode_named_payload(MCP_PAYLOAD_TASK_STATUS, &status)
+        })())
+    }
+
+    /// Request cancellation for one MCP task-progress record.
+    #[tool(
+        name = "atlas_task_cancel",
+        description = "Request cancellation for a bounded MCP task-progress record."
+    )]
+    fn atlas_task_cancel(&self, Parameters(params): Parameters<AtlasTaskParams>) -> String {
+        Self::as_mcp_text((|| {
+            let cancel = self.task_cancel(params.task_id)?;
+            Self::encode_named_payload(MCP_PAYLOAD_TASK_CANCEL, &cancel)
+        })())
+    }
+
     /// Return a bounded purpose curation queue.
     #[tool(
         name = "atlas_purpose_queue",
@@ -2927,6 +3842,13 @@ impl ServerHandler for ProjectAtlasMcpServer {
             ))
             .with_instructions(MCP_SERVER_INSTRUCTIONS)
     }
+}
+
+/// Return current Unix time in milliseconds for MCP task status records.
+fn mcp_unix_time_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis())
 }
 
 #[cfg(test)]
@@ -3050,6 +3972,188 @@ mod tests {
         require(
             !repo.join(".projectatlas").exists(),
             "read-only store created .projectatlas",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn session_brief_missing_index_stays_read_only() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo-a");
+        fs::create_dir(&repo)?;
+        let db_path = repo.join(".projectatlas").join("projectatlas.db");
+        let server = ProjectAtlasMcpServer::new(db_path, None, "mcp-test".to_string(), false);
+
+        let brief = server.build_session_brief(AtlasSessionBriefParams {
+            project_path: None,
+            query: Some("startup".to_string()),
+            folder_limit: None,
+            file_limit: None,
+            blocker_limit: None,
+        })?;
+
+        require(
+            brief.project.index_status == McpIndexStatus::Missing,
+            "missing index was not represented as typed state",
+        )?;
+        require(
+            brief.overview.is_none(),
+            "missing-index brief unexpectedly included overview",
+        )?;
+        require(
+            brief.recommendations.iter().any(|recommendation| {
+                matches!(recommendation.kind, McpBriefRecommendationKind::Scan)
+            }),
+            "missing-index brief did not recommend scan",
+        )?;
+        require(
+            !repo.join(".projectatlas").exists(),
+            "session brief created .projectatlas for a missing index",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn session_brief_recommendations_preserve_per_call_project_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let project_path = "F:/example/repo-b".to_string();
+        let recommendations = ProjectAtlasMcpServer::indexed_project_recommendations(
+            "startup",
+            1,
+            Some(project_path.clone()),
+        );
+
+        require(
+            recommendations.iter().all(|recommendation| {
+                recommendation.arguments.get(MCP_BRIEF_ARG_PROJECT_PATH)
+                    == Some(&serde_json::Value::String(project_path.clone()))
+            }),
+            "indexed brief recommendations did not preserve project_path",
+        )?;
+        require(
+            recommendations.iter().any(|recommendation| {
+                matches!(recommendation.kind, McpBriefRecommendationKind::Folders)
+                    && recommendation.arguments.get(MCP_BRIEF_ARG_QUERY)
+                        == Some(&serde_json::Value::String("startup".to_string()))
+            }),
+            "folder recommendation did not preserve query",
+        )?;
+        require(
+            recommendations.iter().any(|recommendation| {
+                matches!(recommendation.kind, McpBriefRecommendationKind::Health)
+                    && recommendation.arguments.get(MCP_BRIEF_ARG_LIMIT)
+                        == Some(&serde_json::json!(SESSION_BRIEF_DEFAULT_LIMIT))
+            }),
+            "health recommendation did not preserve limit",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn session_brief_file_candidates_ignore_indexed_text_fallback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo-a");
+        fs::create_dir_all(repo.join("src"))?;
+        fs::write(
+            repo.join("src").join("owner.rs"),
+            "const ROUTE: &str = \"hiddenNeedle\";\n",
+        )?;
+        let db_path = repo.join(".projectatlas").join("projectatlas.db");
+        let mut store = open_atlas_store(&db_path)?;
+        let plan = ScanRuntimePlan::for_path(None, &repo, None)?;
+        let symbol_options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, Some(1), Some(30));
+        run_scan_pipeline(&mut store, &plan, &symbol_options)?;
+        drop(store);
+
+        let server = ProjectAtlasMcpServer::new(db_path, None, "mcp-test".to_string(), false);
+        let brief = server.build_session_brief(AtlasSessionBriefParams {
+            project_path: None,
+            query: Some("hiddenNeedle".to_string()),
+            folder_limit: Some(5),
+            file_limit: Some(5),
+            blocker_limit: Some(5),
+        })?;
+
+        require(
+            brief.files.is_empty(),
+            "session brief returned a content-only indexed-text hit",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn settings_capabilities_report_nearest_policy() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo-a");
+        fs::create_dir(&repo)?;
+        let db_path = repo.join(".projectatlas").join("projectatlas.db");
+        let disabled =
+            ProjectAtlasMcpServer::new(db_path.clone(), None, "mcp-test".to_string(), false);
+        let enabled = ProjectAtlasMcpServer::new(db_path, None, "mcp-test".to_string(), true);
+        let disabled_state = disabled.active_project_state()?;
+        let enabled_state = enabled.active_project_state()?;
+
+        let disabled_text = disabled.render_settings_with_capabilities(&disabled_state)?;
+        require(
+            disabled_text.contains("mcp_session:"),
+            "settings did not include mcp_session capabilities",
+        )?;
+        require(
+            disabled_text.contains("path_scope: selected_project"),
+            "disabled nearest-project policy was not typed",
+        )?;
+        let enabled_text = enabled.render_settings_with_capabilities(&enabled_state)?;
+        require(
+            enabled_text.contains("path_scope: nearest_indexed_project"),
+            "enabled nearest-project policy was not typed",
+        )?;
+        require(
+            !enabled_text.contains("GITHUB_TOKEN") && !enabled_text.contains("GH_TOKEN"),
+            "settings capabilities leaked token environment names",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn task_progress_status_and_cancel_are_typed() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo-a");
+        fs::create_dir(&repo)?;
+        let db_path = repo.join(".projectatlas").join("projectatlas.db");
+        let server = ProjectAtlasMcpServer::new(db_path, None, "mcp-test".to_string(), false);
+
+        let status = server.task_status(MCP_TASK_CONTRACT_ID.to_string())?;
+        require(
+            status.lookup == McpTaskLookupStatus::Found,
+            "contract task missing",
+        )?;
+        require(
+            status
+                .task
+                .as_ref()
+                .is_some_and(|task| task.state == McpTaskState::Complete),
+            "contract task was not complete",
+        )?;
+        require(
+            status.states.contains(&McpTaskState::Pending)
+                && status.states.contains(&McpTaskState::Canceled),
+            "status response did not expose task state contract",
+        )?;
+        let cancel = server.task_cancel(MCP_TASK_CONTRACT_ID.to_string())?;
+        require(
+            cancel.result == McpTaskCancelResult::AlreadyFinished,
+            "completed contract task did not return already_finished",
+        )?;
+        let missing = server.task_status("missing-task".to_string())?;
+        require(
+            missing.lookup == McpTaskLookupStatus::NotFound,
+            "unknown task did not return not_found",
         )?;
 
         Ok(())

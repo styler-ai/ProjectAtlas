@@ -1,31 +1,53 @@
 ## Context
 
-Current agent startup usually calls `atlas_settings`, `atlas_overview`, `atlas_folders`, `atlas_files`, and sometimes `atlas_health` before reading source. The workflow is correct but verbose. The brief should be a read-only orchestration layer over existing ProjectAtlas services, not a second ranking or health implementation.
+The current startup path is correct but verbose: agents call settings/root, overview, folders, files, and sometimes health before they know where to inspect source. `atlas_session_brief` should be a small orchestration layer over existing indexed metadata, not a second source of truth.
 
-## Goals / Non-Goals
+## Contract
 
-**Goals:**
-- Provide a compact, deterministic startup payload for agent harnesses.
-- Surface selected project identity, index availability, scan freshness signals, bounded blockers, query-relevant folders/files, and recommended next calls.
-- Keep all output typed with serializable structs and enums.
-- Preserve the existing atlas-first workflow by recommending lower-level calls rather than replacing them.
+`atlas_session_brief` accepts:
 
-**Non-Goals:**
-- Do not auto-scan or mutate the index from the brief call.
-- Do not read arbitrary source contents.
-- Do not remove or hide the existing MCP tools.
-- Do not include human marketing prose in the contract.
+- `project_path`: optional root override for this call only.
+- `query`: optional task text for ranking folders and files.
+- `folder_limit`: optional, clamped to a small maximum.
+- `file_limit`: optional, clamped to a small maximum.
+- `blocker_limit`: optional, clamped to a small maximum.
 
-## Decisions
+The response includes:
 
-- Compose existing services instead of duplicating logic. Folder/file recommendations should call the same ranking paths used by `atlas_folders` and `atlas_files`; blockers should use existing health query code.
-- Use strict bounds. The default response should include only a small number of folders, files, blockers, and next calls with truncation metadata where applicable.
-- Model recommendations as enum-backed records such as `scan`, `folders`, `files`, `summary`, `slice`, `health`, or `filesystem_tools`, with reason fields. This lets harnesses inspect the payload without parsing prose.
-- Keep the tool project-isolated. `project_path` may select a project for the call, but the brief should not change active MCP state.
+- `project`: root, DB path, config path, and active/missing-index status.
+- `policy`: path scope and nearest-project startup policy visible enough for startup decisions.
+- `overview`: file/folder/purpose counts when the index exists.
+- `index`: `available` or `missing`, plus scan recommendation when missing.
+- `folders`: bounded ranked folder candidates from existing ranking helpers.
+- `files`: bounded ranked file candidates from existing ranking helpers.
+- `blockers`: bounded unresolved health/purpose blockers from existing health query paths.
+- `recommendations`: typed next calls such as `atlas_scan`, `atlas_folders`, `atlas_files`, `atlas_file_summary`, `atlas_health`, or `filesystem_tools`.
+- `limits`: requested/effective counts and truncation flags.
 
-## Risks / Trade-offs
+## Implementation Notes
 
-- Brief grows too large -> keep hard limits and include counts/truncation flags.
-- Brief masks stale index state -> expose freshness/index state first and recommend scan when needed.
-- Brief becomes a second implementation of ranking/health -> wire through existing service functions and add regression tests.
-- Recommendations become hard to trust -> include reason codes and source signals for each recommendation.
+- Use `state_for_project_path` to resolve the selected project without mutating active state.
+- If the DB does not exist, return a typed missing-index payload without `open_atlas_store` and without creating `.projectatlas`.
+- If the DB exists, open it read-only through `open_store`.
+- Use `store.overview()`, `ranked_folder_nodes_with_reasons`, `ranked_file_nodes_with_reasons`, and bounded `unresolved_health_findings_page`.
+- Do not record token telemetry from this tool.
+- Encode with the existing `encode_named_payload` helper.
+
+## Edge Cases
+
+- Empty query: still return bounded default candidates and generic recommendations.
+- Missing index: do not create directories/files; recommend scan or explicit project selection.
+- Health-heavy project: cap blocker rows and expose truncation.
+- Stale or wrong project config: reuse existing selected-project validation paths.
+- Absolute paths outside selected project: recommend normal filesystem tools unless the selected indexed project is explicitly changed.
+
+## Pre-Mortem
+
+Risk: the brief duplicates `atlas_next`.
+Mitigation: `atlas_next` remains a query-specific navigation report; the brief adds project/index/policy/blocker context and typed startup recommendations.
+
+Risk: test fixtures pass with empty health because no blocker is created.
+Mitigation: include a fixture with a missing purpose or unresolved health finding and assert a blocker row.
+
+Risk: payload shape is too verbose.
+Mitigation: keep field names stable and compact, and do not include source text.

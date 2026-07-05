@@ -766,9 +766,250 @@ write_mcp_config() {
   "$projectatlas_bin" "$@" > "$output_path"
 }
 
+canonical_path() {
+  candidate=$1
+  if [ -d "$candidate" ]; then
+    CDPATH= cd -- "$candidate" 2>/dev/null && pwd -P && return 0
+  fi
+  canonical_file "$candidate"
+}
+
+require_same_path() {
+  actual=$1
+  expected=$2
+  label=$3
+  if [ -z "$actual" ]; then
+    printf '%s\n' "$label is missing." >&2
+    return 1
+  fi
+  case "$actual" in
+    /*) ;;
+    *)
+      printf '%s\n' "$label path is not absolute: $actual" >&2
+      return 1
+      ;;
+  esac
+  actual_canonical=$(canonical_path "$actual")
+  expected_canonical=$(canonical_path "$expected")
+  if [ "$actual_canonical" != "$expected_canonical" ]; then
+    printf '%s\n' "$label path mismatch: expected $expected, found $actual" >&2
+    return 1
+  fi
+}
+
+require_json_parser() {
+  if command -v jq >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; then
+    return 0
+  fi
+  printf '%s\n' "ProjectAtlas generated MCP config verification requires jq or python3 for JSON parsing." >&2
+  return 1
+}
+
+generated_claude_command() {
+  config_path=$1
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '.mcpServers.projectatlas.command // empty' "$config_path"
+    return 0
+  fi
+  require_json_parser || return 1
+  python3 - "$config_path" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+print(payload.get("mcpServers", {}).get("projectatlas", {}).get("command", ""))
+PY
+}
+
+generated_claude_args() {
+  config_path=$1
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '.mcpServers.projectatlas.args[]? // empty' "$config_path"
+    return 0
+  fi
+  require_json_parser || return 1
+  python3 - "$config_path" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+for arg in payload.get("mcpServers", {}).get("projectatlas", {}).get("args", []):
+    print(arg)
+PY
+}
+
+generated_claude_has_cwd() {
+  config_path=$1
+  if command -v jq >/dev/null 2>&1; then
+    jq -e '.mcpServers.projectatlas | has("cwd")' "$config_path" >/dev/null
+    return $?
+  fi
+  require_json_parser || return 1
+  python3 - "$config_path" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+server = payload.get("mcpServers", {}).get("projectatlas", {})
+sys.exit(0 if "cwd" in server else 1)
+PY
+}
+
+generated_opencode_string() {
+  config_path=$1
+  key=$2
+  if command -v jq >/dev/null 2>&1; then
+    jq -r ".mcp.projectatlas.$key // empty" "$config_path"
+    return 0
+  fi
+  require_json_parser || return 1
+  python3 - "$config_path" "$key" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+value = payload.get("mcp", {}).get("projectatlas", {}).get(sys.argv[2], "")
+print(value if isinstance(value, str) else "")
+PY
+}
+
+generated_opencode_enabled() {
+  config_path=$1
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '.mcp.projectatlas.enabled // empty' "$config_path"
+    return 0
+  fi
+  require_json_parser || return 1
+  python3 - "$config_path" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+value = payload.get("mcp", {}).get("projectatlas", {}).get("enabled", "")
+if isinstance(value, bool):
+    print("true" if value else "false")
+PY
+}
+
+generated_opencode_command_array() {
+  config_path=$1
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '.mcp.projectatlas.command[]? // empty' "$config_path"
+    return 0
+  fi
+  require_json_parser || return 1
+  python3 - "$config_path" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+for arg in payload.get("mcp", {}).get("projectatlas", {}).get("command", []):
+    print(arg)
+PY
+}
+
+effective_config_path() {
+  if [ -f "$project_config" ]; then
+    printf '%s\n' "$project_config"
+  elif [ -f "$flat_config" ]; then
+    printf '%s\n' "$flat_config"
+  fi
+}
+
+require_arg_value() {
+  args_text=$1
+  name=$2
+  expected=$3
+  label=$4
+  path_value=${5:-}
+  seen_name=0
+  while IFS= read -r arg; do
+    if [ "$seen_name" -eq 1 ]; then
+      if [ "$path_value" = path ]; then
+        require_same_path "$arg" "$expected" "$label" || return 1
+      elif [ "$arg" != "$expected" ]; then
+        printf '%s\n' "$label mismatch: expected $expected, found $arg" >&2
+        return 1
+      fi
+      return 0
+    fi
+    if [ "$arg" = "$name" ]; then
+      seen_name=1
+    fi
+  done <<EOF
+$args_text
+EOF
+  printf '%s\n' "$label argument $name is missing." >&2
+  return 1
+}
+
+verify_generated_mcp_config() {
+  config_path=$1
+  harness=$2
+  runtime_version=$(expected_runtime_version)
+  if [ -z "$runtime_version" ]; then
+    runtime_version=$(runtime_version "$projectatlas_bin")
+  fi
+  if [ -z "$runtime_version" ]; then
+    printf '%s\n' "$harness ProjectAtlas generated MCP config cannot be verified because the runtime version is unknown." >&2
+    return 1
+  fi
+  [ -f "$config_path" ] || {
+    printf '%s\n' "$harness ProjectAtlas generated MCP config was not written: $config_path" >&2
+    return 1
+  }
+  case "$harness" in
+    "Claude Code")
+      command_path=$(generated_claude_command "$config_path") || return 1
+      require_same_path "$command_path" "$projectatlas_bin" "Claude Code command" || return 1
+      args_text=$(generated_claude_args "$config_path") || return 1
+      if generated_claude_has_cwd "$config_path"; then
+        printf '%s\n' "Claude Code generated MCP config must not rely on cwd." >&2
+        return 1
+      fi
+      ;;
+    "OpenCode")
+      server_type=$(generated_opencode_string "$config_path" type) || return 1
+      [ "$server_type" = local ] || {
+        printf '%s\n' "OpenCode generated MCP config type mismatch." >&2
+        return 1
+      }
+      server_enabled=$(generated_opencode_enabled "$config_path") || return 1
+      [ "$server_enabled" = true ] || {
+        printf '%s\n' "OpenCode generated MCP config must set enabled=true." >&2
+        return 1
+      }
+      server_cwd=$(generated_opencode_string "$config_path" cwd) || return 1
+      require_same_path "$server_cwd" "$project_root" "OpenCode cwd" || return 1
+      command_array=$(generated_opencode_command_array "$config_path") || return 1
+      command_path=$(printf '%s\n' "$command_array" | sed -n '1p')
+      require_same_path "$command_path" "$projectatlas_bin" "OpenCode command" || return 1
+      args_text=$(printf '%s\n' "$command_array" | sed -n '2,$p')
+      ;;
+    *)
+      printf '%s\n' "Unsupported generated MCP config harness: $harness" >&2
+      return 1
+      ;;
+  esac
+  require_arg_value "$args_text" --require-version "$runtime_version" "$harness --require-version" || return 1
+  require_arg_value "$args_text" --db "$atlas_dir/projectatlas.db" "$harness --db" path || return 1
+  expected_config=$(effective_config_path)
+  if [ -n "$expected_config" ]; then
+    require_arg_value "$args_text" --config "$expected_config" "$harness --config" path || return 1
+  fi
+  last_arg=$(printf '%s\n' "$args_text" | sed '/^$/d' | tail -n 1)
+  [ "$last_arg" = mcp ] || {
+    printf '%s\n' "$harness generated MCP config does not end with mcp." >&2
+    return 1
+  }
+  printf '%s\n' "$harness ProjectAtlas generated MCP config verified for runtime $projectatlas_bin and database $atlas_dir/projectatlas.db."
+}
+
 write_mcp_config "$mcp_config_path"
 write_mcp_config "$claude_mcp_config_path" claude-code
 write_mcp_config "$opencode_config_path" opencode
+verify_generated_mcp_config "$claude_mcp_config_path" "Claude Code"
+verify_generated_mcp_config "$opencode_config_path" "OpenCode"
 update_codex_plugin
 update_codex_mcp_registry
 report_projectatlas_workflow_pins

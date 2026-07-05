@@ -407,6 +407,140 @@ function Get-ProjectAtlasMcpLaunchArguments {
     return $launchArgs
 }
 
+function Get-ProjectAtlasComparablePath {
+    param(
+        [string]$Path
+    )
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return ""
+    }
+    return [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+}
+
+function Assert-ProjectAtlasEquivalentPath {
+    param(
+        [string]$Actual,
+        [string]$Expected,
+        [string]$Label
+    )
+    if ([string]::IsNullOrWhiteSpace($Actual)) {
+        throw "${Label} is missing."
+    }
+    if (-not [System.IO.Path]::IsPathRooted($Actual)) {
+        throw "${Label} path is not absolute: $Actual"
+    }
+    $actualPath = Get-ProjectAtlasComparablePath $Actual
+    $expectedPath = Get-ProjectAtlasComparablePath $Expected
+    if (-not [string]::Equals($actualPath, $expectedPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "${Label} path mismatch: expected $Expected, found $Actual"
+    }
+}
+
+function Assert-ProjectAtlasArgumentValue {
+    param(
+        [object[]]$Arguments,
+        [string]$Name,
+        [string]$Expected,
+        [string]$Label,
+        [switch]$PathValue
+    )
+    for ($index = 0; $index -lt $Arguments.Count - 1; $index += 1) {
+        if ([string]$Arguments[$index] -ne $Name) {
+            continue
+        }
+        $actual = [string]$Arguments[$index + 1]
+        if ($PathValue) {
+            Assert-ProjectAtlasEquivalentPath $actual $Expected $Label
+        }
+        elseif ($actual -ne $Expected) {
+            throw "${Label} mismatch: expected $Expected, found $actual"
+        }
+        return
+    }
+    throw "${Label} argument $Name is missing."
+}
+
+function Get-ProjectAtlasEffectiveConfigPath {
+    param(
+        [string]$ProjectConfigPath,
+        [string]$FlatConfigPath
+    )
+    if (Test-Path -LiteralPath $ProjectConfigPath) {
+        return $ProjectConfigPath
+    }
+    if (Test-Path -LiteralPath $FlatConfigPath) {
+        return $FlatConfigPath
+    }
+    return $null
+}
+
+function Confirm-ProjectAtlasGeneratedMcpConfig {
+    param(
+        [string]$ConfigPath,
+        [string]$Harness,
+        [string]$VerifiedPath,
+        [string]$ExpectedVersion,
+        [string]$DbPath,
+        [string]$ProjectConfigPath,
+        [string]$FlatConfigPath,
+        [string]$ProjectRoot
+    )
+    if (-not (Test-Path -LiteralPath $ConfigPath)) {
+        throw "${Harness} ProjectAtlas generated MCP config was not written: $ConfigPath"
+    }
+    $runtimeVersion = Convert-ProjectAtlasVersionTag $ExpectedVersion
+    if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
+        $runtimeVersion = Get-ProjectAtlasRuntimeVersion $VerifiedPath
+    }
+    if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
+        throw "${Harness} ProjectAtlas generated MCP config cannot be verified because the runtime version is unknown."
+    }
+    $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+    $expectedConfigPath = Get-ProjectAtlasEffectiveConfigPath $ProjectConfigPath $FlatConfigPath
+    if ($Harness -eq "Claude Code") {
+        $server = $config.mcpServers.projectatlas
+        if (-not $server) {
+            throw "Claude Code generated MCP config is missing mcpServers.projectatlas."
+        }
+        Assert-ProjectAtlasEquivalentPath ([string]$server.command) $VerifiedPath "Claude Code command"
+        $arguments = @($server.args)
+        if ($server.PSObject.Properties.Name -contains "cwd") {
+            throw "Claude Code generated MCP config must not rely on cwd."
+        }
+    }
+    elseif ($Harness -eq "OpenCode") {
+        $server = $config.mcp.projectatlas
+        if (-not $server) {
+            throw "OpenCode generated MCP config is missing mcp.projectatlas."
+        }
+        if ([string]$server.type -ne "local") {
+            throw "OpenCode generated MCP config type mismatch: expected local, found $($server.type)"
+        }
+        if ($server.enabled -ne $true) {
+            throw "OpenCode generated MCP config must set enabled=true."
+        }
+        Assert-ProjectAtlasEquivalentPath ([string]$server.cwd) $ProjectRoot "OpenCode cwd"
+        $command = @($server.command)
+        if ($command.Count -lt 2) {
+            throw "OpenCode generated MCP config command array is incomplete."
+        }
+        Assert-ProjectAtlasEquivalentPath ([string]$command[0]) $VerifiedPath "OpenCode command"
+        $arguments = @($command | Select-Object -Skip 1)
+    }
+    else {
+        throw "Unsupported generated MCP config harness: $Harness"
+    }
+    Assert-ProjectAtlasArgumentValue $arguments "--require-version" $runtimeVersion "${Harness} --require-version"
+    Assert-ProjectAtlasArgumentValue $arguments "--db" $DbPath "${Harness} --db" -PathValue
+    if ($expectedConfigPath) {
+        Assert-ProjectAtlasArgumentValue $arguments "--config" $expectedConfigPath "${Harness} --config" -PathValue
+    }
+    if ($arguments.Count -eq 0 -or [string]$arguments[$arguments.Count - 1] -ne "mcp") {
+        throw "${Harness} generated MCP config does not end with mcp."
+    }
+    Write-Output "${Harness} ProjectAtlas generated MCP config verified for runtime $VerifiedPath and database $DbPath."
+}
+
 function Resolve-ProjectAtlasCodexCommand {
     param(
         [string]$Operation
@@ -1075,6 +1209,8 @@ function Write-ProjectAtlasMcpConfig {
 Write-ProjectAtlasMcpConfig $mcpConfigPath $null
 Write-ProjectAtlasMcpConfig $claudeMcpConfigPath "claude-code"
 Write-ProjectAtlasMcpConfig $opencodeConfigPath "opencode"
+Confirm-ProjectAtlasGeneratedMcpConfig $claudeMcpConfigPath "Claude Code" $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath $ProjectRoot
+Confirm-ProjectAtlasGeneratedMcpConfig $opencodeConfigPath "OpenCode" $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath $ProjectRoot
 Update-ProjectAtlasCodexPlugin $ProjectAtlasVersion
 Update-ProjectAtlasCodexMcpRegistry $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath
 Write-ProjectAtlasWorkflowPinReport $ProjectRoot $ProjectAtlasVersion

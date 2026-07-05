@@ -211,6 +211,8 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "projectatlas.opencode.json",
         r#"Write-ProjectAtlasMcpConfig $claudeMcpConfigPath "claude-code""#,
         r#"Write-ProjectAtlasMcpConfig $opencodeConfigPath "opencode""#,
+        "Confirm-ProjectAtlasGeneratedMcpConfig",
+        "ProjectAtlas generated MCP config verified",
         "Write-ProjectAtlasWorkflowPinReport",
         "Stale ProjectAtlas workflow release pin",
         "Claude Code ProjectAtlas integration verified through generated MCP config",
@@ -276,6 +278,10 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "projectatlas.opencode.json",
         "write_mcp_config \"$claude_mcp_config_path\" claude-code",
         "write_mcp_config \"$opencode_config_path\" opencode",
+        "verify_generated_mcp_config",
+        "require_json_parser()",
+        "ProjectAtlas generated MCP config verification requires jq or python3",
+        "ProjectAtlas generated MCP config verified",
         "report_projectatlas_workflow_pins",
         "Stale ProjectAtlas workflow release pin",
         "Claude Code ProjectAtlas integration verified through generated MCP config",
@@ -284,6 +290,34 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         if !posix_installer.contains(required) {
             return Err(io::Error::other(format!(
                 "POSIX installer is missing runtime version guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for forbidden in [
+        r#"sed -n 's/.*"mcpServers""#,
+        r#"sed -n 's/.*"args""#,
+        r#"sed -n 's/.*"mcp""#,
+        r#"sed -n 's/.*"enabled""#,
+    ] {
+        if posix_installer.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "POSIX generated MCP config verification must use a real JSON parser, found {forbidden:?}"
+            ))
+            .into());
+        }
+    }
+    let release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    for required in [
+        format!("releases/tag/{release_tag}"),
+        format!("badge/release-{release_tag}-blue"),
+        format!("--ref {release_tag}"),
+        format!("--tag {release_tag}"),
+        format!("`{release_tag}` ships through the full release matrix"),
+    ] {
+        if !readme.contains(&required) {
+            return Err(io::Error::other(format!(
+                "README release/install docs are missing current version reference {required:?}"
             ))
             .into());
         }
@@ -790,7 +824,20 @@ fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> 
     )?;
     let workspace_root = workspace_root()?;
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
-    run_projectatlas_plugin_installer(&workspace_root, &repo, &runtime)?;
+    let installer_output = run_projectatlas_plugin_installer(&workspace_root, &repo, &runtime)?;
+    let installer_output_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&installer_output.stdout),
+        String::from_utf8_lossy(&installer_output.stderr)
+    );
+    if !installer_output_text.contains("Claude Code ProjectAtlas generated MCP config verified")
+        || !installer_output_text.contains("OpenCode ProjectAtlas generated MCP config verified")
+    {
+        return Err(io::Error::other(format!(
+            "installer did not verify generated Claude/OpenCode configs:\n{installer_output_text}"
+        ))
+        .into());
+    }
 
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
     let codex_config = read_json_file(&atlas_dir.join("projectatlas.mcp.json"))?;
@@ -3965,6 +4012,10 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"atlas_token_report","arguments":{"include_chart":true}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"atlas_purpose_review","arguments":{"apply":true,"items":[{"path":"src/lib.rs","confirm_existing":true}]}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"atlas_next","arguments":{"query":"indexed","limit":1}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"atlas_settings","arguments":{}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"atlas_session_brief","arguments":{"query":"indexed","folder_limit":1,"file_limit":1,"blocker_limit":1}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"atlas_task_status","arguments":{"task_id":"task-progress-contract"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"atlas_task_cancel","arguments":{"task_id":"task-progress-contract"}}}"#.to_string(),
     ];
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let stdout = run_mcp_stdio(
@@ -3981,9 +4032,19 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !stdout.contains(r#""serverInfo":{"name":"ProjectAtlas","version":"#)
         || !stdout.contains(r#""name":"atlas_files""#)
         || !stdout.contains(r#""name":"atlas_next""#)
+        || !stdout.contains(r#""name":"atlas_session_brief""#)
+        || !stdout.contains(r#""name":"atlas_task_status""#)
+        || !stdout.contains(r#""name":"atlas_task_cancel""#)
         || !stdout.contains("overview:")
         || !stdout.contains("files[1]")
         || !stdout.contains("next:")
+        || !stdout.contains("mcp_session:")
+        || !stdout.contains("path_scope: selected_project")
+        || !stdout.contains("session_brief:")
+        || !stdout.contains("task_status:")
+        || !stdout.contains("task_cancel:")
+        || !stdout.contains("task-progress-contract")
+        || !stdout.contains("already_finished")
         || !stdout.contains("health:")
         || !stdout.contains("health_findings[1]")
         || !stdout.contains("next_start_index: 1")

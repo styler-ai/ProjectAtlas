@@ -1,28 +1,50 @@
 ## Context
 
-ProjectAtlas currently exposes synchronous CLI and MCP operations. That is simple and reliable, but long operations can block an MCP request. A task-progress model should be small, typed, and explicit before ProjectAtlas moves any long-running MCP operation to asynchronous execution.
+Current MCP calls are synchronous. That simplicity is valuable, but future scans, watch refreshes, and broad searches need a standard way to report progress if they become task-backed. This change defines the model and minimal tool surface first.
 
-## Goals / Non-Goals
+## Contract
 
-**Goals:**
-- Define typed task states and status payloads for long MCP operations.
-- Preserve existing CLI behavior.
-- Provide a path to status polling and cancellation for MCP clients.
+The task model includes:
 
-**Non-Goals:**
-- Do not implement persistent job queues.
-- Do not add cross-process task state.
-- Do not make scan/watch/search non-blocking until the task contract is approved.
-- Do not couple task progress to nearest-project routing.
+- `task_id`: opaque MCP-session-local id.
+- `operation`: enum such as `scan`, `watch_once`, `search`, or `contract`.
+- `state`: `pending`, `running`, `complete`, `failed`, or `canceled`.
+- `created_at_ms` and `updated_at_ms`: monotonic-enough wall-clock timestamps for status ordering.
+- `progress`: optional bounded progress fields (`current`, `total`, `message`).
+- `error`: optional concise failure diagnostic.
+- `result_ref`: optional text reference for completed task output location or follow-up call.
+- `cancelable`: boolean.
 
-## Decisions
+The MCP surface includes:
 
-- Start with a typed contract before implementation. The minimum useful states are `pending`, `running`, `complete`, `failed`, and `canceled`.
-- Keep task records in memory if implemented; persistence can be a later proposal.
-- Scope initial candidates to MCP scan, watch refresh, and broad search. Normal file summary and slice calls should remain direct.
+- `atlas_task_status`: accepts `task_id` and returns a typed status. Unknown ids return a typed `not_found` status rather than a transport failure.
+- `atlas_task_cancel`: accepts `task_id` and returns typed cancellation state. Unknown ids return `not_found`; running non-cancelable tasks return `not_cancelable`.
 
-## Risks / Trade-offs
+The initial registry may be empty because no long operation is moved async in this release. That is intentional: the stable contract lands before operation migration.
 
-- A task model can become a full job system -> defer persistence and cross-process ownership.
-- Polling can add MCP surface area -> keep status/cancel tools minimal and typed.
-- Async execution can hide failures -> status payloads must include typed failure state and concise diagnostics.
+## Implementation Notes
+
+- Keep the registry on `ProjectAtlasMcpServer` as a bounded in-memory collection protected by `RwLock` or `Mutex`.
+- Keep the capacity small and evict oldest completed records when needed.
+- Add one contract/status record only if useful for testing; do not create fake background work.
+- Encode responses through the existing TOON payload helpers.
+- Do not add fields to CLI runtime-info.
+
+## Edge Cases
+
+- Unknown task id: return `state: not_found` or a typed not-found result without panicking.
+- Cancel unknown id: return `not_found`.
+- Cancel non-cancelable task: return `not_cancelable`.
+- No task-backed operations yet: task tools still advertise the model and return clear typed states.
+- Summary/slice calls: remain direct.
+
+## Pre-Mortem
+
+Risk: users expect cancellation to interrupt scans immediately.
+Mitigation: document that no current operation is task-backed in this release and that future cancellation is best-effort unless checkpoints are added.
+
+Risk: empty registry feels useless.
+Mitigation: the value is the stable contract and harness readiness; operation migration follows only when backed by tests.
+
+Risk: registry locking complicates the MCP server.
+Mitigation: keep it a tiny helper with bounded records and no background workers.
