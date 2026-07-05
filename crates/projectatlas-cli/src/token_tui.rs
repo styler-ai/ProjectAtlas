@@ -15,12 +15,10 @@ use ratatui::widgets::{
     Axis, Block, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table, Widget, Wrap,
 };
 use ratatui::{Frame, Terminal};
-use ratatui_image::{Image as RatatuiImage, Resize, picker::Picker};
 use std::cell::Cell as StdCell;
 use std::collections::VecDeque;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tui_big_text::{BigText, PixelSize};
 
 /// Fixed terminal height for the token overview dashboard snapshot.
 const DASHBOARD_HEIGHT: u16 = 48;
@@ -53,7 +51,7 @@ const THEME_RED: Color = Color::Rgb(235, 95, 95);
 /// `ProjectAtlas` Ani mascot PNG used by the token dashboard image widget.
 const ANI_MASCOT_PNG: &[u8] = include_bytes!("../../../docs/design/ani-mascot-reference.png");
 /// Cached decoded Ani PNG for Ratatui image rendering.
-static ANI_MASCOT_IMAGE: OnceLock<Option<image::DynamicImage>> = OnceLock::new();
+static ANI_MASCOT_IMAGE: OnceLock<Option<image::RgbaImage>> = OnceLock::new();
 
 /// Human token dashboard color mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -405,22 +403,36 @@ impl Widget for AniMascot {
         if target.width == 0 || target.height == 0 {
             return;
         }
-        let mut picker = Picker::halfblocks();
-        if active_token_theme() == TokenDashboardTheme::Light {
-            picker.set_background_color(Some(ani_image_matte()));
+        let image_area = centered_rect(area, target);
+        let scaled = scaled_ani_for_cells(&image, target);
+        for cell_y in 0..target.height {
+            for cell_x in 0..target.width {
+                let x = image_area.x.saturating_add(cell_x);
+                let y = image_area.y.saturating_add(cell_y);
+                if x >= area.x.saturating_add(area.width) || y >= area.y.saturating_add(area.height)
+                {
+                    continue;
+                }
+                let mask = ani_braille_mask(
+                    &scaled,
+                    u32::from(cell_x).saturating_mul(2),
+                    u32::from(cell_y).saturating_mul(4),
+                );
+                if mask != 0
+                    && let Some(symbol) = char::from_u32(0x2800 + u32::from(mask))
+                {
+                    buf[(x, y)]
+                        .set_symbol(&symbol.to_string())
+                        .set_fg(THEME_INK_WHITE)
+                        .set_bg(themed_bg());
+                }
+            }
         }
-        let Ok(protocol) = picker.new_protocol(image, target, Resize::Scale(None)) else {
-            return;
-        };
-        let image_area = centered_rect(area, protocol.size());
-        RatatuiImage::new(&protocol)
-            .allow_clipping(true)
-            .render(image_area, buf);
     }
 }
 
 /// Decode Ani's PNG once for Ratatui image rendering.
-fn ani_image() -> Option<image::DynamicImage> {
+fn ani_image() -> Option<image::RgbaImage> {
     ANI_MASCOT_IMAGE
         .get_or_init(|| {
             image::load_from_memory_with_format(ANI_MASCOT_PNG, image::ImageFormat::Png)
@@ -431,10 +443,10 @@ fn ani_image() -> Option<image::DynamicImage> {
 }
 
 /// Convert the soft mascot PNG into compact high-contrast terminal line art.
-fn high_contrast_ani_image(image: &image::DynamicImage) -> image::DynamicImage {
+fn high_contrast_ani_image(image: &image::DynamicImage) -> image::RgbaImage {
     let source = image.to_rgba8();
     let Some((min_x, min_y, max_x, max_y)) = alpha_bounds(&source) else {
-        return image::DynamicImage::ImageRgba8(source);
+        return source;
     };
     let width = max_x.saturating_sub(min_x).saturating_add(1);
     let height = max_y.saturating_sub(min_y).saturating_add(1);
@@ -461,7 +473,57 @@ fn high_contrast_ani_image(image: &image::DynamicImage) -> image::DynamicImage {
             [238, 234, 224, 255]
         };
     }
-    image::DynamicImage::ImageRgba8(cropped)
+    cropped
+}
+
+/// Scale Ani to terminal Braille subpixels without introducing gray antialiasing.
+fn scaled_ani_for_cells(
+    image: &image::RgbaImage,
+    target: ratatui::layout::Size,
+) -> image::RgbaImage {
+    let pixel_width = u32::from(target.width.max(1)).saturating_mul(2);
+    let pixel_height = u32::from(target.height.max(1)).saturating_mul(4);
+    image::imageops::resize(
+        image,
+        pixel_width,
+        pixel_height,
+        image::imageops::FilterType::Nearest,
+    )
+}
+
+/// Return the Braille dot mask for one terminal cell in Ani's image.
+fn ani_braille_mask(image: &image::RgbaImage, start_x: u32, start_y: u32) -> u8 {
+    let mut mask = 0u8;
+    for (dx, dy, bit) in [
+        (0, 0, 0x01),
+        (0, 1, 0x02),
+        (0, 2, 0x04),
+        (0, 3, 0x40),
+        (1, 0, 0x08),
+        (1, 1, 0x10),
+        (1, 2, 0x20),
+        (1, 3, 0x80),
+    ] {
+        let x = start_x.saturating_add(dx);
+        let y = start_y.saturating_add(dy);
+        if x < image.width() && y < image.height() && ani_pixel_is_ivory(*image.get_pixel(x, y)) {
+            mask |= bit;
+        }
+    }
+    mask
+}
+
+/// Return whether one scaled Ani pixel belongs to the ivory mascot shape.
+fn ani_pixel_is_ivory(pixel: image::Rgba<u8>) -> bool {
+    let [red, green, blue, alpha] = pixel.0;
+    if alpha < 32 {
+        return false;
+    }
+    let luma = 2126u32
+        .saturating_mul(u32::from(red))
+        .saturating_add(7152u32.saturating_mul(u32::from(green)))
+        .saturating_add(722u32.saturating_mul(u32::from(blue)));
+    luma >= 1_550_000
 }
 
 /// Mark the white source-image background connected to the crop edges.
@@ -568,22 +630,6 @@ fn alpha_bounds(image: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
     found.then_some((min_x, min_y, max_x, max_y))
 }
 
-/// Return the matte used behind transparent Ani pixels for the active theme.
-fn ani_image_matte() -> [u8; 4] {
-    match active_token_theme() {
-        TokenDashboardTheme::Dark => rgb_alpha(THEME_PANEL),
-        TokenDashboardTheme::Light => rgb_alpha(LIGHT_THEME.panel),
-    }
-}
-
-/// Convert one RGB theme color into an opaque image matte.
-fn rgb_alpha(color: Color) -> [u8; 4] {
-    match color {
-        Color::Rgb(red, green, blue) => [red, green, blue, 255],
-        _ => [0, 0, 0, 255],
-    }
-}
-
 /// Return a rectangle centered inside another rectangle.
 fn centered_rect(area: Rect, size: ratatui::layout::Size) -> Rect {
     Rect {
@@ -608,7 +654,7 @@ fn render_token_hero(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Length(4),
+            Constraint::Length(5),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(3),
@@ -679,45 +725,80 @@ fn render_hero_value(frame: &mut Frame<'_>, area: Rect, value: isize) {
     let text = signed_count(value);
     let style = hero_value_style(value);
     let marker = hero_state_marker(value);
-    if area.width >= 104 && area.height >= 4 {
-        let big_text = BigText::builder()
-            .pixel_size(PixelSize::Quadrant)
-            .alignment(Alignment::Center)
-            .style(style)
-            .lines(vec![Line::from(Span::styled(text.clone(), style))])
-            .build();
-        frame.render_widget(big_text, area);
+    if area.width >= 104
+        && area.height >= 5
+        && let Some(rows) = hero_digit_art_rows(&text)
+        && rows[0].chars().count() as u16 <= area.width.saturating_sub(6)
+    {
+        let lines = rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let mut spans = vec![Span::styled(row, style)];
+                if index == 2
+                    && let Some(marker) = marker
+                {
+                    spans.push(Span::styled(format!("  {marker}"), style));
+                }
+                Line::from(spans)
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(lines)
+                .style(style)
+                .alignment(Alignment::Center),
+            area,
+        );
+        return;
+    }
+    let line = if area.width >= 48 {
+        let mut spans = vec![Span::styled(text, style)];
         if let Some(marker) = marker {
-            let marker_x = area
-                .x
-                .saturating_add(area.width / 2)
-                .saturating_add((text.chars().count() as u16).saturating_mul(2))
-                .saturating_add(2);
-            if marker_x < area.x.saturating_add(area.width) {
-                frame.render_widget(
-                    Paragraph::new(marker)
-                        .style(style)
-                        .alignment(Alignment::Center),
-                    Rect {
-                        x: marker_x,
-                        y: area.y.saturating_add(1),
-                        width: 3,
-                        height: 1,
-                    },
-                );
-            }
+            spans.push(Span::styled(format!("  {marker}"), style));
         }
+        Line::from(spans)
     } else {
-        let line = if area.width >= 48 {
-            let mut spans = vec![Span::styled(text, style)];
-            if let Some(marker) = marker {
-                spans.push(Span::styled(format!("  {marker}"), style));
+        Line::from(Span::styled(text, style))
+    };
+    frame.render_widget(
+        Paragraph::new(line)
+            .style(style)
+            .alignment(Alignment::Center),
+        area,
+    );
+}
+
+/// Return a compact, readable five-row terminal digit treatment for hero totals.
+fn hero_digit_art_rows(text: &str) -> Option<[String; 5]> {
+    let mut rows = std::array::from_fn(|_| String::new());
+    for (index, character) in text.chars().enumerate() {
+        let glyph = hero_digit_glyph(character)?;
+        for row_index in 0..rows.len() {
+            if index > 0 {
+                rows[row_index].push(' ');
             }
-            Line::from(spans)
-        } else {
-            Line::from(Span::styled(text, style))
-        };
-        frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
+            rows[row_index].push_str(glyph[row_index]);
+        }
+    }
+    Some(rows)
+}
+
+/// Return one five-row glyph used by the hero total.
+fn hero_digit_glyph(character: char) -> Option<[&'static str; 5]> {
+    match character {
+        '0' => Some([" ███ ", "█   █", "█   █", "█   █", " ███ "]),
+        '1' => Some(["  █  ", " ██  ", "  █  ", "  █  ", "█████"]),
+        '2' => Some(["████ ", "    █", " ███ ", "█    ", "█████"]),
+        '3' => Some(["████ ", "    █", " ███ ", "    █", "████ "]),
+        '4' => Some(["█   █", "█   █", "█████", "    █", "    █"]),
+        '5' => Some(["█████", "█    ", "████ ", "    █", "████ "]),
+        '6' => Some([" ███ ", "█    ", "████ ", "█   █", " ███ "]),
+        '7' => Some(["█████", "    █", "   █ ", "  █  ", " █   "]),
+        '8' => Some([" ███ ", "█   █", " ███ ", "█   █", " ███ "]),
+        '9' => Some([" ███ ", "█   █", " ████", "    █", " ███ "]),
+        ',' => Some([" ", " ", " ", "█", "█"]),
+        '-' => Some(["     ", "     ", "█████", "     ", "     "]),
+        _ => None,
     }
 }
 
@@ -2094,7 +2175,7 @@ fn signed_count(value: isize) -> String {
 mod tests {
     use super::{
         DASHBOARD_HEIGHT, THEME_BAR_EMPTY, THEME_BLUE, THEME_GREEN, THEME_INK_WHITE, THEME_YELLOW,
-        TokenDashboardTheme, block_bar, dashboard_width, grouped_count,
+        TokenDashboardTheme, block_bar, dashboard_width, grouped_count, hero_digit_art_rows,
         reconciled_without_projectatlas, reference_title, render_dashboard_to_string,
         render_overview_frame, render_token_dashboard, render_token_dashboard_with_theme,
         render_token_trend_dashboard, render_token_trend_dashboard_with_theme,
@@ -2368,34 +2449,26 @@ mod tests {
         else {
             unreachable!("hero title should render");
         };
-        let hero_rows = ((title_y + 1)..=(title_y + 4).min(buffer.area.height.saturating_sub(1)))
+        let hero_rows = ((title_y + 1)..=(title_y + 5).min(buffer.area.height.saturating_sub(1)))
             .map(|y| line_symbols(&buffer, y))
             .collect::<Vec<_>>()
             .join("\n");
-
+        let expected_art = hero_digit_art_rows(&signed_count(overview.tokens_avoided));
         assert!(
-            hero_rows.chars().any(|character| matches!(
-                character,
-                '█' | '▄'
-                    | '▀'
-                    | '▌'
-                    | '▐'
-                    | '▚'
-                    | '▞'
-                    | '▖'
-                    | '▗'
-                    | '▘'
-                    | '▝'
-                    | '▙'
-                    | '▟'
-                    | '▛'
-                    | '▜'
-            )),
-            "wide hero value should use compact terminal-native big-text glyphs for reference-like hierarchy"
+            expected_art.is_some(),
+            "sample hero total should have a readable digit-art form"
         );
+        let expected_art = expected_art.unwrap_or_else(|| std::array::from_fn(|_| String::new()));
+
+        for row in expected_art {
+            assert!(
+                hero_rows.contains(&row),
+                "wide hero value should render readable line-art row {row:?}"
+            );
+        }
         assert!(
             hero_rows.contains('✓'),
-            "wide hero should draw the saved-state marker outside the big-text font"
+            "wide hero should draw the saved-state marker beside the readable total"
         );
         assert!(
             !hero_rows.chars().any(|character| {
@@ -2404,7 +2477,7 @@ mod tests {
             }),
             "wide hero value should avoid dense segmented glyphs that render inconsistently across terminals"
         );
-        let caption_line = line_symbols(&buffer, title_y + 5);
+        let caption_line = line_symbols(&buffer, title_y + 6);
         assert!(caption_line.contains("tokens avoided"));
         assert!(
             !caption_line.contains(&signed_count(overview.tokens_avoided)),
@@ -2476,7 +2549,7 @@ mod tests {
                 .matches(&signed_count(conservative_avoided))
                 .count(),
             1,
-            "headline total should not duplicate the saved operand as normal text in the wide dashboard"
+            "wide dashboard should show the saved total once as exact text in the equation; the hero uses readable line art"
         );
         assert!(dashboard.contains(&grouped_count(overview.likely_file_reads_avoided)));
         assert!(dashboard.contains(&grouped_count(overview.observed_file_read_replacements)));
@@ -2857,9 +2930,12 @@ mod tests {
                 let Some(cell) = buffer.cell((x, y)) else {
                     continue;
                 };
-                if matches!(cell.symbol(), "▀" | "▄" | "█" | " ")
-                    && (is_bright_rgb(cell.fg) || is_bright_rgb(cell.bg))
-                {
+                let is_image_symbol = matches!(cell.symbol(), "▀" | "▄" | "█" | " ")
+                    || cell
+                        .symbol()
+                        .chars()
+                        .any(|character| ('\u{2801}'..='\u{28ff}').contains(&character));
+                if is_image_symbol && (is_bright_rgb(cell.fg) || is_bright_rgb(cell.bg)) {
                     bright_image_cells = bright_image_cells.saturating_add(1);
                 }
             }

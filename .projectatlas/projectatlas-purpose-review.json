@@ -1197,8 +1197,16 @@
       "purpose": "Primary OpenSpec requirement specifications synchronized from accepted ProjectAtlas change packages."
     },
     {
+      "path": "openspec/specs/.gitkeep",
+      "purpose": "Tracked placeholder that keeps the initialized OpenSpec specs directory present in fresh checkouts."
+    },
+    {
       "path": "openspec/changes/archive",
       "purpose": "Archived OpenSpec change packages retained for ProjectAtlas change-history reference."
+    },
+    {
+      "path": "openspec/changes/archive/.gitkeep",
+      "purpose": "Tracked placeholder that keeps the OpenSpec archive directory present in fresh checkouts."
     },
     {
       "path": "openspec/changes/enhance-projectatlas-init-first-run",
