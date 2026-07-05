@@ -8,7 +8,7 @@ The current screenshot differs from the reference in these concrete ways:
 - Most labels, borders, and numbers use the same pale blue/gray style.
 - `With ProjectAtlas`, file-read totals, observed reads, and measured summaries/slices do not use the requested ivory ProjectAtlas-origin role.
 - The saved headline is not visually dominant enough and lacks the reference-like icon treatment.
-- Ani is an ASCII doodle rather than a small deliberate pixel-art mascot mark.
+- Ani/pixel-art rendering proved distracting and unreadable in the live TUI, so v0.3.26 defers Ani entirely instead of shipping a broken placeholder.
 - The file-read strip and composition panels are flatter than the reference and do not use strong visual separators.
 - The savings table has minimal row separation and reads like plain text inside a bordered box.
 - Footer/status content exists but does not feel integrated into the reference frame.
@@ -25,15 +25,15 @@ The fix must be judged from a real screenshot, not just test output.
    - green: net saved/success,
    - yellow: modeled/search/confidence,
    - warm muted gray: labels/body text.
-4. Use Ratatui widgets and style primitives. Custom drawing is allowed only for small exact-cell details such as icons; Ani is image-derived from the committed transparent PNG/source SVG and rendered through `ratatui-image` halfblocks.
+4. Use Ratatui widgets and style primitives. Custom drawing is allowed only for small exact-cell details such as icons and tested bars. Ani is deferred from the v0.3.26 TUI and must not add an image-rendering dependency in this release.
 5. Add tests that make the visual contract harder to regress: important style roles, ratios, spacing, and absence of duplicated fields.
 
 ## Layout Contract
 
-Target normal dashboard size for screenshot review: **140 columns by 47 terminal rows**. The extra height is intentional so the image-derived Ani mascot remains recognizable with portable halfblock rendering. A compact smoke target of **80 columns by 47 rows** must keep core fields visible. The renderer may adapt below that, but the reference-size layout should allocate vertical space in this order:
+Target normal dashboard size for screenshot review: **140 columns by 48 terminal rows**. The height keeps the KPI panels, table, notes, and footer readable without needing a mascot column. A compact smoke target of **80 columns by 48 rows** must keep core fields visible. The renderer may adapt below that, but the reference-size layout should allocate vertical space in this order:
 
-1. Header band, about 12 rows:
-   - left Ani mascot mark rendered by a small Ratatui widget derived from `docs/design/ani-mascot-reference.png`, with `docs/design/projectatlas-mascot-clean-transparent.svg` retained as the vector source,
+1. Header band, about 7 rows:
+   - no Ani or mascot placeholder in v0.3.26,
    - `ProjectAtlas` in ivory/off-white,
    - `Token Impact` in blue,
    - `Real savings` in green inside the supporting line,
@@ -72,8 +72,8 @@ Use the global Ratatui skill guidance and Context7 for API details before changi
 
 Implementation mapping:
 
-- Full-screen background: `Block` or `Fill` with deep navy background.
-- Window/frame feel: outer `Block` with subtle border and dark background.
+- Terminal canvas: do not paint a full-screen ProjectAtlas background; preserve the user's shell/terminal background outside panels.
+- Window/frame feel: outer `Block` with subtle border and reset/default background.
 - Panels: `Block::bordered()` with themed border/title styles.
 - Header/title: `Paragraph` with styled `Line`/`Span`.
 - Values/equation: `Paragraph` and `Line`/`Span`.
@@ -81,17 +81,17 @@ Implementation mapping:
 - File/composition bars: `Gauge`, `LineGauge`, or tested span bars with filled/empty cell counts.
 - Savings table: `Table`, `Row`, `Cell`, `header(...).bottom_margin(1)`, `column_spacing(2)`, semantic row styles.
 - Signal icons: small styled `Span`s or exact-cell helper rendering.
-- Ani: a tiny image-derived `Widget` using `ratatui-image` halfblock rendering from `docs/design/ani-mascot-reference.png`, with `docs/design/projectatlas-mascot-clean-transparent.svg` as the source asset. It must include recognizable hat/face/map cues and must not require terminal-specific Kitty, sixel, or iTerm image protocols.
+- Ani: deferred from the v0.3.26 TUI. Keep `docs/design/ani-mascot-reference.png` and `docs/design/projectatlas-mascot-clean-transparent.svg` as design references for a future scoped mascot issue, but do not load them or depend on `image`/`ratatui-image` at runtime.
 - Trend mode: preserve the existing dedicated trend dashboard and avoid forcing a large trend chart into overview mode.
 
 ## Theme
 
 Use semantic constants rather than raw color literals in render functions:
 
-- `THEME_BG = Rgb(4, 10, 18)` or close deep ink navy.
+- `THEME_BG = Rgb(4, 10, 18)` or close deep ink navy may remain as a reserved semantic role, but the overview/trend renderers must not apply it as a full-canvas background.
 - `THEME_PANEL = Rgb(7, 20, 33)` with a slightly warmer alternate panel if needed.
 - `THEME_BORDER = Rgb(35, 62, 90)` and `THEME_BORDER_ACTIVE = Rgb(73, 119, 200)`.
-- `THEME_IDENTITY = Rgb(238, 234, 224)` for ProjectAtlas, Ani, and ProjectAtlas-origin values.
+- `THEME_IDENTITY = Rgb(238, 234, 224)` for ProjectAtlas identity, future Ani treatment, and ProjectAtlas-origin values.
 - `THEME_TEXT = Rgb(218, 214, 204)` for readable warm body text.
 - `THEME_MUTED = Rgb(158, 151, 139)` for secondary labels.
 - `THEME_BASELINE = Rgb(93, 143, 255)` for original/counterfactual baseline.
@@ -140,7 +140,8 @@ Add or strengthen unit tests using Ratatui `TestBackend`/`Buffer`:
 - modeled/search/confidence values use yellow,
 - table header has a styled header and at least one visible margin/separator before first data row,
 - bar fill proportions are correct for representative 0%, partial, full, and overflow-clamped ratios,
-- Ani mark has expected styled cells/symbols and is present at normal width,
+- Ani/image rendering is absent from the v0.3.26 overview, and the title starts in the header without a mascot column,
+- overview/trend frames preserve reset/default terminal background outside panels,
 - compact-width smoke does not panic and keeps core fields visible.
 
 Do not rely only on string snapshots. Where symbols are non-ASCII, use direct cell assertions instead of byte-length string matching.
@@ -155,7 +156,7 @@ Before issue closure:
 4. Compare it against `docs/design/token-impact-tui-reference.png`.
 5. Record mismatches and either fix them or explicitly document the terminal limitation.
 
-The only accepted differences from the reference are terminal font/rendering differences and the user-approved color-semantic correction where ProjectAtlas-origin metrics use ivory instead of blue.
+The accepted differences from the reference for v0.3.26 are terminal font/rendering differences, the user-approved color-semantic correction where ProjectAtlas-origin metrics use ivory instead of blue, preserving the user's terminal background outside panels instead of painting the full canvas, and deferring Ani from the TUI until a future focused mascot issue.
 
 ## Subagent Review Gate
 
@@ -172,8 +173,8 @@ Findings must be dispositioned before merge. Valid findings should be fixed; fal
 Risk: the new dashboard still looks monochrome because colors are applied only to section titles.
 Mitigation: tests assert styles on values and key labels, and screenshot review checks first-glance palette.
 
-Risk: Ani becomes distracting, too coarse, boxed, or unreadable.
-Mitigation: keep Ani small, use the clean transparent source asset, composite transparent pixels against the active theme panel, and test both presence and real screenshot readability.
+Risk: the release spends more time on mascot rendering than on readability, math, and background correctness.
+Mitigation: defer Ani from v0.3.26, remove image-runtime dependencies, and keep the mascot assets as future design references.
 
 Risk: table readability regresses at narrow widths.
 Mitigation: use Ratatui table spacing/header margin and compact-width smoke tests.

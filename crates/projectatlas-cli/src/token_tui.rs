@@ -11,20 +11,16 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Axis, Block, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table, Widget, Wrap,
-};
+use ratatui::widgets::{Axis, Block, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table, Wrap};
 use ratatui::{Frame, Terminal};
 use std::cell::Cell as StdCell;
-use std::collections::VecDeque;
-use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Fixed terminal height for the token overview dashboard snapshot.
 const DASHBOARD_HEIGHT: u16 = 48;
 /// Fixed terminal height for the token trend dashboard snapshot.
 const TREND_DASHBOARD_HEIGHT: u16 = 30;
-/// Token dashboard full-screen background.
+/// Reserved terminal-canvas color; overview frames leave the shell background visible.
 const THEME_BG: Color = Color::Rgb(4, 10, 18);
 /// Token dashboard panel background.
 const THEME_PANEL: Color = Color::Rgb(5, 16, 25);
@@ -32,7 +28,7 @@ const THEME_PANEL: Color = Color::Rgb(5, 16, 25);
 const THEME_TEXT: Color = Color::Rgb(224, 198, 164);
 /// Token dashboard muted label text.
 const THEME_MUTED: Color = Color::Rgb(170, 143, 116);
-/// Token dashboard mascot/title white.
+/// Token dashboard identity ivory.
 const THEME_INK_WHITE: Color = Color::Rgb(238, 234, 224);
 /// Counterfactual/original-baseline blue.
 const THEME_BLUE: Color = Color::Rgb(93, 143, 255);
@@ -48,11 +44,6 @@ const THEME_BAR_EMPTY: Color = Color::Rgb(49, 56, 57);
 const THEME_KEYCAP_BG: Color = Color::Rgb(36, 34, 31);
 /// Token dashboard loss red.
 const THEME_RED: Color = Color::Rgb(235, 95, 95);
-/// `ProjectAtlas` Ani mascot PNG used by the token dashboard image widget.
-const ANI_MASCOT_PNG: &[u8] = include_bytes!("../../../docs/design/ani-mascot-reference.png");
-/// Cached decoded Ani PNG for Ratatui image rendering.
-static ANI_MASCOT_IMAGE: OnceLock<Option<image::RgbaImage>> = OnceLock::new();
-
 /// Human token dashboard color mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TokenDashboardTheme {
@@ -235,14 +226,10 @@ where
 /// Draw the full overview dashboard frame.
 fn render_overview_frame(frame: &mut Frame<'_>, overview: &TokenOverview, session: Option<&str>) {
     let area = frame.area();
-    frame.render_widget(
-        Block::default().style(Style::default().bg(themed_bg())),
-        area,
-    );
     let outer = Block::bordered()
         .border_set(symbols::border::ROUNDED)
         .border_style(Style::default().fg(THEME_BORDER))
-        .style(Style::default().fg(THEME_TEXT).bg(themed_bg()));
+        .style(Style::default().fg(THEME_TEXT));
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
     render_window_title_bar(frame, area);
@@ -320,24 +307,20 @@ fn render_window_title_bar(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
-/// Draw the title band, including the small terminal-native Ani mascot mark.
+/// Draw the title band.
 fn render_token_header(
     frame: &mut Frame<'_>,
     area: Rect,
     overview: &TokenOverview,
     session: Option<&str>,
 ) {
-    let mascot_width = if area.width >= 112 { 22 } else { 16 };
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(mascot_width),
-            Constraint::Min(32),
+            Constraint::Min(42),
             Constraint::Length(if area.width >= 110 { 46 } else { 34 }),
         ])
         .split(area);
-
-    frame.render_widget(AniMascot::new(area.width >= 112), columns[0]);
 
     frame.render_widget(
         Paragraph::new(vec![
@@ -353,7 +336,7 @@ fn render_token_header(
             ]),
         ])
         .wrap(Wrap { trim: true }),
-        columns[1],
+        columns[0],
     );
 
     frame.render_widget(
@@ -373,275 +356,8 @@ fn render_token_header(
         ])
         .alignment(Alignment::Right)
         .wrap(Wrap { trim: true }),
-        columns[2],
+        columns[1],
     );
-}
-
-/// Tiny Ratatui widget that renders Ani from the checked-in mascot PNG.
-struct AniMascot {
-    /// Use the wider target cell area when the header has enough room.
-    wide: bool,
-}
-
-impl AniMascot {
-    /// Build the terminal-native Ani image widget.
-    const fn new(wide: bool) -> Self {
-        Self { wide }
-    }
-}
-
-impl Widget for AniMascot {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let Some(image) = ani_image() else {
-            return;
-        };
-        let target = if self.wide {
-            ratatui::layout::Size::new(area.width.min(20), area.height.min(7))
-        } else {
-            ratatui::layout::Size::new(area.width.min(14), area.height.min(7))
-        };
-        if target.width == 0 || target.height == 0 {
-            return;
-        }
-        let image_area = centered_rect(area, target);
-        let scaled = scaled_ani_for_cells(&image, target);
-        for cell_y in 0..target.height {
-            for cell_x in 0..target.width {
-                let x = image_area.x.saturating_add(cell_x);
-                let y = image_area.y.saturating_add(cell_y);
-                if x >= area.x.saturating_add(area.width) || y >= area.y.saturating_add(area.height)
-                {
-                    continue;
-                }
-                let mask = ani_braille_mask(
-                    &scaled,
-                    u32::from(cell_x).saturating_mul(2),
-                    u32::from(cell_y).saturating_mul(4),
-                );
-                if mask != 0
-                    && let Some(symbol) = char::from_u32(0x2800 + u32::from(mask))
-                {
-                    buf[(x, y)]
-                        .set_symbol(&symbol.to_string())
-                        .set_fg(THEME_INK_WHITE)
-                        .set_bg(themed_bg());
-                }
-            }
-        }
-    }
-}
-
-/// Decode Ani's PNG once for Ratatui image rendering.
-fn ani_image() -> Option<image::RgbaImage> {
-    ANI_MASCOT_IMAGE
-        .get_or_init(|| {
-            image::load_from_memory_with_format(ANI_MASCOT_PNG, image::ImageFormat::Png)
-                .ok()
-                .map(|image| high_contrast_ani_image(&image))
-        })
-        .clone()
-}
-
-/// Convert the soft mascot PNG into compact high-contrast terminal line art.
-fn high_contrast_ani_image(image: &image::DynamicImage) -> image::RgbaImage {
-    let source = image.to_rgba8();
-    let Some((min_x, min_y, max_x, max_y)) = alpha_bounds(&source) else {
-        return source;
-    };
-    let width = max_x.saturating_sub(min_x).saturating_add(1);
-    let height = max_y.saturating_sub(min_y).saturating_add(1);
-    let mut cropped = image::imageops::crop_imm(&source, min_x, min_y, width, height).to_image();
-    let background = flood_fill_light_background(&cropped);
-    for (x, y, pixel) in cropped.enumerate_pixels_mut() {
-        let [red, green, blue, alpha] = pixel.0;
-        if alpha < 32 {
-            pixel.0 = [0, 0, 0, 0];
-            continue;
-        }
-        let index = pixel_index_xy(x, y, width);
-        if background.get(index).copied().unwrap_or(false) {
-            pixel.0 = [0, 0, 0, 0];
-            continue;
-        }
-        let luma = 2126u32
-            .saturating_mul(u32::from(red))
-            .saturating_add(7152u32.saturating_mul(u32::from(green)))
-            .saturating_add(722u32.saturating_mul(u32::from(blue)));
-        pixel.0 = if luma < 1_550_000 {
-            [3, 8, 13, 255]
-        } else {
-            [238, 234, 224, 255]
-        };
-    }
-    cropped
-}
-
-/// Scale Ani to terminal Braille subpixels without introducing gray antialiasing.
-fn scaled_ani_for_cells(
-    image: &image::RgbaImage,
-    target: ratatui::layout::Size,
-) -> image::RgbaImage {
-    let pixel_width = u32::from(target.width.max(1)).saturating_mul(2);
-    let pixel_height = u32::from(target.height.max(1)).saturating_mul(4);
-    image::imageops::resize(
-        image,
-        pixel_width,
-        pixel_height,
-        image::imageops::FilterType::Nearest,
-    )
-}
-
-/// Return the Braille dot mask for one terminal cell in Ani's image.
-fn ani_braille_mask(image: &image::RgbaImage, start_x: u32, start_y: u32) -> u8 {
-    let mut mask = 0u8;
-    for (dx, dy, bit) in [
-        (0, 0, 0x01),
-        (0, 1, 0x02),
-        (0, 2, 0x04),
-        (0, 3, 0x40),
-        (1, 0, 0x08),
-        (1, 1, 0x10),
-        (1, 2, 0x20),
-        (1, 3, 0x80),
-    ] {
-        let x = start_x.saturating_add(dx);
-        let y = start_y.saturating_add(dy);
-        if x < image.width() && y < image.height() && ani_pixel_is_ivory(*image.get_pixel(x, y)) {
-            mask |= bit;
-        }
-    }
-    mask
-}
-
-/// Return whether one scaled Ani pixel belongs to the ivory mascot shape.
-fn ani_pixel_is_ivory(pixel: image::Rgba<u8>) -> bool {
-    let [red, green, blue, alpha] = pixel.0;
-    if alpha < 32 {
-        return false;
-    }
-    let luma = 2126u32
-        .saturating_mul(u32::from(red))
-        .saturating_add(7152u32.saturating_mul(u32::from(green)))
-        .saturating_add(722u32.saturating_mul(u32::from(blue)));
-    luma >= 1_550_000
-}
-
-/// Mark the white source-image background connected to the crop edges.
-fn flood_fill_light_background(image: &image::RgbaImage) -> Vec<bool> {
-    let width = image.width();
-    let height = image.height();
-    let Some(len) = width
-        .checked_mul(height)
-        .and_then(|value| usize::try_from(value).ok())
-    else {
-        return Vec::new();
-    };
-    let mut background = vec![false; len];
-    let mut queue = VecDeque::new();
-    for x in 0..width {
-        enqueue_light_background(image, &mut background, &mut queue, x, 0);
-        enqueue_light_background(
-            image,
-            &mut background,
-            &mut queue,
-            x,
-            height.saturating_sub(1),
-        );
-    }
-    for y in 0..height {
-        enqueue_light_background(image, &mut background, &mut queue, 0, y);
-        enqueue_light_background(
-            image,
-            &mut background,
-            &mut queue,
-            width.saturating_sub(1),
-            y,
-        );
-    }
-    while let Some((x, y)) = queue.pop_front() {
-        if x > 0 {
-            enqueue_light_background(image, &mut background, &mut queue, x - 1, y);
-        }
-        if x + 1 < width {
-            enqueue_light_background(image, &mut background, &mut queue, x + 1, y);
-        }
-        if y > 0 {
-            enqueue_light_background(image, &mut background, &mut queue, x, y - 1);
-        }
-        if y + 1 < height {
-            enqueue_light_background(image, &mut background, &mut queue, x, y + 1);
-        }
-    }
-    background
-}
-
-/// Add one image coordinate to the transparent-background flood fill.
-fn enqueue_light_background(
-    image: &image::RgbaImage,
-    background: &mut [bool],
-    queue: &mut VecDeque<(u32, u32)>,
-    x: u32,
-    y: u32,
-) {
-    let index = pixel_index_xy(x, y, image.width());
-    if background.get(index).copied().unwrap_or(true) {
-        return;
-    }
-    let [red, green, blue, alpha] = image.get_pixel(x, y).0;
-    if (alpha < 32 || is_light_background(red, green, blue))
-        && let Some(slot) = background.get_mut(index)
-    {
-        *slot = true;
-        queue.push_back((x, y));
-    }
-}
-
-/// Return whether one source pixel belongs to the white source-image background.
-fn is_light_background(red: u8, green: u8, blue: u8) -> bool {
-    let luma = 2126u32
-        .saturating_mul(u32::from(red))
-        .saturating_add(7152u32.saturating_mul(u32::from(green)))
-        .saturating_add(722u32.saturating_mul(u32::from(blue)));
-    luma > 2_250_000
-}
-
-/// Flatten one pixel coordinate into a row-major index.
-fn pixel_index_xy(x: u32, y: u32, width: u32) -> usize {
-    usize::try_from(y.saturating_mul(width).saturating_add(x)).unwrap_or(usize::MAX)
-}
-
-/// Return the alpha bounds for non-transparent mascot pixels.
-fn alpha_bounds(image: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
-    let mut min_x = u32::MAX;
-    let mut min_y = u32::MAX;
-    let mut max_x = 0u32;
-    let mut max_y = 0u32;
-    let mut found = false;
-    for (x, y, pixel) in image.enumerate_pixels() {
-        if pixel.0[3] < 32 {
-            continue;
-        }
-        found = true;
-        min_x = min_x.min(x);
-        min_y = min_y.min(y);
-        max_x = max_x.max(x);
-        max_y = max_y.max(y);
-    }
-    found.then_some((min_x, min_y, max_x, max_y))
-}
-
-/// Return a rectangle centered inside another rectangle.
-fn centered_rect(area: Rect, size: ratatui::layout::Size) -> Rect {
-    Rect {
-        x: area
-            .x
-            .saturating_add(area.width.saturating_sub(size.width) / 2),
-        y: area
-            .y
-            .saturating_add(area.height.saturating_sub(size.height) / 2),
-        width: area.width.min(size.width),
-        height: area.height.min(size.height),
-    }
 }
 
 /// Draw the dominant saved-token hero panel.
@@ -654,7 +370,7 @@ fn render_token_hero(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Length(5),
+            Constraint::Length(2),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(3),
@@ -725,32 +441,6 @@ fn render_hero_value(frame: &mut Frame<'_>, area: Rect, value: isize) {
     let text = signed_count(value);
     let style = hero_value_style(value);
     let marker = hero_state_marker(value);
-    if area.width >= 104
-        && area.height >= 5
-        && let Some(rows) = hero_digit_art_rows(&text)
-        && rows[0].chars().count() as u16 <= area.width.saturating_sub(6)
-    {
-        let lines = rows
-            .into_iter()
-            .enumerate()
-            .map(|(index, row)| {
-                let mut spans = vec![Span::styled(row, style)];
-                if index == 2
-                    && let Some(marker) = marker
-                {
-                    spans.push(Span::styled(format!("  {marker}"), style));
-                }
-                Line::from(spans)
-            })
-            .collect::<Vec<_>>();
-        frame.render_widget(
-            Paragraph::new(lines)
-                .style(style)
-                .alignment(Alignment::Center),
-            area,
-        );
-        return;
-    }
     let line = if area.width >= 48 {
         let mut spans = vec![Span::styled(text, style)];
         if let Some(marker) = marker {
@@ -766,40 +456,6 @@ fn render_hero_value(frame: &mut Frame<'_>, area: Rect, value: isize) {
             .alignment(Alignment::Center),
         area,
     );
-}
-
-/// Return a compact, readable five-row terminal digit treatment for hero totals.
-fn hero_digit_art_rows(text: &str) -> Option<[String; 5]> {
-    let mut rows = std::array::from_fn(|_| String::new());
-    for (index, character) in text.chars().enumerate() {
-        let glyph = hero_digit_glyph(character)?;
-        for row_index in 0..rows.len() {
-            if index > 0 {
-                rows[row_index].push(' ');
-            }
-            rows[row_index].push_str(glyph[row_index]);
-        }
-    }
-    Some(rows)
-}
-
-/// Return one five-row glyph used by the hero total.
-fn hero_digit_glyph(character: char) -> Option<[&'static str; 5]> {
-    match character {
-        '0' => Some([" ███ ", "█   █", "█   █", "█   █", " ███ "]),
-        '1' => Some(["  █  ", " ██  ", "  █  ", "  █  ", "█████"]),
-        '2' => Some(["████ ", "    █", " ███ ", "█    ", "█████"]),
-        '3' => Some(["████ ", "    █", " ███ ", "    █", "████ "]),
-        '4' => Some(["█   █", "█   █", "█████", "    █", "    █"]),
-        '5' => Some(["█████", "█    ", "████ ", "    █", "████ "]),
-        '6' => Some([" ███ ", "█    ", "████ ", "█   █", " ███ "]),
-        '7' => Some(["█████", "    █", "   █ ", "  █  ", " █   "]),
-        '8' => Some([" ███ ", "█   █", " ███ ", "█   █", " ███ "]),
-        '9' => Some([" ███ ", "█   █", " ████", "    █", " ███ "]),
-        ',' => Some([" ", " ", " ", "█", "█"]),
-        '-' => Some(["     ", "     ", "█████", "     ", "     "]),
-        _ => None,
-    }
 }
 
 /// Return the semantic marker used beside the saved-token headline.
@@ -1723,7 +1379,7 @@ fn reference_title(title: &str) -> String {
     output
 }
 
-/// Mascot and identity label style.
+/// Identity label style.
 fn identity_style() -> Style {
     Style::default()
         .fg(THEME_INK_WHITE)
@@ -1823,21 +1479,14 @@ fn signed_trend_color(points: &[(f64, f64)]) -> Color {
 /// Draw the full trend dashboard frame.
 fn render_trend_frame(frame: &mut Frame<'_>, report: &TokenTrendReport) {
     let area = frame.area();
-    frame.render_widget(
-        Block::default().style(Style::default().bg(themed_bg())),
-        area,
-    );
     let outer = Block::bordered()
         .border_set(symbols::border::ROUNDED)
         .title(Line::from(vec![
-            Span::styled(
-                " ProjectAtlas Token Trends ",
-                identity_title_style().bg(themed_bg()),
-            ),
-            Span::styled(format!("{} ", report.window), body_style().bg(themed_bg())),
+            Span::styled(" ProjectAtlas Token Trends ", identity_title_style()),
+            Span::styled(format!("{} ", report.window), body_style()),
         ]))
         .border_style(Style::default().fg(THEME_BORDER))
-        .style(Style::default().fg(THEME_TEXT).bg(themed_bg()));
+        .style(Style::default().fg(THEME_TEXT));
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
@@ -2097,14 +1746,6 @@ fn remap_to_light_theme(color: Color) -> Color {
     }
 }
 
-/// Return the active full-screen dashboard background.
-fn themed_bg() -> Color {
-    match active_token_theme() {
-        TokenDashboardTheme::Dark => THEME_BG,
-        TokenDashboardTheme::Light => LIGHT_THEME.bg,
-    }
-}
-
 /// Styled field label span.
 fn label(text: &str) -> Span<'static> {
     Span::styled(format!("{text}: "), muted_bold_style())
@@ -2174,8 +1815,8 @@ fn signed_count(value: isize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DASHBOARD_HEIGHT, THEME_BAR_EMPTY, THEME_BLUE, THEME_GREEN, THEME_INK_WHITE, THEME_YELLOW,
-        TokenDashboardTheme, block_bar, dashboard_width, grouped_count, hero_digit_art_rows,
+        DASHBOARD_HEIGHT, THEME_BAR_EMPTY, THEME_BG, THEME_BLUE, THEME_GREEN, THEME_INK_WHITE,
+        THEME_YELLOW, TokenDashboardTheme, block_bar, dashboard_width, grouped_count,
         reconciled_without_projectatlas, reference_title, render_dashboard_to_string,
         render_overview_frame, render_token_dashboard, render_token_dashboard_with_theme,
         render_token_trend_dashboard, render_token_trend_dashboard_with_theme,
@@ -2335,13 +1976,12 @@ mod tests {
         let overview = sample_overview();
         let buffer = render_overview_buffer(&overview, Some("s"));
 
-        assert_ani_image_rendered(&buffer);
         let Some((title_x, title_y)) = find_text(&buffer, "ProjectAtlas") else {
             unreachable!("ProjectAtlas title should render");
         };
         assert!(
-            title_x <= 28,
-            "mascot lane should not push title too far right; title started at x={title_x}"
+            title_x <= 4,
+            "title should start at the left of the header; title started at x={title_x}"
         );
         assert!(
             title_y <= 4,
@@ -2425,6 +2065,55 @@ mod tests {
     }
 
     #[test]
+    fn dashboards_preserve_terminal_background_outside_panels() {
+        let overview = sample_overview();
+        let overview_buffer = render_overview_buffer(&overview, Some("s"));
+        assert_no_terminal_canvas_fill(&overview_buffer);
+        assert_eq!(
+            overview_buffer.cell((0, 0)).map(|cell| cell.bg),
+            Some(Color::Reset),
+            "outer overview border must not force a dashboard background color"
+        );
+
+        let overview_dark =
+            render_token_dashboard_with_theme(&overview, Some("s"), TokenDashboardTheme::Dark);
+        assert!(
+            !overview_dark.contains("48;2;4;10;18"),
+            "dark overview output must not paint the terminal canvas"
+        );
+
+        let overview_light =
+            render_token_dashboard_with_theme(&overview, Some("s"), TokenDashboardTheme::Light);
+        assert!(
+            !overview_light.contains("48;2;252;249;241"),
+            "light overview output must not paint the terminal canvas"
+        );
+
+        let report = sample_trend_report();
+        let trend_buffer = render_trend_buffer(&report);
+        assert_no_terminal_canvas_fill(&trend_buffer);
+        assert_eq!(
+            trend_buffer.cell((0, 0)).map(|cell| cell.bg),
+            Some(Color::Reset),
+            "outer trend border must not force a dashboard background color"
+        );
+
+        let trend_dark =
+            render_token_trend_dashboard_with_theme(&report, TokenDashboardTheme::Dark);
+        assert!(
+            !trend_dark.contains("48;2;4;10;18"),
+            "dark trend output must not paint the terminal canvas"
+        );
+
+        let trend_light =
+            render_token_trend_dashboard_with_theme(&report, TokenDashboardTheme::Light);
+        assert!(
+            !trend_light.contains("48;2;252;249;241"),
+            "light trend output must not paint the terminal canvas"
+        );
+    }
+
+    #[test]
     fn overview_dashboard_hero_value_is_readable_terminal_text() {
         let overview = TokenOverview::from_estimated_totals(3, 241_563_877, 4_749_368);
         let narrow_buffer = render_overview_buffer_at_width(&overview, Some("s"), 100);
@@ -2449,23 +2138,14 @@ mod tests {
         else {
             unreachable!("hero title should render");
         };
-        let hero_rows = ((title_y + 1)..=(title_y + 5).min(buffer.area.height.saturating_sub(1)))
+        let hero_rows = ((title_y + 1)..=(title_y + 2).min(buffer.area.height.saturating_sub(1)))
             .map(|y| line_symbols(&buffer, y))
             .collect::<Vec<_>>()
             .join("\n");
-        let expected_art = hero_digit_art_rows(&signed_count(overview.tokens_avoided));
         assert!(
-            expected_art.is_some(),
-            "sample hero total should have a readable digit-art form"
+            hero_rows.contains(&signed_count(overview.tokens_avoided)),
+            "wide hero value should render the exact saved-token number as normal terminal text"
         );
-        let expected_art = expected_art.unwrap_or_else(|| std::array::from_fn(|_| String::new()));
-
-        for row in expected_art {
-            assert!(
-                hero_rows.contains(&row),
-                "wide hero value should render readable line-art row {row:?}"
-            );
-        }
         assert!(
             hero_rows.contains('✓'),
             "wide hero should draw the saved-state marker beside the readable total"
@@ -2477,7 +2157,7 @@ mod tests {
             }),
             "wide hero value should avoid dense segmented glyphs that render inconsistently across terminals"
         );
-        let caption_line = line_symbols(&buffer, title_y + 6);
+        let caption_line = line_symbols(&buffer, title_y + 3);
         assert!(caption_line.contains("tokens avoided"));
         assert!(
             !caption_line.contains(&signed_count(overview.tokens_avoided)),
@@ -2548,8 +2228,8 @@ mod tests {
             dashboard
                 .matches(&signed_count(conservative_avoided))
                 .count(),
-            1,
-            "wide dashboard should show the saved total once as exact text in the equation; the hero uses readable line art"
+            2,
+            "wide dashboard should show the saved total as readable hero text and as the equation result"
         );
         assert!(dashboard.contains(&grouped_count(overview.likely_file_reads_avoided)));
         assert!(dashboard.contains(&grouped_count(overview.observed_file_read_replacements)));
@@ -2795,6 +2475,17 @@ mod tests {
         frame.buffer.clone()
     }
 
+    fn render_trend_buffer(report: &TokenTrendReport) -> Buffer {
+        let width = dashboard_width().clamp(80, 140) as u16;
+        let backend = TestBackend::new(width, super::TREND_DASHBOARD_HEIGHT);
+        let mut terminal =
+            Terminal::new(backend).expect("in-memory token dashboard backend should initialize");
+        let frame = terminal
+            .draw(|frame| super::render_trend_frame(frame, report))
+            .expect("in-memory token dashboard should render");
+        frame.buffer.clone()
+    }
+
     fn line_symbols(buffer: &Buffer, y: u16) -> String {
         let mut line = String::new();
         for x in 0..buffer.area.width {
@@ -2803,6 +2494,20 @@ mod tests {
             }
         }
         line
+    }
+
+    fn assert_no_terminal_canvas_fill(buffer: &Buffer) {
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let Some(cell) = buffer.cell((x, y)) else {
+                    continue;
+                };
+                assert_ne!(
+                    cell.bg, THEME_BG,
+                    "dashboard should not force the terminal canvas background at ({x},{y})"
+                );
+            }
+        }
     }
 
     fn assert_header_margin(dashboard: &str, header: &str, first_row: &str) {
@@ -2921,37 +2626,6 @@ mod tests {
             cell.modifier.contains(modifier),
             "missing modifier {modifier:?} for {text:?}"
         );
-    }
-
-    fn assert_ani_image_rendered(buffer: &Buffer) {
-        let mut bright_image_cells = 0usize;
-        for y in 0..10.min(buffer.area.height) {
-            for x in 0..34.min(buffer.area.width) {
-                let Some(cell) = buffer.cell((x, y)) else {
-                    continue;
-                };
-                let is_image_symbol = matches!(cell.symbol(), "▀" | "▄" | "█" | " ")
-                    || cell
-                        .symbol()
-                        .chars()
-                        .any(|character| ('\u{2801}'..='\u{28ff}').contains(&character));
-                if is_image_symbol && (is_bright_rgb(cell.fg) || is_bright_rgb(cell.bg)) {
-                    bright_image_cells = bright_image_cells.saturating_add(1);
-                }
-            }
-        }
-        assert!(
-            bright_image_cells >= 24,
-            "Ani image should render a visible bright cell cluster, found {bright_image_cells}"
-        );
-    }
-
-    fn is_bright_rgb(color: Color) -> bool {
-        match color {
-            Color::Rgb(red, green, blue) => red > 180 && green > 180 && blue > 170,
-            Color::White | Color::Gray => true,
-            _ => false,
-        }
     }
 
     fn strip_ansi(input: &str) -> String {

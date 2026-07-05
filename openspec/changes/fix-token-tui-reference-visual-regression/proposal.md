@@ -1,6 +1,6 @@
 ## Why
 
-Issue #302 was accepted too early. The shipped `projectatlas token --view tui` overview still renders like a mostly monochrome terminal report, while the approved reference in `docs/design/token-impact-tui-reference.png` is a polished Ratatui dashboard with clear window framing, warm ProjectAtlas identity treatment, semantic color roles, stronger section hierarchy, visual bars, readable table separation, and an intentional Ani mascot mark.
+Issue #302 was accepted too early. The shipped `projectatlas token --view tui` overview still renders like a mostly monochrome terminal report, while the approved reference in `docs/design/token-impact-tui-reference.png` is a polished Ratatui dashboard with clear window framing, warm ProjectAtlas identity treatment, semantic color roles, stronger section hierarchy, visual bars, and readable table separation. Ani remains a ProjectAtlas mascot asset, but v0.3.26 defers Ani from the TUI so readability, math, and background correctness can ship without a broken mascot placeholder.
 
 This is a trust issue for the token-savings surface. The dashboard is supposed to make the accounting understandable at a glance; if the screenshot looks flat, cramped, or semantically miscolored, users cannot tell which values are original baseline, ProjectAtlas work, modeled estimates, or net savings.
 
@@ -13,8 +13,9 @@ This is a trust issue for the token-savings surface. The dashboard is supposed t
   - Original/counterfactual baseline values use blue.
   - Net saved/savings values use green.
   - Modeled/search/confidence values use yellow.
-- Replace the current plain ASCII Ani treatment with an image-derived Ratatui mascot mark using the committed transparent Ani PNG plus the source SVG, rendered through a portable `ratatui-image` halfblock protocol so it reads as Ani at dashboard size and fits the reference composition.
-- Use Ratatui standard widgets and style primitives before custom drawing: `Layout`, `Block`, `Paragraph`, `Gauge` or `LineGauge`, `Table`, `Row`, `Cell`, `Sparkline`/`BarChart` where trends are needed, and direct `Buffer` writes only for tiny mascot/icon art that needs exact cells.
+- Defer Ani from the v0.3.26 TUI: remove the failed ASCII/image mascot treatment for now, keep the mascot assets as design references, and do not add `image`/`ratatui-image` runtime dependencies for this release.
+- Use Ratatui standard widgets and style primitives before custom drawing: `Layout`, `Block`, `Paragraph`, `Gauge` or `LineGauge`, `Table`, `Row`, `Cell`, `Sparkline`/`BarChart` where trends are needed, and direct `Buffer` writes only for tiny icons or tested bars that need exact cells.
+- Preserve the user's terminal/shell background outside ProjectAtlas panels instead of painting a full-screen ProjectAtlas background color.
 - Preserve the existing information fields and arithmetic:
   - `without_projectatlas - with_projectatlas = saved_by_projectatlas`.
   - `observed_file_read_replacements + modeled_file_reads_avoided = likely_file_reads_avoided`.
@@ -40,7 +41,7 @@ The change is scoped to the CLI token TUI, its tests, OpenSpec/governance metada
 
 ## Non-Goals
 
-- Do not add terminal-specific bitmap protocols, sixel, Kitty graphics, iTerm inline images, or a broad custom renderer. The accepted image path is `ratatui-image` halfblock rendering from the committed transparent Ani asset.
+- Do not add terminal-specific bitmap protocols, sixel, Kitty graphics, iTerm inline images, `image`/`ratatui-image` runtime dependencies, or a broad custom renderer for v0.3.26.
 - Do not change persisted token telemetry schemas.
 - Do not replace the existing trend dashboard unless required to keep it compiling with shared helpers.
 - Do not add repeated explanatory fields that make the overview harder to scan.
@@ -52,7 +53,7 @@ Likely failure modes:
 
 - Tests assert labels and arithmetic but miss the same visual failure again because they do not inspect Ratatui styles.
 - The implementation uses ivory in the title but leaves ProjectAtlas-origin numbers and bars blue, breaking the agreed semantic palette.
-- Ani is technically present but too tiny, too ASCII-flat, too coarse, or visually unrelated to the mascot/reference.
+- Ani work re-enters the release under pressure and distracts from the readable/math-correct dashboard.
 - The table still lacks visible header separation or row dividers, so the `WHERE THE SAVINGS CAME FROM` panel remains hard to read.
 - Bars are text decorations that do not reflect the underlying ratios.
 - The overview becomes taller or more complex than the terminal can comfortably render, causing bottom notes/footer crowding.
@@ -63,7 +64,7 @@ Mitigations:
 
 - Add style-role assertions against Ratatui `Buffer` cells for the critical labels/values.
 - Add bar-ratio tests that inspect filled/empty gauge or bar cells for representative data.
-- Use a small image-derived Ani Ratatui widget with exact cell/style tests and a real screenshot check.
+- Defer Ani from the v0.3.26 TUI, keep mascot assets as future design references, and verify no image-rendering dependency remains in the token dashboard path.
 - Use `Table::header(...).bottom_margin(1)`, row separators, or equivalent Ratatui styling so headers cannot run into content.
 - Keep the dashboard information set close to the reference and remove duplicated totals.
 - Use the global Ratatui skill and Context7 docs before changing widget APIs.

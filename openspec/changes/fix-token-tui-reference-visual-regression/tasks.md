@@ -9,13 +9,13 @@
 
 - [x] 2.1 Inspect `docs/design/token-impact-tui-reference.png` and the current bad screenshot as visual references.
 - [x] 2.2 Inspect `crates/projectatlas-cli/src/token_tui.rs` and existing token TUI tests before editing.
-- [x] 2.3 Record the concrete visual mismatches to address: window frame, palette, Ani treatment, bar hierarchy, table spacing, and footer integration.
+- [x] 2.3 Record the concrete visual mismatches to address: window frame, palette, failed Ani treatment deferral, bar hierarchy, table spacing, terminal background behavior, and footer integration.
 
 ## 3. Ratatui Implementation
 
 - [x] 3.1 Define semantic theme constants for background, panel, border, identity ivory, baseline blue, saved green, modeled yellow, text, muted text, and danger.
 - [x] 3.2 Rework the overview frame/background so the real screenshot resembles the reference window/panel composition.
-- [x] 3.3 Rework the header with small Ani pixel/block mascot, ivory `ProjectAtlas`, blue `Token Impact`, green `Real savings`, and right metadata.
+- [x] 3.3 Rework the header without Ani for v0.3.26, with ivory `ProjectAtlas`, blue `Token Impact`, green `Real savings`, and right metadata.
 - [x] 3.4 Rework the hero panel with dominant green saved-token value, clear equation roles, and tested bars.
 - [x] 3.5 Rework the file-read strip with ivory total/observed ProjectAtlas-origin metrics, yellow modeled metric, confidence, and ratio bars.
 - [x] 3.6 Rework the savings composition and signal panels so they match the reference hierarchy without duplicating headline fields.
@@ -29,7 +29,7 @@
 - [x] 4.1 Add or update math tests for `without - with = saved`, file-read split sum, and source-row sum.
 - [x] 4.2 Add or update Ratatui `Buffer` style tests for baseline blue, ProjectAtlas-origin ivory, saved green, and modeled yellow.
 - [x] 4.3 Add or update bar-ratio tests for zero, partial, full, and clamped values where deterministic.
-- [x] 4.4 Add or update tests for Ani presence/styled cells at normal width.
+- [x] 4.4 Add or update tests for Ani/image deferral and terminal-background preservation at normal width.
 - [x] 4.5 Add or update table spacing/header tests so headers cannot run into the first row.
 - [x] 4.6 Add compact-width smoke coverage that keeps core fields visible and avoids panic/overlap.
 - [x] 4.7 Add or update tests for source-table remainder reconciliation when bucket attribution is incomplete.

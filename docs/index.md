@@ -6,7 +6,7 @@ agent-facing context.
 
 Use it to choose folders, files, structured summaries, outlines, and exact source slices in that order.
 
-`projectatlas token --view tui` opens the human Ratatui token impact dashboard with Ani, the reconciled saved-token equation, file reads avoided, observed/modeled savings, source rows, calibration notes, and status hints. Add `--theme light` for light terminal color schemes.
+`projectatlas token --view tui` opens the human Ratatui token impact dashboard with the reconciled saved-token equation, file reads avoided, observed/modeled savings, source rows, calibration notes, and status hints. Add `--theme light` for light terminal color schemes. Ani remains documented as the ProjectAtlas mascot asset, but mascot rendering is deferred from the token TUI for now.
 
 ## Public docs surfaces
 

@@ -20,7 +20,6 @@ blake3.workspace = true
 clap.workspace = true
 cssparser.workspace = true
 jsonc-parser.workspace = true
-image.workspace = true
 notify.workspace = true
 pulldown-cmark.workspace = true
 rayon.workspace = true

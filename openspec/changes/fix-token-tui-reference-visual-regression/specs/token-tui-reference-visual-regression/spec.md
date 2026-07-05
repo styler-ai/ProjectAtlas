@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Reference Screenshot Visual Parity Gate
-The token overview TUI SHALL be accepted only when a rebuilt real terminal screenshot materially matches `docs/design/token-impact-tui-reference.png` in composition, hierarchy, spacing, semantic colors, and information layout, except for documented terminal limitations and the approved ProjectAtlas-origin ivory color correction.
+The token overview TUI SHALL be accepted only when a rebuilt real terminal screenshot materially matches `docs/design/token-impact-tui-reference.png` in composition, hierarchy, spacing, semantic colors, and information layout, except for documented terminal limitations, the approved ProjectAtlas-origin ivory color correction, the v0.3.26 decision to defer Ani from the TUI, and the requirement to preserve the user's terminal background outside ProjectAtlas panels.
 
 #### Scenario: Real screenshot review before closure
 - **WHEN** issue #304 is marked ready for closure or a release PR claims the token TUI regression is fixed
@@ -46,26 +46,28 @@ The overview dashboard SHALL use semantic style roles for critical values so use
 - **WHEN** token TUI tests render representative overview data through Ratatui `TestBackend`
 - **THEN** tests SHALL inspect foreground/background styles for the baseline blue, ProjectAtlas-origin ivory, saved green, and modeled yellow roles on critical labels or values.
 
-### Requirement: Ani Mascot Image Treatment
-The overview dashboard SHALL show Ani as a deliberate small Ratatui widget near the ProjectAtlas title, derived from the committed transparent Ani raster asset and source SVG.
+### Requirement: Ani Mascot Deferral
+The overview dashboard SHALL defer Ani rendering for v0.3.26 so the release can ship the readable, mathematically correct Ratatui dashboard without a broken mascot placeholder or experimental image dependency.
 
-#### Scenario: Ani is recognizable and image-derived
+#### Scenario: Ani is not rendered in this release
 - **WHEN** the overview dashboard renders at a normal desktop terminal size
-- **THEN** it SHALL display a small Ani mark that visually reads as a mascot/pirate-cartographer identity element
-- **AND** it SHALL be implemented with a tiny Ratatui `Widget` backed by `ratatui-image` halfblock rendering
-- **AND** it SHALL use `docs/design/ani-mascot-reference.png` as the raster runtime asset
-- **AND** it SHALL keep `docs/design/projectatlas-mascot-clean-transparent.svg` as the vector source asset
-- **AND** it SHALL include recognizable hat, face, and repository-map cues
-- **AND** it SHALL NOT require sixel, Kitty graphics, or iTerm image protocols.
+- **THEN** it SHALL NOT render Ani, ASCII Ani, a pixel-art mascot, or a placeholder mascot block in the header
+- **AND** it SHALL keep the header readable with `ProjectAtlas`, `Token Impact`, the supporting line, and right metadata
+- **AND** it SHALL NOT depend on `image`, `ratatui-image`, sixel, Kitty graphics, iTerm image protocols, or a custom bitmap renderer for the token TUI.
 
-#### Scenario: Ani presence is tested
+#### Scenario: Ani assets remain available for a future scoped issue
+- **WHEN** the release keeps `docs/design/ani-mascot-reference.png` and `docs/design/projectatlas-mascot-clean-transparent.svg`
+- **THEN** those files SHALL remain documented as mascot design references
+- **AND** they SHALL NOT be treated as runtime dependencies of `projectatlas token --view tui` in v0.3.26.
+
+#### Scenario: Ani deferral is tested
 - **WHEN** token TUI tests render the normal-width overview
-- **THEN** tests SHALL assert that Ani's expected label, symbols, or styled cells are present.
+- **THEN** tests SHALL assert the title starts in the header without a mascot column
+- **AND** dependency checks or source review SHALL confirm no `image` or Ani renderer path is present in the token TUI.
 
 #### Scenario: Compact terminals preserve core information
 - **WHEN** the overview renders on compact terminal dimensions
-- **THEN** decorative Ani detail MAY compress
-- **BUT** the title, headline saved value, equation, file-read total, observed/modeled split, source table heading, and footer SHALL remain visible.
+- **THEN** the title, headline saved value, equation, file-read total, observed/modeled split, source table heading, and footer SHALL remain visible.
 
 ### Requirement: Ratatui Widget-Based Dashboard
 The overview dashboard SHALL use Ratatui standard widgets and style primitives for structure, styling, bars, and tables.
@@ -81,8 +83,14 @@ The overview dashboard SHALL use Ratatui standard widgets and style primitives f
 #### Scenario: No broad custom renderer
 - **WHEN** the dashboard implementation is reviewed
 - **THEN** it SHALL NOT replace the overview with a bespoke full-screen renderer or broad bitmap/image rendering system
-- **AND** the accepted image dependency SHALL remain limited to Ani's `ratatui-image` halfblock widget
+- **AND** it SHALL NOT add an image rendering dependency for the token TUI in v0.3.26
 - **AND** any direct `Buffer` writes SHALL be limited to small exact-cell details such as icons or tested bars.
+
+#### Scenario: Terminal background is preserved outside panels
+- **WHEN** the overview or trend dashboard renders
+- **THEN** the implementation SHALL NOT paint the full terminal canvas with a ProjectAtlas background color
+- **AND** outer frame/background cells outside panels SHALL keep the terminal default/reset background
+- **AND** ProjectAtlas panel interiors MAY still use the themed panel background for contrast.
 
 ### Requirement: Accounting Relationships Remain Correct
 The overview dashboard SHALL preserve all visible token and file-read accounting relationships while reducing duplicated fields.
@@ -125,6 +133,11 @@ The token TUI test suite SHALL cover the visual mechanics that made the previous
 - **WHEN** the overview dashboard renders
 - **THEN** tests SHALL verify that the same headline values are not repeated in multiple competing panels in a way that contradicts the reference dashboard.
 
+#### Scenario: Terminal background preservation is tested
+- **WHEN** token TUI tests render overview and trend dashboards through Ratatui `TestBackend`
+- **THEN** tests SHALL verify the reserved dashboard canvas color is not written across rendered cells
+- **AND** tests SHALL verify dark and light ANSI output do not emit full-canvas background escape sequences.
+
 #### Scenario: Trend mode remains separate
 - **WHEN** a user runs `projectatlas token --view tui --trend <window>`
 - **THEN** the existing dedicated trend dashboard SHALL still render
@@ -140,8 +153,8 @@ Issue #304 SHALL remain open until OpenSpec tasks, subagent review, tests, and s
 
 #### Scenario: Canonical screenshot dimensions are recorded
 - **WHEN** visual evidence is captured for issue #304
-- **THEN** the primary screenshot SHALL use a 140-column by 47-row terminal where possible
-- **AND** compact smoke evidence SHALL use an 80-column by 47-row terminal or deterministic buffer equivalent.
+- **THEN** the primary screenshot SHALL use a 140-column by 48-row terminal where possible
+- **AND** compact smoke evidence SHALL use an 80-column by 48-row terminal or deterministic buffer equivalent.
 
 #### Scenario: Subagent review findings are dispositioned
 - **WHEN** subagents review the spec, code, tests, or screenshot

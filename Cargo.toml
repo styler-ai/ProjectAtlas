@@ -11,7 +11,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.3.25"
+version = "0.3.26"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/styler-ai/ProjectAtlas"
@@ -69,17 +69,16 @@ must_use_candidate = "allow"
 missing_inline_in_public_items = "allow"
 
 [workspace.dependencies]
-projectatlas-core = { path = "crates/projectatlas-core", version = "0.3.25" }
-projectatlas-db = { path = "crates/projectatlas-db", version = "0.3.25" }
-projectatlas-fs = { path = "crates/projectatlas-fs", version = "0.3.25" }
-projectatlas-service = { path = "crates/projectatlas-service", version = "0.3.25" }
-projectatlas-symbols = { path = "crates/projectatlas-symbols", version = "0.3.25" }
+projectatlas-core = { path = "crates/projectatlas-core", version = "0.3.26" }
+projectatlas-db = { path = "crates/projectatlas-db", version = "0.3.26" }
+projectatlas-fs = { path = "crates/projectatlas-fs", version = "0.3.26" }
+projectatlas-service = { path = "crates/projectatlas-service", version = "0.3.26" }
+projectatlas-symbols = { path = "crates/projectatlas-symbols", version = "0.3.26" }
 blake3 = "1.5"
 clap = { version = "4.5", features = ["derive"] }
 cssparser = "0.37"
 globset = "0.4"
 ignore = "0.4"
-image = { version = "0.25.6", default-features = false, features = ["png"] }
 jsonc-parser = { version = "0.32", features = ["serde"] }
 notify = "8.2"
 pulldown-cmark = "0.13"
