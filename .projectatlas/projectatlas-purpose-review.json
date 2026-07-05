@@ -757,6 +757,14 @@
       "purpose": "Active ProjectAtlas OpenSpec change packages for scheduled and backlog work."
     },
     {
+      "path": "openspec/changes/archive",
+      "purpose": "Archive location for completed ProjectAtlas OpenSpec change packages."
+    },
+    {
+      "path": "openspec/specs",
+      "purpose": "OpenSpec baseline specification directory for accepted ProjectAtlas capabilities."
+    },
+    {
       "path": "openspec/changes/add-agent-session-brief",
       "purpose": "Backlog OpenSpec package for an agent session brief MCP tool."
     },
@@ -803,6 +811,30 @@
     {
       "path": "openspec/changes/close-mcp-cli-parity/specs/mcp-cli-parity",
       "purpose": "MCP CLI parity capability spec directory."
+    },
+    {
+      "path": "openspec/changes/converge-claude-code-installer",
+      "purpose": "OpenSpec package for converging Claude Code installer runtime and generated MCP config validation."
+    },
+    {
+      "path": "openspec/changes/converge-claude-code-installer/specs",
+      "purpose": "OpenSpec requirement specs for Claude Code installer convergence."
+    },
+    {
+      "path": "openspec/changes/converge-claude-code-installer/specs/installer-claude-code-convergence",
+      "purpose": "Claude Code installer convergence capability spec directory."
+    },
+    {
+      "path": "openspec/changes/converge-opencode-installer",
+      "purpose": "OpenSpec package for converging OpenCode installer runtime and generated MCP config validation."
+    },
+    {
+      "path": "openspec/changes/converge-opencode-installer/specs",
+      "purpose": "OpenSpec requirement specs for OpenCode installer convergence."
+    },
+    {
+      "path": "openspec/changes/converge-opencode-installer/specs/installer-opencode-convergence",
+      "purpose": "OpenCode installer convergence capability spec directory."
     },
     {
       "path": "openspec/changes/expose-mcp-capabilities-settings",
@@ -915,6 +947,46 @@
     {
       "path": "openspec/changes/close-mcp-cli-parity/tasks.md",
       "purpose": "Implementation and verification checklist for ProjectAtlas CLI-to-MCP parity."
+    },
+    {
+      "path": "openspec/changes/converge-claude-code-installer/.openspec.yaml",
+      "purpose": "OpenSpec change metadata for the Claude Code installer convergence proposal."
+    },
+    {
+      "path": "openspec/changes/converge-claude-code-installer/design.md",
+      "purpose": "Design rationale and pre-mortem risk analysis for Claude Code installer convergence."
+    },
+    {
+      "path": "openspec/changes/converge-claude-code-installer/proposal.md",
+      "purpose": "Proposal for validating and repairing Claude Code ProjectAtlas installer convergence."
+    },
+    {
+      "path": "openspec/changes/converge-claude-code-installer/specs/installer-claude-code-convergence/spec.md",
+      "purpose": "Specifies Claude Code generated MCP config convergence requirements and verification behavior."
+    },
+    {
+      "path": "openspec/changes/converge-claude-code-installer/tasks.md",
+      "purpose": "Implementation and verification checklist for Claude Code installer convergence."
+    },
+    {
+      "path": "openspec/changes/converge-opencode-installer/.openspec.yaml",
+      "purpose": "OpenSpec change metadata for the OpenCode installer convergence proposal."
+    },
+    {
+      "path": "openspec/changes/converge-opencode-installer/design.md",
+      "purpose": "Design rationale and pre-mortem risk analysis for OpenCode installer convergence."
+    },
+    {
+      "path": "openspec/changes/converge-opencode-installer/proposal.md",
+      "purpose": "Proposal for validating and repairing OpenCode ProjectAtlas installer convergence."
+    },
+    {
+      "path": "openspec/changes/converge-opencode-installer/specs/installer-opencode-convergence/spec.md",
+      "purpose": "Specifies OpenCode generated MCP config convergence requirements and verification behavior."
+    },
+    {
+      "path": "openspec/changes/converge-opencode-installer/tasks.md",
+      "purpose": "Implementation and verification checklist for OpenCode installer convergence."
     },
     {
       "path": "openspec/changes/expose-mcp-capabilities-settings/.openspec.yaml",
