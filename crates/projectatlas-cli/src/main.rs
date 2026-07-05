@@ -524,7 +524,11 @@ enum Command {
         include_mcp_config: bool,
     },
     /// Run the native `ProjectAtlas` MCP server over stdio.
-    Mcp,
+    Mcp {
+        /// Allow absolute path MCP calls to route to the nearest already-indexed `ProjectAtlas` root.
+        #[arg(long)]
+        nearest_project: bool,
+    },
     /// Print a project-local MCP configuration with absolute runtime paths.
     McpConfig {
         /// MCP server name to emit.
@@ -533,6 +537,9 @@ enum Command {
         /// Harness-specific config shape to emit.
         #[arg(long, value_enum, default_value_t = HarnessConfig::McpJson)]
         harness: HarnessConfig,
+        /// Include `mcp --nearest-project` in the generated server startup args.
+        #[arg(long)]
+        nearest_project: bool,
     },
     /// Print structured runtime identity and capability information.
     RuntimeInfo,
@@ -551,6 +558,9 @@ enum RootCommand {
     Set {
         /// Repository root to bind.
         path: PathBuf,
+        /// Include `mcp --nearest-project` in generated project-local MCP configs.
+        #[arg(long)]
+        nearest_project: bool,
     },
     /// Show the root, DB, config, and runtime identity `ProjectAtlas` will use.
     Show,
@@ -1076,9 +1086,12 @@ fn run() -> Result<(), CliError> {
             print_output(cli.format, &toon, &report)?;
         }
         Command::Root { command } => match command {
-            Some(RootCommand::Set { path }) => {
+            Some(RootCommand::Set {
+                path,
+                nearest_project,
+            }) => {
                 let root = canonical_project_root(path)?;
-                let report = bind_project_root(&root)?;
+                let report = bind_project_root(&root, *nearest_project)?;
                 print_output(cli.format, &render_root_report(&report), &report)?;
             }
             None | Some(RootCommand::Show) => {
@@ -1361,18 +1374,25 @@ fn run() -> Result<(), CliError> {
                 &report,
             )?;
         }
-        Command::Mcp => {
-            mcp::run_mcp_server(cli.db.clone(), cli.config.clone(), cli.session.clone())?;
+        Command::Mcp { nearest_project } => {
+            mcp::run_mcp_server(
+                cli.db.clone(),
+                cli.config.clone(),
+                cli.session.clone(),
+                *nearest_project,
+            )?;
         }
         Command::McpConfig {
             server_name,
             harness,
+            nearest_project,
         } => {
             let report = build_harness_mcp_config_report(
                 *harness,
                 server_name,
                 &cli.db,
                 cli.config.as_deref(),
+                *nearest_project,
             )?;
             print_output(cli.format, &render_mcp_config_report(&report), &report)?;
         }
@@ -1437,8 +1457,9 @@ fn build_harness_mcp_config_report(
     server_name: &str,
     db: &Path,
     config: Option<&Path>,
+    nearest_project: bool,
 ) -> Result<serde_json::Value, CliError> {
-    let config = build_mcp_config_report(server_name, db, config)?;
+    let config = build_mcp_config_report(server_name, db, config, nearest_project)?;
     Ok(match harness {
         HarnessConfig::McpJson | HarnessConfig::Codex => serde_json::to_value(config)?,
         HarnessConfig::ClaudeCode => {
@@ -1483,6 +1504,7 @@ fn build_mcp_config_report(
     server_name: &str,
     db: &Path,
     config: Option<&Path>,
+    nearest_project: bool,
 ) -> Result<McpConfigDocument, CliError> {
     let executable = std::env::current_exe().map_err(|source| CliError::Io {
         path: PathBuf::from("current executable"),
@@ -1501,6 +1523,9 @@ fn build_mcp_config_report(
         args.push(mcp_launch_path(config_path));
     }
     args.push("mcp".to_string());
+    if nearest_project {
+        args.push("--nearest-project".to_string());
+    }
     let project_root = default_mcp_project_root(&absolute_db, resolved_config.as_deref())?;
     let mut mcp_servers = BTreeMap::new();
     mcp_servers.insert(
@@ -1588,7 +1613,7 @@ fn render_runtime_info(report: &RuntimeInfoReport) -> String {
 }
 
 /// Bind a project root without creating any machine-global root state.
-fn bind_project_root(root: &Path) -> Result<RootReport, CliError> {
+fn bind_project_root(root: &Path, nearest_project: bool) -> Result<RootReport, CliError> {
     if !root.is_dir() {
         return Err(CliError::InvalidInput(format!(
             "project root {} is not a directory",
@@ -1608,18 +1633,21 @@ fn bind_project_root(root: &Path) -> Result<RootReport, CliError> {
         HarnessConfig::McpJson,
         &db_path,
         &config_path,
+        nearest_project,
     )?;
     write_mcp_config_file(
         &atlas_dir.join("projectatlas.claude.mcp.json"),
         HarnessConfig::ClaudeCode,
         &db_path,
         &config_path,
+        nearest_project,
     )?;
     write_mcp_config_file(
         &atlas_dir.join("projectatlas.opencode.json"),
         HarnessConfig::OpenCode,
         &db_path,
         &config_path,
+        nearest_project,
     )?;
     build_root_report(&db_path, Some(&config_path))
 }
@@ -1630,9 +1658,15 @@ fn write_mcp_config_file(
     harness: HarnessConfig,
     db_path: &Path,
     config_path: &Path,
+    nearest_project: bool,
 ) -> Result<(), CliError> {
-    let value =
-        build_harness_mcp_config_report(harness, "projectatlas", db_path, Some(config_path))?;
+    let value = build_harness_mcp_config_report(
+        harness,
+        "projectatlas",
+        db_path,
+        Some(config_path),
+        nearest_project,
+    )?;
     let text = format!("{}\n", serde_json::to_string_pretty(&value)?);
     fs::write(path, text).map_err(|source| CliError::Io {
         path: path.to_path_buf(),
@@ -2295,19 +2329,18 @@ mod tests {
         OutputFormat, build_runtime_info, render_token_dashboard, serialized_output, truthy_env,
     };
     use notify::EventKind;
-    use projectatlas_core::Node;
-    use projectatlas_core::NodeKind;
     use projectatlas_core::symbols::{
         CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
     };
     use projectatlas_core::telemetry::{
         TokenOverview, TokenTrendPeriod, TokenTrendReport, TokenTrendWindow,
     };
+    use projectatlas_core::{Node, NodeKind, normalize_native_path_display};
     use projectatlas_db::AtlasStore;
     use projectatlas_fs::ScanOptions;
     use rmcp::model::{CallToolRequestParams, ClientInfo};
     use rmcp::{ClientHandler, ServiceExt};
-    use serde_json::{Map, json};
+    use serde_json::{Map, Value, json};
     use std::error::Error;
     use std::fs;
     use std::io;
@@ -2321,6 +2354,53 @@ mod tests {
         fn get_info(&self) -> ClientInfo {
             ClientInfo::default()
         }
+    }
+
+    #[cfg(unix)]
+    fn create_directory_symlink(target: &Path, link: &Path) -> io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_directory_symlink(target: &Path, link: &Path) -> io::Result<()> {
+        match std::os::windows::fs::symlink_dir(target, link) {
+            Ok(()) => Ok(()),
+            Err(source) if source.raw_os_error() == Some(1314) => {
+                let status = std::process::Command::new("cmd")
+                    .arg("/C")
+                    .arg("mklink")
+                    .arg("/J")
+                    .arg(link)
+                    .arg(target)
+                    .status()?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(source)
+                }
+            }
+            Err(source) => Err(source),
+        }
+    }
+
+    fn require_selected_project_audit(
+        text: &str,
+        root: &Path,
+        db: &Path,
+        context: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let root_display = normalize_native_path_display(root.canonicalize()?);
+        let db_display = normalize_native_path_display(db);
+        if text.contains("selected_project:")
+            && text.contains(&root_display)
+            && text.contains(&db_display)
+        {
+            return Ok(());
+        }
+        Err(io::Error::other(format!(
+            "{context} missing selected project audit root/db: {text}"
+        ))
+        .into())
     }
 
     #[test]
@@ -2867,22 +2947,31 @@ mod tests {
         assert!(dashboard.contains("ProjectAtlas Savings Overview"));
         assert!(dashboard.contains("session-a"));
         assert!(dashboard.contains("Conservative tokens avoided"));
-        assert!(dashboard.contains("Measured summaries"));
-        assert!(dashboard.contains("Narrowed files"));
-        assert!(dashboard.contains("Gross tokens: without vs with ProjectAtlas"));
+        assert!(dashboard.contains("Avoided reads"));
         assert!(dashboard.contains("Saved-token trends"));
-        assert!(dashboard.contains("day | latest"));
-        assert!(dashboard.contains("week | latest"));
-        assert!(dashboard.contains("month | latest"));
-        assert!(dashboard.contains("year | latest"));
-        assert!(dashboard.contains("Without ProjectAtlas"));
-        assert!(dashboard.contains("With ProjectAtlas"));
+        assert!(dashboard.contains("day trend"));
+        assert!(dashboard.contains("week trend"));
+        assert!(dashboard.contains("month trend"));
+        assert!(dashboard.contains("year trend"));
+        assert!(dashboard.contains("File Handling Optimization Overview"));
         assert!(dashboard.contains("File reads avoided"));
-        assert!(dashboard.contains("Where the savings came from"));
+        assert!(dashboard.contains("Impact source"));
         assert!(dashboard.contains("What this means"));
         assert!(dashboard.contains("not_recorded"));
-        assert!(dashboard.contains("calibration"));
-        assert!(dashboard.contains("█") || dashboard.contains("▌") || dashboard.contains("▏"));
+        assert!(dashboard.contains("Tokenizer check"));
+        assert!(
+            dashboard
+                .chars()
+                .any(|character| matches!(character, '█' | '▌' | '▏' | '\u{2801}'..='\u{28ff}'))
+        );
+        assert!(!dashboard.contains("Gross tokens: without vs with ProjectAtlas"));
+        assert!(!dashboard.contains("Without ProjectAtlas"));
+        assert!(!dashboard.contains("With ProjectAtlas"));
+        assert!(!dashboard.contains("Saved by ProjectAtlas"));
+        assert!(!dashboard.contains("Where the savings came from"));
+        assert!(!dashboard.contains("How ProjectAtlas helped"));
+        assert!(!dashboard.contains("Measured summaries"));
+        assert!(!dashboard.contains("Narrowed files"));
     }
 
     #[test]
@@ -2968,7 +3057,7 @@ mod tests {
             "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
         )?;
         let db = repo.join(".projectatlas").join("projectatlas.db");
-        let server = ProjectAtlasMcpServer::new(db, None, "mcp-test".to_string());
+        let server = ProjectAtlasMcpServer::new(db, None, "mcp-test".to_string(), false);
         let (server_transport, client_transport) = tokio::io::duplex(16_384);
         let server_handle = tokio::spawn(async move {
             server
@@ -2986,6 +3075,28 @@ mod tests {
             if !tools.tools.iter().any(|tool| tool.name == *required_tool) {
                 return Err(format!("{required_tool} tool was not registered").into());
             }
+        }
+        let schema_has_property =
+            |tool_name: &str, property: &str| -> Result<bool, Box<dyn Error>> {
+                let tool = tools
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name.as_ref() == tool_name)
+                    .ok_or_else(|| std::io::Error::other(format!("{tool_name} missing")))?;
+                let schema = serde_json::to_value(&tool.input_schema)?;
+                Ok(schema
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .is_some_and(|properties| properties.contains_key(property)))
+            };
+        if schema_has_property("atlas_folders", "nearest_project")? {
+            return Err("atlas_folders advertised unused nearest_project parameter".into());
+        }
+        if !schema_has_property("atlas_files", "nearest_project")? {
+            return Err("atlas_files did not advertise nearest_project parameter".into());
+        }
+        if schema_has_property("atlas_next", "nearest_project")? {
+            return Err("atlas_next advertised unused nearest_project parameter".into());
         }
 
         let scan = client
@@ -3072,8 +3183,13 @@ mod tests {
             .and_then(|content| content.raw.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("slice result did not contain text"))?;
-        if !slice_text.contains("project-relative indexed file path") {
-            return Err("atlas_slice did not reject outside-repository absolute paths".into());
+        if !slice_text.contains("indexed ProjectAtlas project")
+            || !slice_text.contains("Get-Content")
+        {
+            return Err(format!(
+                "atlas_slice did not reject outside-repository absolute paths: {slice_text}"
+            )
+            .into());
         }
 
         let token_report = client
@@ -3284,8 +3400,12 @@ mod tests {
 
         let db_a = repo_a.join(".projectatlas").join("projectatlas.db");
         let db_b = repo_b.join(".projectatlas").join("projectatlas.db");
-        let server =
-            ProjectAtlasMcpServer::new(db_a.clone(), None, "mcp-multi-project-test".to_string());
+        let server = ProjectAtlasMcpServer::new(
+            db_a.clone(),
+            None,
+            "mcp-multi-project-test".to_string(),
+            false,
+        );
         let (server_transport, client_transport) = tokio::io::duplex(16_384);
         let server_handle = tokio::spawn(async move {
             server
@@ -3333,9 +3453,10 @@ mod tests {
         if !wrong_path_scan.contains("outside the selected project root")
             || !wrong_path_scan.contains("normal filesystem tools")
         {
-            return Err(
-                "atlas_scan allowed unindexed path-based access outside the active project".into(),
-            );
+            return Err(format!(
+                "atlas_scan allowed unindexed path-based access outside the active project: {wrong_path_scan}"
+            )
+            .into());
         }
 
         let mut scan_b_args = Map::new();
@@ -3361,14 +3482,525 @@ mod tests {
             return Err("project_path-selected atlas_scan did not create repo B database".into());
         }
 
+        let mut absolute_summary_a_args = Map::new();
+        absolute_summary_a_args.insert(
+            "file".to_string(),
+            json!(
+                repo_a
+                    .join("src")
+                    .join("lib.rs")
+                    .to_string_lossy()
+                    .to_string()
+            ),
+        );
+        let absolute_summary_a = call_text!("atlas_file_summary", absolute_summary_a_args);
+        if !absolute_summary_a.contains("alpha_project_a_marker")
+            || !absolute_summary_a.contains("file_path: src/lib.rs")
+        {
+            return Err(format!(
+                "absolute file path inside selected project was not accepted: {absolute_summary_a}"
+            )
+            .into());
+        }
+
+        let mut active_subdir_scan_args = Map::new();
+        active_subdir_scan_args.insert(
+            "path".to_string(),
+            json!(repo_a.join("src").to_string_lossy().to_string()),
+        );
+        active_subdir_scan_args.insert("nearest_project".to_string(), json!(true));
+        let active_subdir_scan = call_text!("atlas_scan", active_subdir_scan_args);
+        if active_subdir_scan.contains("scan:")
+            || !active_subdir_scan.contains("not the selected project root")
+            || active_subdir_scan.contains("selected_project:")
+        {
+            return Err(format!(
+                "nearest_project bypassed root assertion for active subdirectory: {active_subdir_scan}"
+            )
+            .into());
+        }
+        let mut active_relative_subdir_scan_args = Map::new();
+        active_relative_subdir_scan_args.insert("path".to_string(), json!("src"));
+        active_relative_subdir_scan_args.insert("nearest_project".to_string(), json!(true));
+        let active_relative_subdir_scan =
+            call_text!("atlas_scan", active_relative_subdir_scan_args);
+        if active_relative_subdir_scan.contains("scan:")
+            || !active_relative_subdir_scan.contains("not the selected project root")
+            || active_relative_subdir_scan.contains("selected_project:")
+        {
+            return Err(format!(
+                "nearest_project bypassed root assertion for relative active subdirectory: {active_relative_subdir_scan}"
+            )
+            .into());
+        }
+
         let mut indexed_path_scan_b_args = Map::new();
         indexed_path_scan_b_args.insert(
             "path".to_string(),
             json!(repo_b.to_string_lossy().to_string()),
         );
+        let indexed_path_scan_b = call_text!("atlas_scan", indexed_path_scan_b_args.clone());
+        if indexed_path_scan_b.contains("scan:")
+            || !indexed_path_scan_b.contains("outside the selected project root")
+            || !indexed_path_scan_b.contains("Get-Content")
+        {
+            return Err(format!(
+                "default-off atlas_scan routed to another indexed project: {indexed_path_scan_b}"
+            )
+            .into());
+        }
+        indexed_path_scan_b_args.insert("nearest_project".to_string(), json!(true));
         let indexed_path_scan_b = call_text!("atlas_scan", indexed_path_scan_b_args);
         if !indexed_path_scan_b.contains("scan:") {
-            return Err("atlas_scan did not auto-route to an already indexed project path".into());
+            return Err("atlas_scan nearest_project override did not route indexed repo B".into());
+        }
+        let mut indexed_subdir_scan_b_args = Map::new();
+        indexed_subdir_scan_b_args.insert(
+            "path".to_string(),
+            json!(repo_b.join("src").to_string_lossy().to_string()),
+        );
+        indexed_subdir_scan_b_args.insert("nearest_project".to_string(), json!(true));
+        let indexed_subdir_scan_b = call_text!("atlas_scan", indexed_subdir_scan_b_args);
+        if indexed_subdir_scan_b.contains("scan:")
+            || !indexed_subdir_scan_b.contains("outside the selected project root")
+            || indexed_subdir_scan_b.contains("selected_project:")
+        {
+            return Err(format!(
+                "nearest_project treated an indexed project subdirectory as a root assertion: {indexed_subdir_scan_b}"
+            )
+            .into());
+        }
+
+        let mut absolute_summary_b_args = Map::new();
+        absolute_summary_b_args.insert(
+            "file".to_string(),
+            json!(
+                repo_b
+                    .join("src")
+                    .join("lib.rs")
+                    .to_string_lossy()
+                    .to_string()
+            ),
+        );
+        let rejected_summary_b = call_text!("atlas_file_summary", absolute_summary_b_args.clone());
+        if rejected_summary_b.contains("beta_project_b_marker")
+            || !rejected_summary_b.contains("indexed ProjectAtlas project")
+            || !rejected_summary_b.contains("Get-Content")
+        {
+            return Err(format!(
+                "default-off absolute file routing did not fall back to filesystem guidance: {rejected_summary_b}"
+            )
+            .into());
+        }
+        absolute_summary_b_args.insert("nearest_project".to_string(), json!(true));
+        let absolute_summary_b = call_text!("atlas_file_summary", absolute_summary_b_args);
+        if !absolute_summary_b.contains("beta_project_b_marker")
+            || !absolute_summary_b.contains("file_path: src/lib.rs")
+        {
+            return Err(format!(
+                "absolute file path did not route to nearest indexed repo B with override: {absolute_summary_b}"
+            )
+            .into());
+        }
+        require_selected_project_audit(
+            &absolute_summary_b,
+            &repo_b,
+            &db_b,
+            "nearest-routed file summary",
+        )?;
+
+        let mut absolute_slice_b_args = Map::new();
+        absolute_slice_b_args.insert(
+            "file".to_string(),
+            json!(
+                repo_b
+                    .join("src")
+                    .join("lib.rs")
+                    .to_string_lossy()
+                    .to_string()
+            ),
+        );
+        absolute_slice_b_args.insert("start_line".to_string(), json!(1));
+        absolute_slice_b_args.insert("end_line".to_string(), json!(1));
+        let rejected_slice_b = call_text!("atlas_slice", absolute_slice_b_args.clone());
+        if rejected_slice_b.contains("beta_project_b_marker")
+            || !rejected_slice_b.contains("indexed ProjectAtlas project")
+            || !rejected_slice_b.contains("Get-Content")
+        {
+            return Err(format!(
+                "default-off atlas_slice read another project instead of returning filesystem guidance: {rejected_slice_b}"
+            )
+            .into());
+        }
+        absolute_slice_b_args.insert("nearest_project".to_string(), json!(true));
+        let absolute_slice_b = call_text!("atlas_slice", absolute_slice_b_args);
+        if !absolute_slice_b.contains("beta_project_b_marker") {
+            return Err("atlas_slice nearest_project override did not route indexed repo B".into());
+        }
+        require_selected_project_audit(&absolute_slice_b, &repo_b, &db_b, "nearest-routed slice")?;
+
+        let mut absolute_files_b_args = Map::new();
+        absolute_files_b_args.insert("query".to_string(), json!("beta"));
+        absolute_files_b_args.insert(
+            "folder".to_string(),
+            json!(repo_b.join("src").to_string_lossy().to_string()),
+        );
+        let rejected_files_b = call_text!("atlas_files", absolute_files_b_args.clone());
+        if rejected_files_b.contains("src/lib.rs")
+            || !rejected_files_b.contains("indexed ProjectAtlas project")
+            || !rejected_files_b.contains("Get-Content")
+        {
+            return Err(format!(
+                "default-off atlas_files routed another project folder: {rejected_files_b}"
+            )
+            .into());
+        }
+        absolute_files_b_args.insert("nearest_project".to_string(), json!(true));
+        let absolute_files_b = call_text!("atlas_files", absolute_files_b_args);
+        if !absolute_files_b.contains("src/lib.rs")
+            || absolute_files_b.contains("alpha_project_a_marker")
+        {
+            return Err(
+                "absolute folder path did not route file ranking to indexed repo B with override"
+                    .into(),
+            );
+        }
+        require_selected_project_audit(
+            &absolute_files_b,
+            &repo_b,
+            &db_b,
+            "nearest-routed file ranking",
+        )?;
+
+        let mut explicit_project_summary_args = Map::new();
+        explicit_project_summary_args.insert(
+            "project_path".to_string(),
+            json!(repo_a.to_string_lossy().to_string()),
+        );
+        explicit_project_summary_args.insert(
+            "file".to_string(),
+            json!(
+                repo_b
+                    .join("src")
+                    .join("lib.rs")
+                    .to_string_lossy()
+                    .to_string()
+            ),
+        );
+        explicit_project_summary_args.insert("nearest_project".to_string(), json!(true));
+        let explicit_project_summary =
+            call_text!("atlas_file_summary", explicit_project_summary_args);
+        if explicit_project_summary.contains("beta_project_b_marker")
+            || !explicit_project_summary.contains("indexed ProjectAtlas project")
+            || !explicit_project_summary.contains("Get-Content")
+        {
+            return Err(format!(
+                "explicit project_path did not stay isolated from nearest routing: {explicit_project_summary}"
+            )
+            .into());
+        }
+
+        let nested_active_repo = repo_a.join("nested-active-project");
+        fs::create_dir_all(nested_active_repo.join("src"))?;
+        fs::write(
+            nested_active_repo.join("src").join("lib.rs"),
+            "pub fn nested_active_marker() { nested_active_helper(); }\nfn nested_active_helper() {}\n",
+        )?;
+        let mut scan_nested_active_args = Map::new();
+        scan_nested_active_args.insert(
+            "project_path".to_string(),
+            json!(nested_active_repo.to_string_lossy().to_string()),
+        );
+        let scan_nested_active = call_text!("atlas_scan", scan_nested_active_args);
+        if !scan_nested_active.contains("scan:") {
+            return Err("project_path-selected atlas_scan did not scan nested active repo".into());
+        }
+        let nested_active_db = nested_active_repo
+            .join(".projectatlas")
+            .join("projectatlas.db");
+        let nested_active_file = nested_active_repo.join("src").join("lib.rs");
+        let mut nested_active_summary_args = Map::new();
+        nested_active_summary_args.insert(
+            "file".to_string(),
+            json!(nested_active_file.to_string_lossy().to_string()),
+        );
+        let rejected_nested_active =
+            call_text!("atlas_file_summary", nested_active_summary_args.clone());
+        if rejected_nested_active.contains("nested_active_marker") {
+            return Err("default-off routing read nested active child through nearest DB".into());
+        }
+        nested_active_summary_args.insert("nearest_project".to_string(), json!(true));
+        let nested_active_summary =
+            call_text!("atlas_file_summary", nested_active_summary_args.clone());
+        if !nested_active_summary.contains("nested_active_marker")
+            || !nested_active_summary.contains("file_path: src/lib.rs")
+            || nested_active_summary.contains("nested-active-project/src/lib.rs")
+        {
+            return Err(format!(
+                "nearest routing did not prefer nested child DB under active root: {nested_active_summary}"
+            )
+            .into());
+        }
+        require_selected_project_audit(
+            &nested_active_summary,
+            &nested_active_repo,
+            &nested_active_db,
+            "nearest-routed nested summary",
+        )?;
+        let nested_active_outline = call_text!("atlas_outline", nested_active_summary_args.clone());
+        if !nested_active_outline.contains("nested_active_marker") {
+            return Err("atlas_outline did not route to nested child DB".into());
+        }
+        require_selected_project_audit(
+            &nested_active_outline,
+            &nested_active_repo,
+            &nested_active_db,
+            "nearest-routed nested outline",
+        )?;
+        let mut nested_active_slice_args = nested_active_summary_args.clone();
+        nested_active_slice_args.insert("start_line".to_string(), json!(1));
+        nested_active_slice_args.insert("end_line".to_string(), json!(1));
+        let nested_active_slice = call_text!("atlas_slice", nested_active_slice_args);
+        if !nested_active_slice.contains("nested_active_marker") {
+            return Err("atlas_slice did not route to nested child DB".into());
+        }
+        require_selected_project_audit(
+            &nested_active_slice,
+            &nested_active_repo,
+            &nested_active_db,
+            "nearest-routed nested slice",
+        )?;
+        let mut nested_active_symbols_args = Map::new();
+        nested_active_symbols_args.insert(
+            "file".to_string(),
+            json!(nested_active_file.to_string_lossy().to_string()),
+        );
+        nested_active_symbols_args.insert("query".to_string(), json!("nested_active_marker"));
+        nested_active_symbols_args.insert("nearest_project".to_string(), json!(true));
+        let nested_active_symbols = call_text!("atlas_symbols", nested_active_symbols_args.clone());
+        if !nested_active_symbols.contains("nested_active_marker") {
+            return Err("atlas_symbols did not route to nested child DB".into());
+        }
+        require_selected_project_audit(
+            &nested_active_symbols,
+            &nested_active_repo,
+            &nested_active_db,
+            "nearest-routed nested symbols",
+        )?;
+        let nested_active_relations =
+            call_text!("atlas_symbol_relations", nested_active_symbols_args);
+        if !nested_active_relations.contains("nested_active_marker") {
+            return Err("atlas_symbol_relations did not route to nested child DB".into());
+        }
+        require_selected_project_audit(
+            &nested_active_relations,
+            &nested_active_repo,
+            &nested_active_db,
+            "nearest-routed nested symbol relations",
+        )?;
+        let mut nested_active_files_args = Map::new();
+        nested_active_files_args.insert("query".to_string(), json!("nested_active_marker"));
+        nested_active_files_args.insert(
+            "folder".to_string(),
+            json!(nested_active_repo.join("src").to_string_lossy().to_string()),
+        );
+        nested_active_files_args.insert("include_content".to_string(), json!(true));
+        nested_active_files_args.insert("nearest_project".to_string(), json!(true));
+        let nested_active_files = call_text!("atlas_files", nested_active_files_args);
+        if !nested_active_files.contains("src/lib.rs")
+            || nested_active_files.contains("nested-active-project/src/lib.rs")
+        {
+            return Err("atlas_files did not route folder filter to nested child DB".into());
+        }
+        require_selected_project_audit(
+            &nested_active_files,
+            &nested_active_repo,
+            &nested_active_db,
+            "nearest-routed nested file ranking",
+        )?;
+
+        let empty_repo = temp.path().join("repo-empty");
+        fs::create_dir_all(empty_repo.join("src"))?;
+        fs::write(
+            empty_repo.join("src").join("lib.rs"),
+            "pub fn unindexed_project_marker() {}\n",
+        )?;
+        let mut missing_index_file_args = Map::new();
+        missing_index_file_args.insert(
+            "file".to_string(),
+            json!(
+                empty_repo
+                    .join("src")
+                    .join("lib.rs")
+                    .to_string_lossy()
+                    .to_string()
+            ),
+        );
+        missing_index_file_args.insert("nearest_project".to_string(), json!(true));
+        let missing_index_file = call_text!("atlas_file_summary", missing_index_file_args);
+        if !missing_index_file.contains("indexed ProjectAtlas project")
+            || !missing_index_file.contains("Get-Content")
+            || empty_repo.join(".projectatlas").exists()
+        {
+            return Err(
+                "absolute file routing did not fail cleanly when no ancestor DB exists".into(),
+            );
+        }
+
+        let partial_repo = temp.path().join("repo-partial-atlas");
+        fs::create_dir_all(partial_repo.join(".projectatlas"))?;
+        fs::create_dir_all(partial_repo.join("src"))?;
+        fs::write(
+            partial_repo.join("src").join("lib.rs"),
+            "pub fn partial_project_marker() {}\n",
+        )?;
+        let mut partial_index_file_args = Map::new();
+        partial_index_file_args.insert(
+            "file".to_string(),
+            json!(
+                partial_repo
+                    .join("src")
+                    .join("lib.rs")
+                    .to_string_lossy()
+                    .to_string()
+            ),
+        );
+        partial_index_file_args.insert("nearest_project".to_string(), json!(true));
+        let partial_index_file = call_text!("atlas_file_summary", partial_index_file_args);
+        if !partial_index_file.contains("indexed ProjectAtlas project")
+            || !partial_index_file.contains("Get-Content")
+            || partial_repo
+                .join(".projectatlas")
+                .join("projectatlas.db")
+                .exists()
+        {
+            return Err(
+                "nearest routing treated a .projectatlas folder without DB as indexed".into(),
+            );
+        }
+
+        let invalid_db_repo = temp.path().join("repo-invalid-db");
+        fs::create_dir_all(invalid_db_repo.join(".projectatlas"))?;
+        fs::create_dir_all(invalid_db_repo.join("src"))?;
+        fs::write(
+            invalid_db_repo.join("src").join("lib.rs"),
+            "pub fn invalid_db_project_marker() {}\n",
+        )?;
+        let invalid_db = invalid_db_repo
+            .join(".projectatlas")
+            .join("projectatlas.db");
+        fs::write(&invalid_db, [])?;
+        let mut invalid_db_args = Map::new();
+        invalid_db_args.insert(
+            "file".to_string(),
+            json!(
+                invalid_db_repo
+                    .join("src")
+                    .join("lib.rs")
+                    .to_string_lossy()
+                    .to_string()
+            ),
+        );
+        invalid_db_args.insert("nearest_project".to_string(), json!(true));
+        let invalid_db_summary = call_text!("atlas_file_summary", invalid_db_args);
+        if !invalid_db_summary.contains("indexed ProjectAtlas project")
+            || !invalid_db_summary.contains("Get-Content")
+            || fs::metadata(&invalid_db)?.len() != 0
+            || invalid_db.with_extension("db-wal").exists()
+            || invalid_db.with_extension("db-shm").exists()
+        {
+            return Err(format!(
+                "nearest routing mutated or accepted an invalid candidate DB: {invalid_db_summary}"
+            )
+            .into());
+        }
+
+        let nested_repo = repo_b.join("nested-project");
+        fs::create_dir_all(nested_repo.join("src"))?;
+        fs::write(
+            nested_repo.join("src").join("lib.rs"),
+            "pub fn nested_project_marker() {}\n",
+        )?;
+        let mut scan_nested_args = Map::new();
+        scan_nested_args.insert(
+            "project_path".to_string(),
+            json!(nested_repo.to_string_lossy().to_string()),
+        );
+        let scan_nested = call_text!("atlas_scan", scan_nested_args);
+        if !scan_nested.contains("scan:") {
+            return Err("project_path-selected atlas_scan did not scan nested repo".into());
+        }
+        let mut nested_summary_args = Map::new();
+        nested_summary_args.insert(
+            "file".to_string(),
+            json!(
+                nested_repo
+                    .join("src")
+                    .join("lib.rs")
+                    .to_string_lossy()
+                    .to_string()
+            ),
+        );
+        let rejected_nested_summary = call_text!("atlas_file_summary", nested_summary_args.clone());
+        if rejected_nested_summary.contains("nested_project_marker")
+            || !rejected_nested_summary.contains("indexed ProjectAtlas project")
+            || !rejected_nested_summary.contains("Get-Content")
+        {
+            return Err(format!(
+                "default-off nearest nested DB routing did not return filesystem guidance: {rejected_nested_summary}"
+            )
+            .into());
+        }
+        nested_summary_args.insert("nearest_project".to_string(), json!(true));
+        let nested_summary = call_text!("atlas_file_summary", nested_summary_args.clone());
+        if !nested_summary.contains("nested_project_marker")
+            || !nested_summary.contains("file_path: src/lib.rs")
+            || nested_summary.contains("nested-project/src/lib.rs")
+        {
+            return Err("nearest nested ProjectAtlas DB was not preferred".into());
+        }
+        fs::write(
+            nested_repo.join("projectatlas.toml"),
+            "[project]\nroot = \"..\"\n",
+        )?;
+        let nested_config_mismatch = call_text!("atlas_file_summary", nested_summary_args);
+        if !nested_config_mismatch.contains("outside selected project root") {
+            return Err("nearest DB routing did not reject config root mismatch".into());
+        }
+
+        let linked_repo_b = repo_a.join("linked-repo-b");
+        match create_directory_symlink(&repo_b, &linked_repo_b) {
+            Ok(()) => {
+                let mut linked_summary_args = Map::new();
+                linked_summary_args.insert(
+                    "file".to_string(),
+                    json!(
+                        linked_repo_b
+                            .join("src")
+                            .join("lib.rs")
+                            .to_string_lossy()
+                            .to_string()
+                    ),
+                );
+                linked_summary_args.insert("nearest_project".to_string(), json!(true));
+                let linked_summary = call_text!("atlas_file_summary", linked_summary_args);
+                if linked_summary.contains("beta_project_b_marker")
+                    || !linked_summary.contains("symlink or junction")
+                    || !linked_summary.contains("multiple plausible ProjectAtlas roots")
+                    || !linked_summary.contains("Get-Content")
+                {
+                    return Err(format!(
+                        "nearest routing did not reject symlink/junction ambiguity: {linked_summary}"
+                    )
+                    .into());
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
+                ) => {}
+            Err(error) => return Err(error.into()),
         }
 
         let mut search_b_args = Map::new();
@@ -3421,8 +4053,6 @@ mod tests {
             return Err("per-call project_path search did not read repo A".into());
         }
 
-        let empty_repo = temp.path().join("repo-empty");
-        fs::create_dir(&empty_repo)?;
         let mut missing_index_args = Map::new();
         missing_index_args.insert(
             "project_path".to_string(),
@@ -3459,6 +4089,144 @@ mod tests {
         let mismatched_scan = call_text!("atlas_scan", mismatched_scan_args);
         if !mismatched_scan.contains("outside the selected project root") {
             return Err("atlas_scan did not reject mismatched project_path/path roots".into());
+        }
+
+        let default_runtime_info = call_text!("atlas_runtime_info", Map::new());
+        if !default_runtime_info.contains("runtime:")
+            || default_runtime_info.contains("mcp_nearest_project")
+        {
+            return Err(format!(
+                "atlas_runtime_info should report runtime identity only: {default_runtime_info}"
+            )
+            .into());
+        }
+        let mut runtime_info_missing_project_args = Map::new();
+        runtime_info_missing_project_args.insert(
+            "project_path".to_string(),
+            json!(empty_repo.to_string_lossy().to_string()),
+        );
+        let runtime_info_missing_project =
+            call_text!("atlas_runtime_info", runtime_info_missing_project_args);
+        if !runtime_info_missing_project.contains("runtime:")
+            || runtime_info_missing_project.contains("mcp_nearest_project")
+        {
+            return Err(format!(
+                "atlas_runtime_info should be project-agnostic: {runtime_info_missing_project}"
+            )
+            .into());
+        }
+
+        client.cancel().await?;
+        server_handle.await?.map_err(std::io::Error::other)?;
+
+        let server = ProjectAtlasMcpServer::new(
+            db_a.clone(),
+            None,
+            "mcp-nearest-startup-test".to_string(),
+            true,
+        );
+        let (server_transport, client_transport) = tokio::io::duplex(16_384);
+        let server_handle = tokio::spawn(async move {
+            server
+                .serve(server_transport)
+                .await
+                .map_err(|error| error.to_string())?
+                .waiting()
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok::<(), String>(())
+        });
+        let client = TestMcpClient.serve(client_transport).await?;
+
+        macro_rules! call_text_on {
+            ($tool:literal, $args:expr) => {{
+                let result = client
+                    .peer()
+                    .call_tool(CallToolRequestParams::new($tool).with_arguments($args))
+                    .await?;
+                result
+                    .content
+                    .first()
+                    .and_then(|content| content.raw.as_text())
+                    .map(|text| text.text.clone())
+                    .ok_or_else(|| {
+                        std::io::Error::other(format!("{} result did not contain text", $tool))
+                    })?
+            }};
+        }
+
+        let startup_runtime_info = call_text_on!("atlas_runtime_info", Map::new());
+        if !startup_runtime_info.contains("runtime:")
+            || startup_runtime_info.contains("mcp_nearest_project")
+        {
+            return Err(format!(
+                "atlas_runtime_info should remain identity-only when nearest-project startup is enabled: {startup_runtime_info}"
+            )
+            .into());
+        }
+
+        let mut startup_summary_b_args = Map::new();
+        startup_summary_b_args.insert(
+            "file".to_string(),
+            json!(
+                repo_b
+                    .join("src")
+                    .join("lib.rs")
+                    .to_string_lossy()
+                    .to_string()
+            ),
+        );
+        let startup_summary_b = call_text_on!("atlas_file_summary", startup_summary_b_args.clone());
+        if !startup_summary_b.contains("beta_project_b_marker")
+            || !startup_summary_b.contains("file_path: src/lib.rs")
+        {
+            return Err(format!(
+                "startup nearest-project setting did not route indexed repo B: {startup_summary_b}"
+            )
+            .into());
+        }
+        require_selected_project_audit(
+            &startup_summary_b,
+            &repo_b,
+            &db_b,
+            "startup nearest-routed file summary",
+        )?;
+        startup_summary_b_args.insert("nearest_project".to_string(), json!(false));
+        let disabled_startup_summary_b =
+            call_text_on!("atlas_file_summary", startup_summary_b_args);
+        if disabled_startup_summary_b.contains("beta_project_b_marker")
+            || !disabled_startup_summary_b.contains("indexed ProjectAtlas project")
+            || !disabled_startup_summary_b.contains("Get-Content")
+        {
+            return Err(format!(
+                "per-call nearest_project=false did not override startup setting: {disabled_startup_summary_b}"
+            )
+            .into());
+        }
+
+        let mut startup_partial_file_args = Map::new();
+        startup_partial_file_args.insert(
+            "file".to_string(),
+            json!(
+                partial_repo
+                    .join("src")
+                    .join("lib.rs")
+                    .to_string_lossy()
+                    .to_string()
+            ),
+        );
+        let startup_partial_file = call_text_on!("atlas_file_summary", startup_partial_file_args);
+        if !startup_partial_file.contains("indexed ProjectAtlas project")
+            || !startup_partial_file.contains("Get-Content")
+            || partial_repo
+                .join(".projectatlas")
+                .join("projectatlas.db")
+                .exists()
+        {
+            return Err(format!(
+                "startup nearest-project setting did not reject a project without DB: {startup_partial_file}"
+            )
+            .into());
         }
 
         client.cancel().await?;

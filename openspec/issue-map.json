@@ -1,0 +1,11 @@
+{
+  "changes": {
+    "add-agent-session-brief": 292,
+    "add-mcp-task-progress-model": 295,
+    "add-nearest-project-routing": 276,
+    "close-mcp-cli-parity": 281,
+    "expose-mcp-capabilities-settings": 293,
+    "harden-project-path-types": 294,
+    "simplify-token-tui-dashboard": 296
+  }
+}

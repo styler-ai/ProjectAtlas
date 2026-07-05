@@ -47,7 +47,8 @@ result text is TOON by default, so agents get compact structured payloads withou
 
 ```
 ## Startup
-0. If ProjectAtlas MCP tools are available, use `atlas_*` tools for normal scan, overview, folder, file, summary, search, slice, health, and purpose calls. Use the CLI for bootstrap/install/update/release/CI, MCP config generation, MCP startup debugging, human terminal workflows, or when MCP tools are unavailable.
+0. If ProjectAtlas MCP tools are available, use `atlas_*` tools for normal ProjectAtlas command families before shelling out. Expected parity tools include `atlas_init`, `atlas_config`, `atlas_root`/`atlas_root_set`, `atlas_ignore_list`/`atlas_ignore_init_gitignore`/`atlas_ignore_add`/`atlas_ignore_remove`, `atlas_lint`, `atlas_runtime_info`, `atlas_mcp_config`, and `atlas_map`, plus the existing scan, overview, folder, file, summary, search, slice, health, purpose, token, settings, and watcher-status tools. Use the CLI for plugin install/update/release/CI workflows, MCP server startup/debugging, continuous `watch`, terminal TUI views, or when an MCP tool is unavailable.
+0.1. When a GitHub issue has an OpenSpec change, mirror `openspec/changes/<id>/tasks.md` into the issue as a visible checklist under an `OpenSpec Tasks` or `OpenSpec Task Checklist` heading, and update checked items before status updates, closure, or release. Keep `openspec/issue-map.json` current and run `.github/scripts/issue-checklists.py` for release/check-in validation. Treat local/GitHub checklist drift as a check-in blocker; random checkboxes outside explicit task-checklist sections must not satisfy the gate.
 1. Establish the project root. Run ProjectAtlas from that root so `.projectatlas/projectatlas.db` belongs to this project only.
 2. Run `projectatlas scan` when the SQLite index may be stale.
 3. Run `projectatlas overview`.
@@ -59,7 +60,7 @@ result text is TOON by default, so agents get compact structured payloads withou
 9. Run `projectatlas search <pattern> --file-pattern <glob>` for bounded, glob-filtered text search in selected areas; search is intentionally case-insensitive by default for agent discovery, add `--case-sensitive` only when exact casing matters, add `--fuzzy` when the name is approximate, and check returned, searched file, searched byte, and truncated counters before widening the search.
 10. Run `projectatlas slice <file> --start-line <n> --end-line <m>` or `projectatlas symbols slice <file> <symbol> --symbol-parent <parent> --symbol-kind <kind> --symbol-line <line>` for exact source slices; add symbol disambiguators when duplicate names exist.
 11. Run `projectatlas health-check --source-only --limit 50` when planning cleanup or refactors.
-12. Run `projectatlas lint --report-untracked --purpose-level low`.
+12. Run `atlas_lint` or `projectatlas lint --report-untracked --purpose-level low`.
 13. Run `projectatlas token` when the user asks how many tokens ProjectAtlas saved.
 14. Only then run language-server lookups or broad file reads on the selected files.
 
@@ -214,7 +215,7 @@ and the expected release `version` when a plugin manifest or `PROJECTATLAS_VERSI
 
 ## MCP Tool Sequence
 
-Prefer MCP tools when the harness exposes them:
+Prefer MCP tools when the harness exposes them. Use CLI fallbacks only when the matching MCP tool is unavailable or the command is a reviewed exception.
 
 0. `atlas_set_project_path` or per-call `project_path`: select the repository when one MCP server may serve multiple projects; prefer per-call `project_path` for shared or concurrent hosts.
 1. `atlas_scan`: refresh repository, purpose, and symbol state.
@@ -237,6 +238,16 @@ Prefer MCP tools when the harness exposes them:
 18. `atlas_purpose_set`: write agent-approved purpose metadata into SQLite.
 19. `atlas_purpose_review`: preview or apply a reviewed purpose batch into SQLite.
 20. `atlas_health_resolve`: mark an intentional deterministic health finding resolved with rationale.
+21. `atlas_init`: initialize ProjectAtlas files for first-time setup.
+22. `atlas_runtime_info`: inspect runtime identity and capabilities.
+23. `atlas_root` and `atlas_root_set`: inspect, verify, or bind project root identity.
+24. `atlas_config`: inspect effective scan, purpose, and exclusion policy.
+25. `atlas_ignore_list`, `atlas_ignore_init_gitignore`, `atlas_ignore_add`, and `atlas_ignore_remove`: manage the stricter ProjectAtlas manual ignore layer.
+26. `atlas_lint`: run structure, purpose, and untracked-file lint gates.
+27. `atlas_mcp_config`: generate harness MCP config with absolute runtime, DB, and config paths.
+28. `atlas_map`: write an explicit legacy TOON compatibility map when needed.
+
+Reviewed CLI-only exceptions: `projectatlas mcp` starts the server process, continuous `projectatlas watch` needs a terminal/lifecycle contract, and `projectatlas token --view tui` renders a terminal dashboard. Use `atlas_watch_once`, `atlas_watch_status`, and `atlas_token_report` for MCP-safe equivalents.
 
 For read-only reviews or diagnostics, set `PROJECTATLAS_NO_TELEMETRY=1` before running CLI commands or the MCP server.
 This preserves normal atlas reads while preventing usage telemetry writes to `.projectatlas/projectatlas.db`.
@@ -246,12 +257,16 @@ This preserves normal atlas reads while preventing usage telemetry writes to `.p
 | Situation | Preferred MCP tool | CLI fallback |
 | --- | --- | --- |
 | One MCP server may serve another repository | `atlas_set_project_path` or per-call `project_path` | `projectatlas --db <repo>/.projectatlas/projectatlas.db ...` |
+| First-time ProjectAtlas setup | `atlas_init` | `projectatlas init` |
+| Runtime identity and capabilities | `atlas_runtime_info` | `projectatlas --format json runtime-info` |
+| Root diagnostics or binding | `atlas_root` with `verify` when needed, `atlas_root_set` | `projectatlas root show`, `projectatlas root verify`, `projectatlas root set <path>` |
 | Start a non-trivial repo task | `atlas_scan` if stale, then `atlas_overview` | `projectatlas scan`, then `projectatlas overview` |
 | Choose the work area | `atlas_folders` | `projectatlas folders <query>` |
 | Choose files inside a work area | `atlas_files` | `projectatlas files <query> --folder <path>` |
 | Direct glob file discovery | `atlas_files` with `file_pattern` | `projectatlas files --file-pattern <glob>` |
 | Need structured file facts | `atlas_file_summary` | `projectatlas summary <file> --limit <n>` |
-| Need effective scan/config policy | `atlas_settings` | `projectatlas config --print` |
+| Need effective scan/config policy | `atlas_config` | `projectatlas config --print` |
+| Manage manual ProjectAtlas ignores | `atlas_ignore_list`, `atlas_ignore_init_gitignore`, `atlas_ignore_add`, `atlas_ignore_remove` | `projectatlas ignore list`, `projectatlas ignore init-gitignore`, `projectatlas ignore add ...`, `projectatlas ignore remove ...` |
 | Need compressed file context | `atlas_outline` | `projectatlas outline <file>` |
 | Need functions/classes/methods/packages | `atlas_symbols` | `projectatlas symbols list --file <file>` |
 | Need imports/calls/dependencies/containment | `atlas_symbol_relations` | `projectatlas symbols relations --file <file>` |
@@ -260,11 +275,14 @@ This preserves normal atlas reads while preventing usage telemetry writes to `.p
 | Files changed locally | `atlas_watch_once` | `projectatlas watch --once` |
 | Long local editing session | `atlas_watch_status` for diagnostics | `projectatlas watch` |
 | Planning cleanup/refactor/DRY work | `atlas_health` with filters/paging when needed | `projectatlas health-check --source-only --limit <n>` |
+| Lint structure and purpose state | `atlas_lint` | `projectatlas lint --report-untracked --purpose-level low` |
 | Curating missing or generated purposes | `atlas_purpose_queue`, then `atlas_purpose_set` or `atlas_purpose_review` | `projectatlas purpose queue --limit <n>`, then `projectatlas purpose set ...` or `projectatlas purpose review --from-file <json> --apply` |
 | Intentional health conflict | `atlas_health_resolve` | `projectatlas health resolve ... --rationale <why>` |
 | User asks for saved tokens | `atlas_token_report` | `projectatlas token` |
 | Human asks for a terminal token dashboard | `atlas_token_report` first for agent state | `projectatlas token --view tui` |
-| Runtime/index diagnostics | `atlas_settings`, `atlas_watch_status` | `projectatlas settings`, `projectatlas watch-status` |
+| Runtime/index diagnostics | `atlas_settings`, `atlas_watch_status`, `atlas_runtime_info` | `projectatlas settings`, `projectatlas watch-status`, `projectatlas runtime-info` |
+| Generate harness MCP config | `atlas_mcp_config` | `projectatlas --format json --db .projectatlas/projectatlas.db mcp-config` |
+| Write explicit legacy TOON map | `atlas_map` | `projectatlas map --force` |
 | Corrupt or intentionally discarded local index | `atlas_reset_index` dry-run first | `projectatlas reset-index --dry-run`, then `projectatlas reset-index --apply` |
 | Migrating old `.purpose` files | `atlas_strip_legacy_purpose` dry-run first | `projectatlas strip-legacy-purpose --dry-run` |
 

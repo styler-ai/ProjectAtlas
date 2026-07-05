@@ -1,19 +1,21 @@
 //! Purpose: Render token telemetry as package-backed terminal dashboards.
 
 use projectatlas_core::telemetry::{
-    TOKEN_ACCOUNTING_OBSERVED_DELTA, TOKEN_BASELINE_DIRECTORY_WALK, TokenBucketOverview,
-    TokenOverview, TokenTrendReport, TokenTrendWindow,
+    TokenOverview, TokenTrendPeriod, TokenTrendReport, TokenTrendWindow,
 };
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::symbols;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Bar, BarChart, Block, Cell, Gauge, Paragraph, Row, Sparkline, Table, Wrap};
+use ratatui::widgets::{
+    Axis, Block, Cell, Chart, Dataset, Gauge, GraphType, Paragraph, Row, Table, Wrap,
+};
 use ratatui::{Frame, Terminal};
 
 /// Fixed terminal height for the token overview dashboard snapshot.
-const DASHBOARD_HEIGHT: u16 = 56;
+const DASHBOARD_HEIGHT: u16 = 35;
 /// Fixed terminal height for the token trend dashboard snapshot.
 const TREND_DASHBOARD_HEIGHT: u16 = 30;
 
@@ -76,234 +78,45 @@ fn render_overview_frame(
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(3),
             Constraint::Length(10),
-            Constraint::Length(9),
-            Constraint::Length(9),
-            Constraint::Length(6),
+            Constraint::Length(12),
             Constraint::Min(8),
-            Constraint::Length(8),
         ])
         .split(inner);
 
     render_overview_summary(frame, sections[0], overview);
-    render_overview_bars(frame, sections[1], overview);
+    render_file_handling_optimization_overview(frame, sections[1], overview);
     render_overview_trends(frame, sections[2], trends);
-    render_file_handling_optimization_overview(frame, sections[3], overview);
-    render_overview_gauges(frame, sections[4], overview);
-    render_bucket_table(frame, sections[5], overview);
-    render_overview_notes(frame, sections[6], overview);
+    render_overview_notes(frame, sections[3], overview);
 }
 
 /// Draw the top overview metadata block.
 fn render_overview_summary(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
     let text = vec![
         Line::from(vec![
+            label("Conservative tokens avoided"),
+            signed_value(overview.tokens_avoided),
+            Span::raw("   "),
+            label("Avoided reads"),
+            value(overview.likely_file_reads_avoided),
+        ]),
+        Line::from(vec![
             label("Lookups"),
             value(overview.calls),
             Span::raw("   "),
-            label("Gross estimate"),
-            Span::raw("without "),
-            value(overview.estimated_without_projectatlas),
-            Span::raw(" / with "),
-            value(overview.estimated_with_projectatlas),
-        ]),
-        Line::from(vec![
-            label("Gross saved (without - with)"),
-            signed_value(overview.legacy_gross_estimated_saved),
-            Span::raw("   "),
-            Span::raw(format!(
-                "local {} estimate, not provider billing",
-                overview.estimator
-            )),
+            label("Estimate"),
+            Span::raw("local heuristic (not billing tokens)"),
         ]),
     ];
     frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), area);
 }
 
-/// Draw headline accounting gauges.
-fn render_overview_gauges(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
-        ])
-        .split(area);
-    let max_positive = overview
-        .estimated_without_projectatlas
-        .max(overview.estimated_with_projectatlas)
-        .max(overview.tokens_avoided.max(0).unsigned_abs())
-        .max(1);
-    render_gauge(
-        frame,
-        chunks[0],
-        "Saved/avoided tokens",
-        overview.tokens_avoided,
-        max_positive,
-        Color::Green,
-    );
-    render_gauge(
-        frame,
-        chunks[1],
-        "Measured summaries",
-        overview.measured_tokens_saved,
-        max_positive,
-        Color::Yellow,
-    );
-    render_gauge(
-        frame,
-        chunks[2],
-        "Narrowed files",
-        overview.deduped_modeled_tokens_avoided,
-        max_positive,
-        Color::Magenta,
-    );
-}
-
-/// Draw one signed token gauge.
-fn render_gauge(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    title: &str,
-    value: isize,
-    max_positive: usize,
-    color: Color,
-) {
-    let positive = value.max(0).unsigned_abs();
-    let ratio = (positive as f64 / max_positive as f64).clamp(0.0, 1.0);
-    let gauge = Gauge::default()
-        .block(Block::bordered().title(title))
-        .gauge_style(Style::default().fg(color).add_modifier(Modifier::BOLD))
-        .ratio(ratio)
-        .label(format!("{} tokens", signed_count(value)));
-    frame.render_widget(gauge, area);
-}
-
-/// Draw a vertical with/without `ProjectAtlas` token comparison.
-fn render_overview_bars(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
-    let max_value = overview
-        .estimated_without_projectatlas
-        .max(overview.estimated_with_projectatlas)
-        .max(overview.legacy_gross_estimated_saved.max(0).unsigned_abs())
-        .max(1);
-    let block = Block::bordered().title("Gross tokens: without vs with ProjectAtlas");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(3)])
-        .split(inner);
-    let bars = token_comparison_columns(overview)
-        .into_iter()
-        .map(|(label, _value_text, value, color)| {
-            Bar::with_label(
-                token_comparison_short_label(label),
-                saturating_usize_to_u64(value),
-            )
-            .text_value("")
-            .style(Style::default().fg(color))
-            .value_style(Style::default().fg(color).add_modifier(Modifier::BOLD))
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        BarChart::vertical(bars)
-            .max(saturating_usize_to_u64(max_value))
-            .bar_width(12)
-            .bar_gap(6)
-            .label_style(Style::default().fg(Color::DarkGray))
-            .value_style(
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        sections[0],
-    );
-    render_token_comparison_totals(frame, sections[1], overview);
-}
-
-/// Return the values used by the with/without/saved comparison chart.
-fn token_comparison_columns(overview: &TokenOverview) -> [(&'static str, String, usize, Color); 3] {
-    [
-        (
-            "Without ProjectAtlas",
-            grouped_count(overview.estimated_without_projectatlas),
-            overview.estimated_without_projectatlas,
-            Color::Blue,
-        ),
-        (
-            "With ProjectAtlas",
-            grouped_count(overview.estimated_with_projectatlas),
-            overview.estimated_with_projectatlas,
-            Color::Cyan,
-        ),
-        (
-            "Saved by ProjectAtlas",
-            signed_count(overview.legacy_gross_estimated_saved),
-            overview.legacy_gross_estimated_saved.max(0).unsigned_abs(),
-            Color::Green,
-        ),
-    ]
-}
-
-/// Return a short label that fits under a compact `BarChart` bar.
-fn token_comparison_short_label(label: &str) -> &'static str {
-    match label {
-        "Without ProjectAtlas" => "Without",
-        "With ProjectAtlas" => "With",
-        "Saved by ProjectAtlas" => "Saved",
-        _ => "Value",
-    }
-}
-
-/// Draw exact totals below the compact token comparison chart.
-fn render_token_comparison_totals(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
-    let columns = token_comparison_columns(overview);
-    let table = Table::new(
-        [
-            Row::new([
-                Cell::from(columns[0].0),
-                Cell::from(columns[1].0),
-                Cell::from(columns[2].0),
-            ])
-            .style(
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Row::new([
-                Cell::from(columns[0].1.clone()).style(
-                    Style::default()
-                        .fg(columns[0].3)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Cell::from(columns[1].1.clone()).style(
-                    Style::default()
-                        .fg(columns[1].3)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Cell::from(columns[2].1.clone()).style(
-                    Style::default()
-                        .fg(columns[2].3)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-        ],
-        [
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
-        ],
-    )
-    .column_spacing(2);
-    frame.render_widget(table, area);
-}
-
 /// Draw compact saved-token trends for the standard reporting windows.
 fn render_overview_trends(frame: &mut Frame<'_>, area: Rect, trends: &[TokenTrendReport]) {
-    let block = Block::bordered().title("Saved-token trends");
+    let block = Block::bordered()
+        .title("Saved-token trends")
+        .border_style(Style::default().fg(Color::DarkGray));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let rows = Layout::default()
@@ -329,43 +142,85 @@ fn render_overview_trends(frame: &mut Frame<'_>, area: Rect, trends: &[TokenTren
     for (index, window) in windows.into_iter().enumerate() {
         let trend = trends.iter().find(|report| report.window == window);
         let area = areas[index / 2][index % 2];
-        render_trend_sparkline(frame, area, window, trend);
+        render_trend_chart(frame, area, window, trend);
     }
 }
 
 /// Draw one compact saved-token trend strip.
-fn render_trend_sparkline(
+fn render_trend_chart(
     frame: &mut Frame<'_>,
     area: Rect,
     window: TokenTrendWindow,
     trend: Option<&TokenTrendReport>,
 ) {
     let periods = trend.map_or(0, |report| report.periods.len());
-    let latest = trend.and_then(|report| report.periods.last()).map_or_else(
-        || "no data".to_string(),
-        |period| signed_count(period.estimated_saved),
-    );
-    let data = trend
-        .map(|report| {
-            report
-                .periods
-                .iter()
-                .map(|period| saturating_usize_to_u64(period.estimated_saved.max(0).unsigned_abs()))
-                .collect::<Vec<_>>()
-        })
-        .filter(|values| !values.is_empty())
-        .unwrap_or_else(|| vec![0]);
+    let period_label = if periods == 1 { "period" } else { "periods" };
+    let points = signed_trend_points(trend.map(|report| report.periods.as_slice()));
+    let [lower, upper] = signed_y_bounds(&points);
+    let trend_color = signed_trend_color(&points);
     frame.render_widget(
-        Sparkline::default()
-            .block(Block::bordered().title(format!("{window} | latest {latest} | {periods}p")))
-            .data(data)
-            .style(
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
+        Chart::new(vec![
+            Dataset::default()
+                .marker(symbols::Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(
+                    Style::default()
+                        .fg(trend_color)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .data(&points),
+        ])
+        .block(Block::bordered().title(format!("{window} trend | {periods} {period_label}")))
+        .x_axis(Axis::default().bounds([0.0, (points.len().saturating_sub(1)) as f64]))
+        .y_axis(Axis::default().bounds([lower, upper])),
         area,
     );
+}
+
+/// Convert trend periods into signed chart coordinates.
+fn signed_trend_points(periods: Option<&[TokenTrendPeriod]>) -> Vec<(f64, f64)> {
+    let mut points = periods
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .map(|(index, period)| (index as f64, period.estimated_saved as f64))
+        .collect::<Vec<_>>();
+    if points.is_empty() {
+        vec![(0.0, 0.0)]
+    } else if points.len() == 1 {
+        points.push((1.0, points[0].1));
+        points
+    } else {
+        points
+    }
+}
+
+/// Return y-axis bounds that preserve the sign of trend values and include zero.
+fn signed_y_bounds(points: &[(f64, f64)]) -> [f64; 2] {
+    let min_value = points
+        .iter()
+        .map(|(_, value)| *value)
+        .fold(0.0_f64, f64::min);
+    let max_value = points
+        .iter()
+        .map(|(_, value)| *value)
+        .fold(0.0_f64, f64::max);
+    if (min_value - max_value).abs() < f64::EPSILON {
+        [min_value - 1.0, max_value + 1.0]
+    } else {
+        [min_value, max_value]
+    }
+}
+
+/// Return a trend color that signals all-loss or mixed-sign series.
+fn signed_trend_color(points: &[(f64, f64)]) -> Color {
+    let has_positive = points.iter().any(|(_, value)| *value > 0.0);
+    let has_negative = points.iter().any(|(_, value)| *value < 0.0);
+    match (has_positive, has_negative) {
+        (true, true) => Color::Yellow,
+        (false, true) => Color::Red,
+        _ => Color::Green,
+    }
 }
 
 /// Draw a compact table-style file-handling optimization overview.
@@ -374,191 +229,206 @@ fn render_file_handling_optimization_overview(
     area: Rect,
     overview: &TokenOverview,
 ) {
-    let block = Block::bordered().title("File Handling Optimization Overview");
+    let block = Block::bordered()
+        .title("File Handling Optimization Overview")
+        .border_style(Style::default().fg(Color::DarkGray));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let compact = inner.width < 90;
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(2),
             Constraint::Min(4),
+            Constraint::Length(1),
         ])
         .split(inner);
     frame.render_widget(
-        Paragraph::new(file_handling_saved_tokens_line(overview)).wrap(Wrap { trim: true }),
+        Paragraph::new(vec![
+            file_handling_saved_tokens_line(overview, compact),
+            file_handling_reads_line(overview, compact),
+        ])
+        .wrap(Wrap { trim: true }),
         sections[0],
     );
-    frame.render_widget(
-        Paragraph::new(file_handling_reads_line(overview)).wrap(Wrap { trim: true }),
-        sections[1],
-    );
-    let (observed_tokens, modeled_tokens, total_tokens) = file_handling_token_mix(overview);
-    let observed_ratio = ratio(observed_tokens, total_tokens);
+    render_savings_source_table(frame, sections[1], overview);
+    let token_mix = file_handling_token_mix(overview);
+    let observed_ratio = ratio(token_mix.observed_abs, token_mix.total_abs());
+    let gauge_color = if token_mix.net() < 0 {
+        Color::Red
+    } else {
+        Color::Green
+    };
     frame.render_widget(
         Gauge::default()
             .gauge_style(
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(gauge_color)
                     .add_modifier(Modifier::BOLD),
             )
             .ratio(observed_ratio)
-            .label(format!(
-                "observed tokens {} / modeled tokens {}",
-                percentage_label(observed_tokens, total_tokens),
-                percentage_label(modeled_tokens, total_tokens)
-            )),
+            .label(token_mix_label(token_mix)),
         sections[2],
     );
-    render_file_handling_table(frame, sections[3], overview);
 }
 
-/// Return the conservative saved-token equation for file handling.
-fn file_handling_saved_tokens_line(overview: &TokenOverview) -> Line<'static> {
-    Line::from(vec![
-        label("Saved/avoided tokens"),
-        signed_value(overview.tokens_avoided),
-        Span::raw(" = "),
-        signed_value(overview.measured_tokens_saved),
-        Span::raw(" observed + "),
-        signed_value(overview.deduped_modeled_tokens_avoided),
-        Span::raw(" avoided"),
-    ])
-}
-
-/// Return the headline file-read-avoidance equation.
-fn file_handling_reads_line(overview: &TokenOverview) -> Line<'static> {
-    Line::from(vec![
-        label("File reads avoided"),
-        value(overview.likely_file_reads_avoided),
-        Span::raw(" = observed "),
-        value(overview.observed_file_read_replacements),
-        Span::raw(" + search-modeled "),
-        value(overview.modeled_file_reads_avoided),
-        Span::raw(format!(" ({})", overview.read_avoidance_confidence)),
-    ])
-}
-
-/// Return the token operands that back the file-handling contribution gauge.
-fn file_handling_token_mix(overview: &TokenOverview) -> (usize, usize, usize) {
-    let observed = positive_token_value(overview.measured_tokens_saved);
-    let modeled = positive_token_value(overview.deduped_modeled_tokens_avoided);
-    let total = observed.saturating_add(modeled);
-    (observed, modeled, total)
-}
-
-/// Convert signed token savings into the positive contribution shown in gauges.
-fn positive_token_value(value: isize) -> usize {
-    value.max(0).unsigned_abs()
-}
-
-/// Draw observed and modeled file-handling rows.
-fn render_file_handling_table(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
-    let rows = [
-        Row::new(vec![
-            Cell::from("Observed summary/slices"),
-            Cell::from(grouped_count(overview.observed_file_read_replacements)),
-            Cell::from(signed_count(overview.measured_tokens_saved)),
-            Cell::from("replaced reads"),
-        ])
-        .style(Style::default().fg(Color::Green)),
-        Row::new(vec![
-            Cell::from("Search-modeled narrowing"),
-            Cell::from(grouped_count(overview.modeled_file_reads_avoided)),
-            Cell::from(signed_count(overview.deduped_modeled_tokens_avoided)),
-            Cell::from("avoided opens"),
-        ])
-        .style(Style::default().fg(Color::Magenta)),
-    ];
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(24),
-            Constraint::Length(8),
-            Constraint::Length(18),
-            Constraint::Min(18),
-        ],
-    )
-    .header(
-        Row::new(vec!["Source", "reads", "saved tokens", "meaning"])
-            .bottom_margin(1)
-            .style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-    )
-    .column_spacing(2);
-    frame.render_widget(table, area);
-}
-
-/// Draw the bucket table.
-fn render_bucket_table(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
-    let mut rows = overview
-        .buckets
-        .iter()
-        .take(7)
-        .map(|bucket| {
+/// Draw the visible source rows inside the file-handling overview.
+fn render_savings_source_table(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
+    let compact = area.width < 90;
+    let (headers, constraints, column_spacing) = if compact {
+        (
+            ["Impact source", "Reads", "Tokens", "Meaning"],
+            [
+                Constraint::Length(15),
+                Constraint::Length(7),
+                Constraint::Length(14),
+                Constraint::Min(14),
+            ],
+            1,
+        )
+    } else {
+        (
+            [
+                "Impact source",
+                "File reads",
+                "Tokens saved",
+                "Plain meaning",
+            ],
+            [
+                Constraint::Length(26),
+                Constraint::Length(14),
+                Constraint::Length(18),
+                Constraint::Min(24),
+            ],
+            2,
+        )
+    };
+    let mut rows = savings_source_rows_for_width(overview, compact)
+        .into_iter()
+        .map(|source| {
             Row::new(vec![
-                Cell::from(bucket_display_name(bucket)),
-                Cell::from(grouped_count(bucket.calls)),
-                Cell::from(signed_count(bucket.estimated_saved)),
-                Cell::from(bucket_plain_meaning(bucket)),
+                Cell::from(source.label),
+                Cell::from(grouped_count(source.steps)),
+                Cell::from(signed_count(source.tokens)),
+                Cell::from(source.meaning),
             ])
+            .style(Style::default().fg(source.color))
         })
         .collect::<Vec<_>>();
     if rows.is_empty() {
         rows.push(Row::new(vec![
             Cell::from("none"),
-            Cell::from("no telemetry rows"),
-            Cell::from(""),
             Cell::from("0"),
+            Cell::from("0"),
+            Cell::from("no telemetry rows"),
         ]));
     }
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(18),
-            Constraint::Length(7),
-            Constraint::Length(16),
-            Constraint::Min(20),
-        ],
-    )
-    .header(
-        Row::new(vec!["How it helped", "steps", "tokens", "meaning"])
-            .bottom_margin(1)
-            .style(
+    let table = Table::new(rows, constraints)
+        .header(
+            Row::new(headers).bottom_margin(1).style(
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-    )
-    .block(Block::bordered().title("Where the savings came from"))
-    .column_spacing(2)
-    .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        )
+        .column_spacing(column_spacing)
+        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_widget(table, area);
 }
 
-/// Return a plain label for one token-savings bucket.
-fn bucket_display_name(bucket: &TokenBucketOverview) -> String {
-    if bucket.accounting_layer == TOKEN_ACCOUNTING_OBSERVED_DELTA {
-        "Summaries/slices".to_string()
-    } else if bucket.denominator_kind == TOKEN_BASELINE_DIRECTORY_WALK {
-        "Skipped folders".to_string()
+/// Return the conservative saved-token equation for file handling.
+fn file_handling_saved_tokens_line(overview: &TokenOverview, compact: bool) -> Line<'static> {
+    let modeled_suffix = if compact {
+        " modeled"
     } else {
-        "Fewer candidates".to_string()
+        " modeled navigation"
+    };
+    Line::from(vec![
+        label(if compact { "Tokens" } else { "Tokens avoided" }),
+        signed_value(overview.tokens_avoided),
+        Span::raw(" = "),
+        signed_value(overview.measured_tokens_saved),
+        Span::raw(" observed + "),
+        signed_value(overview.deduped_modeled_tokens_avoided),
+        Span::raw(modeled_suffix),
+    ])
+}
+
+/// Return the headline file-read-avoidance equation.
+fn file_handling_reads_line(overview: &TokenOverview, compact: bool) -> Line<'static> {
+    Line::from(vec![
+        label(if compact {
+            "Reads"
+        } else {
+            "File reads avoided"
+        }),
+        value(overview.likely_file_reads_avoided),
+        Span::raw(" = observed "),
+        value(overview.observed_file_read_replacements),
+        Span::raw(if compact {
+            " + modeled "
+        } else {
+            " + search-modeled "
+        }),
+        value(overview.modeled_file_reads_avoided),
+        Span::raw(if compact {
+            String::new()
+        } else {
+            format!(" ({})", overview.read_avoidance_confidence)
+        }),
+    ])
+}
+
+/// Signed and absolute token operands shown in the file-handling contribution gauge.
+#[derive(Clone, Copy)]
+struct TokenMix {
+    /// Signed observed summary/slice savings.
+    observed: isize,
+    /// Signed deduped modeled navigation savings.
+    modeled: isize,
+    /// Absolute observed contribution magnitude for a ratio widget.
+    observed_abs: usize,
+    /// Absolute modeled contribution magnitude for a ratio widget.
+    modeled_abs: usize,
+}
+
+impl TokenMix {
+    /// Return the signed net total represented by the visible operands.
+    fn net(self) -> isize {
+        self.observed.saturating_add(self.modeled)
+    }
+
+    /// Return the absolute denominator used by the contribution gauge.
+    fn total_abs(self) -> usize {
+        self.observed_abs.saturating_add(self.modeled_abs)
     }
 }
 
-/// Explain one token-savings bucket without exposing accounting jargon first.
-fn bucket_plain_meaning(bucket: &TokenBucketOverview) -> String {
-    if bucket.accounting_layer == TOKEN_ACCOUNTING_OBSERVED_DELTA {
-        "replaced reads".to_string()
-    } else if bucket.denominator_kind == TOKEN_BASELINE_DIRECTORY_WALK {
-        "skipped folders".to_string()
+/// Return the token operands that back the file-handling contribution gauge.
+fn file_handling_token_mix(overview: &TokenOverview) -> TokenMix {
+    TokenMix {
+        observed: overview.measured_tokens_saved,
+        modeled: overview.deduped_modeled_tokens_avoided,
+        observed_abs: overview.measured_tokens_saved.unsigned_abs(),
+        modeled_abs: overview.deduped_modeled_tokens_avoided.unsigned_abs(),
+    }
+}
+
+/// Return the file-handling gauge label without hiding signed losses.
+fn token_mix_label(mix: TokenMix) -> String {
+    if mix.observed < 0 || mix.modeled < 0 {
+        format!(
+            "signed saved-token mix: observed {} / modeled {}; net {}",
+            signed_count(mix.observed),
+            signed_count(mix.modeled),
+            signed_count(mix.net())
+        )
     } else {
-        "narrowed files".to_string()
+        format!(
+            "saved-token mix: observed {} / modeled {}",
+            percentage_label(mix.observed_abs, mix.total_abs()),
+            percentage_label(mix.modeled_abs, mix.total_abs())
+        )
     }
 }
 
@@ -566,36 +436,25 @@ fn bucket_plain_meaning(bucket: &TokenBucketOverview) -> String {
 fn render_overview_notes(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
     let mut lines = vec![
         Line::from(vec![
-            label("Conservative tokens avoided"),
-            signed_value(overview.tokens_avoided),
+            label("Accounting"),
+            Span::raw("observed replacements + deduped modeled navigation"),
         ]),
         Line::from(vec![
-            label("Measured summaries"),
-            signed_value(overview.measured_tokens_saved),
-            Span::raw("   "),
-            label("Narrowed navigation"),
-            signed_value(overview.deduped_modeled_tokens_avoided),
-        ]),
-        Line::from(vec![
-            label("File reads avoided"),
-            value(overview.likely_file_reads_avoided),
-        ]),
-        Line::from(vec![
-            Span::raw(" = observed "),
-            value(overview.observed_file_read_replacements),
-            Span::raw(" + search-modeled "),
-            value(overview.modeled_file_reads_avoided),
-            Span::raw(format!(" ({})", overview.read_avoidance_confidence)),
-        ]),
-        Line::from(vec![
-            label("Repeated estimates handled"),
+            label("Deduped"),
             value(overview.repeated_baselines_deduped),
-            Span::raw(" duplicate navigation baselines collapsed"),
+            Span::raw(" repeated navigation baselines collapsed"),
+        ]),
+        Line::from(vec![
+            label("Read estimate"),
+            Span::raw(format!(
+                "{} file-read estimate",
+                overview.read_avoidance_confidence
+            )),
         ]),
     ];
     if let Some(calibration) = &overview.calibration {
         lines.push(Line::from(vec![
-            label("calibration"),
+            label("Tokenizer check"),
             Span::raw(format!(
                 "{} files, heuristic {}, {} {}",
                 calibration.files,
@@ -606,16 +465,68 @@ fn render_overview_notes(frame: &mut Frame<'_>, area: Rect, overview: &TokenOver
         ]));
     } else {
         lines.push(Line::from(vec![
-            label("calibration"),
-            Span::raw("optional tokenizer audit: --tokenizer o200k_base or cl100k_base"),
+            label("Tokenizer check"),
+            Span::raw("optional audit: --tokenizer o200k_base or cl100k_base"),
         ]));
     }
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::bordered().title("What this means"))
+            .block(
+                Block::bordered()
+                    .title("What this means")
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            )
             .wrap(Wrap { trim: true }),
         area,
     );
+}
+
+/// One visible aggregate row for savings-source telemetry.
+struct SavingsSourceRow {
+    /// Human label shown in the source table.
+    label: &'static str,
+    /// Number of telemetry steps represented by the row.
+    steps: usize,
+    /// Estimated saved tokens represented by the row.
+    tokens: isize,
+    /// Plain-language explanation for humans.
+    meaning: &'static str,
+    /// Row color used by Ratatui.
+    color: Color,
+}
+
+/// Aggregate visible accounting with labels that fit the current table width.
+fn savings_source_rows_for_width(overview: &TokenOverview, compact: bool) -> Vec<SavingsSourceRow> {
+    let mut rows = Vec::new();
+    if overview.observed_file_read_replacements > 0 || overview.measured_tokens_saved != 0 {
+        let (label, meaning) = if compact {
+            ("Observed reads", "files replaced")
+        } else {
+            ("Observed reads", "full-file opens replaced")
+        };
+        rows.push(SavingsSourceRow {
+            label,
+            steps: overview.observed_file_read_replacements,
+            tokens: overview.measured_tokens_saved,
+            meaning,
+            color: Color::Green,
+        });
+    }
+    if overview.modeled_file_reads_avoided > 0 || overview.deduped_modeled_tokens_avoided != 0 {
+        let (label, meaning) = if compact {
+            ("Modeled search", "candidates skipped")
+        } else {
+            ("Modeled search", "search candidates skipped")
+        };
+        rows.push(SavingsSourceRow {
+            label,
+            steps: overview.modeled_file_reads_avoided,
+            tokens: overview.deduped_modeled_tokens_avoided,
+            meaning,
+            color: Color::Magenta,
+        });
+    }
+    rows
 }
 
 /// Draw the full trend dashboard frame.
@@ -660,21 +571,19 @@ fn render_trend_frame(frame: &mut Frame<'_>, report: &TokenTrendReport) {
     ];
     frame.render_widget(Paragraph::new(summary), sections[0]);
 
-    let trend_values = report
-        .periods
-        .iter()
-        .map(|period| saturating_usize_to_u64(period.estimated_saved.max(0).unsigned_abs()))
-        .collect::<Vec<_>>();
-    let spark_data = if trend_values.is_empty() {
-        vec![0]
-    } else {
-        trend_values
-    };
+    let trend_points = signed_trend_points(Some(&report.periods));
+    let [lower, upper] = signed_y_bounds(&trend_points);
     frame.render_widget(
-        Sparkline::default()
-            .block(Block::bordered().title("Saved Tokens Trend"))
-            .data(spark_data)
-            .style(Style::default().fg(Color::Green)),
+        Chart::new(vec![
+            Dataset::default()
+                .marker(symbols::Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(signed_trend_color(&trend_points)))
+                .data(&trend_points),
+        ])
+        .block(Block::bordered().title("Saved Tokens Trend"))
+        .x_axis(Axis::default().bounds([0.0, (trend_points.len().saturating_sub(1)) as f64]))
+        .y_axis(Axis::default().bounds([lower, upper])),
         sections[1],
     );
 
@@ -850,16 +759,12 @@ fn signed_count(value: isize) -> String {
     }
 }
 
-/// Convert `usize` to `u64` without panicking on unusual targets.
-fn saturating_usize_to_u64(value: usize) -> u64 {
-    u64::try_from(value).unwrap_or(u64::MAX)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        DASHBOARD_HEIGHT, dashboard_width, render_overview_frame, render_token_dashboard,
-        render_token_trend_dashboard, signed_count, token_comparison_columns,
+        DASHBOARD_HEIGHT, dashboard_width, render_dashboard_to_string, render_overview_frame,
+        render_token_dashboard, render_token_trend_dashboard, savings_source_rows_for_width,
+        signed_count, signed_trend_points, signed_y_bounds,
     };
     use projectatlas_core::telemetry::{
         TokenOverview, TokenTrendPeriod, TokenTrendReport, TokenTrendWindow, usage_from_estimates,
@@ -890,48 +795,50 @@ mod tests {
 
         assert!(dashboard.contains("ProjectAtlas Savings Overview"));
         assert!(dashboard.contains("Conservative tokens avoided"));
-        assert!(dashboard.contains("Measured summaries"));
-        assert!(dashboard.contains("Narrowed files"));
-        assert!(dashboard.contains("Gross tokens: without vs with ProjectAtlas"));
-        assert!(dashboard.contains("Saved-token trends"));
-        assert!(dashboard.contains("day | latest"));
-        assert!(dashboard.contains("week | latest"));
-        assert!(dashboard.contains("month | latest"));
-        assert!(dashboard.contains("year | latest"));
-        assert!(dashboard.contains("Without ProjectAtlas"));
-        assert!(dashboard.contains("With ProjectAtlas"));
-        assert!(dashboard.contains("Saved by ProjectAtlas"));
-        assert!(dashboard.contains("File Handling Optimization Overview"));
-        assert!(dashboard.contains("Saved/avoided tokens"));
+        assert!(dashboard.contains("Avoided reads"));
         assert!(dashboard.contains("File reads avoided"));
-        assert!(dashboard.contains("saved tokens"));
-        assert!(dashboard.contains("Observed summary/slices"));
-        assert!(dashboard.contains("Search-modeled narrowing"));
-        assert!(dashboard.contains("Where the savings came from"));
-        assert!(dashboard.contains("Summaries/slices"));
-        assert!(dashboard.contains("Fewer candidates"));
-        assert!(dashboard.contains("search-modeled"));
-        assert!(dashboard.contains("duplicate navigation baselines collapsed"));
-        assert!(dashboard.contains("█") || dashboard.contains("▌") || dashboard.contains("▏"));
+        assert!(dashboard.contains("File Handling Optimization Overview"));
+        assert!(dashboard.contains("Impact source"));
+        assert!(dashboard.contains("File reads"));
+        assert!(dashboard.contains("Tokens avoided"));
+        assert!(dashboard.contains("Observed reads"));
+        assert!(dashboard.contains("Modeled search"));
+        assert!(!dashboard.contains("Total shown"));
+        assert!(dashboard.contains("Saved-token trends"));
+        assert!(dashboard.contains("day trend"));
+        assert!(dashboard.contains("week trend"));
+        assert!(dashboard.contains("month trend"));
+        assert!(dashboard.contains("year trend"));
+        assert!(dashboard.contains("Accounting"));
+        assert!(dashboard.contains("repeated navigation baselines collapsed"));
+        assert!(dashboard.contains("Tokenizer check"));
+        assert!(dashboard_contains_chart_glyph(&dashboard));
+        assert!(!dashboard.contains("How ProjectAtlas helped"));
+        assert!(!dashboard.contains("Observed summaries/slices"));
+        assert!(!dashboard.contains("Search-modeled narrowing"));
+        assert!(!dashboard.contains("Gross tokens: without vs with ProjectAtlas"));
+        assert!(!dashboard.contains("Gross comparison"));
+        assert!(!dashboard.contains("Without ProjectAtlas"));
+        assert!(!dashboard.contains("With ProjectAtlas"));
+        assert!(!dashboard.contains("Saved by ProjectAtlas"));
+        assert!(!dashboard.contains("Where the savings came from"));
+        assert!(!dashboard.contains("Measured summaries"));
+        assert!(!dashboard.contains("Narrowed files"));
+        assert!(!dashboard.contains("Fewer candidates"));
 
-        let compare = dashboard
-            .find("Gross tokens: without vs with ProjectAtlas")
-            .unwrap_or(usize::MAX);
-        let trend = dashboard.find("Saved-token trends").unwrap_or(usize::MAX);
         let file_reads = dashboard
             .find("File Handling Optimization Overview")
             .unwrap_or(usize::MAX);
-        let buckets = dashboard
-            .find("Where the savings came from")
-            .unwrap_or(usize::MAX);
+        let trend = dashboard.find("Saved-token trends").unwrap_or(usize::MAX);
         let notes = dashboard.find("What this means").unwrap_or(usize::MAX);
-        assert!(compare < trend);
-        assert!(trend < file_reads);
-        assert!(file_reads < buckets);
-        assert!(buckets < notes);
+        assert!(file_reads < trend);
+        assert!(trend < notes);
 
-        assert_header_margin(&dashboard, "Source", "Observed summary/slices");
-        assert_header_margin(&dashboard, "How it helped", "Summaries/slices");
+        assert_header_margin(&dashboard, "Impact source", "Observed reads");
+        assert_occurs_once(&dashboard, "Conservative tokens avoided");
+        assert_occurs_once(&dashboard, "File reads avoided");
+        assert_occurs_once(&dashboard, "File Handling Optimization Overview");
+        assert_occurs_once(&dashboard, "Saved-token trends");
     }
 
     #[test]
@@ -952,15 +859,52 @@ mod tests {
         let trends = sample_trends();
         let buffer = render_overview_buffer(&overview, Some("s"), &trends);
 
-        assert_cell_style(&buffer, "Source", Color::Cyan, Modifier::BOLD);
-        assert_cell_style(&buffer, "saved tokens", Color::Cyan, Modifier::BOLD);
-        assert_cell_style(&buffer, "How it helped", Color::Cyan, Modifier::BOLD);
-        assert_cell_style(
-            &buffer,
-            "Saved by ProjectAtlas",
-            Color::DarkGray,
-            Modifier::BOLD,
-        );
+        assert_cell_style(&buffer, "Impact source", Color::Cyan, Modifier::BOLD);
+        assert_cell_style(&buffer, "Tokens saved", Color::Cyan, Modifier::BOLD);
+        assert_cell_style(&buffer, "Plain meaning", Color::Cyan, Modifier::BOLD);
+        assert_cell_style(&buffer, "Observed reads", Color::Green, Modifier::empty());
+        assert_cell_style(&buffer, "Modeled search", Color::Magenta, Modifier::empty());
+    }
+
+    #[test]
+    fn overview_dashboard_uses_compact_source_table_at_narrow_width() {
+        let events = [
+            usage_from_text(
+                "s",
+                "summary",
+                Some("src/lib.rs".to_string()),
+                None,
+                "abcdabcd",
+                "ab",
+            ),
+            usage_from_estimates(
+                "s",
+                "search",
+                None,
+                Some("token".to_string()),
+                1_234_567_932,
+                42,
+            ),
+        ];
+        let overview = TokenOverview::from_events(&events);
+        let trends = sample_trends();
+        let dashboard = render_dashboard_to_string(80, DASHBOARD_HEIGHT, |frame| {
+            render_overview_frame(frame, &overview, Some("s"), &trends);
+        });
+
+        assert!(dashboard.contains("Impact source"));
+        assert!(dashboard.contains("Reads"));
+        assert!(dashboard.contains("Tokens"));
+        assert!(dashboard.contains("Observed reads"));
+        assert!(dashboard.contains("Modeled search"));
+        assert!(dashboard.contains("1,234,567,890"));
+        assert!(!dashboard.contains("Total shown"));
+        assert!(!dashboard.contains("headline conservative total"));
+        assert!(!dashboard.contains("Observed summaries/slic"));
+        assert!(!dashboard.contains("Search-modeled narrowin"));
+        assert!(!dashboard.contains("How ProjectAtlas helped"));
+        assert!(!dashboard.contains("How PA helped"));
+        assert!(!dashboard.contains(" obs + "));
     }
 
     #[test]
@@ -1004,27 +948,84 @@ mod tests {
             );
         }
 
-        let columns = token_comparison_columns(&overview);
-        assert_eq!(columns[0].0, "Without ProjectAtlas");
-        assert_eq!(columns[0].2, overview.estimated_without_projectatlas);
-        assert_eq!(columns[1].0, "With ProjectAtlas");
-        assert_eq!(columns[1].2, overview.estimated_with_projectatlas);
-        assert_eq!(columns[2].0, "Saved by ProjectAtlas");
-        assert_eq!(columns[2].1, signed_count(gross_saved));
-        assert_eq!(columns[2].2 as isize, gross_saved);
-        assert_ne!(columns[2].1, signed_count(conservative_avoided));
-
         let trends = sample_trends();
         let dashboard = render_token_dashboard(&overview, Some("s"), &trends);
-        assert!(dashboard.contains(&signed_count(gross_saved)));
+        let source_rows = savings_source_rows_for_width(&overview, false);
+        let source_steps = source_rows.iter().map(|row| row.steps).sum::<usize>();
+        let source_tokens = source_rows.iter().map(|row| row.tokens).sum::<isize>();
+
+        assert_eq!(source_steps, overview.likely_file_reads_avoided);
+        assert_eq!(source_tokens, conservative_avoided);
         assert!(dashboard.contains(&signed_count(conservative_avoided)));
+        assert!(!dashboard.contains(&signed_count(gross_saved)));
         assert!(dashboard.contains(&format!(
-            "{} = {} observed + {} avoided",
+            "{} = {} observed + {} modeled navigation",
             signed_count(conservative_avoided),
             signed_count(overview.measured_tokens_saved),
             signed_count(overview.deduped_modeled_tokens_avoided)
         )));
-        assert!(dashboard.contains("observed 1 + search-modeled 3"));
+        assert!(dashboard.contains("4 = observed 1 + search-modeled 3"));
+        assert!(dashboard.contains("Observed reads"));
+        assert!(dashboard.contains("Modeled search"));
+        assert!(!dashboard.contains("Total shown"));
+        assert!(!dashboard.contains("Observed summaries/slices"));
+        assert!(!dashboard.contains("Search-modeled narrowing"));
+        assert!(!dashboard.contains("latest"));
+        assert!(!dashboard.contains("Gross comparison"));
+        assert!(!dashboard.contains("Where the savings came from"));
+        assert!(!dashboard.contains("Fewer candidates"));
+    }
+
+    #[test]
+    fn overview_trend_titles_do_not_expose_gross_saved_values() {
+        let full_file = "x".repeat(400);
+        let atlas_summary = "x".repeat(320);
+        let overview = TokenOverview::from_events(&[
+            usage_from_text(
+                "s",
+                "summary",
+                Some("src/lib.rs".to_string()),
+                None,
+                &full_file,
+                &atlas_summary,
+            ),
+            usage_from_estimates(
+                "s",
+                "search",
+                None,
+                Some("token".to_string()),
+                326_515_240,
+                80,
+            ),
+            usage_from_estimates(
+                "s",
+                "search",
+                None,
+                Some("token".to_string()),
+                172_316_346,
+                0,
+            ),
+        ]);
+        let gross_saved_text = signed_count(overview.legacy_gross_estimated_saved);
+        let conservative_text = signed_count(overview.tokens_avoided);
+        assert_ne!(gross_saved_text, conservative_text);
+
+        let trends = vec![TokenTrendReport::new(
+            Some("s".to_string()),
+            TokenTrendWindow::Year,
+            vec![TokenTrendPeriod::from_totals(
+                "2026".to_string(),
+                3,
+                overview.estimated_without_projectatlas as u128,
+                overview.estimated_with_projectatlas as u128,
+            )],
+        )];
+        let dashboard = render_token_dashboard(&overview, Some("s"), &trends);
+
+        assert!(dashboard.contains(&conservative_text));
+        assert!(!dashboard.contains(&gross_saved_text));
+        assert!(dashboard.contains("year trend | 1 period"));
+        assert!(!dashboard.contains("latest"));
     }
 
     #[test]
@@ -1050,14 +1051,60 @@ mod tests {
         assert_eq!(overview.modeled_file_reads_avoided, 1);
 
         let dashboard = render_token_dashboard(&overview, Some("s"), &sample_trends());
-        assert!(dashboard.contains("100 = 20 observed + 80 avoided"));
+        assert!(dashboard.contains("Conservative tokens avoided"));
         assert!(dashboard.contains("File reads avoided"));
+        assert!(dashboard.contains("100 = 20 observed + 80 modeled navigation"));
         assert!(dashboard.contains("2 = observed 1 + search-modeled 1"));
-        assert!(dashboard.contains("observed tokens 20% / modeled tokens 80%"));
+        assert!(!dashboard.contains("Total shown"));
+        assert!(dashboard.contains("saved-token mix: observed 20% / modeled 80%"));
     }
 
     #[test]
-    fn trend_dashboard_renders_sparkline_and_period_table() {
+    fn overview_dashboard_preserves_negative_savings_in_visual_widgets() {
+        let overview = TokenOverview::from_events(&[
+            usage_from_text(
+                "s",
+                "summary",
+                Some("src/lib.rs".to_string()),
+                None,
+                "abcd",
+                "abcdabcdabcd",
+            ),
+            usage_from_estimates("s", "search", None, Some("token".to_string()), 10, 30),
+        ]);
+        assert!(overview.measured_tokens_saved < 0);
+        assert!(overview.deduped_modeled_tokens_avoided < 0);
+
+        let dashboard = render_token_dashboard(&overview, Some("s"), &sample_trends());
+        assert!(dashboard.contains(&format!(
+            "signed saved-token mix: observed {} / modeled {}; net {}",
+            signed_count(overview.measured_tokens_saved),
+            signed_count(overview.deduped_modeled_tokens_avoided),
+            signed_count(overview.tokens_avoided)
+        )));
+        assert!(!dashboard.contains("% / modeled"));
+
+        let trend = vec![
+            TokenTrendPeriod::from_totals("loss".to_string(), 1, 10, 30),
+            TokenTrendPeriod::from_totals("gain".to_string(), 1, 30, 10),
+        ];
+        let points = signed_trend_points(Some(&trend));
+        assert_float_eq(points[0].1, -20.0);
+        assert_float_eq(points[1].1, 20.0);
+        let bounds = signed_y_bounds(&points);
+        assert_float_eq(bounds[0], -20.0);
+        assert_float_eq(bounds[1], 20.0);
+
+        let single = [TokenTrendPeriod::from_totals("one".to_string(), 1, 30, 10)];
+        let single_points = signed_trend_points(Some(&single));
+        assert_float_eq(single_points[0].0, 0.0);
+        assert_float_eq(single_points[0].1, 20.0);
+        assert_float_eq(single_points[1].0, 1.0);
+        assert_float_eq(single_points[1].1, 20.0);
+    }
+
+    #[test]
+    fn trend_dashboard_renders_chart_and_period_table() {
         let report = TokenTrendReport::new(
             Some("s".to_string()),
             TokenTrendWindow::Month,
@@ -1073,7 +1120,7 @@ mod tests {
         assert!(dashboard.contains("2026-06"));
         assert!(dashboard.contains("2026-07"));
         assert!(dashboard.contains("period"));
-        assert!(dashboard.contains("█") || dashboard.contains("▅") || dashboard.contains("▁"));
+        assert!(dashboard_contains_chart_glyph(&dashboard));
     }
 
     fn sample_trends() -> Vec<TokenTrendReport> {
@@ -1133,6 +1180,30 @@ mod tests {
         assert!(
             row_index >= header_index + 2,
             "expected a visible separator row between {header:?} and {first_row:?}"
+        );
+    }
+
+    fn assert_occurs_once(dashboard: &str, needle: &str) {
+        assert_eq!(
+            dashboard.matches(needle).count(),
+            1,
+            "dashboard should show {needle:?} once"
+        );
+    }
+
+    fn dashboard_contains_chart_glyph(dashboard: &str) -> bool {
+        dashboard.chars().any(|character| {
+            matches!(
+                character,
+                '█' | '▌' | '▏' | '▅' | '▁' | '\u{2801}'..='\u{28ff}'
+            )
+        })
+    }
+
+    fn assert_float_eq(left: f64, right: f64) {
+        assert!(
+            (left - right).abs() < f64::EPSILON,
+            "expected {left} to equal {right}"
         );
     }
 

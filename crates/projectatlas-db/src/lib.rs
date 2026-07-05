@@ -26,7 +26,7 @@ use projectatlas_core::{
     normalize_repo_path_prefix,
 };
 use rusqlite::types::Value;
-use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::TryFromIntError;
@@ -3812,6 +3812,60 @@ impl AtlasStore {
     }
 }
 
+/// Read the recorded project root without creating or migrating a database.
+///
+/// # Errors
+///
+/// Returns an error if `SQLite` cannot open or query the database read-only.
+pub fn read_project_root_read_only(path: &Path) -> DbResult<Option<String>> {
+    let uri = sqlite_immutable_read_uri(path);
+    let connection = Connection::open_with_flags(
+        uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    let root = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'project_root'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(root)
+}
+
+/// Build a read-only immutable `SQLite` URI for non-mutating metadata probes.
+fn sqlite_immutable_read_uri(path: &Path) -> String {
+    let normalized = normalize_native_path_display(path);
+    let uri_path = if normalized.as_bytes().get(1) == Some(&b':') {
+        format!("/{normalized}")
+    } else {
+        normalized
+    };
+    format!(
+        "file:{}?mode=ro&immutable=1",
+        sqlite_uri_escape_path(&uri_path)
+    )
+}
+
+/// Percent-escape a path component while preserving path separators and drive colons.
+fn sqlite_uri_escape_path(path: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut escaped = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b':' | b'.' | b'-' | b'_' | b'~' => {
+                escaped.push(char::from(byte));
+            }
+            other => {
+                escaped.push('%');
+                escaped.push(char::from(HEX[usize::from(other >> 4)]));
+                escaped.push(char::from(HEX[usize::from(other & 0x0F)]));
+            }
+        }
+    }
+    escaped
+}
+
 /// Normalize a filesystem path stored in `SQLite` metadata.
 fn normalize_metadata_path(path: &Path) -> String {
     normalize_native_path_display(path)
@@ -4621,6 +4675,7 @@ mod tests {
     use projectatlas_core::{NodeKind, normalized_parent};
     use std::error::Error;
     use std::fmt::Debug;
+    use std::fs;
     use std::io;
 
     #[test]
@@ -5159,6 +5214,46 @@ mod tests {
             &Some("//server/share/repo".to_string()),
             "windows unc project root metadata",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_project_root_read_only_does_not_create_wal_sidecars() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo with spaces");
+        let atlas_dir = root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let db_path = atlas_dir.join("projectatlas.db");
+        {
+            let store = AtlasStore::open(&db_path)?;
+            store.set_project_root(&root)?;
+            store
+                .connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        }
+        let wal_path = db_path.with_extension("db-wal");
+        let shm_path = db_path.with_extension("db-shm");
+        for sidecar_path in [&wal_path, &shm_path] {
+            match fs::remove_file(sidecar_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let db_len_before = fs::metadata(&db_path)?.len();
+
+        require_eq(
+            &read_project_root_read_only(&db_path)?,
+            &Some(normalize_native_path_display(&root)),
+            "immutable read-only project root",
+        )?;
+        require_eq(
+            &fs::metadata(&db_path)?.len(),
+            &db_len_before,
+            "immutable read-only DB length",
+        )?;
+        require_eq(&wal_path.exists(), &false, "read-only WAL sidecar")?;
+        require_eq(&shm_path.exists(), &false, "read-only SHM sidecar")?;
         Ok(())
     }
 

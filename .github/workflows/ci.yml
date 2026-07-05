@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: read
+  issues: read
   pull-requests: read
 
 jobs:
@@ -53,6 +54,18 @@ jobs:
             echo "Pull request must be assigned to a milestone." >&2
             exit 1
           fi
+
+      - name: Issue checklist check
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 .github/scripts/issue-checklists.py --self-test
+          PR_MILESTONE_TITLE="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.milestone.title // ""')"
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --milestone "$PR_MILESTONE_TITLE"
 
       - name: Format
         run: cargo fmt --check

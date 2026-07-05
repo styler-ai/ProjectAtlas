@@ -16,6 +16,7 @@ on:
 
 permissions:
   contents: read
+  issues: read
 
 env:
   RELEASE_VERSION: ${{ inputs.version }}
@@ -72,6 +73,9 @@ jobs:
       - name: Release notes generator self-test
         run: python3 .github/scripts/release-notes.py --self-test
 
+      - name: Issue checklist self-test
+        run: python3 .github/scripts/issue-checklists.py --self-test
+
       - name: Verify version
         run: |
           requested="$RELEASE_VERSION"
@@ -93,6 +97,14 @@ jobs:
             echo "Cargo.toml version $version does not match requested $requested" >&2
             exit 1
           fi
+
+      - name: Release issue checklist gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --milestone "${RELEASE_VERSION}-00"
 
       - name: ProjectAtlas scan
         run: cargo run --locked -p projectatlas-cli -- --format json scan .

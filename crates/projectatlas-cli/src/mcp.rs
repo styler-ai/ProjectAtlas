@@ -1,13 +1,18 @@
 //! Purpose: Serve `ProjectAtlas` repository intelligence over MCP.
 //! Native MCP adapter for `ProjectAtlas` agent integrations.
 
-use crate::atlas_map::load_atlas_config;
+use crate::atlas_map::{
+    AtlasMapConfig, IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report,
+    init_gitignore, init_project, lint_map, list_ignore_entries, load_atlas_config,
+    load_atlas_config_for_root, remove_ignore_entry, write_map,
+};
 use crate::runtime::{
-    DEFAULT_HEALTH_LIMIT, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, PurposeReviewRequest,
-    ScanRuntimePlan, SymbolBuildOptions, build_settings_report, build_symbols_for_index,
-    byte_count_to_tokens, canonical_project_root, config_root_mismatch_error,
-    default_mcp_project_root, estimated_source_tokens_for_indexed_files,
-    estimated_source_tokens_for_paths, file_summary_usage_baseline, next_step_report,
+    DEFAULT_HEALTH_LIMIT, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel,
+    PurposeReviewRequest, ScanRuntimePlan, SymbolBuildOptions, build_settings_report,
+    build_symbols_for_index, byte_count_to_tokens, canonical_project_root,
+    config_root_mismatch_error, default_mcp_project_root,
+    estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
+    file_summary_usage_baseline, lint_database_if_present, next_step_report,
     next_step_report_payload, normalized_folder_filter, open_atlas_store, purpose_curation_page,
     ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
     record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
@@ -16,9 +21,11 @@ use crate::runtime::{
     validated_indexed_file_key, watcher_status_report,
 };
 use crate::{
-    CliError, DEFAULT_FILE_SUMMARY_LIMIT, OutputFormat, build_parity_report, render_code_slice,
-    render_file_summary, render_parity_report, render_search_report, render_settings_report,
-    render_token_dashboard, render_token_trend_dashboard, render_watch_status,
+    CliError, DEFAULT_FILE_SUMMARY_LIMIT, HarnessConfig, OutputFormat,
+    build_harness_mcp_config_report, build_parity_report, build_root_report, build_runtime_info,
+    render_code_slice, render_file_summary, render_parity_report, render_root_report,
+    render_runtime_info, render_search_report, render_settings_report, render_token_dashboard,
+    render_token_trend_dashboard, render_watch_status,
 };
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
@@ -28,9 +35,12 @@ use projectatlas_core::toon::{
     render_symbol_relations, render_symbols, render_token_overview, render_token_trends,
 };
 use projectatlas_core::{
-    PurposeSource, PurposeStatus, normalize_repo_path_prefix, validated_repo_node_key,
+    PurposeSource, PurposeStatus, normalize_native_path_display, normalize_repo_path,
+    normalize_repo_path_prefix, validated_repo_node_key,
 };
-use projectatlas_db::{AtlasStore, HealthQuery, HealthResolution, HealthScope};
+use projectatlas_db::{
+    AtlasStore, HealthQuery, HealthResolution, HealthScope, read_project_root_read_only,
+};
 use projectatlas_service::{
     SymbolSliceSelector, build_file_summary, read_indexed_code_slice, read_symbol_slice,
     search_indexed_files,
@@ -40,12 +50,22 @@ use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::schemars;
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 /// MCP tools required for the agent-first repository-intelligence surface.
 pub(crate) const REQUIRED_MCP_TOOL_NAMES: &[&str] = &[
     MCP_TOOL_ATLAS_SET_PROJECT_PATH,
+    MCP_TOOL_ATLAS_INIT,
+    MCP_TOOL_ATLAS_MAP,
+    MCP_TOOL_ATLAS_ROOT,
+    MCP_TOOL_ATLAS_ROOT_SET,
+    MCP_TOOL_ATLAS_CONFIG,
+    MCP_TOOL_ATLAS_IGNORE_LIST,
+    MCP_TOOL_ATLAS_IGNORE_INIT_GITIGNORE,
+    MCP_TOOL_ATLAS_IGNORE_ADD,
+    MCP_TOOL_ATLAS_IGNORE_REMOVE,
     MCP_TOOL_ATLAS_SCAN,
     MCP_TOOL_ATLAS_OVERVIEW,
     MCP_TOOL_ATLAS_FOLDERS,
@@ -60,6 +80,7 @@ pub(crate) const REQUIRED_MCP_TOOL_NAMES: &[&str] = &[
     MCP_TOOL_ATLAS_SYMBOL_RELATIONS,
     MCP_TOOL_ATLAS_HEALTH,
     MCP_TOOL_ATLAS_HEALTH_RESOLVE,
+    MCP_TOOL_ATLAS_LINT,
     MCP_TOOL_ATLAS_TOKEN_REPORT,
     MCP_TOOL_ATLAS_PARITY_REPORT,
     MCP_TOOL_ATLAS_SETTINGS,
@@ -67,6 +88,8 @@ pub(crate) const REQUIRED_MCP_TOOL_NAMES: &[&str] = &[
     MCP_TOOL_ATLAS_WATCH_ONCE,
     MCP_TOOL_ATLAS_STRIP_LEGACY_PURPOSE,
     MCP_TOOL_ATLAS_RESET_INDEX,
+    MCP_TOOL_ATLAS_MCP_CONFIG,
+    MCP_TOOL_ATLAS_RUNTIME_INFO,
     MCP_TOOL_ATLAS_PURPOSE_QUEUE,
     MCP_TOOL_ATLAS_PURPOSE_SET,
     MCP_TOOL_ATLAS_PURPOSE_REVIEW,
@@ -74,6 +97,24 @@ pub(crate) const REQUIRED_MCP_TOOL_NAMES: &[&str] = &[
 
 /// MCP tool name for active project selection.
 const MCP_TOOL_ATLAS_SET_PROJECT_PATH: &str = "atlas_set_project_path";
+/// MCP tool name for project initialization.
+const MCP_TOOL_ATLAS_INIT: &str = "atlas_init";
+/// MCP tool name for compatibility map exports.
+const MCP_TOOL_ATLAS_MAP: &str = "atlas_map";
+/// MCP tool name for root diagnostics.
+const MCP_TOOL_ATLAS_ROOT: &str = "atlas_root";
+/// MCP tool name for binding a project root.
+const MCP_TOOL_ATLAS_ROOT_SET: &str = "atlas_root_set";
+/// MCP tool name for effective config reports.
+const MCP_TOOL_ATLAS_CONFIG: &str = "atlas_config";
+/// MCP tool name for ignore policy reports.
+const MCP_TOOL_ATLAS_IGNORE_LIST: &str = "atlas_ignore_list";
+/// MCP tool name for project `.gitignore` initialization.
+const MCP_TOOL_ATLAS_IGNORE_INIT_GITIGNORE: &str = "atlas_ignore_init_gitignore";
+/// MCP tool name for adding manual ignore entries.
+const MCP_TOOL_ATLAS_IGNORE_ADD: &str = "atlas_ignore_add";
+/// MCP tool name for removing manual ignore entries.
+const MCP_TOOL_ATLAS_IGNORE_REMOVE: &str = "atlas_ignore_remove";
 /// MCP tool name for repository scans.
 const MCP_TOOL_ATLAS_SCAN: &str = "atlas_scan";
 /// MCP tool name for repository overviews.
@@ -102,6 +143,8 @@ const MCP_TOOL_ATLAS_SYMBOL_RELATIONS: &str = "atlas_symbol_relations";
 const MCP_TOOL_ATLAS_HEALTH: &str = "atlas_health";
 /// MCP tool name for health resolutions.
 const MCP_TOOL_ATLAS_HEALTH_RESOLVE: &str = "atlas_health_resolve";
+/// MCP tool name for lint reports.
+const MCP_TOOL_ATLAS_LINT: &str = "atlas_lint";
 /// MCP tool name for token reports.
 const MCP_TOOL_ATLAS_TOKEN_REPORT: &str = "atlas_token_report";
 /// MCP tool name for parity reports.
@@ -116,6 +159,10 @@ const MCP_TOOL_ATLAS_WATCH_ONCE: &str = "atlas_watch_once";
 const MCP_TOOL_ATLAS_STRIP_LEGACY_PURPOSE: &str = "atlas_strip_legacy_purpose";
 /// MCP tool name for runtime index reset.
 const MCP_TOOL_ATLAS_RESET_INDEX: &str = "atlas_reset_index";
+/// MCP tool name for generated MCP config documents.
+const MCP_TOOL_ATLAS_MCP_CONFIG: &str = "atlas_mcp_config";
+/// MCP tool name for runtime identity reports.
+const MCP_TOOL_ATLAS_RUNTIME_INFO: &str = "atlas_runtime_info";
 /// MCP tool name for purpose queue lookup.
 const MCP_TOOL_ATLAS_PURPOSE_QUEUE: &str = "atlas_purpose_queue";
 /// MCP tool name for purpose updates.
@@ -126,17 +173,21 @@ const MCP_TOOL_ATLAS_PURPOSE_REVIEW: &str = "atlas_purpose_review";
 const PROJECTATLAS_DIR_NAME: &str = ".projectatlas";
 /// `ProjectAtlas` `SQLite` database filename.
 const PROJECTATLAS_DB_FILE_NAME: &str = "projectatlas.db";
+/// Project-local non-source summary filename.
+const PROJECTATLAS_NONSOURCE_FILE_NAME: &str = "projectatlas-nonsource-files.toon";
 /// Project-local nested config filename.
 const PROJECTATLAS_CONFIG_FILE_NAME: &str = "config.toml";
 /// Project-local flat config filename.
 const PROJECTATLAS_FLAT_CONFIG_FILE_NAME: &str = "projectatlas.toml";
+/// Default MCP config server key.
+const MCP_DEFAULT_CONFIG_SERVER_NAME: &str = "projectatlas";
 /// Missing-index recovery guidance for MCP tools.
 const MISSING_INDEX_GUIDANCE: &str =
     "run atlas_scan with project_path or atlas_set_project_path first";
 /// Recovery guidance when a path names a subfolder rather than another selected root.
-const SELECTED_ROOT_ASSERTION_GUIDANCE: &str = "pass project_path or call atlas_set_project_path for another repository, or use normal filesystem tools for files inside the selected project";
+const SELECTED_ROOT_ASSERTION_GUIDANCE: &str = "pass project_path or call atlas_set_project_path for another repository, or use normal filesystem tools such as Get-Content or rg for files inside the selected project";
 /// Recovery guidance when a path escapes the selected `ProjectAtlas` root.
-const OUTSIDE_SELECTED_PROJECT_GUIDANCE: &str = "pass project_path or call atlas_set_project_path for that repository, or use normal filesystem tools for files outside the selected ProjectAtlas project";
+const OUTSIDE_SELECTED_PROJECT_GUIDANCE: &str = "pass project_path or call atlas_set_project_path for that repository, or use normal filesystem tools such as Get-Content or rg for files outside the selected ProjectAtlas project";
 /// Current-directory root alias.
 const CURRENT_DIR_ALIAS: &str = ".";
 /// `ProjectAtlas` MCP server display name.
@@ -147,6 +198,18 @@ const MCP_PROJECT_STATE_LOCK_POISONED: &str = "MCP project state lock poisoned";
 const MCP_ERROR_SERIALIZATION_FALLBACK_PREFIX: &str = "error: ";
 /// MCP payload key for scan reports.
 const MCP_PAYLOAD_SCAN: &str = "scan";
+/// MCP payload key for project initialization reports.
+const MCP_PAYLOAD_INIT: &str = "init";
+/// MCP payload key for compatibility map reports.
+const MCP_PAYLOAD_MAP: &str = "map";
+/// MCP payload key for effective config reports.
+const MCP_PAYLOAD_CONFIG: &str = "config";
+/// MCP payload key for ignore policy reports.
+const MCP_PAYLOAD_IGNORE: &str = "ignore";
+/// MCP payload key for `.gitignore` initialization reports.
+const MCP_PAYLOAD_GITIGNORE: &str = "gitignore";
+/// MCP payload key for lint reports.
+const MCP_PAYLOAD_LINT: &str = "lint";
 /// MCP payload key for symbol-build reports.
 const MCP_PAYLOAD_SYMBOLS_BUILD: &str = "symbols_build";
 /// MCP payload key for health-resolution reports.
@@ -163,8 +226,12 @@ const MCP_PAYLOAD_WATCH: &str = "watch";
 const MCP_PAYLOAD_LEGACY_PURPOSE_MIGRATION: &str = "legacy_purpose_migration";
 /// MCP payload key for reset-index reports.
 const MCP_PAYLOAD_RESET_INDEX: &str = "reset_index";
+/// MCP payload key for generated MCP config reports.
+const MCP_PAYLOAD_MCP_CONFIG: &str = "mcp_config";
 /// MCP payload key for next-step recommendation reports.
 const MCP_PAYLOAD_NEXT: &str = "next";
+/// MCP payload key for selected-project audit metadata on routed reads.
+const MCP_PAYLOAD_SELECTED_PROJECT: &str = "selected_project";
 /// MCP telemetry event for overview calls.
 const MCP_EVENT_ATLAS_OVERVIEW: &str = "mcp.atlas_overview";
 /// MCP telemetry event for folder calls.
@@ -189,6 +256,67 @@ const MCP_EVENT_ATLAS_SYMBOL_RELATIONS: &str = "mcp.atlas_symbol_relations";
 const MCP_EVENT_ATLAS_HEALTH: &str = "mcp.atlas_health";
 /// MCP telemetry event for purpose-queue calls.
 const MCP_EVENT_ATLAS_PURPOSE_QUEUE: &str = "mcp.atlas_purpose_queue";
+/// MCP ignore kind token for directory names.
+const MCP_IGNORE_KIND_DIR_NAME: &str = "dir-name";
+/// MCP alternate ignore kind token for directory names.
+const MCP_IGNORE_KIND_DIR_NAME_ALIAS: &str = "dir_name";
+/// MCP ignore kind token for path prefixes.
+const MCP_IGNORE_KIND_PATH_PREFIX: &str = "path-prefix";
+/// MCP alternate ignore kind token for path prefixes.
+const MCP_IGNORE_KIND_PATH_PREFIX_ALIAS: &str = "path_prefix";
+/// MCP purpose lint level token for low strictness.
+const MCP_PURPOSE_LEVEL_LOW: &str = "low";
+/// MCP purpose lint level token for medium strictness.
+const MCP_PURPOSE_LEVEL_MEDIUM: &str = "medium";
+/// MCP purpose lint level token for strict mode.
+const MCP_PURPOSE_LEVEL_STRICT: &str = "strict";
+/// MCP harness token for standard MCP JSON config.
+const MCP_HARNESS_MCP_JSON: &str = "mcp-json";
+/// MCP alternate harness token for standard MCP JSON config.
+const MCP_HARNESS_MCP_JSON_ALIAS: &str = "mcp_json";
+/// MCP harness token for Codex config.
+const MCP_HARNESS_CODEX: &str = "codex";
+/// MCP harness token for Claude Code config.
+const MCP_HARNESS_CLAUDE_CODE: &str = "claude-code";
+/// MCP alternate harness token for Claude Code config.
+const MCP_HARNESS_CLAUDE_CODE_ALIAS: &str = "claude_code";
+/// MCP harness token for `OpenCode` config.
+const MCP_HARNESS_OPENCODE: &str = "opencode";
+/// Required ignore kind diagnostic.
+const MCP_ERROR_IGNORE_KIND_REQUIRED: &str =
+    "ignore kind is required; expected dir-name or path-prefix";
+/// Required ignore kind diagnostic for mutation tools.
+const MCP_ERROR_IGNORE_KIND_REQUIRED_FOR_ADD: &str = "ignore kind is required for atlas_ignore_add";
+/// CI environment variable used by MCP map export safeguards.
+const MCP_ENV_CI: &str = "CI";
+/// GitHub Actions environment variable used by MCP map export safeguards.
+const MCP_ENV_GITHUB_ACTIONS: &str = "GITHUB_ACTIONS";
+/// Compatibility map skip reason in CI.
+const MCP_MAP_SKIPPED_IN_CI_REASON: &str =
+    "skipped in CI; pass force=true to write the compatibility map";
+/// Placeholder when no routed root is available for a diagnostic.
+const MCP_NO_ROOT_PLACEHOLDER: &str = "none";
+/// Invalid ignore kind diagnostic prefix.
+const MCP_ERROR_INVALID_IGNORE_KIND_PREFIX: &str = "invalid ignore kind '";
+/// Invalid ignore kind diagnostic suffix.
+const MCP_ERROR_INVALID_IGNORE_KIND_SUFFIX: &str = "'; expected dir-name or path-prefix";
+/// Invalid purpose lint level diagnostic prefix.
+const MCP_ERROR_INVALID_PURPOSE_LEVEL_PREFIX: &str = "invalid purpose_level '";
+/// Invalid purpose lint level diagnostic suffix.
+const MCP_ERROR_INVALID_PURPOSE_LEVEL_SUFFIX: &str = "'; expected low, medium, or strict";
+/// Invalid harness diagnostic prefix.
+const MCP_ERROR_INVALID_HARNESS_PREFIX: &str = "invalid harness '";
+/// Invalid harness diagnostic suffix.
+const MCP_ERROR_INVALID_HARNESS_SUFFIX: &str =
+    "'; expected mcp-json, codex, claude-code, or opencode";
+/// Ambiguous route diagnostic fragment.
+const MCP_ERROR_FOR_PATH_FRAGMENT: &str = " for '";
+/// Ambiguous route diagnostic fragment.
+const MCP_ERROR_LEXICAL_ROOT_FRAGMENT: &str = "'; lexical root: '";
+/// Ambiguous route diagnostic fragment.
+const MCP_ERROR_RESOLVED_ROOT_FRAGMENT: &str = "'; resolved root: '";
+/// Ambiguous route diagnostic fragment.
+const MCP_ERROR_GUIDANCE_FRAGMENT: &str = "'; ";
 /// Node payload label for rendered folder rows.
 const NODE_LABEL_FOLDERS: &str = "folders";
 /// Node payload label for rendered file rows.
@@ -197,6 +325,14 @@ const NODE_LABEL_FILES: &str = "files";
 const SYMBOL_DISAMBIGUATOR_WITHOUT_SYMBOL_ERROR: &str = "symbol disambiguators require symbol";
 /// Error when a line slice omits its start line.
 const START_LINE_REQUIRED_ERROR: &str = "start_line is required unless symbol is provided";
+/// Error when an absolute MCP file path has no valid indexed project ancestor.
+const PATH_NOT_INSIDE_INDEXED_PROJECT_ERROR: &str =
+    "path is not inside an indexed ProjectAtlas project";
+/// Error when an absolute MCP folder path has no valid indexed project ancestor.
+const FOLDER_NOT_INSIDE_INDEXED_PROJECT_ERROR: &str =
+    "folder is not inside an indexed ProjectAtlas project";
+/// Error when lexical and canonical path routing disagree.
+const AMBIGUOUS_NEAREST_PROJECT_PATH_ERROR: &str = "absolute MCP path resolves through a symlink or junction with multiple plausible ProjectAtlas roots";
 /// Separator for diagnostic lists of accepted severity names.
 const SEVERITY_EXPECTED_SEPARATOR: &str = ", ";
 /// Final separator for diagnostic lists of accepted severity names.
@@ -223,13 +359,89 @@ struct AtlasSetProjectPathParams {
     project_path: String,
 }
 
+/// MCP parameter payload for initializing a project.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AtlasInitParams {
+    /// Optional project root for this call. Defaults to the active MCP project.
+    project_path: Option<String>,
+}
+
+/// MCP parameter payload for compatibility map exports.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AtlasMapParams {
+    /// Optional project root for this call. Defaults to the active MCP project.
+    project_path: Option<String>,
+    /// Write JSON compatibility content when true.
+    json: Option<bool>,
+    /// Force map generation even in CI-like environments.
+    force: Option<bool>,
+}
+
+/// MCP parameter payload for root diagnostics.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AtlasRootParams {
+    /// Optional project root for this call. Defaults to the active MCP project.
+    project_path: Option<String>,
+    /// Return the same report shape with `verified` available for gating.
+    verify: Option<bool>,
+}
+
+/// MCP parameter payload for binding a root.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AtlasRootSetParams {
+    /// Project root to bind and make active for later calls.
+    root: String,
+    /// Include mcp --nearest-project in generated project-local MCP configs.
+    nearest_project: Option<bool>,
+}
+
+/// MCP parameter payload for ignore mutations.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AtlasIgnoreMutationParams {
+    /// Optional project root for this call. Defaults to the active MCP project.
+    project_path: Option<String>,
+    /// Ignore kind: dir-name or path-prefix. Omit only for broad remove.
+    kind: Option<String>,
+    /// Directory name or repository-relative path prefix.
+    value: String,
+}
+
+/// MCP parameter payload for lint reports.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AtlasLintParams {
+    /// Optional project root for this call. Defaults to the active MCP project.
+    project_path: Option<String>,
+    /// Deprecated compatibility flag matching the CLI.
+    strict_folders: Option<bool>,
+    /// Purpose lint strictness: low, medium, or strict.
+    purpose_level: Option<String>,
+    /// Include untracked-file report.
+    report_untracked: Option<bool>,
+    /// Make untracked-file findings fail lint.
+    strict_untracked: Option<bool>,
+}
+
+/// MCP parameter payload for generated MCP config documents.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AtlasMcpConfigParams {
+    /// Optional project root for this call. Defaults to the active MCP project.
+    project_path: Option<String>,
+    /// MCP server name to emit. Defaults to projectatlas.
+    server_name: Option<String>,
+    /// Harness config shape: mcp-json, codex, claude-code, or opencode.
+    harness: Option<String>,
+    /// Include mcp --nearest-project in generated startup args.
+    nearest_project: Option<bool>,
+}
+
 /// Run the official RMCP stdio server.
 pub(crate) fn run_mcp_server(
     db_path: PathBuf,
     config_path: Option<PathBuf>,
     session: String,
+    allow_nearest_project: bool,
 ) -> Result<(), CliError> {
-    let server = ProjectAtlasMcpServer::new(db_path, config_path, session);
+    let server = ProjectAtlasMcpServer::new(db_path, config_path, session, allow_nearest_project);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -264,6 +476,8 @@ struct AtlasScanParams {
     project_path: Option<String>,
     /// Repository root path. Defaults to the configured or indexed project root.
     path: Option<String>,
+    /// Opt in to nearest indexed `ProjectAtlas` project discovery for absolute paths.
+    nearest_project: Option<bool>,
     /// Maximum file size to parse for symbols.
     max_bytes: Option<u64>,
     /// Maximum parser worker threads.
@@ -281,6 +495,8 @@ struct AtlasWatchOnceParams {
     project_path: Option<String>,
     /// Repository root path. Defaults to the configured or indexed project root.
     path: Option<String>,
+    /// Opt in to nearest indexed `ProjectAtlas` project discovery for absolute paths.
+    nearest_project: Option<bool>,
     /// Maximum parser worker threads.
     max_workers: Option<usize>,
     /// Stop starting parser work after this many seconds.
@@ -296,8 +512,21 @@ struct AtlasQueryParams {
     project_path: Option<String>,
     /// Search query for path and purpose matching.
     query: Option<String>,
+    /// Maximum number of rows to return.
+    limit: Option<usize>,
+}
+
+/// MCP parameter payload for ranked file lookup with optional absolute folder routing.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AtlasFilesParams {
+    /// Optional project root for this call. Defaults to the active MCP project.
+    project_path: Option<String>,
+    /// Search query for path and purpose matching.
+    query: Option<String>,
     /// Folder path to constrain file lookup.
     folder: Option<String>,
+    /// Opt in to nearest indexed `ProjectAtlas` project discovery for absolute folder paths.
+    nearest_project: Option<bool>,
     /// Optional repository-relative glob filter.
     file_pattern: Option<String>,
     /// Include indexed file text as a bounded fallback ranking signal.
@@ -313,6 +542,8 @@ struct AtlasOutlineParams {
     project_path: Option<String>,
     /// Repository-relative file path.
     file: String,
+    /// Opt in to nearest indexed `ProjectAtlas` project discovery for absolute file paths.
+    nearest_project: Option<bool>,
     /// Number of non-empty preview lines to include.
     lines: Option<usize>,
 }
@@ -324,6 +555,8 @@ struct AtlasFileSummaryParams {
     project_path: Option<String>,
     /// Repository-relative file path.
     file: String,
+    /// Opt in to nearest indexed `ProjectAtlas` project discovery for absolute file paths.
+    nearest_project: Option<bool>,
     /// Maximum rows per functions/methods/classes/types/calls section.
     limit: Option<usize>,
 }
@@ -358,6 +591,8 @@ struct AtlasSliceParams {
     project_path: Option<String>,
     /// Repository-relative file path.
     file: String,
+    /// Opt in to nearest indexed `ProjectAtlas` project discovery for absolute file paths.
+    nearest_project: Option<bool>,
     /// One-based start line when no symbol is supplied.
     start_line: Option<usize>,
     /// Optional one-based end line.
@@ -379,6 +614,8 @@ struct AtlasSymbolsParams {
     project_path: Option<String>,
     /// Optional repository-relative file path.
     file: Option<String>,
+    /// Opt in to nearest indexed `ProjectAtlas` project discovery for absolute file paths.
+    nearest_project: Option<bool>,
     /// Optional symbol, signature, relation, or path query.
     query: Option<String>,
     /// Maximum rows to return.
@@ -439,6 +676,8 @@ struct AtlasStripLegacyParams {
     project_path: Option<String>,
     /// Repository root path. Defaults to the configured or indexed project root.
     path: Option<String>,
+    /// Opt in to nearest indexed `ProjectAtlas` project discovery for absolute paths.
+    nearest_project: Option<bool>,
     /// Remove legacy `.purpose` files when true.
     apply: Option<bool>,
     /// Preview cleanup without modifying files.
@@ -521,6 +760,123 @@ struct McpProjectState {
     config_path: Option<PathBuf>,
 }
 
+/// MCP response for project initialization.
+#[derive(Debug, Serialize)]
+struct McpInitReport {
+    /// Canonical project root that was initialized.
+    root: String,
+    /// Project-local config path.
+    config_path: String,
+    /// Project-local non-source registry path.
+    nonsource_files_path: String,
+    /// Whether the project-local config path exists after the call.
+    config_exists: bool,
+}
+
+/// MCP response for compatibility map export.
+#[derive(Debug, Serialize)]
+struct McpMapReport {
+    /// Canonical project root used for map generation.
+    root: String,
+    /// Map path from the effective config.
+    map_path: String,
+    /// Whether a map file was written by this call.
+    written: bool,
+    /// Whether JSON compatibility output was requested.
+    json: bool,
+    /// Human-readable reason when no file was written.
+    skipped_reason: Option<String>,
+}
+
+/// MCP response for lint reports.
+#[derive(Debug, Serialize)]
+struct McpLintReport {
+    /// Whether lint passed.
+    ok: bool,
+    /// CLI-compatible exit code that callers can gate on.
+    exit_code: i32,
+    /// Combined lint report text.
+    report: String,
+}
+
+/// Role-typed selected root for MCP path routing.
+#[derive(Debug, Clone)]
+struct McpSelectedRoot(PathBuf);
+
+impl McpSelectedRoot {
+    /// Build the selected root wrapper from active project state.
+    fn from_state(state: &McpProjectState) -> Self {
+        Self(state.root.clone())
+    }
+
+    /// Convert an absolute path inside this root into a repository key.
+    fn repo_key_for(&self, path: &McpAbsolutePath) -> Result<Option<McpRepoKey>, CliError> {
+        if !path.as_path().starts_with(&self.0) {
+            return Ok(None);
+        }
+        normalize_repo_path(&self.0, path.as_path())
+            .map(McpRepoKey)
+            .map(Some)
+            .map_err(ProjectAtlasMcpServer::selected_project_path_error)
+    }
+}
+
+/// Role-typed indexed project root discovered by nearest-project routing.
+#[derive(Debug, Clone)]
+struct McpIndexedRoot {
+    /// Canonical indexed project root.
+    root: PathBuf,
+    /// Durable index path that records the same root.
+    db_path: PathBuf,
+}
+
+/// Canonical absolute path supplied to an MCP path-bearing tool.
+#[derive(Debug, Clone)]
+struct McpAbsolutePath(PathBuf);
+
+impl McpAbsolutePath {
+    /// Canonicalize a user-supplied absolute path argument.
+    fn canonicalize(path: &Path) -> Result<Self, CliError> {
+        canonical_project_root(path).map(Self)
+    }
+
+    /// Borrow the canonical path.
+    fn as_path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Return the directory where nearest-indexed-root discovery should begin.
+    fn nearest_search_start(&self) -> &Path {
+        if self.0.is_dir() {
+            &self.0
+        } else {
+            self.0.parent().unwrap_or(self.as_path())
+        }
+    }
+}
+
+/// Repository-relative path key derived from a typed root/path conversion.
+#[derive(Debug, Clone)]
+struct McpRepoKey(String);
+
+impl McpRepoKey {
+    /// Consume the wrapper into the repository key string.
+    fn into_string(self) -> String {
+        self.0
+    }
+}
+
+/// MCP path resolution result with selected-project audit state.
+#[derive(Debug, Clone)]
+struct McpResolvedRepoPath {
+    /// Project state selected for the request.
+    state: McpProjectState,
+    /// Repository-relative path key inside the selected project.
+    key: String,
+    /// Whether nearest-project routing changed the selected root/DB.
+    routed_project: bool,
+}
+
 /// Agent-facing error payload for failed MCP calls.
 #[derive(Debug, Serialize)]
 struct McpErrorResponse {
@@ -590,19 +946,27 @@ pub(crate) struct ProjectAtlasMcpServer {
     project_state: Arc<RwLock<McpProjectState>>,
     /// Token telemetry session id.
     session: String,
+    /// Whether absolute path arguments may select the nearest indexed project by default.
+    allow_nearest_project: bool,
     /// Official RMCP tool router.
     tool_router: ToolRouter<Self>,
 }
 
 impl ProjectAtlasMcpServer {
     /// Create a `ProjectAtlas` MCP server instance.
-    pub(crate) fn new(db_path: PathBuf, config_path: Option<PathBuf>, session: String) -> Self {
+    pub(crate) fn new(
+        db_path: PathBuf,
+        config_path: Option<PathBuf>,
+        session: String,
+        allow_nearest_project: bool,
+    ) -> Self {
         Self {
             project_state: Arc::new(RwLock::new(Self::startup_project_state(
                 db_path,
                 config_path,
             ))),
             session,
+            allow_nearest_project,
             tool_router: Self::tool_router(),
         }
     }
@@ -622,6 +986,165 @@ impl ProjectAtlasMcpServer {
     /// Open the durable index for mutation.
     fn open_mut_store(state: &McpProjectState) -> Result<AtlasStore, CliError> {
         open_atlas_store(&state.db_path)
+    }
+
+    /// Load effective atlas config for the selected state.
+    fn load_config_for_state(state: &McpProjectState) -> Result<AtlasMapConfig, CliError> {
+        state.config_path.as_deref().map_or_else(
+            || load_atlas_config_for_root(&state.root).map_err(CliError::from),
+            |config_path| load_atlas_config(Some(config_path)).map_err(CliError::from),
+        )
+    }
+
+    /// Return the selected project root used by admin-style MCP calls.
+    fn admin_project_root(
+        &self,
+        project_path: Option<String>,
+    ) -> Result<McpProjectState, CliError> {
+        self.state_for_project_path(project_path)
+    }
+
+    /// Parse an MCP ignore kind parameter.
+    fn parse_ignore_kind(
+        kind: Option<&str>,
+        required: bool,
+    ) -> Result<Option<IgnoreEntryKind>, CliError> {
+        let Some(kind) = kind.map(str::trim).filter(|value| !value.is_empty()) else {
+            return if required {
+                Err(CliError::InvalidInput(
+                    MCP_ERROR_IGNORE_KIND_REQUIRED.to_string(),
+                ))
+            } else {
+                Ok(None)
+            };
+        };
+        match kind {
+            MCP_IGNORE_KIND_DIR_NAME | MCP_IGNORE_KIND_DIR_NAME_ALIAS => {
+                Ok(Some(IgnoreEntryKind::DirName))
+            }
+            MCP_IGNORE_KIND_PATH_PREFIX | MCP_IGNORE_KIND_PATH_PREFIX_ALIAS => {
+                Ok(Some(IgnoreEntryKind::PathPrefix))
+            }
+            other => Err(CliError::InvalidInput(Self::invalid_parameter_message(
+                MCP_ERROR_INVALID_IGNORE_KIND_PREFIX,
+                other,
+                MCP_ERROR_INVALID_IGNORE_KIND_SUFFIX,
+            ))),
+        }
+    }
+
+    /// Parse an MCP purpose lint level parameter.
+    fn parse_purpose_lint_level(value: Option<&str>) -> Result<PurposeLintLevel, CliError> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None | Some(MCP_PURPOSE_LEVEL_LOW) => Ok(PurposeLintLevel::Low),
+            Some(MCP_PURPOSE_LEVEL_MEDIUM) => Ok(PurposeLintLevel::Medium),
+            Some(MCP_PURPOSE_LEVEL_STRICT) => Ok(PurposeLintLevel::Strict),
+            Some(other) => Err(CliError::InvalidInput(Self::invalid_parameter_message(
+                MCP_ERROR_INVALID_PURPOSE_LEVEL_PREFIX,
+                other,
+                MCP_ERROR_INVALID_PURPOSE_LEVEL_SUFFIX,
+            ))),
+        }
+    }
+
+    /// Parse an MCP harness config parameter.
+    fn parse_harness_config(value: Option<&str>) -> Result<HarnessConfig, CliError> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None | Some(MCP_HARNESS_MCP_JSON | MCP_HARNESS_MCP_JSON_ALIAS) => {
+                Ok(HarnessConfig::McpJson)
+            }
+            Some(MCP_HARNESS_CODEX) => Ok(HarnessConfig::Codex),
+            Some(MCP_HARNESS_CLAUDE_CODE | MCP_HARNESS_CLAUDE_CODE_ALIAS) => {
+                Ok(HarnessConfig::ClaudeCode)
+            }
+            Some(MCP_HARNESS_OPENCODE) => Ok(HarnessConfig::OpenCode),
+            Some(other) => Err(CliError::InvalidInput(Self::invalid_parameter_message(
+                MCP_ERROR_INVALID_HARNESS_PREFIX,
+                other,
+                MCP_ERROR_INVALID_HARNESS_SUFFIX,
+            ))),
+        }
+    }
+
+    /// Build an invalid-parameter diagnostic from centralized fragments.
+    fn invalid_parameter_message(prefix: &str, value: &str, suffix: &str) -> String {
+        let mut message = String::with_capacity(prefix.len() + value.len() + suffix.len());
+        message.push_str(prefix);
+        message.push_str(value);
+        message.push_str(suffix);
+        message
+    }
+
+    /// Build the `ProjectAtlas` init report used by MCP.
+    fn init_report_for_state(state: &McpProjectState) -> McpInitReport {
+        let config_path = state
+            .root
+            .join(PROJECTATLAS_DIR_NAME)
+            .join(PROJECTATLAS_CONFIG_FILE_NAME);
+        let nonsource_files_path = state
+            .root
+            .join(PROJECTATLAS_DIR_NAME)
+            .join(PROJECTATLAS_NONSOURCE_FILE_NAME);
+        McpInitReport {
+            root: normalize_native_path_display(&state.root),
+            config_exists: config_path.exists(),
+            config_path: normalize_native_path_display(config_path),
+            nonsource_files_path: normalize_native_path_display(nonsource_files_path),
+        }
+    }
+
+    /// Build a compatibility map report, writing the map unless CI skip policy applies.
+    fn build_map_report(
+        state: &McpProjectState,
+        json: bool,
+        force: bool,
+    ) -> Result<McpMapReport, CliError> {
+        let config = Self::load_config_for_state(state)?;
+        let skipped_reason = if !force
+            && (crate::truthy_env(MCP_ENV_CI) || crate::truthy_env(MCP_ENV_GITHUB_ACTIONS))
+        {
+            Some(MCP_MAP_SKIPPED_IN_CI_REASON.to_string())
+        } else {
+            write_map(&config, json)?;
+            None
+        };
+        Ok(McpMapReport {
+            root: normalize_native_path_display(&config.root),
+            map_path: normalize_native_path_display(&config.map_path),
+            written: skipped_reason.is_none(),
+            json,
+            skipped_reason,
+        })
+    }
+
+    /// Build a CLI-compatible lint report for MCP callers.
+    fn lint_report_for_state(
+        state: &McpProjectState,
+        params: &AtlasLintParams,
+    ) -> Result<McpLintReport, CliError> {
+        let config = Self::load_config_for_state(state)?;
+        let (mut report, mut exit_code) = lint_map(
+            &config,
+            LintOptions {
+                strict_folders: params.strict_folders.unwrap_or(false),
+                report_untracked: params.report_untracked.unwrap_or(false),
+                strict_untracked: params.strict_untracked.unwrap_or(false),
+            },
+        )?;
+        let purpose_level = Self::parse_purpose_lint_level(params.purpose_level.as_deref())?;
+        let (db_report, db_exit_code) = lint_database_if_present(&state.db_path, purpose_level)?;
+        if !db_report.is_empty() {
+            if !report.ends_with('\n') {
+                report.push('\n');
+            }
+            report.push_str(&db_report);
+        }
+        exit_code = exit_code.max(db_exit_code);
+        Ok(McpLintReport {
+            ok: exit_code == 0,
+            exit_code,
+            report,
+        })
     }
 
     /// Build startup state from CLI-supplied DB/config paths.
@@ -691,11 +1214,17 @@ impl ProjectAtlasMcpServer {
         )
     }
 
+    /// Return the nearest-project policy for one call, honoring explicit overrides.
+    fn nearest_project_enabled(&self, override_value: Option<bool>) -> bool {
+        override_value.unwrap_or(self.allow_nearest_project)
+    }
+
     /// Return selected state and validate an optional root assertion.
     fn state_and_root_path(
         &self,
         project_path: Option<String>,
         path: Option<String>,
+        nearest_project: bool,
     ) -> Result<(McpProjectState, PathBuf), CliError> {
         let state = self.state_for_project_path(project_path.clone())?;
         let root = match (
@@ -705,8 +1234,14 @@ impl ProjectAtlasMcpServer {
             (None, Some(path)) => match Self::path_or_project_root(&state, Some(path.clone())) {
                 Ok(root) => root,
                 Err(active_error) => {
+                    if !nearest_project {
+                        return Err(active_error);
+                    }
+                    if Self::absolute_path_inside_selected_root(&state, &path)? {
+                        return Err(active_error);
+                    }
                     let Some(indexed_state) =
-                        Self::project_state_from_existing_indexed_root(&path)?
+                        Self::nearest_root_state_for_root_argument(Path::new(&path))?
                     else {
                         return Err(active_error);
                     };
@@ -717,6 +1252,202 @@ impl ProjectAtlasMcpServer {
             (_, path) => Self::path_or_project_root(&state, path)?,
         };
         Ok((state, root))
+    }
+
+    /// Return whether a root assertion path is inside the selected root but not root-equivalent.
+    fn absolute_path_inside_selected_root(
+        state: &McpProjectState,
+        path: &str,
+    ) -> Result<bool, CliError> {
+        let candidate = PathBuf::from(path);
+        if !candidate.is_absolute() {
+            return Ok(false);
+        }
+        let resolved = canonical_project_root(&candidate)?;
+        Ok(resolved != state.root && resolved.starts_with(&state.root))
+    }
+
+    /// Return nearest indexed state only when the addressed path is the project root itself.
+    fn nearest_root_state_for_root_argument(
+        path: &Path,
+    ) -> Result<Option<McpProjectState>, CliError> {
+        let Ok(addressed_root) = canonical_project_root(path) else {
+            return Ok(None);
+        };
+        let Some(indexed_state) = Self::project_state_from_nearest_indexed_path(path)? else {
+            return Ok(None);
+        };
+        if addressed_root == indexed_state.root {
+            Ok(Some(indexed_state))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Return state and a repository-relative file key for an MCP file argument.
+    fn state_and_file_key(
+        &self,
+        project_path: Option<&str>,
+        file: &str,
+        nearest_project: bool,
+    ) -> Result<McpResolvedRepoPath, CliError> {
+        let state = self.state_for_project_path(project_path.map(ToString::to_string))?;
+        let file_path = PathBuf::from(&file);
+        if !file_path.is_absolute() {
+            let store = Self::open_store(&state)?;
+            let file_key = validated_indexed_file_key(&store, &file_path)?;
+            return Ok(McpResolvedRepoPath {
+                state,
+                key: file_key,
+                routed_project: false,
+            });
+        }
+        if nearest_project && project_path.is_none() {
+            let resolved = Self::nearest_state_and_repo_key(&state, file)?.ok_or_else(|| {
+                Self::selected_project_path_error(PATH_NOT_INSIDE_INDEXED_PROJECT_ERROR)
+            })?;
+            let store = Self::open_store(&resolved.state)?;
+            let file_key = validated_indexed_file_key(&store, Path::new(&resolved.key))?;
+            return Ok(McpResolvedRepoPath {
+                key: file_key,
+                ..resolved
+            });
+        }
+        if let Some(file_key) = Self::absolute_path_key_in_selected_project(&state, &file_path)? {
+            let store = Self::open_store(&state)?;
+            let file_key = validated_indexed_file_key(&store, Path::new(&file_key))?;
+            return Ok(McpResolvedRepoPath {
+                state,
+                key: file_key,
+                routed_project: false,
+            });
+        }
+        if project_path.is_some() {
+            return Err(Self::selected_project_path_error(
+                PATH_NOT_INSIDE_INDEXED_PROJECT_ERROR,
+            ));
+        }
+        if !nearest_project {
+            return Err(Self::selected_project_path_error(
+                PATH_NOT_INSIDE_INDEXED_PROJECT_ERROR,
+            ));
+        }
+        Err(Self::selected_project_path_error(
+            PATH_NOT_INSIDE_INDEXED_PROJECT_ERROR,
+        ))
+    }
+
+    /// Return state and an optional repository-relative file key for MCP symbol arguments.
+    fn state_and_optional_file_key(
+        &self,
+        project_path: Option<&str>,
+        file: Option<&str>,
+        nearest_project: bool,
+    ) -> Result<(McpProjectState, Option<String>, bool), CliError> {
+        let Some(file) = file else {
+            return self
+                .state_for_project_path(project_path.map(ToString::to_string))
+                .map(|state| (state, None, false));
+        };
+        let resolved = self.state_and_file_key(project_path, file, nearest_project)?;
+        Ok((resolved.state, Some(resolved.key), resolved.routed_project))
+    }
+
+    /// Return state and an optional folder filter for MCP file-ranking arguments.
+    fn state_and_optional_folder_filter(
+        &self,
+        project_path: Option<&str>,
+        folder: Option<&str>,
+        nearest_project: bool,
+    ) -> Result<(McpProjectState, Option<String>, bool), CliError> {
+        let state = self.state_for_project_path(project_path.map(ToString::to_string))?;
+        let Some(folder) = folder.map(str::trim).filter(|folder| !folder.is_empty()) else {
+            return Ok((state, None, false));
+        };
+        let folder_path = PathBuf::from(&folder);
+        if !folder_path.is_absolute() {
+            let folder_filter = normalized_folder_filter(folder)?;
+            return Ok((state, Some(folder_filter), false));
+        }
+        if nearest_project && project_path.is_none() {
+            let resolved = Self::nearest_state_and_repo_key(&state, folder)?.ok_or_else(|| {
+                Self::selected_project_path_error(FOLDER_NOT_INSIDE_INDEXED_PROJECT_ERROR)
+            })?;
+            let folder_filter = normalized_folder_filter(&resolved.key)?;
+            return Ok((resolved.state, Some(folder_filter), resolved.routed_project));
+        }
+        if let Some(folder_filter) =
+            Self::absolute_path_key_in_selected_project(&state, &folder_path)?
+        {
+            let folder_filter = normalized_folder_filter(&folder_filter)?;
+            return Ok((state, Some(folder_filter), false));
+        }
+        if project_path.is_some() {
+            return Err(Self::selected_project_path_error(
+                FOLDER_NOT_INSIDE_INDEXED_PROJECT_ERROR,
+            ));
+        }
+        if !nearest_project {
+            return Err(Self::selected_project_path_error(
+                FOLDER_NOT_INSIDE_INDEXED_PROJECT_ERROR,
+            ));
+        }
+        Err(Self::selected_project_path_error(
+            FOLDER_NOT_INSIDE_INDEXED_PROJECT_ERROR,
+        ))
+    }
+
+    /// Resolve an absolute addressed path to the nearest indexed project and repo key.
+    fn nearest_state_and_repo_key(
+        active_state: &McpProjectState,
+        path: &str,
+    ) -> Result<Option<McpResolvedRepoPath>, CliError> {
+        let path = Path::new(path);
+        let absolute_path = McpAbsolutePath::canonicalize(path)?;
+        let lexical_state = Self::project_state_from_nearest_lexical_indexed_path(path)?;
+        let canonical_state = Self::project_state_from_nearest_indexed_path(path)?;
+        Self::reject_ambiguous_nearest_project_path(
+            path,
+            lexical_state.as_ref(),
+            canonical_state.as_ref(),
+            &absolute_path,
+        )?;
+        let Some(state) = canonical_state else {
+            return Ok(None);
+        };
+        if state.root == active_state.root {
+            let key = McpSelectedRoot::from_state(active_state)
+                .repo_key_for(&absolute_path)?
+                .ok_or_else(|| {
+                    Self::selected_project_path_error(PATH_NOT_INSIDE_INDEXED_PROJECT_ERROR)
+                })?;
+            return Ok(Some(McpResolvedRepoPath {
+                state: active_state.clone(),
+                key: key.into_string(),
+                routed_project: false,
+            }));
+        }
+        let key = McpSelectedRoot::from_state(&state)
+            .repo_key_for(&absolute_path)?
+            .ok_or_else(|| {
+                Self::selected_project_path_error(PATH_NOT_INSIDE_INDEXED_PROJECT_ERROR)
+            })?;
+        Ok(Some(McpResolvedRepoPath {
+            state,
+            key: key.into_string(),
+            routed_project: true,
+        }))
+    }
+
+    /// Return a selected-project repository key for an absolute path inside the active root.
+    fn absolute_path_key_in_selected_project(
+        state: &McpProjectState,
+        path: &Path,
+    ) -> Result<Option<String>, CliError> {
+        let absolute_path = McpAbsolutePath::canonicalize(path)?;
+        McpSelectedRoot::from_state(state)
+            .repo_key_for(&absolute_path)
+            .map(|key| key.map(McpRepoKey::into_string))
     }
 
     /// Normalize optional project/root path text from MCP payloads.
@@ -743,26 +1474,223 @@ impl ProjectAtlasMcpServer {
         })
     }
 
-    /// Build project state from an explicitly addressed root only when it is already indexed.
-    fn project_state_from_existing_indexed_root(
-        root: &str,
+    /// Build project state from the nearest indexed ancestor of an addressed path.
+    fn project_state_from_nearest_indexed_path(
+        path: &Path,
     ) -> Result<Option<McpProjectState>, CliError> {
-        let Ok(root) = canonical_project_root(Path::new(root)) else {
+        let Ok(absolute_path) = McpAbsolutePath::canonicalize(path) else {
             return Ok(None);
         };
-        if !root.is_dir() {
+        let mut candidate = absolute_path.nearest_search_start();
+        loop {
+            if let Some(indexed_root) = Self::indexed_root_from_candidate(candidate) {
+                let config_path = Self::config_path_for_project_root(&indexed_root.root)?;
+                return Ok(Some(McpProjectState {
+                    root: indexed_root.root,
+                    db_path: indexed_root.db_path,
+                    config_path,
+                }));
+            }
+            let Some(parent) = candidate.parent() else {
+                return Ok(None);
+            };
+            candidate = parent;
+        }
+    }
+
+    /// Build project state from the nearest lexical indexed ancestor of an addressed path.
+    fn project_state_from_nearest_lexical_indexed_path(
+        path: &Path,
+    ) -> Result<Option<McpProjectState>, CliError> {
+        if !path.is_absolute() {
             return Ok(None);
+        }
+        let lexical_path = Self::lexically_normalized_absolute_path(path);
+        let mut candidate = if lexical_path.is_dir() {
+            lexical_path
+        } else {
+            lexical_path
+                .parent()
+                .unwrap_or(lexical_path.as_path())
+                .to_path_buf()
+        };
+        loop {
+            if let Some(indexed_root) = Self::indexed_root_from_lexical_candidate(&candidate) {
+                let config_path = Self::config_path_for_project_root(&indexed_root.root)?;
+                return Ok(Some(McpProjectState {
+                    root: indexed_root.root,
+                    db_path: indexed_root.db_path,
+                    config_path,
+                }));
+            }
+            let Some(parent) = candidate.parent() else {
+                return Ok(None);
+            };
+            candidate = parent.to_path_buf();
+        }
+    }
+
+    /// Return a role-typed indexed root when a candidate folder has a matching DB.
+    fn indexed_root_from_candidate(candidate: &Path) -> Option<McpIndexedRoot> {
+        let Ok(root) = canonical_project_root(candidate) else {
+            return None;
+        };
+        let db_path = Self::projectatlas_db_path(&root);
+        if !db_path.is_file() || !Self::indexed_db_matches_root(&db_path, &root) {
+            return None;
+        }
+        Some(McpIndexedRoot { root, db_path })
+    }
+
+    /// Return an indexed lexical root without treating symlinked descendants as the lexical owner.
+    fn indexed_root_from_lexical_candidate(candidate: &Path) -> Option<McpIndexedRoot> {
+        if Self::path_has_symlink_component(candidate) {
+            return None;
+        }
+        let Ok(root) = canonical_project_root(candidate) else {
+            return None;
+        };
+        if normalize_native_path_display(candidate) != normalize_native_path_display(&root) {
+            return None;
         }
         let db_path = Self::projectatlas_db_path(&root);
-        if !db_path.is_file() {
-            return Ok(None);
+        if !db_path.is_file() || !Self::indexed_db_matches_root(&db_path, &root) {
+            return None;
         }
-        let config_path = Self::config_path_for_project_root(&root)?;
-        Ok(Some(McpProjectState {
-            root,
-            db_path,
-            config_path,
-        }))
+        Some(McpIndexedRoot { root, db_path })
+    }
+
+    /// Return a normalized absolute path without resolving symlinks or junctions.
+    fn lexically_normalized_absolute_path(path: &Path) -> PathBuf {
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+                Component::RootDir => normalized.push(component.as_os_str()),
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    normalized.pop();
+                }
+                Component::Normal(segment) => normalized.push(segment),
+            }
+        }
+        normalized
+    }
+
+    /// Return whether a path contains a symlink component in its lexical ancestry.
+    fn path_has_symlink_component(path: &Path) -> bool {
+        let mut current = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+                Component::RootDir => current.push(component.as_os_str()),
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    current.pop();
+                }
+                Component::Normal(segment) => {
+                    current.push(segment);
+                    if fs::symlink_metadata(&current)
+                        .is_ok_and(|metadata| Self::metadata_is_symlink_or_reparse_point(&metadata))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Return whether metadata represents a symlink or Windows reparse point.
+    fn metadata_is_symlink_or_reparse_point(metadata: &fs::Metadata) -> bool {
+        if metadata.file_type().is_symlink() {
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+            metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    /// Reject nearest-project routing when lexical and canonical roots disagree.
+    fn reject_ambiguous_nearest_project_path(
+        path: &Path,
+        lexical_state: Option<&McpProjectState>,
+        canonical_state: Option<&McpProjectState>,
+        canonical_path: &McpAbsolutePath,
+    ) -> Result<(), CliError> {
+        if let (Some(lexical_state), Some(canonical_state)) = (lexical_state, canonical_state) {
+            if lexical_state.root != canonical_state.root {
+                return Err(Self::ambiguous_nearest_project_path_error(
+                    path,
+                    Some(lexical_state),
+                    Some(canonical_state),
+                ));
+            }
+            return Ok(());
+        }
+        let lexical_path = Self::lexically_normalized_absolute_path(path);
+        if Self::path_has_symlink_component(&lexical_path)
+            || lexical_state.is_some_and(|state| !canonical_path.as_path().starts_with(&state.root))
+        {
+            return Err(Self::ambiguous_nearest_project_path_error(
+                path,
+                lexical_state,
+                canonical_state,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Build a clear MCP error for ambiguous symlink or junction routing.
+    fn ambiguous_nearest_project_path_error(
+        path: &Path,
+        lexical_state: Option<&McpProjectState>,
+        canonical_state: Option<&McpProjectState>,
+    ) -> CliError {
+        let lexical_root = lexical_state.map_or_else(
+            || MCP_NO_ROOT_PLACEHOLDER.to_string(),
+            |state| normalize_native_path_display(&state.root),
+        );
+        let resolved_root = canonical_state.map_or_else(
+            || MCP_NO_ROOT_PLACEHOLDER.to_string(),
+            |state| normalize_native_path_display(&state.root),
+        );
+        let path_display = normalize_native_path_display(path);
+        let mut message = String::new();
+        message.push_str(AMBIGUOUS_NEAREST_PROJECT_PATH_ERROR);
+        message.push_str(MCP_ERROR_FOR_PATH_FRAGMENT);
+        message.push_str(&path_display);
+        message.push_str(MCP_ERROR_LEXICAL_ROOT_FRAGMENT);
+        message.push_str(&lexical_root);
+        message.push_str(MCP_ERROR_RESOLVED_ROOT_FRAGMENT);
+        message.push_str(&resolved_root);
+        message.push_str(MCP_ERROR_GUIDANCE_FRAGMENT);
+        message.push_str(OUTSIDE_SELECTED_PROJECT_GUIDANCE);
+        CliError::InvalidInput(message)
+    }
+
+    /// Return whether an existing DB records the same canonical project root.
+    fn indexed_db_matches_root(db_path: &Path, root: &Path) -> bool {
+        let Ok(stored_root) = read_project_root_read_only(db_path) else {
+            return false;
+        };
+        let Some(stored_root) = stored_root else {
+            return false;
+        };
+        let Ok(stored_root) = canonical_project_root(Path::new(&stored_root)) else {
+            return false;
+        };
+        let Ok(candidate_root) = canonical_project_root(root) else {
+            return false;
+        };
+        stored_root == candidate_root
     }
 
     /// Return the standard `ProjectAtlas` DB path for one project root.
@@ -814,17 +1742,42 @@ impl ProjectAtlasMcpServer {
     /// Render active project state for agents.
     fn render_project_state(state: &McpProjectState) -> Result<String, CliError> {
         let payload = McpProjectStateResponse {
-            project: McpProjectStatePayload {
-                root: state.root.display().to_string(),
-                db: state.db_path.display().to_string(),
-                config: state
-                    .config_path
-                    .as_ref()
-                    .map(|path| path.display().to_string()),
-                status: McpProjectStatus::Active,
-            },
+            project: Self::project_state_payload(state),
         };
         Self::encode_serialized_payload(payload)
+    }
+
+    /// Build selected-project payload fields.
+    fn project_state_payload(state: &McpProjectState) -> McpProjectStatePayload {
+        McpProjectStatePayload {
+            root: normalize_native_path_display(&state.root),
+            db: normalize_native_path_display(&state.db_path),
+            config: state
+                .config_path
+                .as_ref()
+                .map(normalize_native_path_display),
+            status: McpProjectStatus::Active,
+        }
+    }
+
+    /// Prefix routed cross-project read payloads with selected root/DB metadata.
+    fn with_selected_project_audit(
+        state: &McpProjectState,
+        routed_project: bool,
+        toon: String,
+    ) -> Result<String, CliError> {
+        if !routed_project {
+            return Ok(toon);
+        }
+        let prefix = Self::encode_named_payload(
+            MCP_PAYLOAD_SELECTED_PROJECT,
+            &Self::project_state_payload(state),
+        )?;
+        let mut audited = String::with_capacity(prefix.len() + 1 + toon.len());
+        audited.push_str(&prefix);
+        audited.push('\n');
+        audited.push_str(&toon);
+        Ok(audited)
     }
 
     /// Return a path parameter or the selected project root.
@@ -873,15 +1826,6 @@ impl ProjectAtlasMcpServer {
             )));
         }
         Ok(node_key)
-    }
-
-    /// Validate an optional repository-relative MCP file key.
-    fn validated_optional_file_key(path: Option<String>) -> Result<Option<String>, CliError> {
-        path.map(|path| {
-            validated_repo_node_key(std::path::Path::new(&path))
-                .map_err(Self::selected_project_path_error)
-        })
-        .transpose()
     }
 
     /// Add selected-project guidance to repository-relative path errors.
@@ -1042,6 +1986,155 @@ impl ProjectAtlasMcpServer {
         })())
     }
 
+    /// Initialize a `ProjectAtlas` project-local config surface.
+    #[tool(
+        name = "atlas_init",
+        description = "Initialize ProjectAtlas project-local config files without scanning source."
+    )]
+    fn atlas_init(&self, Parameters(params): Parameters<AtlasInitParams>) -> String {
+        Self::as_mcp_text((|| {
+            let state = self.admin_project_root(params.project_path)?;
+            init_project(&state.root)?;
+            Self::encode_named_payload(MCP_PAYLOAD_INIT, &Self::init_report_for_state(&state))
+        })())
+    }
+
+    /// Write an explicit compatibility map export.
+    #[tool(
+        name = "atlas_map",
+        description = "Write the explicit compatibility ProjectAtlas map export for older workflows."
+    )]
+    fn atlas_map(&self, Parameters(params): Parameters<AtlasMapParams>) -> String {
+        Self::as_mcp_text((|| {
+            let state = self.admin_project_root(params.project_path)?;
+            let report = Self::build_map_report(
+                &state,
+                params.json.unwrap_or(false),
+                params.force.unwrap_or(false),
+            )?;
+            Self::encode_named_payload(MCP_PAYLOAD_MAP, &report)
+        })())
+    }
+
+    /// Return root/DB/config diagnostics.
+    #[tool(
+        name = "atlas_root",
+        description = "Show or verify ProjectAtlas root, DB, config, and runtime identity."
+    )]
+    fn atlas_root(&self, Parameters(params): Parameters<AtlasRootParams>) -> String {
+        Self::as_mcp_text((|| {
+            let state = self.admin_project_root(params.project_path)?;
+            let report = build_root_report(&state.db_path, state.config_path.as_deref())?;
+            if params.verify.unwrap_or(false) && !report.verified {
+                return Ok(render_root_report(&report));
+            }
+            Ok(render_root_report(&report))
+        })())
+    }
+
+    /// Bind a project root and make it active for subsequent defaulted calls.
+    #[tool(
+        name = "atlas_root_set",
+        description = "Bind a repository root, generate project-local MCP configs, and make it active for later MCP calls."
+    )]
+    fn atlas_root_set(&self, Parameters(params): Parameters<AtlasRootSetParams>) -> String {
+        Self::as_mcp_text((|| {
+            let root = canonical_project_root(Path::new(&params.root))?;
+            let report = crate::bind_project_root(&root, params.nearest_project.unwrap_or(false))?;
+            let state = Self::project_state_from_root(&root)?;
+            self.set_active_project_state(state)?;
+            Ok(render_root_report(&report))
+        })())
+    }
+
+    /// Return the effective `ProjectAtlas` config.
+    #[tool(
+        name = "atlas_config",
+        description = "Return the effective ProjectAtlas scan, purpose, and output configuration."
+    )]
+    fn atlas_config(&self, Parameters(params): Parameters<AtlasProjectParams>) -> String {
+        Self::as_mcp_text((|| {
+            let state = self.admin_project_root(params.project_path)?;
+            let report = effective_config_report(&Self::load_config_for_state(&state)?);
+            Self::encode_named_payload(MCP_PAYLOAD_CONFIG, &report)
+        })())
+    }
+
+    /// Return the effective `ProjectAtlas` ignore policy.
+    #[tool(
+        name = "atlas_ignore_list",
+        description = "List effective ProjectAtlas manual ignore policy and inherited .gitignore status."
+    )]
+    fn atlas_ignore_list(&self, Parameters(params): Parameters<AtlasProjectParams>) -> String {
+        Self::as_mcp_text((|| {
+            let state = self.admin_project_root(params.project_path)?;
+            let report = list_ignore_entries(state.config_path.as_deref(), &state.root)?;
+            Self::encode_named_payload(MCP_PAYLOAD_IGNORE, &report)
+        })())
+    }
+
+    /// Create a project-root `.gitignore` when it is absent.
+    #[tool(
+        name = "atlas_ignore_init_gitignore",
+        description = "Create a project-root .gitignore when it is missing."
+    )]
+    fn atlas_ignore_init_gitignore(
+        &self,
+        Parameters(params): Parameters<AtlasProjectParams>,
+    ) -> String {
+        Self::as_mcp_text((|| {
+            let state = self.admin_project_root(params.project_path)?;
+            let report = init_gitignore(state.config_path.as_deref(), &state.root)?;
+            Self::encode_named_payload(MCP_PAYLOAD_GITIGNORE, &report)
+        })())
+    }
+
+    /// Add a manual `ProjectAtlas` ignore entry.
+    #[tool(
+        name = "atlas_ignore_add",
+        description = "Add one manual ProjectAtlas ignore entry to the selected project's config."
+    )]
+    fn atlas_ignore_add(
+        &self,
+        Parameters(params): Parameters<AtlasIgnoreMutationParams>,
+    ) -> String {
+        Self::as_mcp_text((|| {
+            let state = self.admin_project_root(params.project_path)?;
+            let kind = Self::parse_ignore_kind(params.kind.as_deref(), true)?.ok_or_else(|| {
+                CliError::InvalidInput(MCP_ERROR_IGNORE_KIND_REQUIRED_FOR_ADD.to_owned())
+            })?;
+            let report = add_ignore_entry(
+                state.config_path.as_deref(),
+                &state.root,
+                kind,
+                &params.value,
+            )?;
+            Self::encode_named_payload(MCP_PAYLOAD_IGNORE, &report)
+        })())
+    }
+
+    /// Remove a manual `ProjectAtlas` ignore entry.
+    #[tool(
+        name = "atlas_ignore_remove",
+        description = "Remove one manual ProjectAtlas ignore entry from the selected project's config."
+    )]
+    fn atlas_ignore_remove(
+        &self,
+        Parameters(params): Parameters<AtlasIgnoreMutationParams>,
+    ) -> String {
+        Self::as_mcp_text((|| {
+            let state = self.admin_project_root(params.project_path)?;
+            let kind = Self::parse_ignore_kind(params.kind.as_deref(), false)?;
+            let report = remove_ignore_entry(
+                state.config_path.as_deref(),
+                &state.root,
+                kind,
+                &params.value,
+            )?;
+            Self::encode_named_payload(MCP_PAYLOAD_IGNORE, &report)
+        })())
+    }
+
     /// Scan a repository, import purpose metadata, rebuild symbols, and return an overview.
     #[tool(
         name = "atlas_scan",
@@ -1049,7 +2142,9 @@ impl ProjectAtlasMcpServer {
     )]
     fn atlas_scan(&self, Parameters(params): Parameters<AtlasScanParams>) -> String {
         Self::as_mcp_text((|| {
-            let (state, path) = self.state_and_root_path(params.project_path, params.path)?;
+            let nearest_project = self.nearest_project_enabled(params.nearest_project);
+            let (state, path) =
+                self.state_and_root_path(params.project_path, params.path, nearest_project)?;
             let plan = ScanRuntimePlan::for_path(
                 state.config_path.as_deref(),
                 &path,
@@ -1121,16 +2216,16 @@ impl ProjectAtlasMcpServer {
         name = "atlas_files",
         description = "Rank repository files by query, purpose, optional folder, and optional indexed text fallback before an agent opens source."
     )]
-    fn atlas_files(&self, Parameters(params): Parameters<AtlasQueryParams>) -> String {
+    fn atlas_files(&self, Parameters(params): Parameters<AtlasFilesParams>) -> String {
         Self::as_mcp_text((|| {
-            let state = self.state_for_project_path(params.project_path)?;
+            let nearest_project = self.nearest_project_enabled(params.nearest_project);
+            let (state, folder_filter, routed_project) = self.state_and_optional_folder_filter(
+                params.project_path.as_deref(),
+                params.folder.as_deref(),
+                nearest_project,
+            )?;
             let store = Self::open_store(&state)?;
             let query = Self::query_or_empty(params.query);
-            let folder_filter = params
-                .folder
-                .as_deref()
-                .map(normalized_folder_filter)
-                .transpose()?;
             let selected = ranked_file_nodes_with_reasons(
                 &store,
                 &query,
@@ -1144,7 +2239,11 @@ impl ProjectAtlasMcpServer {
                 folder_filter.as_deref(),
                 params.file_pattern.as_deref(),
             )?;
-            let toon = render_ranked_nodes(NODE_LABEL_FILES, &selected);
+            let toon = Self::with_selected_project_audit(
+                &state,
+                routed_project,
+                render_ranked_nodes(NODE_LABEL_FILES, &selected),
+            )?;
             record_usage_estimate(
                 &store,
                 &self.session,
@@ -1191,16 +2290,25 @@ impl ProjectAtlasMcpServer {
     )]
     fn atlas_outline(&self, Parameters(params): Parameters<AtlasOutlineParams>) -> String {
         Self::as_mcp_text((|| {
-            let state = self.state_for_project_path(params.project_path)?;
-            let file = PathBuf::from(&params.file);
+            let nearest_project = self.nearest_project_enabled(params.nearest_project);
+            let resolved = self.state_and_file_key(
+                params.project_path.as_deref(),
+                &params.file,
+                nearest_project,
+            )?;
+            let state = resolved.state;
+            let file_key = resolved.key;
             let store = Self::open_store(&state)?;
-            let file_key = validated_indexed_file_key(&store, &file)?;
             let content = read_indexed_file_content(&store, &file_key)?;
             let language = store
                 .load_node_by_path(&file_key)?
                 .and_then(|node| node.node.language);
             let outline = build_outline(&file_key, language, &content, params.lines.unwrap_or(12));
-            let toon = render_outline(&outline);
+            let toon = Self::with_selected_project_audit(
+                &state,
+                resolved.routed_project,
+                render_outline(&outline),
+            )?;
             record_usage_text(
                 &store,
                 &self.session,
@@ -1221,15 +2329,25 @@ impl ProjectAtlasMcpServer {
     )]
     fn atlas_file_summary(&self, Parameters(params): Parameters<AtlasFileSummaryParams>) -> String {
         Self::as_mcp_text((|| {
-            let state = self.state_for_project_path(params.project_path)?;
+            let nearest_project = self.nearest_project_enabled(params.nearest_project);
+            let resolved = self.state_and_file_key(
+                params.project_path.as_deref(),
+                &params.file,
+                nearest_project,
+            )?;
+            let state = resolved.state;
+            let file_key = resolved.key;
             let store = Self::open_store(&state)?;
-            let file = PathBuf::from(&params.file);
             let report = build_file_summary(
                 &store,
-                &file,
+                Path::new(&file_key),
                 params.limit.unwrap_or(DEFAULT_FILE_SUMMARY_LIMIT),
             )?;
-            let toon = render_file_summary(&report);
+            let toon = Self::with_selected_project_audit(
+                &state,
+                resolved.routed_project,
+                render_file_summary(&report),
+            )?;
             record_usage_text(
                 &store,
                 &self.session,
@@ -1284,8 +2402,15 @@ impl ProjectAtlasMcpServer {
     )]
     fn atlas_slice(&self, Parameters(params): Parameters<AtlasSliceParams>) -> String {
         Self::as_mcp_text((|| {
-            let state = self.state_for_project_path(params.project_path)?;
-            let file = PathBuf::from(&params.file);
+            let nearest_project = self.nearest_project_enabled(params.nearest_project);
+            let resolved = self.state_and_file_key(
+                params.project_path.as_deref(),
+                &params.file,
+                nearest_project,
+            )?;
+            let state = resolved.state;
+            let file_key = resolved.key;
+            let file = PathBuf::from(&file_key);
             let store = Self::open_store(&state)?;
             let report = if let Some(symbol) = params.symbol {
                 read_symbol_slice(
@@ -1312,7 +2437,11 @@ impl ProjectAtlasMcpServer {
                     .ok_or_else(|| CliError::InvalidInput(START_LINE_REQUIRED_ERROR.to_string()))?;
                 read_indexed_code_slice(&store, &file, start_line, params.end_line)?
             };
-            let toon = render_code_slice(&report);
+            let toon = Self::with_selected_project_audit(
+                &state,
+                resolved.routed_project,
+                render_code_slice(&report),
+            )?;
             record_usage_text(
                 &store,
                 &self.session,
@@ -1333,7 +2462,9 @@ impl ProjectAtlasMcpServer {
     )]
     fn atlas_symbols_build(&self, Parameters(params): Parameters<AtlasScanParams>) -> String {
         Self::as_mcp_text((|| {
-            let (state, path) = self.state_and_root_path(params.project_path, params.path)?;
+            let nearest_project = self.nearest_project_enabled(params.nearest_project);
+            let (state, path) =
+                self.state_and_root_path(params.project_path, params.path, nearest_project)?;
             let mut store = Self::open_mut_store(&state)?;
             let options = SymbolBuildOptions::new(
                 params.max_bytes.unwrap_or(MAX_SYMBOL_FILE_BYTES),
@@ -1352,15 +2483,23 @@ impl ProjectAtlasMcpServer {
     )]
     fn atlas_symbols(&self, Parameters(params): Parameters<AtlasSymbolsParams>) -> String {
         Self::as_mcp_text((|| {
-            let state = self.state_for_project_path(params.project_path)?;
+            let nearest_project = self.nearest_project_enabled(params.nearest_project);
+            let (state, file, routed_project) = self.state_and_optional_file_key(
+                params.project_path.as_deref(),
+                params.file.as_deref(),
+                nearest_project,
+            )?;
             let store = Self::open_store(&state)?;
-            let file = Self::validated_optional_file_key(params.file)?;
             let symbols = store.load_symbols(
                 file.as_deref(),
                 params.query.as_deref(),
                 params.limit.unwrap_or(50),
             )?;
-            let toon = render_symbols(&symbols);
+            let toon = Self::with_selected_project_audit(
+                &state,
+                routed_project,
+                render_symbols(&symbols),
+            )?;
             let baseline_tokens = estimated_source_tokens_for_paths(
                 &store,
                 symbols.iter().map(|symbol| symbol.path.as_str()),
@@ -1385,15 +2524,23 @@ impl ProjectAtlasMcpServer {
     )]
     fn atlas_symbol_relations(&self, Parameters(params): Parameters<AtlasSymbolsParams>) -> String {
         Self::as_mcp_text((|| {
-            let state = self.state_for_project_path(params.project_path)?;
+            let nearest_project = self.nearest_project_enabled(params.nearest_project);
+            let (state, file, routed_project) = self.state_and_optional_file_key(
+                params.project_path.as_deref(),
+                params.file.as_deref(),
+                nearest_project,
+            )?;
             let store = Self::open_store(&state)?;
-            let file = Self::validated_optional_file_key(params.file)?;
             let relations = store.load_symbol_relations(
                 file.as_deref(),
                 params.query.as_deref(),
                 params.limit.unwrap_or(50),
             )?;
-            let toon = render_symbol_relations(&relations);
+            let toon = Self::with_selected_project_audit(
+                &state,
+                routed_project,
+                render_symbol_relations(&relations),
+            )?;
             let baseline_tokens = estimated_source_tokens_for_paths(
                 &store,
                 relations.iter().map(|relation| relation.path.as_str()),
@@ -1463,6 +2610,19 @@ impl ProjectAtlasMcpServer {
             };
             store.resolve_health_finding(&resolution)?;
             Self::encode_named_payload(MCP_PAYLOAD_HEALTH_RESOLUTION, &resolution)
+        })())
+    }
+
+    /// Run `ProjectAtlas` lint checks without terminating the MCP transport.
+    #[tool(
+        name = "atlas_lint",
+        description = "Run ProjectAtlas lint checks and return an ok flag, CLI-compatible exit code, and report text."
+    )]
+    fn atlas_lint(&self, Parameters(params): Parameters<AtlasLintParams>) -> String {
+        Self::as_mcp_text((|| {
+            let state = self.admin_project_root(params.project_path.clone())?;
+            let report = Self::lint_report_for_state(&state, &params)?;
+            Self::encode_named_payload(MCP_PAYLOAD_LINT, &report)
         })())
     }
 
@@ -1578,7 +2738,9 @@ impl ProjectAtlasMcpServer {
     )]
     fn atlas_watch_once(&self, Parameters(params): Parameters<AtlasWatchOnceParams>) -> String {
         Self::as_mcp_text((|| {
-            let (state, path) = self.state_and_root_path(params.project_path, params.path)?;
+            let nearest_project = self.nearest_project_enabled(params.nearest_project);
+            let (state, path) =
+                self.state_and_root_path(params.project_path, params.path, nearest_project)?;
             let mut store = Self::open_mut_store(&state)?;
             let plan = ScanRuntimePlan::for_path(
                 state.config_path.as_deref(),
@@ -1614,7 +2776,9 @@ impl ProjectAtlasMcpServer {
         Parameters(params): Parameters<AtlasStripLegacyParams>,
     ) -> String {
         Self::as_mcp_text((|| {
-            let (state, path) = self.state_and_root_path(params.project_path, params.path)?;
+            let nearest_project = self.nearest_project_enabled(params.nearest_project);
+            let (state, path) =
+                self.state_and_root_path(params.project_path, params.path, nearest_project)?;
             let report = strip_legacy_purpose(
                 &path,
                 state.config_path.as_deref(),
@@ -1644,6 +2808,39 @@ impl ProjectAtlasMcpServer {
             )?;
             Self::encode_named_payload(MCP_PAYLOAD_RESET_INDEX, &report)
         })())
+    }
+
+    /// Generate a project-local MCP config document.
+    #[tool(
+        name = "atlas_mcp_config",
+        description = "Return a generated ProjectAtlas MCP config document for mcp-json, codex, claude-code, or opencode hosts."
+    )]
+    fn atlas_mcp_config(&self, Parameters(params): Parameters<AtlasMcpConfigParams>) -> String {
+        Self::as_mcp_text((|| {
+            let state = self.admin_project_root(params.project_path)?;
+            let harness = Self::parse_harness_config(params.harness.as_deref())?;
+            let server_name = params
+                .server_name
+                .unwrap_or_else(|| MCP_DEFAULT_CONFIG_SERVER_NAME.to_string());
+            let report = build_harness_mcp_config_report(
+                harness,
+                &server_name,
+                &state.db_path,
+                state.config_path.as_deref(),
+                params.nearest_project.unwrap_or(false),
+            )?;
+            Self::encode_named_payload(MCP_PAYLOAD_MCP_CONFIG, &report)
+        })())
+    }
+
+    /// Return runtime identity and compiled MCP tool surface.
+    #[tool(
+        name = "atlas_runtime_info",
+        description = "Return ProjectAtlas runtime identity, version, capabilities, and compiled MCP tool names."
+    )]
+    fn atlas_runtime_info(&self, Parameters(_params): Parameters<AtlasProjectParams>) -> String {
+        let _session_scope = self.session.as_str();
+        Self::as_mcp_text(Ok(render_runtime_info(&build_runtime_info())))
     }
 
     /// Return a bounded purpose curation queue.
@@ -1752,10 +2949,10 @@ mod tests {
         let repo = temp.path().join("repo-a");
         fs::create_dir(&repo)?;
         let db_path = repo.join(".projectatlas").join("projectatlas.db");
-        let server = ProjectAtlasMcpServer::new(db_path, None, "mcp-test".to_string());
+        let server = ProjectAtlasMcpServer::new(db_path, None, "mcp-test".to_string(), false);
         let expected_root = canonical_project_root(&repo)?;
 
-        let (_state, root) = server.state_and_root_path(None, Some("./".to_string()))?;
+        let (_state, root) = server.state_and_root_path(None, Some("./".to_string()), false)?;
         require(
             root == expected_root,
             "current-dir alias did not use active root",
@@ -1763,7 +2960,8 @@ mod tests {
 
         #[cfg(windows)]
         {
-            let (_state, root) = server.state_and_root_path(None, Some(".\\".to_string()))?;
+            let (_state, root) =
+                server.state_and_root_path(None, Some(".\\".to_string()), false)?;
             require(
                 root == expected_root,
                 "windows current-dir alias did not use active root",
@@ -1816,7 +3014,7 @@ mod tests {
 
         let db_b = repo_b.join(".projectatlas").join("projectatlas.db");
         let server =
-            ProjectAtlasMcpServer::new(db_b.clone(), Some(config_a), "mcp-test".to_string());
+            ProjectAtlasMcpServer::new(db_b.clone(), Some(config_a), "mcp-test".to_string(), false);
         let state = server.active_project_state()?;
 
         require(
@@ -1852,6 +3050,84 @@ mod tests {
         require(
             !repo.join(".projectatlas").exists(),
             "read-only store created .projectatlas",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn selected_root_absolute_path_keys_stay_inside_selected_project()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(repo.join("src"))?;
+        fs::create_dir_all(outside.join("src"))?;
+        let inside_file = repo.join("src").join("lib.rs");
+        let outside_file = outside.join("src").join("lib.rs");
+        fs::write(&inside_file, "pub fn inside() {}\n")?;
+        fs::write(&outside_file, "pub fn outside() {}\n")?;
+        let state = McpProjectState {
+            root: canonical_project_root(&repo)?,
+            db_path: repo.join(".projectatlas").join("projectatlas.db"),
+            config_path: None,
+        };
+
+        let inside_key =
+            ProjectAtlasMcpServer::absolute_path_key_in_selected_project(&state, &inside_file)?
+                .ok_or_else(|| io::Error::other("inside selected root did not produce key"))?;
+        require(
+            inside_key == "src/lib.rs",
+            "inside selected root produced wrong repo key",
+        )?;
+        require(
+            ProjectAtlasMcpServer::absolute_path_key_in_selected_project(&state, &outside_file)?
+                .is_none(),
+            "outside selected root produced a repo key",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_root_candidate_requires_matching_project_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        let other = temp.path().join("other");
+        fs::create_dir_all(repo.join(".projectatlas"))?;
+        fs::create_dir_all(&other)?;
+
+        require(
+            ProjectAtlasMcpServer::indexed_root_from_candidate(&repo).is_none(),
+            "candidate without DB was treated as indexed",
+        )?;
+
+        let db_path = repo.join(".projectatlas").join("projectatlas.db");
+        {
+            let store = open_atlas_store(&db_path)?;
+            store.set_project_root(&other)?;
+        }
+        require(
+            ProjectAtlasMcpServer::indexed_root_from_candidate(&repo).is_none(),
+            "candidate with mismatched DB root was treated as indexed",
+        )?;
+
+        {
+            let store = open_atlas_store(&db_path)?;
+            store.set_project_root(&repo)?;
+        }
+        let indexed = ProjectAtlasMcpServer::indexed_root_from_candidate(&repo)
+            .ok_or_else(|| io::Error::other("matching DB root was not accepted"))?;
+        require(
+            indexed.root == canonical_project_root(&repo)?,
+            "indexed root did not preserve canonical candidate root",
+        )?;
+        let expected_db_path =
+            ProjectAtlasMcpServer::projectatlas_db_path(&canonical_project_root(&repo)?);
+        require(
+            indexed.db_path == expected_db_path,
+            "indexed root changed DB path",
         )?;
 
         Ok(())
