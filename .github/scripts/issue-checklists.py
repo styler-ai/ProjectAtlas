@@ -26,6 +26,10 @@ def gh_json(args):
     return json.loads(run(["gh", *args]))
 
 
+def gh_api_json(args):
+    return json.loads(run(["gh", "api", *args]))
+
+
 def clean(text):
     return " ".join((text or "").replace("\r", "").split())
 
@@ -141,23 +145,76 @@ def check_openspec_tasks(repo, root, issue_map):
     return failures
 
 
-def milestone_issues(repo, milestone):
-    return gh_json(
+def repo_parts(repo):
+    parts = repo.split("/", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise SystemExit(f"--repo must be OWNER/REPO, got {repo!r}")
+    return parts
+
+
+def flatten_paginated_response(payload):
+    if not isinstance(payload, list):
+        raise SystemExit("expected GitHub API pagination response to be a JSON list")
+    if all(isinstance(page, list) for page in payload):
+        return [item for page in payload for item in page]
+    return payload
+
+
+def milestone_number(repo, milestone):
+    owner, name = repo_parts(repo)
+    payload = gh_api_json(
         [
-            "issue",
-            "list",
-            "-R",
-            repo,
-            "--state",
-            "all",
-            "--milestone",
-            milestone,
-            "--limit",
-            "200",
-            "--json",
-            "number,title,state,url",
+            "--paginate",
+            "--slurp",
+            f"repos/{owner}/{name}/milestones",
+            "--method",
+            "GET",
+            "-F",
+            "state=all",
+            "-F",
+            "per_page=100",
         ]
     )
+    matches = [
+        item
+        for item in flatten_paginated_response(payload)
+        if item.get("title") == milestone
+    ]
+    if not matches:
+        return None
+    return matches[0].get("number")
+
+
+def milestone_issues(repo, milestone):
+    number = milestone_number(repo, milestone)
+    if number is None:
+        return []
+    owner, name = repo_parts(repo)
+    payload = gh_api_json(
+        [
+            "--paginate",
+            "--slurp",
+            f"repos/{owner}/{name}/issues",
+            "--method",
+            "GET",
+            "-F",
+            "state=all",
+            "-F",
+            f"milestone={number}",
+            "-F",
+            "per_page=100",
+        ]
+    )
+    return [
+        {
+            "number": item["number"],
+            "title": item.get("title", ""),
+            "state": item.get("state", ""),
+            "url": item.get("html_url", ""),
+        }
+        for item in flatten_paginated_response(payload)
+        if "pull_request" not in item
+    ]
 
 
 def check_milestone_complete(repo, milestone):
@@ -236,6 +293,12 @@ def self_test():
         (False, "2.1 Same-level task subsection"),
     ]
     assert parse_section_tasks(completed, heading_matches_openspec_tasks) == []
+    assert repo_parts("owner/repo") == ["owner", "repo"]
+    assert flatten_paginated_response([[{"number": 1}], [{"number": 2}]]) == [
+        {"number": 1},
+        {"number": 2},
+    ]
+    assert flatten_paginated_response([{"number": 3}]) == [{"number": 3}]
     assert clean("a\r\n  b") == "a b"
     print("issue checklist self-test passed")
 

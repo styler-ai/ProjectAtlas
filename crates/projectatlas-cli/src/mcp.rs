@@ -1243,8 +1243,10 @@ impl McpTaskRegistry {
     /// Create a registry with the built-in task-progress contract record.
     fn new() -> Self {
         let now = mcp_unix_time_ms();
-        let mut records = VecDeque::new();
-        records.push_back(McpTaskRecord {
+        let mut registry = Self {
+            records: VecDeque::new(),
+        };
+        registry.insert(McpTaskRecord {
             task_id: MCP_TASK_CONTRACT_ID.to_string(),
             operation: McpTaskOperation::Contract,
             state: McpTaskState::Complete,
@@ -1259,7 +1261,30 @@ impl McpTaskRegistry {
             result_ref: Some(MCP_TOOL_ATLAS_TASK_STATUS.to_string()),
             cancelable: false,
         });
-        Self { records }
+        registry
+    }
+
+    /// Insert or replace one task record while preserving the fixed registry capacity.
+    fn insert(&mut self, record: McpTaskRecord) {
+        if let Some(existing_index) = self
+            .records
+            .iter()
+            .position(|current| current.task_id == record.task_id)
+        {
+            let _removed = self.records.remove(existing_index);
+        }
+        while self.records.len() >= MCP_TASK_REGISTRY_CAPACITY {
+            if let Some(finished_index) = self
+                .records
+                .iter()
+                .position(McpTaskRecord::is_terminal_state)
+            {
+                let _evicted = self.records.remove(finished_index);
+            } else {
+                let _evicted = self.records.pop_front();
+            }
+        }
+        self.records.push_back(record);
     }
 
     /// Return a task record by id.
@@ -1305,6 +1330,16 @@ struct McpTaskRecord {
     result_ref: Option<String>,
     /// Whether this task can be canceled by the current server.
     cancelable: bool,
+}
+
+impl McpTaskRecord {
+    /// Return whether this record is in a terminal state and can be evicted first.
+    fn is_terminal_state(&self) -> bool {
+        matches!(
+            self.state,
+            McpTaskState::Complete | McpTaskState::Failed | McpTaskState::Canceled
+        )
+    }
 }
 
 /// MCP task operation kind.
@@ -1739,6 +1774,7 @@ impl ProjectAtlasMcpServer {
             recommendations: Self::indexed_project_recommendations(
                 &query,
                 blockers.total,
+                blocker_limit,
                 selected_project_path,
             ),
             blockers,
@@ -1832,6 +1868,7 @@ impl ProjectAtlasMcpServer {
     fn indexed_project_recommendations(
         query: &str,
         blocker_total: usize,
+        blocker_limit: usize,
         project_path: Option<String>,
     ) -> Vec<McpBriefRecommendation> {
         let mut recommendations = vec![
@@ -1864,7 +1901,7 @@ impl ProjectAtlasMcpServer {
                 arguments: Self::brief_call_arguments(
                     project_path,
                     None,
-                    Some((MCP_BRIEF_ARG_LIMIT, SESSION_BRIEF_DEFAULT_LIMIT)),
+                    Some((MCP_BRIEF_ARG_LIMIT, blocker_limit)),
                 ),
             });
         }
@@ -4013,6 +4050,7 @@ mod tests {
         let recommendations = ProjectAtlasMcpServer::indexed_project_recommendations(
             "startup",
             1,
+            7,
             Some(project_path.clone()),
         );
 
@@ -4035,7 +4073,7 @@ mod tests {
             recommendations.iter().any(|recommendation| {
                 matches!(recommendation.kind, McpBriefRecommendationKind::Health)
                     && recommendation.arguments.get(MCP_BRIEF_ARG_LIMIT)
-                        == Some(&serde_json::json!(SESSION_BRIEF_DEFAULT_LIMIT))
+                        == Some(&serde_json::json!(7))
             }),
             "health recommendation did not preserve limit",
         )?;
@@ -4145,6 +4183,69 @@ mod tests {
         require(
             missing.lookup == McpTaskLookupStatus::NotFound,
             "unknown task did not return not_found",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn task_registry_evictions_prefer_old_terminal_records()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut registry = McpTaskRegistry {
+            records: VecDeque::new(),
+        };
+        registry.insert(McpTaskRecord {
+            task_id: "running-0".to_string(),
+            operation: McpTaskOperation::Search,
+            state: McpTaskState::Running,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            progress: None,
+            error: None,
+            result_ref: None,
+            cancelable: true,
+        });
+        for index in 1..MCP_TASK_REGISTRY_CAPACITY {
+            registry.insert(McpTaskRecord {
+                task_id: format!("complete-{index}"),
+                operation: McpTaskOperation::Search,
+                state: McpTaskState::Complete,
+                created_at_ms: index as u128,
+                updated_at_ms: index as u128,
+                progress: None,
+                error: None,
+                result_ref: None,
+                cancelable: false,
+            });
+        }
+
+        registry.insert(McpTaskRecord {
+            task_id: "new-complete".to_string(),
+            operation: McpTaskOperation::Search,
+            state: McpTaskState::Complete,
+            created_at_ms: 100,
+            updated_at_ms: 100,
+            progress: None,
+            error: None,
+            result_ref: Some("atlas_search".to_string()),
+            cancelable: false,
+        });
+
+        require(
+            registry.records.len() == MCP_TASK_REGISTRY_CAPACITY,
+            "task registry exceeded configured capacity",
+        )?;
+        require(
+            registry.get("running-0").is_some(),
+            "registry evicted a running record before old terminal records",
+        )?;
+        require(
+            registry.get("complete-1").is_none(),
+            "registry did not evict the oldest terminal record",
+        )?;
+        require(
+            registry.get("new-complete").is_some(),
+            "registry did not retain the newly inserted record",
         )?;
 
         Ok(())
