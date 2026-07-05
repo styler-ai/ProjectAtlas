@@ -117,6 +117,10 @@
       "purpose": "Images and visual assets referenced by ProjectAtlas README and documentation pages."
     },
     {
+      "path": "docs/design",
+      "purpose": "Design reference images for ProjectAtlas terminal dashboards and mascot identity."
+    },
+    {
       "path": "docs/benchmarks",
       "purpose": "Measured ProjectAtlas token-savings and repository-orientation benchmark documentation."
     },
@@ -525,6 +529,14 @@
       "purpose": "README bar chart visualizing ProjectAtlas token savings benchmark results"
     },
     {
+      "path": "docs/design/ani-mascot-reference.png",
+      "purpose": "Ani mascot reference image used to align ProjectAtlas branding and token dashboard identity."
+    },
+    {
+      "path": "docs/design/token-impact-tui-reference.png",
+      "purpose": "Token Impact TUI reference image used to guide the ProjectAtlas Ratatui dashboard redesign."
+    },
+    {
       "path": "docs/benchmarks/large-application-token-savings.md",
       "purpose": "Document large-application benchmark evidence for token savings and responsiveness checks."
     },
@@ -861,6 +873,18 @@
       "purpose": "OpenSpec requirement delta for the Codex PR review-thread gate and OpenSpec task review surface."
     },
     {
+      "path": "openspec/changes/match-token-impact-reference-tui",
+      "purpose": "OpenSpec change package for matching the Token Impact reference TUI design and palette."
+    },
+    {
+      "path": "openspec/changes/match-token-impact-reference-tui/specs",
+      "purpose": "Spec delta folder for the token impact reference dashboard redesign requirements."
+    },
+    {
+      "path": "openspec/changes/match-token-impact-reference-tui/specs/token-impact-reference-dashboard",
+      "purpose": "OpenSpec requirement delta for the reference-matched Token Impact dashboard."
+    },
+    {
       "path": "openspec/changes/publish-rustdoc-readme-links",
       "purpose": "OpenSpec change package for linking published rustdoc from README and keeping docs/page content fresh after PR closeout."
     },
@@ -1055,6 +1079,26 @@
     {
       "path": "openspec/changes/gate-codex-pr-review-threads/tasks.md",
       "purpose": "OpenSpec implementation checklist for the GitHub Codex PR review-thread CI gate."
+    },
+    {
+      "path": "openspec/changes/match-token-impact-reference-tui/.openspec.yaml",
+      "purpose": "OpenSpec change metadata for the token impact reference dashboard redesign."
+    },
+    {
+      "path": "openspec/changes/match-token-impact-reference-tui/design.md",
+      "purpose": "OpenSpec design notes and pre-mortem for matching the token dashboard reference image."
+    },
+    {
+      "path": "openspec/changes/match-token-impact-reference-tui/proposal.md",
+      "purpose": "OpenSpec proposal for matching the Token Impact TUI reference design and semantic palette."
+    },
+    {
+      "path": "openspec/changes/match-token-impact-reference-tui/specs/token-impact-reference-dashboard/spec.md",
+      "purpose": "Specifies reference dashboard layout, palette, math, and Ratatui rendering requirements."
+    },
+    {
+      "path": "openspec/changes/match-token-impact-reference-tui/tasks.md",
+      "purpose": "Implementation and verification checklist for the Token Impact reference dashboard redesign."
     },
     {
       "path": "openspec/changes/publish-rustdoc-readme-links/design.md",
