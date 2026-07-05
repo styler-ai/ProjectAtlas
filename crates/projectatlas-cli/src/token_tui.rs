@@ -23,7 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tui_big_text::{BigText, PixelSize};
 
 /// Fixed terminal height for the token overview dashboard snapshot.
-const DASHBOARD_HEIGHT: u16 = 50;
+const DASHBOARD_HEIGHT: u16 = 48;
 /// Fixed terminal height for the token trend dashboard snapshot.
 const TREND_DASHBOARD_HEIGHT: u16 = 30;
 /// Token dashboard full-screen background.
@@ -252,8 +252,8 @@ fn render_overview_frame(frame: &mut Frame<'_>, overview: &TokenOverview, sessio
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(9),
-            Constraint::Length(14),
+            Constraint::Length(7),
+            Constraint::Length(13),
             Constraint::Length(6),
             Constraint::Length(6),
             Constraint::Min(8),
@@ -329,7 +329,7 @@ fn render_token_header(
     overview: &TokenOverview,
     session: Option<&str>,
 ) {
-    let mascot_width = if area.width >= 112 { 27 } else { 18 };
+    let mascot_width = if area.width >= 112 { 22 } else { 16 };
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -398,7 +398,7 @@ impl Widget for AniMascot {
             return;
         };
         let target = if self.wide {
-            ratatui::layout::Size::new(area.width.min(27), area.height.min(9))
+            ratatui::layout::Size::new(area.width.min(20), area.height.min(7))
         } else {
             ratatui::layout::Size::new(area.width.min(14), area.height.min(7))
         };
@@ -623,14 +623,9 @@ fn render_token_hero(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview
     );
     render_hero_value(frame, rows[1], overview.tokens_avoided);
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                signed_count(overview.tokens_avoided),
-                hero_value_style(overview.tokens_avoided),
-            ),
-            Span::styled(" tokens avoided", body_style().bg(THEME_PANEL)),
-        ]))
-        .alignment(Alignment::Center),
+        Paragraph::new("tokens avoided")
+            .style(body_style().bg(THEME_PANEL))
+            .alignment(Alignment::Center),
         rows[2],
     );
     render_divider(frame, rows[3]);
@@ -679,17 +674,60 @@ fn render_token_hero(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview
     );
 }
 
-/// Draw the saved-token headline as terminal-native large digits.
+/// Draw the saved-token headline as readable terminal text.
 fn render_hero_value(frame: &mut Frame<'_>, area: Rect, value: isize) {
     let text = signed_count(value);
     let style = hero_value_style(value);
-    let big_text = BigText::builder()
-        .pixel_size(PixelSize::HalfHeight)
-        .alignment(Alignment::Center)
-        .style(style)
-        .lines(vec![Line::from(Span::styled(text, style))])
-        .build();
-    frame.render_widget(big_text, area);
+    let marker = hero_state_marker(value);
+    if area.width >= 104 && area.height >= 4 {
+        let big_text = BigText::builder()
+            .pixel_size(PixelSize::Quadrant)
+            .alignment(Alignment::Center)
+            .style(style)
+            .lines(vec![Line::from(Span::styled(text.clone(), style))])
+            .build();
+        frame.render_widget(big_text, area);
+        if let Some(marker) = marker {
+            let marker_x = area
+                .x
+                .saturating_add(area.width / 2)
+                .saturating_add((text.chars().count() as u16).saturating_mul(2))
+                .saturating_add(2);
+            if marker_x < area.x.saturating_add(area.width) {
+                frame.render_widget(
+                    Paragraph::new(marker)
+                        .style(style)
+                        .alignment(Alignment::Center),
+                    Rect {
+                        x: marker_x,
+                        y: area.y.saturating_add(1),
+                        width: 3,
+                        height: 1,
+                    },
+                );
+            }
+        }
+    } else {
+        let line = if area.width >= 48 {
+            let mut spans = vec![Span::styled(text, style)];
+            if let Some(marker) = marker {
+                spans.push(Span::styled(format!("  {marker}"), style));
+            }
+            Line::from(spans)
+        } else {
+            Line::from(Span::styled(text, style))
+        };
+        frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
+    }
+}
+
+/// Return the semantic marker used beside the saved-token headline.
+fn hero_state_marker(value: isize) -> Option<&'static str> {
+    match value.cmp(&0) {
+        std::cmp::Ordering::Greater => Some("✓"),
+        std::cmp::Ordering::Less => Some("!"),
+        std::cmp::Ordering::Equal => None,
+    }
 }
 
 /// Draw one metric operand in the hero equation.
@@ -734,10 +772,19 @@ fn center_symbol(symbol: &'static str) -> Paragraph<'static> {
 
 /// Draw the reference-style file-read strip.
 fn render_file_reads_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
-    let block = panel("FILE READS AVOIDED");
+    let block = panel("");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let compact = inner.width < 100;
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(3)])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(reference_title("FILE READS AVOIDED"))
+            .style(section_title_style().bg(THEME_PANEL)),
+        rows[0],
+    );
 
     let columns = Layout::default()
         .direction(Direction::Horizontal)
@@ -750,7 +797,7 @@ fn render_file_reads_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOve
             Constraint::Length(1),
             Constraint::Percentage(16),
         ])
-        .split(inner);
+        .split(rows[1]);
     let total_reads = overview.likely_file_reads_avoided;
     let observed_ratio = ratio(overview.observed_file_read_replacements, total_reads);
     let modeled_ratio = ratio(overview.modeled_file_reads_avoided, total_reads);
@@ -2297,6 +2344,87 @@ mod tests {
     }
 
     #[test]
+    fn overview_dashboard_hero_value_is_readable_terminal_text() {
+        let overview = TokenOverview::from_estimated_totals(3, 241_563_877, 4_749_368);
+        let narrow_buffer = render_overview_buffer_at_width(&overview, Some("s"), 100);
+        let Some((_, narrow_title_y)) =
+            find_text(&narrow_buffer, &reference_title("TOTAL TOKENS AVOIDED"))
+        else {
+            unreachable!("hero title should render");
+        };
+        let narrow_value_line = line_symbols(&narrow_buffer, narrow_title_y + 1);
+
+        assert!(
+            narrow_value_line.contains(&signed_count(overview.tokens_avoided)),
+            "narrow hero value should fall back to the exact saved-token number as normal terminal text"
+        );
+        assert!(
+            narrow_value_line.contains('✓'),
+            "narrow hero value should keep the reference-style saved-state marker"
+        );
+
+        let buffer = render_overview_buffer_at_width(&overview, Some("s"), 140);
+        let Some((_, title_y)) = find_text(&buffer, &reference_title("TOTAL TOKENS AVOIDED"))
+        else {
+            unreachable!("hero title should render");
+        };
+        let hero_rows = ((title_y + 1)..=(title_y + 4).min(buffer.area.height.saturating_sub(1)))
+            .map(|y| line_symbols(&buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            hero_rows.chars().any(|character| matches!(
+                character,
+                '█' | '▄'
+                    | '▀'
+                    | '▌'
+                    | '▐'
+                    | '▚'
+                    | '▞'
+                    | '▖'
+                    | '▗'
+                    | '▘'
+                    | '▝'
+                    | '▙'
+                    | '▟'
+                    | '▛'
+                    | '▜'
+            )),
+            "wide hero value should use compact terminal-native big-text glyphs for reference-like hierarchy"
+        );
+        assert!(
+            hero_rows.contains('✓'),
+            "wide hero should draw the saved-state marker outside the big-text font"
+        );
+        assert!(
+            !hero_rows.chars().any(|character| {
+                ('\u{1cc00}'..='\u{1cfff}').contains(&character)
+                    || ('\u{1fb00}'..='\u{1fbff}').contains(&character)
+            }),
+            "wide hero value should avoid dense segmented glyphs that render inconsistently across terminals"
+        );
+        let caption_line = line_symbols(&buffer, title_y + 5);
+        assert!(caption_line.contains("tokens avoided"));
+        assert!(
+            !caption_line.contains(&signed_count(overview.tokens_avoided)),
+            "caption should label the hero without duplicating the numeric value"
+        );
+
+        let dashboard = render_dashboard_to_string(140, DASHBOARD_HEIGHT, |frame| {
+            render_overview_frame(frame, &overview, Some("s"));
+        });
+        assert!(dashboard.contains("tokens avoided"));
+        assert!(
+            !dashboard.contains(&format!(
+                "{} tokens avoided",
+                signed_count(overview.tokens_avoided)
+            )),
+            "caption should not duplicate the saved-token number already shown as the hero and saved operand"
+        );
+    }
+
+    #[test]
     fn overview_dashboard_uses_compact_reference_table_at_narrow_width() {
         let overview = sample_overview();
         let dashboard = render_dashboard_to_string(80, DASHBOARD_HEIGHT, |frame| {
@@ -2347,15 +2475,8 @@ mod tests {
             dashboard
                 .matches(&signed_count(conservative_avoided))
                 .count(),
-            2,
-            "headline total should appear once as the exact caption and once as the saved operand"
-        );
-        assert!(
-            dashboard.contains(&format!(
-                "{} tokens avoided",
-                signed_count(conservative_avoided)
-            )),
-            "caption should preserve the exact headline number below the block-text hero"
+            1,
+            "headline total should not duplicate the saved operand as normal text in the wide dashboard"
         );
         assert!(dashboard.contains(&grouped_count(overview.likely_file_reads_avoided)));
         assert!(dashboard.contains(&grouped_count(overview.observed_file_read_replacements)));
@@ -2448,6 +2569,41 @@ mod tests {
             signed_count(overview.tokens_avoided)
         )));
         assert!(!dashboard.contains("% / modeled"));
+        let wide_buffer = render_overview_buffer_at_width(&overview, Some("s"), 140);
+        let Some((_, wide_title_y)) =
+            find_text(&wide_buffer, &reference_title("TOTAL TOKENS AVOIDED"))
+        else {
+            unreachable!("hero title should render");
+        };
+        let wide_hero_rows = ((wide_title_y + 1)
+            ..=(wide_title_y + 4).min(wide_buffer.area.height.saturating_sub(1)))
+            .map(|y| line_symbols(&wide_buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            wide_hero_rows.contains('!'),
+            "wide negative hero should use a warning marker instead of a success check"
+        );
+        assert!(
+            !wide_hero_rows.contains('✓'),
+            "wide negative hero must not imply success with a check marker"
+        );
+
+        let narrow_buffer = render_overview_buffer_at_width(&overview, Some("s"), 100);
+        let Some((_, narrow_title_y)) =
+            find_text(&narrow_buffer, &reference_title("TOTAL TOKENS AVOIDED"))
+        else {
+            unreachable!("hero title should render");
+        };
+        let narrow_value_line = line_symbols(&narrow_buffer, narrow_title_y + 1);
+        assert!(
+            narrow_value_line.contains('!'),
+            "narrow negative hero should use a warning marker instead of a success check"
+        );
+        assert!(
+            !narrow_value_line.contains('✓'),
+            "narrow negative hero must not imply success with a check marker"
+        );
 
         let trend = vec![
             TokenTrendPeriod::from_totals("loss".to_string(), 1, 10, 30),
@@ -2549,6 +2705,14 @@ mod tests {
 
     fn render_overview_buffer(overview: &TokenOverview, session: Option<&str>) -> Buffer {
         let width = dashboard_width().clamp(80, 140) as u16;
+        render_overview_buffer_at_width(overview, session, width)
+    }
+
+    fn render_overview_buffer_at_width(
+        overview: &TokenOverview,
+        session: Option<&str>,
+        width: u16,
+    ) -> Buffer {
         let backend = TestBackend::new(width, DASHBOARD_HEIGHT);
         let mut terminal =
             Terminal::new(backend).expect("in-memory token dashboard backend should initialize");
@@ -2556,6 +2720,16 @@ mod tests {
             .draw(|frame| render_overview_frame(frame, overview, session))
             .expect("in-memory token dashboard should render");
         frame.buffer.clone()
+    }
+
+    fn line_symbols(buffer: &Buffer, y: u16) -> String {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            if let Some(cell) = buffer.cell((x, y)) {
+                line.push_str(cell.symbol());
+            }
+        }
+        line
     }
 
     fn assert_header_margin(dashboard: &str, header: &str, first_row: &str) {

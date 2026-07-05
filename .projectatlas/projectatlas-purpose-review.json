@@ -1183,6 +1183,86 @@
     {
       "path": "templates/AGENTS.md",
       "purpose": "Reusable ProjectAtlas startup snippet for atlas-first agent workflows, installer drift checks, OpenSpec task gates, and Rust discipline."
+    },
+    {
+      "path": "docs/design/projectatlas-mascot-clean-transparent.svg",
+      "purpose": "Transparent Ani mascot SVG reference asset for ProjectAtlas branding and TUI design."
+    },
+    {
+      "path": "docs/design/token-impact-tui-v0.3.26-qa.png",
+      "purpose": "Rendered v0.3.26 Token Impact TUI QA screenshot captured from the rebuilt Ratatui dashboard."
+    },
+    {
+      "path": "openspec/specs",
+      "purpose": "Primary OpenSpec requirement specifications synchronized from accepted ProjectAtlas change packages."
+    },
+    {
+      "path": "openspec/changes/archive",
+      "purpose": "Archived OpenSpec change packages retained for ProjectAtlas change-history reference."
+    },
+    {
+      "path": "openspec/changes/enhance-projectatlas-init-first-run",
+      "purpose": "OpenSpec change package for one-call ProjectAtlas init first-run setup."
+    },
+    {
+      "path": "openspec/changes/enhance-projectatlas-init-first-run/specs",
+      "purpose": "Spec delta folder for one-call ProjectAtlas init first-run setup."
+    },
+    {
+      "path": "openspec/changes/enhance-projectatlas-init-first-run/specs/projectatlas-first-run-init",
+      "purpose": "Requirement delta folder for ProjectAtlas first-run init behavior."
+    },
+    {
+      "path": "openspec/changes/enhance-projectatlas-init-first-run/.openspec.yaml",
+      "purpose": "OpenSpec change metadata for one-call ProjectAtlas init first-run setup."
+    },
+    {
+      "path": "openspec/changes/enhance-projectatlas-init-first-run/design.md",
+      "purpose": "Design rationale and pre-mortem for one-call ProjectAtlas init first-run setup."
+    },
+    {
+      "path": "openspec/changes/enhance-projectatlas-init-first-run/proposal.md",
+      "purpose": "Proposal for one-call ProjectAtlas init first-run setup."
+    },
+    {
+      "path": "openspec/changes/enhance-projectatlas-init-first-run/specs/projectatlas-first-run-init/spec.md",
+      "purpose": "Specifies ProjectAtlas first-run init setup requirements and edge cases."
+    },
+    {
+      "path": "openspec/changes/enhance-projectatlas-init-first-run/tasks.md",
+      "purpose": "Implementation and verification checklist for one-call ProjectAtlas init first-run setup."
+    },
+    {
+      "path": "openspec/changes/fix-token-tui-reference-visual-regression",
+      "purpose": "OpenSpec change package for fixing Token Impact TUI reference visual regressions."
+    },
+    {
+      "path": "openspec/changes/fix-token-tui-reference-visual-regression/specs",
+      "purpose": "Spec delta folder for Token Impact TUI reference visual regression fixes."
+    },
+    {
+      "path": "openspec/changes/fix-token-tui-reference-visual-regression/specs/token-tui-reference-visual-regression",
+      "purpose": "Requirement delta folder for Token Impact TUI reference visual regression fixes."
+    },
+    {
+      "path": "openspec/changes/fix-token-tui-reference-visual-regression/.openspec.yaml",
+      "purpose": "OpenSpec change metadata for Token Impact TUI reference visual regression fixes."
+    },
+    {
+      "path": "openspec/changes/fix-token-tui-reference-visual-regression/design.md",
+      "purpose": "Design rationale and pre-mortem for Token Impact TUI reference visual regression fixes."
+    },
+    {
+      "path": "openspec/changes/fix-token-tui-reference-visual-regression/proposal.md",
+      "purpose": "Proposal for fixing Token Impact TUI reference visual regressions."
+    },
+    {
+      "path": "openspec/changes/fix-token-tui-reference-visual-regression/specs/token-tui-reference-visual-regression/spec.md",
+      "purpose": "Specifies Token Impact TUI reference layout, palette, math, and visual QA requirements."
+    },
+    {
+      "path": "openspec/changes/fix-token-tui-reference-visual-regression/tasks.md",
+      "purpose": "Implementation and verification checklist for Token Impact TUI reference visual regression fixes."
     }
   ]
 }
