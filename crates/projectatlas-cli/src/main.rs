@@ -1319,12 +1319,7 @@ fn run() -> Result<(), CliError> {
                         print_output(cli.format, &render_token_overview(&overview), &overview)?;
                     }
                     TokenView::Tui => {
-                        let trends = token_dashboard_trends(&store, session.as_deref())?;
-                        write_stdout(&render_token_dashboard(
-                            &overview,
-                            session.as_deref(),
-                            &trends,
-                        ))?;
+                        write_stdout(&render_token_dashboard(&overview, session.as_deref()))?;
                     }
                 }
             }
@@ -2295,22 +2290,6 @@ fn write_stderr(text: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Load the standard trend windows for the token overview dashboard.
-fn token_dashboard_trends(
-    store: &AtlasStore,
-    session: Option<&str>,
-) -> Result<Vec<projectatlas_core::telemetry::TokenTrendReport>, CliError> {
-    [
-        CoreTokenTrendWindow::Day,
-        CoreTokenTrendWindow::Week,
-        CoreTokenTrendWindow::Month,
-        CoreTokenTrendWindow::Year,
-    ]
-    .into_iter()
-    .map(|window| store.token_trends(session, window).map_err(CliError::from))
-    .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::mcp::{
@@ -2332,9 +2311,7 @@ mod tests {
     use projectatlas_core::symbols::{
         CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
     };
-    use projectatlas_core::telemetry::{
-        TokenOverview, TokenTrendPeriod, TokenTrendReport, TokenTrendWindow,
-    };
+    use projectatlas_core::telemetry::TokenOverview;
     use projectatlas_core::{Node, NodeKind, normalize_native_path_display};
     use projectatlas_db::AtlasStore;
     use projectatlas_fs::ScanOptions;
@@ -2902,76 +2879,30 @@ mod tests {
         let dashboard = render_token_dashboard(
             &TokenOverview::from_estimated_totals(3, 12_000, 3_000),
             Some("session-a"),
-            &[
-                TokenTrendReport::new(
-                    Some("session-a".to_string()),
-                    TokenTrendWindow::Day,
-                    vec![
-                        TokenTrendPeriod::from_totals("2026-07-01".to_string(), 1, 100, 50),
-                        TokenTrendPeriod::from_totals("2026-07-02".to_string(), 2, 200, 75),
-                    ],
-                ),
-                TokenTrendReport::new(
-                    Some("session-a".to_string()),
-                    TokenTrendWindow::Week,
-                    vec![TokenTrendPeriod::from_totals(
-                        "2026-W27".to_string(),
-                        3,
-                        300,
-                        125,
-                    )],
-                ),
-                TokenTrendReport::new(
-                    Some("session-a".to_string()),
-                    TokenTrendWindow::Month,
-                    vec![TokenTrendPeriod::from_totals(
-                        "2026-07".to_string(),
-                        3,
-                        300,
-                        125,
-                    )],
-                ),
-                TokenTrendReport::new(
-                    Some("session-a".to_string()),
-                    TokenTrendWindow::Year,
-                    vec![TokenTrendPeriod::from_totals(
-                        "2026".to_string(),
-                        3,
-                        300,
-                        125,
-                    )],
-                ),
-            ],
         );
 
-        assert!(dashboard.contains("ProjectAtlas Savings Overview"));
+        assert!(dashboard.contains("ProjectAtlas"));
+        assert!(dashboard.contains("Token Impact"));
         assert!(dashboard.contains("session-a"));
-        assert!(dashboard.contains("Conservative tokens avoided"));
-        assert!(dashboard.contains("Avoided reads"));
-        assert!(dashboard.contains("Saved-token trends"));
-        assert!(dashboard.contains("day trend"));
-        assert!(dashboard.contains("week trend"));
-        assert!(dashboard.contains("month trend"));
-        assert!(dashboard.contains("year trend"));
-        assert!(dashboard.contains("File Handling Optimization Overview"));
-        assert!(dashboard.contains("File reads avoided"));
-        assert!(dashboard.contains("Impact source"));
-        assert!(dashboard.contains("What this means"));
+        assert!(dashboard.contains("TOTAL TOKENS AVOIDED"));
+        assert!(dashboard.contains("Without ProjectAtlas"));
+        assert!(dashboard.contains("With ProjectAtlas"));
+        assert!(dashboard.contains("Saved by ProjectAtlas"));
+        assert!(dashboard.contains("FILE READS AVOIDED"));
+        assert!(dashboard.contains("SAVINGS COMPOSITION"));
+        assert!(dashboard.contains("SIGNAL"));
+        assert!(dashboard.contains("WHERE THE SAVINGS CAME FROM"));
+        assert!(dashboard.contains("CALIBRATION & NOTES"));
         assert!(dashboard.contains("not_recorded"));
-        assert!(dashboard.contains("Tokenizer check"));
+        assert!(dashboard.contains("Tokenizer audit"));
         assert!(
             dashboard
                 .chars()
-                .any(|character| matches!(character, '█' | '▌' | '▏' | '\u{2801}'..='\u{28ff}'))
+                .any(|character| matches!(character, '━' | '\u{2801}'..='\u{28ff}'))
         );
         assert!(!dashboard.contains("Gross tokens: without vs with ProjectAtlas"));
-        assert!(!dashboard.contains("Without ProjectAtlas"));
-        assert!(!dashboard.contains("With ProjectAtlas"));
-        assert!(!dashboard.contains("Saved by ProjectAtlas"));
-        assert!(!dashboard.contains("Where the savings came from"));
         assert!(!dashboard.contains("How ProjectAtlas helped"));
-        assert!(!dashboard.contains("Measured summaries"));
-        assert!(!dashboard.contains("Narrowed files"));
+        assert!(!dashboard.contains("Saved-token trends"));
     }
 
     #[test]

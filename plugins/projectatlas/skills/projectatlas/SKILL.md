@@ -55,6 +55,8 @@ When `atlas_purpose_queue`, `projectatlas purpose queue`, `atlas_health`, `proje
 7. Rerun health/lint.
 8. Repeat until the ProjectAtlas database has reviewed folder purposes, selected high-value file purposes, and the deep index is refreshed.
 
+For planned folder and file purpose creation or correction, including initial creation and broad refreshes, delegate the work to a low-reasoning subagent when the host supports subagents. Give the subagent bounded context from queue rows, summaries, outlines, or exact snippets; do not ask it to browse the whole repo. The subagent may draft and apply purposes through `atlas_purpose_set`, `atlas_purpose_review`, `projectatlas purpose set`, or `projectatlas purpose review`, then report changed paths and commands. A purpose written by an agent or subagent through those ProjectAtlas APIs is agent-approved and does not need a second approval pass. If any agent notices a wrong, stale, vague, or generic purpose during normal work, correct it along the way with the same ProjectAtlas APIs. Agents and subagents must not edit SQLite directly.
+
 `atlas_purpose_queue` and `projectatlas purpose queue` default to all folders and high-impact files. Use `projectatlas purpose queue --include-low-priority-files` or MCP `include_low_priority_files: true` only when intentionally doing broad file-purpose cleanup. Use `projectatlas purpose queue --include-assets`, MCP `include_assets: true`, raw `atlas_health`, or bare `projectatlas health-check` only when intentionally curating assets or generated outputs.
 Read `folder_scope` and `file_scope` in queue metadata before deciding how broad the current curation pass is.
 

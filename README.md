@@ -20,6 +20,8 @@ ProjectAtlas is the missing local code index between "agent, fix this repo" and 
 
 It keeps a fast local SQLite index of folders, files, one-line purposes, deterministic content summaries, symbols, relations, search text, health findings, and token telemetry. The agent starts with the indexed atlas, narrows to the right folder and file, then escalates to outlines, symbols, or exact source slices only when correctness needs real code.
 
+Ani is the ProjectAtlas mascot. The versioned design references live in [`docs/design/ani-mascot-reference.png`](docs/design/ani-mascot-reference.png) and [`docs/design/token-impact-tui-reference.png`](docs/design/token-impact-tui-reference.png).
+
 No required `.purpose` files. No source-header tax. No hosted index. The project lives beside your repo in `.projectatlas/`, returns compact TOON by default, and runs as a native Rust CLI plus MCP server.
 
 ## Quickstart
@@ -219,6 +221,8 @@ For a human token dashboard:
 projectatlas token --view tui
 ```
 
+That opens the Ratatui token impact dashboard: Ani in the header, a reconciled `Without ProjectAtlas - With ProjectAtlas = Saved by ProjectAtlas` equation, file reads avoided, observed summaries/slices, modeled narrowing, source rows, calibration notes, and compact status hints.
+
 For a local tokenizer calibration of indexed UTF-8 files, add `--tokenizer o200k_base` or `--tokenizer cl100k_base`.
 
 ## Agent And MCP Setup
@@ -325,12 +329,17 @@ skills/                   standalone agent skill snippets
 
 ## Docs
 
+- Published rustdoc and Pages landing page: https://styler-ai.github.io/ProjectAtlas/
+- CLI/MCP runtime crate docs: https://styler-ai.github.io/ProjectAtlas/projectatlas/
+- Core model crate docs: https://styler-ai.github.io/ProjectAtlas/projectatlas_core/
 - `docs/agent-integration.md`
 - `docs/configuration.md`
 - `docs/workflow.md`
 - `docs/structural-summaries.md`
 - `docs/benchmarks/large-application-token-savings.md`
 - `docs/projectatlas-3-architecture.md`
+
+Documentation closeout rule: after a PR changes installation, CLI behavior, MCP behavior, release process, public API, token reporting, or documented agent workflow, update README and the relevant docs/Page-facing content before closing the PR and linked issues. If no docs-facing behavior changed, explicitly confirm README and the published docs surface are still current in the PR checklist.
 
 ## License
 

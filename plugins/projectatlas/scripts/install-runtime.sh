@@ -104,6 +104,26 @@ known_projectatlas_shim_paths() {
 
 canonical_file() {
   file=$1
+  if [ -e "$file" ]; then
+    if command -v realpath >/dev/null 2>&1; then
+      realpath "$file" 2>/dev/null && return 0
+    fi
+    if command -v readlink >/dev/null 2>&1; then
+      resolved=$(readlink -f "$file" 2>/dev/null || true)
+      if [ -n "$resolved" ]; then
+        printf '%s\n' "$resolved"
+        return 0
+      fi
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+      python3 - "$file" <<'PY' && return 0
+from pathlib import Path
+import sys
+
+print(Path(sys.argv[1]).resolve())
+PY
+    fi
+  fi
   dir=$(CDPATH= cd -- "$(dirname -- "$file")" 2>/dev/null && pwd -P) || {
     printf '%s\n' "$file"
     return 0

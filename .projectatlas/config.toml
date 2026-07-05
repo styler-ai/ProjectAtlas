@@ -34,5 +34,5 @@ max_length = 140
 allowed_filenames = []
 allowlist_dir_prefixes = [".githooks"]
 allowlist_files = []
-asset_allowed_prefixes = ["docs/assets"]
+asset_allowed_prefixes = ["docs/assets", "docs/design"]
 asset_extensions = [".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".ico", ".pdf"]

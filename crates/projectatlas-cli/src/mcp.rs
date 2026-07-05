@@ -3537,16 +3537,7 @@ impl ProjectAtlasMcpServer {
             }
             let overview = store.token_overview(params.session.as_deref())?;
             if include_chart {
-                let trends = [
-                    TokenTrendWindow::Day,
-                    TokenTrendWindow::Week,
-                    TokenTrendWindow::Month,
-                    TokenTrendWindow::Year,
-                ]
-                .into_iter()
-                .map(|window| store.token_trends(params.session.as_deref(), window))
-                .collect::<Result<Vec<_>, _>>()?;
-                let chart = render_token_dashboard(&overview, params.session.as_deref(), &trends);
+                let chart = render_token_dashboard(&overview, params.session.as_deref());
                 return Self::encode_two_named_payloads(
                     MCP_PAYLOAD_TOKEN_SAVINGS,
                     &overview,

@@ -11,6 +11,10 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
   workflow_dispatch:
 
 permissions:
@@ -66,6 +70,17 @@ jobs:
           python3 .github/scripts/issue-checklists.py \
             --repo "$GITHUB_REPOSITORY" \
             --milestone "$PR_MILESTONE_TITLE"
+
+      - name: Codex PR review thread gate
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 .github/scripts/codex-pr-review-gate.py --self-test
+          python3 .github/scripts/codex-pr-review-gate.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --pr "$PR_NUMBER"
 
       - name: Format
         run: cargo fmt --check
