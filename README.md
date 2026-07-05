@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.3.22"><img alt="release" src="https://img.shields.io/badge/release-v0.3.22-blue"></a>
+  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.3.25"><img alt="release" src="https://img.shields.io/badge/release-v0.3.25-blue"></a>
   <img alt="rust" src="https://img.shields.io/badge/Rust-2024-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
@@ -20,12 +20,14 @@ ProjectAtlas is the missing local code index between "agent, fix this repo" and 
 
 It keeps a fast local SQLite index of folders, files, one-line purposes, deterministic content summaries, symbols, relations, search text, health findings, and token telemetry. The agent starts with the indexed atlas, narrows to the right folder and file, then escalates to outlines, symbols, or exact source slices only when correctness needs real code.
 
+Ani is the ProjectAtlas mascot. The versioned design references live in [`docs/design/ani-mascot-reference.png`](docs/design/ani-mascot-reference.png) and [`docs/design/token-impact-tui-reference.png`](docs/design/token-impact-tui-reference.png).
+
 No required `.purpose` files. No source-header tax. No hosted index. The project lives beside your repo in `.projectatlas/`, returns compact TOON by default, and runs as a native Rust CLI plus MCP server.
 
 ## Quickstart
 
 ```bash
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.22
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.25
 codex plugin add projectatlas --marketplace projectatlas
 ```
 
@@ -44,7 +46,7 @@ correctly keeps that pinned ref. In that case, replace only the dedicated `style
 
 ```bash
 codex plugin marketplace remove projectatlas
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.22
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.25
 ```
 
 Then tell Codex: "Use ProjectAtlas for this repo."
@@ -178,7 +180,7 @@ Most users can stop at the plugin install. The CLI is here for local debugging, 
 Only need the CLI yourself? Install it from the released tag:
 
 ```bash
-cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.22 projectatlas-cli --locked
+cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.25 projectatlas-cli --locked
 ```
 
 From this checkout:
@@ -219,6 +221,8 @@ For a human token dashboard:
 projectatlas token --view tui
 ```
 
+That opens the Ratatui token impact dashboard: Ani in the header, a reconciled `Without ProjectAtlas - With ProjectAtlas = Saved by ProjectAtlas` equation, file reads avoided, observed summaries/slices, modeled narrowing, source rows, calibration notes, and compact status hints.
+
 For a local tokenizer calibration of indexed UTF-8 files, add `--tokenizer o200k_base` or `--tokenizer cl100k_base`.
 
 ## Agent And MCP Setup
@@ -258,6 +262,20 @@ that global Codex MCP entry yourself. After updates, agents should verify with
 `codex plugin list --marketplace projectatlas --json` and
 `codex mcp get projectatlas` or `codex mcp list`.
 
+Claude Code and OpenCode convergence is generated-config based: the installer parses the generated
+host JSON and verifies the absolute runtime path, `--require-version`, selected DB path, optional
+config path, and final `mcp` command. OpenCode verification also checks `type = "local"`,
+`enabled = true`, and the project `cwd`. The installer does not mutate Claude Code or OpenCode
+user-managed settings or pretend those hosts have a Codex-style ProjectAtlas marketplace cache; restart
+the running host if it cached older instructions.
+
+For MCP startup, agents can call `atlas_session_brief` first to get selected project identity, index
+state, bounded ranked candidates, health blockers, and next-call recommendations. `atlas_settings`
+also includes a typed `mcp_session` capability block with nearest-project policy, path scope, telemetry
+mode, scan policy, runtime identity, and no-secret guarantees. `atlas_task_status` and
+`atlas_task_cancel` expose the bounded task-progress contract; existing scan/watch/search/summary/slice
+calls remain synchronous in this release.
+
 ## What The Agent Gets
 
 ProjectAtlas exposes the same workflow through CLI and MCP:
@@ -285,7 +303,7 @@ ProjectAtlas scans with `.gitignore` awareness, hashes files with BLAKE3, stores
 
 ## Release Quality
 
-`v0.3.22` ships through the full release matrix:
+`v0.3.25` ships through the full release matrix:
 
 - Rust format, check, clippy, dependency policy, tests, doctests, and rustdoc.
 - ProjectAtlas scan, parity, database-backed purpose lint, and health checks.
@@ -311,12 +329,17 @@ skills/                   standalone agent skill snippets
 
 ## Docs
 
+- Published rustdoc and Pages landing page: https://styler-ai.github.io/ProjectAtlas/
+- CLI/MCP runtime crate docs: https://styler-ai.github.io/ProjectAtlas/projectatlas/
+- Core model crate docs: https://styler-ai.github.io/ProjectAtlas/projectatlas_core/
 - `docs/agent-integration.md`
 - `docs/configuration.md`
 - `docs/workflow.md`
 - `docs/structural-summaries.md`
 - `docs/benchmarks/large-application-token-savings.md`
 - `docs/projectatlas-3-architecture.md`
+
+Documentation closeout rule: after a PR changes installation, CLI behavior, MCP behavior, release process, public API, token reporting, or documented agent workflow, update README and the relevant docs/Page-facing content before closing the PR and linked issues. If no docs-facing behavior changed, explicitly confirm README and the published docs surface are still current in the PR checklist.
 
 ## License
 

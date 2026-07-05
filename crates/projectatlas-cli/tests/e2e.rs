@@ -211,6 +211,8 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "projectatlas.opencode.json",
         r#"Write-ProjectAtlasMcpConfig $claudeMcpConfigPath "claude-code""#,
         r#"Write-ProjectAtlasMcpConfig $opencodeConfigPath "opencode""#,
+        "Confirm-ProjectAtlasGeneratedMcpConfig",
+        "ProjectAtlas generated MCP config verified",
         "Write-ProjectAtlasWorkflowPinReport",
         "Stale ProjectAtlas workflow release pin",
         "Claude Code ProjectAtlas integration verified through generated MCP config",
@@ -266,6 +268,9 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "runtime_override=${PROJECTATLAS_RUNTIME_PATH:-}",
         "runtime_version=$(printf",
         "[ \"$runtime_version\" = \"$expected_version\" ]",
+        "command -v realpath",
+        "readlink -f",
+        "Path(sys.argv[1]).resolve()",
         "download_release_file()",
         "archive_sha256()",
         "verify_release_checksum()",
@@ -276,6 +281,10 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "projectatlas.opencode.json",
         "write_mcp_config \"$claude_mcp_config_path\" claude-code",
         "write_mcp_config \"$opencode_config_path\" opencode",
+        "verify_generated_mcp_config",
+        "require_json_parser()",
+        "ProjectAtlas generated MCP config verification requires jq or python3",
+        "ProjectAtlas generated MCP config verified",
         "report_projectatlas_workflow_pins",
         "Stale ProjectAtlas workflow release pin",
         "Claude Code ProjectAtlas integration verified through generated MCP config",
@@ -284,6 +293,34 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         if !posix_installer.contains(required) {
             return Err(io::Error::other(format!(
                 "POSIX installer is missing runtime version guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for forbidden in [
+        r#"sed -n 's/.*"mcpServers""#,
+        r#"sed -n 's/.*"args""#,
+        r#"sed -n 's/.*"mcp""#,
+        r#"sed -n 's/.*"enabled""#,
+    ] {
+        if posix_installer.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "POSIX generated MCP config verification must use a real JSON parser, found {forbidden:?}"
+            ))
+            .into());
+        }
+    }
+    let release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    for required in [
+        format!("releases/tag/{release_tag}"),
+        format!("badge/release-{release_tag}-blue"),
+        format!("--ref {release_tag}"),
+        format!("--tag {release_tag}"),
+        format!("`{release_tag}` ships through the full release matrix"),
+    ] {
+        if !readme.contains(&required) {
+            return Err(io::Error::other(format!(
+                "README release/install docs are missing current version reference {required:?}"
             ))
             .into());
         }
@@ -790,7 +827,20 @@ fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> 
     )?;
     let workspace_root = workspace_root()?;
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
-    run_projectatlas_plugin_installer(&workspace_root, &repo, &runtime)?;
+    let installer_output = run_projectatlas_plugin_installer(&workspace_root, &repo, &runtime)?;
+    let installer_output_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&installer_output.stdout),
+        String::from_utf8_lossy(&installer_output.stderr)
+    );
+    if !installer_output_text.contains("Claude Code ProjectAtlas generated MCP config verified")
+        || !installer_output_text.contains("OpenCode ProjectAtlas generated MCP config verified")
+    {
+        return Err(io::Error::other(format!(
+            "installer did not verify generated Claude/OpenCode configs:\n{installer_output_text}"
+        ))
+        .into());
+    }
 
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
     let codex_config = read_json_file(&atlas_dir.join("projectatlas.mcp.json"))?;
@@ -853,6 +903,70 @@ fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> 
         json_string_at(&opencode_config, &["mcp", "projectatlas", "cwd"])?,
         &repo,
         "opencode cwd",
+    )?;
+
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn posix_installer_accepts_symlinked_runtime_path() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
+    fs::write(
+        repo.join(ATLAS_DIR_NAME).join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    let workspace_root = workspace_root()?;
+    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let runtime_link = temp.path().join("projectatlas-runtime-link");
+    symlink(&runtime, &runtime_link)?;
+
+    let installer_output =
+        run_projectatlas_plugin_installer(&workspace_root, &repo, &runtime_link)?;
+    let installer_output_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&installer_output.stdout),
+        String::from_utf8_lossy(&installer_output.stderr)
+    );
+    if !installer_output.status.success() {
+        return Err(io::Error::other(format!(
+            "POSIX installer rejected symlinked runtime path:\n{installer_output_text}"
+        ))
+        .into());
+    }
+    if !installer_output_text.contains("Claude Code ProjectAtlas generated MCP config verified")
+        || !installer_output_text.contains("OpenCode ProjectAtlas generated MCP config verified")
+    {
+        return Err(io::Error::other(format!(
+            "installer did not verify generated configs with symlinked runtime:\n{installer_output_text}"
+        ))
+        .into());
+    }
+
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    let codex_config = read_json_file(&atlas_dir.join("projectatlas.mcp.json"))?;
+    let claude_config = read_json_file(&atlas_dir.join("projectatlas.claude.mcp.json"))?;
+    let opencode_config = read_json_file(&atlas_dir.join("projectatlas.opencode.json"))?;
+
+    require_same_executable(
+        json_string_at(&codex_config, &["mcpServers", "projectatlas", "command"])?,
+        &runtime,
+        "codex symlink",
+    )?;
+    require_same_executable(
+        json_string_at(&claude_config, &["mcpServers", "projectatlas", "command"])?,
+        &runtime,
+        "claude symlink",
+    )?;
+    require_same_executable(
+        json_string_at(&opencode_config, &["mcp", "projectatlas", "command", "0"])?,
+        &runtime,
+        "opencode symlink",
     )?;
 
     Ok(())
@@ -3062,31 +3176,25 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .args(["token", "--view", "tui"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("ProjectAtlas Savings Overview"))
-        .stdout(predicate::str::contains("Conservative tokens avoided"))
-        .stdout(predicate::str::contains("Avoided reads"))
-        .stdout(predicate::str::contains("Tokens"))
-        .stdout(predicate::str::contains("Reads"))
-        .stdout(predicate::str::contains("Modeled search"))
-        .stdout(predicate::str::contains("Saved-token trends"))
-        .stdout(predicate::str::contains("day trend"))
-        .stdout(predicate::str::contains("week trend"))
-        .stdout(predicate::str::contains("month trend"))
-        .stdout(predicate::str::contains("year trend"))
-        .stdout(predicate::str::contains(
-            "File Handling Optimization Overview",
-        ))
-        .stdout(predicate::str::contains("Impact source"))
-        .stdout(predicate::str::contains("reads"))
-        .stdout(predicate::str::contains("Observed reads"))
-        .stdout(predicate::str::contains("Modeled search"))
+        .stdout(predicate::str::contains("ProjectAtlas"))
+        .stdout(predicate::str::contains("Token Impact"))
+        .stdout(predicate::str::contains("TOTAL TOKENS AVOIDED"))
+        .stdout(predicate::str::contains("Without ProjectAtlas"))
+        .stdout(predicate::str::contains("With ProjectAtlas"))
+        .stdout(predicate::str::contains("Saved by ProjectAtlas"))
+        .stdout(predicate::str::contains("FILE READS AVOIDED"))
+        .stdout(predicate::str::contains("Observed"))
+        .stdout(predicate::str::contains("Modeled narrowing"))
+        .stdout(predicate::str::contains("SAVINGS COMPOSITION"))
+        .stdout(predicate::str::contains("SIGNAL"))
+        .stdout(predicate::str::contains("WHERE THE SAVINGS CAME FROM"))
+        .stdout(predicate::str::contains("Summaries/slices"))
+        .stdout(predicate::str::contains("Skipped folder walk"))
+        .stdout(predicate::str::contains("Fewer candidates"))
+        .stdout(predicate::str::contains("CALIBRATION & NOTES"))
         .stdout(predicate::str::contains("Gross tokens: without").not())
         .stdout(predicate::str::contains("latest").not())
-        .stdout(predicate::str::contains("Without ProjectAtlas").not())
-        .stdout(predicate::str::contains("With ProjectAtlas").not())
-        .stdout(predicate::str::contains("Saved by ProjectAtlas").not())
-        .stdout(predicate::str::contains("Where the savings came from").not())
-        .stdout(predicate::str::contains("What this means"));
+        .stdout(predicate::str::contains("Saved-token trends").not());
     Command::cargo_bin("projectatlas")?
         .env("COLUMNS", "100")
         .arg("--db")
@@ -3094,8 +3202,8 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .args(["token", "--view", "tui", "--tokenizer", "cl100k_base"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("ProjectAtlas Savings Overview"))
-        .stdout(predicate::str::contains("Tokenizer check"))
+        .stdout(predicate::str::contains("Token Impact"))
+        .stdout(predicate::str::contains("Tokenizer audit"))
         .stdout(predicate::str::contains("cl100k_base"));
     Command::cargo_bin("projectatlas")?
         .arg("--db")
@@ -3965,6 +4073,10 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"atlas_token_report","arguments":{"include_chart":true}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"atlas_purpose_review","arguments":{"apply":true,"items":[{"path":"src/lib.rs","confirm_existing":true}]}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"atlas_next","arguments":{"query":"indexed","limit":1}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"atlas_settings","arguments":{}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"atlas_session_brief","arguments":{"query":"indexed","folder_limit":1,"file_limit":1,"blocker_limit":1}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"atlas_task_status","arguments":{"task_id":"task-progress-contract"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"atlas_task_cancel","arguments":{"task_id":"task-progress-contract"}}}"#.to_string(),
     ];
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let stdout = run_mcp_stdio(
@@ -3981,15 +4093,25 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !stdout.contains(r#""serverInfo":{"name":"ProjectAtlas","version":"#)
         || !stdout.contains(r#""name":"atlas_files""#)
         || !stdout.contains(r#""name":"atlas_next""#)
+        || !stdout.contains(r#""name":"atlas_session_brief""#)
+        || !stdout.contains(r#""name":"atlas_task_status""#)
+        || !stdout.contains(r#""name":"atlas_task_cancel""#)
         || !stdout.contains("overview:")
         || !stdout.contains("files[1]")
         || !stdout.contains("next:")
+        || !stdout.contains("mcp_session:")
+        || !stdout.contains("path_scope: selected_project")
+        || !stdout.contains("session_brief:")
+        || !stdout.contains("task_status:")
+        || !stdout.contains("task_cancel:")
+        || !stdout.contains("task-progress-contract")
+        || !stdout.contains("already_finished")
         || !stdout.contains("health:")
         || !stdout.contains("health_findings[1]")
         || !stdout.contains("next_start_index: 1")
-        || !stdout.contains("ProjectAtlas Savings Overview")
-        || !stdout.contains("Conservative tokens avoided")
-        || !stdout.contains("File reads avoided")
+        || !stdout.contains("ProjectAtlas Token Impact")
+        || !stdout.contains("TOTAL TOKENS AVOIDED")
+        || !stdout.contains("FILE READS AVOIDED")
         || !stdout.contains("purpose_review:")
         || !stdout.contains("failed: 0")
         || !stdout.contains("src/lib.rs")

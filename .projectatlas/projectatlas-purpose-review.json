@@ -117,6 +117,10 @@
       "purpose": "Images and visual assets referenced by ProjectAtlas README and documentation pages."
     },
     {
+      "path": "docs/design",
+      "purpose": "Design reference images for ProjectAtlas terminal dashboards and mascot identity."
+    },
+    {
       "path": "docs/benchmarks",
       "purpose": "Measured ProjectAtlas token-savings and repository-orientation benchmark documentation."
     },
@@ -274,7 +278,11 @@
     },
     {
       "path": ".github/ISSUE_TEMPLATE/bug_report.yml",
-      "purpose": "GitHub issue form for public ProjectAtlas bug reports."
+      "purpose": "GitHub issue form for public ProjectAtlas bug reports with OpenSpec task planning prompts."
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/chore.yml",
+      "purpose": "GitHub issue form for ProjectAtlas maintenance, CI, release, installer, and repository policy chores."
     },
     {
       "path": ".github/ISSUE_TEMPLATE/config.yml",
@@ -282,7 +290,7 @@
     },
     {
       "path": ".github/ISSUE_TEMPLATE/improvement_request.yml",
-      "purpose": "GitHub issue form for public ProjectAtlas improvement requests."
+      "purpose": "GitHub issue form for public ProjectAtlas feature and workflow improvement requests with OpenSpec task planning prompts."
     },
     {
       "path": ".github/dependabot.yml",
@@ -290,7 +298,11 @@
     },
     {
       "path": ".github/pull_request_template.md",
-      "purpose": "Pull request checklist for ProjectAtlas changes, verification gates, issue links, purpose queue review, and release-note hygiene."
+      "purpose": "Pull request checklist for ProjectAtlas verification gates, OpenSpec task completion, docs freshness, and release-note hygiene."
+    },
+    {
+      "path": ".github/scripts/codex-pr-review-gate.py",
+      "purpose": "GitHub Actions helper that blocks PR verification while GitHub Codex bot review threads remain unresolved."
     },
     {
       "path": ".github/scripts/release-notes.py",
@@ -306,11 +318,11 @@
     },
     {
       "path": ".github/workflows/04-docs.yml",
-      "purpose": "Workflow that builds and deploys the ProjectAtlas documentation site."
+      "purpose": "Build and publish the ProjectAtlas rustdoc Pages site with a generated landing page."
     },
     {
       "path": ".github/workflows/ci.yml",
-      "purpose": "Verify ProjectAtlas PR/push quality gates, OpenSpec issue checklist drift, and multi-OS installer/MCP smoke tests."
+      "purpose": "Verify ProjectAtlas PR/push quality gates, Codex review-thread gate, OpenSpec checklist drift, and multi-OS installer/MCP smoke tests."
     },
     {
       "path": ".github/workflows/release.yml",
@@ -338,7 +350,7 @@
     },
     {
       "path": "AGENTS.md",
-      "purpose": "Repository-specific Codex startup rules for atlas-first ProjectAtlas development, purpose linting, and release-grade Rust workflow."
+      "purpose": "Project-specific Codex agent workflow rules for ProjectAtlas atlas-first work, OpenSpec task gates, installer drift checks, and Rust discipline."
     },
     {
       "path": "Cargo.lock",
@@ -386,7 +398,7 @@
     },
     {
       "path": "crates/projectatlas-cli/tests/e2e.rs",
-      "purpose": "End-to-end ProjectAtlas CLI tests for scan, MCP, installer updates, locked-runtime updates, purpose, lint, language, and release workflows."
+      "purpose": "End-to-end tests for ProjectAtlas CLI, MCP behavior, plugin installers, routing, token reporting, and release safety policies."
     },
     {
       "path": "crates/projectatlas-cli/tests/lint_diagnostics.rs",
@@ -502,7 +514,7 @@
     },
     {
       "path": "docs/agent-integration.md",
-      "purpose": "Document agent startup, purpose curation, lint-level, and MCP integration workflows for ProjectAtlas."
+      "purpose": "Documents ProjectAtlas agent startup, MCP integration, delegated purpose curation, host configs, token reporting, and installer behavior."
     },
     {
       "path": "docs/assets/agent-harness-funnel.svg",
@@ -515,6 +527,14 @@
     {
       "path": "docs/assets/token-savings-bar.svg",
       "purpose": "README bar chart visualizing ProjectAtlas token savings benchmark results"
+    },
+    {
+      "path": "docs/design/ani-mascot-reference.png",
+      "purpose": "Ani mascot reference image used to align ProjectAtlas branding and token dashboard identity."
+    },
+    {
+      "path": "docs/design/token-impact-tui-reference.png",
+      "purpose": "Token Impact TUI reference image used to guide the ProjectAtlas Ratatui dashboard redesign."
     },
     {
       "path": "docs/benchmarks/large-application-token-savings.md",
@@ -534,7 +554,7 @@
     },
     {
       "path": "docs/index.md",
-      "purpose": "Documentation landing page that summarizes ProjectAtlas quick start, workflow, and guide links."
+      "purpose": "ProjectAtlas documentation index covering public docs surfaces, freshness rules, quickstart, and atlas-first rationale."
     },
     {
       "path": "docs/memory-bank-extension.md",
@@ -706,15 +726,15 @@
     },
     {
       "path": "plugins/projectatlas/scripts/install-runtime.sh",
-      "purpose": "Install or update the ProjectAtlas plugin runtime and POSIX MCP configs."
+      "purpose": "POSIX ProjectAtlas plugin installer that verifies runtimes, repairs managed Codex drift, and writes validated MCP configs."
     },
     {
       "path": "plugins/projectatlas/skills/projectatlas/SKILL.md",
-      "purpose": "Installable ProjectAtlas skill that guides agents through atlas-first orientation, purpose curation, lint levels, and MCP workflows."
+      "purpose": "Installable ProjectAtlas skill for atlas-first orientation, delegated purpose curation, lint levels, installer checks, and MCP workflows."
     },
     {
       "path": "README.md",
-      "purpose": "ProjectAtlas product overview, plugin-first quickstart, CLI reference, workflow funnel, and release quality notes."
+      "purpose": "ProjectAtlas public overview, quickstart, token-savings narrative, integration guide, rustdoc links, and release quality summary."
     },
     {
       "path": "SECURITY.md",
@@ -730,19 +750,19 @@
     },
     {
       "path": "skills/codex-coding-plugin",
-      "purpose": "Reusable Codex skill package for engineering stable Codex plugins, manifests, installers, and cache-drift checks."
+      "purpose": "Repo-local skill package for ProjectAtlas plugin/runtime installer convergence across supported agent hosts."
     },
     {
       "path": "skills/codex-coding-plugin/agents",
-      "purpose": "Agent manifest folder for loading the codex-coding-plugin workflow in OpenAI and Codex contexts."
+      "purpose": "Agent manifest folder for loading the ProjectAtlas plugin integration guidance skill."
     },
     {
       "path": "skills/codex-coding-plugin/SKILL.md",
-      "purpose": "Workflow guidance for building stable Codex plugins, plugin manifests, installers, MCP configs, and cache-drift checks."
+      "purpose": "Repo-local skill for ProjectAtlas plugin/runtime installer convergence across Codex, Claude Code, and OpenCode."
     },
     {
       "path": "skills/codex-coding-plugin/agents/openai.yaml",
-      "purpose": "OpenAI agent manifest that exposes the codex-coding-plugin skill to Codex skill discovery."
+      "purpose": "Skill UI metadata for the ProjectAtlas plugin integration guidance skill."
     },
     {
       "path": "openspec",
@@ -750,7 +770,7 @@
     },
     {
       "path": "openspec/issue-map.json",
-      "purpose": "Map active OpenSpec change directories to their GitHub issue numbers for checklist validation gates."
+      "purpose": "Maps active ProjectAtlas OpenSpec change IDs to their GitHub issue numbers for checklist enforcement."
     },
     {
       "path": "openspec/changes",
@@ -803,6 +823,78 @@
     {
       "path": "openspec/changes/close-mcp-cli-parity/specs/mcp-cli-parity",
       "purpose": "MCP CLI parity capability spec directory."
+    },
+    {
+      "path": "openspec/changes/converge-claude-code-installer",
+      "purpose": "OpenSpec package for converging Claude Code installer runtime and generated MCP config validation."
+    },
+    {
+      "path": "openspec/changes/converge-claude-code-installer/specs",
+      "purpose": "OpenSpec requirement specs for Claude Code installer convergence."
+    },
+    {
+      "path": "openspec/changes/converge-claude-code-installer/specs/installer-claude-code-convergence",
+      "purpose": "Claude Code installer convergence capability spec directory."
+    },
+    {
+      "path": "openspec/changes/converge-opencode-installer",
+      "purpose": "OpenSpec package for converging OpenCode installer runtime and generated MCP config validation."
+    },
+    {
+      "path": "openspec/changes/converge-opencode-installer/specs",
+      "purpose": "OpenSpec requirement specs for OpenCode installer convergence."
+    },
+    {
+      "path": "openspec/changes/converge-opencode-installer/specs/installer-opencode-convergence",
+      "purpose": "OpenCode installer convergence capability spec directory."
+    },
+    {
+      "path": "openspec/changes/delegate-bulk-purpose-curation",
+      "purpose": "OpenSpec change package for delegating bulk ProjectAtlas purpose curation to lower-cost worker agents."
+    },
+    {
+      "path": "openspec/changes/delegate-bulk-purpose-curation/specs",
+      "purpose": "Spec delta folder for worker-owned bulk purpose curation delegation requirements."
+    },
+    {
+      "path": "openspec/changes/delegate-bulk-purpose-curation/specs/bulk-purpose-curation-delegation",
+      "purpose": "OpenSpec requirement delta for worker-owned bulk purpose curation delegation."
+    },
+    {
+      "path": "openspec/changes/gate-codex-pr-review-threads",
+      "purpose": "OpenSpec change package for enforcing unresolved GitHub Codex PR review threads as a CI merge gate."
+    },
+    {
+      "path": "openspec/changes/gate-codex-pr-review-threads/specs",
+      "purpose": "Spec delta folder for the GitHub Codex PR review-thread CI gate capability."
+    },
+    {
+      "path": "openspec/changes/gate-codex-pr-review-threads/specs/codex-pr-review-thread-gate",
+      "purpose": "OpenSpec requirement delta for the Codex PR review-thread gate and OpenSpec task review surface."
+    },
+    {
+      "path": "openspec/changes/match-token-impact-reference-tui",
+      "purpose": "OpenSpec change package for matching the Token Impact reference TUI design and palette."
+    },
+    {
+      "path": "openspec/changes/match-token-impact-reference-tui/specs",
+      "purpose": "Spec delta folder for the token impact reference dashboard redesign requirements."
+    },
+    {
+      "path": "openspec/changes/match-token-impact-reference-tui/specs/token-impact-reference-dashboard",
+      "purpose": "OpenSpec requirement delta for the reference-matched Token Impact dashboard."
+    },
+    {
+      "path": "openspec/changes/publish-rustdoc-readme-links",
+      "purpose": "OpenSpec change package for linking published rustdoc from README and keeping docs/page content fresh after PR closeout."
+    },
+    {
+      "path": "openspec/changes/publish-rustdoc-readme-links/specs",
+      "purpose": "Spec delta folder for published rustdoc discovery and README/docs freshness requirements."
+    },
+    {
+      "path": "openspec/changes/publish-rustdoc-readme-links/specs/published-rustdoc-discovery",
+      "purpose": "OpenSpec requirement delta for GitHub Pages rustdoc discovery and docs freshness closeout."
     },
     {
       "path": "openspec/changes/expose-mcp-capabilities-settings",
@@ -917,6 +1009,114 @@
       "purpose": "Implementation and verification checklist for ProjectAtlas CLI-to-MCP parity."
     },
     {
+      "path": "openspec/changes/converge-claude-code-installer/.openspec.yaml",
+      "purpose": "OpenSpec change metadata for the Claude Code installer convergence proposal."
+    },
+    {
+      "path": "openspec/changes/converge-claude-code-installer/design.md",
+      "purpose": "Design rationale and pre-mortem risk analysis for Claude Code installer convergence."
+    },
+    {
+      "path": "openspec/changes/converge-claude-code-installer/proposal.md",
+      "purpose": "Proposal for validating and repairing Claude Code ProjectAtlas installer convergence."
+    },
+    {
+      "path": "openspec/changes/converge-claude-code-installer/specs/installer-claude-code-convergence/spec.md",
+      "purpose": "Specifies Claude Code generated MCP config convergence requirements and verification behavior."
+    },
+    {
+      "path": "openspec/changes/converge-claude-code-installer/tasks.md",
+      "purpose": "Implementation and verification checklist for Claude Code installer convergence."
+    },
+    {
+      "path": "openspec/changes/converge-opencode-installer/.openspec.yaml",
+      "purpose": "OpenSpec change metadata for the OpenCode installer convergence proposal."
+    },
+    {
+      "path": "openspec/changes/converge-opencode-installer/design.md",
+      "purpose": "Design rationale and pre-mortem risk analysis for OpenCode installer convergence."
+    },
+    {
+      "path": "openspec/changes/converge-opencode-installer/proposal.md",
+      "purpose": "Proposal for validating and repairing OpenCode ProjectAtlas installer convergence."
+    },
+    {
+      "path": "openspec/changes/converge-opencode-installer/specs/installer-opencode-convergence/spec.md",
+      "purpose": "Specifies OpenCode generated MCP config convergence requirements and verification behavior."
+    },
+    {
+      "path": "openspec/changes/converge-opencode-installer/tasks.md",
+      "purpose": "Implementation and verification checklist for OpenCode installer convergence."
+    },
+    {
+      "path": "openspec/changes/delegate-bulk-purpose-curation/design.md",
+      "purpose": "OpenSpec design for worker-owned bulk purpose curation with ProjectAtlas gate validation."
+    },
+    {
+      "path": "openspec/changes/delegate-bulk-purpose-curation/proposal.md",
+      "purpose": "OpenSpec proposal for delegating bulk ProjectAtlas purpose curation to lower-cost workers."
+    },
+    {
+      "path": "openspec/changes/delegate-bulk-purpose-curation/specs/bulk-purpose-curation-delegation/spec.md",
+      "purpose": "OpenSpec requirement delta for worker-owned bulk purpose curation delegation."
+    },
+    {
+      "path": "openspec/changes/delegate-bulk-purpose-curation/tasks.md",
+      "purpose": "OpenSpec implementation checklist for worker-owned bulk purpose curation guidance."
+    },
+    {
+      "path": "openspec/changes/gate-codex-pr-review-threads/design.md",
+      "purpose": "OpenSpec design for the GitHub Codex PR review-thread CI gate and OpenSpec task review surface."
+    },
+    {
+      "path": "openspec/changes/gate-codex-pr-review-threads/proposal.md",
+      "purpose": "OpenSpec proposal for enforcing unresolved GitHub Codex PR review threads through CI."
+    },
+    {
+      "path": "openspec/changes/gate-codex-pr-review-threads/specs/codex-pr-review-thread-gate/spec.md",
+      "purpose": "OpenSpec requirement delta for the Codex PR review-thread gate and OpenSpec task review surface."
+    },
+    {
+      "path": "openspec/changes/gate-codex-pr-review-threads/tasks.md",
+      "purpose": "OpenSpec implementation checklist for the GitHub Codex PR review-thread CI gate."
+    },
+    {
+      "path": "openspec/changes/match-token-impact-reference-tui/.openspec.yaml",
+      "purpose": "OpenSpec change metadata for the token impact reference dashboard redesign."
+    },
+    {
+      "path": "openspec/changes/match-token-impact-reference-tui/design.md",
+      "purpose": "OpenSpec design notes and pre-mortem for matching the token dashboard reference image."
+    },
+    {
+      "path": "openspec/changes/match-token-impact-reference-tui/proposal.md",
+      "purpose": "OpenSpec proposal for matching the Token Impact TUI reference design and semantic palette."
+    },
+    {
+      "path": "openspec/changes/match-token-impact-reference-tui/specs/token-impact-reference-dashboard/spec.md",
+      "purpose": "Specifies reference dashboard layout, palette, math, and Ratatui rendering requirements."
+    },
+    {
+      "path": "openspec/changes/match-token-impact-reference-tui/tasks.md",
+      "purpose": "Implementation and verification checklist for the Token Impact reference dashboard redesign."
+    },
+    {
+      "path": "openspec/changes/publish-rustdoc-readme-links/design.md",
+      "purpose": "OpenSpec design for the rustdoc Pages landing page and README/docs freshness closeout rule."
+    },
+    {
+      "path": "openspec/changes/publish-rustdoc-readme-links/proposal.md",
+      "purpose": "OpenSpec proposal for linking published rustdoc from README and keeping docs/page content fresh after PR closeout."
+    },
+    {
+      "path": "openspec/changes/publish-rustdoc-readme-links/specs/published-rustdoc-discovery/spec.md",
+      "purpose": "OpenSpec requirement delta for published rustdoc discovery and README/page freshness."
+    },
+    {
+      "path": "openspec/changes/publish-rustdoc-readme-links/tasks.md",
+      "purpose": "OpenSpec implementation checklist for published rustdoc discovery and docs freshness updates."
+    },
+    {
       "path": "openspec/changes/expose-mcp-capabilities-settings/.openspec.yaml",
       "purpose": "OpenSpec change metadata for the backlog typed MCP capability and settings contract."
     },
@@ -982,7 +1182,7 @@
     },
     {
       "path": "templates/AGENTS.md",
-      "purpose": "Reusable AGENTS.md startup template for repositories adopting ProjectAtlas purpose-aware atlas-first workflow."
+      "purpose": "Reusable ProjectAtlas startup snippet for atlas-first agent workflows, installer drift checks, OpenSpec task gates, and Rust discipline."
     }
   ]
 }

@@ -32,6 +32,8 @@ Purpose completion loop:
 6. Rerun health/lint.
 7. Continue until the database has complete reviewed folder purposes, selected high-value file purposes, and the deep index is current.
 
+For planned folder and file purpose creation or correction, including initial creation and broad refreshes, delegate the work to a low-reasoning subagent when the host supports subagents. The delegated task should receive bounded ProjectAtlas queue rows, summaries, outlines, or exact snippets, not an instruction to browse the whole repository. The subagent may write purposes through `atlas_purpose_set`, `atlas_purpose_review`, `projectatlas purpose set`, or `projectatlas purpose review`, then report changed paths and commands. A purpose written by an agent or subagent through those ProjectAtlas APIs is agent-approved and does not need a second approval pass. If any agent notices a wrong, stale, vague, or generic purpose during normal work, correct it along the way with the same ProjectAtlas APIs. Agents and subagents must not edit SQLite directly.
+
 `atlas_purpose_queue` and `projectatlas purpose queue` default to all folders and high-impact files. Low-priority source files stay out of the default queue so agents are not pushed through every file in a large repository. Pass `projectatlas purpose queue --include-low-priority-files` or MCP `include_low_priority_files: true` only for explicit broad file-purpose cleanup. Use `projectatlas purpose queue --include-assets`, MCP `include_assets: true`, raw `atlas_health`, or bare `projectatlas health-check` only when intentionally curating assets or generated outputs; non-source files should usually inherit purpose from an approved asset root instead of becoming one-by-one queue noise.
 Queue metadata includes `folder_scope` and `file_scope`; agents should use those fields to understand whether files are limited to high-impact entries, all source files, or asset-inclusive mode.
 
@@ -47,7 +49,7 @@ result text is TOON by default, so agents get compact structured payloads withou
 
 ```
 ## Startup
-0. If ProjectAtlas MCP tools are available, use `atlas_*` tools for normal ProjectAtlas command families before shelling out. Expected parity tools include `atlas_init`, `atlas_config`, `atlas_root`/`atlas_root_set`, `atlas_ignore_list`/`atlas_ignore_init_gitignore`/`atlas_ignore_add`/`atlas_ignore_remove`, `atlas_lint`, `atlas_runtime_info`, `atlas_mcp_config`, and `atlas_map`, plus the existing scan, overview, folder, file, summary, search, slice, health, purpose, token, settings, and watcher-status tools. Use the CLI for plugin install/update/release/CI workflows, MCP server startup/debugging, continuous `watch`, terminal TUI views, or when an MCP tool is unavailable.
+0. If ProjectAtlas MCP tools are available, use `atlas_*` tools for normal ProjectAtlas command families before shelling out. Expected parity tools include `atlas_init`, `atlas_config`, `atlas_root`/`atlas_root_set`, `atlas_ignore_list`/`atlas_ignore_init_gitignore`/`atlas_ignore_add`/`atlas_ignore_remove`, `atlas_lint`, `atlas_runtime_info`, `atlas_mcp_config`, `atlas_session_brief`, `atlas_task_status`/`atlas_task_cancel`, and `atlas_map`, plus the existing scan, overview, folder, file, summary, search, slice, health, purpose, token, settings, and watcher-status tools. Use the CLI for plugin install/update/release/CI workflows, MCP server startup/debugging, continuous `watch`, terminal TUI views, or when an MCP tool is unavailable.
 0.1. When a GitHub issue has an OpenSpec change, mirror `openspec/changes/<id>/tasks.md` into the issue as a visible checklist under an `OpenSpec Tasks` or `OpenSpec Task Checklist` heading, and update checked items before status updates, closure, or release. Keep `openspec/issue-map.json` current and run `.github/scripts/issue-checklists.py` for release/check-in validation. Treat local/GitHub checklist drift as a check-in blocker; random checkboxes outside explicit task-checklist sections must not satisfy the gate.
 1. Establish the project root. Run ProjectAtlas from that root so `.projectatlas/projectatlas.db` belongs to this project only.
 2. Run `projectatlas scan` when the SQLite index may be stale.
@@ -95,6 +97,15 @@ If the addressed root is not already indexed, the tool returns a clear error and
 switch with `atlas_set_project_path`, pass the correct `project_path`, or use ordinary filesystem
 tools instead of ProjectAtlas for out-of-project files. File, folder, slice, purpose, health, and
 search paths remain repository-relative inside the selected project.
+
+`atlas_session_brief` is the compact startup probe for agents. It returns selected project identity,
+index availability, overview counts when present, bounded ranked folder/file candidates, health
+blockers, and typed next-call recommendations without scanning, writing telemetry, or reading source
+content. `atlas_settings` includes an additive `mcp_session` capability block with nearest-project
+startup policy, selected DB/config roots, path scope, telemetry mode, scan policy, runtime identity,
+and no-secret guarantees. `atlas_task_status` and `atlas_task_cancel` expose the bounded MCP
+task-progress contract; scan, watch, search, summary, slice, and CLI commands remain synchronous in
+this release.
 
 The plugin no longer ships a PATH-based fallback `.mcp.json`. Registering a plugin-level MCP file with
 `command = "projectatlas"` is not portable across Windows, Linux, and macOS because an already-running
@@ -186,10 +197,15 @@ verify `codex plugin list --marketplace projectatlas --json` and
 repaired by rerunning the ProjectAtlas installer instead of left for the next
 Codex restart.
 
-The installers report Claude Code/OpenCode generated-config status and warn on
-stale official ProjectAtlas release URLs in downstream `.github/workflows`
-files. These workflow-pin warnings are intentionally non-mutating: update the
-workflow pin deliberately or keep the warning as an explicit migration decision.
+The installers verify Claude Code and OpenCode generated MCP configs after writing them. The checks
+parse the generated JSON and require the verified runtime path, `--require-version`, selected DB
+path, effective config path when present, and final `mcp` command; OpenCode also requires
+`type = "local"`, `enabled = true`, and the project `cwd`. Claude Code/OpenCode do not currently
+have a ProjectAtlas-managed marketplace/cache repair path in the installer, so convergence is
+generated-config verification plus explicit restart guidance for any running host session that cached
+older instructions. The installers also warn on stale official ProjectAtlas release URLs in
+downstream `.github/workflows` files. These workflow-pin warnings are intentionally non-mutating:
+update the workflow pin deliberately or keep the warning as an explicit migration decision.
 
 Harness-specific config can also be generated directly:
 
@@ -217,7 +233,8 @@ and the expected release `version` when a plugin manifest or `PROJECTATLAS_VERSI
 
 Prefer MCP tools when the harness exposes them. Use CLI fallbacks only when the matching MCP tool is unavailable or the command is a reviewed exception.
 
-0. `atlas_set_project_path` or per-call `project_path`: select the repository when one MCP server may serve multiple projects; prefer per-call `project_path` for shared or concurrent hosts.
+0. `atlas_session_brief`: get a compact startup snapshot of selected project identity, index state, top candidates, blockers, and next calls.
+1. `atlas_set_project_path` or per-call `project_path`: select the repository when one MCP server may serve multiple projects; prefer per-call `project_path` for shared or concurrent hosts.
 1. `atlas_scan`: refresh repository, purpose, and symbol state.
 2. `atlas_overview`: inspect repository scale and purpose coverage.
 3. `atlas_folders`: choose the work area from folder purpose and path.

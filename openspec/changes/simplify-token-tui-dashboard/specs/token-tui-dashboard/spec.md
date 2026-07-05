@@ -30,9 +30,9 @@ The token TUI overview SHALL show file-read avoidance as `observed_file_read_rep
 - **WHEN** the overview has observed and search-modeled read avoidance
 - **THEN** the dashboard SHALL show both parts and their total.
 
-#### Scenario: Source table file-read total
-- **WHEN** the dashboard renders the source table
-- **THEN** visible source row file-read counts SHALL sum to `likely_file_reads_avoided`.
+#### Scenario: File-read total
+- **WHEN** the dashboard renders the file-read strip
+- **THEN** visible observed and modeled file-read counts SHALL sum to `likely_file_reads_avoided`.
 
 ### Requirement: Ratatui Widget Composition
 The token TUI overview SHALL be built with Ratatui standard widgets and light-terminal-friendly styling.
@@ -41,10 +41,10 @@ The token TUI overview SHALL be built with Ratatui standard widgets and light-te
 - **WHEN** a table is rendered in the overview dashboard
 - **THEN** the header SHALL use styled text, visible column spacing, and a blank margin before the first row.
 
-#### Scenario: Trend windows
+#### Scenario: Trend dashboard remains dedicated
 - **WHEN** token trend history exists
-- **THEN** the overview SHALL show day, week, month, and year saved-token trend windows.
-- **AND** the overview trend titles SHALL NOT print gross period saved totals as competing numeric saved-token values.
+- **THEN** the dedicated `projectatlas token --view tui --trend <window>` dashboard SHALL show saved-token trend windows.
+- **AND** overview mode SHALL not render the previous day/week/month/year trend grid because `match-token-impact-reference-tui` supersedes the overview with the reference KPI layout.
 
 #### Scenario: Negative savings remain signed
 - **WHEN** a period or accounting operand has negative saved tokens

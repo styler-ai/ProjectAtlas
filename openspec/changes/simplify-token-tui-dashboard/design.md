@@ -15,14 +15,14 @@ The dashboard keeps one visible token-savings view:
 
 The gross compatibility totals remain available through the token data contract, but the overview TUI does not render a separate gross saved value because it competes with the conservative headline and made the dashboard harder to audit.
 
-The source table must use the conservative accounting view, not raw bucket rows, so the table remains explainable:
+The source table must use the conservative accounting view while staying backed by real telemetry bucket categories:
 
-- Observed reads: `observed_file_read_replacements` and `measured_tokens_saved`.
-- Modeled search: `modeled_file_reads_avoided` and `deduped_modeled_tokens_avoided`.
+- Observed source buckets: observed full-file compression steps and `measured_tokens_saved`.
+- Modeled source buckets: actual modeled telemetry buckets, with `deduped_modeled_tokens_avoided` allocated across those real buckets by gross modeled contribution.
 
 Therefore:
 
-- Source table file reads sum to `likely_file_reads_avoided`.
+- Source table steps sum to the overview lookup count represented by `calls`.
 - Source table tokens sum to `tokens_avoided`.
 - Do not add a visible total row to the source table, because that makes the visible source rows double-count when summed. The explicit equation strip carries the total once.
 - File reads avoided equals `observed_file_read_replacements + modeled_file_reads_avoided`.

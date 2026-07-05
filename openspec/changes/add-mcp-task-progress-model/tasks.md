@@ -1,12 +1,17 @@
-## 1. Review
+## 1. Spec and Issue Setup
 
-- [ ] 1.1 Review the task state names and status payload fields.
-- [ ] 1.2 Decide which MCP operations, if any, should become task-backed first.
-- [ ] 1.3 Confirm whether cancellation is required in the first implementation.
+- [x] 1.1 Update the task-progress OpenSpec proposal, design, spec delta, and task list for v0.3.25 implementation.
+- [x] 1.2 Mirror this task list into #295 under `OpenSpec Tasks` and assign the release milestone.
 
-## 2. Implementation
+## 2. MCP Implementation
 
-- [ ] 2.1 Add typed task status structs/enums after contract approval.
-- [ ] 2.2 Add minimal MCP status and cancellation tools if approved.
-- [ ] 2.3 Move one long-running MCP operation behind the task model as a pilot.
-- [ ] 2.4 Add serialization and in-process MCP tests for status, failure, completion, and cancellation.
+- [x] 2.1 Add typed task status, operation, progress, cancellation, and lookup result structs/enums.
+- [x] 2.2 Add a bounded MCP-session-local task registry without persistent queues or background workers.
+- [x] 2.3 Expose `atlas_task_status` and `atlas_task_cancel` MCP tools with typed unknown-task and non-cancelable responses.
+- [x] 2.4 Keep scan, watch, search, summary, slice, and CLI commands synchronous in this release.
+
+## 3. Tests and Documentation
+
+- [x] 3.1 Add tests for task status serialization, unknown task status, cancellation response, and direct summary/slice preservation.
+- [x] 3.2 Update ProjectAtlas skill and agent integration docs for the task-progress contract and current non-async scope.
+- [x] 3.3 Run OpenSpec, issue-checklist, MCP, and Rust verification gates.

@@ -62,6 +62,17 @@ body:
       label: Logs or output
       description: Paste relevant terminal output. Redact secrets and private paths.
       render: shell
+  - type: textarea
+    id: openspec
+    attributes:
+      label: OpenSpec plan and task checklist
+      description: Maintainers or agents should fill this before planned implementation. Mirror the linked `openspec/changes/<id>/tasks.md` checklist under an `OpenSpec Tasks` heading before closing or releasing.
+      value: |
+        OpenSpec change: _to be assigned_
+
+        ## OpenSpec Tasks
+
+        <!-- Mirror tasks from `openspec/changes/<id>/tasks.md` here before implementation. -->
   - type: checkboxes
     id: privacy
     attributes:
