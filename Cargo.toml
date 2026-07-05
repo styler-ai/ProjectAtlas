@@ -79,6 +79,7 @@ clap = { version = "4.5", features = ["derive"] }
 cssparser = "0.37"
 globset = "0.4"
 ignore = "0.4"
+image = { version = "0.25.6", default-features = false, features = ["png"] }
 jsonc-parser = { version = "0.32", features = ["serde"] }
 notify = "8.2"
 pulldown-cmark = "0.13"
@@ -86,6 +87,8 @@ proc-macro2 = { version = "1.0", features = ["span-locations"] }
 regex = "1.11"
 rayon = "1.10"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
+tui-big-text = "0.8.8"
 rmcp = { version = "1.8.0", default-features = false, features = ["server", "transport-io", "macros"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 scraper = "0.27"

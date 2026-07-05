@@ -11,52 +11,216 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Axis, Block, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{
+    Axis, Block, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table, Widget, Wrap,
+};
 use ratatui::{Frame, Terminal};
+use ratatui_image::{Image as RatatuiImage, Resize, picker::Picker};
+use std::cell::Cell as StdCell;
+use std::collections::VecDeque;
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tui_big_text::{BigText, PixelSize};
 
 /// Fixed terminal height for the token overview dashboard snapshot.
-const DASHBOARD_HEIGHT: u16 = 42;
+const DASHBOARD_HEIGHT: u16 = 50;
 /// Fixed terminal height for the token trend dashboard snapshot.
 const TREND_DASHBOARD_HEIGHT: u16 = 30;
-/// Token dashboard near-black navy background.
+/// Token dashboard full-screen background.
 const THEME_BG: Color = Color::Rgb(4, 10, 18);
 /// Token dashboard panel background.
-const THEME_PANEL: Color = Color::Rgb(7, 20, 33);
-/// Token dashboard primary text.
-const THEME_TEXT: Color = Color::Rgb(218, 214, 204);
+const THEME_PANEL: Color = Color::Rgb(5, 16, 25);
+/// Token dashboard primary warm text.
+const THEME_TEXT: Color = Color::Rgb(224, 198, 164);
 /// Token dashboard muted label text.
-const THEME_MUTED: Color = Color::Rgb(158, 151, 139);
+const THEME_MUTED: Color = Color::Rgb(170, 143, 116);
 /// Token dashboard mascot/title white.
 const THEME_INK_WHITE: Color = Color::Rgb(238, 234, 224);
-/// Token dashboard `ProjectAtlas` blue.
+/// Counterfactual/original-baseline blue.
 const THEME_BLUE: Color = Color::Rgb(93, 143, 255);
-/// Token dashboard saved-token green.
+/// Net saved/success green.
 const THEME_GREEN: Color = Color::Rgb(111, 216, 100);
-/// Token dashboard modeled-confidence yellow.
+/// Modeled/search/estimate yellow.
 const THEME_YELLOW: Color = Color::Rgb(230, 179, 55);
-/// Token dashboard border blue.
-const THEME_BORDER: Color = Color::Rgb(35, 62, 90);
+/// Token dashboard subtle warm panel border.
+const THEME_BORDER: Color = Color::Rgb(92, 74, 55);
+/// Token dashboard inactive bar cells.
+const THEME_BAR_EMPTY: Color = Color::Rgb(49, 56, 57);
+/// Token dashboard warm keycap background.
+const THEME_KEYCAP_BG: Color = Color::Rgb(36, 34, 31);
 /// Token dashboard loss red.
 const THEME_RED: Color = Color::Rgb(235, 95, 95);
+/// `ProjectAtlas` Ani mascot PNG used by the token dashboard image widget.
+const ANI_MASCOT_PNG: &[u8] = include_bytes!("../../../docs/design/ani-mascot-reference.png");
+/// Cached decoded Ani PNG for Ratatui image rendering.
+static ANI_MASCOT_IMAGE: OnceLock<Option<image::DynamicImage>> = OnceLock::new();
+
+/// Human token dashboard color mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TokenDashboardTheme {
+    /// Reference dark dashboard theme.
+    Dark,
+    /// Light dashboard theme for light terminal backgrounds.
+    Light,
+}
+
+impl TokenDashboardTheme {
+    /// Parse a token dashboard theme value.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "dark" => Some(Self::Dark),
+            "light" => Some(Self::Light),
+            _ => None,
+        }
+    }
+}
+
+/// Semantic color palette used when serializing Ratatui cells to ANSI.
+#[derive(Clone, Copy)]
+struct ThemePalette {
+    /// Full-screen background.
+    bg: Color,
+    /// Panel background.
+    panel: Color,
+    /// Primary text.
+    text: Color,
+    /// Muted text.
+    muted: Color,
+    /// Product identity color.
+    ink_white: Color,
+    /// Counterfactual baseline blue.
+    blue: Color,
+    /// Saved/success green.
+    green: Color,
+    /// Modeled/estimate yellow.
+    yellow: Color,
+    /// Panel border.
+    border: Color,
+    /// Empty bar fill.
+    bar_empty: Color,
+    /// Footer keycap background.
+    keycap_bg: Color,
+    /// Negative/loss red.
+    red: Color,
+}
+
+/// Light terminal palette preserving the same semantic color roles.
+const LIGHT_THEME: ThemePalette = ThemePalette {
+    bg: Color::Rgb(252, 249, 241),
+    panel: Color::Rgb(246, 242, 232),
+    text: Color::Rgb(34, 32, 28),
+    muted: Color::Rgb(96, 88, 76),
+    ink_white: Color::Rgb(22, 22, 20),
+    blue: Color::Rgb(37, 99, 235),
+    green: Color::Rgb(22, 128, 72),
+    yellow: Color::Rgb(178, 116, 0),
+    border: Color::Rgb(175, 151, 111),
+    bar_empty: Color::Rgb(218, 210, 196),
+    keycap_bg: Color::Rgb(224, 216, 203),
+    red: Color::Rgb(190, 52, 52),
+};
+
+thread_local! {
+    /// Active token dashboard theme for the current render pass.
+    static ACTIVE_TOKEN_THEME: StdCell<TokenDashboardTheme> = const { StdCell::new(TokenDashboardTheme::Dark) };
+}
 
 /// Render the token overview as a human terminal dashboard.
+#[cfg(test)]
 pub(crate) fn render_token_dashboard(overview: &TokenOverview, session: Option<&str>) -> String {
+    render_token_dashboard_with_theme(overview, session, TokenDashboardTheme::Dark)
+}
+
+/// Render the token overview as a human terminal dashboard with the selected theme.
+pub(crate) fn render_token_dashboard_with_theme(
+    overview: &TokenOverview,
+    session: Option<&str>,
+    theme: TokenDashboardTheme,
+) -> String {
     let width = dashboard_width().clamp(80, 140) as u16;
-    render_dashboard_to_string(width, DASHBOARD_HEIGHT, |frame| {
-        render_overview_frame(frame, overview, session);
+    with_token_theme(theme, || {
+        render_dashboard_to_ansi_string(width, DASHBOARD_HEIGHT, |frame| {
+            render_overview_frame(frame, overview, session);
+        })
+    })
+}
+
+/// Render the token overview as a plain terminal chart for agent payloads.
+pub(crate) fn render_token_dashboard_plain_with_theme(
+    overview: &TokenOverview,
+    session: Option<&str>,
+    theme: TokenDashboardTheme,
+) -> String {
+    let width = dashboard_width().clamp(80, 140) as u16;
+    with_token_theme(theme, || {
+        render_dashboard_to_string(width, DASHBOARD_HEIGHT, |frame| {
+            render_overview_frame(frame, overview, session);
+        })
     })
 }
 
 /// Render token trends as a human terminal dashboard.
+#[cfg(test)]
 pub(crate) fn render_token_trend_dashboard(report: &TokenTrendReport) -> String {
+    render_token_trend_dashboard_with_theme(report, TokenDashboardTheme::Dark)
+}
+
+/// Render token trends as a human terminal dashboard with the selected theme.
+pub(crate) fn render_token_trend_dashboard_with_theme(
+    report: &TokenTrendReport,
+    theme: TokenDashboardTheme,
+) -> String {
     let width = dashboard_width().clamp(80, 140) as u16;
-    render_dashboard_to_string(width, TREND_DASHBOARD_HEIGHT, |frame| {
-        render_trend_frame(frame, report);
+    with_token_theme(theme, || {
+        render_dashboard_to_ansi_string(width, TREND_DASHBOARD_HEIGHT, |frame| {
+            render_trend_frame(frame, report);
+        })
     })
 }
 
-/// Render one Ratatui frame into a deterministic string buffer.
+/// Render token trends as a plain terminal chart for agent payloads.
+pub(crate) fn render_token_trend_dashboard_plain_with_theme(
+    report: &TokenTrendReport,
+    theme: TokenDashboardTheme,
+) -> String {
+    let width = dashboard_width().clamp(80, 140) as u16;
+    with_token_theme(theme, || {
+        render_dashboard_to_string(width, TREND_DASHBOARD_HEIGHT, |frame| {
+            render_trend_frame(frame, report);
+        })
+    })
+}
+
+/// Run one render closure with the selected token dashboard theme.
+fn with_token_theme<R>(theme: TokenDashboardTheme, render: impl FnOnce() -> R) -> R {
+    ACTIVE_TOKEN_THEME.with(|active| {
+        let previous = active.replace(theme);
+        let result = render();
+        active.set(previous);
+        result
+    })
+}
+
+/// Return the active token dashboard theme.
+fn active_token_theme() -> TokenDashboardTheme {
+    ACTIVE_TOKEN_THEME.with(StdCell::get)
+}
+
+/// Render one Ratatui frame into a deterministic ANSI terminal buffer.
+fn render_dashboard_to_ansi_string<F>(width: u16, height: u16, render: F) -> String
+where
+    F: FnOnce(&mut Frame<'_>),
+{
+    let backend = TestBackend::new(width, height);
+    let mut terminal =
+        Terminal::new(backend).expect("in-memory token dashboard backend should initialize");
+    let frame = terminal
+        .draw(render)
+        .expect("in-memory token dashboard should render");
+    buffer_to_ansi_string(frame.buffer)
+}
+
+/// Render one Ratatui frame into a deterministic plain string buffer.
 fn render_dashboard_to_string<F>(width: u16, height: u16, render: F) -> String
 where
     F: FnOnce(&mut Frame<'_>),
@@ -73,20 +237,30 @@ where
 /// Draw the full overview dashboard frame.
 fn render_overview_frame(frame: &mut Frame<'_>, overview: &TokenOverview, session: Option<&str>) {
     let area = frame.area();
-    frame.render_widget(Block::default().style(Style::default().bg(THEME_BG)), area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(themed_bg())),
+        area,
+    );
+    let outer = Block::bordered()
+        .border_set(symbols::border::ROUNDED)
+        .border_style(Style::default().fg(THEME_BORDER))
+        .style(Style::default().fg(THEME_TEXT).bg(themed_bg()));
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+    render_window_title_bar(frame, area);
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
-            Constraint::Length(10),
-            Constraint::Length(5),
+            Constraint::Length(9),
+            Constraint::Length(14),
+            Constraint::Length(6),
             Constraint::Length(6),
             Constraint::Min(8),
-            Constraint::Length(5),
+            Constraint::Length(4),
             Constraint::Length(1),
         ])
-        .split(area);
+        .split(inner);
 
     render_token_header(frame, sections[0], overview, session);
     render_token_hero(frame, sections[1], overview);
@@ -100,19 +274,52 @@ fn render_overview_frame(frame: &mut Frame<'_>, overview: &TokenOverview, sessio
 /// Return a screenshot-matched dashboard panel.
 fn panel(title: &'static str) -> Block<'static> {
     let block = Block::bordered()
+        .border_set(symbols::border::ROUNDED)
         .border_style(Style::default().fg(THEME_BORDER))
         .style(Style::default().fg(THEME_TEXT).bg(THEME_PANEL));
     if title.is_empty() {
         block
     } else {
         block.title(Span::styled(
-            format!(" {title} "),
-            Style::default()
-                .fg(THEME_BLUE)
-                .bg(THEME_PANEL)
-                .add_modifier(Modifier::BOLD),
+            format!(" {} ", reference_title(title)),
+            section_title_style().bg(THEME_PANEL),
         ))
     }
+}
+
+/// Draw the reference-style app title bar and window controls.
+fn render_window_title_bar(frame: &mut Frame<'_>, area: Rect) {
+    if area.width < 8 {
+        return;
+    }
+    let top = Rect {
+        x: area.x.saturating_add(1),
+        y: area.y,
+        width: area.width.saturating_sub(2),
+        height: 1,
+    };
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(10),
+            Constraint::Min(12),
+            Constraint::Length(10),
+        ])
+        .split(top);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" ● ", Style::default().fg(THEME_RED)),
+            Span::styled("● ", Style::default().fg(THEME_YELLOW)),
+            Span::styled("●", Style::default().fg(THEME_GREEN)),
+        ])),
+        columns[0],
+    );
+    frame.render_widget(
+        Paragraph::new("projectatlas -- savings-overview")
+            .style(body_style())
+            .alignment(Alignment::Center),
+        columns[1],
+    );
 }
 
 /// Draw the title band, including the small terminal-native Ani mascot mark.
@@ -122,27 +329,21 @@ fn render_token_header(
     overview: &TokenOverview,
     session: Option<&str>,
 ) {
+    let mascot_width = if area.width >= 112 { 27 } else { 18 };
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(18),
+            Constraint::Length(mascot_width),
             Constraint::Min(32),
             Constraint::Length(if area.width >= 110 { 46 } else { 34 }),
         ])
         .split(area);
 
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled("Ani  _/\\_x", identity_style())),
-            Line::from(Span::styled("  __/____\\__", identity_style())),
-            Line::from(Span::styled("   ( -_-) ", identity_style())),
-            Line::from(Span::styled("  /|src docs|", identity_style())),
-        ]),
-        columns[0],
-    );
+    frame.render_widget(AniMascot::new(area.width >= 112), columns[0]);
 
     frame.render_widget(
         Paragraph::new(vec![
+            Line::from(""),
             Line::from(vec![
                 Span::styled("ProjectAtlas", identity_title_style()),
                 Span::raw(" "),
@@ -150,10 +351,7 @@ fn render_token_header(
             ]),
             Line::from(vec![
                 Span::styled("Smarter context. Fewer tokens. ", body_style()),
-                Span::styled(
-                    "Real savings.",
-                    Style::default().fg(THEME_GREEN).bg(THEME_BG),
-                ),
+                Span::styled("Real savings.", Style::default().fg(THEME_GREEN)),
             ]),
         ])
         .wrap(Wrap { trim: true }),
@@ -181,9 +379,228 @@ fn render_token_header(
     );
 }
 
+/// Tiny Ratatui widget that renders Ani from the checked-in mascot PNG.
+struct AniMascot {
+    /// Use the wider target cell area when the header has enough room.
+    wide: bool,
+}
+
+impl AniMascot {
+    /// Build the terminal-native Ani image widget.
+    const fn new(wide: bool) -> Self {
+        Self { wide }
+    }
+}
+
+impl Widget for AniMascot {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let Some(image) = ani_image() else {
+            return;
+        };
+        let target = if self.wide {
+            ratatui::layout::Size::new(area.width.min(27), area.height.min(9))
+        } else {
+            ratatui::layout::Size::new(area.width.min(14), area.height.min(7))
+        };
+        if target.width == 0 || target.height == 0 {
+            return;
+        }
+        let mut picker = Picker::halfblocks();
+        if active_token_theme() == TokenDashboardTheme::Light {
+            picker.set_background_color(Some(ani_image_matte()));
+        }
+        let Ok(protocol) = picker.new_protocol(image, target, Resize::Scale(None)) else {
+            return;
+        };
+        let image_area = centered_rect(area, protocol.size());
+        RatatuiImage::new(&protocol)
+            .allow_clipping(true)
+            .render(image_area, buf);
+    }
+}
+
+/// Decode Ani's PNG once for Ratatui image rendering.
+fn ani_image() -> Option<image::DynamicImage> {
+    ANI_MASCOT_IMAGE
+        .get_or_init(|| {
+            image::load_from_memory_with_format(ANI_MASCOT_PNG, image::ImageFormat::Png)
+                .ok()
+                .map(|image| high_contrast_ani_image(&image))
+        })
+        .clone()
+}
+
+/// Convert the soft mascot PNG into compact high-contrast terminal line art.
+fn high_contrast_ani_image(image: &image::DynamicImage) -> image::DynamicImage {
+    let source = image.to_rgba8();
+    let Some((min_x, min_y, max_x, max_y)) = alpha_bounds(&source) else {
+        return image::DynamicImage::ImageRgba8(source);
+    };
+    let width = max_x.saturating_sub(min_x).saturating_add(1);
+    let height = max_y.saturating_sub(min_y).saturating_add(1);
+    let mut cropped = image::imageops::crop_imm(&source, min_x, min_y, width, height).to_image();
+    let background = flood_fill_light_background(&cropped);
+    for (x, y, pixel) in cropped.enumerate_pixels_mut() {
+        let [red, green, blue, alpha] = pixel.0;
+        if alpha < 32 {
+            pixel.0 = [0, 0, 0, 0];
+            continue;
+        }
+        let index = pixel_index_xy(x, y, width);
+        if background.get(index).copied().unwrap_or(false) {
+            pixel.0 = [0, 0, 0, 0];
+            continue;
+        }
+        let luma = 2126u32
+            .saturating_mul(u32::from(red))
+            .saturating_add(7152u32.saturating_mul(u32::from(green)))
+            .saturating_add(722u32.saturating_mul(u32::from(blue)));
+        pixel.0 = if luma < 1_550_000 {
+            [3, 8, 13, 255]
+        } else {
+            [238, 234, 224, 255]
+        };
+    }
+    image::DynamicImage::ImageRgba8(cropped)
+}
+
+/// Mark the white source-image background connected to the crop edges.
+fn flood_fill_light_background(image: &image::RgbaImage) -> Vec<bool> {
+    let width = image.width();
+    let height = image.height();
+    let Some(len) = width
+        .checked_mul(height)
+        .and_then(|value| usize::try_from(value).ok())
+    else {
+        return Vec::new();
+    };
+    let mut background = vec![false; len];
+    let mut queue = VecDeque::new();
+    for x in 0..width {
+        enqueue_light_background(image, &mut background, &mut queue, x, 0);
+        enqueue_light_background(
+            image,
+            &mut background,
+            &mut queue,
+            x,
+            height.saturating_sub(1),
+        );
+    }
+    for y in 0..height {
+        enqueue_light_background(image, &mut background, &mut queue, 0, y);
+        enqueue_light_background(
+            image,
+            &mut background,
+            &mut queue,
+            width.saturating_sub(1),
+            y,
+        );
+    }
+    while let Some((x, y)) = queue.pop_front() {
+        if x > 0 {
+            enqueue_light_background(image, &mut background, &mut queue, x - 1, y);
+        }
+        if x + 1 < width {
+            enqueue_light_background(image, &mut background, &mut queue, x + 1, y);
+        }
+        if y > 0 {
+            enqueue_light_background(image, &mut background, &mut queue, x, y - 1);
+        }
+        if y + 1 < height {
+            enqueue_light_background(image, &mut background, &mut queue, x, y + 1);
+        }
+    }
+    background
+}
+
+/// Add one image coordinate to the transparent-background flood fill.
+fn enqueue_light_background(
+    image: &image::RgbaImage,
+    background: &mut [bool],
+    queue: &mut VecDeque<(u32, u32)>,
+    x: u32,
+    y: u32,
+) {
+    let index = pixel_index_xy(x, y, image.width());
+    if background.get(index).copied().unwrap_or(true) {
+        return;
+    }
+    let [red, green, blue, alpha] = image.get_pixel(x, y).0;
+    if (alpha < 32 || is_light_background(red, green, blue))
+        && let Some(slot) = background.get_mut(index)
+    {
+        *slot = true;
+        queue.push_back((x, y));
+    }
+}
+
+/// Return whether one source pixel belongs to the white source-image background.
+fn is_light_background(red: u8, green: u8, blue: u8) -> bool {
+    let luma = 2126u32
+        .saturating_mul(u32::from(red))
+        .saturating_add(7152u32.saturating_mul(u32::from(green)))
+        .saturating_add(722u32.saturating_mul(u32::from(blue)));
+    luma > 2_250_000
+}
+
+/// Flatten one pixel coordinate into a row-major index.
+fn pixel_index_xy(x: u32, y: u32, width: u32) -> usize {
+    usize::try_from(y.saturating_mul(width).saturating_add(x)).unwrap_or(usize::MAX)
+}
+
+/// Return the alpha bounds for non-transparent mascot pixels.
+fn alpha_bounds(image: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
+    let mut min_x = u32::MAX;
+    let mut min_y = u32::MAX;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    let mut found = false;
+    for (x, y, pixel) in image.enumerate_pixels() {
+        if pixel.0[3] < 32 {
+            continue;
+        }
+        found = true;
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    found.then_some((min_x, min_y, max_x, max_y))
+}
+
+/// Return the matte used behind transparent Ani pixels for the active theme.
+fn ani_image_matte() -> [u8; 4] {
+    match active_token_theme() {
+        TokenDashboardTheme::Dark => rgb_alpha(THEME_PANEL),
+        TokenDashboardTheme::Light => rgb_alpha(LIGHT_THEME.panel),
+    }
+}
+
+/// Convert one RGB theme color into an opaque image matte.
+fn rgb_alpha(color: Color) -> [u8; 4] {
+    match color {
+        Color::Rgb(red, green, blue) => [red, green, blue, 255],
+        _ => [0, 0, 0, 255],
+    }
+}
+
+/// Return a rectangle centered inside another rectangle.
+fn centered_rect(area: Rect, size: ratatui::layout::Size) -> Rect {
+    Rect {
+        x: area
+            .x
+            .saturating_add(area.width.saturating_sub(size.width) / 2),
+        y: area
+            .y
+            .saturating_add(area.height.saturating_sub(size.height) / 2),
+        width: area.width.min(size.width),
+        height: area.height.min(size.height),
+    }
+}
+
 /// Draw the dominant saved-token hero panel.
 fn render_token_hero(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
-    let block = panel("").border_style(Style::default().fg(THEME_BLUE));
+    let block = panel("").border_style(Style::default().fg(THEME_BORDER));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -191,7 +608,7 @@ fn render_token_hero(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Length(2),
+            Constraint::Length(4),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(3),
@@ -199,21 +616,21 @@ fn render_token_hero(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview
         .split(inner);
 
     frame.render_widget(
-        Paragraph::new("TOTAL TOKENS AVOIDED")
-            .style(header_style())
+        Paragraph::new(reference_title("TOTAL TOKENS AVOIDED"))
+            .style(section_title_style().bg(THEME_PANEL))
             .alignment(Alignment::Center),
         rows[0],
     );
+    render_hero_value(frame, rows[1], overview.tokens_avoided);
     frame.render_widget(
-        Paragraph::new(signed_count(overview.tokens_avoided))
-            .style(hero_value_style(overview.tokens_avoided))
-            .alignment(Alignment::Center),
-        rows[1],
-    );
-    frame.render_widget(
-        Paragraph::new("tokens avoided")
-            .style(body_style())
-            .alignment(Alignment::Center),
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                signed_count(overview.tokens_avoided),
+                hero_value_style(overview.tokens_avoided),
+            ),
+            Span::styled(" tokens avoided", body_style().bg(THEME_PANEL)),
+        ]))
+        .alignment(Alignment::Center),
         rows[2],
     );
     render_divider(frame, rows[3]);
@@ -260,6 +677,19 @@ fn render_token_hero(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview
         signed_color(saved_by_projectatlas),
         ratio(saved_by_projectatlas.unsigned_abs(), denominator),
     );
+}
+
+/// Draw the saved-token headline as terminal-native large digits.
+fn render_hero_value(frame: &mut Frame<'_>, area: Rect, value: isize) {
+    let text = signed_count(value);
+    let style = hero_value_style(value);
+    let big_text = BigText::builder()
+        .pixel_size(PixelSize::HalfHeight)
+        .alignment(Alignment::Center)
+        .style(style)
+        .lines(vec![Line::from(Span::styled(text, style))])
+        .build();
+    frame.render_widget(big_text, area);
 }
 
 /// Draw one metric operand in the hero equation.
@@ -335,22 +765,7 @@ fn render_file_reads_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOve
         "Search-modeled narrowing"
     };
 
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                grouped_count(total_reads),
-                Style::default()
-                    .fg(THEME_INK_WHITE)
-                    .bg(THEME_PANEL)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(
-                "file reads avoided",
-                muted_style().bg(THEME_PANEL),
-            )),
-        ]),
-        columns[0],
-    );
+    render_file_read_total(frame, columns[0], total_reads);
     render_vertical_separator(frame, columns[1]);
 
     frame.render_widget(
@@ -378,7 +793,8 @@ fn render_file_reads_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOve
                 observed_ratio,
                 THEME_INK_WHITE,
             ),
-        ]),
+        ])
+        .style(body_style().bg(THEME_PANEL)),
         columns[2],
     );
     render_vertical_separator(frame, columns[3]);
@@ -408,7 +824,8 @@ fn render_file_reads_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOve
                 modeled_ratio,
                 THEME_YELLOW,
             ),
-        ]),
+        ])
+        .style(body_style().bg(THEME_PANEL)),
         columns[4],
     );
     render_vertical_separator(frame, columns[5]);
@@ -424,8 +841,44 @@ fn render_file_reads_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOve
                     .add_modifier(Modifier::BOLD),
             )),
         ])
+        .style(body_style().bg(THEME_PANEL))
         .alignment(Alignment::Center),
         columns[6],
+    );
+}
+
+/// Draw the left file-read total with the reference document-icon hierarchy.
+fn render_file_read_total(frame: &mut Frame<'_>, area: Rect, total_reads: usize) {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(7), Constraint::Min(8)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled("╭──╮", identity_style().bg(THEME_PANEL))),
+            Line::from(Span::styled("│≡ │", identity_style().bg(THEME_PANEL))),
+            Line::from(Span::styled("╰──╯", identity_style().bg(THEME_PANEL))),
+        ])
+        .alignment(Alignment::Center)
+        .style(body_style().bg(THEME_PANEL)),
+        columns[0],
+    );
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                grouped_count(total_reads),
+                Style::default()
+                    .fg(THEME_INK_WHITE)
+                    .bg(THEME_PANEL)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "file reads avoided",
+                muted_style().bg(THEME_PANEL),
+            )),
+        ])
+        .style(body_style().bg(THEME_PANEL)),
+        columns[1],
     );
 }
 
@@ -552,34 +1005,41 @@ fn composition_line(
 /// Draw signal metadata from the reference dashboard.
 fn render_signal_card(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
     let tokenizer = overview.calibration.as_ref().map_or_else(
-        || "optional".to_string(),
+        || "not run".to_string(),
         |calibration| calibration.tokenizer.clone(),
     );
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("▣  ", Style::default().fg(THEME_BLUE).bg(THEME_PANEL)),
+                Span::styled("▣  ", Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL)),
                 Span::styled(
                     "Repeated baselines collapsed: ",
                     body_style().bg(THEME_PANEL),
                 ),
                 Span::styled(
                     grouped_count(overview.repeated_baselines_deduped),
-                    body_style().bg(THEME_PANEL),
+                    Style::default()
+                        .fg(THEME_INK_WHITE)
+                        .bg(THEME_PANEL)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("⌁  ", Style::default().fg(THEME_BLUE).bg(THEME_PANEL)),
+                Span::styled("⌁  ", Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL)),
                 Span::styled("Estimate type: ", body_style().bg(THEME_PANEL)),
-                Span::styled("local model", body_style().bg(THEME_PANEL)),
+                Span::styled(
+                    "local model",
+                    Style::default().fg(THEME_YELLOW).bg(THEME_PANEL),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("◇  ", Style::default().fg(THEME_BLUE).bg(THEME_PANEL)),
+                Span::styled("◇  ", Style::default().fg(THEME_INK_WHITE).bg(THEME_PANEL)),
                 Span::styled("Tokenizer audit: ", body_style().bg(THEME_PANEL)),
                 Span::styled(tokenizer, body_style().bg(THEME_PANEL)),
             ]),
         ])
         .block(panel("SIGNAL"))
+        .style(body_style().bg(THEME_PANEL))
         .wrap(Wrap { trim: true }),
         area,
     );
@@ -596,7 +1056,7 @@ fn render_savings_breakdown_table(frame: &mut Frame<'_>, area: Rect, overview: &
             Constraint::Length(1),
             Constraint::Length(14),
             Constraint::Length(1),
-            Constraint::Min(18),
+            Constraint::Min(14),
         ]
     } else {
         [
@@ -613,7 +1073,7 @@ fn render_savings_breakdown_table(frame: &mut Frame<'_>, area: Rect, overview: &
         .into_iter()
         .map(|source| {
             Row::new(vec![
-                Cell::from(source.label),
+                Cell::from(format!("{}  {}", source.icon, source.label)),
                 Cell::from("|"),
                 Cell::from(grouped_count(source.steps)),
                 Cell::from("|"),
@@ -645,66 +1105,38 @@ fn render_savings_breakdown_table(frame: &mut Frame<'_>, area: Rect, overview: &
 
 /// Draw calibration notes without duplicating headline totals.
 fn render_calibration_notes(frame: &mut Frame<'_>, area: Rect, overview: &TokenOverview) {
-    let calibration = overview.calibration.as_ref().map_or_else(
-        || "Calibration optional -> add --tokenizer o200k_base or cl100k_base".to_string(),
-        |value| {
-            format!(
-                "Tokenizer audit: {} over {} files",
-                value.tokenizer,
-                grouped_count(value.files)
-            )
-        },
-    );
     let block = panel("CALIBRATION & NOTES");
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "• Local estimate only; not provider billing data",
+            body_style().bg(THEME_PANEL),
+        )),
+        Line::from(Span::styled(
+            format!(
+                "• Observed reads: {}   Modeled narrowing: {}",
+                grouped_count(overview.observed_file_read_replacements),
+                grouped_count(overview.modeled_file_reads_avoided)
+            ),
+            body_style().bg(THEME_PANEL),
+        )),
+    ];
+    if let Some(value) = overview.calibration.as_ref() {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "• Tokenizer audit: {} over {} files",
+                value.tokenizer,
+                grouped_count(value.files)
+            ),
+            body_style().bg(THEME_PANEL),
+        )));
+    }
     if inner.width < 100 {
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled(
-                    "• Local estimate only; not provider billing data",
-                    body_style().bg(THEME_PANEL),
-                )),
-                Line::from(Span::styled(
-                    format!(
-                        "• Observed reads: {}   Modeled narrowing: {}",
-                        grouped_count(overview.observed_file_read_replacements),
-                        grouped_count(overview.modeled_file_reads_avoided)
-                    ),
-                    body_style().bg(THEME_PANEL),
-                )),
-                Line::from(Span::styled(
-                    format!("• {calibration}"),
-                    body_style().bg(THEME_PANEL),
-                )),
-            ])
-            .wrap(Wrap { trim: true }),
-            inner,
-        );
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
         return;
     }
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                "• Local estimate only; not provider billing data",
-                body_style().bg(THEME_PANEL),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "• Observed reads: {}   Modeled narrowing: {}",
-                    grouped_count(overview.observed_file_read_replacements),
-                    grouped_count(overview.modeled_file_reads_avoided)
-                ),
-                body_style().bg(THEME_PANEL),
-            )),
-            Line::from(Span::styled(
-                format!("• {calibration}"),
-                body_style().bg(THEME_PANEL),
-            )),
-        ])
-        .wrap(Wrap { trim: true }),
-        inner,
-    );
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
 /// Draw the compact footer/status row from the reference dashboard.
@@ -715,13 +1147,10 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect) {
         .split(area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(
-                "ProjectAtlas v",
-                Style::default().fg(THEME_BLUE).bg(THEME_BG),
-            ),
+            Span::styled("ProjectAtlas v", Style::default().fg(THEME_INK_WHITE)),
             Span::styled(
                 env!("CARGO_PKG_VERSION"),
-                Style::default().fg(THEME_BLUE).bg(THEME_BG),
+                Style::default().fg(THEME_INK_WHITE),
             ),
         ])),
         columns[0],
@@ -730,20 +1159,20 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect) {
     let controls = if area.width < 100 {
         let compact_clock = clock.get(..5).unwrap_or(&clock).to_string();
         Line::from(vec![
-            Span::styled("q Quit  ? Help  r Refresh  ", body_style().bg(THEME_BG)),
-            Span::styled("● Auto ", Style::default().fg(THEME_GREEN).bg(THEME_BG)),
-            Span::styled(compact_clock, body_style().bg(THEME_BG)),
+            Span::styled("q Quit  ? Help  r Refresh  ", body_style()),
+            Span::styled("● Auto ", Style::default().fg(THEME_GREEN)),
+            Span::styled(compact_clock, body_style()),
         ])
     } else {
         Line::from(vec![
             keycap("q"),
-            Span::styled(" Quit   ", body_style().bg(THEME_BG)),
+            Span::styled(" Quit   ", body_style()),
             keycap("?"),
-            Span::styled(" Help   ", body_style().bg(THEME_BG)),
+            Span::styled(" Help   ", body_style()),
             keycap("r"),
-            Span::styled(" Refresh   ", body_style().bg(THEME_BG)),
-            Span::styled("● Auto ", Style::default().fg(THEME_GREEN).bg(THEME_BG)),
-            Span::styled(clock, body_style().bg(THEME_BG)),
+            Span::styled(" Refresh   ", body_style()),
+            Span::styled("● Auto ", Style::default().fg(THEME_GREEN)),
+            Span::styled(clock, body_style()),
         ])
     };
     frame.render_widget(
@@ -756,7 +1185,7 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect) {
 fn keycap(text: &'static str) -> Span<'static> {
     Span::styled(
         format!(" {text} "),
-        Style::default().fg(THEME_TEXT).bg(Color::DarkGray),
+        Style::default().fg(THEME_TEXT).bg(THEME_KEYCAP_BG),
     )
 }
 
@@ -796,12 +1225,12 @@ fn block_bar(width: usize, ratio_value: f64, color: Color) -> Line<'static> {
     let empty = width.saturating_sub(filled);
     Line::from(vec![
         Span::styled(
-            "━".repeat(filled),
+            "█".repeat(filled),
             Style::default().fg(color).bg(THEME_PANEL),
         ),
         Span::styled(
-            "·".repeat(empty),
-            Style::default().fg(Color::DarkGray).bg(THEME_PANEL),
+            "░".repeat(empty),
+            Style::default().fg(THEME_BAR_EMPTY).bg(THEME_PANEL),
         ),
     ])
 }
@@ -851,6 +1280,8 @@ struct SavingsSourceRow {
     tokens: isize,
     /// Plain-language explanation for humans.
     meaning: &'static str,
+    /// Compact row icon.
+    icon: &'static str,
     /// Row color used by Ratatui.
     color: Color,
 }
@@ -873,6 +1304,7 @@ fn savings_source_rows_for_width(overview: &TokenOverview, compact: bool) -> Vec
             } else {
                 "Compact output replaced file reads"
             },
+            icon: "⌁",
             color: THEME_INK_WHITE,
         });
     }
@@ -901,7 +1333,31 @@ fn savings_source_rows_for_width(overview: &TokenOverview, compact: bool) -> Vec
             } else {
                 group.meaning
             },
+            icon: group.icon,
             color: THEME_YELLOW,
+        });
+    }
+
+    let displayed_steps = rows.iter().map(|row| row.steps).sum::<usize>();
+    let displayed_tokens = rows.iter().map(|row| row.tokens).sum::<isize>();
+    let step_remainder = overview.calls.saturating_sub(displayed_steps);
+    let token_remainder = overview.tokens_avoided.saturating_sub(displayed_tokens);
+    if step_remainder > 0 || token_remainder != 0 {
+        rows.push(SavingsSourceRow {
+            label: if compact {
+                "Other savings"
+            } else {
+                "Unattributed savings"
+            },
+            steps: step_remainder,
+            tokens: token_remainder,
+            meaning: if compact {
+                "Real remainder"
+            } else {
+                "Real remainder not tied to visible buckets"
+            },
+            icon: "•",
+            color: THEME_MUTED,
         });
     }
 
@@ -911,6 +1367,7 @@ fn savings_source_rows_for_width(overview: &TokenOverview, compact: bool) -> Vec
             steps: 0,
             tokens: 0,
             meaning: "No token savings recorded",
+            icon: " ",
             color: THEME_MUTED,
         });
     }
@@ -927,6 +1384,8 @@ struct ModeledSourceGroup {
     meaning: &'static str,
     /// Narrow-width row explanation.
     compact_meaning: &'static str,
+    /// Compact source icon.
+    icon: &'static str,
     /// Number of telemetry calls in the group.
     steps: usize,
     /// Gross saved-token contribution before headline dedupe allocation.
@@ -940,12 +1399,14 @@ impl ModeledSourceGroup {
         compact_label: &'static str,
         meaning: &'static str,
         compact_meaning: &'static str,
+        icon: &'static str,
     ) -> Self {
         Self {
             label,
             compact_label,
             meaning,
             compact_meaning,
+            icon,
             steps: 0,
             gross_tokens: 0,
         }
@@ -981,24 +1442,28 @@ fn modeled_source_groups(overview: &TokenOverview) -> Vec<ModeledSourceGroup> {
             "Skipped folder walk",
             "Ranking skipped broad folders",
             "Folders skipped",
+            "□",
         ),
         ModeledSourceGroup::new(
             "Opened fewer candidates (A)",
             "Fewer candidates A",
             "Folder ranking narrowed files",
             "Folder shortlist",
+            "▤",
         ),
         ModeledSourceGroup::new(
             "Opened fewer candidates (B)",
             "Fewer candidates B",
             "Search/ranking narrowed files",
             "Search shortlist",
+            "▥",
         ),
         ModeledSourceGroup::new(
             "Other modeled narrowing",
             "Other narrowing",
             "Additional modeled avoidance",
             "Other modeled",
+            "◇",
         ),
     ];
     for bucket in overview
@@ -1101,17 +1566,39 @@ fn hero_value_style(value: isize) -> Style {
 
 /// Header style used for panel titles.
 fn header_style() -> Style {
-    Style::default()
-        .fg(THEME_BLUE)
-        .bg(THEME_BG)
-        .add_modifier(Modifier::BOLD)
+    section_title_style()
+}
+
+/// Section title style used for dashboard chrome.
+fn section_title_style() -> Style {
+    Style::default().fg(THEME_TEXT).add_modifier(Modifier::BOLD)
+}
+
+/// Return the reference-like spaced title treatment used for dominant section labels.
+fn reference_title(title: &str) -> String {
+    let mut output = String::with_capacity(title.len().saturating_mul(2));
+    let mut previous_was_space = false;
+    for character in title.chars() {
+        if character == ' ' {
+            if !previous_was_space {
+                output.push_str("   ");
+            }
+            previous_was_space = true;
+        } else {
+            if !output.is_empty() && !previous_was_space {
+                output.push(' ');
+            }
+            output.push(character);
+            previous_was_space = false;
+        }
+    }
+    output
 }
 
 /// Mascot and identity label style.
 fn identity_style() -> Style {
     Style::default()
         .fg(THEME_INK_WHITE)
-        .bg(THEME_BG)
         .add_modifier(Modifier::BOLD)
 }
 
@@ -1119,26 +1606,22 @@ fn identity_style() -> Style {
 fn identity_title_style() -> Style {
     Style::default()
         .fg(THEME_INK_WHITE)
-        .bg(THEME_BG)
         .add_modifier(Modifier::BOLD)
 }
 
 /// Token Impact title style.
 fn token_title_style() -> Style {
-    Style::default()
-        .fg(THEME_BLUE)
-        .bg(THEME_BG)
-        .add_modifier(Modifier::BOLD)
+    Style::default().fg(THEME_BLUE).add_modifier(Modifier::BOLD)
 }
 
 /// Body text style.
 fn body_style() -> Style {
-    Style::default().fg(THEME_TEXT).bg(THEME_BG)
+    Style::default().fg(THEME_TEXT)
 }
 
 /// Muted text style.
 fn muted_style() -> Style {
-    Style::default().fg(THEME_MUTED).bg(THEME_BG)
+    Style::default().fg(THEME_MUTED)
 }
 
 /// Muted bold label style.
@@ -1203,26 +1686,30 @@ fn signed_trend_color(points: &[(f64, f64)]) -> Color {
     let has_positive = points.iter().any(|(_, value)| *value > 0.0);
     let has_negative = points.iter().any(|(_, value)| *value < 0.0);
     match (has_positive, has_negative) {
-        (true, true) => Color::Yellow,
-        (false, true) => Color::Red,
-        _ => Color::Green,
+        (true, true) => THEME_YELLOW,
+        (false, true) => THEME_RED,
+        _ => THEME_GREEN,
     }
 }
 
 /// Draw the full trend dashboard frame.
 fn render_trend_frame(frame: &mut Frame<'_>, report: &TokenTrendReport) {
     let area = frame.area();
+    frame.render_widget(
+        Block::default().style(Style::default().bg(themed_bg())),
+        area,
+    );
     let outer = Block::bordered()
+        .border_set(symbols::border::ROUNDED)
         .title(Line::from(vec![
             Span::styled(
                 " ProjectAtlas Token Trends ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                identity_title_style().bg(themed_bg()),
             ),
-            Span::raw(format!("{} ", report.window)),
+            Span::styled(format!("{} ", report.window), body_style().bg(themed_bg())),
         ]))
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(THEME_BORDER))
+        .style(Style::default().fg(THEME_TEXT).bg(themed_bg()));
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
@@ -1261,7 +1748,7 @@ fn render_trend_frame(frame: &mut Frame<'_>, report: &TokenTrendReport) {
                 .style(Style::default().fg(signed_trend_color(&trend_points)))
                 .data(&trend_points),
         ])
-        .block(Block::bordered().title("Saved Tokens Trend"))
+        .block(panel("SAVED TOKENS TREND"))
         .x_axis(Axis::default().bounds([0.0, (trend_points.len().saturating_sub(1)) as f64]))
         .y_axis(Axis::default().bounds([lower, upper])),
         sections[1],
@@ -1272,8 +1759,9 @@ fn render_trend_frame(frame: &mut Frame<'_>, report: &TokenTrendReport) {
         Paragraph::new(
             "Trend rows are period gross estimates. Use overview mode for deduped tokens avoided.",
         )
+        .style(body_style().bg(THEME_PANEL))
         .alignment(Alignment::Center)
-        .block(Block::bordered().title("Note")),
+        .block(panel("NOTE")),
         sections[3],
     );
 }
@@ -1322,13 +1810,9 @@ fn render_trend_table(frame: &mut Frame<'_>, area: Rect, report: &TokenTrendRepo
         Row::new(vec![
             "period", "saved", "rate", "calls", "baseline", "emitted",
         ])
-        .style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
+        .style(Style::default().fg(THEME_TEXT).add_modifier(Modifier::BOLD)),
     )
-    .block(Block::bordered().title("Periods"));
+    .block(panel("PERIODS"));
     frame.render_widget(table, area);
 }
 
@@ -1354,24 +1838,153 @@ fn buffer_to_string(buffer: &Buffer) -> String {
     output
 }
 
+/// Convert a Ratatui buffer into ANSI-styled terminal text.
+fn buffer_to_ansi_string(buffer: &Buffer) -> String {
+    let width = buffer.area.width;
+    let height = buffer.area.height;
+    let mut output = String::new();
+    let mut active_style: Option<CellAnsiStyle> = None;
+    for y in 0..height {
+        for x in 0..width {
+            let Some(cell) = buffer.cell((x, y)) else {
+                continue;
+            };
+            let style = CellAnsiStyle::from_cell(cell);
+            if active_style != Some(style) {
+                output.push_str("\x1b[0m");
+                output.push_str(&style.to_ansi());
+                active_style = Some(style);
+            }
+            output.push_str(cell.symbol());
+        }
+        output.push_str("\x1b[0m\n");
+        active_style = None;
+    }
+    output
+}
+
+/// Minimal style projection used by the ANSI serializer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CellAnsiStyle {
+    /// Cell foreground color.
+    fg: Color,
+    /// Cell background color.
+    bg: Color,
+    /// Cell modifiers.
+    modifier: Modifier,
+}
+
+impl CellAnsiStyle {
+    /// Build a style projection from one rendered Ratatui cell.
+    fn from_cell(cell: &ratatui::buffer::Cell) -> Self {
+        Self {
+            fg: themed_color(cell.fg),
+            bg: themed_color(cell.bg),
+            modifier: cell.modifier,
+        }
+    }
+
+    /// Convert the style to ANSI Select Graphic Rendition escapes.
+    fn to_ansi(self) -> String {
+        let mut codes = Vec::new();
+        if self.modifier.contains(Modifier::BOLD) {
+            codes.push("1".to_string());
+        }
+        if self.modifier.contains(Modifier::ITALIC) {
+            codes.push("3".to_string());
+        }
+        if self.modifier.contains(Modifier::UNDERLINED) {
+            codes.push("4".to_string());
+        }
+        if let Some(code) = color_to_ansi(self.fg, false) {
+            codes.push(code);
+        }
+        if let Some(code) = color_to_ansi(self.bg, true) {
+            codes.push(code);
+        }
+        if codes.is_empty() {
+            String::new()
+        } else {
+            format!("\x1b[{}m", codes.join(";"))
+        }
+    }
+}
+
+/// Convert one Ratatui color into foreground/background ANSI code.
+fn color_to_ansi(color: Color, background: bool) -> Option<String> {
+    let offset = if background { 10 } else { 0 };
+    let code = match color {
+        Color::Reset => return None,
+        Color::Black => 30 + offset,
+        Color::Red => 31 + offset,
+        Color::Green => 32 + offset,
+        Color::Yellow => 33 + offset,
+        Color::Blue => 34 + offset,
+        Color::Magenta => 35 + offset,
+        Color::Cyan => 36 + offset,
+        Color::Gray | Color::White => 37 + offset,
+        Color::DarkGray => 90 + offset,
+        Color::LightRed => 91 + offset,
+        Color::LightGreen => 92 + offset,
+        Color::LightYellow => 93 + offset,
+        Color::LightBlue => 94 + offset,
+        Color::LightMagenta => 95 + offset,
+        Color::LightCyan => 96 + offset,
+        Color::Rgb(red, green, blue) => {
+            let prefix = if background { 48 } else { 38 };
+            return Some(format!("{prefix};2;{red};{green};{blue}"));
+        }
+        Color::Indexed(index) => {
+            let prefix = if background { 48 } else { 38 };
+            return Some(format!("{prefix};5;{index}"));
+        }
+    };
+    Some(code.to_string())
+}
+
+/// Remap the dark reference palette to the selected output palette.
+fn themed_color(color: Color) -> Color {
+    match active_token_theme() {
+        TokenDashboardTheme::Dark => color,
+        TokenDashboardTheme::Light => remap_to_light_theme(color),
+    }
+}
+
+/// Convert one dark semantic role color into its light-theme counterpart.
+fn remap_to_light_theme(color: Color) -> Color {
+    match color {
+        THEME_BG => LIGHT_THEME.bg,
+        THEME_PANEL => LIGHT_THEME.panel,
+        THEME_TEXT => LIGHT_THEME.text,
+        THEME_MUTED => LIGHT_THEME.muted,
+        THEME_INK_WHITE => LIGHT_THEME.ink_white,
+        THEME_BLUE => LIGHT_THEME.blue,
+        THEME_GREEN => LIGHT_THEME.green,
+        THEME_YELLOW => LIGHT_THEME.yellow,
+        THEME_BORDER => LIGHT_THEME.border,
+        THEME_BAR_EMPTY => LIGHT_THEME.bar_empty,
+        THEME_KEYCAP_BG => LIGHT_THEME.keycap_bg,
+        THEME_RED => LIGHT_THEME.red,
+        _ => color,
+    }
+}
+
+/// Return the active full-screen dashboard background.
+fn themed_bg() -> Color {
+    match active_token_theme() {
+        TokenDashboardTheme::Dark => THEME_BG,
+        TokenDashboardTheme::Light => LIGHT_THEME.bg,
+    }
+}
+
 /// Styled field label span.
 fn label(text: &str) -> Span<'static> {
-    Span::styled(
-        format!("{text}: "),
-        Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD),
-    )
+    Span::styled(format!("{text}: "), muted_bold_style())
 }
 
 /// Styled unsigned value span.
 fn value(value: usize) -> Span<'static> {
-    Span::styled(
-        grouped_count(value),
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    )
+    Span::styled(grouped_count(value), identity_style())
 }
 
 /// Format an optional savings rate.
@@ -1433,11 +2046,12 @@ fn signed_count(value: isize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DASHBOARD_HEIGHT, THEME_BLUE, THEME_GREEN, THEME_INK_WHITE, THEME_YELLOW, block_bar,
-        dashboard_width, grouped_count, reconciled_without_projectatlas,
-        render_dashboard_to_string, render_overview_frame, render_token_dashboard,
-        render_token_trend_dashboard, savings_source_rows_for_width, signed_count,
-        signed_trend_points, signed_y_bounds,
+        DASHBOARD_HEIGHT, THEME_BAR_EMPTY, THEME_BLUE, THEME_GREEN, THEME_INK_WHITE, THEME_YELLOW,
+        TokenDashboardTheme, block_bar, dashboard_width, grouped_count,
+        reconciled_without_projectatlas, reference_title, render_dashboard_to_string,
+        render_overview_frame, render_token_dashboard, render_token_dashboard_with_theme,
+        render_token_trend_dashboard, render_token_trend_dashboard_with_theme,
+        savings_source_rows_for_width, signed_count, signed_trend_points, signed_y_bounds,
     };
     use projectatlas_core::telemetry::{
         TOKEN_ACCOUNTING_MODELED_AVOIDANCE, TOKEN_BASELINE_DIRECTORY_WALK,
@@ -1455,34 +2069,28 @@ mod tests {
     #[test]
     fn overview_dashboard_matches_reference_sections_and_order() {
         let overview = sample_overview();
-        let dashboard = render_token_dashboard(&overview, Some("s"));
+        let dashboard = strip_ansi(&render_token_dashboard(&overview, Some("s")));
 
         for text in [
-            "Ani",
             "ProjectAtlas",
             "Token Impact",
             "Smarter context. Fewer tokens. Real savings.",
             "Session:",
             "Lookups:",
             "Estimate:",
-            "TOTAL TOKENS AVOIDED",
             "tokens avoided",
             "Without ProjectAtlas",
             "With ProjectAtlas",
             "Saved by ProjectAtlas",
-            "FILE READS AVOIDED",
             "file reads avoided",
             "Observed (summaries/slices)",
             "Search-modeled narrowing",
             "Confidence",
-            "SAVINGS COMPOSITION",
             "Measured from summaries/slices",
             "Navigation narrowing",
-            "SIGNAL",
             "Repeated baselines collapsed",
             "Estimate type: local model",
             "Tokenizer audit:",
-            "WHERE THE SAVINGS CAME FROM",
             "Source",
             "Steps",
             "Tokens Avoided",
@@ -1491,7 +2099,6 @@ mod tests {
             "Skipped broad folder walk",
             "Opened fewer candidates (A)",
             "Opened fewer candidates (B)",
-            "CALIBRATION & NOTES",
             "q  Quit",
             "?  Help",
             "r  Refresh",
@@ -1502,9 +2109,21 @@ mod tests {
                 "dashboard should contain {text:?}"
             );
         }
+        for title in [
+            "TOTAL TOKENS AVOIDED",
+            "FILE READS AVOIDED",
+            "SAVINGS COMPOSITION",
+            "SIGNAL",
+            "WHERE THE SAVINGS CAME FROM",
+            "CALIBRATION & NOTES",
+        ] {
+            assert!(dashboard.contains(&reference_title(title)));
+        }
 
         assert!(!dashboard.contains("ProjectAtlas Savings Overview"));
         assert!(!dashboard.contains("Saved-token trends"));
+        assert!(!dashboard.contains("Calibration optional"));
+        assert!(!dashboard.contains("--tokenizer o200k_base"));
         assert!(!dashboard.contains("day trend"));
         assert!(!dashboard.contains("week trend"));
         assert!(!dashboard.contains("month trend"));
@@ -1515,14 +2134,72 @@ mod tests {
             &dashboard,
             &[
                 "ProjectAtlas",
-                "TOTAL TOKENS AVOIDED",
-                "FILE READS AVOIDED",
-                "SAVINGS COMPOSITION",
-                "WHERE THE SAVINGS CAME FROM",
-                "CALIBRATION & NOTES",
+                &reference_title("TOTAL TOKENS AVOIDED"),
+                &reference_title("FILE READS AVOIDED"),
+                &reference_title("SAVINGS COMPOSITION"),
+                &reference_title("WHERE THE SAVINGS CAME FROM"),
+                &reference_title("CALIBRATION & NOTES"),
             ],
         );
         assert_header_margin(&dashboard, "Source", "Summaries and slices");
+    }
+
+    #[test]
+    fn overview_dashboard_light_theme_remaps_semantic_palette() {
+        let overview = sample_overview();
+        let dashboard =
+            render_token_dashboard_with_theme(&overview, Some("s"), TokenDashboardTheme::Light);
+
+        assert!(dashboard.contains("\x1b["));
+        assert!(
+            dashboard.contains("48;2;246;242;232"),
+            "light theme should use the light panel background"
+        );
+        assert!(
+            dashboard.contains("38;2;37;99;235"),
+            "baseline blue should be remapped for light terminals"
+        );
+        assert!(
+            dashboard.contains("38;2;22;128;72"),
+            "saved green should be remapped for light terminals"
+        );
+        assert!(
+            dashboard.contains("38;2;178;116;0"),
+            "modeled yellow should be remapped for light terminals"
+        );
+        assert!(
+            !dashboard.contains("48;2;5;16;25"),
+            "light theme should not serialize the dark panel background"
+        );
+    }
+
+    #[test]
+    fn trend_dashboard_light_theme_remaps_semantic_palette() {
+        let report = sample_trend_report();
+        let dashboard =
+            render_token_trend_dashboard_with_theme(&report, TokenDashboardTheme::Light);
+
+        assert!(dashboard.contains("\x1b["));
+        assert!(
+            dashboard.contains("48;2;246;242;232"),
+            "light trend theme should use the light panel background"
+        );
+        assert!(
+            dashboard.contains("38;2;22;128;72"),
+            "positive trend line should use the light saved green"
+        );
+        assert!(
+            dashboard.contains("38;2;22;22;20"),
+            "ProjectAtlas trend title should use the light identity color"
+        );
+        assert!(
+            !dashboard.contains("38;5;14") && !dashboard.contains("38;5;6"),
+            "trend theme should not serialize hard-coded cyan"
+        );
+        assert!(
+            !dashboard.contains("48;2;5;16;25"),
+            "light trend theme should not serialize the dark panel background"
+        );
     }
 
     #[test]
@@ -1530,9 +2207,26 @@ mod tests {
         let overview = sample_overview();
         let buffer = render_overview_buffer(&overview, Some("s"));
 
+        assert_ani_image_rendered(&buffer);
+        let Some((title_x, title_y)) = find_text(&buffer, "ProjectAtlas") else {
+            unreachable!("ProjectAtlas title should render");
+        };
+        assert!(
+            title_x <= 28,
+            "mascot lane should not push title too far right; title started at x={title_x}"
+        );
+        assert!(
+            title_y <= 4,
+            "title should stay in the upper header band; title started at y={title_y}"
+        );
         assert_cell_style(&buffer, "ProjectAtlas", THEME_INK_WHITE, Modifier::BOLD);
         assert_cell_style(&buffer, "Token Impact", THEME_BLUE, Modifier::BOLD);
-        assert_cell_style(&buffer, "TOTAL TOKENS AVOIDED", THEME_BLUE, Modifier::BOLD);
+        assert_cell_style(
+            &buffer,
+            &reference_title("TOTAL TOKENS AVOIDED"),
+            super::THEME_TEXT,
+            Modifier::BOLD,
+        );
         assert_cell_style(
             &buffer,
             &signed_count(overview.tokens_avoided),
@@ -1593,7 +2287,7 @@ mod tests {
             THEME_YELLOW,
             Modifier::empty(),
         );
-        assert_cell_style(&buffer, "Tokens Avoided", THEME_BLUE, Modifier::BOLD);
+        assert_cell_style(&buffer, "Tokens Avoided", super::THEME_TEXT, Modifier::BOLD);
         assert_cell_style(
             &buffer,
             "Search-modeled narrowing",
@@ -1611,11 +2305,11 @@ mod tests {
 
         assert!(dashboard.contains("ProjectAtlas"));
         assert!(dashboard.contains("Token Impact"));
-        assert!(dashboard.contains("TOTAL TOKENS AVOIDED"));
-        assert!(dashboard.contains("FILE READS AVOIDED"));
-        assert!(dashboard.contains("WHERE THE SAVINGS CAME FROM"));
-        assert!(dashboard.contains("Fewer candidates B"));
-        assert!(dashboard.contains("CALIBRATION & NOTES"));
+        assert!(dashboard.contains(&reference_title("TOTAL TOKENS AVOIDED")));
+        assert!(dashboard.contains(&reference_title("FILE READS AVOIDED")));
+        assert!(dashboard.contains(&reference_title("WHERE THE SAVINGS CAME FROM")));
+        assert!(dashboard.contains("Fewer candidates"));
+        assert!(dashboard.contains(&reference_title("CALIBRATION & NOTES")));
         assert!(!dashboard.contains("Saved-token trends"));
     }
 
@@ -1639,7 +2333,7 @@ mod tests {
             overview.likely_file_reads_avoided
         );
 
-        let dashboard = render_token_dashboard(&overview, Some("s"));
+        let dashboard = strip_ansi(&render_token_dashboard(&overview, Some("s")));
         let source_rows = savings_source_rows_for_width(&overview, false);
         let source_steps = source_rows.iter().map(|row| row.steps).sum::<usize>();
         let source_tokens = source_rows.iter().map(|row| row.tokens).sum::<isize>();
@@ -1649,9 +2343,44 @@ mod tests {
         assert!(dashboard.contains(&signed_count(without_projectatlas)));
         assert!(dashboard.contains(&signed_count(with_projectatlas)));
         assert!(dashboard.contains(&signed_count(conservative_avoided)));
+        assert_eq!(
+            dashboard
+                .matches(&signed_count(conservative_avoided))
+                .count(),
+            2,
+            "headline total should appear once as the exact caption and once as the saved operand"
+        );
+        assert!(
+            dashboard.contains(&format!(
+                "{} tokens avoided",
+                signed_count(conservative_avoided)
+            )),
+            "caption should preserve the exact headline number below the block-text hero"
+        );
         assert!(dashboard.contains(&grouped_count(overview.likely_file_reads_avoided)));
         assert!(dashboard.contains(&grouped_count(overview.observed_file_read_replacements)));
         assert!(dashboard.contains(&grouped_count(overview.modeled_file_reads_avoided)));
+    }
+
+    #[test]
+    fn overview_dashboard_source_table_reconciles_unattributed_remainder() {
+        let mut overview = sample_overview();
+        overview.buckets.clear();
+        overview.calls = 7;
+        overview.measured_tokens_saved = 11;
+        overview.deduped_modeled_tokens_avoided = 29;
+        overview.tokens_avoided = 40;
+
+        let rows = savings_source_rows_for_width(&overview, false);
+        let source_steps = rows.iter().map(|row| row.steps).sum::<usize>();
+        let source_tokens = rows.iter().map(|row| row.tokens).sum::<isize>();
+
+        assert_eq!(source_steps, overview.calls);
+        assert_eq!(source_tokens, overview.tokens_avoided);
+        assert!(rows.iter().any(|row| row.label == "Unattributed savings"));
+
+        let dashboard = strip_ansi(&render_token_dashboard(&overview, Some("s")));
+        assert!(dashboard.contains("Unattributed savings"));
     }
 
     #[test]
@@ -1672,7 +2401,7 @@ mod tests {
         assert_eq!(overview.deduped_modeled_tokens_avoided, 80);
         assert_eq!(overview.tokens_avoided, 100);
 
-        let dashboard = render_token_dashboard(&overview, Some("s"));
+        let dashboard = strip_ansi(&render_token_dashboard(&overview, Some("s")));
         assert!(dashboard.contains("20.0%"));
         assert!(dashboard.contains("80.0%"));
         assert!(dashboard.contains("Measured from summaries/slices"));
@@ -1686,6 +2415,7 @@ mod tests {
 
         let partial = block_bar(10, 0.52, THEME_GREEN);
         assert_bar_segments(&partial, 5, 5, THEME_GREEN);
+        assert_eq!(line_text(&partial), "█████░░░░░");
 
         let clamped = block_bar(10, 2.0, THEME_YELLOW);
         assert_bar_segments(&clamped, 10, 0, THEME_YELLOW);
@@ -1710,7 +2440,7 @@ mod tests {
         assert!(overview.measured_tokens_saved < 0);
         assert!(overview.deduped_modeled_tokens_avoided < 0);
 
-        let dashboard = render_token_dashboard(&overview, Some("s"));
+        let dashboard = strip_ansi(&render_token_dashboard(&overview, Some("s")));
         assert!(dashboard.contains(&format!(
             "Signed mix: observed {} / modeled {}; net {}",
             signed_count(overview.measured_tokens_saved),
@@ -1740,22 +2470,26 @@ mod tests {
 
     #[test]
     fn trend_dashboard_renders_chart_and_period_table() {
-        let report = TokenTrendReport::new(
+        let report = sample_trend_report();
+        let dashboard = strip_ansi(&render_token_trend_dashboard(&report));
+
+        assert!(dashboard.contains("ProjectAtlas Token Trends"));
+        assert!(dashboard.contains(&reference_title("SAVED TOKENS TREND")));
+        assert!(dashboard.contains("2026-06"));
+        assert!(dashboard.contains("2026-07"));
+        assert!(dashboard.contains("period"));
+        assert!(dashboard_contains_chart_glyph(&dashboard));
+    }
+
+    fn sample_trend_report() -> TokenTrendReport {
+        TokenTrendReport::new(
             Some("s".to_string()),
             TokenTrendWindow::Month,
             vec![
                 TokenTrendPeriod::from_totals("2026-06".to_string(), 2, 200, 50),
                 TokenTrendPeriod::from_totals("2026-07".to_string(), 1, 100, 80),
             ],
-        );
-        let dashboard = render_token_trend_dashboard(&report);
-
-        assert!(dashboard.contains("ProjectAtlas Token Trends"));
-        assert!(dashboard.contains("Saved Tokens Trend"));
-        assert!(dashboard.contains("2026-06"));
-        assert!(dashboard.contains("2026-07"));
-        assert!(dashboard.contains("period"));
-        assert!(dashboard_contains_chart_glyph(&dashboard));
+        )
     }
 
     fn sample_overview() -> TokenOverview {
@@ -1886,16 +2620,23 @@ mod tests {
             line.spans[0]
                 .content
                 .chars()
-                .all(|character| character == '━')
+                .all(|character| character == '█')
         );
         assert!(
             line.spans[1]
                 .content
                 .chars()
-                .all(|character| character == '·')
+                .all(|character| character == '░')
         );
         assert_eq!(line.spans[0].style.fg, Some(color));
-        assert_eq!(line.spans[1].style.fg, Some(Color::DarkGray));
+        assert_eq!(line.spans[1].style.fg, Some(THEME_BAR_EMPTY));
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
     }
 
     fn dashboard_contains_chart_glyph(dashboard: &str) -> bool {
@@ -1935,14 +2676,71 @@ mod tests {
         );
     }
 
+    fn assert_ani_image_rendered(buffer: &Buffer) {
+        let mut bright_image_cells = 0usize;
+        for y in 0..10.min(buffer.area.height) {
+            for x in 0..34.min(buffer.area.width) {
+                let Some(cell) = buffer.cell((x, y)) else {
+                    continue;
+                };
+                if matches!(cell.symbol(), "▀" | "▄" | "█" | " ")
+                    && (is_bright_rgb(cell.fg) || is_bright_rgb(cell.bg))
+                {
+                    bright_image_cells = bright_image_cells.saturating_add(1);
+                }
+            }
+        }
+        assert!(
+            bright_image_cells >= 24,
+            "Ani image should render a visible bright cell cluster, found {bright_image_cells}"
+        );
+    }
+
+    fn is_bright_rgb(color: Color) -> bool {
+        match color {
+            Color::Rgb(red, green, blue) => red > 180 && green > 180 && blue > 170,
+            Color::White | Color::Gray => true,
+            _ => false,
+        }
+    }
+
+    fn strip_ansi(input: &str) -> String {
+        let mut output = String::with_capacity(input.len());
+        let mut chars = input.chars().peekable();
+        while let Some(character) = chars.next() {
+            if character == '\u{1b}' && chars.peek() == Some(&'[') {
+                chars.next();
+                for code in chars.by_ref() {
+                    if code.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                output.push(character);
+            }
+        }
+        output
+    }
+
     fn find_text(buffer: &Buffer, text: &str) -> Option<(u16, u16)> {
+        assert!(
+            text.is_ascii(),
+            "use direct cell assertions for non-ASCII symbols"
+        );
         for y in 0..buffer.area.height {
+            let mut cells = Vec::new();
             let mut line = String::new();
             for x in 0..buffer.area.width {
-                line.push_str(buffer.cell((x, y))?.symbol());
+                let symbol = buffer.cell((x, y))?.symbol();
+                if symbol.is_ascii() {
+                    line.push_str(symbol);
+                } else {
+                    line.push(' ');
+                }
+                cells.push((x, y));
             }
             if let Some(index) = line.find(text) {
-                return Some((u16::try_from(index).ok()?, y));
+                return cells.get(index).copied();
             }
         }
         None

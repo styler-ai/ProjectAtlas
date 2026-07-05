@@ -6,8 +6,8 @@ ProjectAtlas is designed to run locally with a project-local SQLite atlas and op
 
 ## Recommended workflow
 
-1. `projectatlas init` (first-time setup).
-2. Run `projectatlas scan` to update the SQLite index.
+1. `projectatlas init` (first-time setup, initial scan/index, generated MCP configs, and purpose handoff).
+2. Run `projectatlas scan` or `projectatlas watch --once` later when you need to refresh the SQLite index.
 3. Run `projectatlas config --print` when effective scan, purpose, or exclusion policy is unclear.
 4. Run `projectatlas overview`, `projectatlas folders <query>`, and `projectatlas files <query>` before broad source reads; use `projectatlas files --file-pattern <glob>` for direct glob discovery.
 5. Run `projectatlas summary <file> --limit 25` before opening full files.
@@ -75,7 +75,7 @@ cargo run -p projectatlas-cli -- lint --report-untracked --purpose-level strict
 
 ## CI behavior
 
-- CI refreshes the SQLite index with `projectatlas scan`, replays the ProjectAtlas repo's reviewed purpose batch with `projectatlas purpose review`, and validates source metadata with strict `projectatlas lint`.
+- CI uses `projectatlas init` for first-run smoke coverage, refreshes the main ProjectAtlas repo index with `projectatlas scan`, replays the reviewed purpose batch with `projectatlas purpose review`, and validates source metadata with strict `projectatlas lint`.
 - `projectatlas lint` checks purpose/header health, non-source declarations, and untracked files; it does not require or validate the optional compatibility TOON export.
 - `projectatlas lint --purpose-level low` is the default first-pass agent gate: stale, duplicate, and repeated temporary-folder findings fail, while missing/suggested/agent-review purpose curation for folders plus high-impact files remains advisory. Use `projectatlas purpose queue` for the actionable curation list, `--purpose-level medium` when all source files must be agent-reviewed, and `--purpose-level strict` only when every indexed file and folder must be agent-reviewed.
 - PRs must reference a GitHub issue and have a milestone.
