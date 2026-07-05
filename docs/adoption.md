@@ -17,12 +17,12 @@ projectatlas init
 ```
 
 Run this from the project root. ProjectAtlas 3 stores one durable index per project at `.projectatlas/projectatlas.db`.
+`projectatlas init` also runs the initial scan/index and writes generated MCP configs under `.projectatlas/`.
 Legacy `.purpose` files are migration input only; new purpose records should be stored with `projectatlas purpose set`.
 
-## 3. Build the atlas
+## 3. Inspect or refresh the atlas
 
 ```bash
-projectatlas scan
 projectatlas overview
 projectatlas folders <query>
 projectatlas files <query> --folder <path>
@@ -31,6 +31,7 @@ projectatlas summary <file> --limit 25
 ```
 
 ProjectAtlas 3 stores durable index state in `.projectatlas/projectatlas.db`.
+Run `projectatlas scan` later when you need an explicit refresh after file changes and no watcher is running.
 Legacy `.purpose` files are migration input, not the final storage model.
 
 ## 4. Add or import purpose summaries
@@ -58,7 +59,7 @@ projectatlas lint --report-untracked --purpose-level low
 
 ## 8. Wire into local scripts
 
-Example shell target:
+Example recurring refresh target after first-run init:
 
 ```bash
 projectatlas scan

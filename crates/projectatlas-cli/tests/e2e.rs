@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{self, Write as IoWrite};
+use std::io::{self, Read as IoRead, Write as IoWrite};
 use std::path::Path;
 use std::process::{Command as StdCommand, Stdio};
 use std::thread;
@@ -33,10 +33,12 @@ const FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_FILE: &str = "plugin-add-failed.marke
 const FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_ENV: &str = "PROJECTATLAS_FAKE_FAILURE_MARKER";
 const FAKE_CODEX_SKILL_CONTENT: &str = "# ProjectAtlas\n";
 const FAKE_PATH_DIR: &str = "fake-path";
+const IGNORED_FIXTURE_DIR: &str = "ignored-dir";
 const ISOLATED_HOME_DIR: &str = "isolated-home";
 const PROJECTATLAS_SKILL_DIR: &str = "skills";
 const PROJECTATLAS_SKILL_NAME: &str = "projectatlas";
 const SKILL_FILE_NAME: &str = "SKILL.md";
+const SUBDIR_CONFIG_DIR: &str = "config";
 #[cfg(windows)]
 const PROJECTATLAS_LOCAL_APPDATA_DIR: &str = "ProjectAtlas";
 
@@ -87,6 +89,426 @@ fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn E
         .stderr(predicate::str::contains(
             "does not satisfy required version",
         ));
+    Ok(())
+}
+
+#[test]
+fn init_bootstrap_creates_db_scan_report_and_host_configs() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn indexed() {}\n",
+    )?;
+
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "init"])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "init command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    require_json_string(&report, &["project_dir", "status"], "created")?;
+    require_json_string(&report, &["config", "status"], "created")?;
+    require_json_string(&report, &["nonsource_files", "status"], "created")?;
+    require_json_string(&report, &["db", "status"], "created")?;
+    require_json_string(&report, &["scan", "status"], "verified")?;
+    require_json_bool(&report, &["scan", "requested"], true)?;
+    require_json_usize_at_least(&report, &["scan", "report", "overview", "files"], 1)?;
+    require_json_string(
+        &report,
+        &["purpose_handoff", "recommended_subagent_reasoning"],
+        "low",
+    )?;
+    require_json_array_len(&report, &["host_configs"], 3)?;
+
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    for file_name in [
+        "projectatlas.mcp.json",
+        "projectatlas.claude.mcp.json",
+        "projectatlas.opencode.json",
+    ] {
+        let config_path = atlas_dir.join(file_name);
+        if !config_path.is_file() {
+            return Err(io::Error::other(format!("{file_name} was not generated")).into());
+        }
+        let config_text = fs::read_to_string(&config_path)?;
+        if config_text.contains("--nearest-project") {
+            return Err(io::Error::other(format!(
+                "init-generated {file_name} enabled nearest-project routing by default"
+            ))
+            .into());
+        }
+    }
+    if !atlas_dir.join("projectatlas.db").is_file() {
+        return Err(io::Error::other("projectatlas.db was not created").into());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn init_no_scan_preserves_existing_config_and_is_idempotent() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    let escaped_root = repo.to_string_lossy().replace('\\', "/");
+    let config_path = atlas_dir.join("config.toml");
+    let sentinel_config =
+        format!("[project]\nroot = \"{escaped_root}\"\n\n[scan]\nmax_file_bytes = 12345\n");
+    fs::write(&config_path, &sentinel_config)?;
+
+    let first_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "init", "--no-scan"])
+        .output()?;
+    if !first_output.status.success() {
+        return Err(io::Error::other(format!(
+            "init --no-scan command failed: {}",
+            String::from_utf8_lossy(&first_output.stderr)
+        ))
+        .into());
+    }
+    let first_report: Value = serde_json::from_slice(&first_output.stdout)?;
+    require_json_string(&first_report, &["config", "status"], "exists")?;
+    require_json_string(&first_report, &["db", "status"], "created")?;
+    require_json_string(&first_report, &["scan", "status"], "skipped")?;
+    require_json_bool(&first_report, &["scan", "requested"], false)?;
+    if fs::read_to_string(&config_path)? != sentinel_config {
+        return Err(io::Error::other("init --no-scan rewrote existing config").into());
+    }
+
+    let second_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "init", "--no-scan"])
+        .output()?;
+    if !second_output.status.success() {
+        return Err(io::Error::other(format!(
+            "second init --no-scan command failed: {}",
+            String::from_utf8_lossy(&second_output.stderr)
+        ))
+        .into());
+    }
+    let second_report: Value = serde_json::from_slice(&second_output.stdout)?;
+    require_json_string(&second_report, &["project_dir", "status"], "exists")?;
+    require_json_string(&second_report, &["config", "status"], "exists")?;
+    require_json_string(&second_report, &["db", "status"], "exists")?;
+    require_json_string(&second_report, &["scan", "status"], "skipped")?;
+
+    let force_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "init", "--force-rescan"])
+        .output()?;
+    if !force_output.status.success() {
+        return Err(io::Error::other(format!(
+            "init --force-rescan command failed: {}",
+            String::from_utf8_lossy(&force_output.stderr)
+        ))
+        .into());
+    }
+    let force_report: Value = serde_json::from_slice(&force_output.stdout)?;
+    require_json_string(&force_report, &["scan", "status"], "verified")?;
+    require_json_bool(&force_report, &["scan", "requested"], true)?;
+    require_json_bool(&force_report, &["scan", "force_rescan"], true)?;
+    if fs::read_to_string(&config_path)? != sentinel_config {
+        return Err(io::Error::other("init --force-rescan rewrote existing config").into());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn init_reports_host_config_failure_before_nonzero_exit() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+
+    let first_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "init", "--no-scan"])
+        .output()?;
+    if !first_output.status.success() {
+        return Err(io::Error::other(format!(
+            "initial init --no-scan command failed: {}",
+            String::from_utf8_lossy(&first_output.stderr)
+        ))
+        .into());
+    }
+
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    let blocked_config_path = atlas_dir.join("projectatlas.mcp.json");
+    fs::remove_file(&blocked_config_path)?;
+    fs::create_dir(&blocked_config_path)?;
+
+    let failed_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "init", "--no-scan"])
+        .output()?;
+    if failed_output.status.success() {
+        return Err(io::Error::other("init succeeded despite blocked host config path").into());
+    }
+
+    let report: Value = serde_json::from_slice(&failed_output.stdout)?;
+    require_json_bool(&report, &["ok"], false)?;
+    require_json_string(&report, &["host_configs", "0", "harness"], "mcp_json")?;
+    require_json_string(&report, &["host_configs", "0", "status"], "failed")?;
+    require_json_contains(&report, &["host_configs", "0", "error"], "io error")?;
+    let next_steps = report["next_steps"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("init report next_steps missing"))?;
+    if !next_steps.iter().any(|step| {
+        step.as_str()
+            .is_some_and(|text| text.contains("Fix generated host MCP config errors"))
+    }) {
+        return Err(
+            io::Error::other("init report did not include host config recovery step").into(),
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn init_preserves_flat_config_and_uses_it_for_first_scan() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(repo.join(IGNORED_FIXTURE_DIR))?;
+    fs::write(repo.join(SRC_DIR_NAME).join("lib.rs"), "pub fn kept() {}\n")?;
+    fs::write(
+        repo.join(IGNORED_FIXTURE_DIR).join("hidden.rs"),
+        "pub fn hidden() {}\n",
+    )?;
+    let flat_config_path = repo.join("projectatlas.toml");
+    let flat_config = "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"ignored-dir\"]\n";
+    fs::write(&flat_config_path, flat_config)?;
+
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "init"])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "init command with flat config failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    require_json_string(&report, &["config", "status"], "exists")?;
+    let reported_config = json_string_at(&report, &["config", "path"])?;
+    if !reported_config
+        .replace('\\', "/")
+        .ends_with("repo/projectatlas.toml")
+    {
+        return Err(io::Error::other(format!(
+            "init did not report flat projectatlas.toml as config path: {reported_config}"
+        ))
+        .into());
+    }
+    if repo.join(ATLAS_DIR_NAME).join("config.toml").exists() {
+        return Err(io::Error::other("init created nested config that shadows flat config").into());
+    }
+    if fs::read_to_string(&flat_config_path)? != flat_config {
+        return Err(io::Error::other("init rewrote flat projectatlas.toml").into());
+    }
+
+    let store = AtlasStore::open(&repo.join(ATLAS_DIR_NAME).join("projectatlas.db"))?;
+    let node_paths = store
+        .load_nodes()?
+        .into_iter()
+        .map(|node| node.node.path)
+        .collect::<Vec<_>>();
+    if !node_paths.iter().any(|path| path == "src/lib.rs") {
+        return Err(io::Error::other("init scan did not index the non-ignored source file").into());
+    }
+    if node_paths
+        .iter()
+        .any(|path| path == "ignored-dir/hidden.rs")
+    {
+        return Err(io::Error::other("init scan ignored the flat config exclude_dir_names").into());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn init_explicit_config_creates_selected_config_and_reports_it() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    let custom_config_path = repo.join("custom.toml");
+
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args([
+            "--format",
+            "json",
+            "--config",
+            "custom.toml",
+            "init",
+            "--no-scan",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "init --config custom.toml --no-scan failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    require_json_string(&report, &["config", "status"], "created")?;
+    let reported_config = json_string_at(&report, &["config", "path"])?;
+    if std::path::Path::new(reported_config).canonicalize()? != custom_config_path.canonicalize()? {
+        return Err(io::Error::other(format!(
+            "init reported the wrong custom config path: {reported_config}"
+        ))
+        .into());
+    }
+    if !custom_config_path.is_file() {
+        return Err(io::Error::other("init did not create selected custom.toml").into());
+    }
+    if repo.join(ATLAS_DIR_NAME).join("config.toml").exists() {
+        return Err(
+            io::Error::other("init created nested config despite explicit custom config").into(),
+        );
+    }
+
+    let generated_mcp_config =
+        fs::read_to_string(repo.join(ATLAS_DIR_NAME).join("projectatlas.mcp.json"))?;
+    let generated_mcp_config_json: Value = serde_json::from_str(&generated_mcp_config)?;
+    let args = generated_mcp_config_json["mcpServers"]["projectatlas"]["args"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("generated mcp args missing"))?;
+    let config_arg = args
+        .iter()
+        .position(|value| value.as_str() == Some("--config"))
+        .ok_or_else(|| io::Error::other("generated mcp config omitted --config"))?;
+    let emitted_config = args
+        .get(config_arg + 1)
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::other("generated mcp config path missing"))?;
+    if std::path::Path::new(emitted_config).canonicalize()? != custom_config_path.canonicalize()? {
+        return Err(io::Error::other("generated mcp config did not use custom.toml").into());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn init_explicit_subdir_config_scans_the_repo_root() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(repo.join(SUBDIR_CONFIG_DIR))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn indexed() {}\n",
+    )?;
+    let custom_config_path = repo.join(SUBDIR_CONFIG_DIR).join("projectatlas.toml");
+
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args([
+            "--format",
+            "json",
+            "--config",
+            "config/projectatlas.toml",
+            "init",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "init --config config/projectatlas.toml failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    require_json_string(&report, &["config", "status"], "created")?;
+    let reported_config = json_string_at(&report, &["config", "path"])?;
+    if std::path::Path::new(reported_config).canonicalize()? != custom_config_path.canonicalize()? {
+        return Err(io::Error::other(format!(
+            "init reported the wrong subdir config path: {reported_config}"
+        ))
+        .into());
+    }
+    let config_text = fs::read_to_string(&custom_config_path)?;
+    if !config_text.contains("root = \"..\"") {
+        return Err(io::Error::other(format!(
+            "subdir init config did not point back to repo root:\n{config_text}"
+        ))
+        .into());
+    }
+    let store = AtlasStore::open(&repo.join(ATLAS_DIR_NAME).join("projectatlas.db"))?;
+    let node_paths = store
+        .load_nodes()?
+        .into_iter()
+        .map(|node| node.node.path)
+        .collect::<Vec<_>>();
+    if !node_paths.iter().any(|path| path == "src/lib.rs") {
+        return Err(io::Error::other(
+            "init scan with explicit subdir config did not index repo source",
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn root_set_preserves_flat_config_for_generated_mcp_configs() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    let flat_config_path = repo.join("projectatlas.toml");
+    fs::write(
+        &flat_config_path,
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("root")
+        .arg("set")
+        .arg(&repo)
+        .assert()
+        .success();
+
+    if repo.join(ATLAS_DIR_NAME).join("config.toml").exists() {
+        return Err(
+            io::Error::other("root set created nested config that shadows flat config").into(),
+        );
+    }
+
+    let root_set_mcp_config_text =
+        fs::read_to_string(repo.join(ATLAS_DIR_NAME).join("projectatlas.mcp.json"))?;
+    let root_set_mcp_config_json: Value = serde_json::from_str(&root_set_mcp_config_text)?;
+    let args = root_set_mcp_config_json["mcpServers"]["projectatlas"]["args"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("root set mcp args missing"))?;
+    let config_arg = args
+        .iter()
+        .position(|value| value.as_str() == Some("--config"))
+        .ok_or_else(|| io::Error::other("root set mcp config omitted --config"))?;
+    let emitted_config = args
+        .get(config_arg + 1)
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::other("root set mcp config path missing"))?;
+    if std::path::Path::new(emitted_config).canonicalize()? != flat_config_path.canonicalize()? {
+        return Err(io::Error::other("root set mcp config did not use projectatlas.toml").into());
+    }
+
     Ok(())
 }
 
@@ -3056,6 +3478,51 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
     require_json_usize_greater_than(&token_json, &["observed_file_read_replacements"], 0)?;
     require_json_usize_greater_than(&token_json, &["modeled_file_reads_avoided"], 0)?;
     require_json_usize_greater_than(&token_json, &["likely_file_reads_avoided"], 0)?;
+    let estimated_without = token_json["estimated_without_projectatlas"]
+        .as_i64()
+        .ok_or_else(|| io::Error::other("estimated_without_projectatlas missing"))?;
+    let estimated_with = token_json["estimated_with_projectatlas"]
+        .as_i64()
+        .ok_or_else(|| io::Error::other("estimated_with_projectatlas missing"))?;
+    let estimated_saved = token_json["estimated_saved"]
+        .as_i64()
+        .ok_or_else(|| io::Error::other("estimated_saved missing"))?;
+    if estimated_without.saturating_sub(estimated_with) != estimated_saved {
+        return Err(io::Error::other(format!(
+            "estimated token totals do not reconcile: {estimated_without} - {estimated_with} != {estimated_saved}"
+        ))
+        .into());
+    }
+    let measured_saved = token_json["measured_tokens_saved"]
+        .as_i64()
+        .ok_or_else(|| io::Error::other("measured_tokens_saved missing"))?;
+    let deduped_modeled_saved = token_json["deduped_modeled_tokens_avoided"]
+        .as_i64()
+        .ok_or_else(|| io::Error::other("deduped_modeled_tokens_avoided missing"))?;
+    let tokens_avoided = token_json["tokens_avoided"]
+        .as_i64()
+        .ok_or_else(|| io::Error::other("tokens_avoided missing"))?;
+    if measured_saved.saturating_add(deduped_modeled_saved) != tokens_avoided {
+        return Err(io::Error::other(format!(
+            "tokens_avoided does not reconcile: {measured_saved} + {deduped_modeled_saved} != {tokens_avoided}"
+        ))
+        .into());
+    }
+    let observed_reads = token_json["observed_file_read_replacements"]
+        .as_u64()
+        .ok_or_else(|| io::Error::other("observed_file_read_replacements missing"))?;
+    let modeled_reads = token_json["modeled_file_reads_avoided"]
+        .as_u64()
+        .ok_or_else(|| io::Error::other("modeled_file_reads_avoided missing"))?;
+    let likely_reads = token_json["likely_file_reads_avoided"]
+        .as_u64()
+        .ok_or_else(|| io::Error::other("likely_file_reads_avoided missing"))?;
+    if observed_reads.saturating_add(modeled_reads) != likely_reads {
+        return Err(io::Error::other(format!(
+            "file-read avoidance totals do not reconcile: {observed_reads} + {modeled_reads} != {likely_reads}"
+        ))
+        .into());
+    }
     require_json_string(&token_json, &["read_avoidance_scope"], READ_AVOIDANCE_SCOPE)?;
     require_json_string(
         &token_json,
@@ -3114,6 +3581,148 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .as_u64()
         .ok_or_else(|| io::Error::other("token calls missing before no-telemetry check"))?;
     Command::cargo_bin("projectatlas")?
+        .env("COLUMNS", "100")
+        .arg("--db")
+        .arg(&db)
+        .args(["token", "--view", "tui"])
+        .assert()
+        .success();
+    let raw_token_after_view = Command::cargo_bin("projectatlas")?
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .arg("token")
+        .output()?;
+    if !raw_token_after_view.status.success() {
+        return Err(io::Error::other("json token command after tui view failed").into());
+    }
+    let token_after_view: Value = serde_json::from_slice(&raw_token_after_view.stdout)?;
+    let calls_after_view = token_after_view["calls"]
+        .as_u64()
+        .ok_or_else(|| io::Error::other("token calls missing after tui view"))?;
+    if calls_before != calls_after_view {
+        return Err(io::Error::other(format!(
+            "token report view mutated call count: before {calls_before}, after {calls_after_view}"
+        ))
+        .into());
+    }
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["summary", "src/main.rs"])
+        .assert()
+        .success();
+    let raw_token_after_summary = Command::cargo_bin("projectatlas")?
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .arg("token")
+        .output()?;
+    if !raw_token_after_summary.status.success() {
+        return Err(io::Error::other("json token command after summary failed").into());
+    }
+    let token_after_summary: Value = serde_json::from_slice(&raw_token_after_summary.stdout)?;
+    let calls_after_summary = token_after_summary["calls"]
+        .as_u64()
+        .ok_or_else(|| io::Error::other("token calls missing after summary"))?;
+    if calls_after_summary <= calls_after_view {
+        return Err(io::Error::other(format!(
+            "summary did not increase token telemetry calls: before {calls_after_view}, after {calls_after_summary}"
+        ))
+        .into());
+    }
+    let reads_after_summary = token_after_summary["likely_file_reads_avoided"]
+        .as_u64()
+        .ok_or_else(|| io::Error::other("likely_file_reads_avoided missing after summary"))?;
+    if reads_after_summary <= likely_reads {
+        return Err(io::Error::other(format!(
+            "summary did not increase likely file reads avoided: before {likely_reads}, after {reads_after_summary}"
+        ))
+        .into());
+    }
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["search", "helper_99", "--file-pattern", "*.rs"])
+        .assert()
+        .success();
+    let raw_token_after_search = Command::cargo_bin("projectatlas")?
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .arg("token")
+        .output()?;
+    if !raw_token_after_search.status.success() {
+        return Err(io::Error::other("json token command after search failed").into());
+    }
+    let token_after_search: Value = serde_json::from_slice(&raw_token_after_search.stdout)?;
+    let calls_after_search = token_after_search["calls"]
+        .as_u64()
+        .ok_or_else(|| io::Error::other("token calls missing after search"))?;
+    if calls_after_search <= calls_after_summary {
+        return Err(io::Error::other(format!(
+            "search did not increase token telemetry calls: before {calls_after_summary}, after {calls_after_search}"
+        ))
+        .into());
+    }
+    let reads_after_search = token_after_search["likely_file_reads_avoided"]
+        .as_u64()
+        .ok_or_else(|| io::Error::other("likely_file_reads_avoided missing after search"))?;
+    if reads_after_search <= reads_after_summary {
+        return Err(io::Error::other(format!(
+            "search did not increase likely file reads avoided: before {reads_after_summary}, after {reads_after_search}"
+        ))
+        .into());
+    }
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "slice",
+            "src/main.rs",
+            "--start-line",
+            "3",
+            "--end-line",
+            "4",
+        ])
+        .assert()
+        .success();
+    let raw_token_after_slice = Command::cargo_bin("projectatlas")?
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .arg("token")
+        .output()?;
+    if !raw_token_after_slice.status.success() {
+        return Err(io::Error::other("json token command after slice failed").into());
+    }
+    let token_after_slice: Value = serde_json::from_slice(&raw_token_after_slice.stdout)?;
+    let calls_after_slice = token_after_slice["calls"]
+        .as_u64()
+        .ok_or_else(|| io::Error::other("token calls missing after slice"))?;
+    if calls_after_slice <= calls_after_search {
+        return Err(io::Error::other(format!(
+            "slice did not increase token telemetry calls: before {calls_after_search}, after {calls_after_slice}"
+        ))
+        .into());
+    }
+    let reads_after_slice = token_after_slice["likely_file_reads_avoided"]
+        .as_u64()
+        .ok_or_else(|| io::Error::other("likely_file_reads_avoided missing after slice"))?;
+    if reads_after_slice <= reads_after_search {
+        return Err(io::Error::other(format!(
+            "slice did not increase likely file reads avoided: before {reads_after_search}, after {reads_after_slice}"
+        ))
+        .into());
+    }
+    Command::cargo_bin("projectatlas")?
         .env("PROJECTATLAS_NO_TELEMETRY", "1")
         .arg("--db")
         .arg(&db)
@@ -3135,9 +3744,9 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
     let calls_after = token_after_no_telemetry["calls"]
         .as_u64()
         .ok_or_else(|| io::Error::other("token calls missing after no-telemetry check"))?;
-    if calls_before != calls_after {
+    if calls_after_slice != calls_after {
         return Err(io::Error::other(format!(
-            "no-telemetry overview mutated call count: before {calls_before}, after {calls_after}"
+            "no-telemetry overview mutated call count: before {calls_after_slice}, after {calls_after}"
         ))
         .into());
     }
@@ -3178,20 +3787,28 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .success()
         .stdout(predicate::str::contains("ProjectAtlas"))
         .stdout(predicate::str::contains("Token Impact"))
-        .stdout(predicate::str::contains("TOTAL TOKENS AVOIDED"))
+        .stdout(predicate::str::contains(
+            "T O T A L   T O K E N S   A V O I D E D",
+        ))
         .stdout(predicate::str::contains("Without ProjectAtlas"))
         .stdout(predicate::str::contains("With ProjectAtlas"))
         .stdout(predicate::str::contains("Saved by ProjectAtlas"))
-        .stdout(predicate::str::contains("FILE READS AVOIDED"))
+        .stdout(predicate::str::contains(
+            "F I L E   R E A D S   A V O I D E D",
+        ))
         .stdout(predicate::str::contains("Observed"))
         .stdout(predicate::str::contains("Modeled narrowing"))
-        .stdout(predicate::str::contains("SAVINGS COMPOSITION"))
-        .stdout(predicate::str::contains("SIGNAL"))
-        .stdout(predicate::str::contains("WHERE THE SAVINGS CAME FROM"))
+        .stdout(predicate::str::contains("S A V I N G S"))
+        .stdout(predicate::str::contains("S I G N A L"))
+        .stdout(predicate::str::contains(
+            "W H E R E   T H E   S A V I N G S   C A M E   F R O M",
+        ))
         .stdout(predicate::str::contains("Summaries/slices"))
-        .stdout(predicate::str::contains("Skipped folder walk"))
+        .stdout(predicate::str::contains("Skipped folder"))
         .stdout(predicate::str::contains("Fewer candidates"))
-        .stdout(predicate::str::contains("CALIBRATION & NOTES"))
+        .stdout(predicate::str::contains(
+            "C A L I B R A T I O N   &   N O T E S",
+        ))
         .stdout(predicate::str::contains("Gross tokens: without").not())
         .stdout(predicate::str::contains("latest").not())
         .stdout(predicate::str::contains("Saved-token trends").not());
@@ -3212,9 +3829,26 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .assert()
         .success()
         .stdout(predicate::str::contains("ProjectAtlas Token Trends"))
-        .stdout(predicate::str::contains("Saved Tokens Trend"))
+        .stdout(predicate::str::contains(
+            "S A V E D   T O K E N S   T R E N D",
+        ))
         .stdout(predicate::str::contains("period"))
         .stdout(predicate::str::contains("saved"));
+    Command::cargo_bin("projectatlas")?
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "token", "--view", "tui", "--trend", "month", "--theme", "light",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\u{1b}["))
+        .stdout(predicate::str::contains("ProjectAtlas Token Trends"))
+        .stdout(predicate::str::contains(
+            "S A V E D   T O K E N S   T R E N D",
+        ))
+        .stdout(predicate::str::contains("48;2;246;242;232"))
+        .stdout(predicate::str::contains("38;2;22;128;72"));
     Command::cargo_bin("projectatlas")?
         .arg("--db")
         .arg(&db)
@@ -4109,9 +4743,11 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         || !stdout.contains("health:")
         || !stdout.contains("health_findings[1]")
         || !stdout.contains("next_start_index: 1")
-        || !stdout.contains("ProjectAtlas Token Impact")
-        || !stdout.contains("TOTAL TOKENS AVOIDED")
-        || !stdout.contains("FILE READS AVOIDED")
+        || !stdout.contains("ProjectAtlas")
+        || !stdout.contains("Token Impact")
+        || !stdout.contains("T O T A L   T O K E N S   A V O I D E D")
+        || !stdout.contains("F I L E   R E A D S   A V O I D E D")
+        || !stdout.contains("S I G N A L")
         || !stdout.contains("purpose_review:")
         || !stdout.contains("failed: 0")
         || !stdout.contains("src/lib.rs")
@@ -4119,6 +4755,12 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         return Err(io::Error::other(format!(
             "mcp stdout did not include expected payloads: {stdout}"
         ))
+        .into());
+    }
+    if stdout.contains("\u{1b}[") || stdout.contains("\\u001b") || stdout.contains("\\x1b") {
+        return Err(io::Error::other(
+            "atlas_token_report include_chart leaked ANSI escape sequences into MCP stdout",
+        )
         .into());
     }
     let reviewed_summary = json_summary_command(&repo, &db, "src/lib.rs")?;
@@ -8064,17 +8706,36 @@ fn run_mcp_stdio(
         .stderr(Stdio::piped())
         .spawn()?;
 
-    child
+    let mut stdin = child
         .stdin
-        .as_mut()
-        .ok_or_else(|| io::Error::other("mcp stdin was not piped"))?
-        .write_all(input.as_bytes())?;
-    drop(child.stdin.take());
+        .take()
+        .ok_or_else(|| io::Error::other("mcp stdin was not piped"))?;
+    stdin.write_all(input.as_bytes())?;
+    drop(stdin);
+
+    let mut stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("mcp stdout was not piped"))?;
+    let mut stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("mcp stderr was not piped"))?;
+    let stdout_reader = thread::spawn(move || -> io::Result<Vec<u8>> {
+        let mut output = Vec::new();
+        stdout_pipe.read_to_end(&mut output)?;
+        Ok(output)
+    });
+    let stderr_reader = thread::spawn(move || -> io::Result<Vec<u8>> {
+        let mut output = Vec::new();
+        stderr_pipe.read_to_end(&mut output)?;
+        Ok(output)
+    });
 
     let started = Instant::now();
-    loop {
-        if child.try_wait()?.is_some() {
-            break;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
         }
         if started.elapsed() > Duration::from_secs(10) {
             if child.try_wait()?.is_none() {
@@ -8091,17 +8752,22 @@ fn run_mcp_stdio(
             .into());
         }
         thread::sleep(Duration::from_millis(100));
-    }
+    };
 
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_panic| io::Error::other("mcp stdout reader panicked"))??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_panic| io::Error::other("mcp stderr reader panicked"))??;
+    if !status.success() {
         return Err(io::Error::other(format!(
             "projectatlas mcp failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            String::from_utf8_lossy(&stderr)
         ))
         .into());
     }
-    Ok(String::from_utf8(output.stdout)?)
+    Ok(String::from_utf8(stdout)?)
 }
 
 /// Require that a real CLI summary reports a caller for a named function.

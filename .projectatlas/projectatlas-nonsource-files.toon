@@ -13,6 +13,10 @@ nonsource_files[]:
   docs/assets/projectatlas-mascot.png,ProjectAtlas README mascot image
   docs/assets/agent-harness-funnel.svg,README diagram explaining the ProjectAtlas agent harness workflow from folder purpose to exact source slice
   docs/assets/token-savings-bar.svg,README bar chart visualizing ProjectAtlas token savings benchmark results
+  docs/design/ani-mascot-reference.png,Ani mascot reference bitmap used by the token impact TUI image widget
+  docs/design/projectatlas-mascot-clean-transparent.svg,Ani mascot transparent SVG source/reference asset
+  docs/design/token-impact-tui-reference.png,Approved token impact TUI visual reference screenshot
+  docs/design/token-impact-tui-v0.3.26-qa.png,Rendered v0.3.26 token impact TUI QA screenshot captured from the rebuilt Ratatui dashboard
   .github/workflows/ci.yml,ProjectAtlas CI workflow
   .github/workflows/release.yml,ProjectAtlas release workflow
   .github/workflows/03-auto-release.yml,ProjectAtlas auto release workflow

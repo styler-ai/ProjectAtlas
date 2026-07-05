@@ -156,7 +156,6 @@ jobs:
           mkdir smoke
           cd smoke
           projectatlas init
-          projectatlas scan
           projectatlas purpose set . "Smoke test repository root"
           projectatlas lint --report-untracked
 

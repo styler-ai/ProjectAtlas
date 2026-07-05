@@ -539,18 +539,45 @@ pub(crate) fn load_atlas_config_for_root(root: &Path) -> AtlasMapResult<AtlasMap
     normalize_config(RawConfig::default(), None, root, root)
 }
 
-/// Write default `ProjectAtlas` config files.
-pub(crate) fn init_project(root: &Path) -> AtlasMapResult<String> {
+/// Write default `ProjectAtlas` config files, honoring an explicitly selected config path.
+pub(crate) fn init_project_with_config(
+    root: &Path,
+    selected_config: Option<&Path>,
+) -> AtlasMapResult<String> {
     let project_dir = root.join(".projectatlas");
     fs::create_dir_all(&project_dir).map_err(|source| AtlasMapError::Io {
         path: project_dir.clone(),
         source,
     })?;
-    let config_path = project_dir.join("config.toml");
+    let nested_config_path = project_dir.join("config.toml");
+    let flat_config_path = root.join("projectatlas.toml");
+    let config_path = selected_config.map_or_else(
+        || {
+            if nested_config_path.exists() {
+                nested_config_path.clone()
+            } else if flat_config_path.exists() {
+                flat_config_path
+            } else {
+                nested_config_path.clone()
+            }
+        },
+        Path::to_path_buf,
+    );
     if !config_path.exists() {
-        fs::write(&config_path, default_config_text()).map_err(|source| AtlasMapError::Io {
-            path: config_path.clone(),
-            source,
+        if let Some(parent) = config_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).map_err(|source| AtlasMapError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        fs::write(&config_path, default_config_text_for(root, &config_path)).map_err(|source| {
+            AtlasMapError::Io {
+                path: config_path.clone(),
+                source,
+            }
         })?;
     }
     let nonsource_path = project_dir.join("projectatlas-nonsource-files.toon");
@@ -2488,10 +2515,52 @@ fn normalized_extension(path: &str) -> String {
 
 /// Build default config text.
 fn default_config_text() -> String {
+    default_config_text_with_root(".")
+}
+
+/// Build default config text for a config file created by init.
+fn default_config_text_for(root: &Path, config_path: &Path) -> String {
+    default_config_text_with_root(&default_config_root_value(root, config_path))
+}
+
+/// Return the `[project].root` value that keeps an explicit init config bound to `root`.
+fn default_config_root_value(root: &Path, config_path: &Path) -> String {
+    if config_path_is_projectatlas(Some(config_path)) {
+        return ".".to_string();
+    }
+    let Some(parent) = config_path.parent() else {
+        return ".".to_string();
+    };
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let parent = parent
+        .canonicalize()
+        .unwrap_or_else(|_| parent.to_path_buf());
+    if parent == root {
+        return ".".to_string();
+    }
+    if let Ok(relative_parent) = parent.strip_prefix(&root) {
+        let depth = relative_parent
+            .components()
+            .filter(|component| matches!(component, std::path::Component::Normal(_)))
+            .count();
+        if depth == 0 {
+            ".".to_string()
+        } else {
+            std::iter::repeat_n("..", depth)
+                .collect::<Vec<_>>()
+                .join("/")
+        }
+    } else {
+        root.to_string_lossy().replace('\\', "/")
+    }
+}
+
+/// Build default config text with the supplied project root value.
+fn default_config_text_with_root(root_value: &str) -> String {
     let source_extensions = toml_array(DEFAULT_SOURCE_EXTENSIONS);
     [
         "[project]",
-        "root = \".\"",
+        &format!("root = \"{}\"", root_value.replace('"', "\\\"")),
         "map_path = \".projectatlas/projectatlas.toon\"",
         "nonsource_files_path = \".projectatlas/projectatlas-nonsource-files.toon\"",
         "",
@@ -2563,9 +2632,9 @@ mod tests {
     use super::{
         AtlasMapConfig, DEFAULT_TEXT_INDEX_MAX_BYTES, MapRecord,
         append_existing_map_purpose_records, append_record_rows, collect_repo_paths,
-        exclude_dir_name_set, extract_block_comment_purpose, extract_line_comment_purpose,
-        normalize_repo_string, project_root_for_projectatlas_config, split_record_cells,
-        stable_generated_at, toon_cell,
+        default_config_root_value, exclude_dir_name_set, extract_block_comment_purpose,
+        extract_line_comment_purpose, normalize_repo_string, project_root_for_projectatlas_config,
+        split_record_cells, stable_generated_at, toon_cell,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -2779,6 +2848,32 @@ mod tests {
             ),
             cwd
         );
+    }
+
+    #[test]
+    fn default_init_config_root_points_from_subdir_back_to_repo()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let config_dir = root.join("config").join("atlas");
+        std::fs::create_dir_all(&config_dir)?;
+
+        let cases = [
+            (root.join(".projectatlas").join("config.toml"), "."),
+            (root.join("projectatlas.toml"), "."),
+            (root.join("config").join("projectatlas.toml"), ".."),
+            (config_dir.join("projectatlas.toml"), "../.."),
+        ];
+        for (config_path, expected_root) in cases {
+            let actual_root = default_config_root_value(root, &config_path);
+            if actual_root != expected_root {
+                return Err(std::io::Error::other(format!(
+                    "default config root mismatch for {config_path:?}: expected {expected_root}, got {actual_root}"
+                ))
+                .into());
+            }
+        }
+        Ok(())
     }
 
     #[test]

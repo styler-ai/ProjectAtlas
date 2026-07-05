@@ -79,7 +79,7 @@ This skill is part of the ProjectAtlas plugin on purpose. Installing the plugin 
 
 - this skill as the workflow and decision manual,
 - native runtime installer scripts under `plugins/projectatlas/scripts/`,
-- `projectatlas mcp-config` plus generated `.projectatlas/projectatlas.mcp.json`, `.projectatlas/projectatlas.claude.mcp.json`, and `.projectatlas/projectatlas.opencode.json` for absolute MCP paths,
+- `projectatlas init` and `projectatlas mcp-config` plus generated `.projectatlas/projectatlas.mcp.json`, `.projectatlas/projectatlas.claude.mcp.json`, and `.projectatlas/projectatlas.opencode.json` for absolute MCP paths,
 - `projectatlas mcp` as the executable MCP server,
 - TOON-first tool responses from all `atlas_*` tools.
 
@@ -110,10 +110,10 @@ This skill is part of the ProjectAtlas plugin on purpose. Installing the plugin 
    Installer tests or release validation may pass an already-built runtime with PowerShell `-RuntimePath <path>` or POSIX `PROJECTATLAS_RUNTIME_PATH=<path>`. The installer must still verify that runtime with `projectatlas --format json runtime-info` before writing configs.
    The installers make their own active process prefer the verified runtime, repair the Windows LocalAppData stable mirror for bare `projectatlas` PATH use, remove verified stale ProjectAtlas shims only from known user-local Cargo/npm-style locations, and report unknown PATH shadows with an actionable warning. MCP configs and Codex registry entries stay pinned to the verified runtime path instead of the mutable stable mirror. When `codex` is available, the installers also repair a stale official `projectatlas` Codex marketplace/plugin cache to the runtime release tag, verify the installed ProjectAtlas skill artifact when Codex exposes its plugin source path, and inspect `codex mcp get projectatlas`; they automatically replace a stale global Codex MCP registry entry with the verified runtime, current project DB, current config, and matching `--require-version`. The installers verify Claude Code/OpenCode generated MCP configs after writing them: runtime path, `--require-version`, selected DB, effective config, and final `mcp`; OpenCode also verifies `type = "local"`, `enabled = true`, and the project `cwd`. Claude Code/OpenCode convergence does not mutate user-managed host settings or assume a Codex-style marketplace cache. The installers also warn on stale official ProjectAtlas release pins in downstream `.github/workflows` files. Set `PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE=1` only when a managed environment intentionally owns the Codex ProjectAtlas plugin marketplace, and set `PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1` only when it intentionally owns that global registry. After plugin/runtime updates, agents must verify `codex plugin list --marketplace projectatlas --json` and `codex mcp get projectatlas` or `codex mcp list` point to the verified runtime and version, and rerun the installer if they do not. A parent Codex, Claude Code, or OpenCode process may still need a restart before bare `projectatlas` lookup or in-process skill metadata sees a newly installed runtime/skill, so generated absolute MCP configs remain the supported registration path.
    One MCP server can serve multiple repositories. Use `atlas_set_project_path` to change the active process default project for later calls in a single-client stdio session, or pass per-call `project_path` on normal `atlas_*` tools when a host knows the workspace root and needs request-level or shared-server isolation. Do not use the active default as a concurrency boundary. Root-level compatibility arguments such as `atlas_scan.path` and `atlas_watch_once.path` are selected-root assertions first; if they resolve outside the active project and the addressed root already has `.projectatlas/projectatlas.db`, ProjectAtlas may route that one call to the addressed indexed project. If the addressed root is not already indexed, the tool returns a clear error and the agent must switch with `atlas_set_project_path`, pass the correct `project_path`, or use ordinary filesystem tools instead of ProjectAtlas for out-of-project files. File, folder, slice, purpose, health, and search paths remain repository-relative inside the selected project.
-6. Initialize the target repo with `projectatlas init`.
-7. Run `projectatlas ignore list` before large-repo indexing. ProjectAtlas inherits `.gitignore` dynamically and then applies the manual ProjectAtlas ignore layer as stricter atlas-only exclusions. If the project has no `.gitignore` and needs one for local runtime state, run `projectatlas ignore init-gitignore`. Add broad generated/vendor/build directory names with `projectatlas ignore add --kind dir-name <name>`, and add exact generated or published subtrees with `projectatlas ignore add --kind path-prefix <path>`.
-8. Run `projectatlas scan`.
-9. Add or import one-line purpose records for important folders and files.
+6. Initialize the target repo with `projectatlas init`. This creates/validates `.projectatlas/`, config, non-source scaffolding, the local DB, generated host MCP configs, and runs the initial scan/index by default.
+7. If init returns a purpose handoff, spawn a subagent with low reasoning to create and correct folder and file purposes, then apply reviewed purposes through ProjectAtlas purpose APIs.
+8. Run `projectatlas ignore list` before large-repo indexing or explicit refreshes. ProjectAtlas inherits `.gitignore` dynamically and then applies the manual ProjectAtlas ignore layer as stricter atlas-only exclusions. If the project has no `.gitignore` and needs one for local runtime state, run `projectatlas ignore init-gitignore`. Add broad generated/vendor/build directory names with `projectatlas ignore add --kind dir-name <name>`, and add exact generated or published subtrees with `projectatlas ignore add --kind path-prefix <path>`.
+9. Run `projectatlas scan` later when the SQLite index may be stale and no watcher refresh has run.
 10. Add summaries for non-source files to `.projectatlas/projectatlas-nonsource-files.toon` when needed.
 11. Run `projectatlas lint --report-untracked --purpose-level low`; fix blocking lint output and use `projectatlas purpose queue` for advisory low-scope purpose curation.
 12. Run `projectatlas map --force` only when an explicit legacy TOON map export is needed.
@@ -218,19 +218,21 @@ If MCP tools are unavailable, use the equivalent CLI sequence:
 ## Startup Workflow
 
 1. Establish the project root and run ProjectAtlas from that root.
-2. Run `projectatlas scan` when the SQLite index may be stale.
-3. Run `projectatlas overview`.
-4. Run `projectatlas folders <query>` to choose the right part of the repo.
-5. Run `projectatlas files <query> --folder <path>` to select targets; use `projectatlas files --file-pattern <glob>` when the file/path pattern is already known.
-6. Run `projectatlas summary <file> --limit 25` before opening full source; inspect `parser_kind` and `summary_status`.
-7. Run `projectatlas outline <file>` if the structured summary is not enough.
-8. Run `projectatlas symbols list --file <file>` and `projectatlas symbols relations --file <file>` when symbol context is needed.
-9. Run `projectatlas search <pattern> --file-pattern <glob>` for bounded filtered text matches; add `--fuzzy` when the name is approximate, and inspect returned, searched file, searched byte, and truncated counters before widening the search.
-10. Run `projectatlas slice <file> --start-line <n> --end-line <m>` or `projectatlas symbols slice <file> <symbol> --symbol-parent <parent> --symbol-kind <kind> --symbol-line <line>` for exact source; add disambiguators when duplicate names exist.
-11. Run `projectatlas health-check --source-only --limit 50` before cleanup/refactor decisions.
-12. Only then use language servers or broad file reads on selected targets.
-13. Run `projectatlas token` when token-savings reporting is requested; use `projectatlas token --view tui` only for a human terminal dashboard.
-14. Run `projectatlas lint --report-untracked --purpose-level low` before finishing structural changes. Low is the nonblocking first-pass purpose curation scope; use `projectatlas purpose queue` for the next curation actions and `--purpose-level medium` or `--purpose-level strict` only for intentionally broader enforced purpose-curation passes.
+2. For first-run setup, run `atlas_init` or `projectatlas init`; it creates the local DB/config, runs the initial scan/index by default, writes generated MCP configs, and returns a purpose handoff.
+3. If init returns a purpose handoff, delegate initial folder/file purpose creation or correction to a subagent with low reasoning and apply reviewed purposes through ProjectAtlas purpose APIs.
+4. Run `projectatlas scan` or `projectatlas watch --once` when the SQLite index may be stale after later edits.
+5. Run `projectatlas overview`.
+6. Run `projectatlas folders <query>` to choose the right part of the repo.
+7. Run `projectatlas files <query> --folder <path>` to select targets; use `projectatlas files --file-pattern <glob>` when the file/path pattern is already known.
+8. Run `projectatlas summary <file> --limit 25` before opening full source; inspect `parser_kind` and `summary_status`.
+9. Run `projectatlas outline <file>` if the structured summary is not enough.
+10. Run `projectatlas symbols list --file <file>` and `projectatlas symbols relations --file <file>` when symbol context is needed.
+11. Run `projectatlas search <pattern> --file-pattern <glob>` for bounded filtered text matches; add `--fuzzy` when the name is approximate, and inspect returned, searched file, searched byte, and truncated counters before widening the search.
+12. Run `projectatlas slice <file> --start-line <n> --end-line <m>` or `projectatlas symbols slice <file> <symbol> --symbol-parent <parent> --symbol-kind <kind> --symbol-line <line>` for exact source; add disambiguators when duplicate names exist.
+13. Run `projectatlas health-check --source-only --limit 50` before cleanup/refactor decisions.
+14. Only then use language servers or broad file reads on selected targets.
+15. Run `projectatlas token` when token-savings reporting is requested; use `projectatlas token --view tui` only for a human terminal dashboard.
+16. Run `projectatlas lint --report-untracked --purpose-level low` before finishing structural changes. Low is the nonblocking first-pass purpose curation scope; use `projectatlas purpose queue` for the next curation actions and `--purpose-level medium` or `--purpose-level strict` only for intentionally broader enforced purpose-curation passes.
 
 Token savings estimate avoided wrong-folder exploration, wrong-file opens, and unnecessary full-code reads caused by the atlas-first workflow. Agent and MCP surfaces should remain structured TOON by default; the TUI view is an explicit Ratatui terminal dashboard with headline `tokens_avoided`, measured summary/slice savings, navigation narrowing, a vertical with/without ProjectAtlas token comparison, a file-read-avoidance mix, bucket rows, and optional calibration.
 

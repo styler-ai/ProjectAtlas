@@ -2,7 +2,8 @@
 //! Shared runtime orchestration for the `ProjectAtlas` CLI and MCP adapters.
 
 use crate::atlas_map::{
-    self, imported_purpose_records, load_atlas_config, load_atlas_config_for_root,
+    self, imported_purpose_records, init_project_with_config, load_atlas_config,
+    load_atlas_config_for_root,
 };
 use crate::structural::{
     is_scanner_fallback_summary, is_structural_summary_candidate, structural_summary_for_path,
@@ -139,6 +140,109 @@ pub(crate) struct PurposeImportReport {
     pub(crate) skipped_existing: usize,
 }
 
+/// Options for the first-run initialization bootstrap.
+pub(crate) struct InitBootstrapOptions {
+    /// Skip the scan/index phase.
+    pub(crate) no_scan: bool,
+    /// Force a scan even when future freshness checks would skip it.
+    pub(crate) force_rescan: bool,
+    /// Optional text index byte limit override.
+    pub(crate) text_index_max_bytes: Option<u64>,
+}
+
+/// Project initialization phase status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum InitPhaseStatus {
+    /// Resource was created during this run.
+    Created,
+    /// Resource already existed before this run.
+    Exists,
+    /// Resource was verified or phase completed.
+    Verified,
+    /// Phase was explicitly skipped.
+    Skipped,
+    /// Phase failed before the report could finish.
+    Failed,
+}
+
+/// First-run init report shared by CLI and MCP adapters.
+#[derive(Debug, Serialize)]
+pub(crate) struct InitSetupReport {
+    /// Whether every init phase completed successfully.
+    pub(crate) ok: bool,
+    /// Canonical project root initialized by this command.
+    pub(crate) root: String,
+    /// Project-local directory status.
+    pub(crate) project_dir: InitPathStatus,
+    /// Project-local config status.
+    pub(crate) config: InitPathStatus,
+    /// Project-local non-source registry status.
+    pub(crate) nonsource_files: InitPathStatus,
+    /// Durable `SQLite` DB status.
+    pub(crate) db: InitPathStatus,
+    /// Generated host MCP config files.
+    pub(crate) host_configs: Vec<InitHostConfigStatus>,
+    /// Scan/index phase result.
+    pub(crate) scan: InitScanPhase,
+    /// Agent harness purpose curation handoff.
+    pub(crate) purpose_handoff: InitPurposeHandoff,
+    /// Human/agent next steps.
+    pub(crate) next_steps: Vec<String>,
+}
+
+/// Status for one path managed by init.
+#[derive(Debug, Serialize)]
+pub(crate) struct InitPathStatus {
+    /// Path status.
+    pub(crate) status: InitPhaseStatus,
+    /// Normalized native display path.
+    pub(crate) path: String,
+}
+
+/// Status for one generated host integration config.
+#[derive(Debug, Serialize)]
+pub(crate) struct InitHostConfigStatus {
+    /// Harness/config shape name.
+    pub(crate) harness: &'static str,
+    /// File status.
+    pub(crate) status: InitPhaseStatus,
+    /// Normalized native display path.
+    pub(crate) path: String,
+    /// Error text when this host config could not be generated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+}
+
+/// Scan/index phase result for init.
+#[derive(Debug, Serialize)]
+pub(crate) struct InitScanPhase {
+    /// Scan phase status.
+    pub(crate) status: InitPhaseStatus,
+    /// Whether scan was requested by this run.
+    pub(crate) requested: bool,
+    /// Whether force-rescan was requested.
+    pub(crate) force_rescan: bool,
+    /// Scan report when the scan ran.
+    pub(crate) report: Option<ScanReport>,
+    /// Error text when the scan/index phase failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+}
+
+/// Purpose curation handoff for agent/plugin harnesses.
+#[derive(Debug, Serialize)]
+pub(crate) struct InitPurposeHandoff {
+    /// Whether this report is intended for an agent harness.
+    pub(crate) agent_harness_expected: bool,
+    /// Recommended subagent reasoning level.
+    pub(crate) recommended_subagent_reasoning: &'static str,
+    /// Purpose queue page for initial curation.
+    pub(crate) queue: PurposeCurationPage,
+    /// Handoff instructions for plugin/agent harnesses.
+    pub(crate) instructions: Vec<String>,
+}
+
 /// Return a canonical absolute project root.
 pub(crate) fn canonical_project_root(root: &Path) -> Result<PathBuf, CliError> {
     root.canonicalize().map_err(|source| CliError::Io {
@@ -170,6 +274,161 @@ pub(crate) fn load_scan_import_config(
 pub(crate) fn open_atlas_store(path: &Path) -> Result<AtlasStore, CliError> {
     ensure_parent_dir(path)?;
     AtlasStore::open(path).map_err(CliError::from)
+}
+
+/// Return the config path init should preserve or create for a project root.
+pub(crate) fn init_config_path(root: &Path, explicit: Option<&Path>) -> PathBuf {
+    if let Some(config_path) = explicit {
+        return if config_path.is_absolute() {
+            config_path.to_path_buf()
+        } else {
+            root.join(config_path)
+        };
+    }
+    let nested_config = root.join(".projectatlas").join("config.toml");
+    if nested_config.exists() {
+        return nested_config;
+    }
+    let flat_config = root.join("projectatlas.toml");
+    if flat_config.exists() {
+        return flat_config;
+    }
+    nested_config
+}
+
+/// Run the one-call first-run init bootstrap.
+pub(crate) fn run_init_bootstrap(
+    root: &Path,
+    db_path: &Path,
+    config_path: Option<&Path>,
+    options: &InitBootstrapOptions,
+) -> Result<InitSetupReport, CliError> {
+    let root = canonical_project_root(root)?;
+    let project_dir = root.join(".projectatlas");
+    let config_file = init_config_path(&root, config_path);
+    let nonsource_file = project_dir.join("projectatlas-nonsource-files.toon");
+    let project_dir_existed = project_dir.exists();
+    let config_existed = config_file.exists();
+    let nonsource_existed = nonsource_file.exists();
+    let db_existed = db_path.exists();
+
+    init_project_with_config(&root, Some(&config_file))?;
+    let mut store = open_atlas_store(db_path)?;
+    store.set_project_root(&root)?;
+
+    let mut ok = true;
+    let (scan_status, scan_report, scan_error) = if options.no_scan {
+        (InitPhaseStatus::Skipped, None, None)
+    } else {
+        match ScanRuntimePlan::for_path(config_path, &root, options.text_index_max_bytes).and_then(
+            |plan| {
+                let symbol_options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None);
+                run_scan_pipeline(&mut store, &plan, &symbol_options)
+            },
+        ) {
+            Ok(report) => (InitPhaseStatus::Verified, Some(report), None),
+            Err(error) => {
+                ok = false;
+                (InitPhaseStatus::Failed, None, Some(error.to_string()))
+            }
+        }
+    };
+
+    let purpose_query = HealthQuery {
+        start_index: 0,
+        limit: DEFAULT_HEALTH_LIMIT,
+        category: None,
+        severity: None,
+        path_prefix: None,
+        summary_only: false,
+        scope: HealthScope::purpose_default(),
+    };
+    let purpose_queue = purpose_curation_page(&store, &purpose_query)?;
+    let next_steps = init_next_steps(options.no_scan, scan_error.is_some(), purpose_queue.total);
+
+    Ok(InitSetupReport {
+        ok,
+        root: normalize_native_path_display(&root),
+        project_dir: InitPathStatus {
+            status: init_path_status(project_dir_existed),
+            path: normalize_native_path_display(project_dir),
+        },
+        config: InitPathStatus {
+            status: init_path_status(config_existed),
+            path: normalize_native_path_display(config_file),
+        },
+        nonsource_files: InitPathStatus {
+            status: init_path_status(nonsource_existed),
+            path: normalize_native_path_display(nonsource_file),
+        },
+        db: InitPathStatus {
+            status: init_path_status(db_existed),
+            path: normalize_native_path_display(db_path),
+        },
+        host_configs: Vec::new(),
+        scan: InitScanPhase {
+            status: scan_status,
+            requested: !options.no_scan,
+            force_rescan: options.force_rescan,
+            report: scan_report,
+            error: scan_error,
+        },
+        purpose_handoff: InitPurposeHandoff {
+            agent_harness_expected: true,
+            recommended_subagent_reasoning: "low",
+            queue: purpose_queue,
+            instructions: init_purpose_handoff_instructions(),
+        },
+        next_steps,
+    })
+}
+
+/// Return created/existing status for a path.
+pub(crate) fn init_path_status(existed: bool) -> InitPhaseStatus {
+    if existed {
+        InitPhaseStatus::Exists
+    } else {
+        InitPhaseStatus::Created
+    }
+}
+
+/// Return stable purpose handoff instructions for agent harnesses.
+fn init_purpose_handoff_instructions() -> Vec<String> {
+    vec![
+        "Spawn a subagent with low reasoning to create and correct folder and file purposes."
+            .to_string(),
+        "Apply reviewed purposes through atlas_purpose_review or projectatlas purpose review --apply; do not edit SQLite directly."
+            .to_string(),
+        "Purposes written by an agent or subagent through the ProjectAtlas purpose API are considered agent-reviewed."
+            .to_string(),
+    ]
+}
+
+/// Return concise next steps for humans and agents.
+fn init_next_steps(
+    scan_skipped: bool,
+    scan_failed: bool,
+    purpose_queue_total: usize,
+) -> Vec<String> {
+    let mut steps = Vec::new();
+    if scan_skipped {
+        steps.push("Run projectatlas scan when you are ready to build the deep index.".to_string());
+    } else if scan_failed {
+        steps.push(
+            "Fix the scan/index error and rerun projectatlas init or projectatlas scan."
+                .to_string(),
+        );
+    }
+    if purpose_queue_total > 0 {
+        steps.push(
+            "Use the purpose_handoff queue to delegate purpose creation/correction to a low-reasoning subagent."
+                .to_string(),
+        );
+    } else {
+        steps.push("Purpose queue is empty for the default high-impact scope.".to_string());
+    }
+    steps.push("Run projectatlas overview to confirm repository orientation.".to_string());
+    steps
 }
 
 /// Create the parent directory for a path when it has one.

@@ -52,19 +52,21 @@ result text is TOON by default, so agents get compact structured payloads withou
 0. If ProjectAtlas MCP tools are available, use `atlas_*` tools for normal ProjectAtlas command families before shelling out. Expected parity tools include `atlas_init`, `atlas_config`, `atlas_root`/`atlas_root_set`, `atlas_ignore_list`/`atlas_ignore_init_gitignore`/`atlas_ignore_add`/`atlas_ignore_remove`, `atlas_lint`, `atlas_runtime_info`, `atlas_mcp_config`, `atlas_session_brief`, `atlas_task_status`/`atlas_task_cancel`, and `atlas_map`, plus the existing scan, overview, folder, file, summary, search, slice, health, purpose, token, settings, and watcher-status tools. Use the CLI for plugin install/update/release/CI workflows, MCP server startup/debugging, continuous `watch`, terminal TUI views, or when an MCP tool is unavailable.
 0.1. When a GitHub issue has an OpenSpec change, mirror `openspec/changes/<id>/tasks.md` into the issue as a visible checklist under an `OpenSpec Tasks` or `OpenSpec Task Checklist` heading, and update checked items before status updates, closure, or release. Keep `openspec/issue-map.json` current and run `.github/scripts/issue-checklists.py` for release/check-in validation. Treat local/GitHub checklist drift as a check-in blocker; random checkboxes outside explicit task-checklist sections must not satisfy the gate.
 1. Establish the project root. Run ProjectAtlas from that root so `.projectatlas/projectatlas.db` belongs to this project only.
-2. Run `projectatlas scan` when the SQLite index may be stale.
-3. Run `projectatlas overview`.
-4. Run `projectatlas folders <query>` to choose where to work from `folder_purpose` overviews.
-5. Run `projectatlas files <query> --folder <path>` to pick targets from `file_purpose` and `content_summary`; use `projectatlas files --file-pattern <glob>` when the filename/path pattern is already known.
-6. Run `projectatlas summary <file> --limit 25` for detailed file intelligence before opening full source; inspect `parser_kind` and `summary_status` before trusting the `content_summary`.
-7. Run `projectatlas outline <file>` if the structured summary is not enough.
-8. Run `projectatlas symbols list --file <file>` and `projectatlas symbols relations --file <file>` when symbol context is needed.
-9. Run `projectatlas search <pattern> --file-pattern <glob>` for bounded, glob-filtered text search in selected areas; search is intentionally case-insensitive by default for agent discovery, add `--case-sensitive` only when exact casing matters, add `--fuzzy` when the name is approximate, and check returned, searched file, searched byte, and truncated counters before widening the search.
-10. Run `projectatlas slice <file> --start-line <n> --end-line <m>` or `projectatlas symbols slice <file> <symbol> --symbol-parent <parent> --symbol-kind <kind> --symbol-line <line>` for exact source slices; add symbol disambiguators when duplicate names exist.
-11. Run `projectatlas health-check --source-only --limit 50` when planning cleanup or refactors.
-12. Run `atlas_lint` or `projectatlas lint --report-untracked --purpose-level low`.
-13. Run `projectatlas token` when the user asks how many tokens ProjectAtlas saved.
-14. Only then run language-server lookups or broad file reads on the selected files.
+2. For first-run setup, run `atlas_init` or `projectatlas init`; it creates the local DB/config, runs the initial scan/index by default, writes generated MCP configs, and returns a purpose handoff.
+2.1. When init returns a purpose handoff, delegate initial folder/file purpose creation or correction to a subagent with low reasoning and apply reviewed purposes through ProjectAtlas purpose APIs.
+3. Run `projectatlas scan` or `projectatlas watch --once` when the SQLite index may be stale after later edits.
+4. Run `projectatlas overview`.
+5. Run `projectatlas folders <query>` to choose where to work from `folder_purpose` overviews.
+6. Run `projectatlas files <query> --folder <path>` to pick targets from `file_purpose` and `content_summary`; use `projectatlas files --file-pattern <glob>` when the filename/path pattern is already known.
+7. Run `projectatlas summary <file> --limit 25` for detailed file intelligence before opening full source; inspect `parser_kind` and `summary_status` before trusting the `content_summary`.
+8. Run `projectatlas outline <file>` if the structured summary is not enough.
+9. Run `projectatlas symbols list --file <file>` and `projectatlas symbols relations --file <file>` when symbol context is needed.
+10. Run `projectatlas search <pattern> --file-pattern <glob>` for bounded, glob-filtered text search in selected areas; search is intentionally case-insensitive by default for agent discovery, add `--case-sensitive` only when exact casing matters, add `--fuzzy` when the name is approximate, and check returned, searched file, searched byte, and truncated counters before widening the search.
+11. Run `projectatlas slice <file> --start-line <n> --end-line <m>` or `projectatlas symbols slice <file> <symbol> --symbol-parent <parent> --symbol-kind <kind> --symbol-line <line>` for exact source slices; add symbol disambiguators when duplicate names exist.
+12. Run `projectatlas health-check --source-only --limit 50` when planning cleanup or refactors.
+13. Run `atlas_lint` or `projectatlas lint --report-untracked --purpose-level low`.
+14. Run `projectatlas token` when the user asks how many tokens ProjectAtlas saved.
+15. Only then run language-server lookups or broad file reads on the selected files.
 
 Note: the non-source file list (`.projectatlas/projectatlas-nonsource-files.toon`) is agent-maintained input for
 non-source summaries. Agents should read current repository intelligence from the SQLite-backed CLI/MCP
@@ -74,8 +76,8 @@ surfaces, not from a checked-in static map snapshot. Purpose review batch files 
 
 ## MCP Server
 
-Prefer the installer-generated project-local MCP config at `.projectatlas/projectatlas.mcp.json`
-for `.mcp.json`-compatible hosts. The installer also writes
+Prefer the `projectatlas init` or installer-generated project-local MCP config at `.projectatlas/projectatlas.mcp.json`
+for `.mcp.json`-compatible hosts. Init and the installer also write
 `.projectatlas/projectatlas.claude.mcp.json` for Claude Code and
 `.projectatlas/projectatlas.opencode.json` for OpenCode. These files contain an absolute native
 `projectatlas` binary path plus explicit project-local `--db` and `--config` arguments, and the

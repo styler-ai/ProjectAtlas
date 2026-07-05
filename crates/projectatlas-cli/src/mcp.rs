@@ -3,29 +3,32 @@
 
 use crate::atlas_map::{
     AtlasMapConfig, IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report,
-    init_gitignore, init_project, lint_map, list_ignore_entries, load_atlas_config,
-    load_atlas_config_for_root, remove_ignore_entry, write_map,
+    init_gitignore, lint_map, list_ignore_entries, load_atlas_config, load_atlas_config_for_root,
+    remove_ignore_entry, write_map,
 };
 use crate::runtime::{
-    DEFAULT_HEALTH_LIMIT, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel,
-    PurposeReviewRequest, ScanRuntimePlan, SymbolBuildOptions, build_settings_report,
-    build_symbols_for_index, byte_count_to_tokens, canonical_project_root,
+    DEFAULT_HEALTH_LIMIT, InitBootstrapOptions, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES,
+    PurposeLintLevel, PurposeReviewRequest, ScanRuntimePlan, SymbolBuildOptions,
+    build_settings_report, build_symbols_for_index, byte_count_to_tokens, canonical_project_root,
     config_root_mismatch_error, default_mcp_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
-    file_summary_usage_baseline, lint_database_if_present, next_step_report,
+    file_summary_usage_baseline, init_config_path, lint_database_if_present, next_step_report,
     next_step_report_payload, normalized_folder_filter, open_atlas_store, purpose_curation_page,
     ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
     record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
     render_health_page, render_purpose_curation_page, render_purpose_review_report,
-    reset_index_files, review_purposes, run_scan_pipeline, run_watch_loop, strip_legacy_purpose,
-    telemetry_disabled, validated_indexed_file_key, watcher_status_report,
+    reset_index_files, review_purposes, run_init_bootstrap, run_scan_pipeline, run_watch_loop,
+    strip_legacy_purpose, telemetry_disabled, validated_indexed_file_key, watcher_status_report,
+};
+use crate::token_tui::{
+    TokenDashboardTheme, render_token_dashboard_plain_with_theme,
+    render_token_trend_dashboard_plain_with_theme,
 };
 use crate::{
     CliError, DEFAULT_FILE_SUMMARY_LIMIT, HarnessConfig, OutputFormat, RuntimeInfoReport,
     build_harness_mcp_config_report, build_parity_report, build_root_report, build_runtime_info,
     render_code_slice, render_file_summary, render_parity_report, render_root_report,
-    render_runtime_info, render_search_report, render_token_dashboard,
-    render_token_trend_dashboard, render_watch_status,
+    render_runtime_info, render_search_report, render_watch_status,
 };
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
@@ -184,8 +187,6 @@ const MCP_TOOL_ATLAS_PURPOSE_REVIEW: &str = "atlas_purpose_review";
 const PROJECTATLAS_DIR_NAME: &str = ".projectatlas";
 /// `ProjectAtlas` `SQLite` database filename.
 const PROJECTATLAS_DB_FILE_NAME: &str = "projectatlas.db";
-/// Project-local non-source summary filename.
-const PROJECTATLAS_NONSOURCE_FILE_NAME: &str = "projectatlas-nonsource-files.toon";
 /// Project-local nested config filename.
 const PROJECTATLAS_CONFIG_FILE_NAME: &str = "config.toml";
 /// Project-local flat config filename.
@@ -381,6 +382,10 @@ const SEVERITY_EXPECTED_SEPARATOR: &str = ", ";
 const SEVERITY_EXPECTED_FINAL_SEPARATOR: &str = ", or ";
 /// Token trend validation error suffix.
 const TOKEN_TREND_WINDOW_ERROR_SUFFIX: &str = "expected day, week, month, or year";
+/// Token chart theme validation error prefix.
+const TOKEN_CHART_THEME_ERROR_PREFIX: &str = "unsupported token chart theme ";
+/// Token chart theme validation error suffix.
+const TOKEN_CHART_THEME_ERROR_SUFFIX: &str = "; expected dark or light";
 /// Watch-status recommendation when no index exists.
 const WATCH_STATUS_SCAN_RECOMMENDATION: &str =
     " Run `atlas_scan` first when no ProjectAtlas index exists for this project.";
@@ -436,6 +441,12 @@ struct AtlasSetProjectPathParams {
 struct AtlasInitParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
+    /// Create/verify the project surface without running the scan/index pipeline.
+    no_scan: Option<bool>,
+    /// Run the scan/index phase even when a future freshness check could skip it.
+    force_rescan: Option<bool>,
+    /// Maximum UTF-8 file size persisted into `SQLite` text search during the init scan.
+    text_index_max_bytes: Option<u64>,
 }
 
 /// MCP parameter payload for compatibility map exports.
@@ -530,7 +541,7 @@ pub(crate) fn run_mcp_server(
     })
 }
 
-/// Return whether the compiled MCP surface contains required tool families.
+/// Return whether the generated RMCP router contains required tool families.
 pub(crate) fn required_mcp_surface_present() -> bool {
     REQUIRED_MCP_TOOL_NAMES
         .iter()
@@ -705,6 +716,8 @@ struct AtlasTokenParams {
     include_chart: Option<bool>,
     /// Optional trend grouping window: day, week, month, or year.
     trend_window: Option<String>,
+    /// Optional chart theme for TUI output: dark or light.
+    theme: Option<String>,
 }
 
 /// MCP parameter payload for bounded health finding lookup.
@@ -830,19 +843,6 @@ struct McpProjectState {
     db_path: PathBuf,
     /// Selected scan/import configuration path.
     config_path: Option<PathBuf>,
-}
-
-/// MCP response for project initialization.
-#[derive(Debug, Serialize)]
-struct McpInitReport {
-    /// Canonical project root that was initialized.
-    root: String,
-    /// Project-local config path.
-    config_path: String,
-    /// Project-local non-source registry path.
-    nonsource_files_path: String,
-    /// Whether the project-local config path exists after the call.
-    config_exists: bool,
 }
 
 /// MCP response for compatibility map export.
@@ -1567,6 +1567,20 @@ impl ProjectAtlasMcpServer {
         }
     }
 
+    /// Parse the optional token chart theme parameter.
+    fn parse_token_chart_theme(value: Option<&str>) -> Result<TokenDashboardTheme, CliError> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None => Ok(TokenDashboardTheme::Dark),
+            Some(theme) => TokenDashboardTheme::parse(theme).ok_or_else(|| {
+                CliError::InvalidInput(Self::invalid_parameter_message(
+                    TOKEN_CHART_THEME_ERROR_PREFIX,
+                    theme,
+                    TOKEN_CHART_THEME_ERROR_SUFFIX,
+                ))
+            }),
+        }
+    }
+
     /// Build an invalid-parameter diagnostic from centralized fragments.
     fn invalid_parameter_message(prefix: &str, value: &str, suffix: &str) -> String {
         let mut message = String::with_capacity(prefix.len() + value.len() + suffix.len());
@@ -1574,24 +1588,6 @@ impl ProjectAtlasMcpServer {
         message.push_str(value);
         message.push_str(suffix);
         message
-    }
-
-    /// Build the `ProjectAtlas` init report used by MCP.
-    fn init_report_for_state(state: &McpProjectState) -> McpInitReport {
-        let config_path = state
-            .root
-            .join(PROJECTATLAS_DIR_NAME)
-            .join(PROJECTATLAS_CONFIG_FILE_NAME);
-        let nonsource_files_path = state
-            .root
-            .join(PROJECTATLAS_DIR_NAME)
-            .join(PROJECTATLAS_NONSOURCE_FILE_NAME);
-        McpInitReport {
-            root: normalize_native_path_display(&state.root),
-            config_exists: config_path.exists(),
-            config_path: normalize_native_path_display(config_path),
-            nonsource_files_path: normalize_native_path_display(nonsource_files_path),
-        }
     }
 
     /// Build a compatibility map report, writing the map unless CI skip policy applies.
@@ -2907,13 +2903,30 @@ impl ProjectAtlasMcpServer {
     /// Initialize a `ProjectAtlas` project-local config surface.
     #[tool(
         name = "atlas_init",
-        description = "Initialize ProjectAtlas project-local config files without scanning source."
+        description = "Initialize ProjectAtlas project-local config, database, host MCP configs, scan/index, and purpose handoff."
     )]
     fn atlas_init(&self, Parameters(params): Parameters<AtlasInitParams>) -> String {
         Self::as_mcp_text((|| {
             let state = self.admin_project_root(params.project_path)?;
-            init_project(&state.root)?;
-            Self::encode_named_payload(MCP_PAYLOAD_INIT, &Self::init_report_for_state(&state))
+            let config_path = init_config_path(&state.root, state.config_path.as_deref());
+            let mut report = run_init_bootstrap(
+                &state.root,
+                &state.db_path,
+                Some(&config_path),
+                &InitBootstrapOptions {
+                    no_scan: params.no_scan.unwrap_or(false),
+                    force_rescan: params.force_rescan.unwrap_or(false),
+                    text_index_max_bytes: params.text_index_max_bytes,
+                },
+            )?;
+            crate::write_init_mcp_config_files(
+                &mut report,
+                &state.root.join(PROJECTATLAS_DIR_NAME),
+                &state.db_path,
+                &config_path,
+                false,
+            );
+            Self::encode_named_payload(MCP_PAYLOAD_INIT, &report)
         })())
     }
 
@@ -3554,6 +3567,7 @@ impl ProjectAtlasMcpServer {
             let state = self.state_for_project_path(params.project_path.clone())?;
             let store = Self::open_store(&state)?;
             let include_chart = params.include_chart.unwrap_or(false);
+            let chart_theme = Self::parse_token_chart_theme(params.theme.as_deref())?;
             if let Some(window) = params.trend_window.as_deref() {
                 let window = TokenTrendWindow::parse(window).ok_or_else(|| {
                     CliError::InvalidInput(format!(
@@ -3562,7 +3576,7 @@ impl ProjectAtlasMcpServer {
                 })?;
                 let report = store.token_trends(params.session.as_deref(), window)?;
                 if include_chart {
-                    let chart = render_token_trend_dashboard(&report);
+                    let chart = render_token_trend_dashboard_plain_with_theme(&report, chart_theme);
                     return Self::encode_two_named_payloads(
                         MCP_PAYLOAD_TOKEN_TRENDS,
                         &report,
@@ -3574,7 +3588,11 @@ impl ProjectAtlasMcpServer {
             }
             let overview = store.token_overview(params.session.as_deref())?;
             if include_chart {
-                let chart = render_token_dashboard(&overview, params.session.as_deref());
+                let chart = render_token_dashboard_plain_with_theme(
+                    &overview,
+                    params.session.as_deref(),
+                    chart_theme,
+                );
                 return Self::encode_two_named_payloads(
                     MCP_PAYLOAD_TOKEN_SAVINGS,
                     &overview,
@@ -4000,6 +4018,74 @@ mod tests {
         require(
             !repo.join(".projectatlas").exists(),
             "read-only store created .projectatlas",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn atlas_init_explicit_project_path_bootstraps_without_switching_active_project()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo_a = temp.path().join("repo-a");
+        let repo_b = temp.path().join("repo-b");
+        fs::create_dir(&repo_a)?;
+        fs::create_dir(&repo_b)?;
+        let db_a = repo_a.join(".projectatlas").join("projectatlas.db");
+        let server = ProjectAtlasMcpServer::new(db_a, None, "mcp-test".to_string(), false);
+        let active_before = server.active_project_state()?;
+
+        let text = server.atlas_init(Parameters(AtlasInitParams {
+            project_path: Some(repo_b.to_string_lossy().to_string()),
+            no_scan: Some(true),
+            force_rescan: Some(false),
+            text_index_max_bytes: None,
+        }));
+
+        let expected_b = normalize_native_path_display(canonical_project_root(&repo_b)?);
+        require(
+            text.contains("init:"),
+            "atlas_init did not return named init payload",
+        )?;
+        require(
+            text.contains(&expected_b),
+            "atlas_init did not report the explicit project path",
+        )?;
+        require(
+            text.contains("status: skipped"),
+            "atlas_init --no-scan did not report skipped scan",
+        )?;
+        require(
+            repo_b
+                .join(".projectatlas")
+                .join("projectatlas.db")
+                .is_file(),
+            "atlas_init did not create the explicit project's DB",
+        )?;
+        require(
+            repo_b
+                .join(".projectatlas")
+                .join("projectatlas.mcp.json")
+                .is_file()
+                && repo_b
+                    .join(".projectatlas")
+                    .join("projectatlas.claude.mcp.json")
+                    .is_file()
+                && repo_b
+                    .join(".projectatlas")
+                    .join("projectatlas.opencode.json")
+                    .is_file(),
+            "atlas_init did not generate host MCP configs",
+        )?;
+
+        let active_after = server.active_project_state()?;
+        require(
+            active_after.root == active_before.root,
+            "atlas_init with explicit project_path changed the active default root",
+        )?;
+        require(
+            !repo_a.join(".projectatlas").exists(),
+            "explicit atlas_init mutated the active project",
         )?;
 
         Ok(())

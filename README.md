@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.3.25"><img alt="release" src="https://img.shields.io/badge/release-v0.3.25-blue"></a>
+  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.3.26"><img alt="release" src="https://img.shields.io/badge/release-v0.3.26-blue"></a>
   <img alt="rust" src="https://img.shields.io/badge/Rust-2024-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
@@ -20,14 +20,14 @@ ProjectAtlas is the missing local code index between "agent, fix this repo" and 
 
 It keeps a fast local SQLite index of folders, files, one-line purposes, deterministic content summaries, symbols, relations, search text, health findings, and token telemetry. The agent starts with the indexed atlas, narrows to the right folder and file, then escalates to outlines, symbols, or exact source slices only when correctness needs real code.
 
-Ani is the ProjectAtlas mascot. The versioned design references live in [`docs/design/ani-mascot-reference.png`](docs/design/ani-mascot-reference.png) and [`docs/design/token-impact-tui-reference.png`](docs/design/token-impact-tui-reference.png).
+Ani is the ProjectAtlas mascot. The versioned design references live in [`docs/design/ani-mascot-reference.png`](docs/design/ani-mascot-reference.png), [`docs/design/projectatlas-mascot-clean-transparent.svg`](docs/design/projectatlas-mascot-clean-transparent.svg), and [`docs/design/token-impact-tui-reference.png`](docs/design/token-impact-tui-reference.png).
 
 No required `.purpose` files. No source-header tax. No hosted index. The project lives beside your repo in `.projectatlas/`, returns compact TOON by default, and runs as a native Rust CLI plus MCP server.
 
 ## Quickstart
 
 ```bash
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.25
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.26
 codex plugin add projectatlas --marketplace projectatlas
 ```
 
@@ -46,7 +46,7 @@ correctly keeps that pinned ref. In that case, replace only the dedicated `style
 
 ```bash
 codex plugin marketplace remove projectatlas
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.25
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.26
 ```
 
 Then tell Codex: "Use ProjectAtlas for this repo."
@@ -180,7 +180,7 @@ Most users can stop at the plugin install. The CLI is here for local debugging, 
 Only need the CLI yourself? Install it from the released tag:
 
 ```bash
-cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.25 projectatlas-cli --locked
+cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.26 projectatlas-cli --locked
 ```
 
 From this checkout:
@@ -193,9 +193,13 @@ Then initialize and inspect a repo:
 
 ```bash
 projectatlas init
-projectatlas scan
 projectatlas overview
 ```
+
+`projectatlas init` is the one-call first-run bootstrap: it creates `.projectatlas/`, writes default config and
+non-source scaffolding when missing, initializes `.projectatlas/projectatlas.db`, runs the initial scan/index, writes
+project-local MCP configs for Codex/generic MCP, Claude Code, and OpenCode, and returns the purpose-curation handoff.
+Use `projectatlas scan` later when you want an explicit refresh.
 
 ## Manual Funnel
 
@@ -221,7 +225,7 @@ For a human token dashboard:
 projectatlas token --view tui
 ```
 
-That opens the Ratatui token impact dashboard: Ani in the header, a reconciled `Without ProjectAtlas - With ProjectAtlas = Saved by ProjectAtlas` equation, file reads avoided, observed summaries/slices, modeled narrowing, source rows, calibration notes, and compact status hints.
+That opens the Ratatui token impact dashboard: a readable reconciled `Without ProjectAtlas - With ProjectAtlas = Saved by ProjectAtlas` equation, file reads avoided, observed summaries/slices, modeled narrowing, source rows, calibration notes, and compact status hints. The default theme is dark; use `projectatlas token --view tui --theme light` for light terminal color schemes. Ani remains the ProjectAtlas mascot in the design assets, but the token TUI defers mascot rendering until a future focused pass.
 
 For a local tokenizer calibration of indexed UTF-8 files, add `--tokenizer o200k_base` or `--tokenizer cl100k_base`.
 
@@ -229,7 +233,7 @@ For a local tokenizer calibration of indexed UTF-8 files, add `--tokenizer o200k
 
 ProjectAtlas ships plugin metadata and installer scripts for Codex and Claude Code, plus an OpenCode MCP config template.
 
-Generate project-local MCP configs:
+`projectatlas init` writes project-local MCP configs automatically. Regenerate them manually when needed:
 
 ```bash
 projectatlas --format json --db .projectatlas/projectatlas.db mcp-config > .projectatlas/projectatlas.mcp.json
@@ -303,7 +307,7 @@ ProjectAtlas scans with `.gitignore` awareness, hashes files with BLAKE3, stores
 
 ## Release Quality
 
-`v0.3.25` ships through the full release matrix:
+`v0.3.26` ships through the full release matrix:
 
 - Rust format, check, clippy, dependency policy, tests, doctests, and rustdoc.
 - ProjectAtlas scan, parity, database-backed purpose lint, and health checks.

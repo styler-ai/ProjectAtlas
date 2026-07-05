@@ -10,6 +10,7 @@
 - Run or describe appropriate tests with explicit timeouts; never leave commands hanging.
 - Use MCP tooling before CLI/manual steps when an MCP surface is available; close sessions when finished.
 - For interactive browser or Electron debugging and manual UI QA loops, use the global `playwright-interactive` skill by default.
+- For code, design, architecture, release, or PR review subagents, use `gpt-5.5` with `xhigh` reasoning. Reserve low-reasoning subagents for purpose creation or correction work only.
 - Keep documentation and specs in sync with behavior; update decision records as needed.
 - Ask for clarification when requirements conflict; document assumptions and blockers.
 - Do not turn local editor, agent, cache, or workspace-state folder names into product invariants. ProjectAtlas honors `.gitignore` dynamically, and the ProjectAtlas ignore config is only the stricter atlas-specific layer applied after `.gitignore`.

@@ -8,9 +8,10 @@ mod token_tui;
 
 use atlas_map::{
     IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report, init_gitignore,
-    init_project, lint_map, list_ignore_entries, load_atlas_config, remove_ignore_entry, write_map,
+    init_project_with_config, lint_map, list_ignore_entries, load_atlas_config,
+    remove_ignore_entry, write_map,
 };
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
 use projectatlas_core::telemetry::{
@@ -30,18 +31,20 @@ use projectatlas_service::{
     read_indexed_code_slice, read_symbol_slice, search_indexed_files,
 };
 use runtime::{
-    DEFAULT_HEALTH_LIMIT, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel,
-    PurposeReviewRequest, ScanRuntimePlan, SettingsReport, SymbolBuildOptions, WatchStatusReport,
-    absolute_path, build_settings_report, build_symbols_for_index, byte_count_to_tokens,
-    canonical_project_root, default_mcp_project_root, defaultable_cli_project_root,
+    DEFAULT_HEALTH_LIMIT, InitBootstrapOptions, InitHostConfigStatus, InitSetupReport,
+    MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel, PurposeReviewRequest,
+    ScanRuntimePlan, SettingsReport, SymbolBuildOptions, WatchStatusReport, absolute_path,
+    build_settings_report, build_symbols_for_index, byte_count_to_tokens, canonical_project_root,
+    default_mcp_project_root, defaultable_cli_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
-    file_summary_usage_baseline, lint_database_if_present, next_step_report,
-    next_step_report_payload, normalized_folder_filter, open_atlas_store, purpose_curation_page,
-    ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
-    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
-    render_health_page, render_purpose_curation_page, render_purpose_review_report,
-    reset_index_files, resolved_mcp_config_path, review_purposes, run_scan_pipeline,
-    run_watch_loop, strip_legacy_purpose, validated_indexed_file_key, watcher_status_report,
+    file_summary_usage_baseline, init_config_path, init_path_status, lint_database_if_present,
+    next_step_report, next_step_report_payload, normalized_folder_filter, open_atlas_store,
+    purpose_curation_page, ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons,
+    read_indexed_file_content, record_directory_walk_usage_estimate, record_usage_estimate,
+    record_usage_text, render_health_page, render_purpose_curation_page,
+    render_purpose_review_report, reset_index_files, resolved_mcp_config_path, review_purposes,
+    run_init_bootstrap, run_scan_pipeline, run_watch_loop, strip_legacy_purpose,
+    validated_indexed_file_key, watcher_status_report,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -50,7 +53,11 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use token_tui::{render_token_dashboard, render_token_trend_dashboard};
+#[cfg(test)]
+use token_tui::render_token_dashboard;
+use token_tui::{
+    TokenDashboardTheme, render_token_dashboard_with_theme, render_token_trend_dashboard_with_theme,
+};
 
 /// Default relative path for the `SQLite` index.
 const DEFAULT_DB_PATH: &str = ".projectatlas/projectatlas.db";
@@ -68,6 +75,38 @@ const WATCH_MODE_NOTIFY: &str = "notify";
 const WATCH_MODE_POLLING: &str = "portable-polling";
 /// Default parity profile for repository-intelligence checks.
 pub(crate) const REPOSITORY_INTELLIGENCE_PROFILE: &str = "repository-intelligence";
+/// CLI command families required for the agent-first repository-intelligence surface.
+const REQUIRED_CLI_COMMANDS: &[RequiredCliCommand] = &[
+    RequiredCliCommand::Init,
+    RequiredCliCommand::Map,
+    RequiredCliCommand::Scan,
+    RequiredCliCommand::Overview,
+    RequiredCliCommand::Folders,
+    RequiredCliCommand::Files,
+    RequiredCliCommand::Next,
+    RequiredCliCommand::Outline,
+    RequiredCliCommand::Summary,
+    RequiredCliCommand::Search,
+    RequiredCliCommand::Slice,
+    RequiredCliCommand::Symbols,
+    RequiredCliCommand::Settings,
+    RequiredCliCommand::Root,
+    RequiredCliCommand::Config,
+    RequiredCliCommand::Ignore,
+    RequiredCliCommand::WatchStatus,
+    RequiredCliCommand::Watch,
+    RequiredCliCommand::HealthCheck,
+    RequiredCliCommand::Health,
+    RequiredCliCommand::Lint,
+    RequiredCliCommand::Token,
+    RequiredCliCommand::Parity,
+    RequiredCliCommand::StripLegacyPurpose,
+    RequiredCliCommand::ResetIndex,
+    RequiredCliCommand::Mcp,
+    RequiredCliCommand::McpConfig,
+    RequiredCliCommand::RuntimeInfo,
+    RequiredCliCommand::Purpose,
+];
 
 /// Error type for CLI boundary failures.
 #[derive(Debug, Error)]
@@ -125,6 +164,24 @@ enum TokenView {
     Agent,
     /// Human terminal dashboard with a compact savings diagram.
     Tui,
+}
+
+/// Token TUI color theme.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum TokenTheme {
+    /// Dark reference dashboard theme.
+    Dark,
+    /// Light dashboard theme for light terminal backgrounds.
+    Light,
+}
+
+impl From<TokenTheme> for TokenDashboardTheme {
+    fn from(theme: TokenTheme) -> Self {
+        match theme {
+            TokenTheme::Dark => Self::Dark,
+            TokenTheme::Light => Self::Light,
+        }
+    }
 }
 
 /// Token trend grouping window.
@@ -256,7 +313,17 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Initialize `ProjectAtlas` files in a repository.
-    Init,
+    Init {
+        /// Create/verify the project surface without running the scan/index pipeline.
+        #[arg(long)]
+        no_scan: bool,
+        /// Run the scan/index phase even when a future freshness check could skip it.
+        #[arg(long)]
+        force_rescan: bool,
+        /// Maximum UTF-8 file size persisted into `SQLite` text search during the init scan.
+        #[arg(long)]
+        text_index_max_bytes: Option<u64>,
+    },
     /// Generate the `ProjectAtlas` TOON map.
     Map {
         /// Also write JSON next to the TOON map.
@@ -486,6 +553,9 @@ enum Command {
         /// Optional local tokenizer calibration for indexed UTF-8 files.
         #[arg(long, value_parser = ["o200k_base", "cl100k_base"])]
         tokenizer: Option<String>,
+        /// Color theme for the human terminal dashboard.
+        #[arg(long, value_enum, default_value_t = TokenTheme::Dark)]
+        theme: TokenTheme,
     },
     /// Check repository-intelligence parity readiness.
     Parity {
@@ -749,13 +819,44 @@ fn run() -> Result<(), CliError> {
         validate_required_runtime_version(required_version)?;
     }
     match &cli.command {
-        Command::Init => {
+        Command::Init {
+            no_scan,
+            force_rescan,
+            text_index_max_bytes,
+        } => {
             let root = std::env::current_dir().map_err(|source| CliError::Io {
                 path: PathBuf::from("."),
                 source,
             })?;
-            let report = init_project(&root)?;
-            write_stdout(&report)?;
+            let db_path = absolute_path(&cli.db)?;
+            let config_path = init_config_path(&root, cli.config.as_deref());
+            let mut report = run_init_bootstrap(
+                &root,
+                &db_path,
+                Some(&config_path),
+                &InitBootstrapOptions {
+                    no_scan: *no_scan,
+                    force_rescan: *force_rescan,
+                    text_index_max_bytes: *text_index_max_bytes,
+                },
+            )?;
+            write_init_mcp_config_files(
+                &mut report,
+                &root.join(".projectatlas"),
+                &db_path,
+                &config_path,
+                false,
+            );
+            print_output(
+                cli.format,
+                &encode_agent_payload(&json!({ "init": report })),
+                &report,
+            )?;
+            if !report.ok {
+                return Err(CliError::InvalidInput(
+                    "projectatlas init completed with failed phase(s); see report".to_string(),
+                ));
+            }
         }
         Command::Map { json, force } => {
             if !force && (truthy_env("CI") || truthy_env("GITHUB_ACTIONS")) {
@@ -1292,6 +1393,7 @@ fn run() -> Result<(), CliError> {
             view,
             trend,
             tokenizer,
+            theme,
         } => {
             let store = open_atlas_store(&cli.db)?;
             if let Some(window) = trend {
@@ -1306,7 +1408,10 @@ fn run() -> Result<(), CliError> {
                         print_output(cli.format, &render_token_trends(&report), &report)?;
                     }
                     TokenView::Tui => {
-                        write_stdout(&render_token_trend_dashboard(&report))?;
+                        write_stdout(&render_token_trend_dashboard_with_theme(
+                            &report,
+                            (*theme).into(),
+                        ))?;
                     }
                 }
             } else {
@@ -1319,7 +1424,11 @@ fn run() -> Result<(), CliError> {
                         print_output(cli.format, &render_token_overview(&overview), &overview)?;
                     }
                     TokenView::Tui => {
-                        write_stdout(&render_token_dashboard(&overview, session.as_deref()))?;
+                        write_stdout(&render_token_dashboard_with_theme(
+                            &overview,
+                            session.as_deref(),
+                            (*theme).into(),
+                        ))?;
                     }
                 }
             }
@@ -1615,10 +1724,10 @@ fn bind_project_root(root: &Path, nearest_project: bool) -> Result<RootReport, C
             root.display()
         )));
     }
-    init_project(root)?;
     let atlas_dir = root.join(".projectatlas");
     let db_path = atlas_dir.join("projectatlas.db");
-    let config_path = atlas_dir.join("config.toml");
+    init_project_with_config(root, None)?;
+    let config_path = init_config_path(root, None);
     {
         let store = open_atlas_store(&db_path)?;
         store.set_project_root(root)?;
@@ -1645,6 +1754,51 @@ fn bind_project_root(root: &Path, nearest_project: bool) -> Result<RootReport, C
         nearest_project,
     )?;
     build_root_report(&db_path, Some(&config_path))
+}
+
+/// Write all generated host MCP configs expected after first-run init.
+fn write_init_mcp_config_files(
+    report: &mut InitSetupReport,
+    atlas_dir: &Path,
+    db_path: &Path,
+    config_path: &Path,
+    nearest_project: bool,
+) {
+    for (harness_name, file_name, harness) in [
+        ("mcp_json", "projectatlas.mcp.json", HarnessConfig::McpJson),
+        (
+            "claude_code",
+            "projectatlas.claude.mcp.json",
+            HarnessConfig::ClaudeCode,
+        ),
+        (
+            "opencode",
+            "projectatlas.opencode.json",
+            HarnessConfig::OpenCode,
+        ),
+    ] {
+        let path = atlas_dir.join(file_name);
+        let existed = path.exists();
+        let (status, error) =
+            match write_mcp_config_file(&path, harness, db_path, config_path, nearest_project) {
+                Ok(()) => (init_path_status(existed), None),
+                Err(error) => {
+                    report.ok = false;
+                    (runtime::InitPhaseStatus::Failed, Some(error.to_string()))
+                }
+            };
+        report.host_configs.push(InitHostConfigStatus {
+            harness: harness_name,
+            status,
+            path: normalize_native_path_display(path),
+            error,
+        });
+    }
+    if !report.ok {
+        report
+            .next_steps
+            .push("Fix generated host MCP config errors and rerun projectatlas init.".to_string());
+    }
 }
 
 /// Write one generated MCP config document as pretty JSON.
@@ -1906,6 +2060,13 @@ struct ParityReport {
     checks: Vec<ParityCheck>,
 }
 
+/// Agent-facing parity payload wrapper.
+#[derive(Debug, Serialize)]
+struct ParityPayload<'a> {
+    /// Repository-intelligence parity report.
+    parity: &'a ParityReport,
+}
+
 /// One parity check row.
 #[derive(Debug, Serialize)]
 struct ParityCheck {
@@ -1931,6 +2092,262 @@ impl ParityCheckStatus {
     /// Return a check status from a boolean predicate.
     fn from_passed(passed: bool) -> Self {
         if passed { Self::Pass } else { Self::Fail }
+    }
+}
+
+/// Required CLI command families whose variants must remain constructible.
+#[derive(Clone, Copy, Debug)]
+enum RequiredCliCommand {
+    /// `projectatlas init`.
+    Init,
+    /// `projectatlas map`.
+    Map,
+    /// `projectatlas scan`.
+    Scan,
+    /// `projectatlas overview`.
+    Overview,
+    /// `projectatlas folders`.
+    Folders,
+    /// `projectatlas files`.
+    Files,
+    /// `projectatlas next`.
+    Next,
+    /// `projectatlas outline`.
+    Outline,
+    /// `projectatlas summary`.
+    Summary,
+    /// `projectatlas search`.
+    Search,
+    /// `projectatlas slice`.
+    Slice,
+    /// `projectatlas symbols`.
+    Symbols,
+    /// `projectatlas settings`.
+    Settings,
+    /// `projectatlas root`.
+    Root,
+    /// `projectatlas config`.
+    Config,
+    /// `projectatlas ignore`.
+    Ignore,
+    /// `projectatlas watch-status`.
+    WatchStatus,
+    /// `projectatlas watch`.
+    Watch,
+    /// `projectatlas health-check`.
+    HealthCheck,
+    /// `projectatlas health`.
+    Health,
+    /// `projectatlas lint`.
+    Lint,
+    /// `projectatlas token`.
+    Token,
+    /// `projectatlas parity`.
+    Parity,
+    /// `projectatlas strip-legacy-purpose`.
+    StripLegacyPurpose,
+    /// `projectatlas reset-index`.
+    ResetIndex,
+    /// `projectatlas mcp`.
+    Mcp,
+    /// `projectatlas mcp-config`.
+    McpConfig,
+    /// `projectatlas runtime-info`.
+    RuntimeInfo,
+    /// `projectatlas purpose`.
+    Purpose,
+}
+
+impl RequiredCliCommand {
+    /// Stable command name used in reports and parity diagnostics.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Init => "init",
+            Self::Map => "map",
+            Self::Scan => "scan",
+            Self::Overview => "overview",
+            Self::Folders => "folders",
+            Self::Files => "files",
+            Self::Next => "next",
+            Self::Outline => "outline",
+            Self::Summary => "summary",
+            Self::Search => "search",
+            Self::Slice => "slice",
+            Self::Symbols => "symbols",
+            Self::Settings => "settings",
+            Self::Root => "root",
+            Self::Config => "config",
+            Self::Ignore => "ignore",
+            Self::WatchStatus => "watch-status",
+            Self::Watch => "watch",
+            Self::HealthCheck => "health-check",
+            Self::Health => "health",
+            Self::Lint => "lint",
+            Self::Token => "token",
+            Self::Parity => "parity",
+            Self::StripLegacyPurpose => "strip-legacy-purpose",
+            Self::ResetIndex => "reset-index",
+            Self::Mcp => "mcp",
+            Self::McpConfig => "mcp-config",
+            Self::RuntimeInfo => "runtime-info",
+            Self::Purpose => "purpose",
+        }
+    }
+
+    /// Construct the actual CLI enum variant so parity is tied to compiled command families.
+    fn command(self) -> Command {
+        match self {
+            Self::Init => Command::Init {
+                no_scan: true,
+                force_rescan: false,
+                text_index_max_bytes: None,
+            },
+            Self::Map => Command::Map {
+                json: false,
+                force: false,
+            },
+            Self::Scan => Command::Scan {
+                path: PathBuf::from("."),
+                text_index_max_bytes: None,
+            },
+            Self::Overview => Command::Overview,
+            Self::Folders => Command::Folders {
+                query: String::new(),
+                limit: 1,
+            },
+            Self::Files => Command::Files {
+                query: None,
+                folder: None,
+                file_pattern: None,
+                include_content: false,
+                limit: 1,
+            },
+            Self::Next => Command::Next {
+                query: String::new(),
+                limit: 1,
+            },
+            Self::Outline => Command::Outline {
+                file: PathBuf::from("src/lib.rs"),
+                lines: 1,
+            },
+            Self::Summary => Command::Summary {
+                file: PathBuf::from("src/lib.rs"),
+                limit: 1,
+            },
+            Self::Search => Command::Search {
+                pattern: String::new(),
+                regex: false,
+                fuzzy: false,
+                case_sensitive: false,
+                file_pattern: None,
+                context_lines: 0,
+                start_index: 0,
+                limit: 1,
+            },
+            Self::Slice => Command::Slice {
+                file: PathBuf::from("src/lib.rs"),
+                start_line: Some(1),
+                end_line: None,
+                symbol: None,
+                symbol_parent: None,
+                symbol_kind: None,
+                symbol_line: None,
+            },
+            Self::Symbols => Command::Symbols {
+                command: SymbolsCommand::List {
+                    file: None,
+                    query: None,
+                    limit: 1,
+                },
+            },
+            Self::Settings => Command::Settings,
+            Self::Root => Command::Root {
+                command: Some(RootCommand::Show),
+            },
+            Self::Config => Command::Config { print: true },
+            Self::Ignore => Command::Ignore {
+                command: IgnoreCommand::List,
+            },
+            Self::WatchStatus => Command::WatchStatus,
+            Self::Watch => Command::Watch {
+                path: PathBuf::from("."),
+                once: true,
+                poll_seconds: 1,
+                max_cycles: 1,
+                max_workers: None,
+                timeout_seconds: None,
+                text_index_max_bytes: None,
+            },
+            Self::HealthCheck => Command::HealthCheck {
+                start_index: 0,
+                limit: 1,
+                category: None,
+                severity: None,
+                path_prefix: None,
+                summary_only: true,
+                source_only: false,
+            },
+            Self::Health => Command::Health {
+                command: HealthCommand::Resolve {
+                    finding_id: String::new(),
+                    category: String::new(),
+                    path: String::new(),
+                    related_path: None,
+                    rationale: String::new(),
+                },
+            },
+            Self::Lint => Command::Lint {
+                strict_folders: false,
+                purpose_level: PurposeLintLevelArg::Low,
+                report_untracked: false,
+                strict_untracked: false,
+            },
+            Self::Token => Command::Token {
+                session: None,
+                view: TokenView::Agent,
+                trend: None,
+                tokenizer: None,
+                theme: TokenTheme::Dark,
+            },
+            Self::Parity => Command::Parity {
+                command: Some(ParityCommand::Report {
+                    profile: REPOSITORY_INTELLIGENCE_PROFILE.to_string(),
+                }),
+                profile: REPOSITORY_INTELLIGENCE_PROFILE.to_string(),
+            },
+            Self::StripLegacyPurpose => Command::StripLegacyPurpose {
+                path: PathBuf::from("."),
+                apply: false,
+                dry_run: true,
+                strip_source_headers: false,
+            },
+            Self::ResetIndex => Command::ResetIndex {
+                apply: false,
+                dry_run: true,
+                include_mcp_config: false,
+            },
+            Self::Mcp => Command::Mcp {
+                nearest_project: false,
+            },
+            Self::McpConfig => Command::McpConfig {
+                server_name: "projectatlas".to_string(),
+                harness: HarnessConfig::McpJson,
+                nearest_project: false,
+            },
+            Self::RuntimeInfo => Command::RuntimeInfo,
+            Self::Purpose => Command::Purpose {
+                command: PurposeCommand::Queue {
+                    start_index: 0,
+                    limit: 1,
+                    category: None,
+                    severity: None,
+                    path_prefix: None,
+                    summary_only: true,
+                    include_assets: false,
+                    include_low_priority_files: false,
+                },
+            },
+        }
     }
 }
 
@@ -2055,7 +2472,7 @@ fn render_search_report(report: &SearchReport) -> String {
 
 /// Render repository-intelligence parity as compact TOON.
 fn render_parity_report(report: &ParityReport) -> String {
-    encode_agent_payload(&json!({ "parity": report }))
+    encode_agent_payload(&ParityPayload { parity: report })
 }
 
 /// Render a code slice as compact TOON.
@@ -2134,7 +2551,8 @@ fn build_parity_report(store: &AtlasStore, profile: &str) -> Result<ParityReport
         .unresolved_health_findings(&store.resolved_health_ids()?)?
         .len();
     let token_calls = store.token_overview(None)?.calls;
-    let watcher = watcher_status_report(false);
+    let watcher_status = watcher_status_report(false);
+    let watcher_mode = watcher_status.mode.clone();
 
     let mut checks = Vec::new();
     push_check(
@@ -2182,8 +2600,11 @@ fn build_parity_report(store: &AtlasStore, profile: &str) -> Result<ParityReport
     push_check(
         &mut checks,
         "watcher-refresh",
-        watcher.available,
-        &format!("watcher mode {}", watcher.mode),
+        watcher_status.available,
+        &format!(
+            "watch-status probe reports mode {watcher_mode} and event backend available={}",
+            watcher_status.event_backend_available
+        ),
     );
     push_check(
         &mut checks,
@@ -2201,13 +2622,13 @@ fn build_parity_report(store: &AtlasStore, profile: &str) -> Result<ParityReport
         &mut checks,
         "cli-surface",
         required_cli_surface_present(),
-        "scan, overview, folders, files, summary, outline, search, slice, symbols, watch, health, token, parity, mcp are compiled",
+        "required CLI command families are constructible from compiled command variants",
     );
     push_check(
         &mut checks,
         "mcp-surface",
         mcp::required_mcp_surface_present(),
-        "atlas_* tools cover scan, overview, folders, files, summary, outline, search, slice, symbols, health, token, settings, watch, parity, and reset-index",
+        "required atlas_* tools are present in the generated RMCP route table",
     );
     let ok = checks
         .iter()
@@ -2222,7 +2643,7 @@ fn build_parity_report(store: &AtlasStore, profile: &str) -> Result<ParityReport
         relations,
         health_findings,
         token_calls,
-        watcher_mode: watcher.mode,
+        watcher_mode,
         checks,
     })
 }
@@ -2238,39 +2659,45 @@ fn push_check(checks: &mut Vec<ParityCheck>, name: &str, passed: bool, detail: &
 
 /// Return whether the compiled CLI surface contains required command families.
 fn required_cli_surface_present() -> bool {
-    let required = [
-        "init",
-        "map",
-        "scan",
-        "overview",
-        "folders",
-        "files",
-        "outline",
-        "summary",
-        "search",
-        "slice",
-        "symbols",
-        "settings",
-        "config",
-        "watch-status",
-        "watch",
-        "health-check",
-        "health",
-        "lint",
-        "token",
-        "parity",
-        "strip-legacy-purpose",
-        "mcp",
-        "mcp-config",
-        "runtime-info",
-        "purpose",
-    ];
-    let command = Cli::command();
-    required.iter().all(|name| {
-        command
-            .get_subcommands()
-            .any(|subcommand| subcommand.get_name() == *name)
-    })
+    !REQUIRED_CLI_COMMANDS.is_empty()
+        && REQUIRED_CLI_COMMANDS
+            .iter()
+            .all(|command| cli_command_name(&command.command()) == command.name())
+}
+
+/// Return the stable CLI name for a parsed command variant.
+fn cli_command_name(command: &Command) -> &'static str {
+    match command {
+        Command::Init { .. } => "init",
+        Command::Map { .. } => "map",
+        Command::Scan { .. } => "scan",
+        Command::Overview => "overview",
+        Command::Folders { .. } => "folders",
+        Command::Files { .. } => "files",
+        Command::Next { .. } => "next",
+        Command::Outline { .. } => "outline",
+        Command::Summary { .. } => "summary",
+        Command::Search { .. } => "search",
+        Command::Slice { .. } => "slice",
+        Command::Symbols { .. } => "symbols",
+        Command::Settings => "settings",
+        Command::Root { .. } => "root",
+        Command::Config { .. } => "config",
+        Command::Ignore { .. } => "ignore",
+        Command::WatchStatus => "watch-status",
+        Command::Watch { .. } => "watch",
+        Command::HealthCheck { .. } => "health-check",
+        Command::Health { .. } => "health",
+        Command::Lint { .. } => "lint",
+        Command::Token { .. } => "token",
+        Command::Parity { .. } => "parity",
+        Command::StripLegacyPurpose { .. } => "strip-legacy-purpose",
+        Command::ResetIndex { .. } => "reset-index",
+        Command::Mcp { .. } => "mcp",
+        Command::McpConfig { .. } => "mcp-config",
+        Command::RuntimeInfo => "runtime-info",
+        Command::Purpose { .. } => "purpose",
+    }
 }
 
 /// Render a deterministic file summary as compact TOON.
@@ -2884,21 +3311,21 @@ mod tests {
         assert!(dashboard.contains("ProjectAtlas"));
         assert!(dashboard.contains("Token Impact"));
         assert!(dashboard.contains("session-a"));
-        assert!(dashboard.contains("TOTAL TOKENS AVOIDED"));
+        assert!(dashboard.contains("T O T A L   T O K E N S   A V O I D E D"));
         assert!(dashboard.contains("Without ProjectAtlas"));
         assert!(dashboard.contains("With ProjectAtlas"));
         assert!(dashboard.contains("Saved by ProjectAtlas"));
-        assert!(dashboard.contains("FILE READS AVOIDED"));
-        assert!(dashboard.contains("SAVINGS COMPOSITION"));
-        assert!(dashboard.contains("SIGNAL"));
-        assert!(dashboard.contains("WHERE THE SAVINGS CAME FROM"));
-        assert!(dashboard.contains("CALIBRATION & NOTES"));
+        assert!(dashboard.contains("F I L E   R E A D S   A V O I D E D"));
+        assert!(dashboard.contains("S A V I N G S   C O M P O S I T I O N"));
+        assert!(dashboard.contains("S I G N A L"));
+        assert!(dashboard.contains("W H E R E   T H E   S A V I N G S   C A M E   F R O M"));
+        assert!(dashboard.contains("C A L I B R A T I O N   &   N O T E S"));
         assert!(dashboard.contains("not_recorded"));
         assert!(dashboard.contains("Tokenizer audit"));
         assert!(
             dashboard
                 .chars()
-                .any(|character| matches!(character, '━' | '\u{2801}'..='\u{28ff}'))
+                .any(|character| matches!(character, '█' | '\u{2801}'..='\u{28ff}'))
         );
         assert!(!dashboard.contains("Gross tokens: without vs with ProjectAtlas"));
         assert!(!dashboard.contains("How ProjectAtlas helped"));
