@@ -1,0 +1,565 @@
+## Context
+
+ProjectAtlas 3 is already a Rust-native, atlas-first repository intelligence system. Its durable source of truth is project-local SQLite; its normal agent funnel is overview -> folders -> files -> summary/outline/symbols -> slice; its agent output is TOON-first; its MCP calls are project-root scoped; and purpose metadata plus token telemetry are ProjectAtlas-owned data rather than disposable parser output. This program expands the intelligence behind those surfaces instead of replacing them with a generic graph product.
+
+The current implementation has six useful ownership boundaries:
+
+| Boundary | Current responsibility | Important current limitation |
+|---|---|---|
+| `projectatlas-core` | Domain types, language detection, symbol and relation enums, summaries, health, telemetry | Symbols have a small relation vocabulary and no durable cross-file identity/resolution state. |
+| `projectatlas-fs` | Parallel repository discovery, dynamic `.gitignore`, stricter atlas excludes, BLAKE3 file identity | Change discovery exists, but graph invalidation is not yet dependency aware. |
+| `projectatlas-symbols` | Tree-sitter, manifest, structural, and fallback extraction plus language augmenters | The parser list is hand-wired and most relations are file-local. |
+| `projectatlas-db` | SQLite schema, files/folders, symbols, text, purposes, health, telemetry | Source candidate search uses `instr(...)`; symbol IDs are transient database integers. |
+| `projectatlas-service` | Ranking, search, summaries, slices, relations | It cannot yet express stable multi-hop impact/architecture analysis. |
+| `projectatlas-cli` | CLI, MCP, scan/watch/runtime composition, task progress, installer surfaces | Several modules and E2E files are now large enough to split by ownership before adding this scope. |
+
+The current watcher already uses filesystem notifications, debounce, polling fallback, content hashes, and per-path refresh. The current ignore behavior dynamically inherits `.gitignore`. Both remain authoritative foundations for this program.
+
+### Capability Baseline
+
+Phase 0 SHALL maintain a neutral, version-controlled inventory of repository-intelligence behaviors, failure modes, parser capabilities, supply-chain evidence, and benchmark questions. The inventory informs the accepted capability set but is not itself a feature-count target. Every accepted capability needs a ProjectAtlas owner, tier, producer, consumer, evidence contract, test corpus, resource budget, and release decision; deliberate exclusions remain visible with rationale.
+
+Generated grammar artifacts are treated as dependencies with pinned provenance, digest, ABI, license, fixtures, and SBOM entries rather than as ProjectAtlas-owned source. Third-party correctness or performance claims receive no ProjectAtlas credit until reproduced by the Phase 0 harness on pinned inputs.
+
+### Repository-Intelligence Pattern Inventory
+
+```text
+process/bootstrap
+  -> MCP, config, watcher, optional UI
+  -> supervised same-binary indexing child
+  -> discovery + ignore evaluation
+  -> parallel tree-sitter extraction into worker-local buffers
+  -> project registry + module-to-definition candidate index
+  -> per-file and cross-file semantic resolution
+  -> package, route, config, test, history, similarity, service, and IaC passes
+  -> whole in-memory generic graph
+  -> SQLite + FTS5 + vector persistence
+  -> MCP search, query, trace, schema, architecture, project, ADR, and trace tools
+
+Side paths:
+  Git-state polling watcher
+  compressed shared graph artifact
+  cache-discovered cross-repository linker
+  optional localhost 3D graph UI
+  multi-agent installer/config updater
+```
+
+### Architecture Disposition Ledger
+
+| Pattern | Behavior | ProjectAtlas disposition |
+|---|---|---|
+| Bootstrap/allocator/watchdog | Initializes allocator, UTF-8 process state, logging, memory limits, MCP/watcher/UI | Retain Rust process/runtime ownership; adopt only measurable startup/resource diagnostics. |
+| Index supervisor/recovery | Runs indexing in a child, detects no progress, retries with stable suspect-file quarantine | **Adopt behavior, redesign protocol** with a typed supervised Rust worker that cannot activate the database. |
+| Discovery/ignore | Supports nested/global Git ignores and a custom ignore engine plus hardcoded exclusions | **Retain ProjectAtlas** dynamic `.gitignore` and stricter atlas-only ignores; do not import hardcoded product invariants. |
+| Language detection | Filename, compound extension, extension, content/dialect, semantic YAML modes, override | **Adopt layered contract** through a generated typed registry. |
+| Grammar registry | Static AST node-kind/factory tables and embedded-language metadata | **Adopt declarative idea**, generate Rust adapters/capabilities/tests/SBOM from one lock manifest. |
+| Unified extraction | Iterative tree walk extracts definitions/imports/calls/usages/types/env/data-flow-like facts | **Adopt normalized pass shape**, but use typed Rust facts and non-vacuous fixtures. |
+| Coverage/quarantine | Distinguishes complete, partial parse, failed, ignored, oversized, and quarantined inputs | **Adopt and improve** with per-pass coverage, exact reasons, reconciliation, and no false-ready state. |
+| Project registries | Builds global definitions plus module-to-definition inverted candidates | **Adopt** as scoped candidate registries before resolution. |
+| Handwritten pseudo-LSP | Roughly 40K lines of language-specific static/type resolution | **Do not port**. Use small typed semantic providers, canonical Rust metadata/parser crates, explicit tiers, and measured scope. |
+| Generic graph buffer | String labels/types, JSON bags, per-object allocation, multiple RAM indexes | **Replace** with typed enums/records, compact vectors/arenas, stable keys, edge-owned identity, and evidence tables. |
+| SQLite store | Projects, hashes, nodes, edges, coverage, summaries, indexes, FTS5, vectors | **Adopt proven SQLite features**, extend current project-local store and migrations. |
+| Raw SQLite page writer | Manually writes b-tree pages and duplicates schema knowledge | **Reject**. Benchmark `rusqlite` prepared batches, transactions, pragmas, and staging. |
+| Full pipeline | Sequential/parallel extraction plus multiple global enrichment passes | **Adopt explicit stages**, deterministic ordering, cancellation, and pass-specific coverage. |
+| Incremental pipeline | Loads old graph, reparses changes, restores some edges, rewrites the DB/FTS; skips deeper resolution | **Replace** with changed-row persistence, dependency invalidation, atomic deltas, and full/incremental equivalence. |
+| FTS/BM25 | Contentless FTS5 with identifier normalization and capped reranking | **Adopt and improve** with exact candidate verification and honest totals. |
+| Semantic/vector | Bundled static token vectors, heuristic score blend, row-wise cosine scan | **Defer/replace** with optional evaluated model packs and ANN; lexical/graph search remains complete without it. |
+| Similarity/clones | MinHash/LSH candidate edges over AST leaf trigrams | **Defer until labeled**; retain deterministic candidates/caps, report estimated vs exact similarity honestly. |
+| Routes/services | HTTP/RPC/GraphQL/tRPC/broker/channel extraction and rendezvous | **Adopt product capability**, implement typed protocol identities and adversarial negative fixtures. |
+| Package/manifests | Extracts common language/build manifests with custom parsers | **Adopt format scope**, use canonical structured Rust parsers and typed package identities. |
+| Config/env/IaC/K8s | Links configuration, environment, containers, Terraform/Helm, K8s/Kustomize | **Phase after core graph**, one independently gated enrichment at a time. |
+| Tests/history | Adds test-production and Git co-change edges | **Adopt as inferred evidence**, keep confidence/provenance and independent toggles. |
+| Cross-repository linker | Scans cached DBs and exact/normalized protocol strings, writes cross edges | **Replace** with explicit-root read federation and typed canonical rendezvous identities. |
+| Graph query/Cypher | Custom read-only subset and in-memory bounded-hop execution | **Reject initially**; typed relations/architecture/impact/trace cover agent workflows with smaller surface. |
+| MCP tool inventory | Fourteen tools; some overlap ProjectAtlas, `ingest_traces` is a no-op | **Preserve ProjectAtlas names**; enrich existing calls and add at most architecture, impact, trace. |
+| Runtime traces | Accepts trace payload shape but does not create runtime edges | **No accepted-capability credit** until a separately specified real trace capability exists. |
+| ADR storage | Stores mutable ADR state beside derived graph data | **Do not adopt in this program**; ProjectAtlas/OpenSpec/docs retain decision ownership. |
+| Shared artifact | Consistent SQLite snapshot, zstd, integrity/sidecar checks, atomic replace | **Adopt concept**, add digest, optional trust/signature, root/revision policy, and preserve authored state. |
+| Watcher | Polls Git HEAD/dirty state, adaptively 5-60s, conservative root pruning | **Retain ProjectAtlas notify design**; add Git/content signature coalescing and conservative lifecycle only. |
+| Local UI | Custom HTTP server plus guarded loopback 3D graph | **Out of scope**. Use maintained Rust web crates if separately justified later. |
+| Installer/client integration | Detects and mutates many agent/editor configs with dry-run/plan | **Retain ProjectAtlas installer/drift model**; adopt only useful host smoke/plan cases. |
+| Tests/defects | Strong reproduce-first malformed/scale/platform corpus; defect evidence exposes gaps | **Adopt negative cases** as independently authored fixtures and release gates. |
+| Release/SBOM/security | Multi-platform builds, attestations, SBOM, checksums, but grammar/checksum drift exists | **Improve** with registry-driven per-component SBOM and self-testing fail-closed integrity gates. |
+
+### Architecture Comparison Map
+
+| Concern | Current ProjectAtlas | Architecture pattern baseline | Target ProjectAtlas |
+|---|---|---|---|
+| Agent workflow | Guided atlas-first funnel | Broad generic graph/query tool inventory | Keep funnel; graph enrichment is automatic behind existing calls. |
+| Language truth | Broad detection, approximately 15 specialized parsers/adapters, explicit fallback metadata | Large declarative registry, but capability depth, fixtures, and documentation can drift | Generated manifest for the accepted capability set, separate detect/parse/symbol/semantic/benchmarked tiers, no phantom mode. |
+| Semantic depth | Per-file typed symbols and small relation set | Deep but costly handwritten resolvers for about ten families | Typed project registries and focused Rust providers for the accepted semantic set; ambiguity/external outcomes first class. |
+| Graph schema | Typed symbols, four typed relations, transient IDs | Generic strings plus JSON property bags | Typed extensible graph, stable keys, typed evidence, candidates, confidence, slot/epoch provenance, and coverage. |
+| Full scan | Parallel filesystem/symbol indexing into project-local SQLite | Whole RAM graph then bulk/custom DB dump | Bounded worker extraction into a separate staging database; parent imports the inactive slot and atomically publishes its epoch. |
+| Incremental | Notify/per-path refresh foundations | Whole graph reload/rewrite and incomplete deeper resolution | Changed-row transactional deltas plus dependency-driven invalidation; canonical equivalence to full. |
+| Text search | Correct literal/regex/fuzzy behavior; candidate content scans | FTS5 BM25 plus capped reranking | FTS5 candidate acceleration with exact verification and correct fallback/totals. |
+| Semantic search | None required | Bundled heuristic vectors and full scan cosine | Optional model pack plus measured ANN only; no implicit network/model. |
+| Architecture/impact | Basic relations/health/ranking | Rich architecture facets and generic traversal | Three bounded ProjectAtlas tools, typed services, evidence, coverage and token limits. |
+| Cross-repository | Strong explicit per-call project isolation; no federation | Cache-discovered read/write cross-links | Explicit selected-root read federation; typed canonical endpoints; no hidden DB/global writes. |
+| Watcher | Notify + debounce + poll fallback | Git-only polling | Keep notify; add state-signature coalescing and dependency invalidation. |
+| Persistence safety | `rusqlite`, project-local authored metadata | WAL plus custom raw page writer and shared artifacts | `rusqlite` staging/transactions, loud errors, safe backup/import, digest/trust and authored-data preservation. |
+| Concurrency/failure | Bounded MCP task progress and cancellation surface | Child isolation, but single-threaded MCP dispatch and global pipeline lock | Supervised per-project workers, independent reads/projects, bounded CPU pools, no process-global serialization. |
+| Metrics | Token/read telemetry | Marketing/performance claims with incomplete reproducibility | Public paired-baseline correctness/performance/resource/agent-efficiency artifacts linked to claims. |
+
+## Goals / Non-Goals
+
+**Goals:**
+
+- Reach accepted capability-set parity and exceed the accepted baseline in correctness, determinism, incremental efficiency, resource use, query latency, agent simplicity, and evidence quality. Raw language, parser, node, edge, or tool counts do not define parity.
+- Preserve every existing ProjectAtlas CLI command and MCP tool name, accepted request shape, default behavior, response format, exit/error contract, and normal workflow while making graph enrichment automatic behind scan/watch and query services.
+- Support the Phase 0 accepted language/file capability set without equating detection or no-crash syntax support with symbol, relation, semantic, or benchmarked support.
+- Build independently structured Rust product logic with ProjectAtlas-native modules, types, method names, schemas, tests, and tool names.
+- Make all graph facts auditable through stable identity, evidence, resolution state, confidence, resolver version, slot/epoch provenance, and coverage.
+- Guarantee full/incremental canonical equivalence and fail loudly rather than serving corrupt, partial, stale, or misleading success results.
+- Prove superiority through pinned reproducible gates rather than assuming Rust is faster.
+
+**Non-Goals:**
+
+- No source-to-source translation, mirrored source directory/pass/function naming, copied comments/constants/tests, or unapproved alternate public API.
+- No rename or removal of existing ProjectAtlas MCP calls.
+- No custom Cypher parser, 3D UI, ADR subsystem, generic runtime-trace claim, or always-on model in this program.
+- No execution of repository code, language servers, package managers, build scripts, or repository-supplied parser binaries during normal indexing.
+- No universal semantic-depth claim for every syntax grammar.
+- No dead-code safety proof from inbound-edge absence.
+- No hidden cross-repository discovery, global mutable graph DB, or implicit cross-root write.
+- No hand-written SQLite pages or duplicated schema implementations.
+
+## Decisions
+
+### Decision 1: Preserve Public ProjectAtlas Vocabulary, Independently Name New Internals
+
+Existing ProjectAtlas tool/command/type terminology remains stable. New internal modules and methods are named from their ProjectAtlas ownership and domain role; copied or mirror-shaped source topology is prohibited. Industry-standard names such as SQLite, FTS5, BM25, MinHash, ANN, tree-sitter, BLAKE3, TOON, HTTP, gRPC, GraphQL, and Kubernetes remain unchanged because renaming public algorithms/protocols would reduce clarity.
+
+Implementation review SHALL compare new source topology and identifiers against the Architecture Disposition Ledger and current ProjectAtlas crate ownership. A behavior may be reimplemented, but its code structure, comments, constants, fixtures, and naming must arise from this design and ProjectAtlas conventions. This is a technical independence and maintainability rule, not a cosmetic mass rename after copying.
+
+**Alternative considered:** translate implementation files and rename symbols afterward. Rejected because it imports unrelated ownership decisions and does not produce an independent or better architecture.
+
+### Decision 2: Keep Graph Complexity Behind Existing Calls
+
+`scan`, `watch_once`, and the watcher maintain the active graph automatically. Existing file/folder ranking consumes available graph signals without new required arguments. File summaries add only a bounded relationship digest, coverage, and typed next-step recommendations. Full evidence stays in `atlas_symbol_relations` or the new analysis tools. Graph schema version, accepted relation families, capability tiers, active search backend, slot/epoch state, and optional-pack lifecycle are surfaced through additive fields on the existing `atlas_settings`; this program adds no separate schema or capability tool.
+
+Only `atlas_architecture`, `atlas_impact`, and `atlas_trace` may be added by this program. They are optional expert/informational surfaces and are never prerequisites for graph freshness or normal startup, navigation, search, file selection, summary, outline, relation, or slice work. `atlas_symbol_relations` gains optional direction/kind/depth/evidence filters while preserving old defaults. Exact search modes keep their semantics and deterministic lexical fallback remains available even when FTS acceleration is unavailable. A generated inventory and golden corpus cover every existing CLI and MCP surface, including names, arguments, defaults, output formats, exit/error behavior, root isolation, and recorded startup/navigation sequences; old clients do not need more calls.
+
+**Alternative considered:** clone fourteen generic tools and a Cypher surface. Rejected because it expands agent choice and token cost while duplicating workflows already represented by ProjectAtlas services.
+
+### Decision 3: Generate One Honest Language Capability Registry
+
+Create a version-controlled registry/lock input that owns identifier, aliases, filename/extension/content rules, parser artifact, ABI, embedded-language adapters, feature pack, extraction queries, semantic provider, fixtures, source/version/digest/license metadata, and capability tiers. Code generation emits:
+
+- Rust detection and adapter tables;
+- capability/settings output;
+- parser/fixture conformance tests;
+- `language-capabilities.json` for docs/releases;
+- per-component SBOM/provenance inputs;
+- drift checks for README and packaged assets.
+
+Phase 0 freezes an accepted capability set from product value, user workflows, parser quality, supply-chain status, platform support, and resource cost. The initial manifest contains at least 159 runnable language/file modes mapped to at least 157 verified parser capabilities after aliases and parser reuse are normalized. Capability-set parity is achieved only when every accepted entry passes its declared detect/parse/symbol/relation/semantic/benchmark tier; deliberately excluded entries remain listed with reasons and may be accepted in later revisions. Aliases, semantic modes, and parser reuse are disclosed rather than counted as unique parser implementations. A fixture with zero expected declarations earns parse/no-crash tier only, and the breadth floor never substitutes for capability evidence.
+
+**Alternative considered:** copy a large grammar inventory into Cargo dependencies and hand-maintain match expressions. Rejected for binary size, compilation time, drift, and inaccurate claims.
+
+### Decision 4: Use Trusted Core Parsers Plus An Explicit Broad Grammar Pack
+
+Current trusted grammar crates remain available for priority languages while Phase 0 benchmarks a broad installable grammar pack. The preferred broad-pack form is versioned tree-sitter WASM parser artifacts behind a separate Rust pack-host process with strict time/memory/input limits; this avoids dynamically loading arbitrary native libraries and isolates broad syntax support from the core executable. If WASM throughput fails the performance gate, a vetted generated-parser pack MAY be selected, but ProjectAtlas-owned parsing orchestration, extraction, resolution, storage, and query logic remains Rust and every parser remains pinned/inventoried.
+
+The broad pack is installed explicitly and can be mirrored for offline use. Normal scan/query never downloads or compiles a parser. The default feature graph and core executable SHALL NOT link, load, or initialize a broad grammar/WASM runtime, ANN backend, tokenizer/model runtime, or model asset. Pack manifests may be inspected as data; execution occurs only by starting the separately installed, supervised pack process after an explicit enablement or pack-targeted task. Core operation remains useful without a pack and reports precise tiers.
+
+The following are hard per-platform default-core release ceilings, measured without optional packs on the declared release runners and permanent benchmark corpora. Phase 0 MAY tighten them; raising one requires a reviewed design change rather than rebasing the measurement:
+
+| Default-core property | Hard ceiling |
+|---|---|
+| Stripped release executable | 48 MiB |
+| Installed core payload, excluding symbol/debug files and optional packs | 64 MiB |
+| Cold `runtime-info` process completion, p95 | 250 ms |
+| Cold MCP process start through successful initialize and tool readiness, p95 | 500 ms |
+| Idle MCP RSS 30 seconds after initialize with no scan or pack process | 96 MiB |
+| Peak RSS for the declared no-pack large-corpus full scan | 512 MiB |
+
+Each optional pack has separate executable/install/RSS/startup budgets in its manifest and cannot spend the default-core allowance. A default-core budget failure blocks release even if an aggregate comparison is favorable.
+
+**Alternatives considered:** runtime compilation of repository grammars; dynamic loading of unverified shared libraries; an always-bundled monolith. Rejected for supply-chain, startup, crash-isolation, and package-size reasons.
+
+### Decision 5: Use Typed Facts, Stable Keys, And Explicit Resolution
+
+Extraction emits typed syntax facts, not resolved edges. Project-wide provider stages build package/module/scope registries and candidate indexes, then produce typed resolution outcomes. The graph contract separates:
+
+| Concept | Required fields |
+|---|---|
+| Entity | stable key/version, project/repository, kind, qualified identity, normalized path/external identity, source span, language/adapter, slot/last-changed epoch |
+| Relation | stable key/version, source/target stable keys or unresolved identity, typed kind/payload, resolution state, confidence, resolver/version, slot/last-changed epoch |
+| Evidence | origin path/span or manifest/protocol/Git evidence, direct/inferred class, bounded explanation |
+| Candidate set | ambiguous/unresolved source, typed candidates, rejection reasons, total/returned/truncated |
+| Coverage | file/stage/relation class, complete/partial/failed/ignored/quarantined/stale, counts, limits/reason, slot/last-changed epoch |
+
+Confidence is a small typed class with documented meaning, not arbitrary precision theater. `resolved`, `ambiguous`, `unresolved`, `external`, `inferred`, and `truncated` are not collapsed. Stable keys use a versioned BLAKE3 encoding of owning project/repository identity, entity kind, normalized path or external package identity, qualified name, and documented overload/signature disambiguator.
+
+Root binding is a typed identity boundary. Normal mismatched opens stop at `RebindRequired`; an explicit verified move on the existing root-set surface transitions through `Rebinding` to `Bound` in one database transaction and preserves `ProjectInstanceId`. A copy/clone instead initializes independently or explicitly detaches to a new instance ID. This program does not add identity adoption, and snapshot import never replaces the destination identity.
+
+Every accepted relation family has one generated traceability row naming its stable serialized kind, owning module, producers, consumers, required evidence, resolution and confidence rules, capability tier, feature/pack boundary, schema migration, query surfaces, fixtures, precision/recall gate, and OpenSpec task/test evidence. A relation family cannot enter the shared graph merely because an extractor can emit a string; missing ownership, consumer, evidence, or benchmark data keeps it adapter-private or deferred. `atlas_settings` renders this accepted relation-family manifest without creating a new schema tool.
+
+**Alternative considered:** generic string labels and JSON property bags. Rejected because identity, migrations, queries, validation, and Rust compiler coverage all become weaker.
+
+### Decision 6: Implement Small Semantic Providers, Not A Pseudo-LSP Monolith
+
+The initial accepted semantic-provider set covers Go, C/C++/CUDA, PHP, Perl, Python, JavaScript/JSX/TypeScript/TSX, C#, Java/Kotlin, and Rust. Each provider consumes normalized facts and package metadata through a common typed interface but owns only the language-specific resolution rules that cannot be expressed generically. Canonical Rust crates and structured metadata are preferred for manifests, package/module rules, and compiler formats. External language-server processes are not required for normal ProjectAtlas correctness.
+
+Every provider ships positive, negative, ambiguity, external dependency, malformed, and cross-file tests. ProjectAtlas abstains when static evidence is insufficient. Objective-C, Zig, Vue, and PowerShell retain current extraction and can advance independently without blocking the accepted semantic-provider set.
+
+**Alternative considered:** port the entire handwritten type system/resolver collection. Rejected due to maintenance cost, correctness risk, and conflict with ProjectAtlas's focused product boundaries.
+
+### Decision 7: Publish Through Two Derived-Data Slots And Epochs
+
+The live database owns exactly two physical core structural/lexical derived-data slots plus `(active_slot, active_epoch)` metadata. A supervised full scan writes only to a parent-created separate staging database. The worker cannot open the live database for writes or choose a slot. After read-only staging validation, the parent re-discovers and fingerprints the complete source/config/compiler-metadata input manifest; any drift aborts, retries, or replans within the task budget. Only then does the parent start one live-database transaction, clear/replace the inactive slot from staging, assign the next epoch, reconcile schema/root/coverage/counts/UTF-8/endpoints/FTS state, and atomically flip `active_slot` and `active_epoch`. Normal graph, coverage, and FTS queries filter by `active_slot` only. Per-row `last_changed_epoch` is freshness/provenance metadata and is never a visibility predicate.
+
+Optional semantic/vector storage is pack-owned and separately published. `StructuralGenerationInputs` contains only the source, repository, ignore/configuration, compiler-metadata, parser/registry/provider, feature, seed, and hard-budget identities that determine core structural/lexical output; it never contains model, tokenizer, model-input, or preprocessing identity. `SemanticGenerationInputs` contains one captured structural `(active_slot, active_epoch)` plus model, tokenizer, preprocessing, normalized model-input, feature, seed, and semantic-budget identity. Its active generation binds to that complete semantic tuple. A structural flip or incremental epoch advance makes an older semantic generation stale immediately, while a model/tokenizer/preprocessing-only change invalidates and rebuilds only the semantic generation. Semantic/hybrid queries require a separately ready compatible semantic generation; lexical/structural publication never waits for or rolls back because vector work fails.
+
+The previously active slot becomes the retained rollback slot after a full publication. It remains intact until the next successful full publication needs that inactive slot or an explicit bounded cleanup/backup policy removes rollback eligibility. The design does not create append-only slot chains or a table copy per epoch.
+
+Incremental work computes a delta against the active slot, including affected inbound references and provider/global-enrichment dependency keys. It validates the delta, then updates/deletes/inserts only affected rows in that slot and advances `active_epoch` in one transaction. Unchanged rows keep an older `last_changed_epoch` but remain visible because they belong to the active slot. Readers observe the pre-commit or post-commit epoch, never a mixture; SQLite rollback preserves the prior epoch on failure. Authored purpose/telemetry/settings tables are outside both disposable slots.
+
+Parser, registry, provider, compiler-metadata, or configuration version changes participate in core invalidation through `StructuralGenerationInputs`. Similarity, architecture communities, call-only federation results, coverage, aggregates, and FTS are recomputed or marked stale when their declared input dependency changes. Model, tokenizer, preprocessing, normalized model-input, or captured structural-tuple changes participate only in `SemanticGenerationInputs` and invalidate the separate semantic generation; optional vector rebuilding and activation occur only through the semantic lifecycle. Stale results are never silently restored.
+
+**Alternatives considered:** whole-graph RAM reconstruction for one-file changes; append-only overlay chains or a physical table set for every epoch. Rejected respectively for write amplification and query/migration complexity.
+
+### Decision 8: Supervise Risky Work Without Serializing Projects
+
+A hidden ProjectAtlas index-worker mode uses a length-delimited typed protocol. The parent selects the project, configuration, registry, budgets, and staging destination. The child receives no authority to activate or replace the live database. Heartbeats identify current stage and bounded file identity; no-progress and resource thresholds terminate the child. Repeated deterministic suspect evidence may quarantine a file while coverage remains partial and visible.
+
+On Windows, the parent assigns the child to a kill-on-close Job Object before accepting work and configures supported process-memory/CPU limits. On Unix, the child starts in its own process group with supported `rlimit` ceilings, while the parent independently enforces wall-time, no-progress, cancellation, and sampled resource watchdogs and terminates the whole group. Platform reports distinguish kernel-enforced limits from sampled/watchdog limits. A broad WASM pack additionally receives fuel or epoch-interruption deadlines and a hard linear-memory cap with no inherited filesystem/network capability unless explicitly required by a separately reviewed pack contract. Native parser process isolation limits crash/resource blast radius; it is not described as a hostile-code sandbox or complete filesystem-security boundary.
+
+The effective resource envelope uses typed precedence: per-call override, project configuration, then a derived default, followed by unavoidable hard clamps. Derived defaults use the minimum applicable host, Linux cgroup v2/v1 CPU-memory-cpuset/quota, Windows Job Object, and ProjectAtlas safe limits. Reports preserve requested, configured, derived, effective, source, and kernel-enforced versus watchdog/advisory values; invalid zero, negative, overflowed, contradictory, or unsupported limits fail explicitly. Platform discovery stays behind narrow `cfg` adapters and uses maintained safe wrapper crates where they meet the contract.
+
+CPU parsing uses a bounded Rayon pool; orchestration and process I/O use existing synchronous/runtime patterns or Tokio only where it removes real complexity. Separate project-local databases can index concurrently. Read-only queries remain available against the active slot/epoch while a full scan builds its separate staging database. There is no global pipeline lock.
+
+**Alternative considered:** keep all parser/model work in the long-lived MCP process. Rejected because generated parsers and optional native model runtimes can abort outside Rust unwinding and would spend the default-core idle/startup budget.
+
+### Decision 9: Keep Lexical Retrieval Complete And Treat FTS/Semantics As Accelerators
+
+Deterministic lexical retrieval is an always-available default-core capability. The current exact matcher and bounded deterministic fallback remain authoritative when FTS5 is absent, fails runtime preflight, does not support the selected tokenizer, or cannot safely narrow a regex/fuzzy/short/punctuation query. A migration ID assigned from the repository migration ledger MAY add an external-content/trigram candidate FTS table for file text after benchmarks prove support, plus an identifier-oriented FTS table using Unicode tokenization and deterministic camel/snake/qualified-name expansion. FTS is conditional acceleration: it narrows candidates, the exact matcher verifies final lines, differential tests require result equivalence, and `atlas_settings` reports the active backend and fallback reason.
+
+Optional semantic retrieval is a separately installed and supervised feature pack. Phase 0 and the optional-semantic phase evaluate maintained Rust-compatible ANN backends and local model runtimes on labeled data, package size, licensing, cross-platform support, tolerance-based determinism, update cost, RSS, and latency. No ANN/model runtime is linked or initialized in default core, and no model is bundled or downloaded implicitly. No backend/model choice is committed until the quality gate passes.
+
+The per-project semantic lifecycle uses the single typed state contract from the semantic specification: `Absent`, `InstalledDisabled`, `EnabledIndexMissing`, `Building`, `Ready`, `Stale`, `Updating`, `RollbackReady`, `Incompatible`, `Failed`, and `Removing`. Its transition table defines allowed operations, active/rollback generations, and readiness. Install verifies platform, manifest, digest, license, runtime, and separate resource budgets before `InstalledDisabled`; enable/build publishes a derived semantic index against the complete `SemanticGenerationInputs` identity only after reconciliation; a structural epoch change makes the selected generation `Stale`; disablement enters `InstalledDisabled` immediately; update retains last-known-good rollback data; and removal deletes only pack-owned derived data/assets before `Absent`. A failed semantic task never flips or invalidates the structural slot.
+
+Normal `scan`, `watch_once`, and watcher completion means the required structural/lexical pipeline published successfully. If semantic maintenance was requested or auto-scheduled, its task/state is reported separately and does not turn structural success into failure. Omitted or explicit lexical search remains deterministic and independent of pack state. Explicit semantic or hybrid search succeeds only in `Ready` or `RollbackReady`; every other lifecycle state returns a typed capability error and never silently executes another mode. Program/phase completion cannot claim semantic capability until install, enable, build, stale-update, update, rollback, failure, disable, removal, offline, and cross-platform lifecycle tests pass.
+
+**Alternative considered:** embed a static token-vector blob and scan every vector. Rejected because retrieval quality is ungrounded and normal query complexity scales linearly with vector count/dimensions.
+
+### Decision 10: Expose Typed Architecture, Impact, And Trace Services
+
+`projectatlas-core` owns only reusable graph identities, relation/evidence types, selector/filter newtypes, and hard-budget primitives. `projectatlas-service` owns use-case request objects, reports, algorithms, and cursor semantics for relations, architecture, impact, trace, and federation, preserving the acyclic `service -> db -> core` direction. Architecture facets are computed from direct typed facts first; optional deterministic community/layer inference is clearly separated. Impact returns evidence paths and affected identities, not an invented risk score. Trace returns node-simple paths: one stable entity identity may appear at most once in a path, so cycles cannot be represented by taking a different edge back to a visited node. Dead-code output is candidate-only and gated by entry-point/export/framework/dynamic/unresolved coverage.
+
+All query budgets include depth, rows, visited nodes, expanded edges, wall time, cancellation, and memory. Result ordering, totals where knowable, and truncation are deterministic. Every opaque cursor binds a cursor-format version, canonical project root identity or explicit ordered federation roots, `active_slot`, `active_epoch`, graph schema/capability version, query kind, normalized selectors/filters/relation families/order, and page-budget identity. A checksum detects accidental corruption; any binding mismatch, epoch change, root change, or unsupported cursor version returns a typed stale/invalid-cursor error rather than resuming against different data. CLI/MCP adapters only parse typed parameters and serialize service output.
+
+**Alternative considered:** general graph query language first. Rejected until real agent-task evidence demonstrates recurring needs that typed services cannot cover.
+
+### Decision 11: Federate Only Explicit Call Roots And Fail Closed
+
+Federation is query-time and call-only. Each approved relation/architecture/impact/trace request supplies its complete ordered root set explicitly; roots are not inherited from a prior call, remembered in server state, discovered from caches, or expanded from the active single-project default. Each root must already own a valid project-local database and is opened with SQLite read-only/query-only flags. Entities remain project/repository qualified. Protocol-specific canonical identities match packages, HTTP, gRPC, GraphQL, tRPC, channels/topics, configuration, and data/schema references with original evidence and ambiguity.
+
+Before query execution, ProjectAtlas validates every requested root's canonical binding, schema/capability compatibility, integrity/readability, active slot/epoch, revision/dirty-state metadata, and path authorization. Any missing, writable-only, mismatched, corrupt, unsupported, changed-during-bind, or otherwise invalid root fails the entire call before returning graph rows; silently dropping a root or returning a plausible partial federation result is prohibited. Federated calls never write participating databases, persist cross-root edges, schedule background work, or mutate single-project state.
+
+A persistent federation cache is outside this change. If future scale evidence requires one, it needs a separate specification for derivation, trust, invalidation, and deletion and still cannot become an authored global source of truth.
+
+**Alternative considered:** scan cache directories, retain an implicit root set, partially answer around invalid roots, or mutate matching databases. Rejected for correctness, security, concurrency, and explicit-root isolation.
+
+### Decision 12: Make Snapshot Sharing Optional And Integrity-First
+
+Snapshots use SQLite online backup or `VACUUM INTO`, zstd, a cryptographic digest over metadata plus payload, schema/runtime/registry/project/revision metadata, decompression/size limits, temporary-path `quick_check`, required-table/count reconciliation, stale destination sidecar removal where replacement is unavoidable, and atomic activation. Trust/signature policy is optional but explicit. Dirty overlays are never represented as a clean commit artifact without a content/state digest.
+
+Authored purpose, review, settings, and telemetry state is never replaced by an imported derived graph. Import writes only the inactive derived-data slot or preserves/reconciles authored tables through a typed migration before an atomic slot/epoch flip.
+
+**Alternative considered:** raw-copy the main SQLite file in WAL mode. Rejected because committed WAL frames and concurrent checkpointing make the main file alone an unsafe snapshot.
+
+### Decision 13: Measure Superiority With A Pinned Public Harness
+
+The harness records exact commits, repositories, ignore profiles, hardware/OS, toolchains, commands, timeouts, warmups/repetitions, failures, raw results, and machine-readable summaries. It measures:
+
+- per-language/per-relation precision, recall, F1, abstention, span and coverage;
+- full/incremental and 1/N-worker canonical equivalence;
+- Unicode and platform correctness through real processes;
+- cold/warm indexing, one-file/fan-out/no-change updates, writes/WAL, RSS, DB/package bytes;
+- simple/bounded graph query p50/p95 and cancellation;
+- lexical/semantic IR quality and cost;
+- blinded agent answer quality, unsupported claims, tokens, reads, calls, and time.
+
+Before a benchmark run, the harness freezes accepted capabilities, corpora, primary endpoints, scoring rubrics, equivalence/tolerance rules, minimum sample sizes, random seed, and exclusion policy. Timeout, crash, missing output, invalid serialization, or unsupported accepted capability counts as failure rather than disappearing from the denominator. Primary endpoint confidence intervals use a deterministic paired bootstrap with at least 10,000 resamples; proportion-only capability gates additionally publish Wilson intervals, and Holm correction protects families of primary comparisons.
+
+The decision functions are explicit:
+
+- **Accepted capability-set parity:** every accepted capability independently meets its declared correctness/coverage threshold and compatibility contract. Aggregate success cannot hide a failed language, relation family, platform, or query class.
+- **Performance superiority:** all hard absolute and per-resource budgets pass, the upper corrected adverse confidence bound for paired geometric-mean ProjectAtlas/baseline cold-index time and peak-RSS ratios is at most `0.80`, and the upper bound of each required corpus's runtime ratio is at most `1.10`. Writes, DB bytes, package/install bytes, and every other named resource receive independent non-regression and claim decisions; one composite score cannot trade memory or storage failure for speed.
+- **Agent-quality superiority:** tasks are paired, blinded, and order-randomized under a frozen rubric. The point estimate for normalized quality improvement is at least five percentage points and the corrected 95% lower confidence bound is above zero. A high-baseline 95% absolute-quality result may be reported separately but does not replace the paired superiority rule and is not called superiority unless that rule also passes.
+- **Retrieval/semantic acceptance:** lexical baselines remain complete; MRR, nDCG@10, Recall@10, latency, and cost use paired queries and declared non-inferiority/superiority margins. Vector preprocessing is exact and seeded, while floating vector values compare with backend-declared absolute/relative tolerances; cross-platform bit identity and ANN internal topology are not required. Top-k overlap and labeled recall must still meet frozen thresholds.
+
+Query latency has two non-interchangeable tracks. Warm SQLite/service benchmarks use an already-open database after declared warmups and exclude process start and JSON-RPC serialization; their reference-host goals are 1 ms for simple indexed name/filter/one-hop queries and 50 ms for the declared bounded three-hop query. Warm end-to-end MCP benchmarks use an already-started server but include JSON-RPC framing, project routing, service execution, TOON/JSON serialization, and response delivery; their reference-host goals are 50 ms and 150 ms respectively. Phase 0 pins an eligible runner class and a pre-result tolerance factor no greater than 1.25; raw measured latency is never divided by a calibration score, and uncalibrated hosted-runner results are informational. Cold process/MCP startup is measured only against Decision 4's fixed-runner startup budgets. Paired same-host comparisons against each baseline remain mandatory.
+
+ProjectAtlas must be correct first. A superiority claim requires every applicable decision function and compatibility/resource gate to pass. Failures remain published and block the claim; changing a margin after seeing results creates a new benchmark version and requires rerunning every baseline.
+
+**Alternative considered:** repeat marketing wall-clock and manual PASS claims. Rejected because they cannot support engineering or release decisions.
+
+### Decision 14: Split Large Modules Only At First Touch
+
+There is no standalone repository-wide module-splitting phase. When an implementation task first touches a large file and the accepted change would otherwise mix ownership or make focused testing materially harder, extract only the smallest existing ownership boundary needed by that task. Preserve behavior with focused tests and compatibility re-exports where an internal path is already consumed. Untouched large files are not split merely to match this target map, which is need-driven guidance rather than a mandatory end-state checklist:
+
+```text
+projectatlas-core/src/
+  graph/{entity,relation,evidence,identity,resolution,coverage,selector,limits}.rs
+  language/{registry,capability}.rs
+
+projectatlas-db/src/
+  schema/{mod,migrations,slots}.rs
+  graph/{entities,relations,evidence,coverage}.rs
+  search/{file_fts,symbol_fts}.rs
+  existing purposes/health/telemetry modules
+
+projectatlas-symbols/src/
+  registry/{generated,adapter,embedded}.rs
+  extraction/{tree_sitter,structural,manifest,fallback}.rs
+  resolution/{registry,provider,candidates}.rs
+  languages/<projectatlas-native provider names>.rs
+
+projectatlas-service/src/
+  ranking.rs, search.rs, summary.rs, slice.rs, relations.rs
+  query/{common,architecture,impact,trace,federation}.rs
+
+projectatlas-cli/src/
+  index/{full,incremental,worker,publication}.rs
+  watch/{events,state_signature,reconcile}.rs
+  mcp/{navigation,graph,index,admin,purpose,telemetry}.rs
+```
+
+`projectatlas-index` becomes a crate only if another real binary must consume scan/index orchestration without `projectatlas-cli`; a hypothetical consumer is insufficient. Semantic indexing, ANN, tokenizer, and model-runtime code remains owned by the optional semantic pack outside the default core crate graph and process. Speculative crates and traits are prohibited.
+
+### Decision 15: Win Performance Through Data Layout And Less Work
+
+Rust is an enabler, not the benchmark result. The graph hot path uses compact typed vectors/arenas, numeric internal IDs, string/path interning, relation-kind-owned identity fields, bounded worker-local batches, and deterministic bulk merge. It avoids one heap allocation per fact and avoids JSON serialization/deserialization between extraction, persistence, adjacency lookup, and traversal. Persistence uses measured prepared batches and staging publication; queries use source/target/kind/package/stable-key/slot indexes; optional pack-owned vectors use ANN rather than full scans.
+
+The primary speed advantage for normal development comes from doing less work: content/state coalescing, dependency-driven invalidation, changed-row transactions, and concurrent queries against the active slot/epoch. Full scans retain parser reuse, bounded Rayon parallelism, project-wide candidate indexes, and batched writes, but memory remains bounded rather than requiring an unconstrained whole-repository graph in RAM.
+
+Every optimization must preserve stable identities, coverage reconciliation, deterministic 1/N-worker output, and per-language graph correctness. Phase 0 records allocation/RSS/write/query profiles before implementation; later phases compare each optimization against the last correct baseline and the pinned comparison baseline.
+
+**Alternatives considered:** rely on Rust alone; hold an unconstrained generic graph in RAM; copy a handwritten SQLite page writer; trade correctness/coverage for throughput. Rejected because none provides a maintainable or truthful superiority result.
+
+### Decision 16: Give Plugin Installation One Managed Lifecycle Owner
+
+Phase 0 first proves that the official plugin store and host expose the lifecycle capability needed for a true one-action clean-host install. If the host cannot invoke or provision the required runtime path, that is a release blocker rather than permission to hide a manual installer step. The runtime-side ProjectAtlas host-lifecycle service owns a typed plan, managed-artifact journal, apply/verify sequence, compensating rollback, last-known-good recovery, and preservation policy across runtime, skill, plugin, and MCP registration. Shell and PowerShell remain thin platform bootstrap/download/launch adapters; they do not independently own version selection, host reconciliation, repair, or rollback policy.
+
+Filesystem, plugin-manager, and MCP-registry updates are not one atomic transaction. The implementation therefore records every intended and completed managed action, verifies the resulting runtime and real `atlas_init`/overview path, and either restores the last-known-good managed state or fails closed with a precise recovery command. Project-local databases and authored purpose/settings/telemetry are never managed installation artifacts and survive update, rollback, repair, removal, and reinstall by default.
+
+**Alternative considered:** continue expanding independent PowerShell and shell policy or call the cross-system sequence transactional. Rejected because duplicated lifecycle rules drift and the participating host/filesystem registries do not provide one atomic transaction.
+
+## Target Runtime Architecture
+
+```text
+existing CLI / MCP names
+          |
+          v
+thin typed adapters
+          |
+          v
+projectatlas-service
+  navigation/ranking/search/summary/slice
+  relations/architecture/impact/trace/federation
+          |
+          +-------------------------------+
+          |                               |
+          v                               v
+projectatlas-db                      index coordinator
+  active slot / epoch                  |
+  lexical / conditional FTS            v
+  authored purposes/telemetry       supervised worker
+          ^                         discovery + extraction
+          |                         project registries
+          |                         semantic providers
+          |                         gated enrichments
+          |                               |
+          +---- validate + atomic publish-+
+
+optional broad grammar pack -> supervised pack-process boundary
+optional semantic pack      -> supervised ANN/model process boundary
+explicit call roots         -> read-only/query-only federation boundary
+
+official plugin-store action -> thin platform bootstrap -> typed host-lifecycle plan/journal -> verified runtime + skill + MCP registration
+```
+
+### Pipeline Stages
+
+1. **Select and verify project:** canonical root, DB/config binding, ignore policy, registry/model capabilities, compiler-metadata identity where consumed, and the typed effective resource envelope after host/container/job clamps.
+2. **Discover and fingerprint:** dynamic `.gitignore`, atlas ignores, BLAKE3 identity, language detection, Git/content state signature.
+3. **Plan:** full staging-database rebuild or active-slot incremental delta; parser/provider/config invalidation; dependent files/global enrichments.
+4. **Extract structure:** repository/folder/file/package facts and exact coverage rows.
+5. **Extract syntax:** bounded parallel parsers emit normalized facts and parse/error spans.
+6. **Build registries:** packages/modules/scopes/definitions plus inverted candidate indexes.
+7. **Resolve:** provider-owned import/export/call/reference/type outcomes with evidence and ambiguity.
+8. **Enrich:** independently toggled structural tests, routes/services, config/env, IaC/K8s, history, and similarity candidates.
+9. **Index retrieval:** always build deterministic lexical state; populate conditional file/symbol FTS for the same staging snapshot only when preflight allows it. Optional semantic maintenance is a separate pack task bound after structural publication.
+10. **Reconcile:** counts, coverage, stable-key uniqueness, edge endpoints, UTF-8, schema, integrity, deterministic order.
+11. **Publish:** parent imports the validated full snapshot into the inactive slot and atomically flips `(active_slot, active_epoch)`, or transactionally updates the active slot and advances its epoch for an incremental delta.
+12. **Maintain:** preserve the prior slot as bounded rollback state, report semantic-pack freshness/tasks separately, and emit telemetry/task results. Call-only federation has no persistent cache or maintenance job.
+
+### All-Surface Compatibility Contract
+
+Phase 0 SHALL generate a complete compatibility manifest from the registered MCP tool inventory and CLI command tree, then replay a golden request/response/error corpus against every entry. The groups below organize that manifest; they do not exempt an omitted alias or command. For each existing MCP tool and every CLI equivalent, the contract freezes names and aliases, arguments/request schemas, defaults, root selection and `project_path` isolation, output formats, boundedness/pagination, stdout/stderr placement, exit status or typed MCP error behavior, task semantics, and current startup/navigation call flows. Additive fields must remain deserializable by recorded clients, and graph enrichment cannot require an extra call.
+
+| Existing surface family | Automatic enhancement | Compatibility rule |
+|---|---|---|
+| `atlas_init`, `atlas_config`, `atlas_root`, `atlas_root_set`, `atlas_set_project_path` | Graph defaults and root/schema capability preflight where applicable | Existing initialization, config precedence, project-local DB ownership, and root-selection behavior remain unchanged. |
+| `atlas_ignore_list`, `atlas_ignore_init_gitignore`, `atlas_ignore_add`, `atlas_ignore_remove`, `atlas_lint`, `atlas_map` | Capability-aware diagnostics and graph health where additive | Dynamic `.gitignore` inheritance, stricter atlas-only ignores, purpose levels, report modes, and existing exit/error contracts remain authoritative. |
+| `atlas_runtime_info`, `atlas_mcp_config`, `atlas_settings` | Default-core budgets; graph schema, accepted capabilities/relation families, backend, slot/epoch, and semantic-pack state | Existing fields remain; reporting is additive and bounded. No separate schema/capability tool is introduced. |
+| `atlas_reset_index`, `atlas_strip_legacy_purpose`, and registered aliases/legacy entries | Slot-aware derived-data reset where relevant | Existing names, preview/confirmation/safety behavior, authored-data preservation, formats, and errors remain exact; legacy entries are tested, not silently dropped. |
+| `atlas_scan`, `atlas_symbols_build`, `atlas_watch_once`, `atlas_watch_status`, `atlas_task_status`, `atlas_task_cancel` | Staged full publication, active-slot deltas, coverage, and separate optional-pack tasks | Existing orchestration and progress/cancellation contracts remain; structural completion does not wait for an optional semantic task unless explicitly required. |
+| `atlas_overview`, `atlas_folders`, `atlas_files`, `atlas_next` | Slot/epoch and bounded graph/capability digests plus graph-aware ranking reasons | No new required argument or workflow call; exact path and purpose behavior wins over inferred signals. |
+| `atlas_file_summary`, `atlas_outline`, `atlas_search`, `atlas_slice`, `atlas_symbols`, `atlas_symbol_relations` | Richer coverage, stable identities, conditional FTS, relation filters, evidence, and bound cursors | Old requests and defaults retain their core shape and meaning; literal/regex/fuzzy completeness and repository-relative source safety remain exact. |
+| `atlas_health`, `atlas_health_resolve`, `atlas_purpose_queue`, `atlas_purpose_set`, `atlas_purpose_review` | Graph-aware diagnostics and relation-family purpose context where bounded | Existing purpose text, review state, ordering, levels, and authored persistence are never treated as disposable derived data. |
+| `atlas_token_report`, `atlas_parity_report`, `atlas_session_brief` | Graph-aware reads avoided, accepted-capability status, and bounded next-step hints | Existing accounting definitions, response formats, and call sequences remain compatible; new measurements are separately labeled. |
+| New `atlas_architecture`, `atlas_impact`, `atlas_trace` plus CLI equivalents | Bounded facets, evidence-backed affected identities, and node-simple paths | Typed filters, cursor bindings, and deterministic limits apply; there is no Cypher surface or unsupported risk claim. |
+
+## Phased Delivery
+
+Every phase ends with a one-page generated scoreboard rather than a prose-only status. The scoreboard reports accepted-capability correctness, full/incremental performance, RSS/writes/bytes, query latency, agent quality/tokens/reads/calls, production code/dependencies, and public tool growth. Reviewers must be able to answer: what became measurably better, what complexity was added, what was deleted or deferred, and whether the next phase is still the smallest releasable step. A feature that cannot justify its cost remains optional/off or is removed.
+
+| Phase | Deliverable | Gate to continue |
+|---|---|---|
+| 0. Truth and baselines | Generated architecture/capability inventory, pinned corpus, calibrated benchmark harness, naming/independence rules, parser-pack/FTS/ANN spikes, plugin-host feasibility, lifecycle ownership, native/FFI inventory | Reproducible baseline and recorded architecture decisions; no implementation claim. |
+| 1. Storage and lexical foundation | First-touch module extraction where needed, ledger-assigned transactional migrations, stable IDs, typed evidence/resolution/coverage, conditional file/symbol FTS, compatibility adapters | Generated all-surface golden tests, migration/purpose preservation, lexical equivalence with and without FTS, no performance regression. |
+| 2. Broad structural intelligence | Generated registry, broad pack, normalized extraction/embedded parsing, package/manifests, non-vacuous fixtures | Every accepted capability passes its declared tier; platform shards; no phantom/docs/SBOM drift. |
+| 3. Semantic graph and incrementality | Project registries, accepted semantic providers, inbound invalidation, supervised worker, full/incremental equivalence | Per-language precision/recall, 1/N determinism, mutation equivalence, Unicode/crash/resource gates. |
+| 4. Agent analysis | Automatic graph ranking/summary digest, enriched relations, architecture/impact/trace | Old-call compatibility, bounded traversal, agent workflow same/fewer calls/tokens, query latency gates. |
+| 5. Typed enrichments and federation | Routes/services, tests, config/env, IaC/K8s, history, explicit-root cross-repository matching | Per-protocol positive/negative metrics, root isolation, freshness, no false global writes. |
+| 6. Optional semantic retrieval/snapshots | Evaluated ANN/model pack, clones if useful, safe compressed graph artifacts | Labeled IR/clone value, deterministic updates, resource/package/privacy/integrity gates. |
+| 7. Plugin-store lifecycle | One-action clean-host install, typed managed-artifact journal, update/repair/rollback/remove/reinstall, thin platform bootstraps | Real packaged E2E on every supported host, last-known-good recovery, project data preserved, no hidden manual configuration. |
+| 8. Superiority release | Full paired-baseline evaluation, docs/support matrix, SBOM/attestation, rollback rehearsal | All normative acceptance gates pass; public claims generated from artifacts. |
+
+## Risks / Trade-offs
+
+### Pre-Mortem
+
+Assume the program failed after substantial engineering effort. The most likely causes and prevention evidence are:
+
+| Failure mode | Early warning | Mitigation / required evidence |
+|---|---|---|
+| Language count becomes marketing rather than capability | Registry count differs from tests/docs; zero-definition fixtures pass | Generated manifest; tier-specific non-vacuous fixtures; docs/SBOM drift hard fail. |
+| Broad grammar support bloats builds/releases | CI compile time, binary/install bytes, cold startup, idle RSS, or no-pack scan RSS grow rapidly | Separate grammar/WASM process; default-core dependency-graph check; hard 48 MiB binary, 64 MiB install, 250 ms runtime-info, 500 ms MCP-ready, 96 MiB idle-RSS, and 512 MiB no-pack-scan ceilings. |
+| “Rust-native” is used to hide generated/native dependencies | SBOM lacks parser/runtime components or safety claims ignore native/FFI code | Per-component provenance/SBOM; transitive unsafe/native/FFI/dynamic-library/advisory inventory; containment report by platform; ProjectAtlas-owned logic boundary; no runtime repo compilation/loading. |
+| Semantic providers become another 40K-line monolith | Shared interface accumulates language branches and pseudo-types | Provider-local modules; canonical crates; strict scope; per-provider metrics; abstain rather than emulate compilers. |
+| Typed graph becomes speculative taxonomy | Many unused kinds/properties; migrations outpace queries | Add relation/entity kind only with owner, producer, consumer, fixtures, and query use. |
+| Stable IDs churn on formatting/line movement | Full scan changes identities for unchanged qualified symbols | Versioned identity fixtures; canonical diff; line numbers excluded from identity except explicit fallback. |
+| Full and incremental graphs diverge | Mutation corpus mismatch or stale inbound edges | Canonical equivalence gate on every schema/provider change; dependency invalidation tests; no stale snapshot restore. |
+| Incremental work still rewrites the graph | DB/WAL bytes scale with whole repo for one-file change | Write-amplification metrics; changed-row SQL assertions; dirty-state coalescing tests. |
+| Failed scan replaces valid data | Queries see partial counts after timeout/crash | Worker cannot activate; separate staging DB; parent imports only the inactive slot after reconciliation; atomic slot/epoch flip; last-valid queries during failure. |
+| SQLite corruption becomes plausible empty output | Count/query contradictions or swallowed terminal step status | Central row-step helpers; corruption mutation tests; loud query failure; quick/integrity checks. |
+| Migration loses purposes or telemetry | Rebuilt DB passes graph tests but authored rows disappear | Authored tables outside both derived slots; read-only preflight; before/after reconciliation; migration rollback rehearsal. |
+| Parallel output is nondeterministic | Stable checkout yields changing semantic/similarity edges | Sorted inputs/candidates/ties; seeded algorithms; 1/N and ten-run canonical comparison. |
+| Unicode works in unit tests but fails in worker/release | Windows/CJK subprocess or truncation regressions | Real packaged-process matrix; UTF-8 boundary helpers; NFC/NFD/CJK/emoji/long-path fixtures. |
+| FTS introduces false negatives | Literal results differ for punctuation/short/case queries | Candidate-only acceleration; exact verification; mode-specific fallback; differential tests. |
+| Graph ranking buries exact paths | Related but weak matches outrank explicit file/path query | Exact path/name priority invariant; reason codes; deterministic ranking regressions. |
+| Existing MCP clients break or require more calls | Schema deserialization/golden flow failures | Recorded old payload corpus; tool list/name tests; workflow call/token budget gate. |
+| Summary responses become graph dumps | Default TOON grows with edge count | Per-response graph enrichment is capped at 512 bytes/128 conservative tokens and each frozen workflow at 1,536 bytes/384 tokens; returned/available/truncated counters and relation next-call hints preserve bounded detail. |
+| Traversal becomes a denial-of-service vector | Cyclic fixture consumes client timeout/RSS | Typed bounded queries; depth/edge/node/time/memory caps; cancellation; node-simple paths; concurrent read test. |
+| Dead-code analysis causes unsafe deletion | Framework/dynamic symbol is marked certain | Candidate wording only; entry/export/framework/dynamic/unresolved coverage; precision fixtures; no auto-delete. |
+| Route/service graph overfits strings | CI paths, regex, docs create endpoints | Protocol-aware extractors; typed evidence; adversarial negative corpus; precision threshold per relation. |
+| Cross-repository identities miss across languages | gRPC/package prefixes do not rendezvous | Canonical protocol IDs with original evidence; cross-language fixtures; ambiguity rather than exact-string assumption. |
+| Federation leaks, mutates, or partially omits a requested root | Same relative paths/root mismatch cause wrong reads/writes or plausible partial answers | Per-call explicit ordered roots; read-only/query-only opens; validate all roots before execution; fail the whole call; no persisted edges/cache/tasks; wrong-root and corrupt-root tests. |
+| Optional semantic search adds cost but no value | MRR/nDCG flat; RSS/package/query cost high | Feature remains off; labeled gate before release; lexical/graph baseline always available; remove pack cleanly. |
+| Model/vector results are unstable | Repeated runs change top-k/edges | Versioned deterministic preprocessing; ANN seed/tie rules; declared absolute/relative vector tolerances plus frozen top-k/recall gates; slot/epoch invalidation. |
+| Snapshot sharing serves torn/stale data | Imported counts differ or dirty commit appears clean | Backup/VACUUM source; digest; metadata/content state; quick check; temp validation; atomic activation. |
+| Supply-chain check “passes” while checking zero files | Missing/absolute manifest paths only warn | Self-tests require nonzero expected count and fail modified/missing/extra/absolute/stale entries. |
+| Benchmarks are cherry-picked | One run, unpinned repos, suppressed errors, aggregate hides weak language | Pinned inputs, at least ten paired performance repetitions, ten deterministic runs, raw outputs, per-language metrics, failures retained. |
+| New source looks mechanically mirror-shaped | Similar module/function/pass/test layout appears without ProjectAtlas ownership reasons | Need-driven module plan in this design; ProjectAtlas naming review; no copied source/comments/constants/fixtures; architecture reviewer gate. |
+| Scope never ships | All phases coupled to embeddings/UI/all languages at once | Phase gates; FTS/stable IDs first; optional semantic/UI excluded; each phase independently releasable. |
+
+### Trade-Offs
+
+- A typed graph requires more deliberate migrations and adapter code than string labels, but pays back in correctness, query speed, schema validation, and maintainability.
+- A separate full-scan staging database plus exactly two live derived-data slots temporarily increases disk usage. This is accepted within a configured multiplier because it protects the active and immediately prior full publication; cleanup and free-space preflight are mandatory.
+- Explicit ambiguity/unresolved outcomes may reduce apparent recall compared with first-name matching. Precision and honest abstention are more valuable for agent decisions.
+- Broad grammar packs increase supply-chain work. Pack separation and a generated registry make that cost visible and controllable.
+- WASM parser isolation may be slower than native grammar artifacts. Phase 0 decides with measurements; no purity claim overrides the performance/correctness gate.
+- Optional real ANN/model support introduces dependency and package complexity. It remains absent unless labeled evaluation proves agent value beyond lexical/graph retrieval.
+
+## Migration Plan
+
+1. Record current schema, scan/search/ranking/tool golden outputs, package sizes, purposes, telemetry, and full/incremental snapshots.
+2. Before any migration DDL or writable database open, run a read-only preflight that validates canonical root/database binding, current schema support, runtime compatibility, SQLite `quick_check`/required integrity checks, required free disk, backup feasibility and digest plan, and compiled/runtime FTS support when an FTS migration is proposed. Any failed or unknown check leaves the database byte-for-byte untouched and returns an actionable error.
+3. Assign ordered migration IDs and immutable checksums from the repository migration ledger when implementation lands; this design does not reserve numeric schema versions. The runtime refuses an unknown future migration, missing predecessor, reordered ID, or checksum mismatch.
+4. Create and verify a consistent backup after preflight and before the first writable open. Apply each ledger migration transactionally, run table/count/authored-row/root/integrity reconciliation, and record that migration's ledger row only after reconciliation passes in the same transaction.
+5. Add stable identity and typed resolution/evidence/coverage storage while retaining current name/path response fields and compatibility readers. Extract touched storage modules only when needed by this work.
+6. Add exactly two derived-data slots plus `(active_slot, active_epoch)` metadata. Reconcile existing derived rows into one active slot and leave the other available for the first full publication; authored purpose/review/settings/telemetry tables remain outside both slots.
+7. Add conditional FTS acceleration only through a ledger migration whose preflight succeeds on the selected build. Keep deterministic lexical search complete on databases/builds without FTS, and prove with/without-FTS result equivalence before recording readiness.
+8. Introduce the generated registry behind the current parser adapter; prove every accepted existing capability before enabling a broad pack.
+9. Add structural adapters and provider/enrichment phases behind visible capabilities/config; publish only completed tiers.
+10. Add automatic graph ranking/digests to existing services, then the three analysis tools, with generated all-surface compatibility and bounded-query tests.
+11. Add call-only federation and optional semantic/snapshot packs only after their prerequisite gates and independent lifecycle/resource tests pass.
+12. Rehearse every ledger path against verified copies of databases from each supported prior migration state and release platform; never use a user's only database for rehearsal. Generate support matrices and claims from validated artifacts and rehearse rollback before release.
+
+### Rollback
+
+- Before each schema migration, create a consistent local backup subject to disk preflight and digest verification.
+- A migration failure rolls back the SQLite transaction and leaves the prior runtime/index usable.
+- Full staging, import, or reconciliation failure never changes `(active_slot, active_epoch)`. After a successful full flip, the retained previous slot may be reactivated with a new atomic epoch only while it remains intact and schema-compatible; the next full publication may reuse it, so no arbitrary publication history is promised.
+- Incremental publication is one transaction; failure rolls it back. Post-release rollback restores the compatible backup or forces a derived-graph rebuild while importing/reconciling authored purpose/telemetry/settings.
+- Optional grammar/model packs can be disabled/removed independently; core parser/search behavior remains available and capability output updates honestly.
+- New MCP tools are additive. If a new analysis path is faulty, it can be disabled without renaming/removing existing calls or changing the index ownership model.
+
+## Acceptance Gate Summary
+
+The detailed normative gates live in the seven capability specs. Program completion requires at minimum:
+
+- Every accepted capability independently passes its declared tier, compatibility, provenance/SBOM, and per-capability correctness/coverage gate; raw language/parser/tool counts and aggregate averages cannot hide a failure.
+- Core extraction precision is at least 95% and recall at least 90%; semantic-edge precision is at least 90% and recall at least 80% for every accepted benchmarked language/relation family, with no aggregate masking.
+- The exact two-slot/epoch model passes canonical full/incremental and 1/N-worker equivalence, atomic flip/delta/rollback tests, ten-run deterministic enrichment checks, and Unicode real-process tests on Windows/macOS/Linux.
+- The generated manifest proves compatibility for every registered CLI command, MCP tool, alias, format, default, root-isolation rule, exit/error contract, task behavior, and recorded workflow; no existing workflow gains a required call and no more than three analysis tools are added.
+- Read-only migration preflight, ledger ID/checksum validation, transactional reconciliation-before-recording, loud SQLite/integrity failures, safe snapshots, and authored metadata preservation pass against every supported prior migration state.
+- The default core stays at or below 48 MiB stripped executable, 64 MiB installed payload, 250 ms cold `runtime-info` p95, 500 ms cold MCP-ready p95, 96 MiB idle MCP RSS, and 512 MiB no-pack large-corpus scan peak RSS. Broad grammar/WASM/ANN/model runtimes are absent from its dependency graph and initialization path.
+- Warm SQLite/service p95 has 1 ms/50 ms reference-host goals and warm end-to-end MCP p95 has 50 ms/150 ms reference-host goals. An eligible pinned runner class, calibration envelope, and pre-result tolerance factor no greater than 1.25 make “same vicinity” mechanical; raw and paired same-host results remain visible and separate from cold startup.
+- Statistical decisions follow Decision 13: accepted capabilities cannot be pooled away; performance requires every hard budget, paired geometric-mean time and peak-RSS ratio upper bounds at most 0.80, and every required-corpus runtime-ratio upper bound at most 1.10; agent-quality superiority always requires the paired five-point/corrected-confidence rule, while a high-baseline absolute-quality result is reported separately.
+- Deterministic lexical retrieval remains complete with FTS disabled or unsupported; optional semantic capability passes its full install-to-removal state machine, and vector outputs use declared absolute/relative tolerances plus frozen top-k/recall gates rather than bit equality.
+- Node-simple traversal, cursor bindings, cancellation, and call-only explicit-root read-only/query-only fail-closed federation pass negative and concurrency tests. No implicit network, repository-code, grammar, model, or federation background execution occurs.
+
+### Test Strategy And Task Traceability
+
+Create a version-controlled verification matrix keyed by every OpenSpec task ID. Each row names the requirement/scenario, owner, changed artifacts, highest risk class, applicable layers, justified inapplicable layers, timeout, and result artifact. Evidence is risk-based and cumulative where the affected boundary requires it:
+
+- **L1 - pure/domain:** unit tests and property tests for parsing, typed state, identity, resolution, ranking, serialization, scoring, limits, and deterministic algorithms.
+- **L2 - persistence/cross-crate:** applicable L1 evidence plus integration tests for SQLite transactions/migrations/slots, worker protocols, service/database joins, full/incremental equivalence, pack adapters, snapshots, and federation.
+- **L3 - public/concurrency:** applicable L1/L2 evidence plus real CLI and MCP E2E for public request/response/error contracts, old-client compatibility, cancellation, cursor staleness, process supervision, and concurrent reads/tasks.
+- **L4 - migration/package/security/platform:** all relevant preceding layers plus packaged-binary/pack smoke flows, supported-platform shards, corruption/adversarial/fuzz or mutation evidence, and benchmark/resource gates appropriate to the change.
+
+A narrow task does not acquire unrelated integration, E2E, packaged-smoke, platform, benchmark, property, or fuzz layers merely because it changes runtime code, but every omitted layer requires a reviewed matrix justification. Every task, including planning, documentation, benchmark-policy, and GitHub-only work, still owns at least one task-specific automated unit-level test: runtime tasks name a focused unit test for the owning logic, while non-runtime tasks name a focused validator test that asserts the promised schema, artifact, drift, reproduction, or policy behavior. Packaged smoke tests verify a small real repository flow, not only `--help` or exit zero.
+
+The machine-readable task-evidence record contains the OpenSpec task ID, unit-test ID, exact bounded command, asserted behavior, commit SHA, successful run URL or retained artifact identity, completion state, and any additional risk-required layers. GitHub IssueOps renders or links that evidence beside the corresponding task in an umbrella or bounded phase issue, and the authoritative issue map prevents duplicated or missing ownership when GitHub body limits require multiple issues. The task checklist/IssueOps validator SHALL reject a checked local or GitHub task whose unit test or successful run is missing, failing, skipped, flaky, timed out, stale for the checked commit, or vacuous; it also rejects local/GitHub state drift and a PR proposed for review while mapped tasks or evidence remain incomplete. Each command has an explicit timeout and preserves stdout/stderr plus machine-readable results; placeholder evidence is prohibited.
+
+Repository instructions plus the validated global Rust skill are the agent-orchestration contract for this program. Another repository-local implementation skill is not added unless a measured enforcement gap receives a separate approved specification; product behavior and release gates never depend on local agent folders.
+
+## Open Questions
+
+These are Phase 0 decisions, not permission to weaken the normative gates:
+
+1. Which broad parser-pack host wins measured safety/performance/package trade-offs: tree-sitter WASM, vetted generated native artifacts, or a split by language tier?
+2. Which checked-in corpus manifests and hardware runner classes form the permanent small/medium/large and kernel-scale benchmark suite?
+3. Does FTS5 trigram support every target platform/build, and what exact query classes require the current fallback?
+4. Which canonical Rust metadata/parser crates are mature enough for each semantic provider before ProjectAtlas-specific logic begins?
+5. Which ANN backend and local model, if any, provides enough labeled agent value to justify shipping an optional pack?
+6. Should deterministic architecture communities use a maintained graph crate/algorithm or remain out of the first architecture release?
+7. What measured scale evidence would justify a separate future specification for a derived federation cache without changing this program's call-only contract?
+8. Which phases map to separate releases/milestones after Phase 0 measurements establish realistic sequencing?
+
+## Final Architecture Acceptance Criteria
+
+The program is not complete until an independent final review verifies all of the following:
+
+1. **Clear crate graph:** `projectatlas-core` owns shared domain contracts; `db`, `fs`, and `symbols` remain focused infrastructure/extraction boundaries; `service` owns use-case queries; `cli` composes adapters. The dependency graph is acyclic; broad grammar/WASM and semantic ANN/model packs remain separate outer processes and are neither linked nor initialized by core; no core crate depends on CLI/MCP/UI/install concerns.
+2. **One owner per contract:** language capabilities, stable identities, relation kinds, resolution states, coverage, slot/epoch publication, query types, migration-ledger entries, and serialized MCP/TOON values each have one smallest correct owning module. `atlas_settings` is the existing public owner for graph schema/capability reporting. No parallel string/schema implementation exists.
+3. **Rust-native data model:** domain state uses documented structs, enums, newtypes, `Result`, validated constructors, iterators, slices, and ownership/borrowing rather than generic JSON bags, sentinel strings, inheritance emulation, or mutable global state.
+4. **Purposeful traits/generics:** open provider or adapter variation may use a narrow trait; closed state/kinds use enums; one injected operation prefers a closure; generics provide demonstrated compile-time reuse or measured static-dispatch value. Single-implementation speculative traits/factories and unconstrained type complexity are removed. Dynamic dispatch is kept outside measured hot loops unless a runtime-extension or ownership requirement wins and its cost passes benchmarks.
+5. **GoF intent adapted to Rust:** Command is expressed as typed query/task structs, State as enums or narrowly justified typestate, Strategy as closures/generics/traits selected by openness, Adapter as wrappers at parser/model/pack boundaries, and Builder only for genuinely multi-field validated configuration. The existing store facade remains a ProjectAtlas architecture boundary rather than a claim that Repository is a GoF pattern. Singleton, service locator, inheritance-heavy Template Method/Visitor, and pattern ceremony are rejected.
+6. **Fast by layout and work avoided:** compact typed arenas/vectors, interned repeated strings/paths, numeric internal IDs, bounded worker batches, indexed adjacency, batched staged writes, and dependency-driven incremental deltas meet the hard default-core size/startup/RSS budgets and separate warm service/MCP latency gates without losing facts.
+7. **Stable modern Rust:** the workspace uses supported stable Rust, Edition 2024/resolver 3 or a reviewed stable successor, canonical maintained crates, explicit minimal features, a locked dependency graph, and no nightly-only architecture requirement.
+8. **Strict safety and diagnostics:** every ProjectAtlas-owned crate keeps `unsafe_code = "forbid"` without an exception path; typed errors and actionable context replace panic/unwrap/expect; cancellation, limits, integrity, partial coverage, and recovery are explicit; secrets and repository code never leave/execute implicitly. Safe wrapper crates are preferred for native platform boundaries, and transitive unsafe/native/FFI/dynamic-library/advisory plus containment evidence is reported rather than hidden behind a Rust safety claim.
+9. **No warnings or broad suppressions:** `cargo fmt`, locked all-target/all-feature `cargo check`, strict Clippy `-D warnings`, all tests/doctests, and rustdoc `-D warnings` pass. Existing workspace deny lints are not weakened and new broad `allow` attributes are rejected unless narrowly justified and reviewed.
+10. **Tests trace every task by risk:** each verification-matrix row carries an L1-L4 risk class and every applicable unit/property, integration, CLI/MCP E2E, packaged/platform, negative/fuzz, and benchmark layer. Separately gated `cargo nextest`, `cargo test --doc`, `cargo llvm-cov`, and `cargo mutants` evidence must pass the mapped Rust test-quality change, including its exclusion, timeout, and coverage/mutation ratchet policies. Justified inapplicable layers are reviewed; no placeholder, flaky, skipped, or timeout-only evidence counts.
+11. **All existing agent surfaces remain compatible:** the generated manifest covers every CLI command, MCP tool, alias, format, default, root rule, exit/error behavior, task contract, and recorded workflow. Normal workflows require no extra calls, default responses remain bounded/TOON-first, only three analysis tools are added, and optional complexity remains configured once and automatic behind existing calls.
+12. **Two-slot integrity:** full scans publish only through a separate staging database into the inactive slot and one atomic slot/epoch flip; incremental deltas update the active slot transactionally; normal queries use `active_slot` only; rollback never implies more than the retained second slot or a verified backup.
+13. **Retrieval and federation fail honestly:** lexical retrieval is always available, FTS is conditional acceleration with differential equivalence, vector determinism uses declared tolerances, cursors bind all result-defining state, and federation is explicit-root, call-only, read-only/query-only, non-persistent, and fail-closed for the whole call.
+14. **Measured superiority without hidden cost:** accepted-capability correctness, full/incremental equivalence, hard budgets, statistically defined speed/resource/query/agent-quality gates, and the phase scoreboard expose code/dependency/package/public-surface cost. Features that fail that value test are removed, deferred, or remain optional with an honest lifecycle state.
+15. **Clean installation and agent use:** on clean supported hosts, one official plugin-store installation action provisions and verifies the matching runtime, ProjectAtlas skill, and MCP registration without manual downloads, PATH edits, MCP JSON, version pins, or database-path wiring. Update, rollback, repair, and remove use one typed managed-artifact journal with compensating rollback/last-known-good recovery and preserve project-local indexes/authored metadata; `atlas_init` followed by ordinary atlas-first calls is proven by real packaged E2E.
+16. **Objectively cleaner implementation:** a generated architecture scorecard reports production and generated code separately, crate/dependency growth, dependency cycles, ProjectAtlas-owned unsafe lines, transitive native/unsafe/FFI boundaries, duplicated schema/protocol owners, custom storage/query infrastructure, public tool/config/install steps, warnings, and unresolved review findings. The program may claim a cleaner and more modern architecture only when every hard Rust/ownership/safety gate passes, no metric is hidden, every increase has a capability/value justification, and independent Rust, storage, security, performance, KISS, and agent-workflow reviewers resolve all blocking findings.
