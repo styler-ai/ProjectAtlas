@@ -541,20 +541,32 @@ fn verification_plan_cargo_filters_resolve_once() -> Result<(), Box<dyn std::err
     }
 }
 
-/// Keep the Rust validator aligned with the tagged test identifiers used by feature changes.
+/// Keep the Rust validator aligned with declared behavioral test anchors.
 #[test]
-fn verification_plan_accepts_tagged_task_test_ids() -> Result<(), Box<dyn std::error::Error>> {
+fn verification_plan_accepts_declared_task_test_anchors() -> Result<(), Box<dyn std::error::Error>>
+{
     let root = workspace_root()?;
-    let tasks = parse_openspec_tasks("- [ ] 1.1 Verify feature planning. [UT:ARRI-1.1]")?;
-    let parsed = tasks
-        .first()
-        .ok_or_else(|| std::io::Error::other("tagged task was not parsed"))?;
+    let tasks = parse_openspec_tasks(&read_text(
+        &root.input("openspec/changes/advance-rust-repository-intelligence/tasks.md")?,
+    )?)?;
     let plan: VerificationPlan = read_json(&root.input("openspec/task-verification.json")?)?;
-    let planned = plan
+    let change = plan
         .changes
         .get("advance-rust-repository-intelligence")
-        .and_then(|change| change.tasks.first())
-        .ok_or_else(|| std::io::Error::other("feature verification task is missing"))?;
-    validate_verification_task(&root, parsed, planned)?;
+        .ok_or_else(|| std::io::Error::other("feature verification change is missing"))?;
+    for task_id in ["1.1", "2.1"] {
+        let parsed = tasks
+            .iter()
+            .find(|task| task.task_id == task_id)
+            .ok_or_else(|| std::io::Error::other(format!("task {task_id} is missing")))?;
+        let planned = change
+            .tasks
+            .iter()
+            .find(|task| task.task_id == task_id)
+            .ok_or_else(|| {
+                std::io::Error::other(format!("verification task {task_id} is missing"))
+            })?;
+        validate_verification_task(&root, parsed, planned)?;
+    }
     Ok(())
 }

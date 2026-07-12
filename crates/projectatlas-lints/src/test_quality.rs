@@ -595,8 +595,9 @@ fn encode_hex(bytes: &[u8]) -> String {
 /// Hash sorted covered inputs after normalizing task checkboxes.
 fn normalized_covered_inputs_digest(
     root: &RepositoryRoot,
-    inputs: &[CoveredInput],
+    task: &VerificationTask,
 ) -> Result<String, QualityError> {
+    let inputs = &task.covered_inputs;
     if inputs.is_empty() {
         return Err(QualityError::Policy(vec![
             "covered_inputs must not be empty".to_string(),
@@ -646,10 +647,15 @@ fn normalized_covered_inputs_digest(
             }
         }
     }
+    let projection = VerificationTaskDigest::from(task);
     let mut hasher = Sha256::new();
+    hasher.update(canonical_json(&projection)?);
+    hasher.update([0]);
     for (key, bytes) in records {
-        hash_length_prefixed(&mut hasher, key.as_bytes());
-        hash_length_prefixed(&mut hasher, &bytes);
+        hasher.update(key.as_bytes());
+        hasher.update([0]);
+        hasher.update(Sha256::digest(bytes));
+        hasher.update([b'\n']);
     }
     Ok(encode_hex(&hasher.finalize()))
 }
@@ -666,9 +672,7 @@ fn add_covered_file(
         path: path.to_path_buf(),
         source,
     })?;
-    if key.ends_with("/tasks.md") || key == "tasks.md" {
-        bytes = normalize_task_checkboxes(&bytes);
-    }
+    bytes = normalize_covered_value(&key, bytes);
     if records.insert(key.clone(), bytes).is_some() {
         return Err(QualityError::Policy(vec![format!(
             "duplicate covered input {key}"
@@ -684,20 +688,73 @@ fn hash_length_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
 }
 
 /// Normalize checked `OpenSpec` boxes so closure-only edits do not stale evidence.
-fn normalize_task_checkboxes(bytes: &[u8]) -> Vec<u8> {
-    let text = String::from_utf8_lossy(bytes);
-    text.lines()
+fn normalize_task_checkboxes(text: &str) -> String {
+    text.split_inclusive('\n')
         .map(|line| {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("- [x] ") || trimmed.starts_with("- [X] ") {
+            if line.starts_with("- [x] ") || line.starts_with("- [X] ") {
                 line.replacen("[x]", "[ ]", 1).replacen("[X]", "[ ]", 1)
             } else {
                 line.to_string()
             }
         })
-        .collect::<Vec<_>>()
-        .join("\n")
-        .into_bytes()
+        .collect()
+}
+
+/// Normalize covered metadata and text identically to the `IssueOps` adapter.
+fn normalize_covered_value(key: &str, bytes: Vec<u8>) -> Vec<u8> {
+    if key == "openspec/task-verification.json" {
+        return b"task-plan-entry-normalized-by-covered-input-digest-v1".to_vec();
+    }
+    if key == "openspec/task-evidence.json" {
+        return b"task-evidence-metadata-normalized-by-issueops-v1".to_vec();
+    }
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => return error.into_bytes(),
+    };
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    if key.ends_with("/tasks.md") || key == "tasks.md" {
+        normalize_task_checkboxes(&text).into_bytes()
+    } else {
+        text.into_bytes()
+    }
+}
+
+/// Serialize a digest projection like Python's sorted, ASCII-only compact JSON.
+fn canonical_json<T: Serialize>(value: &T) -> Result<Vec<u8>, QualityError> {
+    let json = serde_json::to_string(value).map_err(|source| QualityError::Json {
+        path: PathBuf::from("task verification digest projection"),
+        source: Box::new(source),
+    })?;
+    let mut output = String::with_capacity(json.len());
+    for character in json.chars() {
+        if character.is_ascii() {
+            output.push(character);
+            continue;
+        }
+        let code = u32::from(character);
+        if code <= 0xffff {
+            push_json_code_unit(&mut output, code);
+        } else {
+            let supplementary = code - 0x1_0000;
+            let high = 0xd800 + (supplementary >> 10);
+            let low = 0xdc00 + (supplementary & 0x03ff);
+            push_json_code_unit(&mut output, high);
+            push_json_code_unit(&mut output, low);
+        }
+    }
+    Ok(output.into_bytes())
+}
+
+/// Append one lowercase JSON Unicode escape without allocation.
+fn push_json_code_unit(output: &mut String, code: u32) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    output.push('\\');
+    output.push('u');
+    for shift in [12, 8, 4, 0] {
+        let index = usize::try_from((code >> shift) & 0x0f).unwrap_or_default();
+        output.push(char::from(HEX[index]));
+    }
 }
 
 /// Require a lowercase 40-character Git commit identity.
@@ -3493,6 +3550,48 @@ struct VerificationCommand {
     arguments: Vec<String>,
 }
 
+#[derive(Serialize)]
+/// Canonical task projection shared with `IssueOps` covered-input digests.
+struct VerificationTaskDigest<'a> {
+    /// Acceptance assertion proved by a task.
+    assertion: &'a str,
+    /// Command contract or gate command.
+    command: VerificationCommandDigest<'a>,
+    /// Files and trees bound into task evidence.
+    covered_inputs: &'a [CoveredInput],
+    /// `OpenSpec` task identifier.
+    task_id: &'a str,
+    /// Runnable test identities reconciled from inventory and `JUnit`.
+    test_ids: &'a [String],
+    /// Maximum task command duration in seconds.
+    timeout_seconds: u64,
+}
+
+impl<'a> From<&'a VerificationTask> for VerificationTaskDigest<'a> {
+    fn from(task: &'a VerificationTask) -> Self {
+        Self {
+            assertion: &task.assertion,
+            command: VerificationCommandDigest {
+                arguments: &task.command.arguments,
+                executable: &task.command.executable,
+            },
+            covered_inputs: &task.covered_inputs,
+            task_id: &task.task_id,
+            test_ids: &task.test_ids,
+            timeout_seconds: task.timeout_seconds,
+        }
+    }
+}
+
+#[derive(Serialize)]
+/// Canonical command projection shared with `IssueOps` covered-input digests.
+struct VerificationCommandDigest<'a> {
+    /// Ordered command arguments.
+    arguments: &'a [String],
+    /// Executable identity used by the command.
+    executable: &'a str,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 /// File or tree whose normalized digest binds task evidence.
@@ -3645,6 +3744,16 @@ fn validate_task_evidence(
             "verification change {change_name} is not release-required"
         )]));
     }
+    for result in &ledger.results {
+        if !plan.changes.contains_key(&result.change)
+            || !policy.required_changes.contains(&result.change)
+        {
+            return Err(QualityError::Policy(vec![format!(
+                "orphan task evidence for change {}",
+                result.change
+            )]));
+        }
+    }
     let task_map = change
         .tasks
         .iter()
@@ -3666,13 +3775,11 @@ fn validate_task_evidence(
         }
     }
     let mut seen = BTreeSet::new();
-    for result in &ledger.results {
-        if &result.change != *change_name {
-            return Err(QualityError::Policy(vec![format!(
-                "orphan task evidence for change {}",
-                result.change
-            )]));
-        }
+    for result in ledger
+        .results
+        .iter()
+        .filter(|result| &result.change == *change_name)
+    {
         let key = (result.task_id.as_str(), result.test_id.as_str());
         if !required.contains_key(&key) || !seen.insert(key) {
             return Err(QualityError::Policy(vec![format!(
@@ -3743,7 +3850,13 @@ fn validate_verification_task(
             }
         }
     }
-    let rust_command = planned.command.executable == "cargo"
+    let declared_rust_filter = !planned.test_sources.is_empty()
+        && planned.test_sources.iter().all(|source| {
+            planned.command.arguments.iter().any(|argument| {
+                argument == &source.anchor || argument.ends_with(&format!("::{}", source.anchor))
+            })
+        });
+    let generated_rust_filter = planned.test_sources.is_empty()
         && planned.test_ids.iter().all(|test_id| {
             let suffix = test_id
                 .chars()
@@ -3761,6 +3874,8 @@ fn validate_verification_task(
                 .iter()
                 .any(|argument| argument.starts_with("task_") && argument.ends_with(&suffix))
         });
+    let rust_command =
+        planned.command.executable == "cargo" && (declared_rust_filter || generated_rust_filter);
     let python_command = ["python", "python3"].contains(&planned.command.executable.as_str())
         && planned
             .command
@@ -3797,7 +3912,7 @@ fn validate_verification_task(
             }
         }
     }
-    normalized_covered_inputs_digest(root, &planned.covered_inputs)?;
+    normalized_covered_inputs_digest(root, planned)?;
     Ok(())
 }
 
@@ -3810,7 +3925,7 @@ fn validate_task_result(
     result: &TaskEvidenceResult,
 ) -> Result<(), QualityError> {
     validate_commit(&result.tested_commit)?;
-    let digest = normalized_covered_inputs_digest(root, &planned.covered_inputs)?;
+    let digest = normalized_covered_inputs_digest(root, planned)?;
     if result.covered_input_digest != format!("sha256:{digest}") {
         return Err(QualityError::Status {
             status: QualityStatus::StaleEvidence,
