@@ -7,6 +7,8 @@ mod mcp;
 #[cfg(test)]
 mod optional_pack_candidate_readiness_tests;
 #[cfg(test)]
+mod relation_traceability_contract_tests;
+#[cfg(test)]
 mod repository_intelligence_contract_tests;
 #[cfg(test)]
 mod repository_intelligence_scoreboard_tests;

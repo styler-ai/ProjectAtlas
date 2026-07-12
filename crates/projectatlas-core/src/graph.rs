@@ -756,30 +756,110 @@ impl EntityKey {
     }
 }
 
-/// Initial versioned graph relation families compatible with the legacy graph.
+/// Accepted versioned repository-graph relation families.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[non_exhaustive]
 #[serde(rename_all = "kebab-case")]
 pub enum GraphRelationKind {
-    /// One entity contains another.
-    Contains,
-    /// One source imports or includes another module.
-    Imports,
     /// One declaration calls another target.
     Calls,
+    /// One entity communicates through a topic or channel.
+    Channel,
+    /// Two entities change together in version-control history.
+    CoChanges,
+    /// One entity configures another.
+    Configures,
+    /// One entity contains another.
+    Contains,
+    /// A call-scoped federated match relates entities from explicit repositories.
+    CrossRepository,
+    /// One entity declares another.
+    Declares,
     /// One package, module, or manifest depends on another.
     DependsOn,
+    /// One infrastructure entity deploys another.
+    Deploys,
+    /// One module or package exports another entity.
+    Exports,
+    /// One entity generates another.
+    Generates,
+    /// One declaration implements an interface or trait contract.
+    Implements,
+    /// One source imports or includes another module.
+    Imports,
+    /// One declaration inherits from another.
+    Inherits,
+    /// One declaration overrides another declaration.
+    Overrides,
+    /// One entity reads from a configuration, environment, or data source.
+    Reads,
+    /// One source occurrence references another entity.
+    References,
+    /// One client or handler participates in an HTTP route.
+    Routes,
+    /// One client or handler participates in a typed RPC boundary.
+    Rpc,
+    /// Two entities are inferred to be structurally or semantically similar.
+    Similar,
+    /// One test entity exercises another entity.
+    Tests,
+    /// One entity writes to a configuration, environment, or data target.
+    Writes,
 }
 
 impl GraphRelationKind {
+    /// Complete accepted relation-family inventory in stable serialized order.
+    pub const ALL: [Self; 22] = [
+        Self::Calls,
+        Self::Channel,
+        Self::CoChanges,
+        Self::Configures,
+        Self::Contains,
+        Self::CrossRepository,
+        Self::Declares,
+        Self::DependsOn,
+        Self::Deploys,
+        Self::Exports,
+        Self::Generates,
+        Self::Implements,
+        Self::Imports,
+        Self::Inherits,
+        Self::Overrides,
+        Self::Reads,
+        Self::References,
+        Self::Routes,
+        Self::Rpc,
+        Self::Similar,
+        Self::Tests,
+        Self::Writes,
+    ];
+
     /// Return the stable canonical and serialized spelling.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Contains => "contains",
-            Self::Imports => "imports",
             Self::Calls => "calls",
+            Self::Channel => "channel",
+            Self::CoChanges => "co-changes",
+            Self::Configures => "configures",
+            Self::Contains => "contains",
+            Self::CrossRepository => "cross-repository",
+            Self::Declares => "declares",
             Self::DependsOn => "depends-on",
+            Self::Deploys => "deploys",
+            Self::Exports => "exports",
+            Self::Generates => "generates",
+            Self::Implements => "implements",
+            Self::Imports => "imports",
+            Self::Inherits => "inherits",
+            Self::Overrides => "overrides",
+            Self::Reads => "reads",
+            Self::References => "references",
+            Self::Routes => "routes",
+            Self::Rpc => "rpc",
+            Self::Similar => "similar",
+            Self::Tests => "tests",
+            Self::Writes => "writes",
         }
     }
 
@@ -791,6 +871,24 @@ impl GraphRelationKind {
             Self::Imports => Some(RelationKind::Imports),
             Self::Calls => Some(RelationKind::Calls),
             Self::DependsOn => Some(RelationKind::DependsOn),
+            Self::Channel
+            | Self::CoChanges
+            | Self::Configures
+            | Self::CrossRepository
+            | Self::Declares
+            | Self::Deploys
+            | Self::Exports
+            | Self::Generates
+            | Self::Implements
+            | Self::Inherits
+            | Self::Overrides
+            | Self::Reads
+            | Self::References
+            | Self::Routes
+            | Self::Rpc
+            | Self::Similar
+            | Self::Tests
+            | Self::Writes => None,
         }
     }
 }

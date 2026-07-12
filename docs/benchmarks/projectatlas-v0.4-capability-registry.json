@@ -75,6 +75,200 @@
       "evidence": "eligible pinned throughput, RSS, startup, package, and containment result"
     }
   },
+  "relation_traceability_contract": {
+    "schema_version": 1,
+    "matrix_source": "capabilities[family=relation].traceability",
+    "typed_enum": "projectatlas_core::graph::GraphRelationKind",
+    "fixture_id_template": "{fixture_id}.{fixture_class}",
+    "fixture_classes": [
+      "positive",
+      "ambiguous-or-unresolved",
+      "adversarial-negative"
+    ],
+    "settings_exposure": "atlas_settings.graph.relation_families",
+    "evidence_profiles": {
+      "direct-syntax-v1": {
+        "evidence_classes": [
+          "direct"
+        ],
+        "required_fields": [
+          "origin",
+          "source_span",
+          "parser",
+          "confidence",
+          "resolution",
+          "coverage"
+        ]
+      },
+      "direct-semantic-v1": {
+        "evidence_classes": [
+          "direct"
+        ],
+        "required_fields": [
+          "origin",
+          "source_span",
+          "resolver",
+          "resolver_version",
+          "confidence",
+          "resolution",
+          "coverage"
+        ]
+      },
+      "inferred-v1": {
+        "evidence_classes": [
+          "inferred"
+        ],
+        "required_fields": [
+          "origin",
+          "resolver",
+          "resolver_version",
+          "confidence",
+          "coverage",
+          "bounded_explanation"
+        ]
+      },
+      "federated-v1": {
+        "evidence_classes": [
+          "direct",
+          "inferred"
+        ],
+        "required_fields": [
+          "ordered_project_identities",
+          "captured_slot_epochs",
+          "canonical_rendezvous_identity",
+          "origin_evidence",
+          "target_evidence",
+          "resolver_version",
+          "confidence",
+          "resolution",
+          "coverage"
+        ]
+      }
+    },
+    "persistence_profiles": {
+      "slot-scoped-v1": {
+        "mode": "persistent-derived-slot",
+        "payload_schema": null,
+        "stable_identity_fields": [],
+        "tables": [
+          "graph_relations",
+          "graph_evidence_occurrences",
+          "graph_resolution_occurrences"
+        ],
+        "indexes": [
+          "graph_relations_by_source_kind_slot",
+          "graph_relations_by_target_kind_slot",
+          "graph_relations_by_kind_slot",
+          "graph_relations_by_stable_key_slot",
+          "graph_evidence_by_relation_slot"
+        ],
+        "implementation_state": "pending-ledger-migration"
+      },
+      "call-scoped-federation-v1": {
+        "mode": "bounded-call-memory-only",
+        "payload_schema": null,
+        "stable_identity_fields": [],
+        "tables": [],
+        "indexes": [],
+        "implementation_state": "pending-call-only-service",
+        "persistence_prohibited": true
+      }
+    },
+    "invalidation_profiles": {
+      "syntax-source-v1": [
+        "source-content-identity",
+        "parser-identity",
+        "language-registry-identity",
+        "structural-configuration",
+        "structural-hard-budgets"
+      ],
+      "semantic-resolution-v1": [
+        "source-and-target-entity-identities",
+        "package-module-scope-registry",
+        "provider-identity",
+        "compiler-metadata-identity-when-consumed",
+        "structural-configuration"
+      ],
+      "protocol-resolution-v1": [
+        "source-and-target-protocol-facts",
+        "protocol-adapter-identity",
+        "resolver-identity",
+        "structural-configuration"
+      ],
+      "configuration-resolution-v1": [
+        "source-and-target-configuration-facts",
+        "configuration-adapter-identity",
+        "resolver-identity",
+        "structural-configuration"
+      ],
+      "deployment-resolution-v1": [
+        "source-and-target-deployment-facts",
+        "deployment-adapter-identity",
+        "resolver-identity",
+        "structural-configuration"
+      ],
+      "history-v1": [
+        "vcs-revision-and-dirty-signature",
+        "history-algorithm-identity",
+        "deterministic-seed",
+        "structural-hard-budgets"
+      ],
+      "similarity-v1": [
+        "active-structural-slot-epoch",
+        "similarity-algorithm-identity",
+        "deterministic-seed",
+        "structural-hard-budgets"
+      ],
+      "federation-call-v1": [
+        "ordered-project-identities",
+        "captured-slot-epochs",
+        "normalized-query-and-filters",
+        "relation-inventory-identity",
+        "call-end-unconditional-discard"
+      ]
+    },
+    "accuracy_gates": {
+      "symbols-family-v1": {
+        "minimum_precision": 0.95,
+        "minimum_recall": 0.9,
+        "required_metrics": [
+          "precision",
+          "recall",
+          "f1",
+          "abstention",
+          "coverage",
+          "source-span-correctness"
+        ],
+        "decision": "corrected-adverse-confidence-bound-per-family"
+      },
+      "semantic-family-v1": {
+        "minimum_precision": 0.9,
+        "minimum_recall": 0.8,
+        "required_metrics": [
+          "precision",
+          "recall",
+          "f1",
+          "abstention",
+          "coverage",
+          "source-span-correctness"
+        ],
+        "decision": "corrected-adverse-confidence-bound-per-family"
+      },
+      "inferred-candidate-v1": {
+        "minimum_precision": 0.9,
+        "minimum_recall": 0.8,
+        "required_metrics": [
+          "precision",
+          "recall",
+          "f1",
+          "abstention",
+          "coverage",
+          "determinism"
+        ],
+        "decision": "corrected-adverse-confidence-bound-per-family"
+      }
+    }
+  },
   "counts": {
     "modes": 212,
     "normalized_parser_capabilities": 207,
@@ -3719,6 +3913,21 @@
         "graph.relation.calls"
       ],
       "acceptance_rule": "calls reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::Calls",
+        "serialized_kind": "calls",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::resolution::calls",
+        "producer_state": "implemented-legacy-projection",
+        "evidence_profile": "direct-semantic-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "semantic-resolution-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "semantic-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -3735,6 +3944,21 @@
         "graph.relation.channel"
       ],
       "acceptance_rule": "channel reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::Channel",
+        "serialized_kind": "channel",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::enrichment::protocol",
+        "producer_state": "pending",
+        "evidence_profile": "direct-semantic-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "protocol-resolution-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "semantic-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -3751,6 +3975,21 @@
         "graph.relation.co-changes"
       ],
       "acceptance_rule": "co-changes reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::CoChanges",
+        "serialized_kind": "co-changes",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::enrichment::history",
+        "producer_state": "pending",
+        "evidence_profile": "inferred-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "history-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "inferred-candidate-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -3767,6 +4006,21 @@
         "graph.relation.configures"
       ],
       "acceptance_rule": "configures reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::Configures",
+        "serialized_kind": "configures",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::enrichment::configuration",
+        "producer_state": "pending",
+        "evidence_profile": "direct-semantic-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "configuration-resolution-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "semantic-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -3783,6 +4037,21 @@
         "graph.relation.contains"
       ],
       "acceptance_rule": "contains reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::Contains",
+        "serialized_kind": "contains",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::extraction::containment",
+        "producer_state": "implemented-legacy-projection",
+        "evidence_profile": "direct-syntax-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "syntax-source-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "symbols-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -3799,6 +4068,21 @@
         "graph.relation.cross-repository"
       ],
       "acceptance_rule": "cross-repository reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::CrossRepository",
+        "serialized_kind": "cross-repository",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_service::query::federation",
+        "producer_state": "pending",
+        "evidence_profile": "federated-v1",
+        "persistence_profile": "call-scoped-federation-v1",
+        "invalidation_profile": "federation-call-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_architecture", "atlas_impact", "atlas_trace"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "semantic-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -3815,6 +4099,21 @@
         "graph.relation.declares"
       ],
       "acceptance_rule": "declares reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::Declares",
+        "serialized_kind": "declares",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::extraction::declarations",
+        "producer_state": "pending",
+        "evidence_profile": "direct-syntax-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "syntax-source-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "symbols-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -3831,6 +4130,21 @@
         "graph.relation.depends"
       ],
       "acceptance_rule": "depends reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::DependsOn",
+        "serialized_kind": "depends-on",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::manifest::dependencies",
+        "producer_state": "implemented-legacy-projection",
+        "evidence_profile": "direct-syntax-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "syntax-source-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "symbols-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -3847,6 +4161,21 @@
         "graph.relation.deploys"
       ],
       "acceptance_rule": "deploys reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::Deploys",
+        "serialized_kind": "deploys",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::enrichment::deployment",
+        "producer_state": "pending",
+        "evidence_profile": "direct-semantic-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "deployment-resolution-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "semantic-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -3863,6 +4192,21 @@
         "graph.relation.exports"
       ],
       "acceptance_rule": "exports reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::Exports",
+        "serialized_kind": "exports",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::extraction::exports",
+        "producer_state": "pending",
+        "evidence_profile": "direct-syntax-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "syntax-source-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "symbols-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -3879,6 +4223,21 @@
         "graph.relation.generates"
       ],
       "acceptance_rule": "generates reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::Generates",
+        "serialized_kind": "generates",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::enrichment::generation",
+        "producer_state": "pending",
+        "evidence_profile": "direct-semantic-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "semantic-resolution-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "semantic-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -3895,6 +4254,21 @@
         "graph.relation.implements"
       ],
       "acceptance_rule": "implements reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::Implements",
+        "serialized_kind": "implements",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::resolution::types",
+        "producer_state": "pending",
+        "evidence_profile": "direct-semantic-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "semantic-resolution-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "semantic-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -3911,6 +4285,21 @@
         "graph.relation.imports"
       ],
       "acceptance_rule": "imports reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::Imports",
+        "serialized_kind": "imports",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::extraction::imports",
+        "producer_state": "implemented-legacy-projection",
+        "evidence_profile": "direct-syntax-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "syntax-source-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "symbols-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -3927,6 +4316,21 @@
         "graph.relation.inherits"
       ],
       "acceptance_rule": "inherits reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::Inherits",
+        "serialized_kind": "inherits",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::resolution::types",
+        "producer_state": "pending",
+        "evidence_profile": "direct-semantic-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "semantic-resolution-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "semantic-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -3943,6 +4347,21 @@
         "graph.relation.overrides"
       ],
       "acceptance_rule": "overrides reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::Overrides",
+        "serialized_kind": "overrides",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::resolution::types",
+        "producer_state": "pending",
+        "evidence_profile": "direct-semantic-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "semantic-resolution-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "semantic-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -3959,6 +4378,21 @@
         "graph.relation.reads"
       ],
       "acceptance_rule": "reads reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::Reads",
+        "serialized_kind": "reads",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::enrichment::configuration",
+        "producer_state": "pending",
+        "evidence_profile": "direct-semantic-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "configuration-resolution-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "semantic-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -3975,6 +4409,21 @@
         "graph.relation.references"
       ],
       "acceptance_rule": "references reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::References",
+        "serialized_kind": "references",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::resolution::references",
+        "producer_state": "pending",
+        "evidence_profile": "direct-semantic-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "semantic-resolution-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "semantic-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -3991,6 +4440,21 @@
         "graph.relation.routes"
       ],
       "acceptance_rule": "routes reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::Routes",
+        "serialized_kind": "routes",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::enrichment::protocol",
+        "producer_state": "pending",
+        "evidence_profile": "direct-semantic-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "protocol-resolution-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "semantic-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -4007,6 +4471,21 @@
         "graph.relation.rpc"
       ],
       "acceptance_rule": "rpc reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::Rpc",
+        "serialized_kind": "rpc",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::enrichment::protocol",
+        "producer_state": "pending",
+        "evidence_profile": "direct-semantic-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "protocol-resolution-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "semantic-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -4023,6 +4502,21 @@
         "graph.relation.similar"
       ],
       "acceptance_rule": "similar reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::Similar",
+        "serialized_kind": "similar",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::enrichment::similarity",
+        "producer_state": "pending",
+        "evidence_profile": "inferred-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "similarity-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "inferred-candidate-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -4039,6 +4533,21 @@
         "graph.relation.tests"
       ],
       "acceptance_rule": "tests reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::Tests",
+        "serialized_kind": "tests",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::enrichment::tests",
+        "producer_state": "pending",
+        "evidence_profile": "direct-semantic-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "semantic-resolution-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "semantic-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
@@ -4055,6 +4564,21 @@
         "graph.relation.writes"
       ],
       "acceptance_rule": "writes reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "traceability": {
+        "typed_enum": "projectatlas_core::graph::GraphRelationKind::Writes",
+        "serialized_kind": "writes",
+        "owning_module": "projectatlas_core::graph",
+        "producer": "projectatlas_symbols::enrichment::configuration",
+        "producer_state": "pending",
+        "evidence_profile": "direct-semantic-v1",
+        "persistence_profile": "slot-scoped-v1",
+        "invalidation_profile": "configuration-resolution-v1",
+        "query_surfaces": ["atlas_symbol_relations", "atlas_file_summary"],
+        "settings_exposure": "atlas_settings.graph.relation_families",
+        "fixture_inventory_source": "capability.fixture_ids",
+        "accuracy_gate": "semantic-family-v1",
+        "availability": "pending"
+      },
       "evidence_state": "pending",
       "advertised": false
     },
