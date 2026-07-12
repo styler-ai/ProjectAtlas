@@ -48,7 +48,7 @@ Use Sections 1-2 for contracts. Implement and stabilize Sections 3-10 with focus
 ## 3. First-Touch Module Splits And Ownership
 
 - [x] 3.1 Record the intended ownership map for core domain types, database/migrations, parser registry/extraction, services, CLI/MCP adapters, and tests without performing a speculative all-at-once refactor. [UT:ARRI-3.1]
-- [ ] 3.2 On the first feature touch to `projectatlas-core`, extract only the smallest focused language or graph module required by that feature while preserving serialized values and public behavior. [UT:ARRI-3.2]
+- [x] 3.2 On the first feature touch to `projectatlas-core`, extract only the smallest focused language or graph module required by that feature while preserving serialized values and public behavior. [UT:ARRI-3.2]
 - [ ] 3.3 On the first feature touch to `projectatlas-db`, extract only the required schema/migration, text, graph, purpose, health, or telemetry ownership behind the existing store facade. [UT:ARRI-3.3]
 - [ ] 3.4 On the first feature touch to `projectatlas-symbols`, extract only the required registry, extraction, manifest, fallback, resolution, or language-adapter ownership while preserving current parser output. [UT:ARRI-3.4]
 - [ ] 3.5 On the first feature touch to `projectatlas-service`, extract only the required ranking, search, summary, slice, relation, architecture, impact, trace, or federation service boundary. [UT:ARRI-3.5]
@@ -60,7 +60,7 @@ Use Sections 1-2 for contracts. Implement and stabilize Sections 3-10 with focus
 
 ## 4. Typed Graph, Migration Preflight, And Two-Slot Storage
 
-- [ ] 4.1 Add centralized typed entity, relation, evidence, confidence, resolution-state, candidate, coverage, selector/filter, hard-budget, slot, epoch, and parser-origin contracts in the smallest owning core modules; keep relation/architecture/impact/trace/federation use-case request/report/cursor contracts owned by `projectatlas-service` and preserve `service -> db -> core`. [UT:ARRI-4.1]
+- [x] 4.1 Add centralized typed entity, relation, evidence, confidence, resolution-state, candidate, coverage, selector/filter, hard-budget, slot, epoch, and parser-origin contracts in the smallest owning core modules; keep relation/architecture/impact/trace/federation use-case request/report/cursor contracts owned by `projectatlas-service` and preserve `service -> db -> core`. [UT:ARRI-4.1]
 - [ ] 4.2 Initialize and preserve `ProjectInstanceId` during the graph-schema migration before defining and testing stable-key encoding for project, normalized path or out-of-project identity, entity kind, qualified name, and overload/signature disambiguation; the verified move/copy/detach root-binding UX remains owned by 4.24-4.25. [UT:ARRI-4.2]
 - [ ] 4.3 Add identity fixtures proving unchanged symbols survive line/format movement and duplicate short names remain distinct across scopes and overloads. [UT:ARRI-4.3]
 - [ ] 4.4 Generate a complete relation-family traceability matrix mapping every accepted relation family to its typed enum, producer, evidence, persisted schema, indexes, invalidation keys, query surfaces, settings/capability exposure, fixtures, and semantic accuracy gate. [UT:ARRI-4.4]
