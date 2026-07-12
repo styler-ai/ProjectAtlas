@@ -1271,6 +1271,254 @@
     {
       "path": "openspec/changes/fix-token-tui-reference-visual-regression/tasks.md",
       "purpose": "Implementation and verification checklist for Token Impact TUI reference visual regression fixes."
+    },
+    {
+      "path": "crates/projectatlas-cli/examples",
+      "purpose": "Dedicated executable examples for ProjectAtlas calibration and repository-evaluation evidence capture."
+    },
+    {
+      "path": "docs/benchmarks/results",
+      "purpose": "Retained machine-readable results from ProjectAtlas benchmark, evaluation, and readiness campaigns."
+    },
+    {
+      "path": "docs/benchmarks/results/phase-0-truth-and-baselines",
+      "purpose": "Retained Phase 0 implementation-readiness evidence and independent review records."
+    },
+    {
+      "path": "fixtures/contracts",
+      "purpose": "Versioned compatibility, canonicalization, lexical-search, and graph contract fixtures for ProjectAtlas."
+    },
+    {
+      "path": "fixtures/languages/python",
+      "purpose": "Python fixtures for ProjectAtlas parser, symbol, call, and summary regression coverage."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence",
+      "purpose": "OpenSpec change package for expanding ProjectAtlas repository intelligence behind existing agent workflows."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs",
+      "purpose": "Requirement delta folders for the ProjectAtlas repository-intelligence expansion."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/cross-repository-intelligence",
+      "purpose": "Requirement delta folder for explicit, read-only cross-repository ProjectAtlas intelligence."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/graph-retrieval-and-analysis",
+      "purpose": "Requirement delta folder for automatic graph retrieval and bounded repository analysis."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/incremental-index-integrity",
+      "purpose": "Requirement delta folder for atomic full and incremental index publication integrity."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/language-intelligence-registry",
+      "purpose": "Requirement delta folder for generated, tiered, and evidence-backed language capabilities."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/local-semantic-retrieval",
+      "purpose": "Requirement delta folder for deterministic lexical retrieval and optional local semantic packs."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/repository-intelligence-benchmarks",
+      "purpose": "Requirement delta folder for reproducible repository-intelligence benchmarks and claim gates."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/repository-knowledge-graph",
+      "purpose": "Requirement delta folder for typed repository graph identities, relations, evidence, and coverage."
+    },
+    {
+      "path": "openspec/changes/enforce-rust-test-quality-gates",
+      "purpose": "OpenSpec change package for blocking Rust test, coverage, mutation, and task-evidence quality gates."
+    },
+    {
+      "path": "openspec/changes/enforce-rust-test-quality-gates/specs",
+      "purpose": "Requirement delta folders for ProjectAtlas Rust test-quality enforcement."
+    },
+    {
+      "path": "openspec/changes/enforce-rust-test-quality-gates/specs/rust-test-quality-gates",
+      "purpose": "Requirement delta folder for nextest, coverage, mutation, and IssueOps evidence gates."
+    },
+    {
+      "path": "crates/projectatlas-cli/examples/calibration-evidence-runner.rs",
+      "purpose": "Launch the dedicated ProjectAtlas calibration evidence runner executable."
+    },
+    {
+      "path": "crates/projectatlas-cli/examples/repository-evaluation-runner.rs",
+      "purpose": "Launch the isolated ProjectAtlas repository-evaluation evidence runner executable."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/bounded_process_supervisor.rs",
+      "purpose": "Supervise evidence subprocess trees with bounded output, timeouts, and teardown through processkit."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/calibration_evidence_runner.rs",
+      "purpose": "Run manifest-bound calibration workloads and publish validated, bounded evidence journals."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/git_process_policy.rs",
+      "purpose": "Build and validate closed Git subprocess arguments, environments, and worktree evidence."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/language_capability_registry_tests.rs",
+      "purpose": "Verify accepted language capability identities, tiers, owners, platforms, and resource contracts."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/optional_pack_candidate_readiness_tests.rs",
+      "purpose": "Validate fail-closed readiness evidence for optional parser-host and semantic-pack candidates."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/repository_evaluation_runner.rs",
+      "purpose": "Execute isolated manifest-bound repository evaluations and emit validated evidence artifacts."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs",
+      "purpose": "Detect drift across versioned v0.4 repository-intelligence contracts and readiness evidence."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/repository_intelligence_scoreboard_tests.rs",
+      "purpose": "Project repository-intelligence source contracts into a deterministic no-claim readiness scoreboard."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/sqlite_architecture_evaluation.rs",
+      "purpose": "Evaluate deterministic lexical retrieval and SQLite indexing strategies over scanned corpus rows."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/task_evidence_plan_tests.rs",
+      "purpose": "Validate one complete initial verification-plan row for every v0.4 OpenSpec task."
+    },
+    {
+      "path": "crates/projectatlas-cli/tests/runtime_trust_boundary.rs",
+      "purpose": "Verify installers never execute ProjectAtlas source discovered inside a target repository."
+    },
+    {
+      "path": "crates/projectatlas-core/src/budget.rs",
+      "purpose": "Define typed hard budgets and enforcement status for default-core indexing and query work."
+    },
+    {
+      "path": "crates/projectatlas-core/src/graph.rs",
+      "purpose": "Define typed repository-graph identities, relations, evidence, coverage, and publication limits."
+    },
+    {
+      "path": "docs/benchmarks/projectatlas-v0.4-capability-registry.json",
+      "purpose": "Declare accepted v0.4 language capabilities, tiers, owners, packs, platforms, and budgets."
+    },
+    {
+      "path": "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json",
+      "purpose": "Preregister pinned corpora, toolchains, workloads, limits, and result schemas for v0.4 evaluation."
+    },
+    {
+      "path": "docs/benchmarks/projectatlas-v0.4-host-safety.json",
+      "purpose": "Record host trust-boundary evidence and fail-closed readiness gates for repository evaluation."
+    },
+    {
+      "path": "docs/benchmarks/projectatlas-v0.4-optional-pack-candidate-readiness.json",
+      "purpose": "Define fail-closed selection evidence for optional parser-host, ANN, and model candidates."
+    },
+    {
+      "path": "docs/benchmarks/projectatlas-v0.4-phase-scoreboard.json",
+      "purpose": "Define the source-projected Phase 0 implementation-readiness scoreboard and no-claim state."
+    },
+    {
+      "path": "docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json",
+      "purpose": "Centralize versioned v0.4 compatibility, architecture, budget, and decision contracts."
+    },
+    {
+      "path": "docs/benchmarks/results/phase-0-truth-and-baselines/reviews.json",
+      "purpose": "Retain independent Phase 0 implementation-readiness reviews, findings, and dispositions."
+    },
+    {
+      "path": "fixtures/contracts/lexical-search-edge-cases-v1.json",
+      "purpose": "Define punctuation, short-token, Unicode, and tokenizer edge cases for lexical-search equivalence."
+    },
+    {
+      "path": "fixtures/contracts/projectatlas-v0.3.26-behavior-cases.json",
+      "purpose": "Freeze representative v0.3.26 CLI and MCP behavior cases for compatibility replay."
+    },
+    {
+      "path": "fixtures/contracts/projectatlas-v0.3.26-compatibility-evidence.json",
+      "purpose": "Bind v0.3.26 compatibility observations to exact surface, behavior, runtime, and host identities."
+    },
+    {
+      "path": "fixtures/contracts/projectatlas-v0.3.26-surface.json",
+      "purpose": "Freeze the v0.3.26 CLI and MCP surface as the v0.4 compatibility floor."
+    },
+    {
+      "path": "fixtures/contracts/projectatlas-v0.4-canonical-graph.json",
+      "purpose": "Provide canonical graph records for deterministic normalization and comparison tests."
+    },
+    {
+      "path": "fixtures/languages/python/builder.py",
+      "purpose": "Provide deterministic Python class, method, function, docstring, and call extraction coverage."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/.openspec.yaml",
+      "purpose": "OpenSpec schema metadata for the ProjectAtlas repository-intelligence expansion."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/design.md",
+      "purpose": "Define architecture, ownership, decisions, risks, and sequencing for repository intelligence."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/proposal.md",
+      "purpose": "Propose the phased ProjectAtlas repository-intelligence expansion and its compatibility boundaries."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/cross-repository-intelligence/spec.md",
+      "purpose": "Specify explicit, bounded, read-only cross-repository intelligence and federation behavior."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/graph-retrieval-and-analysis/spec.md",
+      "purpose": "Specify automatic graph enrichment, retrieval, analysis, compatibility, and agent-call budgets."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/incremental-index-integrity/spec.md",
+      "purpose": "Specify staged indexing, atomic publication, consistent reads, invalidation, and recovery integrity."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/language-intelligence-registry/spec.md",
+      "purpose": "Specify generated language registration, honest support tiers, packs, and provenance."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/local-semantic-retrieval/spec.md",
+      "purpose": "Specify deterministic lexical retrieval and the explicit lifecycle of optional local semantic packs."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/repository-intelligence-benchmarks/spec.md",
+      "purpose": "Specify pinned comparison harnesses, eligibility rules, statistics, performance, and agent evaluations."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/repository-knowledge-graph/spec.md",
+      "purpose": "Specify typed graph identities, relations, evidence, coverage, storage, and resource constraints."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md",
+      "purpose": "Authoritative phased implementation and verification checklist for repository intelligence."
+    },
+    {
+      "path": "openspec/changes/enforce-rust-test-quality-gates/.openspec.yaml",
+      "purpose": "OpenSpec schema metadata for ProjectAtlas Rust test-quality enforcement."
+    },
+    {
+      "path": "openspec/changes/enforce-rust-test-quality-gates/design.md",
+      "purpose": "Define architecture, policy, risks, and sequencing for Rust quality and evidence gates."
+    },
+    {
+      "path": "openspec/changes/enforce-rust-test-quality-gates/proposal.md",
+      "purpose": "Propose blocking nextest, coverage, mutation, and IssueOps evidence enforcement."
+    },
+    {
+      "path": "openspec/changes/enforce-rust-test-quality-gates/specs/rust-test-quality-gates/spec.md",
+      "purpose": "Specify repository-owned test, coverage, mutation, evidence, and exception policies."
+    },
+    {
+      "path": "openspec/changes/enforce-rust-test-quality-gates/tasks.md",
+      "purpose": "Authoritative implementation and verification checklist for Rust test-quality gates."
+    },
+    {
+      "path": "openspec/task-verification-plan.json",
+      "purpose": "Map every v0.4 OpenSpec task to its bounded task-specific verification command and assertion."
     }
   ]
 }
