@@ -1260,6 +1260,26 @@
         "state": "implemented_uncommitted"
       },
       "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "4.3",
+      "requirement": "Parser-backed declaration identity remains stable across source line and header-format movement while qualified scopes and overload signatures keep otherwise identical short names distinct.",
+      "scenario": "Rust methods are extracted before and after line/header movement under two owning scopes, and Java overloads are extracted under one scope; canonical EntityKey construction preserves moved declarations and separates scope- or signature-distinct declarations.",
+      "owner": "typed-graph-domain-contracts",
+      "changed_artifacts": ["crates/projectatlas-symbols/src/lib.rs", "openspec/changes/advance-rust-repository-intelligence/tasks.md", "openspec/task-verification-plan.json"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-4.3",
+        "function": "tests::task_arri_ut_arri_4_3",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-symbols", "tests::task_arri_ut_arri_4_3", "--", "--exact"] },
+        "assertion": "Tree-sitter-backed Rust method keys survive declaration line and header-format movement, duplicate short names under Left and Right remain distinct, and Java run overloads with numeric versus textual signatures produce distinct keys under the same project and scope.",
+        "covered_inputs": ["Rust parser-backed method declarations before movement", "Rust parser-backed method declarations after line and header-format movement", "Left and Right qualified scopes with the same short name", "Java run overloads with numeric and textual signatures", "stable ProjectInstanceId input", "tree-sitter parser provenance", "canonical EntitySelector and EntityKey construction"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
     }
   ],
   "planned_row_definitions": [

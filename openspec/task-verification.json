@@ -2343,22 +2343,39 @@
           "test_ids": [
             "UT:ARRI-4.3"
           ],
-          "assertion": "Verify add identity fixtures proving unchanged symbols survive line/format movement and duplicate short names remain distinct across scopes and overloads.",
+          "assertion": "Tree-sitter-backed Rust method keys survive declaration line and header-format movement, duplicate short names under Left and Right remain distinct, and Java run overloads with numeric versus textual signatures produce distinct keys under the same project and scope.",
           "command": {
             "executable": "cargo",
             "arguments": [
               "test",
               "--locked",
-              "--workspace",
-              "--all-features",
-              "task_arri_ut_arri_4_3"
+              "-p",
+              "projectatlas-symbols",
+              "tests::task_arri_ut_arri_4_3",
+              "--",
+              "--exact"
             ]
           },
           "timeout_seconds": 300,
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "crates/projectatlas-symbols/src/lib.rs"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification-plan.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-4.3",
+              "path": "crates/projectatlas-symbols/src/lib.rs",
+              "anchor": "task_arri_ut_arri_4_3"
             }
           ]
         },

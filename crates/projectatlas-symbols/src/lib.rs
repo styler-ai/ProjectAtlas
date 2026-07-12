@@ -1873,7 +1873,7 @@ fn helper() {}
     }
 
     #[test]
-    fn parser_backed_declaration_identity_survives_header_format_and_line_movement() {
+    fn task_arri_ut_arri_4_3() {
         let before_source = r"
 struct Left;
 
@@ -1959,10 +1959,7 @@ impl Right {
         assert_eq!(before_left_i32_key, after_left_i32_key);
         assert_eq!(before_right_i32_key, after_right_i32_key);
         assert_ne!(before_left_i32_key, before_right_i32_key);
-    }
 
-    #[test]
-    fn parser_backed_java_overloads_have_distinct_identity() {
         let source = r"
 class Runner {
     int run(int value) {
