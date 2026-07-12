@@ -2048,22 +2048,47 @@
           "test_ids": [
             "UT:ARRI-3.4"
           ],
-          "assertion": "Verify on the first feature touch to `projectatlas-symbols`, extract only the required registry, extraction, manifest, fallback, resolution, or language-adapter ownership while preserving current parser output.",
+          "assertion": "The first projectatlas-symbols feature touch extracts exactly the closed built-in tree-sitter parser registry, preserves the public specialized-language inventory and aliases, and continues to emit tree-sitter symbol output for every registered language without adding a trait, factory, crate, or dynamic dispatch.",
           "command": {
             "executable": "cargo",
             "arguments": [
               "test",
               "--locked",
-              "--workspace",
-              "--all-features",
-              "task_arri_ut_arri_3_4"
+              "-p",
+              "projectatlas-symbols",
+              "tests::task_arri_ut_arri_3_4",
+              "--",
+              "--exact"
             ]
           },
           "timeout_seconds": 300,
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "crates/projectatlas-symbols/src/lib.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-symbols/src/parser_registry.rs"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification-plan.json"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-3.4",
+              "path": "crates/projectatlas-symbols/src/lib.rs",
+              "anchor": "task_arri_ut_arri_3_4"
             }
           ]
         },

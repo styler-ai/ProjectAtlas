@@ -1203,6 +1203,26 @@
     },
     {
       "change": "advance-rust-repository-intelligence",
+      "task_id": "3.4",
+      "requirement": "The first projectatlas-symbols feature touch extracts only the built-in parser registry ownership while preserving current parser selection, aliases, public inventory, and symbol output.",
+      "scenario": "The closed tree-sitter language-to-parser mapping moves behind one concrete parser_registry module, the extraction facade and public functions remain compatible, and every registered language still emits the expected tree-sitter symbol kind and name.",
+      "owner": "rust-ownership-and-module-boundaries",
+      "changed_artifacts": ["crates/projectatlas-symbols/src/lib.rs", "crates/projectatlas-symbols/src/parser_registry.rs", "openspec/task-verification-plan.json"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-3.4",
+        "function": "tests::task_arri_ut_arri_3_4",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-symbols", "tests::task_arri_ut_arri_3_4", "--", "--exact"] },
+        "assertion": "The first projectatlas-symbols feature touch extracts exactly the closed built-in tree-sitter parser registry, preserves the public specialized-language inventory and aliases, and continues to emit tree-sitter symbol output for every registered language without adding a trait, factory, crate, or dynamic dispatch.",
+        "covered_inputs": ["built-in specialized-language inventory", "Rust build-script parser alias", "C and C++ header parser aliases", "tree-sitter parser selection", "representative symbol kind and name output for every registered language", "unchanged extraction facade and public registry functions"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
       "task_id": "4.1",
       "requirement": "Centralized typed graph and hard-budget contracts live in the smallest core owners while service use-case contracts remain outside core and the service-to-database-to-core dependency direction is preserved.",
       "scenario": "A generation-neutral graph fact composes validated entity identity and selector, parser provenance, a project-scoped logical relation, evidence occurrences, finite confidence, and structural slot/epoch stamping; the focused graph suite separately exercises resolution candidates, coverage, typed budgets, serialization, and compatibility.",

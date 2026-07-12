@@ -1,6 +1,9 @@
 //! Purpose: Extract tree-sitter-backed `ProjectAtlas` symbol graphs.
 
 mod languages;
+mod parser_registry;
+
+pub use parser_registry::{has_specialized_parser, specialized_languages};
 
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
@@ -9,7 +12,7 @@ use regex::Regex;
 use std::borrow::Cow;
 use std::path::Path;
 use toml::Value as TomlValue;
-use tree_sitter::{Language, Node, Parser};
+use tree_sitter::{Node, Parser};
 
 /// Maximum symbols kept from one file to bound large generated sources.
 const MAX_SYMBOLS_PER_FILE: usize = 4_000;
@@ -46,35 +49,6 @@ pub fn extract_symbol_graph(path: &str, language: Option<&str>, content: &str) -
         return parsed.graph;
     }
     extract_fallback_graph(path, language, parse_content.as_ref())
-}
-
-/// Return whether the language has a specialized tree-sitter parser.
-#[must_use]
-pub fn has_specialized_parser(language: &str) -> bool {
-    tree_sitter_language(language).is_some()
-}
-
-/// Return all specialized parser language identifiers.
-#[must_use]
-pub fn specialized_languages() -> &'static [&'static str] {
-    &[
-        "rust",
-        "rust-build-script",
-        "python",
-        "javascript",
-        "typescript",
-        "tsx",
-        "java",
-        "kotlin",
-        "csharp",
-        "go",
-        "objective-c",
-        "zig",
-        "c",
-        "cpp",
-        "h",
-        "hpp",
-    ]
 }
 
 /// Return whether a file is a Cargo manifest or lockfile.
@@ -581,7 +555,7 @@ fn extract_tree_sitter_graph(
     content: &str,
 ) -> Option<TreeSitterParse> {
     let language_name = language?;
-    let parser_language = tree_sitter_language(language_name)?;
+    let parser_language = parser_registry::parser_language(language_name)?;
     let mut parser = Parser::new();
     if parser.set_language(&parser_language).is_err() {
         return None;
@@ -593,26 +567,6 @@ fn extract_tree_sitter_graph(
     visit_node(root, content, &mut graph);
     languages::augment_language_graph(&mut graph, content);
     Some(TreeSitterParse { graph, had_errors })
-}
-
-/// Return a tree-sitter language for supported source families.
-fn tree_sitter_language(language: &str) -> Option<Language> {
-    match language {
-        "rust" | "rust-build-script" => Some(tree_sitter_rust::LANGUAGE.into()),
-        "python" => Some(tree_sitter_python::LANGUAGE.into()),
-        "javascript" => Some(tree_sitter_javascript::LANGUAGE.into()),
-        "typescript" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
-        "tsx" => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
-        "java" => Some(tree_sitter_java::LANGUAGE.into()),
-        "kotlin" => Some(tree_sitter_kotlin_ng::LANGUAGE.into()),
-        "csharp" => Some(tree_sitter_c_sharp::LANGUAGE.into()),
-        "go" => Some(tree_sitter_go::LANGUAGE.into()),
-        "objective-c" => Some(tree_sitter_objc::LANGUAGE.into()),
-        "zig" => Some(tree_sitter_zig::LANGUAGE.into()),
-        "c" | "h" => Some(tree_sitter_c::LANGUAGE.into()),
-        "cpp" | "hpp" => Some(tree_sitter_cpp::LANGUAGE.into()),
-        _ => None,
-    }
 }
 
 /// Recursively inspect one tree-sitter node.
@@ -3116,20 +3070,96 @@ version = "0.60.0"
     }
 
     #[test]
-    fn specialized_language_registry_covers_target_set() {
-        for expected in [
-            "rust",
-            "python",
-            "javascript",
-            "typescript",
-            "java",
-            "kotlin",
-            "csharp",
-            "go",
-            "objective-c",
-            "zig",
-        ] {
-            assert!(specialized_languages().contains(&expected));
+    fn task_arri_ut_arri_3_4() {
+        let samples = [
+            ("rust", "fn run() {}", SymbolKind::Function, "run"),
+            (
+                "rust-build-script",
+                "fn main() {}",
+                SymbolKind::Function,
+                "main",
+            ),
+            (
+                "python",
+                "def run():\n    return None\n",
+                SymbolKind::Function,
+                "run",
+            ),
+            (
+                "javascript",
+                "function run() {}",
+                SymbolKind::Function,
+                "run",
+            ),
+            (
+                "typescript",
+                "function run(): void {}",
+                SymbolKind::Function,
+                "run",
+            ),
+            (
+                "tsx",
+                "function Run() { return <div />; }",
+                SymbolKind::Function,
+                "Run",
+            ),
+            (
+                "java",
+                "class Runner { void run() {} }",
+                SymbolKind::Class,
+                "Runner",
+            ),
+            (
+                "kotlin",
+                "class Runner { fun run() {} }",
+                SymbolKind::Class,
+                "Runner",
+            ),
+            (
+                "csharp",
+                "class Runner { void Run() {} }",
+                SymbolKind::Class,
+                "Runner",
+            ),
+            (
+                "go",
+                "package main\nfunc run() {}\n",
+                SymbolKind::Function,
+                "run",
+            ),
+            (
+                "objective-c",
+                "@interface Runner\n@end\n@implementation Runner\n@end\n",
+                SymbolKind::Class,
+                "Runner",
+            ),
+            ("zig", "pub fn run() void {}", SymbolKind::Function, "run"),
+            (
+                "c",
+                "int run(void) { return 0; }",
+                SymbolKind::Function,
+                "run",
+            ),
+            ("cpp", "class Runner {};", SymbolKind::Class, "Runner"),
+            ("h", "int run(void);", SymbolKind::Function, "run"),
+            ("hpp", "class Runner {};", SymbolKind::Class, "Runner"),
+        ];
+
+        assert_eq!(specialized_languages().len(), samples.len());
+        for ((language, source, expected_kind, expected_name), registered_language) in
+            samples.into_iter().zip(specialized_languages())
+        {
+            assert_eq!(language, *registered_language);
+            let graph = extract_symbol_graph("fixture", Some(language), source);
+            assert_eq!(graph.parser, ParserKind::TreeSitter, "{language}");
+            assert!(
+                graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| { symbol.kind == expected_kind && symbol.name == expected_name }),
+                "expected parser output for {language} to contain {expected_kind:?} {expected_name}: {:?}",
+                graph.symbols
+            );
         }
     }
 }
