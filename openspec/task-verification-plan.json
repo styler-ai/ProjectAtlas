@@ -1174,6 +1174,26 @@
     },
     {
       "change": "advance-rust-repository-intelligence",
+      "task_id": "3.3",
+      "requirement": "The first database feature touch extracts only schema initialization, version reconciliation, and supported legacy repair behind the unchanged AtlasStore facade.",
+      "scenario": "The public store facade initializes the exact current table and index inventory, records the same schema version, and remains idempotent after schema ownership moves to one private module; the existing database suite supplies the broader persistence regression evidence.",
+      "owner": "rust-ownership-and-module-boundaries",
+      "changed_artifacts": ["crates/projectatlas-db/src/lib.rs", "crates/projectatlas-db/src/schema.rs", "openspec/task-verification-plan.json"],
+      "risk": "L2-persistence-cross-crate",
+      "required_evidence_layers": ["unit", "integration"],
+      "timeout_seconds": 600,
+      "unit_test": {
+        "test_id": "UT:ARRI-3.3",
+        "function": "schema::tests::store_facade_preserves_existing_schema_contract",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-db", "schema::tests::store_facade_preserves_existing_schema_contract", "--", "--exact"] },
+        "assertion": "AtlasStore initialization remains idempotent and preserves the exact current table, explicit-index, and schema-version inventory after schema ownership moves into one private responsibility-named module.",
+        "covered_inputs": ["AtlasStore in-memory facade", "repeat initialize_schema call", "schema version 8 metadata", "ten current tables", "sixteen current explicit indexes", "schema-only module boundary"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
       "task_id": "4.1",
       "requirement": "Centralized typed graph and hard-budget contracts live in the smallest core owners while service use-case contracts remain outside core and the service-to-database-to-core dependency direction is preserved.",
       "scenario": "A generation-neutral graph fact composes validated entity identity and selector, parser provenance, a project-scoped logical relation, evidence occurrences, finite confidence, and structural slot/epoch stamping; the focused graph suite separately exercises resolution candidates, coverage, typed budgets, serialization, and compatibility.",
