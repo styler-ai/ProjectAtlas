@@ -324,7 +324,7 @@ mod tests {
     use std::io;
 
     #[test]
-    fn store_facade_preserves_existing_schema_contract() -> Result<(), Box<dyn Error>> {
+    fn store_facade_preserves_current_and_legacy_schema_contracts() -> Result<(), Box<dyn Error>> {
         let store = crate::AtlasStore::in_memory()?;
         store.initialize_schema()?;
         let connection = &store.connection;
@@ -375,7 +375,205 @@ mod tests {
         {
             return Err(io::Error::other("index inventory changed during extraction").into());
         }
+        require_column_contract(
+            connection,
+            "summaries",
+            "subject",
+            ("TEXT", true, Some("''"), false),
+        )?;
+        require_column_contract(
+            connection,
+            "symbols",
+            "exported",
+            ("INTEGER", true, Some("0"), false),
+        )?;
+        require_column_contract(
+            connection,
+            "usage_events",
+            "dedupe_scope",
+            ("TEXT", true, Some("'session'"), false),
+        )?;
+        if index_columns(connection, "idx_usage_session_created_at")?
+            != ["session_id", "created_at"]
+        {
+            return Err(io::Error::other("compound usage index changed during extraction").into());
+        }
+
+        let legacy = tempfile::tempdir()?;
+        let legacy_path = legacy.path().join("legacy.db");
+        seed_legacy_schema(&legacy_path, 7)?;
+        let legacy_store = crate::AtlasStore::open(&legacy_path)?;
+        let legacy_connection = &legacy_store.connection;
+        let version = legacy_connection.query_row(
+            "SELECT value FROM metadata WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        if version != SCHEMA_VERSION.to_string() {
+            return Err(io::Error::other("supported schema version was not reconciled").into());
+        }
+        require_column_contract(
+            legacy_connection,
+            "summaries",
+            "subject",
+            ("TEXT", true, Some("''"), false),
+        )?;
+        require_column_contract(
+            legacy_connection,
+            "symbols",
+            "exported",
+            ("INTEGER", true, Some("0"), false),
+        )?;
+        require_column_contract(
+            legacy_connection,
+            "symbols",
+            "documentation",
+            ("TEXT", false, None, false),
+        )?;
+        require_column_contract(
+            legacy_connection,
+            "usage_events",
+            "created_at",
+            ("TEXT", false, None, false),
+        )?;
+        let repaired_usage = legacy_connection.query_row(
+            "SELECT accounting_layer, denominator_kind, dedupe_scope, created_at FROM usage_events WHERE session_id = 'legacy-session'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )?;
+        if repaired_usage.0 != "observed_delta"
+            || repaired_usage.1 != "full_file"
+            || repaired_usage.2 != "event"
+            || repaired_usage.3.is_empty()
+        {
+            return Err(io::Error::other("legacy usage metadata was not repaired").into());
+        }
+
+        let future = tempfile::tempdir()?;
+        let future_path = future.path().join("future.db");
+        seed_legacy_schema(&future_path, SCHEMA_VERSION + 1)?;
+        match crate::AtlasStore::open(&future_path) {
+            Err(DbError::SchemaVersion { found, expected })
+                if found == SCHEMA_VERSION + 1 && expected == SCHEMA_VERSION => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "future schema returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(_) => return Err(io::Error::other("future schema version was accepted").into()),
+        }
         Ok(())
+    }
+
+    fn seed_legacy_schema(path: &std::path::Path, version: i64) -> DbResult<()> {
+        let connection = Connection::open(path)?;
+        connection.execute_batch(
+            "
+            CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE summaries(id INTEGER PRIMARY KEY, node_id INTEGER NOT NULL, summary TEXT);
+            CREATE TABLE symbols(
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL,
+                language TEXT,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                line_start INTEGER NOT NULL,
+                line_end INTEGER NOT NULL,
+                parent TEXT,
+                parser TEXT NOT NULL,
+                detail TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE usage_events(
+                id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                command TEXT NOT NULL,
+                path TEXT,
+                query TEXT,
+                estimated_tokens_without_projectatlas INTEGER,
+                estimated_tokens_with_projectatlas INTEGER,
+                estimated_tokens_saved INTEGER,
+                token_savings_bucket TEXT NOT NULL DEFAULT 'navigation_avoidance',
+                provider TEXT NOT NULL DEFAULT 'heuristic',
+                model TEXT NOT NULL DEFAULT 'unknown',
+                tokenizer_backend TEXT NOT NULL DEFAULT 'chars_div_4',
+                accuracy TEXT NOT NULL DEFAULT 'heuristic_estimate',
+                baseline_kind TEXT NOT NULL DEFAULT 'selected_candidates',
+                confidence TEXT NOT NULL DEFAULT 'inferred',
+                calculation_trace TEXT NOT NULL DEFAULT 'heuristic=ceil(chars_or_bytes/4)'
+            );
+            INSERT INTO usage_events(
+                session_id,
+                command,
+                estimated_tokens_without_projectatlas,
+                estimated_tokens_with_projectatlas,
+                estimated_tokens_saved,
+                token_savings_bucket
+            ) VALUES('legacy-session', 'legacy', 100, 20, 80, 'full_file_compression');
+            ",
+        )?;
+        connection.execute(
+            "INSERT INTO metadata(key, value) VALUES('schema_version', ?1)",
+            [version.to_string()],
+        )?;
+        Ok(())
+    }
+
+    fn require_column_contract(
+        connection: &Connection,
+        table: &str,
+        column: &str,
+        expected: (&str, bool, Option<&str>, bool),
+    ) -> Result<(), Box<dyn Error>> {
+        let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? != 0,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)? != 0,
+            ))
+        })?;
+        let mut actual = None;
+        for row in rows {
+            let (name, declared_type, not_null, default_value, primary_key) = row?;
+            if name == column {
+                actual = Some((declared_type, not_null, default_value, primary_key));
+                break;
+            }
+        }
+        let actual = actual
+            .ok_or_else(|| io::Error::other(format!("missing {table}.{column} schema contract")))?;
+        let expected = (
+            expected.0.to_string(),
+            expected.1,
+            expected.2.map(str::to_string),
+            expected.3,
+        );
+        if actual != expected {
+            return Err(io::Error::other(format!(
+                "{table}.{column} schema contract changed: {actual:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    fn index_columns(connection: &Connection, index: &str) -> DbResult<Vec<String>> {
+        let mut statement = connection.prepare(&format!("PRAGMA index_info({index})"))?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(2))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
     }
 
     fn object_names(connection: &Connection, kind: &str) -> DbResult<Vec<String>> {
