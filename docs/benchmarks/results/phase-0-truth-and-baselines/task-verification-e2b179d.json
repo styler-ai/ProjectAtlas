@@ -2,15 +2,15 @@
   "schema_version": 1,
   "artifact_kind": "projectatlas_task_verification_run",
   "change": "advance-rust-repository-intelligence",
-  "tested_commit": "370d15d29342c10a4f1ed592818f8cabe19699e5",
+  "tested_commit": "e2b179d861bed3859e8e0c4cdcf00e88ed4be179",
   "platform": {
     "os": "windows",
     "arch": "x64"
   },
-  "started_at": "2026-07-12T20:55:38.808Z",
-  "completed_at": "2026-07-12T20:56:06.664Z",
-  "result_count": 41,
-  "passed_count": 41,
+  "started_at": "2026-07-12T21:25:46.568Z",
+  "completed_at": "2026-07-12T21:26:38.950Z",
+  "result_count": 42,
+  "passed_count": 42,
   "results": [
     {
       "task_id": "1.1",
@@ -26,12 +26,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:38.809Z",
-      "completed_at": "2026-07-12T20:55:39.667Z",
+      "started_at": "2026-07-12T21:25:46.568Z",
+      "completed_at": "2026-07-12T21:26:00.061Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:1f834fc20f79f53bfc6b08287ed734b9c4f2835bebd298e97de1340021fcd4d3"
+      "executed_test_count": 1,
+      "output_digest": "sha256:442d7ecada1e7c316a5838b24123503a07f6b3435003027b0e778a28cb345aaf"
     },
     {
       "task_id": "1.2",
@@ -47,11 +48,12 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:39.698Z",
-      "completed_at": "2026-07-12T20:55:40.286Z",
+      "started_at": "2026-07-12T21:26:00.061Z",
+      "completed_at": "2026-07-12T21:26:00.639Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
+      "executed_test_count": 1,
       "output_digest": "sha256:a918c92248816b982568121012a02942521b9d0fbceab0b44fbf7cb13806a941"
     },
     {
@@ -68,12 +70,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:40.288Z",
-      "completed_at": "2026-07-12T20:55:40.825Z",
+      "started_at": "2026-07-12T21:26:00.639Z",
+      "completed_at": "2026-07-12T21:26:01.154Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:fc7d3d6b6d27f2863871f56ef55eba9032b9b2a7d0e84c0a95284ea04addd993"
+      "executed_test_count": 1,
+      "output_digest": "sha256:3291d9aecc1889222ee527e54e57d8d89799b57764d5b5f6fd0565e2288763f7"
     },
     {
       "task_id": "1.4",
@@ -89,11 +92,12 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:40.826Z",
-      "completed_at": "2026-07-12T20:55:41.378Z",
+      "started_at": "2026-07-12T21:26:01.155Z",
+      "completed_at": "2026-07-12T21:26:01.693Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
+      "executed_test_count": 1,
       "output_digest": "sha256:5b520115426597c965c2f31e58785e41c4b8d3f675784ce479ef9d12d3cbb1aa"
     },
     {
@@ -110,11 +114,12 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:41.379Z",
-      "completed_at": "2026-07-12T20:55:41.899Z",
+      "started_at": "2026-07-12T21:26:01.693Z",
+      "completed_at": "2026-07-12T21:26:02.197Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
+      "executed_test_count": 1,
       "output_digest": "sha256:4d6e0839452104f20cea0acba932589e5fee1e62e763e674f17376dddfef579b"
     },
     {
@@ -131,12 +136,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:41.900Z",
-      "completed_at": "2026-07-12T20:55:43.019Z",
+      "started_at": "2026-07-12T21:26:02.197Z",
+      "completed_at": "2026-07-12T21:26:03.298Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:7834088fd2864a997f44e440541f52b347c3273e61df2da4c2b495f977b13455"
+      "executed_test_count": 1,
+      "output_digest": "sha256:4ab080d25ab5b7f9c1a824b67bfd33a29f95c1f8cca46a66e7f0d4d230fc99f9"
     },
     {
       "task_id": "2.1",
@@ -154,12 +160,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:43.019Z",
-      "completed_at": "2026-07-12T20:55:43.557Z",
+      "started_at": "2026-07-12T21:26:03.298Z",
+      "completed_at": "2026-07-12T21:26:03.843Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:0919e59deef149baa07d7c75514e3ff58009c047d8eef4e120939b3db2d762a1"
+      "executed_test_count": 1,
+      "output_digest": "sha256:7a9a7673f23dc76f0d015583956124d4c9e76455127cef35d2f4502700401037"
     },
     {
       "task_id": "2.2",
@@ -177,12 +184,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:43.558Z",
-      "completed_at": "2026-07-12T20:55:44.489Z",
+      "started_at": "2026-07-12T21:26:03.843Z",
+      "completed_at": "2026-07-12T21:26:05.007Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:f94b411305141208380ce07f11859a32b1c25fa52981bb3de17b4525576c3f0d"
+      "executed_test_count": 1,
+      "output_digest": "sha256:d9b54a7903d598241ba2d7485bf847979db4104d59e57ae97fd7de84bd4152ef"
     },
     {
       "task_id": "2.3",
@@ -200,11 +208,12 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:44.489Z",
-      "completed_at": "2026-07-12T20:55:45.288Z",
+      "started_at": "2026-07-12T21:26:05.007Z",
+      "completed_at": "2026-07-12T21:26:05.556Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
+      "executed_test_count": 1,
       "output_digest": "sha256:478f004bb03a08fc4daac12c30312ff07277fd9c1c0085ff2ebc21eb6cdb4bc5"
     },
     {
@@ -223,12 +232,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:45.288Z",
-      "completed_at": "2026-07-12T20:55:45.896Z",
+      "started_at": "2026-07-12T21:26:05.556Z",
+      "completed_at": "2026-07-12T21:26:06.172Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:0f02161e22821b828fe68ab9a3a3bfaa251c4cd157b6f472d8d912e854980171"
+      "executed_test_count": 1,
+      "output_digest": "sha256:8c56c75b941a47cad1e31a4c9e560bb265f2a3229bb2d94a38c4cc968a1e95cc"
     },
     {
       "task_id": "2.5",
@@ -246,12 +256,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:45.897Z",
-      "completed_at": "2026-07-12T20:55:46.436Z",
+      "started_at": "2026-07-12T21:26:06.172Z",
+      "completed_at": "2026-07-12T21:26:06.686Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:f2209022a1593ebae3fc8505032d83498549c2ee2f04cb4afbaea7b2f05ceab7"
+      "executed_test_count": 1,
+      "output_digest": "sha256:d2115f9d115badb7bfcc62fe30c6bfcbae3179638e04b1169bef6ebdf27ef3b4"
     },
     {
       "task_id": "2.6",
@@ -269,11 +280,12 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:46.437Z",
-      "completed_at": "2026-07-12T20:55:46.954Z",
+      "started_at": "2026-07-12T21:26:06.686Z",
+      "completed_at": "2026-07-12T21:26:07.200Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
+      "executed_test_count": 1,
       "output_digest": "sha256:598390712bdb0149e9c0800d5d65db95aae91d36e0d72b123f0efe02730319f8"
     },
     {
@@ -292,12 +304,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:46.954Z",
-      "completed_at": "2026-07-12T20:55:47.473Z",
+      "started_at": "2026-07-12T21:26:07.200Z",
+      "completed_at": "2026-07-12T21:26:07.715Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:fe030872d0433f63eee569ccaea2169812d8b100bfcd84c5366bbfda580e4169"
+      "executed_test_count": 1,
+      "output_digest": "sha256:cae8cf84a0fe940796d91c5739dcc90d7ace3a0096709eb4fc6d37da64f875fb"
     },
     {
       "task_id": "2.8",
@@ -315,12 +328,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:47.473Z",
-      "completed_at": "2026-07-12T20:55:48.005Z",
+      "started_at": "2026-07-12T21:26:07.715Z",
+      "completed_at": "2026-07-12T21:26:08.209Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:12f22a927b1f9897ff06633cd661ed212039626d2a3c1f46dedfc85f675522a0"
+      "executed_test_count": 1,
+      "output_digest": "sha256:e3c337b274a966641851cc2cdbb0e721a2c57fd066dd2b19002c0287116e7b9a"
     },
     {
       "task_id": "2.9",
@@ -338,12 +352,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:48.005Z",
-      "completed_at": "2026-07-12T20:55:48.514Z",
+      "started_at": "2026-07-12T21:26:08.209Z",
+      "completed_at": "2026-07-12T21:26:08.731Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:3daca6313b63300588d4c6808d9e30d86a367fa2a9fe2b4ece29e74ad4753772"
+      "executed_test_count": 1,
+      "output_digest": "sha256:3d71640656395ddb865bbd02f8dfe06db0320d6e052195d2f40f628493474e65"
     },
     {
       "task_id": "2.10",
@@ -361,12 +376,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:48.514Z",
-      "completed_at": "2026-07-12T20:55:49.051Z",
+      "started_at": "2026-07-12T21:26:08.731Z",
+      "completed_at": "2026-07-12T21:26:09.248Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:34d62189f0e913157ef945a8471ac05479eb2da25790848a7fd37c1930ca0910"
+      "executed_test_count": 1,
+      "output_digest": "sha256:e112fb49687ac2ac1ac07744cd5a3cd9db9db7c2aa371545b5dc9b21bdfa4ba1"
     },
     {
       "task_id": "2.11",
@@ -384,11 +400,12 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:49.052Z",
-      "completed_at": "2026-07-12T20:55:49.586Z",
+      "started_at": "2026-07-12T21:26:09.248Z",
+      "completed_at": "2026-07-12T21:26:09.947Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
+      "executed_test_count": 1,
       "output_digest": "sha256:b13202e7a7049e85ed37d7c8ff34ccddc063eeb4323176065fd4e3fb82701359"
     },
     {
@@ -409,12 +426,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:49.587Z",
-      "completed_at": "2026-07-12T20:55:50.983Z",
+      "started_at": "2026-07-12T21:26:09.947Z",
+      "completed_at": "2026-07-12T21:26:20.468Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:23a13f88404e80ecc034fa30d6234693899cf8662954a3469dbddb63c222c42a"
+      "executed_test_count": 1,
+      "output_digest": "sha256:f420420d0e84aa6d30a67d10f105e60806ed593c9f05c4ec55f20ce3a3435a56"
     },
     {
       "task_id": "2.13",
@@ -434,12 +452,13 @@
         ]
       },
       "timeout_seconds": 600,
-      "started_at": "2026-07-12T20:55:50.983Z",
-      "completed_at": "2026-07-12T20:55:52.236Z",
+      "started_at": "2026-07-12T21:26:20.468Z",
+      "completed_at": "2026-07-12T21:26:21.776Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:41d1761bbd04fe710bce4989b0689a2488d8dfc055d7f9557a11fc937e40e2f6"
+      "executed_test_count": 1,
+      "output_digest": "sha256:3e306ce2ff90cd215bd1bbe88675a7e167e46ee4d4b20a29dd0c5087dc0540e9"
     },
     {
       "task_id": "2.14",
@@ -457,12 +476,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:52.236Z",
-      "completed_at": "2026-07-12T20:55:53.081Z",
+      "started_at": "2026-07-12T21:26:21.776Z",
+      "completed_at": "2026-07-12T21:26:22.683Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:4462208dfcdad72d963f2bf83a1fc5a5883ca49ba14a2590c913f9cb2f85abbc"
+      "executed_test_count": 1,
+      "output_digest": "sha256:955fad7ace5cdae5bcefd74349e0edb64c008b3d579a7b903766287692add0c1"
     },
     {
       "task_id": "2.15",
@@ -480,11 +500,12 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:53.082Z",
-      "completed_at": "2026-07-12T20:55:53.601Z",
+      "started_at": "2026-07-12T21:26:22.684Z",
+      "completed_at": "2026-07-12T21:26:23.212Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
+      "executed_test_count": 1,
       "output_digest": "sha256:e77726a853d4678995dcddb84bafc35da4d0c217398ff470d466c5dd97e9f448"
     },
     {
@@ -503,12 +524,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:53.601Z",
-      "completed_at": "2026-07-12T20:55:54.113Z",
+      "started_at": "2026-07-12T21:26:23.212Z",
+      "completed_at": "2026-07-12T21:26:23.759Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:a9390109502ab7fe1962635252780ae3ad13ac314f6c76222a46236985170ee6"
+      "executed_test_count": 1,
+      "output_digest": "sha256:30014e030d15f3cc36920418ba93bf214ae7145e3d04c087bbe67837bff76991"
     },
     {
       "task_id": "2.17",
@@ -526,12 +548,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:54.114Z",
-      "completed_at": "2026-07-12T20:55:54.659Z",
+      "started_at": "2026-07-12T21:26:23.760Z",
+      "completed_at": "2026-07-12T21:26:24.319Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:ee727721cc26cf0a7e7355944e90aa78414d55ea2b8437b9afd8271a3e6b2ed4"
+      "executed_test_count": 1,
+      "output_digest": "sha256:1abe0cf6aa90557a06e9ddbb94c176c62a074fb954be4a70ecb5a8129728fda2"
     },
     {
       "task_id": "2.18",
@@ -549,12 +572,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:54.660Z",
-      "completed_at": "2026-07-12T20:55:55.197Z",
+      "started_at": "2026-07-12T21:26:24.319Z",
+      "completed_at": "2026-07-12T21:26:24.862Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:a4af1e81cb184fe818e33bcada7e6295b449cb75564f4edc95d585206cc9df53"
+      "executed_test_count": 1,
+      "output_digest": "sha256:f6d50193887a54713aa91044a2457f131469a93775424252777c240f4c2027c9"
     },
     {
       "task_id": "2.19",
@@ -572,12 +596,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:55.197Z",
-      "completed_at": "2026-07-12T20:55:55.724Z",
+      "started_at": "2026-07-12T21:26:24.863Z",
+      "completed_at": "2026-07-12T21:26:25.360Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:85f1cfd150da4533cf350e7dfe93006a79d53f7a479d2bdccf90029dda0fbcc2"
+      "executed_test_count": 1,
+      "output_digest": "sha256:a8abdc1cde680856766136243b80e6f69f96fb17e7b11e79c8a5bf7ce34f8e92"
     },
     {
       "task_id": "2.20",
@@ -595,12 +620,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:55.725Z",
-      "completed_at": "2026-07-12T20:55:56.231Z",
+      "started_at": "2026-07-12T21:26:25.360Z",
+      "completed_at": "2026-07-12T21:26:25.864Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:483448fa2babed8670ebc3840b9dd30199d5cc06ee32d7cbd2794f60734a0d3b"
+      "executed_test_count": 1,
+      "output_digest": "sha256:3e4029318fd0b9f03e25a8cd0cd63dff44db85b2219237684ac742b59aac3ec7"
     },
     {
       "task_id": "2.21",
@@ -618,11 +644,12 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:56.231Z",
-      "completed_at": "2026-07-12T20:55:56.834Z",
+      "started_at": "2026-07-12T21:26:25.864Z",
+      "completed_at": "2026-07-12T21:26:26.454Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
+      "executed_test_count": 1,
       "output_digest": "sha256:55d2f2fd4ea295808ca844ceb164379beb164ea37d9c173ac31a1151ebc45932"
     },
     {
@@ -641,12 +668,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:56.834Z",
-      "completed_at": "2026-07-12T20:55:57.369Z",
+      "started_at": "2026-07-12T21:26:26.454Z",
+      "completed_at": "2026-07-12T21:26:26.955Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:ece85ea40be7281fa41423309e0193b653c6a6d115f40fe378d8ac9e70a4475b"
+      "executed_test_count": 1,
+      "output_digest": "sha256:da872f765e103651a79680eed4f60f4f4578d08859ea725b4985e002acd4204e"
     },
     {
       "task_id": "2.23",
@@ -664,12 +692,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:57.369Z",
-      "completed_at": "2026-07-12T20:55:57.886Z",
+      "started_at": "2026-07-12T21:26:26.955Z",
+      "completed_at": "2026-07-12T21:26:27.477Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:efa39e01b44c83087b2df89d3ae17ac0bf31efeef581a17c6b4662ee575887e5"
+      "executed_test_count": 1,
+      "output_digest": "sha256:c06693840f163b977c04feebb05047a69163d7b936073dd134b30ba5316ac6b0"
     },
     {
       "task_id": "2.24",
@@ -687,12 +716,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:57.887Z",
-      "completed_at": "2026-07-12T20:55:58.656Z",
+      "started_at": "2026-07-12T21:26:27.477Z",
+      "completed_at": "2026-07-12T21:26:28.235Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:26864e8873b84b96ee543ae90a127c7b052308530f100ee6040e92fbf39f68a4"
+      "executed_test_count": 1,
+      "output_digest": "sha256:382e09d3db31059116edd5ab504a8838012e150a69cf2c1797e932b3c75a0549"
     },
     {
       "task_id": "2.25",
@@ -710,12 +740,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:58.657Z",
-      "completed_at": "2026-07-12T20:55:59.195Z",
+      "started_at": "2026-07-12T21:26:28.236Z",
+      "completed_at": "2026-07-12T21:26:28.753Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:47bb57bcd21704c8103b06bfba1a32d0ad965fc5bdc61d4799803d95f2cdfc0c"
+      "executed_test_count": 1,
+      "output_digest": "sha256:688c4977d36493a5f5fc17e6ae39b846b2949743f60318d8674236bd0bfdcfe8"
     },
     {
       "task_id": "2.26",
@@ -733,12 +764,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:59.195Z",
-      "completed_at": "2026-07-12T20:55:59.739Z",
+      "started_at": "2026-07-12T21:26:28.753Z",
+      "completed_at": "2026-07-12T21:26:29.287Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:5e8bf1651508da42c92cc80075550f258071e2ca175003c1a508756141179490"
+      "executed_test_count": 1,
+      "output_digest": "sha256:5ff67df0c37cff7c8ae31488714b96ed579a418c542cb1ca23646d312a04979d"
     },
     {
       "task_id": "2.27",
@@ -756,12 +788,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:55:59.740Z",
-      "completed_at": "2026-07-12T20:56:00.288Z",
+      "started_at": "2026-07-12T21:26:29.287Z",
+      "completed_at": "2026-07-12T21:26:29.808Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:a85b136beaafe0e5bbf88aeda6fa1fad6deb90acc1e3e8a13e86d24b91428788"
+      "executed_test_count": 1,
+      "output_digest": "sha256:e31c797008ce4ec58dadb6aa6a384e44a792cbb78fd89df8763439e3d395bf40"
     },
     {
       "task_id": "2.28",
@@ -779,12 +812,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:56:00.288Z",
-      "completed_at": "2026-07-12T20:56:03.330Z",
+      "started_at": "2026-07-12T21:26:29.808Z",
+      "completed_at": "2026-07-12T21:26:33.506Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:0aefe40f73d4a22b6273a25bdad06ff0fb697905ee5ab6cf7f9612bbdd1b422b"
+      "executed_test_count": 1,
+      "output_digest": "sha256:98a3648384688f44ddef61489a715223329ff746dbc4be3c9d7a20f7fbfe5109"
     },
     {
       "task_id": "2.29",
@@ -802,12 +836,13 @@
         ]
       },
       "timeout_seconds": 1800,
-      "started_at": "2026-07-12T20:56:03.330Z",
-      "completed_at": "2026-07-12T20:56:04.143Z",
+      "started_at": "2026-07-12T21:26:33.507Z",
+      "completed_at": "2026-07-12T21:26:34.224Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:8a82926b056415d826ed3cd5d0895b3ba7109f098cf62bb0b680488eca094acf"
+      "executed_test_count": 1,
+      "output_digest": "sha256:f86219443dbf93147259e4c412ee19f33085184900cefc76e9257502a15fe81f"
     },
     {
       "task_id": "2.30",
@@ -825,12 +860,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:56:04.143Z",
-      "completed_at": "2026-07-12T20:56:04.704Z",
+      "started_at": "2026-07-12T21:26:34.225Z",
+      "completed_at": "2026-07-12T21:26:34.809Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:973ac7f439ea9a53d3a9b00fce9fbc3021384fb28789a37e2bb35fe981b03efe"
+      "executed_test_count": 1,
+      "output_digest": "sha256:4daaff65791fd4300beb2e18b8628eed69b10cf34ce7269ac077b49e3497cd74"
     },
     {
       "task_id": "2.31",
@@ -848,12 +884,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:56:04.704Z",
-      "completed_at": "2026-07-12T20:56:05.263Z",
+      "started_at": "2026-07-12T21:26:34.809Z",
+      "completed_at": "2026-07-12T21:26:35.323Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:de43ffeb11edff169d74f376b3935239b8261fbf6c2818ce4abf4d4dfe6bd9de"
+      "executed_test_count": 1,
+      "output_digest": "sha256:0d9b2c7d8dc19d04aad039c8becfa36cd509d2beb64ff04fd5a4878b93bb883e"
     },
     {
       "task_id": "3.1",
@@ -871,11 +908,12 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:56:05.263Z",
-      "completed_at": "2026-07-12T20:56:05.788Z",
+      "started_at": "2026-07-12T21:26:35.323Z",
+      "completed_at": "2026-07-12T21:26:35.855Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
+      "executed_test_count": 1,
       "output_digest": "sha256:46e7b43562864ca238033b9c25eded513cae594525c69e273c131ad1c71412a5"
     },
     {
@@ -894,12 +932,13 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:56:05.788Z",
-      "completed_at": "2026-07-12T20:56:06.043Z",
+      "started_at": "2026-07-12T21:26:35.855Z",
+      "completed_at": "2026-07-12T21:26:36.726Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:9d23a8bdeaa8ce7ccce919827e8eaf36a7f83f6200746dda03d07c08ce9e97b3"
+      "executed_test_count": 1,
+      "output_digest": "sha256:8a999fe6a88310f1573ed381ec491609d6bfdb5ccaacf9168469a240a427801e"
     },
     {
       "task_id": "3.3",
@@ -917,12 +956,37 @@
         ]
       },
       "timeout_seconds": 600,
-      "started_at": "2026-07-12T20:56:06.044Z",
-      "completed_at": "2026-07-12T20:56:06.417Z",
+      "started_at": "2026-07-12T21:26:36.726Z",
+      "completed_at": "2026-07-12T21:26:37.857Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
-      "output_digest": "sha256:7d553d1ad7467807f12360c6f01683e1a50fbecd94b6608017249e25638ff033"
+      "executed_test_count": 1,
+      "output_digest": "sha256:5f8caeb7832f326319475ab5af4356e6bdf606ee32bd2ea2bb7dc760a559e1b7"
+    },
+    {
+      "task_id": "3.4",
+      "test_id": "UT:ARRI-3.4",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-symbols",
+          "tests::task_arri_ut_arri_3_4",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-12T21:26:37.858Z",
+      "completed_at": "2026-07-12T21:26:38.717Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:50f2c6792d34f377c4c2c237856469f135a2b6f4453731d62eb0f314e635e9d7"
     },
     {
       "task_id": "4.1",
@@ -940,11 +1004,12 @@
         ]
       },
       "timeout_seconds": 300,
-      "started_at": "2026-07-12T20:56:06.417Z",
-      "completed_at": "2026-07-12T20:56:06.661Z",
+      "started_at": "2026-07-12T21:26:38.717Z",
+      "completed_at": "2026-07-12T21:26:38.950Z",
       "outcome": "passed",
       "exit_code": 0,
       "timed_out": false,
+      "executed_test_count": 1,
       "output_digest": "sha256:ae4b7f659b650d8a78f7a23c356059ba9703859c22abc4e1514357d9d8a8c708"
     }
   ]
