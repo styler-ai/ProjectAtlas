@@ -1,0 +1,288 @@
+# Purpose: Define ProjectAtlas Rust quality targets, floors, evidence, and IssueOps policy.
+
+schema_version = 1
+policy_id = "projectatlas-rust-quality-v1"
+repository = "styler-ai/ProjectAtlas"
+release_milestone = "v0.4.0-00"
+required_changes = [
+    "advance-rust-repository-intelligence",
+    "enforce-rust-test-quality-gates",
+]
+
+[tools]
+cargo_nextest = "0.9.140"
+cargo_llvm_cov = "0.8.7"
+cargo_mutants = "27.1.0"
+
+[reference_toolchain]
+rust = "1.93.1"
+llvm = "21.1.8"
+host = "x86_64-pc-windows-msvc"
+
+[scope]
+include_globs = ["crates/*/src/**/*.rs"]
+exclude_globs = []
+exclude_categories = ["test-only", "generated", "proven-unreachable"]
+blanket_exclusions_allowed = false
+raw_rows_retained = true
+
+[timeouts]
+nextest_test_seconds = 120
+nextest_command_seconds = 1200
+nextest_job_seconds = 1500
+doctest_command_seconds = 900
+doctest_job_seconds = 1200
+coverage_command_seconds = 2400
+coverage_job_seconds = 2700
+changed_mutant_test_seconds = 180
+changed_mutant_build_seconds = 900
+changed_mutation_command_seconds = 2700
+changed_mutation_job_seconds = 3000
+inventory_command_seconds = 900
+inventory_job_seconds = 1200
+mutation_shard_test_seconds = 180
+mutation_shard_build_seconds = 900
+mutation_shard_command_seconds = 6300
+mutation_shard_job_seconds = 7200
+mutation_aggregate_command_seconds = 600
+mutation_aggregate_job_seconds = 900
+release_consumption_command_seconds = 600
+release_consumption_job_seconds = 900
+
+[retention]
+artifact_days = 90
+release_decision_window_days = 30
+
+[targets.coverage.lines]
+raw_basis_points = 9800
+adjusted_basis_points = 10000
+tracking_issue = 309
+
+[targets.coverage.regions]
+raw_basis_points = 9500
+adjusted_basis_points = 9800
+tracking_issue = 309
+
+[targets.coverage.functions]
+raw_basis_points = 9800
+adjusted_basis_points = 10000
+tracking_issue = 309
+
+[targets.mutation]
+raw_viable_kill_basis_points = 9000
+adjusted_viable_kill_basis_points = 9500
+tracking_issue = 309
+
+[target_policy]
+target_gap_waivers_allowed = false
+public_complete_claim_requires_complete_counts = true
+
+[evidence]
+manifest_schema_version = 1
+verification_plan = "openspec/task-verification.json"
+task_ledger = "openspec/task-evidence.json"
+output_root = "target/projectatlas-quality"
+metadata_only_closure = true
+closure_task_mutations = ["checkbox-state-only"]
+closure_ledger_mutations = ["current-evidence-pointer-only"]
+closure_issue_map_mutations = []
+require_pr_head_aggregate = true
+trusted_result_kinds = ["github-actions", "repository-retained-local"]
+
+[issueops]
+body_character_limit = 65536
+managed_marker_prefix = "projectatlas-task-evidence:v1"
+evidence_comment_scope = "top-level-section"
+pull_request_issue_field = "OpenSpec-Issue"
+pull_request_scope_field = "OpenSpec-Task"
+allow_pull_request_target = false
+execute_artifact_commands = false
+trust_caller_urls_or_status = false
+fork_writeback_allowed = false
+
+[exception_schema]
+common_required_fields = [
+    "id",
+    "category",
+    "rationale",
+    "owner",
+    "tracking_issue",
+    "approved_by",
+    "approved_on",
+    "source_sha256",
+]
+coverage_selector_fields = ["path", "start_line", "end_line"]
+mutation_selector_fields = ["mutant_id", "path"]
+expiry_fields = ["expires_on", "expires_release"]
+exact_selector_required = true
+future_expiry_required = true
+exactly_one_expiry_required = true
+overlap_allowed = false
+unused_allowed = false
+
+[exceptions]
+records = []
+
+[historical.nextest]
+commit = "d3b3e157f954c7d360d821ed0385762e8b044385"
+platform = "x86_64-pc-windows-msvc"
+test_count = 286
+suite_count = 9
+ignored_count = 0
+eligible_floor_evidence = false
+eligibility_note = "Reported snapshot predates the versioned evidence manifest."
+
+[historical.coverage]
+commit = "d3b3e157f954c7d360d821ed0385762e8b044385"
+platform = "x86_64-pc-windows-msvc"
+rust = "1.93.1"
+llvm = "21.1.8"
+cargo_llvm_cov = "0.8.7"
+line_percent = 87.75
+region_percent = 84.90
+function_percent = 86.28
+missed_lines = 3369
+eligible_floor_evidence = false
+eligibility_note = "Superseded rounded planning report without retained count-based evidence; it is not release or floor evidence."
+
+[historical.mutation_inventory]
+commit = "d3b3e157f954c7d360d821ed0385762e8b044385"
+cargo_mutants = "27.1.0"
+total = 4911
+eligible_floor_evidence = false
+eligibility_note = "Snapshot used cargo-mutants default call skipping and has no complete shard outcomes."
+
+[historical.mutation_inventory.packages]
+projectatlas_cli = 2189
+projectatlas_db = 951
+projectatlas_service = 587
+projectatlas_symbols = 570
+projectatlas_core = 441
+projectatlas_fs = 97
+projectatlas_lints = 76
+
+[observed.nextest]
+commit = "c672442438404411389ef86e2efd767f3a4b2be0"
+platform = "x86_64-pc-windows-msvc"
+observed_at_utc = "2026-07-11T10:56:02Z"
+test_count = 286
+suite_count = 9
+ignored_count = 0
+command_executable = "cargo"
+command_arguments = [
+    "nextest",
+    "list",
+    "--workspace",
+    "--all-features",
+    "--locked",
+    "--message-format",
+    "json",
+]
+inventory_artifact = "target/projectatlas-quality/nextest-list.json"
+artifact_sha256 = "66433cab511cd445b1f8a203e60023da1a376b0fac91d410b2c1769b0566ffa1"
+eligible_release_evidence = false
+eligibility_note = "Local inventory has not yet been retained by a trusted hosted run."
+
+[observed.coverage]
+commit = "c672442438404411389ef86e2efd767f3a4b2be0"
+platform = "x86_64-pc-windows-msvc"
+observed_at_utc = "2026-07-11T10:54:59Z"
+rust = "1.93.1"
+llvm = "21.1.8"
+cargo_llvm_cov = "0.8.7"
+command_executable = "cargo"
+command_arguments = [
+    "llvm-cov",
+    "--workspace",
+    "--all-features",
+    "--locked",
+    "--json",
+    "--output-path",
+    "target/projectatlas-quality/baseline-coverage.json",
+]
+lines_covered = 24130
+lines_total = 27495
+regions_covered = 34041
+regions_total = 40094
+functions_covered = 2045
+functions_total = 2369
+missed_lines = 3365
+line_basis_points = 8776
+region_basis_points = 8490
+function_basis_points = 8632
+artifact = "target/projectatlas-quality/baseline-coverage.json"
+artifact_sha256 = "2fefd29d300cfe113f8aa5558227c782d68cb685fecde396421f1ede9daff548"
+eligible_floor_evidence = false
+eligibility_note = "Exact local counts await trusted hosted retention before establishing the Windows floor."
+
+[observed.mutation_inventory]
+commit = "c672442438404411389ef86e2efd767f3a4b2be0"
+cargo_mutants = "27.1.0"
+platform = "x86_64-pc-windows-msvc"
+observed_at_utc = "2026-07-11T10:55:03Z"
+total = 4931
+raw_unfiltered = true
+skip_calls_defaults = false
+command_executable = "cargo"
+command_arguments = [
+    "mutants",
+    "--config",
+    ".cargo/mutants.toml",
+    "--list",
+    "--json",
+    "--diff",
+]
+artifact = "target/projectatlas-quality/raw-mutants.json"
+artifact_sha256 = "8122fa068d1e2a9e70af81855d85cac3d8259136508037c0b397ea14939ef575"
+config_sha256 = "b81df1c60f138fe8c6ef3f0b9d6c09e37f7c2ffe997e724fd133ef2f7a16db57"
+eligible_floor_evidence = false
+eligibility_note = "Inventory used an uncommitted working-tree config and has no shard outcomes."
+historical_drift = 20
+drift_reason = "Disabling the native default with_capacity call skip exposes 16 CLI and 4 database candidates."
+
+[observed.mutation_inventory.packages]
+projectatlas_cli = 2205
+projectatlas_db = 955
+projectatlas_service = 587
+projectatlas_symbols = 570
+projectatlas_core = 441
+projectatlas_fs = 97
+projectatlas_lints = 76
+
+[[platforms]]
+id = "linux-x86_64-gnu"
+runner = "ubuntu-latest"
+target = "x86_64-unknown-linux-gnu"
+coverage_floor_established = false
+
+[[platforms]]
+id = "windows-x86_64-msvc"
+runner = "windows-latest"
+target = "x86_64-pc-windows-msvc"
+coverage_floor_established = false
+observed_lines_covered = 24130
+observed_lines_total = 27495
+observed_regions_covered = 34041
+observed_regions_total = 40094
+observed_functions_covered = 2045
+observed_functions_total = 2369
+observed_evidence_commit = "c672442438404411389ef86e2efd767f3a4b2be0"
+
+[[platforms]]
+id = "macos-x86_64"
+runner = "macos-15-intel"
+target = "x86_64-apple-darwin"
+coverage_floor_established = false
+
+[[platforms]]
+id = "macos-aarch64"
+runner = "macos-14"
+target = "aarch64-apple-darwin"
+coverage_floor_established = false
+
+[mutation_floor]
+established = false
+raw_viable_kill_basis_points = 0
+adjusted_viable_kill_basis_points = 0
+required_shards = 16
+reason = "No complete retained 16-shard run exists yet."

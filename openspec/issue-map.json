@@ -1,21 +1,125 @@
 {
+  "schema_version": 2,
   "changes": {
-    "add-agent-session-brief": 292,
-    "add-mcp-task-progress-model": 295,
-    "add-nearest-project-routing": 276,
-    "advance-rust-repository-intelligence": 308,
-    "close-mcp-cli-parity": 281,
-    "converge-claude-code-installer": 278,
-    "converge-opencode-installer": 279,
-    "delegate-bulk-purpose-curation": 301,
-    "enforce-rust-test-quality-gates": 309,
-    "expose-mcp-capabilities-settings": 293,
-    "gate-codex-pr-review-threads": 299,
-    "harden-project-path-types": 294,
-    "enhance-projectatlas-init-first-run": 305,
-    "fix-token-tui-reference-visual-regression": 304,
-    "match-token-impact-reference-tui": 302,
-    "publish-rustdoc-readme-links": 300,
-    "simplify-token-tui-dashboard": 296
+    "add-agent-session-brief": {
+      "contract": "checklist-v1",
+      "primary_issue": 292,
+      "owners": [
+        { "issue": 292, "first_task": "1.1", "last_task": "3.3" }
+      ]
+    },
+    "add-mcp-task-progress-model": {
+      "contract": "checklist-v1",
+      "primary_issue": 295,
+      "owners": [
+        { "issue": 295, "first_task": "1.1", "last_task": "3.3" }
+      ]
+    },
+    "add-nearest-project-routing": {
+      "contract": "checklist-v1",
+      "primary_issue": 276,
+      "owners": [
+        { "issue": 276, "first_task": "1.1", "last_task": "3.4" }
+      ]
+    },
+    "advance-rust-repository-intelligence": {
+      "contract": "evidence-v2",
+      "primary_issue": 308,
+      "owners": [
+        { "issue": 308, "first_task": "1.1", "last_task": "8.25" },
+        { "issue": 311, "first_task": "9.1", "last_task": "11.39" }
+      ]
+    },
+    "close-mcp-cli-parity": {
+      "contract": "checklist-v1",
+      "primary_issue": 281,
+      "owners": [
+        { "issue": 281, "first_task": "1.1", "last_task": "4.4" }
+      ]
+    },
+    "converge-claude-code-installer": {
+      "contract": "checklist-v1",
+      "primary_issue": 278,
+      "owners": [
+        { "issue": 278, "first_task": "1.1", "last_task": "3.3" }
+      ]
+    },
+    "converge-opencode-installer": {
+      "contract": "checklist-v1",
+      "primary_issue": 279,
+      "owners": [
+        { "issue": 279, "first_task": "1.1", "last_task": "3.3" }
+      ]
+    },
+    "delegate-bulk-purpose-curation": {
+      "contract": "checklist-v1",
+      "primary_issue": 301,
+      "owners": [
+        { "issue": 301, "first_task": "1.1", "last_task": "3.2" }
+      ]
+    },
+    "enforce-rust-test-quality-gates": {
+      "contract": "evidence-v2",
+      "primary_issue": 309,
+      "owners": [
+        { "issue": 309, "first_task": "1.1", "last_task": "10.13" }
+      ]
+    },
+    "enhance-projectatlas-init-first-run": {
+      "contract": "checklist-v1",
+      "primary_issue": 305,
+      "owners": [
+        { "issue": 305, "first_task": "1.1", "last_task": "6.7" }
+      ]
+    },
+    "expose-mcp-capabilities-settings": {
+      "contract": "checklist-v1",
+      "primary_issue": 293,
+      "owners": [
+        { "issue": 293, "first_task": "1.1", "last_task": "3.3" }
+      ]
+    },
+    "fix-token-tui-reference-visual-regression": {
+      "contract": "checklist-v1",
+      "primary_issue": 304,
+      "owners": [
+        { "issue": 304, "first_task": "1.1", "last_task": "6.7" }
+      ]
+    },
+    "gate-codex-pr-review-threads": {
+      "contract": "checklist-v1",
+      "primary_issue": 299,
+      "owners": [
+        { "issue": 299, "first_task": "1.1", "last_task": "3.4" }
+      ]
+    },
+    "harden-project-path-types": {
+      "contract": "checklist-v1",
+      "primary_issue": 294,
+      "owners": [
+        { "issue": 294, "first_task": "1.1", "last_task": "3.2" }
+      ]
+    },
+    "match-token-impact-reference-tui": {
+      "contract": "checklist-v1",
+      "primary_issue": 302,
+      "owners": [
+        { "issue": 302, "first_task": "1.1", "last_task": "4.6" }
+      ]
+    },
+    "publish-rustdoc-readme-links": {
+      "contract": "checklist-v1",
+      "primary_issue": 300,
+      "owners": [
+        { "issue": 300, "first_task": "1.1", "last_task": "3.2" }
+      ]
+    },
+    "simplify-token-tui-dashboard": {
+      "contract": "checklist-v1",
+      "primary_issue": 296,
+      "owners": [
+        { "issue": 296, "first_task": "1.1", "last_task": "3.9" }
+      ]
+    }
   }
 }

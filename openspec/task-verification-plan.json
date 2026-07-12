@@ -60,6 +60,7 @@
     "initial_unit_test_state": "definition_pending_stable_implementation",
     "initial_result_state": "not_started",
     "explicit_override_sources": [
+      "implemented_range_definitions",
       "stable_row_overrides",
       "planned_row_definitions"
     ],
@@ -117,44 +118,52 @@
     { "change": "enforce-rust-test-quality-gates", "first_task": "9.1", "last_task": "9.5", "owner": "local-quality-workflow", "risk": "L3-public-process-workflow", "default_layers": ["unit", "integration"], "planned_artifacts": [".githooks", "docs"] },
     { "change": "enforce-rust-test-quality-gates", "first_task": "10.1", "last_task": "10.13", "owner": "final-quality-closure", "risk": "L4-platform-release-security", "default_layers": ["unit", "integration", "e2e", "platform", "benchmark", "packaged_smoke"], "planned_artifacts": ["crates", ".github", "docs", "openspec"] }
   ],
-  "unit_test_exemptions": [
+  "implemented_range_definitions": [
     {
       "change": "advance-rust-repository-intelligence",
-      "task_id": "1.1",
-      "scope": "unit-test-link-only",
-      "reason": "Planning-only OpenSpec proposal, design, specification, and task authoring changed no executable behavior."
-    },
-    {
-      "change": "advance-rust-repository-intelligence",
-      "task_id": "1.2",
-      "scope": "unit-test-link-only",
-      "reason": "Creating the planning issue was a one-time tracker mutation with no executable repository behavior."
-    },
-    {
-      "change": "advance-rust-repository-intelligence",
-      "task_id": "1.3",
-      "scope": "unit-test-link-only",
-      "reason": "Issue-map registration is tracker metadata validated live by IssueOps rather than executable product behavior."
-    },
-    {
-      "change": "advance-rust-repository-intelligence",
-      "task_id": "1.4",
-      "scope": "unit-test-link-only",
-      "reason": "Initial checklist mirroring is GitHub tracker state validated live by IssueOps rather than executable product behavior."
-    },
-    {
-      "change": "advance-rust-repository-intelligence",
-      "task_id": "1.5",
-      "scope": "unit-test-link-only",
-      "reason": "This task records successful validation command execution and adds no independently testable behavior."
-    },
-    {
-      "change": "advance-rust-repository-intelligence",
-      "task_id": "1.6",
-      "scope": "unit-test-link-only",
-      "reason": "The planning-diff publication review was a one-time repository-state inspection with no durable executable behavior."
+      "first_task": "1.1",
+      "last_task": "1.6",
+      "owner": "planning-and-issueops",
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "changed_artifacts": [
+        "openspec/changes/advance-rust-repository-intelligence",
+        "openspec/issue-map.json",
+        "openspec/task-verification-plan.json",
+        "crates/projectatlas-cli/src/task_evidence_plan_tests.rs"
+      ],
+      "unit_test": {
+        "source_path": "crates/projectatlas-cli/src/task_evidence_plan_tests.rs",
+        "function_prefix": "task_evidence_plan_tests::task_arri_",
+        "filter_prefix": "task_arri_",
+        "command_executable": "cargo",
+        "command_arguments_prefix": ["test", "--locked", "-p", "projectatlas-cli"],
+        "state": "implemented_uncommitted"
+      },
+      "result": {
+        "state": "pending_commit_bound_run",
+        "implementation_commit": null,
+        "covered_input_digest": null,
+        "run_identity": null,
+        "artifact_digest": null
+      }
     }
   ],
+  "unit_test_exemptions": [],
+  "planning_validation": {
+    "commit": "c672442438404411389ef86e2efd767f3a4b2be0",
+    "commands": [
+      {
+        "executable": "openspec",
+        "arguments": ["validate", "advance-rust-repository-intelligence", "--strict", "--no-interactive"]
+      },
+      {
+        "executable": "python",
+        "arguments": [".github/scripts/issue-checklists.py", "--self-test", "--root", "."]
+      }
+    ]
+  },
   "stable_row_overrides": [
     {
       "change": "advance-rust-repository-intelligence",
@@ -1086,8 +1095,8 @@
         "test_id": "UT:ARRI-2.29",
         "function": "repository_intelligence_contract_tests::arri_2_29_phase_review_and_evaluator_boundaries_are_closed",
         "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::arri_2_29_phase_review_and_evaluator_boundaries_are_closed", "--", "--exact"] },
-        "assertion": "Exactly seven unique resolved reviewer roles cover the exact ten-finding Phase 0 ledger; every evidence path is normalized, repository-local, unique, and present; fixed findings have no deferral while narrowed/deferred findings have valid OpenSpec owners; checked v0.4 tasks cannot bypass implemented-test or explicit-exemption policy; no blocking finding remains open; no product/release claim is accepted; callable-variable identities retain qualified scope; and evaluator filter, concurrency, residual, path, executable-copy mode, and byte-limit policy remains fail-closed.",
-        "covered_inputs": ["seven closed reviewer roles", "ten required Phase 0 findings", "three closed dispositions", "repository-local evidence paths", "authoritative ARRI task owners", "checked-task implemented-test or explicit-exemption coverage", "callable-variable qualified stable identity", "zero unresolved blockers", "implementation-readiness-only and no-claim states", "bounded materialized checkout reads", "linked/reparse ancestry rejection", "byte-preserving Unix paths and symlink targets", "executable-copy mode preservation and launch coverage", "custom-filter ineligibility", "isolated quiescent workspace assumption", "hostile same-user filesystem residual deferred to ARRI-11.2"],
+        "assertion": "Exactly seven unique resolved reviewer roles cover the exact ten-finding Phase 0 ledger; every evidence path is normalized, repository-local, unique, and present; fixed findings have no deferral while narrowed/deferred findings have valid OpenSpec owners; every checked v0.4 task has an implemented task-specific test; no blocking finding remains open; no product/release claim is accepted; callable-variable identities retain qualified scope; and evaluator filter, concurrency, residual, path, executable-copy mode, and byte-limit policy remains fail-closed.",
+        "covered_inputs": ["seven closed reviewer roles", "ten required Phase 0 findings", "three closed dispositions", "repository-local evidence paths", "authoritative ARRI task owners", "checked-task implemented-test coverage", "callable-variable qualified stable identity", "zero unresolved blockers", "implementation-readiness-only and no-claim states", "bounded materialized checkout reads", "linked/reparse ancestry rejection", "byte-preserving Unix paths and symlink targets", "executable-copy mode preservation and launch coverage", "custom-filter ineligibility", "isolated quiescent workspace assumption", "hostile same-user filesystem residual deferred to ARRI-11.2"],
         "state": "implemented_uncommitted"
       },
       "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }

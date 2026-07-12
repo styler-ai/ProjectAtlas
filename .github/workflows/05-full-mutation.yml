@@ -1,0 +1,478 @@
+# Purpose: Run complete deterministic ProjectAtlas source-mutation evidence in sixteen shards.
+
+name: 05-Full-Mutation
+
+on:
+  schedule:
+    - cron: "17 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Optional exact commit to test; defaults to the dispatched ref.
+        required: false
+        type: string
+        default: ""
+  workflow_call:
+    inputs:
+      expected_sha:
+        description: Exact release commit to test.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  MUTATION_SHA: ${{ inputs.expected_sha || github.sha }}
+
+jobs:
+  inventory:
+    name: full-mutation inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ env.MUTATION_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify immutable mutation commit
+        run: |
+          [[ "$MUTATION_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$MUTATION_SHA"
+
+      - name: Setup Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install pinned mutation tools
+        uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
+        with:
+          tool: cargo-nextest@0.9.140,cargo-mutants@27.1.0
+
+      - name: Validate quality policy and native configs
+        run: |
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+            test-quality policy --root . --policy test-quality.toml
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+            test-quality configs --root . --policy test-quality.toml \
+            --nextest .config/nextest.toml --mutants .cargo/mutants.toml
+
+      - name: Record tool identity
+        run: |
+          mkdir -p target/projectatlas-quality/full-mutation/plan
+          cargo nextest --version | tee target/projectatlas-quality/full-mutation/plan/nextest-version.txt
+          cargo nextest --version | grep -Eq '^cargo-nextest 0\.9\.140([[:space:]]|$)'
+          cargo mutants --version | tee target/projectatlas-quality/full-mutation/plan/mutants-version.txt
+          cargo mutants --version | grep -Eq '^cargo-mutants 27\.1\.0([[:space:]]|$)'
+          rustc -Vv > target/projectatlas-quality/full-mutation/plan/rustc-version.txt
+          cp .cargo/mutants.toml target/projectatlas-quality/full-mutation/plan/base-mutants.toml
+
+      - name: Generate unfiltered raw master inventory
+        id: inventory
+        timeout-minutes: 15
+        run: |
+          cargo mutants \
+            --config .cargo/mutants.toml \
+            --workspace \
+            --list \
+            --json \
+            > target/projectatlas-quality/full-mutation/plan/raw-master.json
+
+      - name: Validate and normalize mutation plan
+        if: always()
+        id: mutation_plan
+        timeout-minutes: 5
+        run: |
+          set -o pipefail
+          plan_root=target/projectatlas-quality/full-mutation/plan
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+            test-quality mutation-inventory \
+            --root . \
+            --policy test-quality.toml \
+            --inventory "$plan_root/raw-master.json" \
+            --json | tee "$plan_root/inventory-validation.json"
+          mutation_plan="$(jq -ce '.mutation_plan' "$plan_root/inventory-validation.json")"
+          printf '%s' "$mutation_plan" > "$plan_root/mutation-plan.json"
+
+      - name: Derive exact filtered and excluded inventories
+        id: filtered_inventory
+        timeout-minutes: 10
+        run: |
+          plan_root=target/projectatlas-quality/full-mutation/plan
+          exclusion_argv=()
+          while IFS= read -r -d '' argument; do
+            exclusion_argv+=("$argument")
+          done < <(jq -j '.exclude_argv[] | ., "\u0000"' "$plan_root/mutation-plan.json")
+          cargo mutants \
+            --config .cargo/mutants.toml \
+            --workspace \
+            --list \
+            --json \
+            "${exclusion_argv[@]}" \
+            > "$plan_root/filtered-master.json"
+          jq --slurpfile filtered "$plan_root/filtered-master.json" \
+            '($filtered[0] | INDEX(.name)) as $kept | [.[] | select($kept[.name] == null)]' \
+            "$plan_root/raw-master.json" > "$plan_root/excluded-master.json"
+          raw_count="$(jq 'length' "$plan_root/raw-master.json")"
+          filtered_count="$(jq 'length' "$plan_root/filtered-master.json")"
+          excluded_count="$(jq 'length' "$plan_root/excluded-master.json")"
+          expected_excluded="$(jq '.excluded_ids | length' "$plan_root/mutation-plan.json")"
+          test "$raw_count" -eq "$((filtered_count + excluded_count))"
+          test "$excluded_count" -eq "$expected_excluded"
+
+      - name: Record inventory outcome
+        if: always()
+        env:
+          NATIVE_OUTCOME: ${{ steps.inventory.outcome }}
+          PLAN_OUTCOME: ${{ steps.mutation_plan.outcome }}
+          FILTER_OUTCOME: ${{ steps.filtered_inventory.outcome }}
+        run: |
+          printf '{"run_id":%s,"run_attempt":%s,"head_sha":"%s","job":"inventory","required_shards":16,"native_outcome":"%s","plan_outcome":"%s","filter_outcome":"%s"}\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$MUTATION_SHA" \
+            "$NATIVE_OUTCOME" "$PLAN_OUTCOME" "$FILTER_OUTCOME" \
+            > target/projectatlas-quality/full-mutation/plan/run.json
+
+      - name: Upload mutation plan
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: full-mutation-plan-${{ env.MUTATION_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/projectatlas-quality/full-mutation/plan
+          if-no-files-found: error
+          retention-days: 90
+
+  mutation-shard:
+    name: full-mutation shard ${{ matrix.shard }} of 16
+    needs: inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ env.MUTATION_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify immutable mutation commit
+        run: |
+          [[ "$MUTATION_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$MUTATION_SHA"
+
+      - name: Setup Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install pinned mutation tools
+        uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
+        with:
+          tool: cargo-nextest@0.9.140,cargo-mutants@27.1.0
+
+      - name: Download immutable mutation plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: full-mutation-plan-${{ env.MUTATION_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/projectatlas-quality/full-mutation/plan
+
+      - name: Prepare shard evidence
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          mkdir -p "target/projectatlas-quality/full-mutation/shard-$SHARD"
+          date -u +%Y-%m-%dT%H:%M:%SZ \
+            > "target/projectatlas-quality/full-mutation/shard-$SHARD/started-at.txt"
+          cp target/projectatlas-quality/full-mutation/plan/run.json \
+            "target/projectatlas-quality/full-mutation/shard-$SHARD/plan-run.json"
+
+      - name: Run native mutation shard
+        id: mutation_shard
+        timeout-minutes: 105
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          exclusion_argv=()
+          while IFS= read -r -d '' argument; do
+            exclusion_argv+=("$argument")
+          done < <(jq -j '.exclude_argv[] | ., "\u0000"' \
+            target/projectatlas-quality/full-mutation/plan/mutation-plan.json)
+          cargo mutants \
+            --config target/projectatlas-quality/full-mutation/plan/base-mutants.toml \
+            --workspace \
+            --shard "$SHARD/16" \
+            --baseline run \
+            --timeout 180 \
+            --build-timeout 900 \
+            --output "target/projectatlas-quality/full-mutation/shard-$SHARD/native" \
+            --annotations github \
+            "${exclusion_argv[@]}"
+
+      - name: Build strict shard manifest
+        if: always()
+        id: shard_manifest
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          shard_root="target/projectatlas-quality/full-mutation/shard-$SHARD"
+          plan_root=target/projectatlas-quality/full-mutation/plan
+          mutants_path="$shard_root/native/mutants.out/mutants.json"
+          outcomes_path="$shard_root/native/mutants.out/outcomes.json"
+          completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          rustc_version="$(rustc --version)"
+          llvm_version="$(rustc -Vv | sed -n 's/^LLVM version: //p')"
+          target_triple="$(rustc -Vv | sed -n 's/^host: //p')"
+          cargo_mutants_version="$(cargo mutants --version | awk '{print $2}')"
+          cargo_lock_sha256="$(sha256sum Cargo.lock | cut -d ' ' -f1)"
+          policy_sha256="$(sha256sum test-quality.toml | cut -d ' ' -f1)"
+          base_config_sha256="$(sha256sum "$plan_root/base-mutants.toml" | cut -d ' ' -f1)"
+          mutation_plan_sha256="$(sha256sum "$plan_root/mutation-plan.json" | cut -d ' ' -f1)"
+          raw_inventory_sha256="$(jq -er '.raw_digest' "$plan_root/mutation-plan.json")"
+          filtered_inventory_sha256="$(jq -er '.filtered_digest' "$plan_root/mutation-plan.json")"
+          excluded_inventory_sha256="$(jq -er '.excluded_digest' "$plan_root/mutation-plan.json")"
+          native_mutants_sha256="$(sha256sum "$mutants_path" | cut -d ' ' -f1)"
+          native_outcomes_sha256="$(sha256sum "$outcomes_path" | cut -d ' ' -f1)"
+          started_at="$(cat "$shard_root/started-at.txt")"
+          artifact_name="full-mutation-shard-$SHARD-$MUTATION_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit_sha "$MUTATION_SHA" \
+            --arg target_triple "$target_triple" \
+            --arg rustc_version "$rustc_version" \
+            --arg llvm_version "$llvm_version" \
+            --arg cargo_mutants_version "$cargo_mutants_version" \
+            --arg cargo_lock_sha256 "$cargo_lock_sha256" \
+            --arg policy_sha256 "$policy_sha256" \
+            --arg base_config_sha256 "$base_config_sha256" \
+            --arg mutation_plan_sha256 "$mutation_plan_sha256" \
+            --arg raw_inventory_sha256 "$raw_inventory_sha256" \
+            --arg filtered_inventory_sha256 "$filtered_inventory_sha256" \
+            --arg excluded_inventory_sha256 "$excluded_inventory_sha256" \
+            --arg native_mutants_sha256 "$native_mutants_sha256" \
+            --arg native_outcomes_sha256 "$native_outcomes_sha256" \
+            --arg started_at_utc "$started_at" \
+            --arg completed_at_utc "$completed_at" \
+            --arg artifact_name "$artifact_name" \
+            --argjson shard_index "$SHARD" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+            '{schema_version:1,kind:"full-mutation-shard",repository:$repository,commit_sha:$commit_sha,platform_id:"linux-x86_64-gnu",target_triple:$target_triple,shard_index:$shard_index,shard_count:16,rustc_version:$rustc_version,llvm_version:$llvm_version,cargo_mutants_version:$cargo_mutants_version,cargo_lock_sha256:$cargo_lock_sha256,policy_sha256:$policy_sha256,base_config_sha256:$base_config_sha256,mutation_plan_sha256:$mutation_plan_sha256,raw_inventory_sha256:$raw_inventory_sha256,filtered_inventory_sha256:$filtered_inventory_sha256,excluded_inventory_sha256:$excluded_inventory_sha256,feature_set:"all-features",test_profile:"mutants",native_mutants_path:"native/mutants.out/mutants.json",native_mutants_sha256:$native_mutants_sha256,native_outcomes_path:"native/mutants.out/outcomes.json",native_outcomes_sha256:$native_outcomes_sha256,started_at_utc:$started_at_utc,completed_at_utc:$completed_at_utc,run_id:$run_id,run_attempt:$run_attempt,job:"mutation-shard",artifact_name:$artifact_name}' \
+            > "$shard_root/shard-manifest.json"
+
+      - name: Record shard outcome
+        if: always()
+        env:
+          NATIVE_OUTCOME: ${{ steps.mutation_shard.outcome }}
+          MANIFEST_OUTCOME: ${{ steps.shard_manifest.outcome }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          printf '{"run_id":%s,"run_attempt":%s,"head_sha":"%s","job":"mutation-shard","shard":%s,"shard_count":16,"native_outcome":"%s","manifest_outcome":"%s"}\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$MUTATION_SHA" "$SHARD" \
+            "$NATIVE_OUTCOME" "$MANIFEST_OUTCOME" \
+            > "target/projectatlas-quality/full-mutation/shard-$SHARD/run.json"
+
+      - name: Upload shard evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: full-mutation-shard-${{ matrix.shard }}-${{ env.MUTATION_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/projectatlas-quality/full-mutation/shard-${{ matrix.shard }}
+          if-no-files-found: error
+          retention-days: 90
+
+  aggregate:
+    name: full-mutation aggregate
+    if: always()
+    needs: [inventory, mutation-shard]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout trusted validator
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ env.MUTATION_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify immutable mutation commit
+        run: |
+          [[ "$MUTATION_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$MUTATION_SHA"
+
+      - name: Setup Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Prepare aggregate diagnostics
+        if: always()
+        run: |
+          mkdir -p target/projectatlas-quality/full-mutation/aggregate
+          date -u +%Y-%m-%dT%H:%M:%SZ \
+            > target/projectatlas-quality/full-mutation/aggregate/started-at.txt
+
+      - name: Download mutation plan
+        if: always()
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: full-mutation-plan-${{ env.MUTATION_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/projectatlas-quality/full-mutation/plan
+
+      - name: Download all shard evidence
+        if: always()
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: full-mutation-shard-*-${{ env.MUTATION_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/projectatlas-quality/full-mutation/shards
+
+      - name: Reconcile all candidate identities and dispositions
+        if: always()
+        id: aggregate
+        timeout-minutes: 10
+        env:
+          INVENTORY_RESULT: ${{ needs.inventory.result }}
+          SHARD_RESULT: ${{ needs.mutation-shard.result }}
+        run: |
+          set -o pipefail
+          aggregate_root=target/projectatlas-quality/full-mutation/aggregate
+          mapfile -t shard_manifests < <(find target/projectatlas-quality/full-mutation/shards \
+            -type f -name shard-manifest.json | sort)
+          printf '%s\n' "${shard_manifests[@]}" > "$aggregate_root/shard-manifests.txt"
+          shard_args=()
+          for manifest in "${shard_manifests[@]}"; do
+            shard_args+=(--shard "$manifest")
+          done
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+            test-quality mutation-aggregate \
+            --root . \
+            --policy test-quality.toml \
+            --inventory target/projectatlas-quality/full-mutation/plan/raw-master.json \
+            "${shard_args[@]}" \
+            --json | tee "$aggregate_root/validation.json"
+          test "$INVENTORY_RESULT" = success
+          test "$SHARD_RESULT" = success
+
+      - name: Build and validate full-mutation manifest
+        if: always()
+        id: aggregate_manifest
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          evidence=target/projectatlas-quality/full-mutation
+          aggregate="$evidence/aggregate"
+          : "${ImageOS:?hosted runner image is unavailable}"
+          : "${ImageVersion:?hosted runner image version is unavailable}"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            > "$aggregate/jobs.json"
+          job="$(jq -ce --arg runner "$RUNNER_NAME" \
+            '[.jobs[] | select(.runner_name == $runner and .status == "in_progress")] | if length == 1 then .[0] else error("current Actions job identity is ambiguous") end' \
+            "$aggregate/jobs.json")"
+          job_id="$(jq -er '.id' <<<"$job")"
+          job_name="$(jq -er '.name' <<<"$job")"
+          artifacts='[]'
+          add_artifact() {
+            local role="$1"
+            local path="$2"
+            local digest
+            digest="$(sha256sum "$evidence/$path" | cut -d ' ' -f1)"
+            artifacts="$(jq -c --arg role "$role" --arg path "$path" --arg digest "$digest" \
+              '. + [{role:$role,path:$path,sha256:$digest}]' <<<"$artifacts")"
+          }
+          add_artifact mutation_raw_inventory plan/raw-master.json
+          add_artifact mutation_filtered_inventory plan/filtered-master.json
+          add_artifact mutation_excluded_inventory plan/excluded-master.json
+          add_artifact mutation_plan plan/mutation-plan.json
+          add_artifact validation_summary aggregate/validation.json
+          while IFS= read -r path; do
+            relative="${path#"$evidence/"}"
+            add_artifact mutation_shard_manifest "$relative"
+          done < <(find "$evidence/shards" -type f -name shard-manifest.json | sort)
+          while IFS= read -r path; do
+            relative="${path#"$evidence/"}"
+            add_artifact mutation_shard_inventory "$relative"
+          done < <(find "$evidence/shards" -type f -path '*/native/mutants.out/mutants.json' | sort)
+          while IFS= read -r path; do
+            relative="${path#"$evidence/"}"
+            add_artifact mutation_shard_outcomes "$relative"
+          done < <(find "$evidence/shards" -type f -path '*/native/mutants.out/outcomes.json' | sort)
+          printf '%s' "$artifacts" > "$aggregate/artifacts.json"
+          command_arguments='["run","--locked","-p","projectatlas-lints","--bin","cargo-projectatlas-lints","--","test-quality","mutation-aggregate","--root",".","--policy","test-quality.toml","--inventory","target/projectatlas-quality/full-mutation/plan/raw-master.json"]'
+          while IFS= read -r manifest; do
+            command_arguments="$(jq -c --arg manifest "$manifest" \
+              '. + ["--shard", $manifest]' <<<"$command_arguments")"
+          done < "$aggregate/shard-manifests.txt"
+          command_arguments="$(jq -c '. + ["--json"]' <<<"$command_arguments")"
+          source_scope_sha256="$(jq -er '.identities.source_scope_sha256' "$aggregate/validation.json")"
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit_sha "$MUTATION_SHA" \
+            --arg target "$(rustc -Vv | sed -n 's/^host: //p')" \
+            --arg runner_image "$ImageOS" \
+            --arg runner_image_version "$ImageVersion" \
+            --arg rustc_version "$(rustc --version)" \
+            --arg llvm_version "$(rustc -Vv | sed -n 's/^LLVM version: //p')" \
+            --arg cargo_lock_sha256 "$(sha256sum Cargo.lock | cut -d ' ' -f1)" \
+            --arg policy_sha256 "$(sha256sum test-quality.toml | cut -d ' ' -f1)" \
+            --arg source_scope_sha256 "$source_scope_sha256" \
+            --arg nextest_config_sha256 "$(sha256sum .config/nextest.toml | cut -d ' ' -f1)" \
+            --arg mutants_config_sha256 "$(sha256sum .cargo/mutants.toml | cut -d ' ' -f1)" \
+            --arg started_at_utc "$(cat "$aggregate/started-at.txt")" \
+            --arg completed_at_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
+            --arg job_name "$job_name" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --argjson job_id "$job_id" \
+            --argjson artifacts "$artifacts" \
+            --argjson command_arguments "$command_arguments" \
+            --argjson raw_total "$(jq -er '.counts.raw_total' "$aggregate/validation.json")" \
+            --argjson caught "$(jq -er '.counts.caught' "$aggregate/validation.json")" \
+            --argjson missed "$(jq -er '.counts.missed' "$aggregate/validation.json")" \
+            --argjson timed_out "$(jq -er '.counts.timed_out' "$aggregate/validation.json")" \
+            --argjson unviable "$(jq -er '.counts.unviable' "$aggregate/validation.json")" \
+            --argjson excluded "$(jq -er '.counts.excluded' "$aggregate/validation.json")" \
+            --argjson unresolved "$(jq -er '.counts.unresolved' "$aggregate/validation.json")" \
+            --argjson baseline_passed "$(jq -er '.counts.baseline_passed == 1' "$aggregate/validation.json")" \
+            --argjson shards "$(jq -er '.counts.shards' "$aggregate/validation.json")" \
+            --argjson raw_kill_basis_points "$(jq -er '.counts.raw_kill_basis_points' "$aggregate/validation.json")" \
+            --argjson adjusted_viable_kill_basis_points "$(jq -er '.counts.adjusted_viable_kill_basis_points' "$aggregate/validation.json")" \
+            '{schema_version:1,repository:$repository,gate:"full_mutation",status:"passed",commit_sha:$commit_sha,platform:{id:"linux-x86_64-gnu",os:"linux",arch:"x86_64",target:$target,runner_image:$runner_image,runner_image_version:$runner_image_version},toolchain:{rustc_version:$rustc_version,llvm_version:$llvm_version},tool:{name:"cargo-mutants",version:"27.1.0"},inputs:{cargo_lock_sha256:$cargo_lock_sha256,policy_sha256:$policy_sha256,source_scope_sha256:$source_scope_sha256,configs:[{role:"nextest",path:".config/nextest.toml",sha256:$nextest_config_sha256},{role:"mutants",path:".cargo/mutants.toml",sha256:$mutants_config_sha256}]},command:{executable:"cargo",arguments:$command_arguments,profile:"mutants"},timeouts:{command_seconds:600,job_seconds:900,test_seconds:180,build_seconds:900},started_at_utc:$started_at_utc,completed_at_utc:$completed_at_utc,run:{kind:"github_actions",run_id:$run_id,run_attempt:$run_attempt,job_id:$job_id,job_name:$job_name,workflow_ref:$workflow_ref},artifacts:$artifacts,result:{kind:"full_mutation",raw_total:$raw_total,caught:$caught,missed:$missed,timed_out:$timed_out,unviable:$unviable,excluded:$excluded,unresolved:$unresolved,baseline_passed:$baseline_passed,shards:$shards,raw_kill_basis_points:$raw_kill_basis_points,adjusted_viable_kill_basis_points:$adjusted_viable_kill_basis_points}}' \
+            > "$evidence/manifest.json"
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+            test-quality evidence --root . --policy test-quality.toml \
+            --manifest "$evidence/manifest.json" --json \
+            | tee "$aggregate/manifest-validation.json"
+
+      - name: Record aggregate outcome
+        if: always()
+        env:
+          AGGREGATE_OUTCOME: ${{ steps.aggregate.outcome }}
+          MANIFEST_OUTCOME: ${{ steps.aggregate_manifest.outcome }}
+          INVENTORY_RESULT: ${{ needs.inventory.result }}
+          SHARD_RESULT: ${{ needs.mutation-shard.result }}
+        run: |
+          shard_count="$(find target/projectatlas-quality/full-mutation/shards -type f -name shard-manifest.json 2>/dev/null | wc -l | tr -d ' ')"
+          printf '{"run_id":%s,"run_attempt":%s,"head_sha":"%s","job":"aggregate","inventory_result":"%s","shard_result":"%s","aggregate_outcome":"%s","manifest_outcome":"%s","observed_shards":%s,"required_shards":16}\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$MUTATION_SHA" \
+            "$INVENTORY_RESULT" "$SHARD_RESULT" "$AGGREGATE_OUTCOME" \
+            "$MANIFEST_OUTCOME" "$shard_count" \
+            > target/projectatlas-quality/full-mutation/aggregate/run.json
+
+      - name: Upload aggregate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: full-mutation-aggregate-${{ env.MUTATION_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/projectatlas-quality/full-mutation
+          if-no-files-found: error
+          retention-days: 90

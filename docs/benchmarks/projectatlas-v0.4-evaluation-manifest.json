@@ -9,7 +9,7 @@
     "baseline_runtime_commit": "d3b3e157f954c7d360d821ed0385762e8b044385",
     "baseline_runtime_tree": "3ec62b574e61c861cb562080c10d52c749b78866",
     "baseline_runtime_cargo_lock_sha256": "1e925a59e00fc8c0e82e925e64cf248e16fe08a37809b4923618342c382f073c",
-    "cargo_lock_sha256": "4a1bb80ae6b5c7021e703082611013c601f8ce874206d94f4ea24f4d83b112dc",
+    "cargo_lock_sha256": "34caf807b11b865e5b91ff758c9ca438661c828fc29cbbc488c00c105ab459dd",
     "baseline_release_artifacts": [
       {
         "target": "x86_64-pc-windows-msvc",

@@ -33,15 +33,84 @@ Run the full local check suite with Cargo:
 
 ```bash
 cargo fmt --check
-cargo check --workspace --all-targets --all-features
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
-cargo test --doc --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
-cargo run -p projectatlas-cli -- --format json scan .
-cargo run -p projectatlas-cli -- purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply
-cargo run -p projectatlas-cli -- lint --report-untracked --purpose-level strict
+cargo check --workspace --all-targets --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo nextest run --workspace --all-features --locked --profile ci
+cargo test --doc --workspace --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
+cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- test-quality policy --root . --policy test-quality.toml
+cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- test-quality configs --root . --policy test-quality.toml --nextest .config/nextest.toml --mutants .cargo/mutants.toml
+cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- test-quality tasks --root . --policy test-quality.toml --tasks openspec/changes/enforce-rust-test-quality-gates/tasks.md --plan openspec/task-verification.json --evidence openspec/task-evidence.json --expected-commit "$(git rev-parse HEAD)"
+python3 .github/scripts/issue-checklists.py --self-test
+python3 .github/scripts/issue-checklists.py --repo "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" --root . --issue-map openspec/issue-map.json --verification-plan openspec/task-verification.json --evidence openspec/task-evidence.json
+cargo run --locked -p projectatlas-cli -- --format json scan .
+cargo run --locked -p projectatlas-cli -- purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply
+cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level strict
 ```
+
+## Rust test-quality gates
+
+Install and verify the exact developer tools declared by `test-quality.toml`:
+
+```bash
+cargo install --locked cargo-nextest --version 0.9.140
+cargo install --locked cargo-llvm-cov --version 0.8.7
+cargo install --locked cargo-mutants --version 27.1.0
+rustup component add llvm-tools-preview
+cargo nextest --version
+cargo llvm-cov --version
+cargo mutants --version
+```
+
+`01-CI` reports nextest, stable doctests, LLVM coverage, and changed-source mutation as independent
+blocking jobs. A pass in one dimension cannot replace another. Hosted command/job ceilings are read from
+`test-quality.toml`: 20/25 minutes for nextest, 15/20 for doctests, 40/45 for coverage, and 45/50 for
+changed-source mutation. Native nextest and cargo-mutants timeouts remain active inside those outer bounds.
+Every job uploads its raw report, tool identity, outcome manifest, and diagnostics for 90 days with
+`if: always()`; a successful upload never changes a failed quality conclusion.
+
+Run local LLVM coverage without instrumenting unstable doctests:
+
+```bash
+mkdir -p target/projectatlas-quality/local-coverage
+cargo llvm-cov clean --workspace
+NEXTEST_PROFILE=ci cargo llvm-cov nextest --workspace --all-features --locked --json --output-path target/projectatlas-quality/local-coverage/coverage.json
+cargo llvm-cov report --text --output-path target/projectatlas-quality/local-coverage/coverage.txt
+```
+
+Run changed-source mutation against a trusted merge base explicitly:
+
+```bash
+base="$(git merge-base HEAD origin/main)"
+cargo mutants --config .cargo/mutants.toml --workspace --in-diff "$base..HEAD" --baseline run --timeout 180 --build-timeout 900 --output target/projectatlas-quality/local-changed-mutation
+```
+
+The expensive complete mutation run is not part of the pre-push hook. Dispatch the checked-in workflow,
+which generates one unfiltered master inventory and executes exactly 16 native shards:
+
+```bash
+gh workflow run 05-full-mutation.yml --ref "$(git branch --show-current)" --field expected_sha="$(git rev-parse HEAD)"
+```
+
+Evidence lives below `target/projectatlas-quality/`. The committed verification plan and task ledger live at
+`openspec/task-verification.json` and `openspec/task-evidence.json`. A task may be checked only after every
+declared `TQG-UT-*` assertion has a current successful row for the tested implementation commit and covered-input
+digest. The mapped GitHub checklist must then match `tasks.md` exactly; PR validation checks only the linked
+`OpenSpec-Task` range, while release validation retains the full milestone gate.
+
+The measured pre-gate snapshot was 286 runnable non-doctests across nine suites with zero ignored, 87.75% line,
+84.90% region, and 86.28% function coverage with 3,369 missed production lines. The historical mutation listing
+contained 4,911 candidates; the later unfiltered listing contained 4,931 after disabling native default call
+skips. These are provenance-bound baselines, not current floors, 100% coverage, near-complete mutation strength,
+or a no-bugs claim. Raw reports always remain visible. Narrow reviewed exceptions affect only the adjusted
+denominator and require an owner, issue, approval, exact selector, rationale, source identity, and future expiry.
+The hard v0.4 targets in `test-quality.toml` remain blocking even when a tracking issue exists.
+
+Failure meanings are distinct: missing/mismatched tool, empty inventory, test failure, coverage below a floor or
+target, mutation baseline failure, viable missed mutant, mutant timeout, command/job timeout, stale commit,
+incomplete shard set, corrupt artifact, and IssueOps drift all fail closed. Reruns create a new run/attempt identity
+and do not erase the earlier failure.
 
 ## Issue hygiene
 
@@ -79,6 +148,10 @@ cargo run -p projectatlas-cli -- lint --report-untracked --purpose-level strict
 - `projectatlas lint` checks purpose/header health, non-source declarations, and untracked files; it does not require or validate the optional compatibility TOON export.
 - `projectatlas lint --purpose-level low` is the default first-pass agent gate: stale, duplicate, and repeated temporary-folder findings fail, while missing/suggested/agent-review purpose curation for folders plus high-impact files remains advisory. Use `projectatlas purpose queue` for the actionable curation list, `--purpose-level medium` when all source files must be agent-reviewed, and `--purpose-level strict` only when every indexed file and folder must be agent-reviewed.
 - PRs must reference a GitHub issue and have a milestone.
+- PRs declare their authoritative task scope with `OpenSpec-Task: <change>/<task-or-range>`; incomplete issues elsewhere in the milestone do not block an otherwise complete incremental PR.
+- `05-Full-Mutation` runs weekly, manually, and from release with exactly 16 shards. It is intentionally not run by the local pre-push hook.
+- `06-Task-Evidence-Render` runs only after same-repository `01-CI` pull-request runs, uses trusted default-branch code, validates run/artifact provenance, and never executes commands from issue or artifact content.
+- Release runs require an exact main commit SHA and block package jobs until independent quality, full mutation, task evidence, and full-milestone checks all pass for that commit.
 - CI can be run manually via `workflow_dispatch` when checks do not auto-trigger.
 
 Environment toggles:

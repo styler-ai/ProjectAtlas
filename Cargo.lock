@@ -1387,6 +1387,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "syn",
  "tempfile",
  "thiserror",
  "tiktoken",
@@ -1436,8 +1437,17 @@ dependencies = [
 name = "projectatlas-lints"
 version = "0.3.26"
 dependencies = [
+ "globset",
  "proc-macro2",
+ "quick-xml",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
  "syn",
+ "tempfile",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]
@@ -1494,6 +1504,15 @@ name = "pulldown-cmark-escape"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
+
+[[package]]
+name = "quick-xml"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "quote"

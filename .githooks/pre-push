@@ -4,11 +4,29 @@
 set -e
 
 cargo fmt --check
-cargo check --workspace --all-targets --all-features
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo run -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
-cargo test --workspace --all-features
-cargo test --doc --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
-cargo run -p projectatlas-cli -- --format json scan .
-cargo run -p projectatlas-cli -- lint --report-untracked --purpose-level low
+cargo check --workspace --all-targets --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
+cargo nextest --version | grep -Eq '^cargo-nextest 0\.9\.140([[:space:]]|$)'
+cargo nextest run --workspace --all-features --locked --profile ci
+cargo test --doc --workspace --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+  test-quality policy --root . --policy test-quality.toml
+cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+  test-quality configs --root . --policy test-quality.toml \
+  --nextest .config/nextest.toml --mutants .cargo/mutants.toml
+cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+  test-quality tasks --root . --policy test-quality.toml \
+  --tasks openspec/changes/enforce-rust-test-quality-gates/tasks.md \
+  --plan openspec/task-verification.json --evidence openspec/task-evidence.json \
+  --expected-commit "$(git rev-parse HEAD)"
+python3 .github/scripts/issue-checklists.py --self-test
+command -v gh >/dev/null 2>&1
+repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+python3 .github/scripts/issue-checklists.py \
+  --repo "$repo" --root . --issue-map openspec/issue-map.json \
+  --verification-plan openspec/task-verification.json \
+  --evidence openspec/task-evidence.json
+cargo run --locked -p projectatlas-cli -- --format json scan .
+cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level low

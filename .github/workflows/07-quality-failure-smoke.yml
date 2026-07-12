@@ -1,0 +1,268 @@
+# Purpose: Prove required quality failures remain failed while diagnostics upload.
+
+name: 07-Quality-Failure-Smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  controlled-failure:
+    name: controlled failure ${{ matrix.case }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - nextest
+          - doctest
+          - coverage-lines
+          - coverage-regions
+          - coverage-functions
+          - changed-miss
+          - changed-timeout
+          - missing-shard
+          - stale-evidence
+          - task-ledger-drift
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Setup Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Prepare controlled invalid evidence
+        env:
+          FAILURE_CASE: ${{ matrix.case }}
+        run: |
+          evidence="target/projectatlas-quality/failure-smoke/$FAILURE_CASE"
+          mkdir -p "$evidence"
+          printf '{"test-count":0,"rust-suites":{}}\n' > "$evidence/nextest.json"
+          printf '<testsuites/>\n' > "$evidence/junit.xml"
+          printf 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n' \
+            > "$evidence/doctest.log"
+          case "$FAILURE_CASE" in
+            coverage-lines) lines=0; regions=1; functions=1 ;;
+            coverage-regions) lines=1; regions=0; functions=1 ;;
+            coverage-functions) lines=1; regions=1; functions=0 ;;
+            *) lines=0; regions=0; functions=0 ;;
+          esac
+          jq -n \
+            --arg manifest "$GITHUB_WORKSPACE/Cargo.toml" \
+            --arg source "$GITHUB_WORKSPACE/crates/projectatlas-core/src/lib.rs" \
+            --argjson lines "$lines" \
+            --argjson regions "$regions" \
+            --argjson functions "$functions" \
+            '{
+              data: [{
+                files: [{
+                  filename: $source,
+                  segments: [[1, 1, 1, true, true, false]],
+                  summary: {
+                    lines: {count: 1, covered: $lines, notcovered: (1 - $lines)},
+                    regions: {count: 1, covered: $regions, notcovered: (1 - $regions)},
+                    functions: {count: 1, covered: $functions, notcovered: (1 - $functions)}
+                  }
+                }],
+                functions: [{
+                  count: $functions,
+                  filenames: [$source],
+                  name: "failure_smoke",
+                  regions: [[1, 1, 1, 2, 1, 0, 0, 0]]
+                }],
+                totals: {
+                  lines: {count: 1, covered: $lines, notcovered: (1 - $lines)},
+                  regions: {count: 1, covered: $regions, notcovered: (1 - $regions)},
+                  functions: {count: 1, covered: $functions, notcovered: (1 - $functions)}
+                }
+              }],
+              type: "llvm.coverage.json.export",
+              version: "2.0.1",
+              cargo_llvm_cov: {version: "0.8.7", manifest_path: $manifest}
+            }' > "$evidence/coverage.json"
+          jq -n '{
+            name: "failure_smoke",
+            package: "projectatlas-lints",
+            file: "crates/projectatlas-lints/src/test_quality.rs",
+            function: null,
+            span: {start: {line: 1, column: 1}, end: {line: 1, column: 2}},
+            replacement: "0",
+            genre: "FnValue"
+          }' > "$evidence/mutant.json"
+          jq -s '.' "$evidence/mutant.json" > "$evidence/mutants.json"
+          if [[ "$FAILURE_CASE" = changed-timeout ]]; then
+            summary=Timeout
+            process_status='"Timeout"'
+            missed=0
+            timed_out=1
+          else
+            summary=MissedMutant
+            process_status='"Success"'
+            missed=1
+            timed_out=0
+          fi
+          jq -n \
+            --slurpfile mutant "$evidence/mutant.json" \
+            --arg summary "$summary" \
+            --argjson process_status "$process_status" \
+            --argjson missed "$missed" \
+            --argjson timed_out "$timed_out" \
+            '{
+              outcomes: [
+                {
+                  scenario: "Baseline",
+                  summary: "Success",
+                  log_path: "baseline.log",
+                  diff_path: null,
+                  phase_results: [{
+                    phase: "Test", duration: 0.1,
+                    process_status: "Success", argv: ["cargo", "test"]
+                  }]
+                },
+                {
+                  scenario: {Mutant: $mutant[0]},
+                  summary: $summary,
+                  log_path: "mutant.log",
+                  diff_path: "mutant.diff",
+                  phase_results: [{
+                    phase: "Test", duration: 0.1,
+                    process_status: $process_status, argv: ["cargo", "test"]
+                  }]
+                }
+              ],
+              total_mutants: 1,
+              missed: $missed,
+              caught: 0,
+              timeout: $timed_out,
+              unviable: 0,
+              success: 0,
+              start_time: "2026-07-12T00:00:00Z",
+              end_time: "2026-07-12T00:00:01Z",
+              cargo_mutants_version: "27.1.0"
+            }' > "$evidence/outcomes.json"
+          printf '[]\n' > "$evidence/empty-mutants.json"
+          printf '{}\n' > "$evidence/shard.json"
+          jq -n '{
+            schema_version: 1,
+            repository: "styler-ai/ProjectAtlas",
+            gate: "nextest",
+            status: "passed",
+            commit_sha: "0000000000000000000000000000000000000000",
+            platform: {
+              id: "linux-x86_64-gnu", os: "linux", arch: "x86_64",
+              target: "x86_64-unknown-linux-gnu", runner_image: "ubuntu-latest",
+              runner_image_version: "failure-smoke"
+            },
+            toolchain: {rustc_version: "1.93.1", llvm_version: "21.1.8"},
+            tool: {name: "cargo-nextest", version: "0.9.140"},
+            inputs: {
+              cargo_lock_sha256: ("0" * 64), policy_sha256: ("0" * 64),
+              source_scope_sha256: ("0" * 64), configs: []
+            },
+            command: {executable: "cargo", arguments: ["nextest"], profile: "ci"},
+            timeouts: {command_seconds: 1, job_seconds: 1, test_seconds: 1, build_seconds: null},
+            started_at_utc: "2026-07-12T00:00:00Z",
+            completed_at_utc: "2026-07-12T00:00:01Z",
+            run: {kind: "repository_retained_local", run_id: "failure-smoke", host: "linux"},
+            artifacts: [],
+            result: {
+              kind: "nextest", tests: 1, suites: 1, ignored: 0,
+              failed: 0, errors: 0, timed_out: 0
+            }
+          }' > "$evidence/stale-manifest.json"
+          awk 'BEGIN { changed = 0 }
+            !changed && /^- \[ \]/ { sub(/^- \[ \]/, "- [x]"); changed = 1 }
+            { print }' \
+            openspec/changes/enforce-rust-test-quality-gates/tasks.md \
+            > "$evidence/tasks-with-drift.md"
+
+      - name: Reject controlled invalid evidence with the real validator
+        env:
+          FAILURE_CASE: ${{ matrix.case }}
+        run: |
+          set -o pipefail
+          evidence="target/projectatlas-quality/failure-smoke/$FAILURE_CASE"
+          validator=(cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints --)
+          {
+            case "$FAILURE_CASE" in
+              nextest)
+                "${validator[@]}" test-quality nextest \
+                  --root . --policy test-quality.toml \
+                  --inventory "$evidence/nextest.json" --junit "$evidence/junit.xml"
+                ;;
+              doctest)
+                "${validator[@]}" test-quality doctest \
+                  --root . --policy test-quality.toml \
+                  --log "$evidence/doctest.log" --exit-code 1
+                ;;
+              coverage-lines|coverage-regions|coverage-functions)
+                "${validator[@]}" test-quality coverage \
+                  --root . --policy test-quality.toml \
+                  --platform linux-x86_64-gnu --llvm-json "$evidence/coverage.json"
+                ;;
+              changed-miss|changed-timeout)
+                "${validator[@]}" test-quality mutation-changed \
+                  --root . --policy test-quality.toml \
+                  --inventory "$evidence/mutants.json" \
+                  --outcomes "$evidence/outcomes.json" \
+                  --merge-base "$(git rev-parse "$GITHUB_SHA^")"
+                ;;
+              missing-shard)
+                "${validator[@]}" test-quality mutation-aggregate \
+                  --root . --policy test-quality.toml \
+                  --inventory "$evidence/empty-mutants.json" \
+                  --shard "$evidence/shard.json"
+                ;;
+              stale-evidence)
+                "${validator[@]}" test-quality evidence \
+                  --root . --policy test-quality.toml \
+                  --manifest "$evidence/stale-manifest.json"
+                ;;
+              task-ledger-drift)
+                "${validator[@]}" test-quality tasks \
+                  --root . --policy test-quality.toml \
+                  --tasks "$evidence/tasks-with-drift.md" \
+                  --plan openspec/task-verification.json \
+                  --evidence openspec/task-evidence.json \
+                  --expected-commit "$GITHUB_SHA"
+                ;;
+            esac
+          } 2>&1 | tee "$evidence/validator.log"
+
+      - name: Upload controlled failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-failure-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/projectatlas-quality/failure-smoke/${{ matrix.case }}
+          if-no-files-found: error
+          retention-days: 90
+
+  observe:
+    name: verify controlled failures and artifacts
+    if: always()
+    needs: controlled-failure
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download all controlled diagnostics
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: quality-failure-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/projectatlas-quality/failure-smoke
+
+      - name: Verify failure propagation
+        env:
+          PRODUCER_RESULT: ${{ needs.controlled-failure.result }}
+        run: |
+          test "$PRODUCER_RESULT" = failure
+          artifact_count="$(find target/projectatlas-quality/failure-smoke -type f -name validator.log | wc -l | tr -d ' ')"
+          test "$artifact_count" = 10

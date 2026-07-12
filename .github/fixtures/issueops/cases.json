@@ -1,0 +1,51 @@
+{
+  "schema_version": 2,
+  "cases": [
+    { "name": "valid-single-issue", "expected": "accept" },
+    { "name": "valid-managed-comment", "expected": "accept" },
+    { "name": "valid-phase-ledger", "expected": "accept" },
+    { "name": "valid-metadata-only-closure", "expected": "accept" },
+    { "name": "closure-covered-input-drift", "expected": "reject" },
+    { "name": "aggregate-green-task-evidence-missing", "expected": "reject" },
+    { "name": "local-only-completion", "expected": "reject" },
+    { "name": "remote-only-completion", "expected": "reject" },
+    { "name": "orphan-evidence", "expected": "reject" },
+    { "name": "stale-github-text", "expected": "reject" },
+    { "name": "fork-artifact", "expected": "reject" },
+    { "name": "wrong-run-attempt", "expected": "reject" },
+    { "name": "wrong-head-sha", "expected": "reject" },
+    { "name": "wrong-job", "expected": "reject" },
+    { "name": "wrong-artifact-digest", "expected": "reject" },
+    { "name": "duplicate-marker", "expected": "reject" },
+    { "name": "markdown-escaping", "expected": "accept" },
+    { "name": "pagination", "expected": "accept" },
+    { "name": "retry-idempotency", "expected": "accept" },
+    { "name": "concurrency-idempotency", "expected": "reject" }
+  ],
+  "markdown_cells": [
+    "plain",
+    "pipe | value",
+    "<script>alert('x')</script>",
+    "[caller link](https://invalid.example)",
+    "line\nbreak",
+    "`command` *status* _claim_"
+  ],
+  "paginated": [
+    [
+      { "number": 1 }
+    ],
+    [
+      { "number": 2 }
+    ]
+  ],
+  "duplicate_comments": [
+    {
+      "id": 1,
+      "body": "<!-- projectatlas-task-evidence:v1 change=change section=1 -->\nfirst"
+    },
+    {
+      "id": 2,
+      "body": "<!-- projectatlas-task-evidence:v1 change=change section=1 -->\nsecond"
+    }
+  ]
+}

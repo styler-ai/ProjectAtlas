@@ -16,19 +16,52 @@ on:
   pull_request_review_comment:
     types: [created, edited, deleted]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      expected_sha:
+        description: Exact commit expected by a release caller.
+        required: false
+        type: string
+        default: ""
+      mutation_base_sha:
+        description: Trusted base commit for release-call changed-source mutation.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
+  actions: read
   issues: read
   pull-requests: read
+
+env:
+  QUALITY_SHA: ${{ inputs.expected_sha || github.event.pull_request.head.sha || github.sha }}
 
 jobs:
   verify:
     name: verify
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ env.QUALITY_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify immutable quality commit
+        env:
+          EXPECTED_SHA: ${{ env.QUALITY_SHA }}
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
       - name: Setup Rust
         run: |
@@ -59,20 +92,23 @@ jobs:
             exit 1
           fi
 
-      - name: Issue checklist check
+      - name: PR-scoped IssueOps check
         if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           python3 .github/scripts/issue-checklists.py --self-test
-          PR_MILESTONE_TITLE="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.milestone.title // ""')"
           python3 .github/scripts/issue-checklists.py \
             --repo "$GITHUB_REPOSITORY" \
-            --milestone "$PR_MILESTONE_TITLE"
+            --root . \
+            --issue-map openspec/issue-map.json \
+            --verification-plan openspec/task-verification.json \
+            --evidence openspec/task-evidence.json \
+            --pr "$PR_NUMBER"
 
       - name: Codex PR review thread gate
-        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment'
+        if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -98,20 +134,61 @@ jobs:
       - name: Dependency policy
         run: cargo deny check
 
-      - name: Tests
-        run: cargo test --workspace --all-features --locked
-
-      - name: ProjectAtlas purpose lint levels
-        run: cargo test --locked -p projectatlas-cli lint_purpose_levels_require_agent_review_at_configured_scope --test e2e
-
-      - name: ProjectAtlas purpose preservation
-        run: cargo test --locked -p projectatlas-cli watch_once_preserves_unchanged_deep_summary_and_text_index --test e2e
-
-      - name: Doc tests
-        run: cargo test --doc --all-features --locked
-
       - name: Rustdoc
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+
+      - name: ProjectAtlas purpose E2E
+        timeout-minutes: 10
+        run: |
+          cargo test --locked -p projectatlas-cli --test e2e \
+            lint_purpose_levels_require_agent_review_at_configured_scope -- --exact
+          cargo test --locked -p projectatlas-cli --test e2e \
+            watch_once_preserves_unchanged_deep_summary_and_text_index -- --exact
+
+      - name: Test-quality policy
+        run: >-
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints --
+          test-quality policy --root . --policy test-quality.toml
+
+      - name: Test-quality native configs
+        run: >-
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints --
+          test-quality configs --root . --policy test-quality.toml
+          --nextest .config/nextest.toml --mutants .cargo/mutants.toml
+
+      - name: Task-specific evidence
+        id: task_evidence
+        run: |
+          mkdir -p target/projectatlas-quality/task-evidence
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+            test-quality tasks \
+            --root . \
+            --policy test-quality.toml \
+            --tasks openspec/changes/enforce-rust-test-quality-gates/tasks.md \
+            --plan openspec/task-verification.json \
+            --evidence openspec/task-evidence.json \
+            --expected-commit "$QUALITY_SHA" \
+            --json | tee target/projectatlas-quality/task-evidence/validation.json
+
+      - name: Collect task evidence
+        if: always()
+        env:
+          TASK_EVIDENCE_OUTCOME: ${{ steps.task_evidence.outcome }}
+        run: |
+          mkdir -p target/projectatlas-quality/task-evidence
+          printf '{"repository":"%s","run_id":%s,"run_attempt":%s,"head_sha":"%s","event":"%s","job":"verify","outcome":"%s"}\n' \
+            "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$QUALITY_SHA" \
+            "$GITHUB_EVENT_NAME" "$TASK_EVIDENCE_OUTCOME" \
+            > target/projectatlas-quality/task-evidence/run.json
+
+      - name: Upload task evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: task-evidence-${{ env.QUALITY_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/projectatlas-quality/task-evidence
+          if-no-files-found: error
+          retention-days: 90
 
       - name: ProjectAtlas scan
         run: cargo run --locked -p projectatlas-cli -- --format json scan .
@@ -125,13 +202,704 @@ jobs:
       - name: ProjectAtlas lint
         run: cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level strict
 
+  review-gate:
+    name: review-gate
+    if: >-
+      github.event_name == 'pull_request_review' ||
+      github.event_name == 'pull_request_review_comment'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout trusted workflow helpers
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Codex PR review thread gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 .github/scripts/codex-pr-review-gate.py --self-test
+          python3 .github/scripts/codex-pr-review-gate.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --pr "$PR_NUMBER"
+
+  nextest:
+    name: nextest
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ env.QUALITY_SHA }}
+          persist-credentials: false
+
+      - name: Verify immutable quality commit
+        run: |
+          [[ "$QUALITY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$QUALITY_SHA"
+
+      - name: Setup Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install pinned nextest
+        uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
+        with:
+          tool: cargo-nextest@0.9.140
+
+      - name: Record tool identity
+        run: |
+          mkdir -p target/projectatlas-quality/nextest
+          date -u +%Y-%m-%dT%H:%M:%SZ > target/projectatlas-quality/nextest/started-at.txt
+          cargo nextest --version | tee target/projectatlas-quality/nextest/tool-version.txt
+          cargo nextest --version | grep -Eq '^cargo-nextest 0\.9\.140([[:space:]]|$)'
+          rustc -Vv > target/projectatlas-quality/nextest/rustc-version.txt
+
+      - name: Run nextest inventory and suites
+        id: nextest
+        timeout-minutes: 20
+        run: |
+          set -o pipefail
+          cargo nextest list --workspace --all-features --locked --profile ci --message-format json \
+            > target/projectatlas-quality/nextest/inventory.json
+          cargo nextest run --workspace --all-features --locked --profile ci 2>&1 \
+            | tee target/projectatlas-quality/nextest/run.log
+
+      - name: Validate nextest inventory and JUnit
+        if: always()
+        id: nextest_validation
+        timeout-minutes: 5
+        run: |
+          set -o pipefail
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+            test-quality nextest \
+            --root . \
+            --policy test-quality.toml \
+            --inventory target/projectatlas-quality/nextest/inventory.json \
+            --junit target/nextest/ci/junit.xml \
+            --json | tee target/projectatlas-quality/nextest/validation.json
+
+      - name: Build and validate nextest manifest
+        if: always()
+        id: nextest_manifest
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          evidence=target/projectatlas-quality/nextest
+          cp target/nextest/ci/junit.xml "$evidence/junit.xml"
+          : "${ImageOS:?hosted runner image is unavailable}"
+          : "${ImageVersion:?hosted runner image version is unavailable}"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            > "$evidence/jobs.json"
+          job="$(jq -ce --arg runner "$RUNNER_NAME" \
+            '[.jobs[] | select(.runner_name == $runner and .status == "in_progress")] | if length == 1 then .[0] else error("current Actions job identity is ambiguous") end' \
+            "$evidence/jobs.json")"
+          job_id="$(jq -er '.id' <<<"$job")"
+          job_name="$(jq -er '.name' <<<"$job")"
+          completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          source_scope_sha256="$(jq -er '.identities.source_scope_sha256' "$evidence/validation.json")"
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit_sha "$QUALITY_SHA" \
+            --arg target "$(rustc -Vv | sed -n 's/^host: //p')" \
+            --arg runner_image "$ImageOS" \
+            --arg runner_image_version "$ImageVersion" \
+            --arg rustc_version "$(rustc --version)" \
+            --arg llvm_version "$(rustc -Vv | sed -n 's/^LLVM version: //p')" \
+            --arg cargo_lock_sha256 "$(sha256sum Cargo.lock | cut -d ' ' -f1)" \
+            --arg policy_sha256 "$(sha256sum test-quality.toml | cut -d ' ' -f1)" \
+            --arg source_scope_sha256 "$source_scope_sha256" \
+            --arg nextest_config_sha256 "$(sha256sum .config/nextest.toml | cut -d ' ' -f1)" \
+            --arg inventory_sha256 "$(sha256sum "$evidence/inventory.json" | cut -d ' ' -f1)" \
+            --arg junit_sha256 "$(sha256sum "$evidence/junit.xml" | cut -d ' ' -f1)" \
+            --arg validation_sha256 "$(sha256sum "$evidence/validation.json" | cut -d ' ' -f1)" \
+            --arg diagnostics_sha256 "$(sha256sum "$evidence/run.log" | cut -d ' ' -f1)" \
+            --arg started_at_utc "$(cat "$evidence/started-at.txt")" \
+            --arg completed_at_utc "$completed_at" \
+            --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
+            --arg job_name "$job_name" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --argjson job_id "$job_id" \
+            --argjson tests "$(jq -er '.counts.tests' "$evidence/validation.json")" \
+            --argjson suites "$(jq -er '.counts.suites' "$evidence/validation.json")" \
+            --argjson ignored "$(jq -er '.counts.ignored' "$evidence/validation.json")" \
+            --argjson failed "$(jq -er '.counts.failed' "$evidence/validation.json")" \
+            --argjson errors "$(jq -er '.counts.errors' "$evidence/validation.json")" \
+            --argjson timed_out "$(jq -er '.counts.timed_out' "$evidence/validation.json")" \
+            '{schema_version:1,repository:$repository,gate:"nextest",status:"passed",commit_sha:$commit_sha,platform:{id:"linux-x86_64-gnu",os:"linux",arch:"x86_64",target:$target,runner_image:$runner_image,runner_image_version:$runner_image_version},toolchain:{rustc_version:$rustc_version,llvm_version:$llvm_version},tool:{name:"cargo-nextest",version:"0.9.140"},inputs:{cargo_lock_sha256:$cargo_lock_sha256,policy_sha256:$policy_sha256,source_scope_sha256:$source_scope_sha256,configs:[{role:"nextest",path:".config/nextest.toml",sha256:$nextest_config_sha256}]},command:{executable:"cargo",arguments:["nextest","run","--workspace","--all-features","--locked","--profile","ci"],profile:"ci"},timeouts:{command_seconds:1200,job_seconds:1500,test_seconds:120,build_seconds:null},started_at_utc:$started_at_utc,completed_at_utc:$completed_at_utc,run:{kind:"github_actions",run_id:$run_id,run_attempt:$run_attempt,job_id:$job_id,job_name:$job_name,workflow_ref:$workflow_ref},artifacts:[{role:"nextest_inventory",path:"inventory.json",sha256:$inventory_sha256},{role:"junit",path:"junit.xml",sha256:$junit_sha256},{role:"validation_summary",path:"validation.json",sha256:$validation_sha256},{role:"diagnostics",path:"run.log",sha256:$diagnostics_sha256}],result:{kind:"nextest",tests:$tests,suites:$suites,ignored:$ignored,failed:$failed,errors:$errors,timed_out:$timed_out}}' \
+            > "$evidence/manifest.json"
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+            test-quality evidence --root . --policy test-quality.toml \
+            --manifest "$evidence/manifest.json" --json \
+            | tee "$evidence/manifest-validation.json"
+
+      - name: Record nextest outcome
+        if: always()
+        env:
+          NATIVE_OUTCOME: ${{ steps.nextest.outcome }}
+          VALIDATION_OUTCOME: ${{ steps.nextest_validation.outcome }}
+          MANIFEST_OUTCOME: ${{ steps.nextest_manifest.outcome }}
+        run: |
+          printf '{"run_id":%s,"run_attempt":%s,"head_sha":"%s","job":"nextest","native_outcome":"%s","validation_outcome":"%s","manifest_outcome":"%s"}\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$QUALITY_SHA" \
+            "$NATIVE_OUTCOME" "$VALIDATION_OUTCOME" "$MANIFEST_OUTCOME" \
+            > target/projectatlas-quality/nextest/run.json
+
+      - name: Upload nextest evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-nextest-${{ env.QUALITY_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/projectatlas-quality/nextest
+            target/nextest/**/junit.xml
+          if-no-files-found: error
+          retention-days: 90
+
+  doctest:
+    name: doctest
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ env.QUALITY_SHA }}
+          persist-credentials: false
+
+      - name: Verify immutable quality commit
+        run: |
+          [[ "$QUALITY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$QUALITY_SHA"
+
+      - name: Setup Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Record tool identity
+        run: |
+          mkdir -p target/projectatlas-quality/doctest
+          date -u +%Y-%m-%dT%H:%M:%SZ > target/projectatlas-quality/doctest/started-at.txt
+          rustc -Vv > target/projectatlas-quality/doctest/rustc-version.txt
+
+      - name: Run stable doctests
+        id: doctest
+        timeout-minutes: 15
+        run: |
+          set +e
+          cargo test --doc --workspace --all-features --locked 2>&1 \
+            | tee target/projectatlas-quality/doctest/run.log
+          native_status=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$native_status" \
+            > target/projectatlas-quality/doctest/native-exit-code.txt
+          set +e
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+            test-quality doctest \
+            --root . \
+            --policy test-quality.toml \
+            --log target/projectatlas-quality/doctest/run.log \
+            --exit-code "$native_status" \
+            --json | tee target/projectatlas-quality/doctest/validation.json
+          validation_status=${PIPESTATUS[0]}
+          set -e
+          if [[ "$native_status" -ne 0 ]]; then
+            exit "$native_status"
+          fi
+          exit "$validation_status"
+
+      - name: Build and validate doctest manifest
+        if: always()
+        id: doctest_manifest
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          evidence=target/projectatlas-quality/doctest
+          : "${ImageOS:?hosted runner image is unavailable}"
+          : "${ImageVersion:?hosted runner image version is unavailable}"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            > "$evidence/jobs.json"
+          job="$(jq -ce --arg runner "$RUNNER_NAME" \
+            '[.jobs[] | select(.runner_name == $runner and .status == "in_progress")] | if length == 1 then .[0] else error("current Actions job identity is ambiguous") end' \
+            "$evidence/jobs.json")"
+          job_id="$(jq -er '.id' <<<"$job")"
+          job_name="$(jq -er '.name' <<<"$job")"
+          source_scope_sha256="$(jq -er '.identities.source_scope_sha256' "$evidence/validation.json")"
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit_sha "$QUALITY_SHA" \
+            --arg target "$(rustc -Vv | sed -n 's/^host: //p')" \
+            --arg runner_image "$ImageOS" \
+            --arg runner_image_version "$ImageVersion" \
+            --arg rustc_version "$(rustc --version)" \
+            --arg llvm_version "$(rustc -Vv | sed -n 's/^LLVM version: //p')" \
+            --arg cargo_version "$(cargo --version | awk '{print $2}')" \
+            --arg cargo_lock_sha256 "$(sha256sum Cargo.lock | cut -d ' ' -f1)" \
+            --arg policy_sha256 "$(sha256sum test-quality.toml | cut -d ' ' -f1)" \
+            --arg source_scope_sha256 "$source_scope_sha256" \
+            --arg log_sha256 "$(sha256sum "$evidence/run.log" | cut -d ' ' -f1)" \
+            --arg validation_sha256 "$(sha256sum "$evidence/validation.json" | cut -d ' ' -f1)" \
+            --arg diagnostics_sha256 "$(sha256sum "$evidence/native-exit-code.txt" | cut -d ' ' -f1)" \
+            --arg started_at_utc "$(cat "$evidence/started-at.txt")" \
+            --arg completed_at_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
+            --arg job_name "$job_name" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --argjson job_id "$job_id" \
+            --argjson passed "$(jq -er '.counts.passed' "$evidence/validation.json")" \
+            --argjson failed "$(jq -er '.counts.failed' "$evidence/validation.json")" \
+            --argjson ignored "$(jq -er '.counts.ignored' "$evidence/validation.json")" \
+            --argjson measured "$(jq -er '.counts.measured' "$evidence/validation.json")" \
+            --argjson filtered "$(jq -er '.counts.filtered' "$evidence/validation.json")" \
+            --argjson summaries "$(jq -er '.counts.summaries' "$evidence/validation.json")" \
+            '{schema_version:1,repository:$repository,gate:"doctest",status:"passed",commit_sha:$commit_sha,platform:{id:"linux-x86_64-gnu",os:"linux",arch:"x86_64",target:$target,runner_image:$runner_image,runner_image_version:$runner_image_version},toolchain:{rustc_version:$rustc_version,llvm_version:$llvm_version},tool:{name:"cargo",version:$cargo_version},inputs:{cargo_lock_sha256:$cargo_lock_sha256,policy_sha256:$policy_sha256,source_scope_sha256:$source_scope_sha256,configs:[]},command:{executable:"cargo",arguments:["test","--doc","--workspace","--all-features","--locked"],profile:"test"},timeouts:{command_seconds:900,job_seconds:1200,test_seconds:null,build_seconds:null},started_at_utc:$started_at_utc,completed_at_utc:$completed_at_utc,run:{kind:"github_actions",run_id:$run_id,run_attempt:$run_attempt,job_id:$job_id,job_name:$job_name,workflow_ref:$workflow_ref},artifacts:[{role:"doctest_log",path:"run.log",sha256:$log_sha256},{role:"validation_summary",path:"validation.json",sha256:$validation_sha256},{role:"diagnostics",path:"native-exit-code.txt",sha256:$diagnostics_sha256}],result:{kind:"doctest",passed:$passed,failed:$failed,ignored:$ignored,measured:$measured,filtered:$filtered,summaries:$summaries}}' \
+            > "$evidence/manifest.json"
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+            test-quality evidence --root . --policy test-quality.toml \
+            --manifest "$evidence/manifest.json" --json \
+            | tee "$evidence/manifest-validation.json"
+
+      - name: Record doctest outcome
+        if: always()
+        env:
+          NATIVE_OUTCOME: ${{ steps.doctest.outcome }}
+          MANIFEST_OUTCOME: ${{ steps.doctest_manifest.outcome }}
+        run: |
+          printf '{"run_id":%s,"run_attempt":%s,"head_sha":"%s","job":"doctest","native_outcome":"%s","manifest_outcome":"%s"}\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$QUALITY_SHA" \
+            "$NATIVE_OUTCOME" "$MANIFEST_OUTCOME" \
+            > target/projectatlas-quality/doctest/run.json
+
+      - name: Upload doctest evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-doctest-${{ env.QUALITY_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/projectatlas-quality/doctest
+          if-no-files-found: error
+          retention-days: 90
+
+  coverage:
+    name: coverage ${{ matrix.label }}
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64-gnu
+            os: ubuntu-latest
+          - label: windows-x86_64-msvc
+            os: windows-latest
+          - label: macos-x86_64
+            os: macos-15-intel
+          - label: macos-aarch64
+            os: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ env.QUALITY_SHA }}
+          persist-credentials: false
+
+      - name: Verify immutable quality commit
+        shell: bash
+        run: |
+          [[ "$QUALITY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$QUALITY_SHA"
+
+      - name: Setup Rust with matching LLVM tools
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component llvm-tools-preview
+          rustup default stable
+
+      - name: Install pinned coverage tools
+        uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
+        with:
+          tool: cargo-nextest@0.9.140,cargo-llvm-cov@0.8.7
+
+      - name: Record tool identity
+        shell: bash
+        env:
+          PLATFORM_ID: ${{ matrix.label }}
+        run: |
+          evidence="target/projectatlas-quality/coverage/$PLATFORM_ID"
+          mkdir -p "$evidence"
+          date -u +%Y-%m-%dT%H:%M:%SZ > "$evidence/started-at.txt"
+          cargo nextest --version | tee "$evidence/nextest-version.txt"
+          cargo nextest --version | grep -Eq '^cargo-nextest 0\.9\.140([[:space:]]|$)'
+          cargo llvm-cov --version | tee "$evidence/llvm-cov-version.txt"
+          cargo llvm-cov --version | grep -Eq '^cargo-llvm-cov 0\.8\.7([[:space:]]|$)'
+          rustc -Vv > "$evidence/rustc-version.txt"
+
+      - name: Run LLVM coverage
+        id: coverage
+        timeout-minutes: 40
+        shell: bash
+        env:
+          NEXTEST_PROFILE: ci
+          PLATFORM_ID: ${{ matrix.label }}
+        run: |
+          evidence="target/projectatlas-quality/coverage/$PLATFORM_ID"
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov nextest --workspace --all-features --locked \
+            --json --output-path "$evidence/coverage.json"
+          cargo llvm-cov report --text --output-path "$evidence/coverage.txt"
+
+      - name: Validate coverage policy
+        if: always()
+        id: coverage_validation
+        timeout-minutes: 5
+        shell: bash
+        env:
+          PLATFORM_ID: ${{ matrix.label }}
+        run: |
+          set -o pipefail
+          evidence="target/projectatlas-quality/coverage/$PLATFORM_ID"
+          mkdir -p "$evidence"
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+            test-quality coverage \
+            --root . \
+            --policy test-quality.toml \
+            --platform "$PLATFORM_ID" \
+            --llvm-json "$evidence/coverage.json" \
+            --json | tee "$evidence/validation.json"
+
+      - name: Build and validate coverage manifest
+        if: always()
+        id: coverage_manifest
+        timeout-minutes: 5
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLATFORM_ID: ${{ matrix.label }}
+        run: |
+          set -o pipefail
+          evidence="target/projectatlas-quality/coverage/$PLATFORM_ID"
+          : "${ImageOS:?hosted runner image is unavailable}"
+          : "${ImageVersion:?hosted runner image version is unavailable}"
+          case "$RUNNER_OS" in
+            Linux) platform_os=linux ;;
+            Windows) platform_os=windows ;;
+            macOS) platform_os=macos ;;
+            *) echo "unsupported runner OS $RUNNER_OS" >&2; exit 1 ;;
+          esac
+          case "$RUNNER_ARCH" in
+            X64) platform_arch=x86_64 ;;
+            ARM64) platform_arch=aarch64 ;;
+            *) echo "unsupported runner architecture $RUNNER_ARCH" >&2; exit 1 ;;
+          esac
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            > "$evidence/jobs.json"
+          job="$(jq -ce --arg runner "$RUNNER_NAME" \
+            '[.jobs[] | select(.runner_name == $runner and .status == "in_progress")] | if length == 1 then .[0] else error("current Actions job identity is ambiguous") end' \
+            "$evidence/jobs.json")"
+          job_id="$(jq -er '.id' <<<"$job")"
+          job_name="$(jq -er '.name' <<<"$job")"
+          source_scope_sha256="$(jq -er '.identities.source_scope_sha256' "$evidence/validation.json")"
+          lines_covered="$(jq -er '.counts.lines_covered' "$evidence/validation.json")"
+          lines_total="$(jq -er '.counts.lines_total' "$evidence/validation.json")"
+          regions_covered="$(jq -er '.counts.regions_covered' "$evidence/validation.json")"
+          regions_total="$(jq -er '.counts.regions_total' "$evidence/validation.json")"
+          functions_covered="$(jq -er '.counts.functions_covered' "$evidence/validation.json")"
+          functions_total="$(jq -er '.counts.functions_total' "$evidence/validation.json")"
+          coverage_path="$evidence/coverage.json"
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit_sha "$QUALITY_SHA" \
+            --arg platform_id "$PLATFORM_ID" \
+            --arg platform_os "$platform_os" \
+            --arg platform_arch "$platform_arch" \
+            --arg target "$(rustc -Vv | sed -n 's/^host: //p')" \
+            --arg runner_image "$ImageOS" \
+            --arg runner_image_version "$ImageVersion" \
+            --arg rustc_version "$(rustc --version)" \
+            --arg llvm_version "$(rustc -Vv | sed -n 's/^LLVM version: //p')" \
+            --arg cargo_lock_sha256 "$(sha256sum Cargo.lock | cut -d ' ' -f1)" \
+            --arg policy_sha256 "$(sha256sum test-quality.toml | cut -d ' ' -f1)" \
+            --arg source_scope_sha256 "$source_scope_sha256" \
+            --arg nextest_config_sha256 "$(sha256sum .config/nextest.toml | cut -d ' ' -f1)" \
+            --arg llvm_json_sha256 "$(sha256sum "$evidence/coverage.json" | cut -d ' ' -f1)" \
+            --arg coverage_report_sha256 "$(sha256sum "$evidence/coverage.txt" | cut -d ' ' -f1)" \
+            --arg validation_sha256 "$(sha256sum "$evidence/validation.json" | cut -d ' ' -f1)" \
+            --arg started_at_utc "$(cat "$evidence/started-at.txt")" \
+            --arg completed_at_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
+            --arg job_name "$job_name" \
+            --arg coverage_path "$coverage_path" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --argjson job_id "$job_id" \
+            --argjson lines_covered "$lines_covered" \
+            --argjson lines_total "$lines_total" \
+            --argjson regions_covered "$regions_covered" \
+            --argjson regions_total "$regions_total" \
+            --argjson functions_covered "$functions_covered" \
+            --argjson functions_total "$functions_total" \
+            '{schema_version:1,repository:$repository,gate:"coverage",status:"passed",commit_sha:$commit_sha,platform:{id:$platform_id,os:$platform_os,arch:$platform_arch,target:$target,runner_image:$runner_image,runner_image_version:$runner_image_version},toolchain:{rustc_version:$rustc_version,llvm_version:$llvm_version},tool:{name:"cargo-llvm-cov",version:"0.8.7"},inputs:{cargo_lock_sha256:$cargo_lock_sha256,policy_sha256:$policy_sha256,source_scope_sha256:$source_scope_sha256,configs:[{role:"nextest",path:".config/nextest.toml",sha256:$nextest_config_sha256}]},command:{executable:"cargo",arguments:["llvm-cov","nextest","--workspace","--all-features","--locked","--json","--output-path",$coverage_path],profile:"ci"},timeouts:{command_seconds:2400,job_seconds:2700,test_seconds:120,build_seconds:null},started_at_utc:$started_at_utc,completed_at_utc:$completed_at_utc,run:{kind:"github_actions",run_id:$run_id,run_attempt:$run_attempt,job_id:$job_id,job_name:$job_name,workflow_ref:$workflow_ref},artifacts:[{role:"llvm_json",path:"coverage.json",sha256:$llvm_json_sha256},{role:"coverage_report",path:"coverage.txt",sha256:$coverage_report_sha256},{role:"validation_summary",path:"validation.json",sha256:$validation_sha256}],result:{kind:"coverage",raw:{lines:{covered:$lines_covered,total:$lines_total},regions:{covered:$regions_covered,total:$regions_total},functions:{covered:$functions_covered,total:$functions_total}},adjusted:{lines:{covered:$lines_covered,total:$lines_total},regions:{covered:$regions_covered,total:$regions_total},functions:{covered:$functions_covered,total:$functions_total}},exceptions_used:0}}' \
+            > "$evidence/manifest.json"
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+            test-quality evidence --root . --policy test-quality.toml \
+            --manifest "$evidence/manifest.json" --json \
+            | tee "$evidence/manifest-validation.json"
+
+      - name: Record coverage outcome
+        if: always()
+        shell: bash
+        env:
+          NATIVE_OUTCOME: ${{ steps.coverage.outcome }}
+          VALIDATION_OUTCOME: ${{ steps.coverage_validation.outcome }}
+          MANIFEST_OUTCOME: ${{ steps.coverage_manifest.outcome }}
+          PLATFORM_ID: ${{ matrix.label }}
+        run: |
+          evidence="target/projectatlas-quality/coverage/$PLATFORM_ID"
+          printf '{"run_id":%s,"run_attempt":%s,"head_sha":"%s","job":"coverage","platform":"%s","native_outcome":"%s","validation_outcome":"%s","manifest_outcome":"%s"}\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$QUALITY_SHA" "$PLATFORM_ID" \
+            "$NATIVE_OUTCOME" "$VALIDATION_OUTCOME" "$MANIFEST_OUTCOME" \
+            > "$evidence/run.json"
+
+      - name: Upload coverage evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-coverage-${{ matrix.label }}-${{ env.QUALITY_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/projectatlas-quality/coverage/${{ matrix.label }}
+          if-no-files-found: error
+          retention-days: 90
+
+  changed-mutation:
+    name: changed-mutation
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ env.QUALITY_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify immutable quality commit
+        run: |
+          [[ "$QUALITY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$QUALITY_SHA"
+
+      - name: Setup Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install pinned mutation tools
+        uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
+        with:
+          tool: cargo-nextest@0.9.140,cargo-mutants@27.1.0
+
+      - name: Resolve trusted mutation base
+        id: mutation_base
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+          CALLED_BASE_SHA: ${{ inputs.mutation_base_sha }}
+        run: |
+          mkdir -p target/projectatlas-quality/changed-mutation
+          if [[ -n "$CALLED_BASE_SHA" ]]; then
+            base="$CALLED_BASE_SHA"
+          else
+            case "$EVENT_NAME" in
+            pull_request) base="$PR_BASE_SHA" ;;
+            push) base="$PUSH_BASE_SHA" ;;
+            *) base="$(git rev-parse HEAD^)" ;;
+            esac
+          fi
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            echo "Trusted mutation base is missing or invalid" >&2
+            exit 1
+          fi
+          git cat-file -e "$base^{commit}"
+          git merge-base --is-ancestor "$base" HEAD
+          echo "$base" > target/projectatlas-quality/changed-mutation/base-sha.txt
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+      - name: Record tool identity
+        run: |
+          date -u +%Y-%m-%dT%H:%M:%SZ \
+            > target/projectatlas-quality/changed-mutation/started-at.txt
+          cargo nextest --version | tee target/projectatlas-quality/changed-mutation/nextest-version.txt
+          cargo nextest --version | grep -Eq '^cargo-nextest 0\.9\.140([[:space:]]|$)'
+          cargo mutants --version | tee target/projectatlas-quality/changed-mutation/mutants-version.txt
+          cargo mutants --version | grep -Eq '^cargo-mutants 27\.1\.0([[:space:]]|$)'
+          rustc -Vv > target/projectatlas-quality/changed-mutation/rustc-version.txt
+
+      - name: Run changed-source mutation
+        id: changed_mutation
+        timeout-minutes: 45
+        env:
+          BASE_SHA: ${{ steps.mutation_base.outputs.base }}
+        run: |
+          cargo mutants \
+            --config .cargo/mutants.toml \
+            --workspace \
+            --in-diff "$BASE_SHA..$QUALITY_SHA" \
+            --baseline run \
+            --timeout 180 \
+            --build-timeout 900 \
+            --output target/projectatlas-quality/changed-mutation/native \
+            --annotations github
+
+      - name: Validate changed-source mutation policy
+        if: always()
+        id: changed_mutation_validation
+        timeout-minutes: 5
+        env:
+          BASE_SHA: ${{ steps.mutation_base.outputs.base }}
+        run: |
+          set -o pipefail
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+            test-quality mutation-changed \
+            --root . \
+            --policy test-quality.toml \
+            --inventory target/projectatlas-quality/changed-mutation/native/mutants.out/mutants.json \
+            --outcomes target/projectatlas-quality/changed-mutation/native/mutants.out/outcomes.json \
+            --merge-base "$BASE_SHA" \
+            --json | tee target/projectatlas-quality/changed-mutation/validation.json
+
+      - name: Build and validate changed-mutation manifest
+        if: always()
+        id: changed_mutation_manifest
+        timeout-minutes: 5
+        env:
+          BASE_SHA: ${{ steps.mutation_base.outputs.base }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          evidence=target/projectatlas-quality/changed-mutation
+          mutants_path="$evidence/native/mutants.out/mutants.json"
+          outcomes_path="$evidence/native/mutants.out/outcomes.json"
+          : "${ImageOS:?hosted runner image is unavailable}"
+          : "${ImageVersion:?hosted runner image version is unavailable}"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            > "$evidence/jobs.json"
+          job="$(jq -ce --arg runner "$RUNNER_NAME" \
+            '[.jobs[] | select(.runner_name == $runner and .status == "in_progress")] | if length == 1 then .[0] else error("current Actions job identity is ambiguous") end' \
+            "$evidence/jobs.json")"
+          job_id="$(jq -er '.id' <<<"$job")"
+          job_name="$(jq -er '.name' <<<"$job")"
+          source_scope_sha256="$(jq -er '.identities.source_scope_sha256' "$evidence/validation.json")"
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit_sha "$QUALITY_SHA" \
+            --arg target "$(rustc -Vv | sed -n 's/^host: //p')" \
+            --arg runner_image "$ImageOS" \
+            --arg runner_image_version "$ImageVersion" \
+            --arg rustc_version "$(rustc --version)" \
+            --arg llvm_version "$(rustc -Vv | sed -n 's/^LLVM version: //p')" \
+            --arg cargo_lock_sha256 "$(sha256sum Cargo.lock | cut -d ' ' -f1)" \
+            --arg policy_sha256 "$(sha256sum test-quality.toml | cut -d ' ' -f1)" \
+            --arg source_scope_sha256 "$source_scope_sha256" \
+            --arg nextest_config_sha256 "$(sha256sum .config/nextest.toml | cut -d ' ' -f1)" \
+            --arg mutants_config_sha256 "$(sha256sum .cargo/mutants.toml | cut -d ' ' -f1)" \
+            --arg inventory_sha256 "$(sha256sum "$mutants_path" | cut -d ' ' -f1)" \
+            --arg outcomes_sha256 "$(sha256sum "$outcomes_path" | cut -d ' ' -f1)" \
+            --arg validation_sha256 "$(sha256sum "$evidence/validation.json" | cut -d ' ' -f1)" \
+            --arg started_at_utc "$(cat "$evidence/started-at.txt")" \
+            --arg completed_at_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
+            --arg job_name "$job_name" \
+            --arg diff_range "$BASE_SHA..$QUALITY_SHA" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --argjson job_id "$job_id" \
+            --argjson raw_total "$(jq -er '.counts.raw_total' "$evidence/validation.json")" \
+            --argjson caught "$(jq -er '.counts.caught' "$evidence/validation.json")" \
+            --argjson missed "$(jq -er '.counts.missed' "$evidence/validation.json")" \
+            --argjson timed_out "$(jq -er '.counts.timed_out' "$evidence/validation.json")" \
+            --argjson unviable "$(jq -er '.counts.unviable' "$evidence/validation.json")" \
+            --argjson excluded "$(jq -er '.counts.excluded' "$evidence/validation.json")" \
+            --argjson unresolved "$(jq -er '.counts.unresolved' "$evidence/validation.json")" \
+            --argjson baseline_passed "$(jq -er '.counts.baseline_passed == 1' "$evidence/validation.json")" \
+            '{schema_version:1,repository:$repository,gate:"changed_mutation",status:"passed",commit_sha:$commit_sha,platform:{id:"linux-x86_64-gnu",os:"linux",arch:"x86_64",target:$target,runner_image:$runner_image,runner_image_version:$runner_image_version},toolchain:{rustc_version:$rustc_version,llvm_version:$llvm_version},tool:{name:"cargo-mutants",version:"27.1.0"},inputs:{cargo_lock_sha256:$cargo_lock_sha256,policy_sha256:$policy_sha256,source_scope_sha256:$source_scope_sha256,configs:[{role:"nextest",path:".config/nextest.toml",sha256:$nextest_config_sha256},{role:"mutants",path:".cargo/mutants.toml",sha256:$mutants_config_sha256}]},command:{executable:"cargo",arguments:["mutants","--config",".cargo/mutants.toml","--workspace","--in-diff",$diff_range,"--baseline","run","--timeout","180","--build-timeout","900","--output","target/projectatlas-quality/changed-mutation/native","--annotations","github"],profile:"mutants"},timeouts:{command_seconds:2700,job_seconds:3000,test_seconds:180,build_seconds:900},started_at_utc:$started_at_utc,completed_at_utc:$completed_at_utc,run:{kind:"github_actions",run_id:$run_id,run_attempt:$run_attempt,job_id:$job_id,job_name:$job_name,workflow_ref:$workflow_ref},artifacts:[{role:"mutation_changed_inventory",path:"native/mutants.out/mutants.json",sha256:$inventory_sha256},{role:"mutation_changed_outcomes",path:"native/mutants.out/outcomes.json",sha256:$outcomes_sha256},{role:"validation_summary",path:"validation.json",sha256:$validation_sha256}],result:{kind:"changed_mutation",raw_total:$raw_total,caught:$caught,missed:$missed,timed_out:$timed_out,unviable:$unviable,excluded:$excluded,unresolved:$unresolved,baseline_passed:$baseline_passed}}' \
+            > "$evidence/manifest.json"
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+            test-quality evidence --root . --policy test-quality.toml \
+            --manifest "$evidence/manifest.json" --json \
+            | tee "$evidence/manifest-validation.json"
+
+      - name: Record changed-mutation outcome
+        if: always()
+        env:
+          NATIVE_OUTCOME: ${{ steps.changed_mutation.outcome }}
+          VALIDATION_OUTCOME: ${{ steps.changed_mutation_validation.outcome }}
+          MANIFEST_OUTCOME: ${{ steps.changed_mutation_manifest.outcome }}
+        run: |
+          printf '{"run_id":%s,"run_attempt":%s,"head_sha":"%s","job":"changed-mutation","native_outcome":"%s","validation_outcome":"%s","manifest_outcome":"%s"}\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$QUALITY_SHA" \
+            "$NATIVE_OUTCOME" "$VALIDATION_OUTCOME" "$MANIFEST_OUTCOME" \
+            > target/projectatlas-quality/changed-mutation/run.json
+
+      - name: Upload changed-mutation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-changed-mutation-${{ env.QUALITY_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/projectatlas-quality/changed-mutation
+          if-no-files-found: error
+          retention-days: 90
+
   install-smoke:
     name: install-smoke
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: verify
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ env.QUALITY_SHA }}
+          persist-credentials: false
+
+      - name: Verify immutable quality commit
+        run: |
+          [[ "$QUALITY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$QUALITY_SHA"
 
       - name: Setup Rust
         run: |
@@ -161,8 +929,14 @@ jobs:
 
   e2e-smoke:
     name: e2e-smoke ${{ matrix.label }}
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call'
     needs: verify
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -178,6 +952,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ env.QUALITY_SHA }}
+          persist-credentials: false
+
+      - name: Verify immutable quality commit
+        shell: bash
+        run: |
+          [[ "$QUALITY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$QUALITY_SHA"
 
       - name: Setup Rust
         shell: bash

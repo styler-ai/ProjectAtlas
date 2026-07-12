@@ -1,0 +1,15 @@
+# Purpose: Configure deterministic source-mutation execution without hiding raw candidates.
+
+all_features = true
+test_workspace = true
+test_tool = "nextest"
+additional_cargo_args = ["--locked"]
+additional_cargo_test_args = ["--profile", "mutants", "--no-tests=fail"]
+minimum_test_timeout = 120.0
+timeout_multiplier = 2.0
+build_timeout_multiplier = 2.0
+sharding = "slice"
+copy_vcs = true
+gitignore = true
+skip_calls_defaults = false
+cap_lints = false

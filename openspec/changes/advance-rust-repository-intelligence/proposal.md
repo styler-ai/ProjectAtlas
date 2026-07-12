@@ -19,6 +19,7 @@ The program is ready for phased implementation after Phase 0 freezes its benchma
 - Permit independent, behavior-level Rust implementations of useful public algorithms and capabilities, but prohibit source-to-source translation, copied comments/tests/constants, and mirrored source module/function structure. Implementation review SHALL verify ProjectAtlas-owned structure and complete provenance.
 - Preserve compatibility across every existing ProjectAtlas CLI command and MCP tool unless a delta specification explicitly changes it, including names, accepted request shapes, default semantics, output formats, exit/error behavior, project-local databases, dynamic `.gitignore` inheritance, repository-relative path validation, explicit `project_path` isolation, purpose metadata, TOON-first responses, token telemetry, and bounded MCP task progress.
 - Sequence the separately mapped Rust test-quality change as the final v0.4 quality-closure prerequisite, not as a prerequisite to implementing this change's architecture or features. Focused behavior tests remain part of each implementation slice.
+- After feature and substantive quality evidence stabilize, completely refresh the public README and ProjectAtlas front page while retaining the existing mascot. Installation, host/language support, automatic graph-aware workflows, security, architecture, performance/resources, token efficiency, and plugin-store advantages SHALL be generated from or validated against v0.4 capability and benchmark evidence.
 
 ### Non-Goals
 

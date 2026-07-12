@@ -4,7 +4,12 @@ Describe what this change does and why.
 
 ## Issue
 
-Closes #NNN
+Refs #NNN
+
+OpenSpec-Issue: #NNN
+OpenSpec-Task: change-id/1.1
+
+Repeat `OpenSpec-Issue` and `OpenSpec-Task` rows only for additional authoritative issues or disjoint task ranges changed by this PR. Use `change-id/1.1..1.4` for an inclusive range.
 
 ## Checklist
 
@@ -15,6 +20,6 @@ Closes #NNN
 - [ ] `cargo test --workspace --all-features` clean.
 - [ ] `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` clean.
 - [ ] Tests updated or added where behavior changed.
-- [ ] All OpenSpec changes are mapped in `openspec/issue-map.json`, all task checklists are mirrored into linked GitHub issues, every OpenSpec task is checked off before merge, and `.github/scripts/issue-checklists.py` passes.
+- [ ] Declared OpenSpec task ranges are checked, evidence-current, exactly mirrored in their authoritative issues, and `.github/scripts/issue-checklists.py --pr <number>` passes; unrelated milestone tasks may remain open.
 - [ ] README, Markdown docs, and GitHub Pages/rustdoc-facing content are updated or confirmed current for this change.
 - [ ] PR text contains no private or internal-only details (release notes are generated from PR text).

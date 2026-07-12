@@ -1,6 +1,8 @@
 //! Purpose: Enforce `ProjectAtlas` source-code policy beyond built-in Clippy lints.
 //! Cargo-adjacent lint gate for `ProjectAtlas`-specific Rust contracts.
 
+mod test_quality;
+
 use proc_macro2::{TokenStream, TokenTree};
 use std::collections::BTreeMap;
 use std::env;
@@ -21,6 +23,8 @@ use syn::{
 
 /// Subcommand that runs strict source-contract linting, including string ownership.
 const COMMAND_STRICT_STRINGS: &str = "strict-strings";
+/// Subcommand group that validates Rust test-quality policy and evidence.
+const COMMAND_TEST_QUALITY: &str = "test-quality";
 /// Successful process exit.
 const EXIT_OK: u8 = 0;
 /// Lint failure process exit.
@@ -228,11 +232,7 @@ fn main() -> ExitCode {
             if writeln!(stderr, "{error}").is_err() {
                 return ExitCode::from(EXIT_FAILURE);
             }
-            if matches!(error, LintError::Usage(_)) {
-                ExitCode::from(EXIT_USAGE)
-            } else {
-                ExitCode::from(EXIT_FAILURE)
-            }
+            ExitCode::from(error.exit_code())
         }
     }
 }
@@ -245,7 +245,10 @@ fn current_dir() -> PathBuf {
 /// Dispatch one lint command from normalized command-line arguments.
 fn run(args: impl IntoIterator<Item = OsString>, current_dir: &Path) -> Result<(), LintError> {
     let args = normalized_args(args);
-    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
         return help();
     }
     let Some(command) = args.first() else {
@@ -253,6 +256,8 @@ fn run(args: impl IntoIterator<Item = OsString>, current_dir: &Path) -> Result<(
     };
     match command.as_str() {
         COMMAND_STRICT_STRINGS => run_strict_strings(current_dir),
+        COMMAND_TEST_QUALITY => test_quality::run(&args[1..], current_dir)
+            .map_err(|source| LintError::Quality(Box::new(source))),
         other => Err(LintError::Usage(format!(
             "unknown projectatlas lint command {other:?}"
         ))),
@@ -276,7 +281,7 @@ fn help() -> Result<(), LintError> {
     let mut stdout = io::stdout().lock();
     writeln!(
         stdout,
-        "Usage: cargo projectatlas-lints {COMMAND_STRICT_STRINGS}\n\nCommands:\n  {COMMAND_STRICT_STRINGS}  Fail on ProjectAtlas source-contract literals and duplicated mutable task counts."
+        "Usage: cargo projectatlas-lints <COMMAND>\n\nCommands:\n  {COMMAND_STRICT_STRINGS}  Fail on ProjectAtlas source-contract literals and duplicated mutable task counts.\n  {COMMAND_TEST_QUALITY}    Validate Rust test-quality policy and retained evidence."
     )
     .map_err(LintError::Io)
 }
@@ -980,6 +985,21 @@ enum LintError {
     },
     /// Strict string-contract violations.
     Violations(Vec<SourceLiteralViolation>),
+    /// Rust test-quality policy or evidence failure.
+    Quality(Box<test_quality::QualityError>),
+}
+
+impl LintError {
+    /// Return the process exit code for this failure.
+    fn exit_code(&self) -> u8 {
+        match self {
+            Self::Usage(_) => EXIT_USAGE,
+            Self::Quality(source) => source.exit_code(),
+            Self::Io(_) | Self::ReadFile { .. } | Self::Parse { .. } | Self::Violations(_) => {
+                EXIT_FAILURE
+            }
+        }
+    }
 }
 
 impl Display for LintError {
@@ -994,11 +1014,21 @@ impl Display for LintError {
             Self::Violations(violations) => {
                 write!(formatter, "{} strict source violations", violations.len())
             }
+            Self::Quality(source) => Display::fmt(source, formatter),
         }
     }
 }
 
-impl std::error::Error for LintError {}
+impl std::error::Error for LintError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(source) | Self::ReadFile { source, .. } => Some(source),
+            Self::Parse { source, .. } => Some(source),
+            Self::Quality(source) => Some(source.as_ref()),
+            Self::Usage(_) | Self::Violations(_) => None,
+        }
+    }
+}
 
 /// Write all strict string-contract diagnostics.
 fn write_violations(

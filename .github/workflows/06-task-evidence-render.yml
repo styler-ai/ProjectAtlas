@@ -1,0 +1,172 @@
+# Purpose: Render validated task evidence into authoritative GitHub issue comments from trusted code.
+
+name: 06-Task-Evidence-Render
+
+on:
+  workflow_run:
+    workflows: ["01-CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  issues: write
+
+jobs:
+  render:
+    name: task-evidence-render
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted default-branch renderer
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Validate source run and artifact metadata
+        id: provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SOURCE_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          SOURCE_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          SOURCE_EVENT: ${{ github.event.workflow_run.event }}
+        run: |
+          set -euo pipefail
+          test "$SOURCE_HEAD_REPOSITORY" = "$GITHUB_REPOSITORY"
+          test "$SOURCE_EVENT" = pull_request
+          [[ "$SOURCE_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          mkdir -p target/projectatlas-quality/renderer
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" \
+            > target/projectatlas-quality/renderer/source-run.json
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg sha "$SOURCE_HEAD_SHA" \
+            --arg event "$SOURCE_EVENT" \
+            --argjson attempt "$SOURCE_RUN_ATTEMPT" \
+            '.name == "01-CI" and .repository.full_name == $repository and .head_repository.full_name == $repository and .head_sha == $sha and .event == $event and .run_attempt == $attempt and .status == "completed" and .conclusion == "success"' \
+            target/projectatlas-quality/renderer/source-run.json >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/attempts/$SOURCE_RUN_ATTEMPT/jobs?per_page=100" \
+            > target/projectatlas-quality/renderer/source-jobs.json
+          job_id="$(jq -r \
+            '[.jobs[] | select(.name == "verify" and .conclusion == "success")] | if length == 1 then .[0].id else empty end' \
+            target/projectatlas-quality/renderer/source-jobs.json)"
+          [[ "$job_id" =~ ^[0-9]+$ ]]
+          artifact_name="task-evidence-$SOURCE_HEAD_SHA-$SOURCE_RUN_ID-$SOURCE_RUN_ATTEMPT"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" \
+            > target/projectatlas-quality/renderer/source-artifacts.json
+          jq -e --arg name "$artifact_name" \
+            '[.artifacts[] | select(.name == $name)] | length == 1' \
+            target/projectatlas-quality/renderer/source-artifacts.json >/dev/null
+          jq -e --arg name "$artifact_name" \
+            '.artifacts[] | select(.name == $name) | .expired == false and .size_in_bytes > 0 and .size_in_bytes <= 10485760 and (.digest | test("^sha256:[0-9a-f]{64}$"))' \
+            target/projectatlas-quality/renderer/source-artifacts.json >/dev/null
+          artifact_id="$(jq -r --arg name "$artifact_name" \
+            '.artifacts[] | select(.name == $name) | .id' \
+            target/projectatlas-quality/renderer/source-artifacts.json)"
+          artifact_digest="$(jq -r --arg name "$artifact_name" \
+            '.artifacts[] | select(.name == $name) | .digest' \
+            target/projectatlas-quality/renderer/source-artifacts.json)"
+          [[ "$artifact_id" =~ ^[0-9]+$ ]]
+          pr_number="$(jq -r '.pull_requests | if length == 1 then .[0].number else empty end' target/projectatlas-quality/renderer/source-run.json)"
+          [[ "$pr_number" =~ ^[0-9]+$ ]]
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg artifact_name "$artifact_name" \
+            --arg artifact_digest "$artifact_digest" \
+            --arg head_sha "$SOURCE_HEAD_SHA" \
+            --argjson run_id "$SOURCE_RUN_ID" \
+            --argjson run_attempt "$SOURCE_RUN_ATTEMPT" \
+            --argjson job_id "$job_id" \
+            --argjson artifact_id "$artifact_id" \
+            --argjson pull_request "$pr_number" \
+            '{schema_version: 1, repository: $repository, workflow_name: "01-CI", event: "pull_request", conclusion: "success", run_id: $run_id, run_attempt: $run_attempt, job_id: $job_id, job_name: "verify", artifact_id: $artifact_id, artifact_name: $artifact_name, artifact_digest: $artifact_digest, head_repository: $repository, head_sha: $head_sha, pull_request: $pull_request}' \
+            > target/projectatlas-quality/renderer/provenance.json
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout validated same-repository PR head as data
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          path: target/projectatlas-quality/renderer/source-snapshot
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download source-run task evidence without executing it
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ steps.provenance.outputs.artifact_name }}
+          path: target/projectatlas-quality/renderer/task-evidence
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Revalidate downloaded evidence with trusted code
+        env:
+          EXPECTED_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          artifact_root="$PWD/target/projectatlas-quality/renderer/task-evidence"
+          evidence_root="$PWD/target/projectatlas-quality/renderer/source-snapshot"
+          test -f "$evidence_root/Cargo.toml"
+          test -f "$evidence_root/Cargo.lock"
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg sha "$EXPECTED_SHA" \
+            --argjson run_id "$SOURCE_RUN_ID" \
+            --argjson attempt "$EXPECTED_ATTEMPT" \
+            '.repository == $repository and .head_sha == $sha and .run_id == $run_id and .run_attempt == $attempt and .event == "pull_request" and .job == "verify" and .outcome == "success"' \
+            "$artifact_root/run.json" >/dev/null
+          cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
+            test-quality tasks \
+            --root "$evidence_root" \
+            --policy test-quality.toml \
+            --tasks openspec/changes/enforce-rust-test-quality-gates/tasks.md \
+            --plan openspec/task-verification.json \
+            --evidence openspec/task-evidence.json \
+            --expected-commit "$EXPECTED_SHA"
+
+      - name: Build managed comment operations without executing artifact content
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.provenance.outputs.pr_number }}
+        run: |
+          evidence_root="$PWD/target/projectatlas-quality/renderer/source-snapshot"
+          provenance="$PWD/target/projectatlas-quality/renderer/provenance.json"
+          python3 .github/scripts/issue-checklists.py --self-test
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --root "$evidence_root" \
+            --issue-map openspec/issue-map.json \
+            --verification-plan openspec/task-verification.json \
+            --evidence openspec/task-evidence.json \
+            --pr "$PR_NUMBER" \
+            --provenance "$provenance" \
+            --render-plan "$PWD/target/projectatlas-quality/renderer/managed-comments.json"
+
+      - name: Apply only the validated managed comment plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.provenance.outputs.pr_number }}
+        run: |
+          evidence_root="$PWD/target/projectatlas-quality/renderer/source-snapshot"
+          provenance="$PWD/target/projectatlas-quality/renderer/provenance.json"
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --root "$evidence_root" \
+            --issue-map openspec/issue-map.json \
+            --verification-plan openspec/task-verification.json \
+            --evidence openspec/task-evidence.json \
+            --pr "$PR_NUMBER" \
+            --provenance "$provenance" \
+            --apply-render-plan "$PWD/target/projectatlas-quality/renderer/managed-comments.json"

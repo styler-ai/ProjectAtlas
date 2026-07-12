@@ -62,4 +62,5 @@ jobs:
         run: |
           gh workflow run release.yml \
             --ref main \
-            --field version="v${{ steps.version.outputs.version }}"
+            --field version="v${{ steps.version.outputs.version }}" \
+            --field commit_sha="$GITHUB_SHA"

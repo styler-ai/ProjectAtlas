@@ -1,0 +1,32 @@
+# Purpose: Pin deterministic ProjectAtlas nextest profiles for local, CI, and mutation runs.
+
+nextest-version = { required = "0.9.140", recommended = "0.9.140" }
+
+[store]
+dir = "target/nextest"
+
+[profile.default]
+retries = 0
+flaky-result = "fail"
+fail-fast = true
+status-level = "fail"
+final-status-level = "pass"
+slow-timeout = { period = "120s", terminate-after = 1, grace-period = "10s" }
+global-timeout = "20m"
+
+[profile.ci]
+inherits = "default"
+fail-fast = false
+global-timeout = "20m"
+
+[profile.ci.junit]
+path = "junit.xml"
+report-name = "projectatlas-nextest"
+store-success-output = false
+store-failure-output = true
+flaky-fail-status = "failure"
+
+[profile.mutants]
+inherits = "default"
+fail-fast = true
+global-timeout = "15m"

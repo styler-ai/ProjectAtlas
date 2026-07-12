@@ -19,6 +19,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+use syn::visit::Visit as _;
 
 /// Versioned machine-readable contract artifact.
 const CONTRACT: &str = include_str!(
@@ -1023,13 +1024,15 @@ fn validate_host_safety_states(policy: &Value) -> Result<(), Box<dyn Error>> {
 /// Validate that every local host observation is reproducible from one bound envelope.
 fn validate_host_command_evidence(policy: &Value) -> Result<(), Box<dyn Error>> {
     const HISTORICAL_BINDING_ID: &str = "windows-dev-c672442-8c66fec8";
+    const HISTORICAL_HEAD_COMMIT: &str = "c672442438404411389ef86e2efd767f3a4b2be0";
+    const HISTORICAL_HEAD_TREE: &str = "cc9bc004837c8843b84151cb269fba41e8944116";
     const HISTORICAL_LOCKFILE_SHA256: &str =
         "8c66fec898d4535a0cdd4f88ff986f206bb53d7d8f6d548cc9f7d5cd2bcc841d";
     const HISTORICAL_MANIFEST_SHA256: &str =
         "709867f2d9bb4790f5c0e8356633efa2c34aa8466a6aaba524c3ad2cfe4d2bb7";
-    const CURRENT_BINDING_ID: &str = "windows-dev-c672442-4a1bb80a-20260711T221227Z";
+    const CURRENT_BINDING_ID: &str = "windows-dev-7f57cb9-34caf807-20260712T195754Z";
     const CURRENT_MANIFEST_SHA256: &str =
-        "0ae527e5d723769e19a9456e94e02be29230fa0c08a724b58bb3e36b43c9087e";
+        "a49b742972c29961ab78a84f639293f47d745b903e266ba446091f84fbe708f7";
     let evidence = &policy["command_evidence"];
     let binding_id = evidence["binding_id"]
         .as_str()
@@ -1048,8 +1051,8 @@ fn validate_host_command_evidence(policy: &Value) -> Result<(), Box<dyn Error>> 
                 .as_str()
                 .is_some_and(|reason| reason.contains("cannot prove the current candidate"))
             && evidence["host_id"] == policy["audit_host"]["id"]
-            && evidence["head_commit"] == policy["source_snapshot"]["head_commit"]
-            && evidence["head_tree"] == policy["source_snapshot"]["head_tree"]
+            && evidence["head_commit"] == HISTORICAL_HEAD_COMMIT
+            && evidence["head_tree"] == HISTORICAL_HEAD_TREE
             && evidence["lockfile_sha256"] == HISTORICAL_LOCKFILE_SHA256
             && evidence["lockfile_sha256"]
                 != policy["source_snapshot"]["dirty_candidate_lockfile"]["sha256"]
@@ -1607,6 +1610,57 @@ fn validate_safety_inventory(
     )
 }
 
+/// Count unsafe syntax, foreign blocks, and native-link attributes in parsed Rust source.
+#[derive(Default)]
+struct OwnedBoundaryVisitor {
+    unsafe_constructs: usize,
+    extern_blocks: usize,
+    link_attributes: usize,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for OwnedBoundaryVisitor {
+    fn visit_attribute(&mut self, node: &'ast syn::Attribute) {
+        self.link_attributes += usize::from(node.path().is_ident("link"));
+        syn::visit::visit_attribute(self, node);
+    }
+
+    fn visit_expr_unsafe(&mut self, node: &'ast syn::ExprUnsafe) {
+        self.unsafe_constructs += 1;
+        syn::visit::visit_expr_unsafe(self, node);
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        self.unsafe_constructs += usize::from(node.sig.unsafety.is_some());
+        syn::visit::visit_item_fn(self, node);
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.unsafe_constructs += usize::from(node.sig.unsafety.is_some());
+        syn::visit::visit_impl_item_fn(self, node);
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        self.unsafe_constructs += usize::from(node.sig.unsafety.is_some());
+        syn::visit::visit_trait_item_fn(self, node);
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        self.unsafe_constructs += usize::from(node.unsafety.is_some());
+        syn::visit::visit_item_impl(self, node);
+    }
+
+    fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
+        self.unsafe_constructs += usize::from(node.unsafety.is_some());
+        syn::visit::visit_item_trait(self, node);
+    }
+
+    fn visit_item_foreign_mod(&mut self, node: &'ast syn::ItemForeignMod) {
+        self.unsafe_constructs += usize::from(node.unsafety.is_some());
+        self.extern_blocks += 1;
+        syn::visit::visit_item_foreign_mod(self, node);
+    }
+}
+
 /// Reconcile owned manifests and Rust sources with the current workspace.
 fn current_safety_evidence() -> Result<CurrentSafetyEvidence, Box<dyn Error>> {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -1618,14 +1672,8 @@ fn current_safety_evidence() -> Result<CurrentSafetyEvidence, Box<dyn Error>> {
     let members = workspace["workspace"]["members"]
         .as_array()
         .ok_or_else(|| io::Error::other("workspace members are not an array"))?;
-    let unsafe_construct = Regex::new(r"\bunsafe\s*(?:\{|fn\b|impl\b|trait\b|extern\b)")?;
-    let extern_block =
-        Regex::new(r#"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?extern\s*(?:"[^"]+"\s*)?\{"#)?;
-    let link_attribute = Regex::new(r"#\s*\[\s*link(?:\s*\(|\])")?;
     let mut owned_crates = BTreeSet::new();
-    let mut unsafe_constructs = 0_usize;
-    let mut extern_blocks = 0_usize;
-    let mut link_attributes = 0_usize;
+    let mut boundaries = OwnedBoundaryVisitor::default();
 
     for member in members {
         let relative_path = member
@@ -1650,9 +1698,12 @@ fn current_safety_evidence() -> Result<CurrentSafetyEvidence, Box<dyn Error>> {
         )?;
         for source_path in rust_source_paths(&member_root)? {
             let source = fs::read_to_string(&source_path)?;
-            unsafe_constructs += unsafe_construct.find_iter(&source).count();
-            extern_blocks += extern_block.find_iter(&source).count();
-            link_attributes += link_attribute.find_iter(&source).count();
+            boundaries.visit_file(&syn::parse_file(&source).map_err(|error| {
+                io::Error::other(format!(
+                    "failed to parse {}: {error}",
+                    source_path.display()
+                ))
+            })?);
         }
     }
 
@@ -1667,9 +1718,9 @@ fn current_safety_evidence() -> Result<CurrentSafetyEvidence, Box<dyn Error>> {
     )?;
     Ok(CurrentSafetyEvidence {
         owned_crates,
-        unsafe_constructs,
-        extern_blocks,
-        link_attributes,
+        unsafe_constructs: boundaries.unsafe_constructs,
+        extern_blocks: boundaries.extern_blocks,
+        link_attributes: boundaries.link_attributes,
         lockfile_packages,
         workspace_packages,
         external_packages,
@@ -4067,9 +4118,20 @@ fn validate_quality_release_prerequisite(
     quality_spec: &str,
 ) -> Result<(), Box<dyn Error>> {
     let issue_map: Value = serde_json::from_str(issue_map_source)?;
+    let intelligence = &issue_map["changes"]["advance-rust-repository-intelligence"];
+    let quality = &issue_map["changes"]["enforce-rust-test-quality-gates"];
     require(
-        issue_map["changes"]["advance-rust-repository-intelligence"] == 308
-            && issue_map["changes"]["enforce-rust-test-quality-gates"] == 309,
+        issue_map["schema_version"] == 2
+            && intelligence["contract"] == "evidence-v2"
+            && intelligence["primary_issue"] == 308
+            && issue_mapping_covers_tasks(
+                intelligence,
+                intelligence_tasks,
+                &BTreeSet::from([308, 311]),
+            )?
+            && quality["contract"] == "evidence-v2"
+            && quality["primary_issue"] == 309
+            && issue_mapping_covers_tasks(quality, quality_tasks, &BTreeSet::from([309]))?,
         "v0.4 feature and quality changes are not mapped to issues 308 and 309",
     )?;
 
@@ -4232,11 +4294,9 @@ fn arri_2_30_quality_release_prerequisite_is_ordered() -> Result<(), Box<dyn Err
         QUALITY_SPEC,
     )?;
 
-    let wrong_issue = ISSUE_MAP.replacen(
-        "\"enforce-rust-test-quality-gates\": 309",
-        "\"enforce-rust-test-quality-gates\": 310",
-        1,
-    );
+    let mut wrong_issue: Value = serde_json::from_str(ISSUE_MAP)?;
+    wrong_issue["changes"]["enforce-rust-test-quality-gates"]["primary_issue"] = json!(310);
+    let wrong_issue = serde_json::to_string(&wrong_issue)?;
     require(
         validate_quality_release_prerequisite(
             &wrong_issue,
@@ -4484,15 +4544,66 @@ fn arri_2_24_self_test_catalog_is_complete() -> Result<(), Box<dyn Error>> {
     )
 }
 
+/// Return whether one issue mapping covers every authoritative task exactly once.
+fn issue_mapping_covers_tasks(
+    mapping: &Value,
+    task_source: &str,
+    expected_issues: &BTreeSet<u64>,
+) -> Result<bool, Box<dyn Error>> {
+    let owners = mapping["owners"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("issue owners are not an array"))?;
+    let issues = owners
+        .iter()
+        .filter_map(|owner| owner["issue"].as_u64())
+        .collect::<BTreeSet<_>>();
+    if &issues != expected_issues {
+        return Ok(false);
+    }
+    for (task_id, _) in task_and_test_ids(task_source)? {
+        let task = task_id_parts(&task_id)?;
+        let matches = owners
+            .iter()
+            .filter(|owner| {
+                let Some(first) = owner["first_task"].as_str() else {
+                    return false;
+                };
+                let Some(last) = owner["last_task"].as_str() else {
+                    return false;
+                };
+                match (task_id_parts(first), task_id_parts(last)) {
+                    (Ok(first), Ok(last)) => task >= first && task <= last,
+                    _ => false,
+                }
+            })
+            .count();
+        if matches != 1 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// ARRI-2.25 contract test: `IssueOps` ownership and activation are explicit.
 #[test]
 fn arri_2_25_issueops_ownership_is_explicit() -> Result<(), Box<dyn Error>> {
     let plan = verification_plan()?;
     let issue_map: Value = serde_json::from_str(ISSUE_MAP)?;
     let issueops = &plan["issueops"];
+    let intelligence = &issue_map["changes"]["advance-rust-repository-intelligence"];
+    let quality = &issue_map["changes"]["enforce-rust-test-quality-gates"];
     require(
-        issue_map["changes"]["advance-rust-repository-intelligence"] == 308
-            && issue_map["changes"]["enforce-rust-test-quality-gates"] == 309,
+        issue_map["schema_version"] == 2
+            && intelligence["contract"] == "evidence-v2"
+            && intelligence["primary_issue"] == 308
+            && issue_mapping_covers_tasks(
+                intelligence,
+                INTELLIGENCE_TASKS,
+                &BTreeSet::from([308, 311]),
+            )?
+            && quality["contract"] == "evidence-v2"
+            && quality["primary_issue"] == 309
+            && issue_mapping_covers_tasks(quality, QUALITY_TASKS, &BTreeSet::from([309]))?,
         "local issue map does not own both v0.4 changes",
     )?;
     require(

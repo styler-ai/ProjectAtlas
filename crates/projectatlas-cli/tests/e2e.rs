@@ -1215,60 +1215,70 @@ fn repository_guidance_keeps_legacy_toon_export_optional() -> Result<(), Box<dyn
             .into());
         }
     }
-    for (workflow_name, workflow) in [("ci", &ci_workflow), ("release", &release_workflow)] {
-        let verify = workflow_job_block(workflow, "verify")?;
-        if verify.contains("projectatlas.toon") || verify.contains("map --force") {
+    let verify = workflow_job_block(&ci_workflow, "verify")?;
+    if verify.contains("projectatlas.toon") || verify.contains("map --force") {
+        return Err(io::Error::other(
+            "CI verify job must not require the legacy committed TOON map artifact",
+        )
+        .into());
+    }
+    if verify.contains("--strict-folders") {
+        return Err(io::Error::other(
+            "CI verify job must not require legacy folder .purpose linting",
+        )
+        .into());
+    }
+    if !verify.contains("lint_purpose_levels_require_agent_review_at_configured_scope") {
+        return Err(io::Error::other(
+            "CI verify job must run the low/medium/strict purpose lint E2E",
+        )
+        .into());
+    }
+    if !verify.contains("watch_once_preserves_unchanged_deep_summary_and_text_index") {
+        return Err(io::Error::other(
+            "CI verify job must test reviewed purpose preservation across deep refresh",
+        )
+        .into());
+    }
+    if !verify.contains("projectatlas-lints") || !verify.contains("strict-strings") {
+        return Err(io::Error::other(
+            "CI verify job must run strict ProjectAtlas source string lints",
+        )
+        .into());
+    }
+    if !verify.contains(
+        "purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply",
+    ) {
+        return Err(io::Error::other(
+            "CI verify job must replay reviewed purposes through ProjectAtlas before strict lint",
+        )
+        .into());
+    }
+    if !verify.contains("lint --report-untracked --purpose-level strict") {
+        return Err(io::Error::other(
+            "CI verify job must enforce strict purpose lint after review replay",
+        )
+        .into());
+    }
+    let scan_offset = verify.find("ProjectAtlas scan").unwrap_or(usize::MAX);
+    let review_offset = verify
+        .find("ProjectAtlas purpose review")
+        .unwrap_or(usize::MAX);
+    let lint_offset = verify.find("ProjectAtlas lint").unwrap_or(usize::MAX);
+    if !(scan_offset < review_offset && review_offset < lint_offset) {
+        return Err(io::Error::other(
+            "CI verify job must run scan, purpose review, then strict lint in order",
+        )
+        .into());
+    }
+    let release_quality = workflow_job_block(&release_workflow, "quality")?;
+    for required in [
+        "uses: ./.github/workflows/ci.yml",
+        "expected_sha: ${{ inputs.commit_sha }}",
+    ] {
+        if !release_quality.contains(required) {
             return Err(io::Error::other(format!(
-                "{workflow_name} verify job must not require the legacy committed TOON map artifact"
-            ))
-            .into());
-        }
-        if verify.contains("--strict-folders") {
-            return Err(io::Error::other(format!(
-                "{workflow_name} verify job must not require legacy folder .purpose linting"
-            ))
-            .into());
-        }
-        if !verify.contains("lint_purpose_levels_require_agent_review_at_configured_scope") {
-            return Err(io::Error::other(format!(
-                "{workflow_name} verify job must run the low/medium/strict purpose lint E2E"
-            ))
-            .into());
-        }
-        if !verify.contains("watch_once_preserves_unchanged_deep_summary_and_text_index") {
-            return Err(io::Error::other(format!(
-                "{workflow_name} verify job must test reviewed purpose preservation across deep refresh"
-            ))
-            .into());
-        }
-        if !verify.contains("projectatlas-lints") || !verify.contains("strict-strings") {
-            return Err(io::Error::other(format!(
-                "{workflow_name} verify job must run strict ProjectAtlas source string lints"
-            ))
-            .into());
-        }
-        if !verify.contains(
-            "purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply",
-        ) {
-            return Err(io::Error::other(format!(
-                "{workflow_name} verify job must replay reviewed purposes through ProjectAtlas before strict lint"
-            ))
-            .into());
-        }
-        if !verify.contains("lint --report-untracked --purpose-level strict") {
-            return Err(io::Error::other(format!(
-                "{workflow_name} verify job must enforce strict purpose lint after review replay"
-            ))
-            .into());
-        }
-        let scan_offset = verify.find("ProjectAtlas scan").unwrap_or(usize::MAX);
-        let review_offset = verify
-            .find("ProjectAtlas purpose review")
-            .unwrap_or(usize::MAX);
-        let lint_offset = verify.find("ProjectAtlas lint").unwrap_or(usize::MAX);
-        if !(scan_offset < review_offset && review_offset < lint_offset) {
-            return Err(io::Error::other(format!(
-                "{workflow_name} verify job must run scan, purpose review, then strict lint in order"
+                "release quality job must reuse exact-commit CI verification; missing {required:?}"
             ))
             .into());
         }
@@ -1445,6 +1455,453 @@ fn release_and_actions_policy_is_hardened() -> Result<(), Box<dyn Error>> {
             "auto-release workflow must narrow permissions to contents read and actions write",
         )
         .into());
+    }
+    Ok(())
+}
+
+/// `TQG-UT-4.2` through `TQG-UT-4.7`, `TQG-UT-5.1`, `TQG-UT-5.2`,
+/// `TQG-UT-5.9`, `TQG-UT-6.1`, `TQG-UT-6.3`, `TQG-UT-6.7`,
+/// `TQG-UT-8.1`, `TQG-UT-8.2`, `TQG-UT-8.4`, and `TQG-UT-8.5`.
+#[test]
+fn rust_quality_ci_jobs_are_independent_bounded_and_pinned() -> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
+    let ci = fs::read_to_string(
+        workspace_root
+            .join(".github")
+            .join("workflows")
+            .join("ci.yml"),
+    )?;
+    assert_actions_are_sha_pinned("ci.yml", &ci)?;
+    if ci.contains("pull_request_target") || ci.contains("continue-on-error") {
+        return Err(io::Error::other(
+            "quality CI must not use pull_request_target or continue-on-error",
+        )
+        .into());
+    }
+    if !ci.contains("--pr \"$PR_NUMBER\"") || ci.contains("--milestone \"$PR_MILESTONE_TITLE\"") {
+        return Err(io::Error::other(
+            "pull-request IssueOps must validate the linked PR scope, not the entire milestone",
+        )
+        .into());
+    }
+    for required in [
+        "QUALITY_SHA: ${{ inputs.expected_sha || github.event.pull_request.head.sha || github.sha }}",
+        "ref: ${{ env.QUALITY_SHA }}",
+        "[[ \"$QUALITY_SHA\" =~ ^[0-9a-f]{40}$ ]]",
+        "test \"$(git rev-parse HEAD)\" = \"$QUALITY_SHA\"",
+    ] {
+        if !ci.contains(required) {
+            return Err(io::Error::other(format!(
+                "quality CI is missing immutable PR-head binding {required:?}"
+            ))
+            .into());
+        }
+    }
+    let expectations: [(&str, &[&str]); 4] = [
+        (
+            "nextest",
+            &[
+                "timeout-minutes: 25",
+                "cargo-nextest@0.9.140",
+                "cargo nextest list --workspace --all-features --locked --profile ci",
+                "cargo nextest run --workspace --all-features --locked --profile ci",
+                "test-quality nextest",
+                "target/nextest/ci/junit.xml",
+                "gate:\"nextest\"",
+                "test-quality evidence",
+                "if: always()",
+                "retention-days: 90",
+            ],
+        ),
+        (
+            "doctest",
+            &[
+                "timeout-minutes: 20",
+                "cargo test --doc --workspace --all-features --locked",
+                "native_status=${PIPESTATUS[0]}",
+                "test-quality doctest",
+                "--exit-code \"$native_status\"",
+                "gate:\"doctest\"",
+                "test-quality evidence",
+                "id: doctest",
+                "if: always()",
+                "retention-days: 90",
+                "quality-doctest-",
+            ],
+        ),
+        (
+            "coverage",
+            &[
+                "timeout-minutes: 45",
+                "cargo-nextest@0.9.140,cargo-llvm-cov@0.8.7",
+                "llvm-tools-preview",
+                "cargo llvm-cov nextest --workspace --all-features --locked",
+                "test-quality coverage",
+                "--llvm-json \"$evidence/coverage.json\"",
+                "gate:\"coverage\"",
+                "test-quality evidence",
+                "if: always()",
+                "retention-days: 90",
+            ],
+        ),
+        (
+            "changed-mutation",
+            &[
+                "timeout-minutes: 50",
+                "fetch-depth: 0",
+                "cargo-nextest@0.9.140,cargo-mutants@27.1.0",
+                "--in-diff \"$BASE_SHA..$QUALITY_SHA\"",
+                "test-quality mutation-changed",
+                "native/mutants.out/outcomes.json",
+                "gate:\"changed_mutation\"",
+                "test-quality evidence",
+                "--timeout 180",
+                "--build-timeout 900",
+            ],
+        ),
+    ];
+    for (job, required) in expectations {
+        let block = workflow_job_block(&ci, job)?;
+        if block.contains("needs: nextest") || block.contains("needs: doctest") {
+            return Err(io::Error::other(format!(
+                "quality job {job} must have an independent conclusion"
+            ))
+            .into());
+        }
+        for &text in required {
+            if !block.contains(text) {
+                return Err(io::Error::other(format!(
+                    "quality job {job} is missing policy text {text:?}"
+                ))
+                .into());
+            }
+        }
+    }
+    let coverage = workflow_job_block(&ci, "coverage")?;
+    for platform in [
+        "linux-x86_64-gnu",
+        "windows-x86_64-msvc",
+        "macos-x86_64",
+        "macos-aarch64",
+    ] {
+        if !coverage.contains(platform) {
+            return Err(io::Error::other(format!(
+                "coverage matrix is missing supported platform {platform}"
+            ))
+            .into());
+        }
+    }
+    if coverage.contains("--doctests") || ci.contains("tarpaulin") {
+        return Err(io::Error::other(
+            "LLVM coverage must not use unstable doctest coverage or Tarpaulin",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// `TQG-UT-7.3`, `TQG-UT-7.8`, `TQG-UT-7.9`, `TQG-UT-8.2`, and
+/// `TQG-UT-8.4`.
+#[test]
+fn full_mutation_workflow_has_exactly_sixteen_retained_shards() -> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
+    let workflow = fs::read_to_string(
+        workspace_root
+            .join(".github")
+            .join("workflows")
+            .join("05-full-mutation.yml"),
+    )?;
+    assert_actions_are_sha_pinned("05-full-mutation.yml", &workflow)?;
+    for trigger in ["schedule:", "workflow_dispatch:", "workflow_call:"] {
+        if !workflow.contains(trigger) {
+            return Err(
+                io::Error::other(format!("full mutation workflow is missing {trigger}")).into(),
+            );
+        }
+    }
+    let inventory = workflow_job_block(&workflow, "inventory")?;
+    for required in [
+        "timeout-minutes: 20",
+        "--list",
+        "--json",
+        "raw-master.json",
+        "test-quality mutation-inventory",
+        "mutation-plan.json",
+        "filtered-master.json",
+        "excluded-master.json",
+        ".exclude_argv[]",
+    ] {
+        if !inventory.contains(required) {
+            return Err(io::Error::other(format!(
+                "full mutation inventory is missing {required:?}"
+            ))
+            .into());
+        }
+    }
+    let shard = workflow_job_block(&workflow, "mutation-shard")?;
+    for required in [
+        "shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]",
+        "timeout-minutes: 120",
+        "timeout-minutes: 105",
+        "--shard \"$SHARD/16\"",
+        "--timeout 180",
+        "--build-timeout 900",
+        "mutation-plan.json",
+        "shard-manifest.json",
+        "test_profile:\"mutants\"",
+        "native_mutants_path:\"native/mutants.out/mutants.json\"",
+        "native_outcomes_path:\"native/mutants.out/outcomes.json\"",
+        "if: always()",
+        "retention-days: 90",
+    ] {
+        if !shard.contains(required) {
+            return Err(io::Error::other(format!(
+                "full mutation shard topology is missing {required:?}"
+            ))
+            .into());
+        }
+    }
+    let aggregate = workflow_job_block(&workflow, "aggregate")?;
+    for required in [
+        "if: always()",
+        "needs: [inventory, mutation-shard]",
+        "test-quality mutation-aggregate",
+        "shard_args+=(--shard \"$manifest\")",
+        "shard-manifests.txt",
+        "raw-master.json",
+        "gate:\"full_mutation\"",
+        "mutation_raw_inventory",
+        "mutation_filtered_inventory",
+        "mutation_excluded_inventory",
+        "mutation_shard_manifest",
+        "mutation_shard_inventory",
+        "mutation_shard_outcomes",
+        "test-quality evidence",
+        "full-mutation-aggregate-",
+        "retention-days: 90",
+    ] {
+        if !aggregate.contains(required) {
+            return Err(io::Error::other(format!(
+                "full mutation aggregate is missing {required:?}"
+            ))
+            .into());
+        }
+    }
+    if workflow.contains("continue-on-error") || workflow.contains("pull_request_target") {
+        return Err(io::Error::other("full mutation workflow contains a failure bypass").into());
+    }
+    for required in [
+        "MUTATION_SHA: ${{ inputs.expected_sha || github.sha }}",
+        "ref: ${{ env.MUTATION_SHA }}",
+        "[[ \"$MUTATION_SHA\" =~ ^[0-9a-f]{40}$ ]]",
+    ] {
+        if !workflow.contains(required) {
+            return Err(io::Error::other(format!(
+                "full mutation workflow is missing immutable identity {required:?}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// `TQG-UT-8.3` and `TQG-UT-8.4`.
+#[test]
+fn release_packages_require_exact_commit_quality_evidence() -> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
+    let workflow_dir = workspace_root.join(".github").join("workflows");
+    let release = fs::read_to_string(workflow_dir.join("release.yml"))?;
+    let auto_release = fs::read_to_string(workflow_dir.join("03-auto-release.yml"))?;
+    for required in [
+        "commit_sha:",
+        "RELEASE_SHA: ${{ inputs.commit_sha }}",
+        "main moved to $main_sha; refusing stale release commit $RELEASE_SHA",
+        "uses: ./.github/workflows/ci.yml",
+        "uses: ./.github/workflows/05-full-mutation.yml",
+        "needs: [release-policy, quality, full-mutation]",
+        "name: release evidence",
+        "test-quality evidence",
+        "--release-commit \"$RELEASE_SHA\"",
+        "--milestone \"${RELEASE_VERSION}-00\"",
+    ] {
+        if !release.contains(required) {
+            return Err(io::Error::other(format!(
+                "release workflow is missing exact-evidence guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for job in ["package-unix", "package-windows"] {
+        let block = workflow_job_block(&release, job)?;
+        if !block.contains("needs: release-evidence") || block.contains("needs: verify") {
+            return Err(io::Error::other(format!(
+                "release package job {job} can bypass exact-commit evidence"
+            ))
+            .into());
+        }
+    }
+    if !auto_release.contains("--field commit_sha=\"$GITHUB_SHA\"") {
+        return Err(io::Error::other(
+            "auto-release must bind the release dispatch to its triggering commit",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// `TQG-UT-8.4` and `TQG-UT-8.6`.
+#[test]
+fn issueops_renderer_and_failure_smoke_preserve_trust_and_failure() -> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
+    let workflow_dir = workspace_root.join(".github").join("workflows");
+    let renderer = fs::read_to_string(workflow_dir.join("06-task-evidence-render.yml"))?;
+    let smoke = fs::read_to_string(workflow_dir.join("07-quality-failure-smoke.yml"))?;
+    assert_actions_are_sha_pinned("06-task-evidence-render.yml", &renderer)?;
+    assert_actions_are_sha_pinned("07-quality-failure-smoke.yml", &smoke)?;
+    for required in [
+        "workflow_run:",
+        "contents: read",
+        "actions: read",
+        "pull-requests: read",
+        "issues: write",
+        "github.event.workflow_run.head_repository.full_name == github.repository",
+        "ref: ${{ github.event.repository.default_branch }}",
+        "persist-credentials: false",
+        ".size_in_bytes <= 10485760",
+        "source-jobs.json",
+        "provenance.json",
+        "--provenance \"$provenance\"",
+        "Checkout validated same-repository PR head as data",
+        "ref: ${{ github.event.workflow_run.head_sha }}",
+        "path: target/projectatlas-quality/renderer/source-snapshot",
+        "fetch-depth: 0",
+        "--expected-commit \"$EXPECTED_SHA\"",
+        "--render-plan",
+        "--apply-render-plan",
+    ] {
+        if !renderer.contains(required) {
+            return Err(io::Error::other(format!(
+                "trusted IssueOps renderer is missing {required:?}"
+            ))
+            .into());
+        }
+    }
+    if renderer.contains("pull_request_target")
+        || renderer
+            .contains("working-directory: target/projectatlas-quality/renderer/source-snapshot")
+        || renderer.contains("cd target/projectatlas-quality/renderer/source-snapshot")
+    {
+        return Err(
+            io::Error::other("IssueOps renderer must not execute from pull-request data").into(),
+        );
+    }
+    let provenance_position = renderer
+        .find("Validate source run and artifact metadata")
+        .ok_or_else(|| io::Error::other("renderer provenance step is missing"))?;
+    let data_checkout_position = renderer
+        .find("Checkout validated same-repository PR head as data")
+        .ok_or_else(|| io::Error::other("renderer data checkout is missing"))?;
+    if provenance_position >= data_checkout_position {
+        return Err(io::Error::other(
+            "renderer must validate same-repository provenance before checking out PR data",
+        )
+        .into());
+    }
+    for case in [
+        "nextest",
+        "doctest",
+        "coverage-lines",
+        "coverage-regions",
+        "coverage-functions",
+        "changed-miss",
+        "changed-timeout",
+        "missing-shard",
+        "stale-evidence",
+        "task-ledger-drift",
+    ] {
+        if !smoke.contains(case) {
+            return Err(
+                io::Error::other(format!("controlled failure smoke is missing {case}")).into(),
+            );
+        }
+    }
+    for required in [
+        "cargo-projectatlas-lints",
+        "test-quality nextest",
+        "test-quality doctest",
+        "test-quality coverage",
+        "test-quality mutation-changed",
+        "test-quality mutation-aggregate",
+        "test-quality evidence",
+        "test-quality tasks",
+        "if: always()",
+        "test \"$PRODUCER_RESULT\" = failure",
+    ] {
+        if !smoke.contains(required) {
+            return Err(io::Error::other(format!(
+                "controlled failure smoke is missing {required:?}"
+            ))
+            .into());
+        }
+    }
+    if smoke.contains("continue-on-error") || smoke.contains("|| true") || smoke.contains("exit 1")
+    {
+        return Err(io::Error::other(
+            "failure smoke must fail through real validator rejection, not a shell-forced bypass",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// `TQG-UT-9.1` through `TQG-UT-9.5`.
+#[test]
+fn local_hook_and_workflow_docs_match_hosted_quality_policy() -> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
+    let hook = fs::read_to_string(workspace_root.join(".githooks").join("pre-push"))?;
+    let docs = fs::read_to_string(workspace_root.join("docs").join("workflow.md"))?;
+    for required in [
+        "cargo nextest --version",
+        "cargo nextest run --workspace --all-features --locked --profile ci",
+        "cargo test --doc --workspace --all-features --locked",
+        "test-quality policy --root . --policy test-quality.toml",
+        "test-quality configs --root . --policy test-quality.toml",
+        "test-quality tasks --root . --policy test-quality.toml",
+        "--expected-commit \"$(git rev-parse HEAD)\"",
+        "issue-checklists.py --self-test",
+    ] {
+        if !hook.contains(required) {
+            return Err(io::Error::other(format!(
+                "pre-push hook is missing quality command {required:?}"
+            ))
+            .into());
+        }
+    }
+    if hook.contains("05-full-mutation") || hook.contains("--shard") {
+        return Err(io::Error::other(
+            "pre-push must not run the intentional full mutation workflow",
+        )
+        .into());
+    }
+    for required in [
+        "cargo-nextest --version 0.9.140",
+        "cargo-llvm-cov --version 0.8.7",
+        "cargo-mutants --version 27.1.0",
+        "05-full-mutation.yml",
+        "exactly 16 native shards",
+        "target/projectatlas-quality/",
+        "OpenSpec-Task",
+        "4,911 candidates",
+        "4,931",
+        "not current floors, 100% coverage",
+        "no-bugs claim",
+    ] {
+        if !docs.contains(required) {
+            return Err(io::Error::other(format!(
+                "workflow documentation is missing quality contract {required:?}"
+            ))
+            .into());
+        }
     }
     Ok(())
 }
@@ -10101,6 +10558,9 @@ fn assert_actions_are_sha_pinned(name: &str, workflow: &str) -> Result<(), Box<d
             continue;
         };
         let reference = reference.split('#').next().unwrap_or("").trim();
+        if reference.starts_with("./") {
+            continue;
+        }
         let Some((_, revision)) = reference.rsplit_once('@') else {
             return Err(io::Error::other(format!(
                 "{name}:{} uses reference {reference:?} without an @revision",
