@@ -2,6 +2,7 @@
 
 mod schema;
 
+use projectatlas_core::graph::{GraphContractError, ProjectInstanceId};
 use projectatlas_core::health::{
     CATEGORY_DUPLICATE_PURPOSE, CATEGORY_MISSING_PURPOSE, CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
     CATEGORY_REPEATED_TEMPORARY_FOLDER, CATEGORY_STALE_PURPOSE, CATEGORY_SUGGESTED_PURPOSE_REVIEW,
@@ -51,6 +52,18 @@ pub enum DbError {
         found: i64,
         /// Expected version.
         expected: i64,
+    },
+    /// Required persistent project identity metadata is missing.
+    #[error("project instance identity is missing from database metadata")]
+    ProjectInstanceIdMissing,
+    /// Persistent project identity metadata is invalid.
+    #[error("invalid project instance identity in database metadata: {value}")]
+    InvalidProjectInstanceId {
+        /// Invalid stored identity text.
+        value: String,
+        /// Domain validation failure.
+        #[source]
+        source: Box<GraphContractError>,
     },
     /// Invalid enum value read from the database.
     #[error("invalid {field} value in database: {value}")]
@@ -607,6 +620,15 @@ impl AtlasStore {
             )
             .optional()
             .map_err(DbError::from)
+    }
+
+    /// Load the persistent identity of this independently initialized database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the identity is missing, malformed, or cannot be read.
+    pub fn project_instance_id(&self) -> DbResult<ProjectInstanceId> {
+        schema::project_instance_id(&self.connection)
     }
 
     /// Replace the symbol graph for a file path.

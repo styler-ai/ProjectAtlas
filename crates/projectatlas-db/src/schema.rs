@@ -1,10 +1,15 @@
 //! `SQLite` schema initialization and legacy repair behind the store facade.
 
 use crate::{DbError, DbResult};
+use projectatlas_core::graph::ProjectInstanceId;
 use rusqlite::{Connection, OptionalExtension};
 
 /// Current `SQLite` schema version supported by this crate.
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
+/// Metadata key for the schema contract version.
+const SCHEMA_VERSION_METADATA_KEY: &str = "schema_version";
+/// Metadata key for one independently initialized database identity.
+const PROJECT_INSTANCE_ID_METADATA_KEY: &str = "project_instance_id";
 
 /// Initialize the current schema and repair supported legacy columns.
 pub(crate) fn initialize(connection: &Connection) -> DbResult<()> {
@@ -166,34 +171,86 @@ pub(crate) fn initialize(connection: &Connection) -> DbResult<()> {
 fn reconcile_schema_version(connection: &Connection) -> DbResult<()> {
     let stored = connection
         .query_row(
-            "SELECT value FROM metadata WHERE key = 'schema_version'",
-            [],
+            "SELECT value FROM metadata WHERE key = ?1",
+            [SCHEMA_VERSION_METADATA_KEY],
             |row| row.get::<_, String>(0),
         )
         .optional()?;
-    match stored {
-        Some(value) => {
-            let found = value.parse::<i64>().map_or(-1, |parsed| parsed);
-            if (1..SCHEMA_VERSION).contains(&found) {
-                connection.execute(
-                    "UPDATE metadata SET value = ?1 WHERE key = 'schema_version'",
-                    [SCHEMA_VERSION.to_string()],
-                )?;
-            } else if found != SCHEMA_VERSION {
-                return Err(DbError::SchemaVersion {
-                    found,
-                    expected: SCHEMA_VERSION,
-                });
-            }
-        }
-        None => {
+    if let Some(value) = stored {
+        let found = value.parse::<i64>().map_or(-1, |parsed| parsed);
+        if (1..SCHEMA_VERSION).contains(&found) {
+            ensure_project_instance_id(connection, true)?;
             connection.execute(
-                "INSERT INTO metadata(key, value) VALUES('schema_version', ?1)",
-                [SCHEMA_VERSION.to_string()],
+                "UPDATE metadata SET value = ?1 WHERE key = ?2",
+                (SCHEMA_VERSION.to_string(), SCHEMA_VERSION_METADATA_KEY),
             )?;
+        } else if found == SCHEMA_VERSION {
+            ensure_project_instance_id(connection, false)?;
+        } else {
+            return Err(DbError::SchemaVersion {
+                found,
+                expected: SCHEMA_VERSION,
+            });
         }
+    } else {
+        ensure_project_instance_id(connection, true)?;
+        connection.execute(
+            "INSERT INTO metadata(key, value) VALUES(?1, ?2)",
+            (SCHEMA_VERSION_METADATA_KEY, SCHEMA_VERSION.to_string()),
+        )?;
     }
     Ok(())
+}
+
+/// Load and validate the persistent identity of one initialized database.
+pub(crate) fn project_instance_id(connection: &Connection) -> DbResult<ProjectInstanceId> {
+    load_project_instance_id(connection)?.ok_or(DbError::ProjectInstanceIdMissing)
+}
+
+/// Preserve an existing identity or initialize one for a fresh or supported legacy database.
+fn ensure_project_instance_id(
+    connection: &Connection,
+    initialize_when_missing: bool,
+) -> DbResult<ProjectInstanceId> {
+    if let Some(identity) = load_project_instance_id(connection)? {
+        return Ok(identity);
+    }
+    if !initialize_when_missing {
+        return Err(DbError::ProjectInstanceIdMissing);
+    }
+
+    let value = connection.query_row("SELECT lower(hex(randomblob(16)))", [], |row| {
+        row.get::<_, String>(0)
+    })?;
+    let identity = parse_project_instance_id(value.clone())?;
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES(?1, ?2)",
+        (PROJECT_INSTANCE_ID_METADATA_KEY, &value),
+    )?;
+    Ok(identity)
+}
+
+/// Return validated identity metadata when the row exists.
+fn load_project_instance_id(connection: &Connection) -> DbResult<Option<ProjectInstanceId>> {
+    connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key = ?1",
+            [PROJECT_INSTANCE_ID_METADATA_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(parse_project_instance_id)
+        .transpose()
+}
+
+/// Convert stored identity text through the core graph-domain validator.
+fn parse_project_instance_id(value: String) -> DbResult<ProjectInstanceId> {
+    ProjectInstanceId::try_from(value.as_str()).map_err(|source| {
+        DbError::InvalidProjectInstanceId {
+            value,
+            source: Box::new(source),
+        }
+    })
 }
 
 /// Add usage telemetry metadata columns to older databases.
@@ -469,6 +526,141 @@ mod tests {
                 .into());
             }
             Ok(_) => return Err(io::Error::other("future schema version was accepted").into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_2() -> Result<(), Box<dyn Error>> {
+        let initialized = tempfile::tempdir()?;
+        let initialized_path = initialized.path().join("initialized.db");
+        let first_identity = {
+            let store = crate::AtlasStore::open(&initialized_path)?;
+            let identity = store.project_instance_id()?;
+            store.initialize_schema()?;
+            if store.project_instance_id()? != identity {
+                return Err(io::Error::other(
+                    "repeated schema initialization replaced the project identity",
+                )
+                .into());
+            }
+            identity
+        };
+        let reopened = crate::AtlasStore::open(&initialized_path)?;
+        if reopened.project_instance_id()? != first_identity {
+            return Err(io::Error::other("database reopen replaced the project identity").into());
+        }
+
+        let independent_path = initialized.path().join("independent.db");
+        let independent = crate::AtlasStore::open(&independent_path)?.project_instance_id()?;
+        if independent == first_identity {
+            return Err(io::Error::other(
+                "independent database initialization reused a project identity",
+            )
+            .into());
+        }
+
+        let legacy = tempfile::tempdir()?;
+        let legacy_path = legacy.path().join("legacy.db");
+        seed_legacy_schema(&legacy_path, SCHEMA_VERSION - 1)?;
+        {
+            let connection = Connection::open(&legacy_path)?;
+            connection.execute(
+                "INSERT INTO metadata(key, value) VALUES('project_root', ?1)",
+                ["C:/workspace/authored"],
+            )?;
+            connection.execute(
+                "INSERT INTO metadata(key, value) VALUES('authored_note', ?1)",
+                ["preserve-me"],
+            )?;
+        }
+        let legacy_store = crate::AtlasStore::open(&legacy_path)?;
+        let legacy_identity = legacy_store.project_instance_id()?;
+        if legacy_store.project_root()?.as_deref() != Some("C:/workspace/authored") {
+            return Err(io::Error::other("legacy upgrade changed project-root metadata").into());
+        }
+        let authored_note = legacy_store.connection.query_row(
+            "SELECT value FROM metadata WHERE key = 'authored_note'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        if authored_note != "preserve-me" {
+            return Err(io::Error::other("legacy upgrade changed authored metadata").into());
+        }
+        legacy_store.initialize_schema()?;
+        if legacy_store.project_instance_id()? != legacy_identity {
+            return Err(io::Error::other("legacy identity was not stable after upgrade").into());
+        }
+
+        let preserved = tempfile::tempdir()?;
+        let preserved_path = preserved.path().join("preserved.db");
+        seed_legacy_schema(&preserved_path, SCHEMA_VERSION - 1)?;
+        let expected = ProjectInstanceId::try_from("00112233445566778899aabbccddeeff")?;
+        Connection::open(&preserved_path)?.execute(
+            "INSERT INTO metadata(key, value) VALUES(?1, ?2)",
+            (PROJECT_INSTANCE_ID_METADATA_KEY, expected.to_string()),
+        )?;
+        let preserved_store = crate::AtlasStore::open(&preserved_path)?;
+        if preserved_store.project_instance_id()? != expected {
+            return Err(io::Error::other("legacy upgrade replaced a valid identity").into());
+        }
+
+        for (label, invalid) in [
+            ("malformed", "not-an-instance-id"),
+            ("all-zero", "00000000000000000000000000000000"),
+        ] {
+            let corrupt = tempfile::tempdir()?;
+            let corrupt_path = corrupt.path().join(format!("{label}.db"));
+            seed_legacy_schema(&corrupt_path, SCHEMA_VERSION - 1)?;
+            Connection::open(&corrupt_path)?.execute(
+                "INSERT INTO metadata(key, value) VALUES(?1, ?2)",
+                (PROJECT_INSTANCE_ID_METADATA_KEY, invalid),
+            )?;
+            match crate::AtlasStore::open(&corrupt_path) {
+                Err(DbError::InvalidProjectInstanceId { value, .. }) if value == invalid => {}
+                Err(error) => {
+                    return Err(io::Error::other(format!(
+                        "{label} identity returned the wrong error: {error}"
+                    ))
+                    .into());
+                }
+                Ok(_) => {
+                    return Err(io::Error::other(format!(
+                        "{label} identity was silently accepted or replaced"
+                    ))
+                    .into());
+                }
+            }
+            let stored_version = Connection::open(&corrupt_path)?.query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                [SCHEMA_VERSION_METADATA_KEY],
+                |row| row.get::<_, String>(0),
+            )?;
+            if stored_version != (SCHEMA_VERSION - 1).to_string() {
+                return Err(io::Error::other(format!(
+                    "{label} identity advanced the schema version before failing"
+                ))
+                .into());
+            }
+        }
+
+        let missing = tempfile::tempdir()?;
+        let missing_path = missing.path().join("missing.db");
+        seed_legacy_schema(&missing_path, SCHEMA_VERSION)?;
+        match crate::AtlasStore::open(&missing_path) {
+            Err(DbError::ProjectInstanceIdMissing) => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "current schema without identity returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(_) => {
+                return Err(io::Error::other(
+                    "current schema silently replaced missing identity metadata",
+                )
+                .into());
+            }
         }
         Ok(())
     }

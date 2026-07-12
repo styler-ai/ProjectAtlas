@@ -1240,6 +1240,26 @@
         "state": "implemented_uncommitted"
       },
       "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "4.2",
+      "requirement": "Every fresh or supported legacy ProjectAtlas database receives one validated persistent ProjectInstanceId, while existing valid identity and unrelated authored metadata survive schema initialization, upgrade, and reopen without silent replacement.",
+      "scenario": "Fresh and independent file-backed databases initialize valid identities, repeated initialization and reopen preserve them, supported legacy databases initialize or retain identity without changing root or authored metadata, and missing current-schema, malformed, or all-zero identity state fails before schema-version advancement.",
+      "owner": "graph-schema-and-storage",
+      "changed_artifacts": ["crates/projectatlas-db/src/lib.rs", "crates/projectatlas-db/src/schema.rs", "openspec/changes/advance-rust-repository-intelligence/tasks.md", "openspec/task-verification-plan.json"],
+      "risk": "L2-persistence-cross-crate",
+      "required_evidence_layers": ["unit", "integration"],
+      "timeout_seconds": 600,
+      "unit_test": {
+        "test_id": "UT:ARRI-4.2",
+        "function": "schema::tests::task_arri_ut_arri_4_2",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-db", "schema::tests::task_arri_ut_arri_4_2", "--", "--exact"] },
+        "assertion": "The schema owns one validated ProjectInstanceId metadata value: fresh and supported legacy databases initialize it, existing valid values and unrelated metadata are preserved across repeated initialization, upgrade, and reopen, independent databases differ, and missing current-schema, malformed, or all-zero values fail without advancing the schema version.",
+        "covered_inputs": ["fresh database identity initialization", "independent database identity separation", "repeated initialization and file-backed reopen", "supported legacy upgrade without identity", "supported legacy upgrade with valid identity", "project-root and unrelated authored metadata preservation", "malformed and all-zero identity rejection", "current-schema missing identity rejection", "schema-version advancement ordering"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
     }
   ],
   "planned_row_definitions": [

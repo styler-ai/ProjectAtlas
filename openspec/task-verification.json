@@ -2298,22 +2298,43 @@
           "test_ids": [
             "UT:ARRI-4.2"
           ],
-          "assertion": "Verify define and test stable-key encoding for project, normalized path or out-of-project identity, entity kind, qualified name, and overload/signature disambiguation.",
+          "assertion": "The schema owns one validated ProjectInstanceId metadata value: fresh and supported legacy databases initialize it, existing valid values and unrelated metadata are preserved across repeated initialization, upgrade, and reopen, independent databases differ, and missing current-schema, malformed, or all-zero values fail without advancing the schema version.",
           "command": {
             "executable": "cargo",
             "arguments": [
               "test",
               "--locked",
-              "--workspace",
-              "--all-features",
-              "task_arri_ut_arri_4_2"
+              "-p",
+              "projectatlas-db",
+              "schema::tests::task_arri_ut_arri_4_2",
+              "--",
+              "--exact"
             ]
           },
-          "timeout_seconds": 300,
+          "timeout_seconds": 600,
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "crates/projectatlas-db/src/lib.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/schema.rs"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification-plan.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-4.2",
+              "path": "crates/projectatlas-db/src/schema.rs",
+              "anchor": "task_arri_ut_arri_4_2"
             }
           ]
         },
