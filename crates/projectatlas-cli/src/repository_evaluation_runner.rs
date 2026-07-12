@@ -2538,7 +2538,7 @@ async fn materialized_checkout_sha256_with_limits(
                     u64::try_from(target_bytes.len()).unwrap_or(u64::MAX),
                     limits.aggregate_bytes,
                 )?;
-                hasher.update([b'l']);
+                hasher.update(*b"l");
                 hash_field(&mut hasher, &target_bytes);
                 require(
                     matches!(
@@ -2560,7 +2560,7 @@ async fn materialized_checkout_sha256_with_limits(
                         .is_some_and(|bytes| bytes <= limits.aggregate_bytes),
                     "tracked checkout exceeds the aggregate read limit",
                 )?;
-                hasher.update([b'f']);
+                hasher.update(*b"f");
                 hasher.update(metadata.len().to_le_bytes());
                 let file = fs::File::open(&path)?;
                 let remaining_aggregate = limits.aggregate_bytes - aggregate_bytes;
@@ -3193,7 +3193,7 @@ async fn prepare_seed_database(
         context.executable,
         &argv,
         &corpus.checkout,
-        Duration::from_secs(900),
+        Duration::from_mins(15),
         None,
         context.environment,
         context.raw_directory,

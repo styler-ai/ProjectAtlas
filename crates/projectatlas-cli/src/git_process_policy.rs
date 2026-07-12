@@ -720,11 +720,18 @@ pub(crate) const fn git_null_device() -> &'static str {
 
 /// Render a canonical path for native Git, which rejects Windows verbatim prefixes.
 fn git_path_argument(path: &Path) -> io::Result<OsString> {
+    #[cfg(unix)]
+    if path.as_os_str().as_bytes().contains(&0) {
+        return Err(invalid_git_metadata("Git path contains a NUL byte"));
+    }
     #[cfg(windows)]
     {
         let text = path
             .to_str()
             .ok_or_else(|| invalid_git_metadata("Git path is not valid Unicode"))?;
+        if text.contains('\0') {
+            return Err(invalid_git_metadata("Git path contains a NUL character"));
+        }
         if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
             return Ok(OsString::from(format!(r"\\{unc}")));
         }
@@ -977,6 +984,7 @@ fn read_bounded_file(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
 
 /// Convert exact Git path bytes into one native relative path.
 pub(crate) fn path_from_git_bytes(path: &[u8]) -> io::Result<PathBuf> {
+    validate_git_path(path)?;
     #[cfg(unix)]
     {
         Ok(PathBuf::from(OsString::from_vec(path.to_vec())))
@@ -995,6 +1003,9 @@ fn validate_git_path(path: &[u8]) -> io::Result<()> {
         return Err(invalid_git_metadata(
             "Git path has an unsupported byte length",
         ));
+    }
+    if path.contains(&0) {
+        return Err(invalid_git_metadata("Git path contains a NUL byte"));
     }
     if path.starts_with(b"/")
         || path.ends_with(b"/")
@@ -1385,6 +1396,34 @@ mod tests {
             "intent-to-add evidence was accepted",
         )?;
         Ok(())
+    }
+
+    /// Native path adaptation rejects empty, absolute, parent, and NUL-bearing Git paths.
+    #[test]
+    fn native_git_path_adaptation_rejects_invalid_bytes() -> io::Result<()> {
+        for path in [
+            b"".as_slice(),
+            b"/absolute.rs",
+            b"../parent.rs",
+            b"nul\0path.rs",
+        ] {
+            verify(
+                path_from_git_bytes(path).is_err(),
+                "invalid Git path bytes were adapted to a native path",
+            )?;
+        }
+        verify(
+            path_from_git_bytes(b"src/lib.rs")? == Path::new("src/lib.rs"),
+            "valid Git path bytes changed during native adaptation",
+        )?;
+        verify(
+            git_path_argument(Path::new("nul\0path.rs")).is_err(),
+            "NUL-bearing native Git path was accepted",
+        )?;
+        verify(
+            git_path_argument(Path::new("src/lib.rs"))? == "src/lib.rs",
+            "valid native Git path changed during argument adaptation",
+        )
     }
 
     /// Windows path streams, separators, devices, and case aliases fail closed.

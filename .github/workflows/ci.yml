@@ -209,6 +209,11 @@ jobs:
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails --test e2e
 
+      - name: Unix executable-copy regression
+        if: runner.os != 'Windows'
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli --example repository-evaluation-runner repository_evaluation_runner::tests::executable_copy_preserves_unix_mode_and_runs -- --exact
+
       - name: Windows locked runtime update E2E
         if: matrix.label == 'windows'
         timeout-minutes: 5
