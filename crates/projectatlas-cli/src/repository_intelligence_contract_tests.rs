@@ -89,6 +89,8 @@ const WINDOWS_INSTALLER: &[u8] =
 /// POSIX installer bound to the host-lifecycle evidence.
 const POSIX_INSTALLER: &[u8] =
     include_bytes!("../../../plugins/projectatlas/scripts/install-runtime.sh");
+/// Cross-platform source-artifact digest contract.
+const SOURCE_DIGEST_MODE_UTF8_LF: &str = "utf8-lf";
 
 /// Minimal MCP client used to inspect the compiled tool schema.
 #[derive(Clone, Default)]
@@ -1326,7 +1328,8 @@ fn validate_host_source_artifacts(policy: &Value) -> Result<(), Box<dyn Error>> 
         let row = &rows[id];
         require(
             row["path"] == path
-                && row["sha256"] == sha256(bytes)
+                && row["digest_mode"] == SOURCE_DIGEST_MODE_UTF8_LF
+                && row["sha256"] == canonical_source_digest(bytes)?
                 && row["evidence_state"] == "proven_local"
                 && row["gate_state"] == gate_state,
             format!("host source artifact {id} is missing, stale, or misclassified"),
@@ -1800,6 +1803,13 @@ fn current_locked_cargo_metadata() -> Result<Value, Box<dyn Error>> {
 /// Render bytes as a lowercase SHA-256 digest.
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Hash one UTF-8 source artifact after canonicalizing host line endings.
+fn canonical_source_digest(bytes: &[u8]) -> Result<String, Box<dyn Error>> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| io::Error::other(format!("source artifact is not UTF-8: {error}")))?;
+    Ok(sha256(text.replace("\r\n", "\n").as_bytes()))
 }
 
 /// Normalize host line endings before hashing replay output.
@@ -5341,6 +5351,26 @@ fn arri_2_26_host_capability_truth_table_rejects_hidden_manual_steps() -> Result
     require(
         validate_plugin_store_lifecycle(&stale_source).is_err(),
         "stale host source digest was accepted",
+    )?;
+    require(
+        canonical_source_digest(b"line-one\r\nline-two\r\n")?
+            == canonical_source_digest(b"line-one\nline-two\n")?,
+        "source digest changed across host line endings",
+    )?;
+    require(
+        canonical_source_digest(b"line-one\rline-two")?
+            != canonical_source_digest(b"line-one\nline-two")?,
+        "source digest normalized a bare carriage return",
+    )?;
+    require(
+        canonical_source_digest(&[0xff]).is_err(),
+        "non-UTF-8 source artifact was accepted",
+    )?;
+    let mut raw_source_digest = policy.clone();
+    raw_source_digest["source_artifacts"][0]["digest_mode"] = json!("raw-bytes");
+    require(
+        validate_plugin_store_lifecycle(&raw_source_digest).is_err(),
+        "host-dependent raw source digest was accepted",
     )?;
     let mut malformed = policy.clone();
     malformed["plugin_store_lifecycle"]["hosts"][0]["evidence_state"] = json!("assumed");

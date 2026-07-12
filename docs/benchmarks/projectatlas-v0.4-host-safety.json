@@ -188,6 +188,7 @@
     {
       "id": "workspace-lint-policy",
       "path": "Cargo.toml",
+      "digest_mode": "utf8-lf",
       "sha256": "35e024f7d9b50ea2826da79204e40a12b295e9007030d7e5721e77e52fdb63ef",
       "evidence_state": "proven_local",
       "gate_state": "pass"
@@ -195,6 +196,7 @@
     {
       "id": "codex-plugin-manifest",
       "path": "plugins/projectatlas/.codex-plugin/plugin.json",
+      "digest_mode": "utf8-lf",
       "sha256": "6d2de206f3c4b0a14e49c3f698b5dc72b602257c987fc7db71bb839d5d9b9c8a",
       "evidence_state": "proven_local",
       "gate_state": "pass"
@@ -202,6 +204,7 @@
     {
       "id": "claude-plugin-manifest",
       "path": "plugins/projectatlas/.claude-plugin/plugin.json",
+      "digest_mode": "utf8-lf",
       "sha256": "e7e455a0928dff05ad9929fe1973b4e4dc963e2dbfa4d24b52c06501a40499df",
       "evidence_state": "proven_local",
       "gate_state": "pass"
@@ -209,6 +212,7 @@
     {
       "id": "opencode-template",
       "path": "plugins/projectatlas/opencode/opencode.json",
+      "digest_mode": "utf8-lf",
       "sha256": "0e6ee3cf3487006d4dd9f48a485807d852a2c4d240fa4bbcdce61543892d9f94",
       "evidence_state": "proven_local",
       "gate_state": "pass"
@@ -216,13 +220,15 @@
     {
       "id": "windows-installer",
       "path": "plugins/projectatlas/scripts/install-runtime.ps1",
-      "sha256": "9b2848f75952a9ad1966588a039f6afac14c47f808f50a5aad4583d3245ed5fd",
+      "digest_mode": "utf8-lf",
+      "sha256": "34e1cdab0f7363848fac3f60334c6855f8bb57b0fb8fe01fb7e4b8d2369056f6",
       "evidence_state": "proven_local",
       "gate_state": "release_blocker"
     },
     {
       "id": "posix-installer",
       "path": "plugins/projectatlas/scripts/install-runtime.sh",
+      "digest_mode": "utf8-lf",
       "sha256": "a11374f291287dbfdc9fbc2237769e0c7e2b4dc18393b9953c0fe7ac6a2b1b31",
       "evidence_state": "proven_local",
       "gate_state": "release_blocker"
