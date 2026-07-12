@@ -570,3 +570,21 @@ fn verification_plan_accepts_declared_task_test_anchors() -> Result<(), Box<dyn 
     }
     Ok(())
 }
+
+/// Keep metadata-only task closure narrow enough to preserve commit binding.
+#[test]
+fn task_evidence_metadata_paths_are_narrow() {
+    assert!(task_evidence_metadata_path("openspec/task-evidence.json"));
+    assert!(task_evidence_metadata_path(
+        "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-a95a9de.json"
+    ));
+    assert!(!task_evidence_metadata_path(
+        "openspec/task-verification.json"
+    ));
+    assert!(!task_evidence_metadata_path(
+        "docs/benchmarks/results/phase-0-truth-and-baselines/reviews.json"
+    ));
+    assert!(!task_evidence_metadata_path(
+        "crates/projectatlas-core/src/lib.rs"
+    ));
+}

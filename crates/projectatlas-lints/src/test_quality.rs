@@ -477,14 +477,42 @@ impl RepositoryRoot {
         Ok(commit)
     }
 
-    /// Require the task evidence commit to equal the repository HEAD.
+    /// Accept HEAD or a narrowly evidence-only descendant of the tested commit.
     fn task_commit(&self, expected: &str) -> Result<String, QualityError> {
         validate_commit(expected)?;
         if !self.0.join(".git").exists() {
             return Ok(expected.to_ascii_lowercase());
         }
         let actual = self.head_commit()?;
-        if !actual.eq_ignore_ascii_case(expected) {
+        if actual.eq_ignore_ascii_case(expected) {
+            return Ok(actual);
+        }
+        let ancestry = Command::new("git")
+            .arg("-C")
+            .arg(&self.0)
+            .args(["merge-base", "--is-ancestor", expected, &actual])
+            .status()
+            .map_err(|source| QualityError::Io {
+                operation: "check task evidence ancestry",
+                path: self.0.clone(),
+                source,
+            })?;
+        let changed = Command::new("git")
+            .arg("-C")
+            .arg(&self.0)
+            .args(["diff", "--name-only", expected, &actual, "--"])
+            .output()
+            .map_err(|source| QualityError::Io {
+                operation: "list task evidence closure paths",
+                path: self.0.clone(),
+                source,
+            })?;
+        let metadata_only = ancestry.success()
+            && changed.status.success()
+            && String::from_utf8_lossy(&changed.stdout)
+                .lines()
+                .all(task_evidence_metadata_path);
+        if !metadata_only {
             return Err(QualityError::Status {
                 status: QualityStatus::StaleEvidence,
                 message: format!(
@@ -492,7 +520,7 @@ impl RepositoryRoot {
                 ),
             });
         }
-        Ok(actual)
+        Ok(expected.to_ascii_lowercase())
     }
 
     /// List repository paths changed from a validated merge base.
@@ -527,6 +555,22 @@ impl RepositoryRoot {
             .map(|line| line.replace('\\', "/"))
             .collect())
     }
+}
+
+/// Return whether a path is narrowly owned by task evidence closure metadata.
+fn task_evidence_metadata_path(path: &str) -> bool {
+    if path == "openspec/task-evidence.json" {
+        return true;
+    }
+    let Some(name) = path.strip_prefix("docs/benchmarks/results/") else {
+        return false;
+    };
+    name.rsplit('/').next().is_some_and(|file| {
+        file.starts_with("task-verification-")
+            && Path::new(file)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+    })
 }
 
 /// Read a UTF-8 text artifact with path-aware errors.
