@@ -47,7 +47,7 @@ Use Sections 1-2 for contracts. Implement and stabilize Sections 3-10 with focus
 
 ## 3. First-Touch Module Splits And Ownership
 
-- [ ] 3.1 Record the intended ownership map for core domain types, database/migrations, parser registry/extraction, services, CLI/MCP adapters, and tests without performing a speculative all-at-once refactor. [UT:ARRI-3.1]
+- [x] 3.1 Record the intended ownership map for core domain types, database/migrations, parser registry/extraction, services, CLI/MCP adapters, and tests without performing a speculative all-at-once refactor. [UT:ARRI-3.1]
 - [ ] 3.2 On the first feature touch to `projectatlas-core`, extract only the smallest focused language or graph module required by that feature while preserving serialized values and public behavior. [UT:ARRI-3.2]
 - [ ] 3.3 On the first feature touch to `projectatlas-db`, extract only the required schema/migration, text, graph, purpose, health, or telemetry ownership behind the existing store facade. [UT:ARRI-3.3]
 - [ ] 3.4 On the first feature touch to `projectatlas-symbols`, extract only the required registry, extraction, manifest, fallback, resolution, or language-adapter ownership while preserving current parser output. [UT:ARRI-3.4]
