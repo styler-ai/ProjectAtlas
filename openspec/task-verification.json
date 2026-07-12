@@ -2439,16 +2439,41 @@
             "arguments": [
               "test",
               "--locked",
-              "--workspace",
-              "--all-features",
-              "task_arri_ut_arri_4_5"
+              "-p",
+              "projectatlas-cli",
+              "relation_traceability_contract_tests::task_arri_ut_arri_4_5",
+              "--",
+              "--exact"
             ]
           },
           "timeout_seconds": 300,
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "crates/projectatlas-core/src/graph.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/relation_traceability_contract_tests.rs"
+            },
+            {
+              "kind": "file",
+              "path": "docs/benchmarks/projectatlas-v0.4-capability-registry.json"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-4.5",
+              "path": "crates/projectatlas-cli/src/relation_traceability_contract_tests.rs",
+              "anchor": "task_arri_ut_arri_4_5"
             }
           ]
         },

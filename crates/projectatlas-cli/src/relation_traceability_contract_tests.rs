@@ -1,7 +1,7 @@
 //! Validate the accepted relation-family inventory against the typed graph contract.
 
 use projectatlas_core::graph::GraphRelationKind;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::io;
@@ -57,10 +57,7 @@ fn string_set(value: &Value, field: &str) -> Result<BTreeSet<String>, Box<dyn Er
         .collect()
 }
 
-/// ARRI-4.4: every accepted relation family maps to one complete typed trace row.
-#[test]
-fn task_arri_ut_arri_4_4() -> Result<(), Box<dyn Error>> {
-    let registry: Value = serde_json::from_str(CAPABILITY_REGISTRY)?;
+fn validate_relation_traceability(registry: &Value) -> Result<(), Box<dyn Error>> {
     let contract = &registry["relation_traceability_contract"];
     require(
         contract["schema_version"] == 1
@@ -219,5 +216,122 @@ fn task_arri_ut_arri_4_4() -> Result<(), Box<dyn Error>> {
     require(
         remaining.is_empty(),
         "typed relation variants are missing traceability rows",
+    )
+}
+
+fn relation_capability_mut<'a>(
+    registry: &'a mut Value,
+    capability_id: &str,
+) -> Result<&'a mut Value, Box<dyn Error>> {
+    registry["capabilities"]
+        .as_array_mut()
+        .and_then(|capabilities| {
+            capabilities
+                .iter_mut()
+                .find(|capability| capability["capability_id"] == capability_id)
+        })
+        .ok_or_else(|| io::Error::other(format!("missing capability {capability_id}")).into())
+}
+
+fn reject_registry_mutation(
+    label: &str,
+    expected_error: &str,
+    mutate: impl FnOnce(&mut Value) -> Result<(), Box<dyn Error>>,
+) -> Result<(), Box<dyn Error>> {
+    let mut registry: Value = serde_json::from_str(CAPABILITY_REGISTRY)?;
+    mutate(&mut registry)?;
+    let message = match validate_relation_traceability(&registry) {
+        Ok(()) => {
+            return Err(io::Error::other(format!(
+                "{label} mutation passed relation traceability validation"
+            ))
+            .into());
+        }
+        Err(error) => error.to_string(),
+    };
+    require(
+        message.contains(expected_error),
+        format!("{label} mutation returned unexpected error: {message}"),
+    )
+}
+
+/// ARRI-4.4: every accepted relation family maps to one complete typed trace row.
+#[test]
+fn task_arri_ut_arri_4_4() -> Result<(), Box<dyn Error>> {
+    let registry: Value = serde_json::from_str(CAPABILITY_REGISTRY)?;
+    validate_relation_traceability(&registry)
+}
+
+/// ARRI-4.5: incomplete or inaccurate relation trace rows fail closed.
+#[test]
+fn task_arri_ut_arri_4_5() -> Result<(), Box<dyn Error>> {
+    reject_registry_mutation(
+        "missing row",
+        "accepted relation rows do not match",
+        |registry| {
+            let capabilities = registry["capabilities"]
+                .as_array_mut()
+                .ok_or_else(|| io::Error::other("capabilities is not an array"))?;
+            let index = capabilities
+                .iter()
+                .position(|capability| capability["capability_id"] == "relation.calls")
+                .ok_or_else(|| io::Error::other("missing relation.calls"))?;
+            capabilities.remove(index);
+            Ok(())
+        },
+    )?;
+    reject_registry_mutation(
+        "duplicate typed mapping",
+        "duplicates or omits a typed enum variant",
+        |registry| {
+            relation_capability_mut(registry, "relation.channel")?["traceability"]["serialized_kind"] =
+                json!("calls");
+            Ok(())
+        },
+    )?;
+    reject_registry_mutation(
+        "string-only mapping",
+        "missing nonempty typed_enum",
+        |registry| {
+            relation_capability_mut(registry, "relation.calls")?["traceability"]
+                .as_object_mut()
+                .ok_or_else(|| io::Error::other("traceability is not an object"))?
+                .remove("typed_enum");
+            Ok(())
+        },
+    )?;
+    reject_registry_mutation(
+        "unpersisted mapping",
+        "only call-scoped federation may omit",
+        |registry| {
+            relation_capability_mut(registry, "relation.calls")?["traceability"]["persistence_profile"] =
+                json!("call-scoped-federation-v1");
+            Ok(())
+        },
+    )?;
+    reject_registry_mutation(
+        "unqueryable mapping",
+        "missing nonempty array query_surfaces",
+        |registry| {
+            relation_capability_mut(registry, "relation.calls")?["traceability"]["query_surfaces"] =
+                json!([]);
+            Ok(())
+        },
+    )?;
+    reject_registry_mutation(
+        "untested mapping",
+        "missing nonempty array fixture_ids",
+        |registry| {
+            relation_capability_mut(registry, "relation.calls")?["fixture_ids"] = json!([]);
+            Ok(())
+        },
+    )?;
+    reject_registry_mutation(
+        "inaccurately advertised mapping",
+        "advertised without completed evidence",
+        |registry| {
+            relation_capability_mut(registry, "relation.calls")?["advertised"] = json!(true);
+            Ok(())
+        },
     )
 }
