@@ -1381,6 +1381,10 @@
       "purpose": "Project repository-intelligence source contracts into a deterministic no-claim readiness scoreboard."
     },
     {
+      "path": "crates/projectatlas-cli/src/repository_ownership_contract_tests.rs",
+      "purpose": "Validate need-driven product-crate, test, and workspace-tool ownership contracts."
+    },
+    {
       "path": "crates/projectatlas-cli/src/sqlite_architecture_evaluation.rs",
       "purpose": "Evaluate deterministic lexical retrieval and SQLite indexing strategies over scanned corpus rows."
     },

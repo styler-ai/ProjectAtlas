@@ -558,6 +558,121 @@
       "selection_rule": "a pack remains unaccepted and unadvertised until every hard ceiling is measured on every required platform and runtime clamps plus lifecycle tests pass"
     }
   },
+  "ownership_map": {
+    "implementation_state": "ownership-recorded-without-refactor",
+    "split_policy": "first-feature-touch-only",
+    "all_at_once_refactor_allowed": false,
+    "owners": [
+      {
+        "owner": "projectatlas-core",
+        "responsibilities": [
+          "graph-domain-contracts",
+          "language-domain-contracts"
+        ],
+        "depends_on": []
+      },
+      {
+        "owner": "projectatlas-db",
+        "responsibilities": [
+          "schema-and-migrations",
+          "graph-persistence",
+          "lexical-indexes"
+        ],
+        "depends_on": [
+          "projectatlas-core"
+        ]
+      },
+      {
+        "owner": "projectatlas-fs",
+        "responsibilities": [
+          "gitignore-aware-discovery",
+          "file-identity"
+        ],
+        "depends_on": [
+          "projectatlas-core"
+        ]
+      },
+      {
+        "owner": "projectatlas-symbols",
+        "responsibilities": [
+          "language-registry",
+          "syntax-extraction",
+          "semantic-resolution",
+          "language-adapters"
+        ],
+        "depends_on": [
+          "projectatlas-core"
+        ]
+      },
+      {
+        "owner": "projectatlas-service",
+        "responsibilities": [
+          "ranking-and-retrieval",
+          "summary-and-slice",
+          "graph-relations-and-analysis"
+        ],
+        "depends_on": [
+          "projectatlas-core",
+          "projectatlas-db"
+        ]
+      },
+      {
+        "owner": "projectatlas-cli",
+        "responsibilities": [
+          "index-and-watch-orchestration",
+          "cli-and-mcp-adapters"
+        ],
+        "depends_on": [
+          "projectatlas-core",
+          "projectatlas-db",
+          "projectatlas-fs",
+          "projectatlas-service",
+          "projectatlas-symbols"
+        ]
+      }
+    ],
+    "test_ownership": [
+      {
+        "scope": "unit",
+        "owner_rule": "beside-owning-logic"
+      },
+      {
+        "scope": "process",
+        "owner_rule": "affected-workflow-family"
+      },
+      {
+        "scope": "cli",
+        "owner_rule": "affected-workflow-family"
+      },
+      {
+        "scope": "mcp",
+        "owner_rule": "affected-workflow-family"
+      },
+      {
+        "scope": "installer",
+        "owner_rule": "affected-workflow-family"
+      }
+    ],
+    "new_crate_policy": {
+      "candidate": "projectatlas-index",
+      "state": "not-created",
+      "creation_trigger": "demonstrated-boundary-and-independent-consumer",
+      "hypothetical_consumer_sufficient": false
+    },
+    "independent_workspace_tools": [
+      {
+        "owner": "projectatlas-lints",
+        "responsibility": "source-policy-enforcement",
+        "dependency_rule": "no-product-flow-edges"
+      }
+    ],
+    "rejected_scaffolding": [
+      "empty-modules",
+      "one-implementation-traits-or-factories",
+      "premature-generic-providers",
+      "topology-only-crates"
+    ]
+  },
   "architecture_decisions": [
     {
       "id": "ADR-04-01",

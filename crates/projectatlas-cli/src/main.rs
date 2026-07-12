@@ -10,6 +10,8 @@ mod optional_pack_candidate_readiness_tests;
 mod repository_intelligence_contract_tests;
 #[cfg(test)]
 mod repository_intelligence_scoreboard_tests;
+#[cfg(test)]
+mod repository_ownership_contract_tests;
 mod runtime;
 mod structural;
 #[cfg(test)]

@@ -1127,7 +1127,27 @@
         "function": "repository_intelligence_contract_tests::arri_2_31_pre_mortem_mitigations_are_task_owned",
         "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::arri_2_31_pre_mortem_mitigations_are_task_owned", "--", "--exact"] },
         "assertion": "All 29 PM rows have unique stable IDs, concrete mitigation actions, and one or more references to existing ARRI tasks; missing actions, orphan rows, duplicate IDs, and unknown task references fail.",
-        "covered_inputs": ["29 detailed design pre-mortem rows", "228 authoritative repository-intelligence tasks", "issue-facing mitigation ownership"],
+        "covered_inputs": ["29 detailed design pre-mortem rows", "authoritative repository-intelligence task identities derived from tasks.md", "issue-facing mitigation ownership"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "3.1",
+      "requirement": "The intended product-crate, test, and independent workspace-tool ownership boundaries are recorded without performing a speculative repository refactor.",
+      "scenario": "A typed contract reconciles the exact six existing product owners and acyclic dependency direction against normalized local path dependencies parsed from the live root and member Cargo manifests, then validates the filesystem boundary, independent lint-tool role, test placement, first-touch split policy, real-consumer crate gate, and rejected speculative scaffolding.",
+      "owner": "rust-ownership-and-module-boundaries",
+      "changed_artifacts": ["docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json", "crates/projectatlas-cli/src/repository_ownership_contract_tests.rs", "crates/projectatlas-cli/src/main.rs", "openspec/task-verification-plan.json", ".projectatlas/projectatlas-purpose-review.json"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-3.1",
+        "function": "repository_ownership_contract_tests::arri_3_1_ownership_map_is_need_driven",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_ownership_contract_tests::arri_3_1_ownership_map_is_need_driven", "--", "--exact"] },
+        "assertion": "Exactly six existing product crates own the declared responsibilities and direct acyclic dependency edges reconciled from the live Cargo workspace; projectatlas-lints remains an independent workspace tool with no product-flow edge and projectatlas-index remains absent; unit and workflow tests retain their owning placement; first-touch-only splitting, no all-at-once refactor, and the demonstrated-boundary-plus-independent-consumer crate gate hold; missing owners, missing test ownership, duplicate/self/undeclared edges, a declared-owner multi-node cycle, speculative refactoring, and hypothetical crate ownership fail.",
+        "covered_inputs": ["root workspace and seven member Cargo manifests parsed with the existing toml crate", "normalized and deduplicated dependencies/dev-dependencies/build-dependencies plus target-specific dependency sections", "six existing product-crate owners, exact responsibilities, and direct local path dependencies", "five unit/process/CLI/MCP/installer test scopes", "duplicate, self, undeclared, and multi-node cycle dependency mutations", "first-feature-touch-only split policy", "projectatlas-index real-independent-consumer gate and live absence", "projectatlas-lints live dependency-DAG independence", "four rejected speculative scaffolding kinds"],
         "state": "implemented_uncommitted"
       },
       "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
