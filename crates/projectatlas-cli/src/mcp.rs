@@ -4386,19 +4386,14 @@ mod tests {
         )?;
 
         let db_path = repo.join(".projectatlas").join("projectatlas.db");
-        {
-            let store = open_atlas_store(&db_path)?;
-            store.set_project_root(&other)?;
-        }
+        let store = open_atlas_store(&db_path)?;
+        store.set_project_root(&other)?;
         require(
             ProjectAtlasMcpServer::indexed_root_from_candidate(&repo).is_none(),
             "candidate with mismatched DB root was treated as indexed",
         )?;
-
-        {
-            let store = open_atlas_store(&db_path)?;
-            store.set_project_root(&repo)?;
-        }
+        store.set_project_root(&repo)?;
+        drop(store);
         let indexed = ProjectAtlasMcpServer::indexed_root_from_candidate(&repo)
             .ok_or_else(|| io::Error::other("matching DB root was not accepted"))?;
         require(

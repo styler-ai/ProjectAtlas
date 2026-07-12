@@ -1030,9 +1030,9 @@ fn validate_host_command_evidence(policy: &Value) -> Result<(), Box<dyn Error>> 
         "8c66fec898d4535a0cdd4f88ff986f206bb53d7d8f6d548cc9f7d5cd2bcc841d";
     const HISTORICAL_MANIFEST_SHA256: &str =
         "709867f2d9bb4790f5c0e8356633efa2c34aa8466a6aaba524c3ad2cfe4d2bb7";
-    const CURRENT_BINDING_ID: &str = "windows-dev-7f57cb9-34caf807-20260712T195754Z";
+    const CURRENT_BINDING_ID: &str = "windows-dev-c122075-82b8c1df-20260712T231656Z";
     const CURRENT_MANIFEST_SHA256: &str =
-        "a49b742972c29961ab78a84f639293f47d745b903e266ba446091f84fbe708f7";
+        "208690e5ee82230ab21618ae2b99cf2b8d190911e973d441ddbdf9385a51e0cc";
     let evidence = &policy["command_evidence"];
     let binding_id = evidence["binding_id"]
         .as_str()

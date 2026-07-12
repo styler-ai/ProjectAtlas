@@ -53,6 +53,12 @@ pub enum DbError {
         /// Expected version.
         expected: i64,
     },
+    /// Read-only schema inspection found state that is unsafe to mutate.
+    #[error("schema preflight rejected the database: {message}")]
+    SchemaPreflight {
+        /// Actionable incompatibility or readiness detail.
+        message: String,
+    },
     /// Required persistent project identity metadata is missing.
     #[error("project instance identity is missing from database metadata")]
     ProjectInstanceIdMissing,
@@ -313,6 +319,7 @@ impl AtlasStore {
     ///
     /// Returns an error if `SQLite` setup or schema validation fails.
     pub fn open(path: &Path) -> DbResult<Self> {
+        schema::preflight(path)?;
         let connection = Connection::open(path)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
@@ -327,6 +334,7 @@ impl AtlasStore {
     ///
     /// Returns an error if schema setup fails.
     pub fn in_memory() -> DbResult<Self> {
+        schema::preflight_in_memory()?;
         let store = Self {
             connection: Connection::open_in_memory()?,
         };
@@ -3507,7 +3515,7 @@ impl AtlasStore {
 ///
 /// Returns an error if `SQLite` cannot open or query the database read-only.
 pub fn read_project_root_read_only(path: &Path) -> DbResult<Option<String>> {
-    let uri = sqlite_immutable_read_uri(path);
+    let uri = sqlite_read_uri(path, true);
     let connection = Connection::open_with_flags(
         uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
@@ -3522,16 +3530,17 @@ pub fn read_project_root_read_only(path: &Path) -> DbResult<Option<String>> {
     Ok(root)
 }
 
-/// Build a read-only immutable `SQLite` URI for non-mutating metadata probes.
-fn sqlite_immutable_read_uri(path: &Path) -> String {
+/// Build a read-only `SQLite` URI, optionally treating the database as immutable.
+pub(crate) fn sqlite_read_uri(path: &Path, immutable: bool) -> String {
     let normalized = normalize_native_path_display(path);
     let uri_path = if normalized.as_bytes().get(1) == Some(&b':') {
         format!("/{normalized}")
     } else {
         normalized
     };
+    let immutable = if immutable { "&immutable=1" } else { "" };
     format!(
-        "file:{}?mode=ro&immutable=1",
+        "file:{}?mode=ro{immutable}",
         sqlite_uri_escape_path(&uri_path)
     )
 }
