@@ -324,7 +324,7 @@ mod tests {
     use std::io;
 
     #[test]
-    fn store_facade_preserves_current_and_legacy_schema_contracts() -> Result<(), Box<dyn Error>> {
+    fn store_facade_preserves_schema_and_legacy_repairs() -> Result<(), Box<dyn Error>> {
         let store = crate::AtlasStore::in_memory()?;
         store.initialize_schema()?;
         let connection = &store.connection;

@@ -1176,7 +1176,7 @@
       "change": "advance-rust-repository-intelligence",
       "task_id": "3.3",
       "requirement": "The first database feature touch extracts only schema initialization, version reconciliation, and supported legacy repair behind the unchanged AtlasStore facade.",
-      "scenario": "The public store facade preserves the current schema contract, remains idempotent, repairs every supported legacy summary, symbol, and usage schema shape, reconciles schema version 7, and rejects a future schema version after schema ownership moves to one private module.",
+      "scenario": "The public store facade preserves the current schema contract, remains idempotent, repairs the supported legacy summary, symbol, and usage schema shape, reconciles schema version 7, and rejects a future schema version after schema ownership moves to one private module.",
       "owner": "rust-ownership-and-module-boundaries",
       "changed_artifacts": ["crates/projectatlas-db/src/lib.rs", "crates/projectatlas-db/src/schema.rs", "openspec/task-verification-plan.json"],
       "risk": "L2-persistence-cross-crate",
@@ -1184,9 +1184,9 @@
       "timeout_seconds": 600,
       "unit_test": {
         "test_id": "UT:ARRI-3.3",
-        "function": "schema::tests::store_facade_preserves_current_and_legacy_schema_contracts",
-        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-db", "schema::tests::store_facade_preserves_current_and_legacy_schema_contracts", "--", "--exact"] },
-        "assertion": "AtlasStore initialization remains idempotent, preserves the current table, index, column, and schema-version contract, repairs supported legacy summary, symbol, and usage schemas, reconciles schema version 7, and rejects a future schema version after ownership moves into one private responsibility-named module.",
+        "function": "schema::tests::store_facade_preserves_schema_and_legacy_repairs",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-db", "schema::tests::store_facade_preserves_schema_and_legacy_repairs", "--", "--exact"] },
+        "assertion": "AtlasStore initialization remains idempotent, preserves the current table and index inventory plus selected compatibility-critical column, default, compound-index, and schema-version contracts, repairs the supported legacy summary, symbol, and usage schema shape, reconciles schema version 7, and rejects a future schema version after ownership moves into one private responsibility-named module.",
         "covered_inputs": ["AtlasStore in-memory facade", "repeat initialize_schema call", "schema version 8 metadata", "ten current tables", "sixteen current explicit indexes", "selected column defaults and compound index columns", "legacy summary without subject", "legacy symbols without exported or documentation", "legacy usage metadata and backfill", "schema version 7 reconciliation", "future schema rejection", "schema-only module boundary"],
         "state": "implemented_uncommitted"
       },
