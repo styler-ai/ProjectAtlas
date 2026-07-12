@@ -7507,10 +7507,7 @@ fn notify_watch_refreshes_symbols_after_file_change() -> Result<(), Box<dyn Erro
             if child.try_wait()?.is_none() {
                 child.kill()?;
             }
-            match child.wait() {
-                Ok(_status) => {}
-                Err(error) => return Err(error.into()),
-            }
+            let _status = child.wait()?;
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "projectatlas watch did not exit after file change",
@@ -9828,10 +9825,7 @@ fn run_mcp_stdio(
             if child.try_wait()?.is_none() {
                 child.kill()?;
             }
-            match child.wait() {
-                Ok(_status) => {}
-                Err(error) => return Err(error.into()),
-            }
+            let _status = child.wait()?;
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "projectatlas mcp did not exit after stdin closed",

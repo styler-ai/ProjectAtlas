@@ -1332,7 +1332,7 @@ mod tests {
         let oid = "a".repeat(40);
         let head = format!("100644 blob {oid}\tfile.txt\0");
         let index = format!("100644 {oid} 0\tfile.txt\0");
-        for flag in [b'S', b'h'] {
+        for flag in *b"Sh" {
             let flags = [
                 flag, b' ', b'f', b'i', b'l', b'e', b'.', b't', b'x', b't', 0,
             ];

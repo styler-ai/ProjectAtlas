@@ -2666,7 +2666,7 @@ mod tests {
         let executable_directory = executable.parent().ok_or_else(|| {
             CalibrationError::Binding("Git fixture executable has no parent".into())
         })?;
-        let mut command = Command::new(executable)
+        let command = Command::new(executable)
             .args(arguments)
             .env_clear()
             .env("PATH", executable_directory)
@@ -2674,11 +2674,15 @@ mod tests {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0");
         #[cfg(windows)]
-        for name in ["SYSTEMROOT", "WINDIR"] {
-            if let Some(value) = env::var_os(name) {
-                command = command.env(name, value);
+        let command = {
+            let mut command = command;
+            for name in ["SYSTEMROOT", "WINDIR"] {
+                if let Some(value) = env::var_os(name) {
+                    command = command.env(name, value);
+                }
             }
-        }
+            command
+        };
         run_supervised(command, Duration::from_secs(15), 32 * 1024)
             .await
             .map_err(Into::into)
@@ -3228,7 +3232,7 @@ mod tests {
                 .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", directory.path())
                 .env("GIT_EXTERNAL_DIFF", "definitely-not-a-helper")
                 .env("GIT_PAGER", "definitely-not-a-helper"),
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             32 * 1024,
         )
         .await?;
@@ -3273,7 +3277,7 @@ mod tests {
                 .env(GIT_ENVIRONMENT_PROBE_ENV, "child")
                 .env(GIT_ENVIRONMENT_RESULT_ENV, &result_path)
                 .env("PATH", poisoned_path),
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             32 * 1024,
         )
         .await?;
