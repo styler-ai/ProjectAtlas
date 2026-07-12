@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "full": [
+    {
+      "record_kind": "entity",
+      "project_identity": "project-01",
+      "stable_key": "entity-01",
+      "entity_kind": "file",
+      "normalized_path": "src\\lib.rs",
+      "label": "Line one\r\nLine two",
+      "row_id": 7,
+      "slot_id": 0,
+      "active_epoch": 41,
+      "updated_at": "2026-07-11T10:00:00Z"
+    },
+    {
+      "record_kind": "relation",
+      "project_identity": "project-01",
+      "stable_key": "edge-01",
+      "relation_kind": "calls",
+      "source_stable_key": "entity-01",
+      "target_stable_key": "entity-02",
+      "discriminator": "direct",
+      "row_id": 9,
+      "slot_id": 0,
+      "last_changed_epoch": 41,
+      "telemetry": { "duration_ns": 99 }
+    }
+  ],
+  "incremental": [
+    {
+      "slot_id": 1,
+      "record_kind": "relation",
+      "target_stable_key": "entity-02",
+      "source_stable_key": "entity-01",
+      "relation_kind": "calls",
+      "project_identity": "project-01",
+      "stable_key": "edge-01",
+      "discriminator": "direct",
+      "row_id": 111,
+      "last_changed_epoch": 99,
+      "telemetry": { "duration_ns": 1234 }
+    },
+    {
+      "slot_id": 1,
+      "record_kind": "entity",
+      "stable_key": "entity-01",
+      "project_identity": "project-01",
+      "normalized_path": "src/lib.rs",
+      "label": "Line one\nLine two",
+      "entity_kind": "file",
+      "row_id": 101,
+      "active_epoch": 99,
+      "updated_at": "2026-07-11T11:00:00Z"
+    }
+  ],
+  "semantic_change": [
+    {
+      "record_kind": "entity",
+      "project_identity": "project-01",
+      "stable_key": "entity-01",
+      "entity_kind": "file",
+      "normalized_path": "src/lib.rs",
+      "label": "Line one\nLine two"
+    },
+    {
+      "record_kind": "relation",
+      "project_identity": "project-01",
+      "stable_key": "edge-01",
+      "relation_kind": "references",
+      "source_stable_key": "entity-01",
+      "target_stable_key": "entity-02",
+      "discriminator": "direct"
+    }
+  ],
+  "expected_first_semantic_difference": {
+    "record_kind": "relation",
+    "stable_key": "edge-01",
+    "field": "relation_kind"
+  }
+}

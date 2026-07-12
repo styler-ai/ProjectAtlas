@@ -1,0 +1,534 @@
+{
+  "schema_version": 1,
+  "format": "projectatlas.phase-scoreboard-contract",
+  "scoreboard_id": "projectatlas-v0.4-repository-intelligence-scoreboard",
+  "phase_id": "phase-0-truth-and-baselines",
+  "task_ids": [
+    "ARRI-2.17",
+    "ARRI-2.18"
+  ],
+  "contract_state": "defined-not-evaluated",
+  "claim_state": "no-claim",
+  "claim_reason": "Phase 0 authorizes implementation only; final v0.4 measurements plus eligible compatibility, hosted-platform, containment, plugin, package, and comparative evidence remain incomplete.",
+  "generation_contract": {
+    "kind": "source-pointer-projection",
+    "source_of_truth": "source_artifacts and retained evidence referenced by each dimension",
+    "dimension_defaults": {
+      "required": true,
+      "missing_behavior": "block",
+      "failure_behavior": "block",
+      "claim_state": "no-claim"
+    },
+    "dimension_fields": [
+      "id",
+      "group",
+      "label",
+      "source_refs",
+      "result_schema",
+      "decision_function",
+      "scope",
+      "eligibility",
+      "state",
+      "blocker"
+    ],
+    "materialization_rule": "resolve every source pointer, apply the named decision function independently, and emit one row per dimension without aggregate compensation"
+  },
+  "source_artifacts": {
+    "capability_registry": {
+      "path": "docs/benchmarks/projectatlas-v0.4-capability-registry.json",
+      "format": "projectatlas.capability-registry",
+      "required_pointer": "/achieved_manifest",
+      "current_state": "present"
+    },
+    "evaluation_manifest": {
+      "path": "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json",
+      "format": "projectatlas.evaluation-manifest",
+      "required_pointer": "/measurements",
+      "current_state": "present"
+    },
+    "repository_intelligence_contracts": {
+      "path": "docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json",
+      "format": "projectatlas.repository-intelligence-contracts",
+      "current_state": "present"
+    },
+    "surface_contract": {
+      "path": "fixtures/contracts/projectatlas-v0.3.26-surface.json",
+      "schema_version": 1,
+      "current_state": "present"
+    },
+    "canonical_graph_contract": {
+      "path": "fixtures/contracts/projectatlas-v0.4-canonical-graph.json",
+      "schema_version": 1,
+      "current_state": "present"
+    },
+    "measurement_results": {
+      "path_pattern": "docs/benchmarks/results/{phase_id}/{run_id}.json",
+      "required": true,
+      "current_state": "missing"
+    },
+    "architecture_cost_results": {
+      "path_pattern": "docs/benchmarks/results/{phase_id}/architecture-cost.json",
+      "required": true,
+      "current_state": "missing"
+    },
+    "compatibility_results": {
+      "path_pattern": "docs/benchmarks/results/{phase_id}/compatibility.json",
+      "required": true,
+      "current_state": "missing"
+    },
+    "hosted_results": {
+      "path_pattern": "docs/benchmarks/results/{phase_id}/hosted/{platform}.json",
+      "required": true,
+      "current_state": "missing"
+    },
+    "review_results": {
+      "path": "docs/benchmarks/results/phase-0-truth-and-baselines/reviews.json",
+      "path_pattern": "docs/benchmarks/results/{phase_id}/reviews.json",
+      "required": true,
+      "current_state": "present"
+    }
+  },
+  "decision_functions": {
+    "all_required_members_pass": {
+      "kind": "all",
+      "rule": "every required member has state pass; averages, totals, optional members, and stronger members cannot compensate for a non-pass member"
+    },
+    "corrected_lower_bound_floor": {
+      "kind": "threshold",
+      "rule": "the preregistered multiplicity-corrected one-sided 95 percent lower confidence bound meets the member-specific floor"
+    },
+    "corrected_upper_bound_ceiling": {
+      "kind": "threshold",
+      "rule": "the preregistered multiplicity-corrected one-sided 95 percent upper confidence bound meets the member-specific ceiling or ratio margin"
+    },
+    "exact_equivalence": {
+      "kind": "equality",
+      "rule": "canonical outputs match after only the preregistered exclusions and tolerances; the first semantic difference fails the member"
+    },
+    "hard_budget": {
+      "kind": "ceiling",
+      "rule": "the exact value or adverse p95 confidence bound is at or below the preregistered hard ceiling"
+    },
+    "compatibility_replay": {
+      "kind": "all",
+      "rule": "every frozen success, error, exit, default, format, root, task, and normal-workflow replay passes for old and current clients"
+    },
+    "agent_non_inferiority": {
+      "kind": "all",
+      "rule": "answer quality, unsupported assertions, context tokens, reads, calls, and workflow members independently meet their preregistered non-inferiority rules against the prior release and accepted baseline"
+    },
+    "zero_growth": {
+      "kind": "ceiling",
+      "rule": "the independently named public or workflow surface grows by no more than its explicit allowance"
+    },
+    "complete_containment": {
+      "kind": "all",
+      "rule": "every required platform and negative case proves the declared process, filesystem, network, execution, resource, cancellation, and provenance containment contract"
+    },
+    "review_clearance": {
+      "kind": "all",
+      "rule": "every required reviewer role has a current disposition and zero unresolved blocking findings"
+    }
+  },
+  "result_schemas": {
+    "evaluation_index_result": {
+      "source": "evaluation_manifest#/result_schema",
+      "manifest_schema_id": "index-result",
+      "metric_set": "index_result_metrics"
+    },
+    "evaluation_incremental_result": {
+      "source": "evaluation_manifest#/result_schema",
+      "manifest_schema_id": "incremental-result",
+      "metric_set": "incremental_result_metrics"
+    },
+    "evaluation_query_result": {
+      "source": "evaluation_manifest#/result_schema",
+      "manifest_schema_id": "query-result",
+      "metric_set": "query_result_metrics"
+    },
+    "dimension_result": {
+      "required_fields": [
+        "schema_version",
+        "phase_id",
+        "dimension_id",
+        "candidate_commit",
+        "source_digests",
+        "eligible",
+        "state",
+        "decision_function_id",
+        "members",
+        "evidence"
+      ],
+      "member_required_fields": [
+        "member_id",
+        "required",
+        "eligible",
+        "state",
+        "observed",
+        "threshold",
+        "evidence"
+      ]
+    },
+    "correctness_family_result": {
+      "required_metrics": [
+        "true_positive",
+        "false_positive",
+        "false_negative",
+        "true_negative",
+        "precision",
+        "recall",
+        "f1",
+        "abstention",
+        "parse_error_coverage",
+        "span_correctness",
+        "lower_confidence_bounds"
+      ]
+    },
+    "compatibility_result": {
+      "required_metrics": [
+        "surface_id",
+        "client_version",
+        "request_digest",
+        "expected_digest",
+        "actual_digest",
+        "exit_code",
+        "stream",
+        "state"
+      ]
+    },
+    "determinism_result": {
+      "required_metrics": [
+        "comparison_kind",
+        "left_snapshot_digest",
+        "right_snapshot_digest",
+        "excluded_fields",
+        "first_difference",
+        "state"
+      ]
+    },
+    "resource_result": {
+      "required_metrics": [
+        "component",
+        "unit",
+        "raw_samples",
+        "point_estimate",
+        "adverse_confidence_bound",
+        "baseline_values",
+        "state"
+      ]
+    },
+    "agent_workflow_result": {
+      "required_metrics": [
+        "workflow_family",
+        "task_id",
+        "answer_quality",
+        "unsupported_assertions",
+        "context_tokens",
+        "likely_file_reads",
+        "tool_calls",
+        "mandatory_call_sequence",
+        "wall_time_ns",
+        "state"
+      ]
+    },
+    "architecture_cost_result": {
+      "required_metrics": [
+        "production_lines",
+        "generated_lines",
+        "workspace_crates",
+        "direct_dependencies",
+        "transitive_dependencies",
+        "dependency_cycles",
+        "projectatlas_owned_unsafe_lines",
+        "native_ffi_boundaries",
+        "duplicated_contract_owners",
+        "custom_storage_or_query_owners",
+        "warnings",
+        "public_cli_commands",
+        "public_mcp_tools",
+        "public_config_fields",
+        "install_steps"
+      ]
+    },
+    "containment_result": {
+      "required_metrics": [
+        "platform",
+        "artifact_digest",
+        "process_tree",
+        "filesystem_scope_ok",
+        "network_denied",
+        "repository_code_not_executed",
+        "timeout_enforced",
+        "memory_limit_enforced",
+        "cancellation_enforced",
+        "provenance_complete",
+        "state"
+      ]
+    }
+  },
+  "state_model": {
+    "dimension_states": [
+      "pending",
+      "missing",
+      "ineligible",
+      "fail",
+      "pass",
+      "informational"
+    ],
+    "phase_exit_states": [
+      "blocked",
+      "pass"
+    ],
+    "claim_states": [
+      "no-claim",
+      "blocked",
+      "non-inferior",
+      "superior"
+    ],
+    "only_exit_passing_state": "pass",
+    "informational_is_passing": false
+  },
+  "eligibility_contract": {
+    "universal_requirements": [
+      "all referenced source artifacts exist and validate against their declared format or schema identity and schema version",
+      "the result binds the exact phase, candidate commit, baseline commit, corpus commit, profile, environment, toolchain, operation, and decision-function version",
+      "required capabilities, coverage, limits, cache state, warmups, repetitions, timeouts, and outputs match the preregistered evaluation manifest",
+      "timeouts, crashes, invalid output, undeclared fallback, incomplete coverage, and unexpected network access remain recorded failures",
+      "required raw artifacts and digests are retained and no observed sample is silently dropped or replaced",
+      "each required platform, corpus, family, workflow, and baseline member is present and independently eligible"
+    ],
+    "absolute_reference_host_requirements": [
+      "the runner identity matches the frozen reference-host class",
+      "before and after calibration values remain inside the frozen raw-time envelope",
+      "the tolerance factor was fixed before results and is no greater than 1.25",
+      "measured latency is not divided by calibration"
+    ],
+    "hosted_requirements": [
+      "every required hosted platform result is present",
+      "the packaged artifact and managed runtime identity match the candidate commit",
+      "a local-only or uncalibrated observation cannot replace required hosted evidence"
+    ]
+  },
+  "phase_readiness_gates": [
+    {
+      "id": "contracts.frozen",
+      "label": "Frozen implementation contracts",
+      "scope": "The accepted capability, compatibility-surface, graph-snapshot, budget, evaluation, verification, and simplicity contracts needed to begin implementation are frozen; final behavioral replay remains a release gate.",
+      "state": "pass",
+      "blocker": null
+    },
+    {
+      "id": "sqlite-feasibility.complete",
+      "label": "Decision-enabling SQLite feasibility",
+      "scope": "The local real-SQLite lexical/FTS and storage/publication labs in ARRI-2.12 and ARRI-2.13 pass; full pinned-corpus campaigns remain a release gate.",
+      "state": "pass",
+      "blocker": null
+    },
+    {
+      "id": "architecture-decisions.accepted",
+      "label": "Implementation-enabling architecture decisions",
+      "scope": "Typed graph, lexical fallback, publication, semantic-boundary, rollback, and explicitly deferred optional-pack decisions are accepted without claiming unmeasured candidates.",
+      "state": "pass",
+      "blocker": null
+    },
+    {
+      "id": "phase-reviews.resolved",
+      "label": "Resolved Phase 0 reviews",
+      "scope": "Every required Phase 0 reviewer role has a visible disposition and no unresolved blocking finding.",
+      "state": "pass",
+      "blocker": null
+    }
+  ],
+  "phase_exit_contract": {
+    "combiner": "all-required-readiness-gates-pass",
+    "required_gate_ids": [
+      "contracts.frozen",
+      "sqlite-feasibility.complete",
+      "architecture-decisions.accepted",
+      "phase-reviews.resolved"
+    ],
+    "release_evidence_affects_phase_exit": false,
+    "missing_required_gate": "blocked",
+    "non_passing_required_gate": "blocked",
+    "claim_rule": "Phase 0 readiness authorizes implementation only and never authorizes a correctness, performance, compatibility, platform, installation, or superiority claim"
+  },
+  "release_acceptance_contract": {
+    "combiner": "all-required-dimensions-pass",
+    "aggregate_compensation_allowed": false,
+    "optional_member_compensation_allowed": false,
+    "missing_required_dimension": "blocked",
+    "missing_required_member": "blocked",
+    "ineligible_required_dimension": "blocked",
+    "informational_required_dimension": "blocked",
+    "failing_required_dimension": "blocked",
+    "required_hosted_result_missing": "blocked",
+    "claim_rule": "v0.4 release acceptance requires every applicable required dimension and every required member to have state pass under its preregistered decision function",
+    "superiority_rule": "a superiority claim additionally requires every hard correctness, compatibility, determinism, containment, resource, workflow, and simplicity gate plus each dimension-specific superiority decision; non-inferiority or a stronger unrelated metric cannot substitute",
+    "methodology_change_rule": "changing a corpus, member set, threshold, margin, sample plan, eligibility rule, or decision function after observing results creates a new scoreboard schema version and requires rerunning every affected candidate and baseline cell"
+  },
+  "dimension_count": 42,
+  "dimensions": [
+    {"id":"capability.accepted-coverage","group":"correctness","label":"Accepted capability coverage","source_refs":["capability_registry#/accepted_set_policy","capability_registry#/achieved_manifest"],"result_schema":"dimension_result","decision_function":"all_required_members_pass","scope":"every accepted mode, normalized parser capability, entity, relation, enrichment, search, analysis, federation, snapshot, pack, tier, and required platform","eligibility":"an achieved manifest exists and every member has immutable provenance plus non-vacuous evidence for its advertised tier","state":"missing","blocker":"capability_registry#/achieved_manifest is null"},
+    {"id":"correctness.per-family-accuracy","group":"correctness","label":"Per-language and per-relation-family accuracy","source_refs":["evaluation_manifest#/decision_functions/correctness","measurement_results"],"result_schema":"correctness_family_result","decision_function":"corrected_lower_bound_floor","scope":"each advertised language, parser, symbol family, relation family, semantic provider, query family, and platform with non-zero preregistered denominators","eligibility":"minimum positive and negative examples are met and precision, recall, abstention, parse-error coverage, span correctness, and corrected confidence bounds are present","state":"missing","blocker":"no correctness measurements exist"},
+    {"id":"compatibility.cli","group":"compatibility","label":"CLI compatibility","source_refs":["repository_intelligence_contracts#/compatibility/cli","surface_contract#/cli","compatibility_results"],"result_schema":"compatibility_result","decision_function":"compatibility_replay","scope":"every frozen CLI command, option, default, output mode, success/error shape, stream, exit code, root rule, and normal workflow","eligibility":"golden success and failure replays cover every frozen invocation and old-client behavior","state":"ineligible","blocker":"the CLI contract remains partial until complete golden replay"},
+    {"id":"compatibility.mcp","group":"compatibility","label":"MCP compatibility","source_refs":["repository_intelligence_contracts#/compatibility/mcp","surface_contract#/mcp","compatibility_results"],"result_schema":"compatibility_result","decision_function":"compatibility_replay","scope":"every frozen MCP tool, request schema, default, success/error transport, output root, root-selection rule, task contract, and old-client workflow","eligibility":"real initialized MCP replay covers every frozen request and response contract","state":"ineligible","blocker":"the MCP default and behavior contract remains partial until complete replay"},
+    {"id":"determinism.full-incremental","group":"determinism","label":"Full and incremental equivalence","source_refs":["repository_intelligence_contracts#/graph_snapshot","canonical_graph_contract","measurement_results"],"result_schema":"determinism_result","decision_function":"exact_equivalence","scope":"every accepted mutation class, corpus, profile, and required platform","eligibility":"both runs reach the same repository state and canonicalize with the frozen exclusions","state":"missing","blocker":"no full-versus-incremental run artifacts exist"},
+    {"id":"determinism.worker-count","group":"determinism","label":"Worker-count equivalence","source_refs":["repository_intelligence_contracts#/graph_snapshot/comparisons","measurement_results"],"result_schema":"determinism_result","decision_function":"exact_equivalence","scope":"worker count 1 versus the preregistered N for every accepted corpus and profile","eligibility":"worker counts and all other inputs match the evaluation manifest","state":"missing","blocker":"no 1-versus-N canonical comparisons exist"},
+    {"id":"determinism.repeated-run","group":"determinism","label":"Repeated-run determinism","source_refs":["repository_intelligence_contracts#/graph_snapshot/comparisons","measurement_results"],"result_schema":"determinism_result","decision_function":"exact_equivalence","scope":"at least ten repeated runs for every nondeterminism-sensitive enrichment and required platform","eligibility":"all declared repetitions complete and use the frozen seed, ordering, and tolerance rules","state":"missing","blocker":"no repeated-run canonical comparisons exist"},
+    {"id":"correctness.platform-unicode","group":"correctness","label":"Real-process platform and Unicode correctness","source_refs":["capability_registry#/required_platforms","hosted_results"],"result_schema":"dimension_result","decision_function":"all_required_members_pass","scope":"Windows x86_64, Linux x86_64, macOS arm64, and macOS x86_64 with UTF-8, CJK, emoji, spaces, metacharacters, long supported paths, and available NFC/NFD cases","eligibility":"real packaged ProjectAtlas and supervised worker processes run on every required host","state":"missing","blocker":"required hosted platform results do not exist"},
+    {"id":"containment.parser-and-optional-pack","group":"containment","label":"Parser and optional-pack containment","source_refs":["evaluation_manifest#/operations","repository_intelligence_contracts#/budgets/optional_pack_contract","hosted_results"],"result_schema":"containment_result","decision_function":"complete_containment","scope":"every candidate parser host and accepted optional pack on every required platform","eligibility":"artifact provenance, process-tree accounting, time/memory/input/output/cancellation limits, ABI, crash isolation, and offline behavior are all exercised","state":"missing","blocker":"ARRI-2.14 hosted parser-host and containment evidence is pending"},
+    {"id":"containment.network-filesystem-execution","group":"containment","label":"Network, filesystem, and repository-code containment","source_refs":["evaluation_manifest#/profiles","hosted_results"],"result_schema":"containment_result","decision_function":"complete_containment","scope":"normal scan/query, parser worker, optional pack, installer lifecycle, and federation negative cases on every required platform","eligibility":"unexpected network, out-of-root access, repository-code execution, hidden download, and implicit federation are actively denied and observed","state":"missing","blocker":"complete hosted negative-case evidence does not exist"},
+    {"id":"performance.full-scan-time","group":"performance","label":"Full scan time","source_refs":["evaluation_manifest#/operations","evaluation_manifest#/result_schema/index_result_metrics","measurement_results"],"result_schema":"evaluation_index_result","decision_function":"corrected_upper_bound_ceiling","scope":"cold and warm scan for every required corpus, profile, worker count, and accepted baseline","eligibility":"correctness, coverage, cache state, repetitions, timeout treatment, paired host, and output validation all pass","state":"missing","blocker":"evaluation_manifest#/measurements is empty"},
+    {"id":"performance.incremental-time","group":"performance","label":"Incremental publication time","source_refs":["evaluation_manifest#/operations","evaluation_manifest#/result_schema/incremental_result_metrics","measurement_results"],"result_schema":"evaluation_incremental_result","decision_function":"corrected_upper_bound_ceiling","scope":"no-change, one-file, dependency-fan-out, and dirty-worktree publication classes for every required corpus and baseline","eligibility":"the mutation reaches the declared state, publication is complete, and work/write coverage is validated","state":"missing","blocker":"no incremental result artifacts exist"},
+    {"id":"resource.complete-process-tree-rss","group":"resources","label":"Complete-process-tree RSS","source_refs":["evaluation_manifest#/result_schema","repository_intelligence_contracts#/budgets/default_core/release_limits","measurement_results"],"result_schema":"resource_result","decision_function":"corrected_upper_bound_ceiling","scope":"idle core, full scan, incremental publication, query concurrency, parser host, semantic pack, and installer lifecycle on every required host","eligibility":"the named platform metric includes every ProjectAtlas-owned child process with the preregistered sampling interval and shared-page policy","state":"missing","blocker":"no complete-process-tree memory results exist"},
+    {"id":"writes.physical-database","group":"writes","label":"Physical main-database writes","source_refs":["evaluation_manifest#/result_schema/index_result_metrics","evaluation_manifest#/result_schema/incremental_result_metrics","measurement_results"],"result_schema":"resource_result","decision_function":"corrected_upper_bound_ceiling","scope":"full, no-change, one-file, fan-out, and dirty-worktree operations for every corpus and baseline","eligibility":"physical bytes written to the live SQLite main database are measured rather than inferred from final size","state":"missing","blocker":"component-specific physical database-write results do not exist"},
+    {"id":"writes.physical-wal-shm-journal","group":"writes","label":"Physical WAL, SHM, and journal writes","source_refs":["evaluation_manifest#/result_schema/index_result_metrics","evaluation_manifest#/result_schema/incremental_result_metrics","measurement_results"],"result_schema":"resource_result","decision_function":"corrected_upper_bound_ceiling","scope":"WAL, SHM, rollback journal, checkpoint, and cleanup writes for every accepted mutation class","eligibility":"each component is measured independently and overwritten same-size pages remain counted","state":"missing","blocker":"component-specific WAL, SHM, and journal write results do not exist"},
+    {"id":"writes.physical-staging-temp","group":"writes","label":"Physical staging and SQLite temporary writes","source_refs":["evaluation_manifest#/result_schema/index_result_metrics","measurement_results"],"result_schema":"resource_result","decision_function":"corrected_upper_bound_ceiling","scope":"staging database, import, temporary, sort, and failed-publication cleanup writes","eligibility":"all process-tree files are observed through successful and failed publication lifecycles","state":"missing","blocker":"physical staging and temporary write results do not exist"},
+    {"id":"writes.physical-sidecar","group":"writes","label":"Physical derived-sidecar writes","source_refs":["evaluation_manifest#/result_schema/incremental_result_metrics","measurement_results"],"result_schema":"resource_result","decision_function":"corrected_upper_bound_ceiling","scope":"FTS, vector, ANN, snapshot, manifest, and every required derived sidecar enabled by the measured profile","eligibility":"all required sidecars are inventoried and both writes and retention are measured","state":"missing","blocker":"component-specific physical sidecar-write results do not exist"},
+    {"id":"writes.logical","group":"writes","label":"Logical row and page changes","source_refs":["evaluation_manifest#/result_schema/index_result_metrics","evaluation_manifest#/result_schema/incremental_result_metrics","measurement_results"],"result_schema":"resource_result","decision_function":"corrected_upper_bound_ceiling","scope":"full, no-change, one-file, fan-out, and dirty-worktree mutation classes","eligibility":"logical changes are reported separately from physical writes and final file-size deltas","state":"missing","blocker":"no logical-write results exist"},
+    {"id":"bytes.persistent-index","group":"bytes","label":"Persistent index bytes","source_refs":["evaluation_manifest#/result_schema/index_result_metrics","measurement_results"],"result_schema":"resource_result","decision_function":"corrected_upper_bound_ceiling","scope":"SQLite main, retained WAL/SHM, FTS, vector/ANN, and required sidecars by corpus and profile, including bytes per reconciled true fact","eligibility":"publication, checkpoint, close, retention, truth reconciliation, and fact denominator follow the frozen procedure","state":"missing","blocker":"no persistent-index result artifacts exist"},
+    {"id":"bytes.package-artifact","group":"bytes","label":"Package and compressed artifact bytes","source_refs":["repository_intelligence_contracts#/budgets/default_core/release_limits","repository_intelligence_contracts#/budgets/optional_pack_contract","measurement_results"],"result_schema":"resource_result","decision_function":"hard_budget","scope":"default-core binary/package and each optional pack artifact for every release platform","eligibility":"release stripping, debug-symbol exclusion, compression, platform, digest, and included-file rules are fixed","state":"missing","blocker":"packaged candidate artifacts and size results do not exist"},
+    {"id":"bytes.install-transfer","group":"bytes","label":"Installation transfer bytes","source_refs":["hosted_results","measurement_results"],"result_schema":"resource_result","decision_function":"corrected_upper_bound_ceiling","scope":"clean install, update, repair, rollback, remove, and reinstall for every supported plugin host and release platform","eligibility":"network and cache state are declared and every transferred managed artifact is counted","state":"missing","blocker":"clean-host transfer measurements do not exist"},
+    {"id":"bytes.installed-logical","group":"bytes","label":"Installed logical bytes","source_refs":["repository_intelligence_contracts#/budgets/default_core/release_limits","repository_intelligence_contracts#/budgets/optional_pack_contract","hosted_results"],"result_schema":"resource_result","decision_function":"hard_budget","scope":"default core and each enabled pack on every supported installation target","eligibility":"managed files, generated config, runtime, skill, registry data, and pack files are inventoried without counting project-local indexes as installation bytes","state":"missing","blocker":"clean-host installed logical byte results do not exist"},
+    {"id":"bytes.installed-allocated","group":"bytes","label":"Installed allocated filesystem bytes","source_refs":["hosted_results","measurement_results"],"result_schema":"resource_result","decision_function":"corrected_upper_bound_ceiling","scope":"default core and each enabled pack on every supported filesystem and release platform","eligibility":"allocated bytes use a named platform metric and are separated from logical and transferred bytes","state":"missing","blocker":"clean-host allocated filesystem byte results do not exist"},
+    {"id":"latency.sqlite-warm","group":"latency","label":"Warm SQLite latency","source_refs":["evaluation_manifest#/latency_goals","evaluation_manifest#/calibration","measurement_results"],"result_schema":"evaluation_query_result","decision_function":"hard_budget","scope":"simple indexed name, filter, and one-hop query cells at declared concurrency","eligibility":"prepared-statement bind through final validated row decode uses an open warmed connection on an eligible reference host","state":"ineligible","blocker":"calibration pilot and raw-time eligibility envelope are pending"},
+    {"id":"latency.service-warm","group":"latency","label":"Warm service latency","source_refs":["evaluation_manifest#/latency_goals","evaluation_manifest#/calibration","measurement_results"],"result_schema":"evaluation_query_result","decision_function":"hard_budget","scope":"simple and bounded-three-hop service cells at declared concurrency and million-node scale","eligibility":"typed service entry through fully materialized result excludes transport but uses an eligible calibrated reference host","state":"ineligible","blocker":"calibration pilot and service measurements are pending"},
+    {"id":"latency.mcp-e2e-warm","group":"latency","label":"Warm MCP end-to-end latency","source_refs":["evaluation_manifest#/latency_goals","evaluation_manifest#/timing_decomposition","measurement_results"],"result_schema":"evaluation_query_result","decision_function":"hard_budget","scope":"simple and bounded-three-hop MCP calls at concurrency 1, 4, and 16 plus the declared mixed workload","eligibility":"request frame write through validated complete response includes routing, transport, serialization, service, and response delivery on an eligible calibrated host","state":"ineligible","blocker":"calibration pilot, candidate implementation, and MCP measurements are pending"},
+    {"id":"latency.cold-startup","group":"latency","label":"Cold runtime and MCP readiness","source_refs":["repository_intelligence_contracts#/budgets/default_core/release_limits","measurement_results"],"result_schema":"resource_result","decision_function":"hard_budget","scope":"cold runtime-info completion and cold MCP process start through initialized tool readiness on every release platform","eligibility":"at least thirty measured launches use fixed packaged artifacts, no surviving process, and the declared cache state","state":"missing","blocker":"packaged cold-startup results do not exist"},
+    {"id":"agent.answer-quality","group":"agent-workflow","label":"Agent answer quality","source_refs":["evaluation_manifest#/result_schema/agent_flow_result_metrics","measurement_results"],"result_schema":"agent_workflow_result","decision_function":"agent_non_inferiority","scope":"at least thirty unique blinded paired tasks across the frozen repositories and task families","eligibility":"model, prompts, tool permissions, budgets, rubric, assignment, grading, attempts, and cluster-aware analysis are pinned","state":"missing","blocker":"no blinded paired agent-task results exist"},
+    {"id":"agent.unsupported-assertions","group":"agent-workflow","label":"Unsupported agent assertions","source_refs":["evaluation_manifest#/result_schema/agent_flow_result_metrics","measurement_results"],"result_schema":"agent_workflow_result","decision_function":"agent_non_inferiority","scope":"every frozen repository and task family","eligibility":"the same blinded paired tasks and retained adjudication used for answer quality are present","state":"missing","blocker":"no unsupported-assertion results exist"},
+    {"id":"agent.workflow-context-tokens","group":"agent-workflow","label":"Per-workflow context tokens","source_refs":["evaluation_manifest#/result_schema/agent_flow_result_metrics","repository_intelligence_contracts#/simplicity","measurement_results"],"result_schema":"agent_workflow_result","decision_function":"agent_non_inferiority","scope":"startup-orientation, locate, inspect-summary, and exact-slice workflows, each decided independently","eligibility":"the frozen model, prompts, token counter, response caps, and mandatory call sequence match both baselines","state":"missing","blocker":"per-workflow token baselines and paired results do not exist"},
+    {"id":"agent.workflow-file-reads","group":"agent-workflow","label":"Per-workflow file reads","source_refs":["evaluation_manifest#/result_schema/agent_flow_result_metrics","measurement_results"],"result_schema":"agent_workflow_result","decision_function":"agent_non_inferiority","scope":"startup-orientation, locate, inspect-summary, and exact-slice workflows, each decided independently","eligibility":"read accounting uses the frozen definition and complete tool transcript for both baselines","state":"missing","blocker":"per-workflow read baselines and paired results do not exist"},
+    {"id":"agent.workflow-tool-calls","group":"agent-workflow","label":"Per-workflow tool calls","source_refs":["evaluation_manifest#/result_schema/agent_flow_result_metrics","repository_intelligence_contracts#/simplicity/normal_workflow_new_required_calls","measurement_results"],"result_schema":"agent_workflow_result","decision_function":"agent_non_inferiority","scope":"startup-orientation, locate, inspect-summary, and exact-slice workflows, each decided independently","eligibility":"all calls are captured and the workflow receives no hidden setup or graph-management call","state":"missing","blocker":"per-workflow call baselines and paired results do not exist"},
+    {"id":"agent.mandatory-call-sequence","group":"agent-workflow","label":"Mandatory atlas-first call-sequence growth","source_refs":["repository_intelligence_contracts#/compatibility/cli/atlas_first_workflow","repository_intelligence_contracts#/compatibility/mcp/normal_workflow","repository_intelligence_contracts#/simplicity/normal_workflow_new_required_calls","compatibility_results"],"result_schema":"agent_workflow_result","decision_function":"zero_growth","scope":"startup-orientation, locate, inspect-summary, and exact-slice workflows","eligibility":"old-client and current-client workflow replays exercise automatic graph enrichment with no manual graph setup","state":"ineligible","blocker":"complete old-client workflow replay is pending"},
+    {"id":"architecture.production-code-growth","group":"complexity","label":"Production code growth","source_refs":["architecture_cost_results"],"result_schema":"architecture_cost_result","decision_function":"all_required_members_pass","scope":"ProjectAtlas-owned production Rust, scripts, schema, and installer policy, separated by crate and generated versus handwritten ownership","eligibility":"baseline and candidate use the same tracked-file, generated-file, comment, blank-line, fixture, and vendored-code classification","state":"missing","blocker":"no architecture-cost baseline exists"},
+    {"id":"architecture.generated-code-growth","group":"complexity","label":"Generated code growth","source_refs":["architecture_cost_results"],"result_schema":"architecture_cost_result","decision_function":"all_required_members_pass","scope":"generated Rust, registry, schema, fixtures, manifests, and release data reported separately from production code","eligibility":"generated inputs, outputs, regeneration command, and drift status are present","state":"missing","blocker":"no generated-code baseline exists"},
+    {"id":"architecture.crate-and-dependency-growth","group":"complexity","label":"Crate and dependency growth","source_refs":["repository_intelligence_contracts#/simplicity/new_crate_rule","architecture_cost_results"],"result_schema":"architecture_cost_result","decision_function":"all_required_members_pass","scope":"workspace crates, direct dependencies, transitive dependencies, optional-pack dependency graphs, and dependency cycles, each reported independently","eligibility":"locked baseline and candidate graphs use equivalent feature and target matrices and every increase has a delivered-capability justification","state":"missing","blocker":"no locked architecture dependency baseline exists"},
+    {"id":"architecture.unsafe-native-ffi-boundaries","group":"containment","label":"Unsafe, native, FFI, and dynamic-library boundaries","source_refs":["architecture_cost_results","hosted_results"],"result_schema":"architecture_cost_result","decision_function":"complete_containment","scope":"ProjectAtlas-owned unsafe lines plus every transitive native, unsafe, FFI, dynamic-library, parser, model, ANN, and platform boundary","eligibility":"ProjectAtlas-owned unsafe remains zero and the complete transitive inventory, advisories, safe-wrapper options, provenance, and platform containment evidence are current","state":"pending","blocker":"complete transitive audit and hosted packaged-containment proof remain pending in ARRI-11.18, ARRI-11.23, and ARRI-11.28"},
+    {"id":"architecture.contract-owner-duplication","group":"complexity","label":"Duplicated contract and custom infrastructure owners","source_refs":["architecture_cost_results","review_results"],"result_schema":"architecture_cost_result","decision_function":"review_clearance","scope":"schema, protocol, status, command, event, mode, storage, query, installer-lifecycle, and capability ownership","eligibility":"the architecture review traces every owner and reports duplicate or custom owners rather than relying on source-line totals","state":"missing","blocker":"no current ownership review artifact exists"},
+    {"id":"surface.cli-growth","group":"public-surface","label":"Public CLI surface growth","source_refs":["surface_contract#/cli","repository_intelligence_contracts#/simplicity/allowed_new_analysis_cli_commands","architecture_cost_results"],"result_schema":"architecture_cost_result","decision_function":"zero_growth","scope":"commands, aliases, global options, command options, output modes, required config fields, and user installation steps","eligibility":"generated inventories use the same parser and count each additive surface exactly once","state":"missing","blocker":"the frozen baseline exists but no phase result exists"},
+    {"id":"surface.mcp-growth","group":"public-surface","label":"Public MCP surface growth","source_refs":["surface_contract#/mcp","repository_intelligence_contracts#/simplicity/allowed_new_analysis_tools","architecture_cost_results"],"result_schema":"architecture_cost_result","decision_function":"zero_growth","scope":"tools, request fields, required arguments, response roots, modes, task surfaces, and normal-workflow calls","eligibility":"generated inventories cover every registered MCP tool and distinguish optional additive fields from required workflow growth","state":"missing","blocker":"the frozen baseline exists but no phase result exists"},
+    {"id":"surface.plugin-install-effort","group":"public-surface","label":"Plugin-store installation effort","source_refs":["hosted_results","architecture_cost_results"],"result_schema":"dimension_result","decision_function":"all_required_members_pass","scope":"clean install, first useful overview, update, repair, rollback, remove, and reinstall on every supported host","eligibility":"one official store action provisions matching runtime, skill, and MCP registration with zero manual PATH, config, version, or database wiring","state":"missing","blocker":"ARRI-2.26 plugin-store and host lifecycle feasibility evidence is pending"},
+    {"id":"quality.warnings-and-review-blockers","group":"quality","label":"Warnings and unresolved blocking reviews","source_refs":["architecture_cost_results","review_results"],"result_schema":"architecture_cost_result","decision_function":"review_clearance","scope":"format, locked check, strict Clippy, tests/doctests, rustdoc, architecture, Rust, performance, security, storage, platform, KISS, and agent-workflow findings applicable to the phase","eligibility":"results bind the evaluated commit and every blocking finding has a visible disposition","state":"pending","blocker":"final v0.4 quality-gate and independent release-review evidence is incomplete"}
+  ],
+  "current_phase_exit": {
+    "state": "pass",
+    "claim_state": "no-claim",
+    "required_readiness_gate_count": 4,
+    "passing_readiness_gate_count": 4,
+    "blocking_readiness_gate_count": 0,
+    "blocking_states": {
+      "pending": 0,
+      "missing": 0,
+      "ineligible": 0,
+      "fail": 0,
+      "informational": 0
+    },
+    "blocking_gate_ids": [],
+    "next_phase_reason": "Phase 0 implementation readiness passes with no claim; final performance, compatibility, hosted-platform, containment, plugin, and packaged evidence remains a Section 11 release gate."
+  },
+  "current_release_acceptance": {
+    "state": "blocked",
+    "claim_state": "no-claim",
+    "evaluated_candidate_commit": null,
+    "required_dimension_count": 42,
+    "passing_dimension_count": 0,
+    "blocking_dimension_count": 42,
+    "blocking_states": {
+      "pending": 2,
+      "missing": 34,
+      "ineligible": 6,
+      "fail": 0,
+      "informational": 0
+    },
+    "hosted_required_blockers": [
+      "correctness.platform-unicode",
+      "containment.parser-and-optional-pack",
+      "containment.network-filesystem-execution",
+      "latency.sqlite-warm",
+      "latency.service-warm",
+      "latency.mcp-e2e-warm",
+      "latency.cold-startup",
+      "architecture.unsafe-native-ffi-boundaries",
+      "surface.plugin-install-effort"
+    ],
+    "source_blockers": [
+      "capability_registry#/achieved_manifest is null",
+      "evaluation_manifest#/measurements is empty",
+      "evaluation_manifest#/claim_status is not-measured",
+      "evaluation_manifest#/calibration/state is preregistered-pilot-pending",
+      "evaluation_manifest#/environments/0/claim_eligible is false",
+      "repository_intelligence_contracts#/delivery_status/ARRI-2.4 remains partial",
+      "repository_intelligence_contracts#/delivery_status/ARRI-2.6 remains unmeasured",
+      "repository_intelligence_contracts#/architecture_decisions contains provisional decisions",
+      "required hosted plugin, platform, containment, and independent-review artifacts are missing"
+    ],
+    "smallest_next_independently_releasable_phase": null,
+    "next_phase_reason": "v0.4 cannot release until the reproducible baselines, eligible host calibration, full campaigns, accepted final decisions, hosted feasibility and containment evidence, and final review dispositions pass."
+  },
+  "one_page_rendering_contract": {
+    "output_format": "markdown",
+    "output_path_pattern": "docs/benchmarks/generated/{phase_id}-scoreboard.md",
+    "title_template": "ProjectAtlas v0.4 {phase_id} Scoreboard",
+    "required_sections": [
+      "identity-and-claim-banner",
+      "phase-exit-decision",
+      "independent-dimension-table",
+      "complexity-added-deleted-deferred",
+      "smallest-next-releasable-phase",
+      "source-provenance"
+    ],
+    "banner_fields": [
+      "phase_id",
+      "candidate_commit",
+      "baseline_commits",
+      "claim_state",
+      "phase_exit_state",
+      "eligible_required_dimensions",
+      "passing_required_dimensions",
+      "blocking_required_dimensions"
+    ],
+    "dimension_table_columns": [
+      "group",
+      "dimension",
+      "eligible_members",
+      "required_members",
+      "decision_function",
+      "observed",
+      "threshold",
+      "state",
+      "blocker_or_evidence"
+    ],
+    "group_order": [
+      "correctness",
+      "compatibility",
+      "determinism",
+      "containment",
+      "performance",
+      "resources",
+      "writes",
+      "bytes",
+      "latency",
+      "agent-workflow",
+      "complexity",
+      "public-surface",
+      "quality"
+    ],
+    "member_rendering": "a dimension row may compact members as passed-over-required plus blocker count, but it must retain a stable evidence link containing every member decision and must print every non-pass member ID when the count fits the one-page target",
+    "one_page_rule": "compact presentation may collapse evidence detail but never collapse, average, omit, or change an independent decision",
+    "required_questions": [
+      "what became measurably better",
+      "what complexity was added",
+      "what was deleted or deferred",
+      "whether the next phase is the smallest independently releasable step"
+    ],
+    "prohibited_output": [
+      "composite score",
+      "aggregate pass that hides a non-pass member",
+      "green phase status while a required dimension is missing, ineligible, informational, pending, or failing",
+      "superiority language without eligible dimension-specific evidence",
+      "host-normalized latency produced by dividing by calibration",
+      "omission of failures, excluded cells, confidence bounds, methodology version, or evidence links"
+    ]
+  }
+}

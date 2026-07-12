@@ -1,5 +1,7 @@
 //! Purpose: Define `ProjectAtlas` 3 core domain models and shared helpers.
 
+pub mod budget;
+pub mod graph;
 pub mod health;
 pub mod language;
 pub mod outline;

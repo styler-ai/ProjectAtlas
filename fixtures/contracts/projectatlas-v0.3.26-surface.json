@@ -1,0 +1,3306 @@
+{
+  "schema_version": 1,
+  "baseline": {
+    "runtime_version": "0.3.26",
+    "planning_commit": "c672442438404411389ef86e2efd767f3a4b2be0",
+    "runtime_source_commit": "d3b3e157f954c7d360d821ed0385762e8b044385",
+    "source_tree": "cc9bc004837c8843b84151cb269fba41e8944116",
+    "runtime_paths_dirty": false
+  },
+  "cli": [
+    {
+      "path": "projectatlas",
+      "aliases": [],
+      "subcommand_required": true,
+      "arg_required_else_help": true,
+      "arguments": [
+        {
+          "id": "db",
+          "short": null,
+          "long": "db",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            ".projectatlas/projectatlas.db"
+          ],
+          "possible_values": []
+        },
+        {
+          "id": "format",
+          "short": null,
+          "long": "format",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "toon"
+          ],
+          "possible_values": [
+            "toon",
+            "json"
+          ]
+        },
+        {
+          "id": "session",
+          "short": null,
+          "long": "session",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "default"
+          ],
+          "possible_values": []
+        },
+        {
+          "id": "config",
+          "short": null,
+          "long": "config",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "require_version",
+          "short": null,
+          "long": "require-version",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "201c0e2cf9e0234e7cfa708a9e2f6526e3700a00e2a548be45f63a12285f7858"
+    },
+    {
+      "path": "projectatlas config",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "print",
+          "short": null,
+          "long": "print",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "long_help_sha256": "f04f07b4e31df7669098a862daec413269543a786149bb9dc593b05089cccb41"
+    },
+    {
+      "path": "projectatlas files",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "query",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "folder",
+          "short": null,
+          "long": "folder",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "file_pattern",
+          "short": null,
+          "long": "file-pattern",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "include_content",
+          "short": null,
+          "long": "include-content",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [
+            "false"
+          ],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "id": "limit",
+          "short": null,
+          "long": "limit",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "10"
+          ],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "b6c82998cb75a68f2be6d1604353ad2e6b26fbf39d8c3e40cbe9dc4ce32ebbe8"
+    },
+    {
+      "path": "projectatlas folders",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "query",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "limit",
+          "short": null,
+          "long": "limit",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "10"
+          ],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "2ce296a6be8247e046b4a34eabd24d83b857b6ca6c3431a6f059313d3dad2dc9"
+    },
+    {
+      "path": "projectatlas health",
+      "aliases": [],
+      "subcommand_required": true,
+      "arg_required_else_help": true,
+      "arguments": [],
+      "long_help_sha256": "eae98f7293404dad7567bd3a1909c944c26695eca4a1ed3e9422592a880cedb5"
+    },
+    {
+      "path": "projectatlas health resolve",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "finding_id",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "category",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "path",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "related_path",
+          "short": null,
+          "long": "related-path",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "rationale",
+          "short": null,
+          "long": "rationale",
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "a5596e74335c54da885fb7254e8a7d0537f036543fce70dd8744144affdb301f"
+    },
+    {
+      "path": "projectatlas health-check",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "start_index",
+          "short": null,
+          "long": "start-index",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "0"
+          ],
+          "possible_values": []
+        },
+        {
+          "id": "limit",
+          "short": null,
+          "long": "limit",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "50"
+          ],
+          "possible_values": []
+        },
+        {
+          "id": "category",
+          "short": null,
+          "long": "category",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "severity",
+          "short": null,
+          "long": "severity",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "info",
+            "warning",
+            "error"
+          ]
+        },
+        {
+          "id": "path_prefix",
+          "short": null,
+          "long": "path-prefix",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "summary_only",
+          "short": null,
+          "long": "summary-only",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "id": "source_only",
+          "short": null,
+          "long": "source-only",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "long_help_sha256": "62cc4e1710a7707b156d0b74a093d131c9ef0f5ff9c8b53e224fda77e0ccd2b8"
+    },
+    {
+      "path": "projectatlas ignore",
+      "aliases": [],
+      "subcommand_required": true,
+      "arg_required_else_help": true,
+      "arguments": [],
+      "long_help_sha256": "198bea4f5b93a3cab0f31050d19ebadb52bfc5a7c4f9162f58d057333f5f0304"
+    },
+    {
+      "path": "projectatlas ignore add",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "kind",
+          "short": null,
+          "long": "kind",
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "dir-name",
+            "path-prefix"
+          ]
+        },
+        {
+          "id": "value",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "ee7b3f7970b74e494f180d94327a20763aa8313764a3b86701c5fb180f555c07"
+    },
+    {
+      "path": "projectatlas ignore init-gitignore",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [],
+      "long_help_sha256": "41cea62203d54b3af28f90cc47c3d5c2076bd348a50f3435998475808012a9e6"
+    },
+    {
+      "path": "projectatlas ignore list",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [],
+      "long_help_sha256": "b50b227e01e4a72aea2591dc65e1471a4bfbf8e974bcf75634785e0e0f4f33cd"
+    },
+    {
+      "path": "projectatlas ignore remove",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "kind",
+          "short": null,
+          "long": "kind",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "dir-name",
+            "path-prefix"
+          ]
+        },
+        {
+          "id": "value",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "72ba0e36685fece3d9e5a1cb03fb341b72a526d9c692128aa21078e9f6fee8bb"
+    },
+    {
+      "path": "projectatlas init",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "no_scan",
+          "short": null,
+          "long": "no-scan",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "id": "force_rescan",
+          "short": null,
+          "long": "force-rescan",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "id": "text_index_max_bytes",
+          "short": null,
+          "long": "text-index-max-bytes",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "12ac7bb2f9630f04c99e1e8b05ae799e2b185b9f4c76e797f2e333e57413487a"
+    },
+    {
+      "path": "projectatlas lint",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "strict_folders",
+          "short": null,
+          "long": "strict-folders",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "id": "purpose_level",
+          "short": null,
+          "long": "purpose-level",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "low"
+          ],
+          "possible_values": [
+            "low",
+            "medium",
+            "strict"
+          ]
+        },
+        {
+          "id": "report_untracked",
+          "short": null,
+          "long": "report-untracked",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "id": "strict_untracked",
+          "short": null,
+          "long": "strict-untracked",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "long_help_sha256": "7077cf2104c961300e27d959d97aa3210b569bf79e37ae012e476b7ed33dd859"
+    },
+    {
+      "path": "projectatlas map",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "json",
+          "short": null,
+          "long": "json",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "id": "force",
+          "short": null,
+          "long": "force",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "long_help_sha256": "e32522ad3ba986cc1a05c58ab9918a448c99caea76f6ba96085f541338311854"
+    },
+    {
+      "path": "projectatlas mcp",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "nearest_project",
+          "short": null,
+          "long": "nearest-project",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "long_help_sha256": "fffeb85d3bd333a6be0da814069fa62a441b1312c03697d256ef4708473b01f6"
+    },
+    {
+      "path": "projectatlas mcp-config",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "server_name",
+          "short": null,
+          "long": "server-name",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "projectatlas"
+          ],
+          "possible_values": []
+        },
+        {
+          "id": "harness",
+          "short": null,
+          "long": "harness",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "mcp-json"
+          ],
+          "possible_values": [
+            "mcp-json",
+            "codex",
+            "claude-code",
+            "opencode"
+          ]
+        },
+        {
+          "id": "nearest_project",
+          "short": null,
+          "long": "nearest-project",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "long_help_sha256": "4190d428b09924ce167da0002f1cd715f5f0471ee51baa29e7d86964e555a5da"
+    },
+    {
+      "path": "projectatlas next",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "query",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "limit",
+          "short": null,
+          "long": "limit",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "3"
+          ],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "aaa3e1e33dc3d055bafff569348d4c602dd3881cce9c746800e4fda4ac3286b7"
+    },
+    {
+      "path": "projectatlas outline",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "file",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "lines",
+          "short": null,
+          "long": "lines",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "12"
+          ],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "106d39310dfb0a37bb80011cd920c9e6c266ff8c91d45221754e9094ed2bfb91"
+    },
+    {
+      "path": "projectatlas overview",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [],
+      "long_help_sha256": "a3c1ee90a50a4d57a6c44f6d1514e5346e95992c82f644532e8f1a7092b8e0fc"
+    },
+    {
+      "path": "projectatlas parity",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "profile",
+          "short": null,
+          "long": "profile",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "repository-intelligence"
+          ],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "22fef564eb78c8fef735c06cea000b8c027cbabec8ddbdd2d180509241a54965"
+    },
+    {
+      "path": "projectatlas parity report",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "profile",
+          "short": null,
+          "long": "profile",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "repository-intelligence"
+          ],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "5ad863c951f157add31a49c5af797c5a217c55256f5d904f8db39450fc5159c7"
+    },
+    {
+      "path": "projectatlas purpose",
+      "aliases": [],
+      "subcommand_required": true,
+      "arg_required_else_help": true,
+      "arguments": [],
+      "long_help_sha256": "01d72f1aa5c73671476ae0d184487713d60d073c253872602a42add999a6ba50"
+    },
+    {
+      "path": "projectatlas purpose queue",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "start_index",
+          "short": null,
+          "long": "start-index",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "0"
+          ],
+          "possible_values": []
+        },
+        {
+          "id": "limit",
+          "short": null,
+          "long": "limit",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "50"
+          ],
+          "possible_values": []
+        },
+        {
+          "id": "category",
+          "short": null,
+          "long": "category",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "severity",
+          "short": null,
+          "long": "severity",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "info",
+            "warning",
+            "error"
+          ]
+        },
+        {
+          "id": "path_prefix",
+          "short": null,
+          "long": "path-prefix",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "summary_only",
+          "short": null,
+          "long": "summary-only",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "id": "include_assets",
+          "short": null,
+          "long": "include-assets",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "id": "include_low_priority_files",
+          "short": null,
+          "long": "include-low-priority-files",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "long_help_sha256": "b6b82c0a4bdfb79d649ac1666a637ad9ff7b0f7d74596e1f21c879bcec739f4b"
+    },
+    {
+      "path": "projectatlas purpose review",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "from_file",
+          "short": null,
+          "long": "from-file",
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "apply",
+          "short": null,
+          "long": "apply",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "long_help_sha256": "6463b0edecba91a88a36e8065dd27b28eb3193ed4859e29bbd094f5c6890059d"
+    },
+    {
+      "path": "projectatlas purpose set",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "path",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "purpose",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "f25049da2c0334c1a1fb18e2f0d4b373019dc81c7f9b79a3237dc68184906a2a"
+    },
+    {
+      "path": "projectatlas reset-index",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "apply",
+          "short": null,
+          "long": "apply",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "id": "dry_run",
+          "short": null,
+          "long": "dry-run",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "id": "include_mcp_config",
+          "short": null,
+          "long": "include-mcp-config",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "long_help_sha256": "cf85b9f8fd72a895c02f7e349ce3be7c881a487e38b362eb9f5f7ffb61d0e4a5"
+    },
+    {
+      "path": "projectatlas root",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [],
+      "long_help_sha256": "a73931687153174514728e2cbf53f4f9b572a497833bfe19e4ee5ab3986460fa"
+    },
+    {
+      "path": "projectatlas root set",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "path",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "nearest_project",
+          "short": null,
+          "long": "nearest-project",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "long_help_sha256": "6e2a2c2f4ed082fbb464af813be98473bd9b121f101eca6089df6ff094de9f90"
+    },
+    {
+      "path": "projectatlas root show",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [],
+      "long_help_sha256": "e5ad6833fb6abfc1343db6ac9b9bf9a19d82865d35ee056e27efccf168744d74"
+    },
+    {
+      "path": "projectatlas root verify",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [],
+      "long_help_sha256": "b9f80af057284595eb718b35bf028ea1753bedab06ec13d4932a027cbae421a1"
+    },
+    {
+      "path": "projectatlas runtime-info",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [],
+      "long_help_sha256": "788f88d03efce89c1e76c220584fa71beeafdf82fb6a7c74cfb328d07dbfc392"
+    },
+    {
+      "path": "projectatlas scan",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "path",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "."
+          ],
+          "possible_values": []
+        },
+        {
+          "id": "text_index_max_bytes",
+          "short": null,
+          "long": "text-index-max-bytes",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "065f67a296d637259b28485b8b621390c8e28fa5f876be19c4a34430471c452d"
+    },
+    {
+      "path": "projectatlas search",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "pattern",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "regex",
+          "short": null,
+          "long": "regex",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "id": "fuzzy",
+          "short": null,
+          "long": "fuzzy",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "id": "case_sensitive",
+          "short": null,
+          "long": "case-sensitive",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "id": "file_pattern",
+          "short": null,
+          "long": "file-pattern",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "context_lines",
+          "short": null,
+          "long": "context-lines",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "0"
+          ],
+          "possible_values": []
+        },
+        {
+          "id": "start_index",
+          "short": null,
+          "long": "start-index",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "0"
+          ],
+          "possible_values": []
+        },
+        {
+          "id": "limit",
+          "short": null,
+          "long": "limit",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "20"
+          ],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "8b1ebc99b6726c8b26556a21b1a571dde237bebd9ec607045f674effcd81566a"
+    },
+    {
+      "path": "projectatlas settings",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [],
+      "long_help_sha256": "83658d02533f21f42a974fafc07440fad0681f1d90f10ea8f085ed451ceddae3"
+    },
+    {
+      "path": "projectatlas slice",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "file",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "start_line",
+          "short": null,
+          "long": "start-line",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "end_line",
+          "short": null,
+          "long": "end-line",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "symbol",
+          "short": null,
+          "long": "symbol",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "symbol_parent",
+          "short": null,
+          "long": "symbol-parent",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "symbol_kind",
+          "short": null,
+          "long": "symbol-kind",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "symbol_line",
+          "short": null,
+          "long": "symbol-line",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "9c85437f110b72984260665fc9e63b62a6f13c241d3df263d7e3f2a8675682e9"
+    },
+    {
+      "path": "projectatlas strip-legacy-purpose",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "path",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "."
+          ],
+          "possible_values": []
+        },
+        {
+          "id": "apply",
+          "short": null,
+          "long": "apply",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "id": "dry_run",
+          "short": null,
+          "long": "dry-run",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "id": "strip_source_headers",
+          "short": null,
+          "long": "strip-source-headers",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "long_help_sha256": "fc924c83efe78ce25d00e1ed04c04f46875aaf29659364944ff244203232c0df"
+    },
+    {
+      "path": "projectatlas summary",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "file",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "limit",
+          "short": null,
+          "long": "limit",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "25"
+          ],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "cbb86a82d9f7d85063c7d7a9972e467732aefea3d2ba71cc7d470b4aae4aeb86"
+    },
+    {
+      "path": "projectatlas symbols",
+      "aliases": [],
+      "subcommand_required": true,
+      "arg_required_else_help": true,
+      "arguments": [],
+      "long_help_sha256": "7a0cc672649dc1c43ba00ff8b0837175cb5d347b541aadacff55d86f8b0240fb"
+    },
+    {
+      "path": "projectatlas symbols build",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "path",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "."
+          ],
+          "possible_values": []
+        },
+        {
+          "id": "max_bytes",
+          "short": null,
+          "long": "max-bytes",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "2000000"
+          ],
+          "possible_values": []
+        },
+        {
+          "id": "max_workers",
+          "short": null,
+          "long": "max-workers",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "timeout_seconds",
+          "short": null,
+          "long": "timeout-seconds",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "be288066495daef9546024cf40c6cdb4fb5aa6c2dd7a326769dbe16026ea36ea"
+    },
+    {
+      "path": "projectatlas symbols list",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "file",
+          "short": null,
+          "long": "file",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "query",
+          "short": null,
+          "long": "query",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "limit",
+          "short": null,
+          "long": "limit",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "50"
+          ],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "2c140bb203eae01488567ca1e9dbf7e569ecbabf958cda2e08d68ccf1d2c166a"
+    },
+    {
+      "path": "projectatlas symbols relations",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "file",
+          "short": null,
+          "long": "file",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "query",
+          "short": null,
+          "long": "query",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "limit",
+          "short": null,
+          "long": "limit",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "50"
+          ],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "4ae2231659fd713048c2371f5fc9becefb838239da26d18949fed25e7f810b5b"
+    },
+    {
+      "path": "projectatlas symbols slice",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "file",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "symbol",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": true,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "symbol_parent",
+          "short": null,
+          "long": "symbol-parent",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "symbol_kind",
+          "short": null,
+          "long": "symbol-kind",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "symbol_line",
+          "short": null,
+          "long": "symbol-line",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "64aa5d240728cafb547f6b9f6938f1fe108cda22e61bc8121908292d8b3d5dbd"
+    },
+    {
+      "path": "projectatlas token",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "session",
+          "short": null,
+          "long": "session",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "view",
+          "short": null,
+          "long": "view",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "agent"
+          ],
+          "possible_values": [
+            "agent",
+            "tui"
+          ]
+        },
+        {
+          "id": "trend",
+          "short": null,
+          "long": "trend",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "day",
+            "week",
+            "month",
+            "year"
+          ]
+        },
+        {
+          "id": "tokenizer",
+          "short": null,
+          "long": "tokenizer",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "o200k_base",
+            "cl100k_base"
+          ]
+        },
+        {
+          "id": "theme",
+          "short": null,
+          "long": "theme",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "dark"
+          ],
+          "possible_values": [
+            "dark",
+            "light"
+          ]
+        }
+      ],
+      "long_help_sha256": "dcf1b9bafd7de305984776732d482fde5e68774326e34e03a83896f8fa04e0f1"
+    },
+    {
+      "path": "projectatlas watch",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [
+        {
+          "id": "path",
+          "short": null,
+          "long": null,
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "."
+          ],
+          "possible_values": []
+        },
+        {
+          "id": "once",
+          "short": null,
+          "long": "once",
+          "index": null,
+          "required": false,
+          "action": "SetTrue",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "id": "poll_seconds",
+          "short": null,
+          "long": "poll-seconds",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "2"
+          ],
+          "possible_values": []
+        },
+        {
+          "id": "max_cycles",
+          "short": null,
+          "long": "max-cycles",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [
+            "0"
+          ],
+          "possible_values": []
+        },
+        {
+          "id": "max_workers",
+          "short": null,
+          "long": "max-workers",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "timeout_seconds",
+          "short": null,
+          "long": "timeout-seconds",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        },
+        {
+          "id": "text_index_max_bytes",
+          "short": null,
+          "long": "text-index-max-bytes",
+          "index": null,
+          "required": false,
+          "action": "Set",
+          "num_args": null,
+          "defaults": [],
+          "possible_values": []
+        }
+      ],
+      "long_help_sha256": "aef6a6a2fff7c3629564975576c33dc065d415ed7a5adb14953c7dd392b07108"
+    },
+    {
+      "path": "projectatlas watch-status",
+      "aliases": [],
+      "subcommand_required": false,
+      "arg_required_else_help": false,
+      "arguments": [],
+      "long_help_sha256": "21aec503d5c5b8110dca513fe60a33c2c4d348f9c1972cbfdd33c9ea12ae969f"
+    }
+  ],
+  "mcp": [
+    {
+      "name": "atlas_config",
+      "description": "Return the effective ProjectAtlas scan, purpose, and output configuration.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "input_schema_sha256": "e49d4f77ec9b398d3a7f49b60d3a31dc58ec03c08188a529c9204c9eef0a3640"
+    },
+    {
+      "name": "atlas_file_summary",
+      "description": "Return structured TOON file intelligence: file purpose, content summary, imports, symbols, line ranges, and calls.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "type": "string"
+          },
+          "nearest_project": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "limit": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          }
+        }
+      },
+      "input_schema_sha256": "070ba141b94ee3b1600b3a7df7b1f97c468c1942d7063d3ae01b418017bae530"
+    },
+    {
+      "name": "atlas_files",
+      "description": "Rank repository files by query, purpose, optional folder, and optional indexed text fallback before an agent opens source.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "query": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "folder": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nearest_project": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "file_pattern": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include_content": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "limit": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          }
+        }
+      },
+      "input_schema_sha256": "699f5503f948b98e6c51f34376ab7bae46fb6c7e30ee3b5b08c52752e00cc7cf"
+    },
+    {
+      "name": "atlas_folders",
+      "description": "Rank repository folders by query and purpose so agents choose a work area before opening files.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "query": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          }
+        }
+      },
+      "input_schema_sha256": "459accd6e4aa1c00eae9a3da38db75c1d827233ccfaa2df38c32b2a4e3bcd552"
+    },
+    {
+      "name": "atlas_health",
+      "description": "Return a bounded ProjectAtlas structural health page with optional category, severity, and path-prefix filters.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start_index": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          },
+          "limit": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "severity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path_prefix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary_only": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "source_only": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "include_assets": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "include_low_priority_files": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "input_schema_sha256": "0e2b2273dfe9c61513d95801b449a96e81fe427535170d221add508be96be0bf"
+    },
+    {
+      "name": "atlas_health_resolve",
+      "description": "Mark a deterministic ProjectAtlas health finding as agent-resolved with rationale.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "finding_id",
+          "category",
+          "path",
+          "rationale"
+        ],
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finding_id": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "related_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rationale": {
+            "type": "string"
+          }
+        }
+      },
+      "input_schema_sha256": "2ae1f8787589b8f39b1e6f5154e6d5f86b965c5c9e33846be7d0e85412ddd5cd"
+    },
+    {
+      "name": "atlas_ignore_add",
+      "description": "Add one manual ProjectAtlas ignore entry to the selected project's config.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "input_schema_sha256": "25947e5ffcca241e805d16870680e18d6d5a95c917638b472164279d9e6f5df9"
+    },
+    {
+      "name": "atlas_ignore_init_gitignore",
+      "description": "Create a project-root .gitignore when it is missing.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "input_schema_sha256": "e49d4f77ec9b398d3a7f49b60d3a31dc58ec03c08188a529c9204c9eef0a3640"
+    },
+    {
+      "name": "atlas_ignore_list",
+      "description": "List effective ProjectAtlas manual ignore policy and inherited .gitignore status.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "input_schema_sha256": "e49d4f77ec9b398d3a7f49b60d3a31dc58ec03c08188a529c9204c9eef0a3640"
+    },
+    {
+      "name": "atlas_ignore_remove",
+      "description": "Remove one manual ProjectAtlas ignore entry from the selected project's config.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "input_schema_sha256": "25947e5ffcca241e805d16870680e18d6d5a95c917638b472164279d9e6f5df9"
+    },
+    {
+      "name": "atlas_init",
+      "description": "Initialize ProjectAtlas project-local config, database, host MCP configs, scan/index, and purpose handoff.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "no_scan": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "force_rescan": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "text_index_max_bytes": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64"
+          }
+        }
+      },
+      "input_schema_sha256": "7b0ad49684baeda16c76adb464ec5431f3124b69a35f5b03507d5045ab6ce26d"
+    },
+    {
+      "name": "atlas_lint",
+      "description": "Run ProjectAtlas lint checks and return an ok flag, CLI-compatible exit code, and report text.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "strict_folders": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "purpose_level": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "report_untracked": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "strict_untracked": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "input_schema_sha256": "f482ef504aa97d2cb4cec6b86402f4ce78ce065e4c151254d1cc4324adfe9588"
+    },
+    {
+      "name": "atlas_map",
+      "description": "Write the explicit compatibility ProjectAtlas map export for older workflows.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "json": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "force": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "input_schema_sha256": "ac3023c2231227fa54dffbb3f2b0dfb94d8ed95582c937f81a3db06914e4f1b7"
+    },
+    {
+      "name": "atlas_mcp_config",
+      "description": "Return a generated ProjectAtlas MCP config document for mcp-json, codex, claude-code, or opencode hosts.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "harness": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nearest_project": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "input_schema_sha256": "54b4e83443c17bafcc8accb94d27f960c31e03b3f0087f22e9e08ab11dd5fe74"
+    },
+    {
+      "name": "atlas_next",
+      "description": "Recommend top indexed folders/files with reasons and deterministic follow-up commands for a task query.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "query": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          }
+        }
+      },
+      "input_schema_sha256": "459accd6e4aa1c00eae9a3da38db75c1d827233ccfaa2df38c32b2a4e3bcd552"
+    },
+    {
+      "name": "atlas_outline",
+      "description": "Return compact TOON outline and preview context for a selected file.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "type": "string"
+          },
+          "nearest_project": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "lines": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          }
+        }
+      },
+      "input_schema_sha256": "30339a0e89226d1e4b8871cb94bcf7d077eba37385df31794f0d9bfe25ee7292"
+    },
+    {
+      "name": "atlas_overview",
+      "description": "Return a compact TOON overview of indexed files, folders, and purpose coverage.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "input_schema_sha256": "e49d4f77ec9b398d3a7f49b60d3a31dc58ec03c08188a529c9204c9eef0a3640"
+    },
+    {
+      "name": "atlas_parity_report",
+      "description": "Return a ProjectAtlas repository-intelligence parity gate report for release and agent-runtime readiness.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "profile": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "input_schema_sha256": "dec0c04800efe6ef84e93c32be33a90474aa784ff891c7579a1eaf873b3e1aaf"
+    },
+    {
+      "name": "atlas_purpose_queue",
+      "description": "Return a bounded folder-first queue of ProjectAtlas paths that need agent purpose curation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start_index": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          },
+          "limit": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "severity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path_prefix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary_only": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "source_only": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "include_assets": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "include_low_priority_files": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "input_schema_sha256": "0e2b2273dfe9c61513d95801b449a96e81fe427535170d221add508be96be0bf"
+    },
+    {
+      "name": "atlas_purpose_review",
+      "description": "Preview or apply agent-reviewed ProjectAtlas purpose metadata for multiple indexed paths.",
+      "input_schema": {
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "items": {
+            "items": {
+              "$ref": "#/$defs/AtlasPurposeReviewItem"
+            },
+            "type": "array"
+          },
+          "apply": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "$defs": {
+          "AtlasPurposeReviewItem": {
+            "required": [
+              "path"
+            ],
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "purpose": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "confirm_existing": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "input_schema_sha256": "aa4d2d249ad80bd157f2c266b5b8c477179be2a5f1108336e825c2479147cea9"
+    },
+    {
+      "name": "atlas_purpose_set",
+      "description": "Set agent-approved ProjectAtlas purpose metadata for one indexed path.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "path",
+          "purpose"
+        ],
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          }
+        }
+      },
+      "input_schema_sha256": "6691f6e213da90b3d6e87da8c58e2f7823f42e7d201f4dc84eddcb72a340540d"
+    },
+    {
+      "name": "atlas_reset_index",
+      "description": "Preview or clear ProjectAtlas local SQLite index/cache files for recovery.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "apply": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "dry_run": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "include_mcp_config": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "input_schema_sha256": "34bf2fb62bc067a9364bcdfcf84ed910c4161f76d0f10a6dcf4fb8b3d03e056e"
+    },
+    {
+      "name": "atlas_root",
+      "description": "Show or verify ProjectAtlas root, DB, config, and runtime identity.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verify": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "input_schema_sha256": "305ac8e144dfe0528e9755966eefd13a3aedc10f47e7bbc2420b2a79a3554387"
+    },
+    {
+      "name": "atlas_root_set",
+      "description": "Bind a repository root, generate project-local MCP configs, and make it active for later MCP calls.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "root"
+        ],
+        "properties": {
+          "root": {
+            "type": "string"
+          },
+          "nearest_project": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "input_schema_sha256": "7d08bb4144f76d1001dcec7b42731be4d28178730165f4f57a781d1f4b78e693"
+    },
+    {
+      "name": "atlas_runtime_info",
+      "description": "Return ProjectAtlas runtime identity, version, capabilities, and compiled MCP tool names.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "input_schema_sha256": "e49d4f77ec9b398d3a7f49b60d3a31dc58ec03c08188a529c9204c9eef0a3640"
+    },
+    {
+      "name": "atlas_scan",
+      "description": "Scan repository structure, import ProjectAtlas purpose metadata, rebuild symbols, and return a TOON overview.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nearest_project": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "max_bytes": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64"
+          },
+          "max_workers": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          },
+          "timeout_seconds": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64"
+          },
+          "text_index_max_bytes": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64"
+          }
+        }
+      },
+      "input_schema_sha256": "c70412d30a97b47643c81f471a0bdc16ea09506372b01e8d0e3fa67015723424"
+    },
+    {
+      "name": "atlas_search",
+      "description": "Search indexed files with literal, regex, or fuzzy matching, file filters, pagination, and TOON results.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "pattern"
+        ],
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pattern": {
+            "type": "string"
+          },
+          "regex": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "fuzzy": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "case_sensitive": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "file_pattern": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "context_lines": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          },
+          "start_index": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          },
+          "limit": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          }
+        }
+      },
+      "input_schema_sha256": "caada552659827af28faa79b7c8c8eb2b5af495c2a486bc747bef939e0d5b989"
+    },
+    {
+      "name": "atlas_session_brief",
+      "description": "Return selected project identity, index state, ranked candidates, blockers, and typed next-call recommendations for agent startup.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "query": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "folder_limit": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          },
+          "file_limit": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          },
+          "blocker_limit": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          }
+        }
+      },
+      "input_schema_sha256": "b01db20fdaa7e9b93ffa58f931c1ab1b5cb46d76bcf60e4e04cccd4a656acd20"
+    },
+    {
+      "name": "atlas_set_project_path",
+      "description": "Select the active ProjectAtlas project root for later MCP calls that omit project_path.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "project_path"
+        ],
+        "properties": {
+          "project_path": {
+            "type": "string"
+          }
+        }
+      },
+      "input_schema_sha256": "e0d444ea0a4dc56e308def789f36def3f76e2581526b1449c540e9298c5a8466"
+    },
+    {
+      "name": "atlas_settings",
+      "description": "Return ProjectAtlas local settings, config, and durable index paths.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "input_schema_sha256": "e49d4f77ec9b398d3a7f49b60d3a31dc58ec03c08188a529c9204c9eef0a3640"
+    },
+    {
+      "name": "atlas_slice",
+      "description": "Return exact source for a selected line range or indexed symbol, after folder/file orientation.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "type": "string"
+          },
+          "nearest_project": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "start_line": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          },
+          "end_line": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          },
+          "symbol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "symbol_parent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "symbol_kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "symbol_line": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          }
+        }
+      },
+      "input_schema_sha256": "20dab9b20f2f024d6ce5ea6238ca3c83d931c72f9529bb256a7bb752aa09f4bd"
+    },
+    {
+      "name": "atlas_strip_legacy_purpose",
+      "description": "Preview or remove legacy .purpose files after their metadata has been imported to SQLite.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nearest_project": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "apply": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "dry_run": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "strip_source_headers": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "input_schema_sha256": "fb21a0acbb2c158697de73270ffdd769d3f741e7f8144645fd9be23b4d7e6e8d"
+    },
+    {
+      "name": "atlas_symbol_relations",
+      "description": "List imports, calls, dependencies, and containment edges as compact TOON.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nearest_project": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "query": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          }
+        }
+      },
+      "input_schema_sha256": "5e447e4410d3212cd4c95a3bcb1bcb49c12412f48cbd8f34eb6303b75973e830"
+    },
+    {
+      "name": "atlas_symbols",
+      "description": "List indexed symbols by optional file and query as compact TOON.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nearest_project": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "query": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          }
+        }
+      },
+      "input_schema_sha256": "5e447e4410d3212cd4c95a3bcb1bcb49c12412f48cbd8f34eb6303b75973e830"
+    },
+    {
+      "name": "atlas_symbols_build",
+      "description": "Rebuild ProjectAtlas symbol graphs for indexed files and return a TOON build report.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nearest_project": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "max_bytes": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64"
+          },
+          "max_workers": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          },
+          "timeout_seconds": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64"
+          },
+          "text_index_max_bytes": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64"
+          }
+        }
+      },
+      "input_schema_sha256": "c70412d30a97b47643c81f471a0bdc16ea09506372b01e8d0e3fa67015723424"
+    },
+    {
+      "name": "atlas_task_cancel",
+      "description": "Request cancellation for a bounded MCP task-progress record.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "task_id"
+        ],
+        "properties": {
+          "task_id": {
+            "type": "string"
+          }
+        }
+      },
+      "input_schema_sha256": "13a70b2adc4323da9590e7dc398cc3b6b42ae2bc04f129fc5cf217aa9dfa2b19"
+    },
+    {
+      "name": "atlas_task_status",
+      "description": "Return typed status for a bounded MCP task-progress record.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "task_id"
+        ],
+        "properties": {
+          "task_id": {
+            "type": "string"
+          }
+        }
+      },
+      "input_schema_sha256": "13a70b2adc4323da9590e7dc398cc3b6b42ae2bc04f129fc5cf217aa9dfa2b19"
+    },
+    {
+      "name": "atlas_token_report",
+      "description": "Return ProjectAtlas token-savings telemetry for the whole index or one session.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include_chart": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "trend_window": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "theme": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "input_schema_sha256": "4552d24a64617d120538b108fd92709bd03f907dda8f76fb357816ae212d3728"
+    },
+    {
+      "name": "atlas_watch_once",
+      "description": "Run one MCP-safe watcher refresh pass over the repository and rebuild changed symbols, with optional worker, timeout, and text-index size controls.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nearest_project": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "max_workers": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint"
+          },
+          "timeout_seconds": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64"
+          },
+          "text_index_max_bytes": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64"
+          }
+        }
+      },
+      "input_schema_sha256": "d222835609124f57e509cad6c21d881905ffb785862a892837efe3b5bbb91a07"
+    },
+    {
+      "name": "atlas_watch_status",
+      "description": "Return ProjectAtlas watcher availability and current operating mode.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "input_schema_sha256": "e49d4f77ec9b398d3a7f49b60d3a31dc58ec03c08188a529c9204c9eef0a3640"
+    }
+  ]
+}

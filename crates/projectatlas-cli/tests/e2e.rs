@@ -8,13 +8,16 @@ use projectatlas_core::telemetry::{
     READ_AVOIDANCE_CONFIDENCE_MODELED, READ_AVOIDANCE_SCOPE, usage_from_estimates,
 };
 use projectatlas_db::{AtlasStore, HealthResolution};
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{self, Read as IoRead, Write as IoWrite};
+use std::io::{self, BufRead as IoBufRead, BufReader, Read as IoRead, Write as IoWrite};
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::{Command as StdCommand, Stdio};
 use std::thread;
@@ -39,8 +42,217 @@ const PROJECTATLAS_SKILL_DIR: &str = "skills";
 const PROJECTATLAS_SKILL_NAME: &str = "projectatlas";
 const SKILL_FILE_NAME: &str = "SKILL.md";
 const SUBDIR_CONFIG_DIR: &str = "config";
+const COMPATIBILITY_BEHAVIOR_CASES: &str =
+    include_str!("../../../fixtures/contracts/projectatlas-v0.3.26-behavior-cases.json");
+const COMPATIBILITY_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(windows)]
 const PROJECTATLAS_LOCAL_APPDATA_DIR: &str = "ProjectAtlas";
+
+/// Closed compatibility behavior inventory replayed through the real binary.
+#[derive(Debug, Deserialize)]
+struct CompatibilityBehaviorCases {
+    /// CLI output and termination profiles.
+    cli_profiles: BTreeMap<String, CliBehaviorProfile>,
+    /// One executable row per invocable CLI path.
+    cli_cases: Vec<CliBehaviorCase>,
+    /// One executable row per MCP tool.
+    mcp_cases: Vec<McpBehaviorCase>,
+    /// Global JSON and human-facing TUI output-mode replays.
+    output_mode_cases: Vec<OutputModeCase>,
+    /// Representative post-parser and tool-domain failures.
+    failure_cases: CompatibilityFailureCases,
+    /// Exhaustive negative replay policy for every frozen command and tool.
+    failure_coverage: CompatibilityFailureCoverage,
+}
+
+/// Process-level CLI stream and exit expectations.
+#[derive(Debug, Deserialize)]
+struct CliBehaviorProfile {
+    /// Required process exit code.
+    exit_code: i32,
+    /// Standard-output contract name.
+    stdout: String,
+    /// Standard-error contract name.
+    stderr: String,
+    /// Bounded completion mechanism.
+    bounded_stream: String,
+}
+
+/// Frozen root-selection behavior shared by CLI and MCP compatibility rows.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum CompatibilityRootSelection {
+    /// Select the repository from the command working directory.
+    WorkingDirectory,
+    /// Select the repository bound to the explicit database.
+    DatabaseRoot,
+    /// Select repository configuration without requiring indexed data.
+    Configuration,
+    /// Require the database and configuration to agree on one root.
+    DatabaseAndConfiguration,
+    /// Select the root from one explicit positional path.
+    ExplicitPath,
+    /// Run without a selected repository.
+    RuntimeIndependent,
+    /// Retain project selection only within one MCP stdio session.
+    StdioSession,
+    /// Select the project from one MCP call argument.
+    PerCallProjectPath,
+    /// Change the active root for the current MCP session.
+    SessionMutation,
+    /// Persist root binding through the root-set contract.
+    PersistentBinding,
+}
+
+/// Frozen observable side-effect class shared by CLI and MCP compatibility rows.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum CompatibilitySideEffect {
+    /// Create project-local files and populate the database.
+    FilesystemAndDatabase,
+    /// Mutate only derived or authored database state.
+    Database,
+    /// Perform no durable mutation.
+    None,
+    /// Record bounded usage telemetry while serving the request.
+    Telemetry,
+    /// Mutate project or host configuration.
+    Configuration,
+    /// Mutate a project-local filesystem artifact.
+    Filesystem,
+    /// Report a planned mutation without applying it.
+    Preview,
+    /// Exchange a bounded stdio protocol stream.
+    Stream,
+    /// Mutate only current MCP session state.
+    Session,
+}
+
+/// One real CLI compatibility replay row.
+#[derive(Debug, Deserialize)]
+struct CliBehaviorCase {
+    /// Frozen public invocation path.
+    invocation: String,
+    /// Referenced CLI behavior profile.
+    profile: String,
+    /// Arguments after global `ProjectAtlas` options.
+    arguments: Vec<String>,
+    /// Required stdout roots or semantic fields.
+    required_stdout: Vec<String>,
+    /// Required stderr fields for diagnostic profiles.
+    #[serde(default)]
+    required_stderr: Vec<String>,
+    /// Frozen root-selection mode.
+    root_selection: CompatibilityRootSelection,
+    /// Frozen side-effect class.
+    side_effect: CompatibilitySideEffect,
+}
+
+/// One real MCP compatibility replay row.
+#[derive(Debug, Deserialize)]
+struct McpBehaviorCase {
+    /// Frozen public tool name.
+    tool: String,
+    /// Referenced MCP behavior profile.
+    profile: String,
+    /// JSON Schema-compatible tool arguments.
+    arguments: Value,
+    /// Required TOON response roots or semantic fields.
+    required_text: Vec<String>,
+    /// Frozen root-selection mode.
+    root_selection: CompatibilityRootSelection,
+    /// Frozen side-effect class.
+    side_effect: CompatibilitySideEffect,
+}
+
+/// One non-default or human-facing CLI output-mode replay.
+#[derive(Debug, Deserialize)]
+struct OutputModeCase {
+    /// Stable case identity.
+    id: String,
+    /// Full CLI arguments including global output options.
+    arguments: Vec<String>,
+    /// Expected output representation.
+    stdout: String,
+    /// Required top-level JSON fields.
+    #[serde(default)]
+    required_fields: Vec<String>,
+    /// Required text fragments.
+    #[serde(default)]
+    required_fragments: Vec<String>,
+    /// Bounded completion mechanism.
+    bounded_stream: String,
+}
+
+/// Closed representative failure-case groups.
+#[derive(Debug, Deserialize)]
+struct CompatibilityFailureCases {
+    /// CLI failures after successful argument parsing.
+    cli: Vec<CliFailureCase>,
+    /// MCP domain failures returned as TOON error payloads.
+    mcp: Vec<McpFailureCase>,
+}
+
+/// One real command-specific CLI failure.
+#[derive(Debug, Deserialize)]
+struct CliFailureCase {
+    /// Stable case identity.
+    id: String,
+    /// Arguments after global `ProjectAtlas` options.
+    arguments: Vec<String>,
+    /// Required process exit code.
+    exit_code: i32,
+    /// Standard-output contract name.
+    stdout: String,
+    /// Required diagnostic fragment.
+    stderr_contains: String,
+}
+
+/// One real MCP tool-domain failure.
+#[derive(Debug, Deserialize)]
+struct McpFailureCase {
+    /// Stable case identity.
+    id: String,
+    /// Frozen public tool name.
+    tool: String,
+    /// JSON Schema-compatible tool arguments.
+    arguments: Value,
+    /// Referenced error behavior profile.
+    profile: String,
+    /// Required TOON error fields.
+    required_text: Vec<String>,
+}
+
+/// Executable negative coverage rules shared by every frozen surface row.
+#[derive(Debug, Deserialize)]
+struct CompatibilityFailureCoverage {
+    /// Unknown CLI option replayed once for every invocable command path.
+    cli_unknown_option: String,
+    /// Missing project path used for project-bound MCP domain failures.
+    mcp_missing_project_path: String,
+    /// Runtime-independent tools whose bounded not-found result is their negative contract.
+    mcp_not_found_tools: Vec<String>,
+    /// Runtime-independent tools without an applicable domain failure.
+    mcp_no_domain_failure_tools: Vec<String>,
+}
+
+/// Stable logical database state used to prove compatibility side effects.
+#[derive(Debug, Eq, PartialEq)]
+struct CompatibilityDatabaseSnapshot {
+    /// Stable JSON encoding of indexed and authored state, excluding telemetry.
+    logical_state: String,
+    /// Number of persisted usage events.
+    usage_events: usize,
+}
+
+/// Durable project state before or after one compatibility invocation.
+#[derive(Debug, Eq, PartialEq)]
+struct CompatibilityDurableSnapshot {
+    /// Content digests for project files other than `SQLite` runtime files.
+    files: BTreeMap<String, String>,
+    /// Logical database state when an index exists.
+    database: Option<CompatibilityDatabaseSnapshot>,
+}
 
 #[test]
 fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn Error>> {
@@ -72,7 +284,7 @@ fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn E
         return Err(io::Error::other("runtime-info created .projectatlas").into());
     }
     let required_version = format!("v{}", env!("CARGO_PKG_VERSION"));
-    Command::cargo_bin("projectatlas")?
+    compatibility_command()?
         .current_dir(&repo)
         .args([
             "--require-version",
@@ -81,7 +293,7 @@ fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn E
         ])
         .assert()
         .success();
-    Command::cargo_bin("projectatlas")?
+    compatibility_command()?
         .current_dir(&repo)
         .args(["--require-version", "0.0.0", "runtime-info"])
         .assert()
@@ -477,7 +689,7 @@ fn root_set_preserves_flat_config_for_generated_mcp_configs() -> Result<(), Box<
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
     )?;
 
-    Command::cargo_bin("projectatlas")?
+    compatibility_command()?
         .current_dir(&repo)
         .arg("root")
         .arg("set")
@@ -1432,26 +1644,12 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
     fs::copy(&runtime, &stable_runtime)?;
 
-    let db = atlas_dir.join("projectatlas.db");
-    let mut locked_runtime = StdCommand::new(&stable_runtime)
-        .arg("--require-version")
-        .arg(env!("CARGO_PKG_VERSION"))
-        .arg("--db")
-        .arg(&db)
-        .arg("mcp")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    thread::sleep(Duration::from_millis(300));
-    if let Some(status) = locked_runtime.try_wait()? {
-        return Err(io::Error::other(format!(
-            "fixture runtime exited before it could lock the stable mirror: {status}"
-        ))
-        .into());
-    }
+    let _locked_runtime = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&stable_runtime)?;
 
-    let test_result = (|| -> Result<(), Box<dyn Error>> {
+    (|| -> Result<(), Box<dyn Error>> {
         let release_archive = create_windows_release_archive(temp.path(), &runtime)?;
         let (release_base_url, release_server) = serve_release_assets(&release_archive, None)?;
         let workspace_root = workspace_root()?;
@@ -1637,22 +1835,7 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
         }
 
         Ok(())
-    })();
-
-    let kill_result = locked_runtime.kill();
-    let wait_result = locked_runtime.wait();
-    if let Err(error) = kill_result
-        && test_result.is_ok()
-        && error.kind() != io::ErrorKind::InvalidInput
-    {
-        return Err(error.into());
-    }
-    if let Err(error) = wait_result
-        && test_result.is_ok()
-    {
-        return Err(error.into());
-    }
-    test_result
+    })()
 }
 
 #[test]
@@ -1688,7 +1871,7 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         "existing project-local state must survive plugin updates\n",
     )?;
     let db = atlas_dir.join("projectatlas.db");
-    Command::cargo_bin("projectatlas")?
+    compatibility_command()?
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -4771,6 +4954,867 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         &["file_purpose"],
         "Imported Rust library purpose for MCP review.",
     )?;
+    Ok(())
+}
+
+#[test]
+fn frozen_compatibility_behavior_cases_replay_real_cli_and_mcp() -> Result<(), Box<dyn Error>> {
+    let fixture: CompatibilityBehaviorCases = serde_json::from_str(COMPATIBILITY_BEHAVIOR_CASES)?;
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    write_compatibility_replay_repo(&repo, "compatibility-replay", "atlas")?;
+    let session_repo = temp.path().join("session-repo");
+    write_compatibility_replay_repo(
+        &session_repo,
+        "compatibility-session-replay",
+        "session-atlas",
+    )?;
+    let legacy_purpose = repo.join("legacy").join(".purpose");
+    fs::create_dir_all(
+        legacy_purpose
+            .parent()
+            .ok_or_else(|| io::Error::other("legacy purpose parent missing"))?,
+    )?;
+    fs::write(&legacy_purpose, "Legacy compatibility replay purpose.\n")?;
+    let db = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let review_file = temp.path().join("compatibility-purpose-review.json");
+    fs::write(
+        &review_file,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "items": [{
+                "path": "src/lib.rs",
+                "purpose": "Compatibility replay fixture library."
+            }]
+        }))?,
+    )?;
+
+    let empty_health_finding = (String::new(), String::new(), String::new());
+    let mut cli_health_finding = None;
+    let mut streamed_cli_case = None;
+    for case in &fixture.cli_cases {
+        let profile = fixture
+            .cli_profiles
+            .get(&case.profile)
+            .ok_or_else(|| io::Error::other(format!("unknown CLI profile {}", case.profile)))?;
+        let health_finding = cli_health_finding.as_ref().unwrap_or(&empty_health_finding);
+        let arguments = case
+            .arguments
+            .iter()
+            .map(|argument| {
+                resolve_compatibility_placeholder(argument, &repo, &review_file, health_finding)
+            })
+            .collect::<Vec<_>>();
+        validate_cli_compatibility_ownership(case, &arguments, &repo)?;
+        replay_cli_failure_for_invocation(
+            case,
+            &arguments,
+            &fixture.failure_coverage.cli_unknown_option,
+            &repo,
+            &db,
+        )?;
+        if profile.stdout == "json_lines" {
+            streamed_cli_case = Some((case, profile));
+            continue;
+        }
+        prepare_compatibility_side_effect(&case.invocation, &repo)?;
+        let before = compatibility_durable_snapshot(&repo, &db)?;
+        let output = compatibility_command()?
+            .current_dir(&repo)
+            .env_remove("CI")
+            .env_remove("GITHUB_ACTIONS")
+            .arg("--db")
+            .arg(&db)
+            .args(&arguments)
+            .output()?;
+        let after = compatibility_durable_snapshot(&repo, &db)?;
+        let exit_code = output.status.code().ok_or_else(|| {
+            io::Error::other(format!(
+                "{} terminated without an exit code",
+                case.invocation
+            ))
+        })?;
+        if exit_code != profile.exit_code {
+            return Err(io::Error::other(format!(
+                "{} exited {exit_code}, expected {}\nstdout:\n{}\nstderr:\n{}",
+                case.invocation,
+                profile.exit_code,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        let stdout = String::from_utf8(output.stdout)?;
+        let stderr = String::from_utf8(output.stderr)?;
+        match profile.stdout.as_str() {
+            "toon_required_roots" => assert_compatibility_fragments(
+                &case.invocation,
+                "stdout",
+                &stdout,
+                &case.required_stdout,
+            )?,
+            "empty" if !stdout.is_empty() => {
+                return Err(io::Error::other(format!(
+                    "{} unexpectedly wrote stdout: {stdout}",
+                    case.invocation
+                ))
+                .into());
+            }
+            "empty" => {}
+            contract => {
+                return Err(io::Error::other(format!(
+                    "{} uses unsupported stdout contract {contract}",
+                    case.invocation
+                ))
+                .into());
+            }
+        }
+        match profile.stderr.as_str() {
+            "empty" if !stderr.is_empty() => {
+                return Err(io::Error::other(format!(
+                    "{} unexpectedly wrote stderr: {stderr}",
+                    case.invocation
+                ))
+                .into());
+            }
+            "empty" => {}
+            "bounded_text" => assert_compatibility_fragments(
+                &case.invocation,
+                "stderr",
+                &stderr,
+                &case.required_stderr,
+            )?,
+            contract => {
+                return Err(io::Error::other(format!(
+                    "{} uses unsupported stderr contract {contract}",
+                    case.invocation
+                ))
+                .into());
+            }
+        }
+        if profile.bounded_stream != "process_exit" {
+            return Err(io::Error::other(format!(
+                "{} lacks bounded process completion",
+                case.invocation
+            ))
+            .into());
+        }
+        assert_compatibility_side_effect(&case.invocation, case.side_effect, &before, &after)?;
+        if case.invocation == "projectatlas init" {
+            cli_health_finding = Some(active_compatibility_health_finding(&db)?);
+        }
+    }
+
+    for case in &fixture.output_mode_cases {
+        let output = compatibility_command()?
+            .current_dir(&repo)
+            .arg("--db")
+            .arg(&db)
+            .args(&case.arguments)
+            .output()?;
+        if !output.status.success()
+            || !output.stderr.is_empty()
+            || case.bounded_stream != "process_exit"
+        {
+            return Err(io::Error::other(format!(
+                "output-mode case {} failed\nstdout:\n{}\nstderr:\n{}",
+                case.id,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        match case.stdout.as_str() {
+            "json_object" => {
+                let payload: Value = serde_json::from_slice(&output.stdout)?;
+                let object = payload.as_object().ok_or_else(|| {
+                    io::Error::other(format!("output-mode case {} is not an object", case.id))
+                })?;
+                for field in &case.required_fields {
+                    if !object.contains_key(field) {
+                        return Err(io::Error::other(format!(
+                            "output-mode case {} lacks JSON field {field}",
+                            case.id
+                        ))
+                        .into());
+                    }
+                }
+            }
+            "bounded_text" => assert_compatibility_fragments(
+                &case.id,
+                "stdout",
+                &String::from_utf8(output.stdout)?,
+                &case.required_fragments,
+            )?,
+            contract => {
+                return Err(io::Error::other(format!(
+                    "output-mode case {} uses unknown contract {contract}",
+                    case.id
+                ))
+                .into());
+            }
+        }
+    }
+
+    let cli_health_finding = cli_health_finding
+        .as_ref()
+        .ok_or_else(|| io::Error::other("CLI init did not produce health findings"))?;
+    for case in &fixture.failure_cases.cli {
+        let arguments = case
+            .arguments
+            .iter()
+            .map(|argument| {
+                resolve_compatibility_placeholder(argument, &repo, &review_file, cli_health_finding)
+            })
+            .collect::<Vec<_>>();
+        let output = compatibility_command()?
+            .current_dir(&repo)
+            .arg("--db")
+            .arg(&db)
+            .args(arguments)
+            .output()?;
+        if output.status.code() != Some(case.exit_code)
+            || (case.stdout == "empty" && !output.stdout.is_empty())
+            || !String::from_utf8_lossy(&output.stderr).contains(&case.stderr_contains)
+        {
+            return Err(io::Error::other(format!(
+                "CLI failure case {} drifted\nstdout:\n{}\nstderr:\n{}",
+                case.id,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+    }
+
+    if !db.is_file()
+        || !repo
+            .join(ATLAS_DIR_NAME)
+            .join("projectatlas.toon")
+            .is_file()
+        || !repo.join(".gitignore").is_file()
+        || !legacy_purpose.is_file()
+        || fs::read_to_string(repo.join(ATLAS_DIR_NAME).join("config.toml"))?
+            .contains("contract-generated")
+    {
+        return Err(
+            io::Error::other("CLI behavior side effects or dry-run preservation drifted").into(),
+        );
+    }
+    if !AtlasStore::open(&db)?
+        .resolved_health_ids()?
+        .iter()
+        .any(|finding_id| finding_id == &cli_health_finding.0)
+    {
+        return Err(io::Error::other("CLI health resolution was not persisted").into());
+    }
+
+    let mcp_health_finding = active_compatibility_health_finding(&db)?;
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let mcp_args = [
+        "--db".to_string(),
+        db.display().to_string(),
+        "mcp".to_string(),
+    ];
+    let mut stdout = String::new();
+    let session_default_id = 2_000_u64;
+    let missing_project_root = temp.path().join("missing-project-root");
+    for (index, case) in fixture.mcp_cases.iter().enumerate() {
+        let id = 100_u64 + u64::try_from(index)?;
+        let mut arguments = case.arguments.clone();
+        resolve_compatibility_value(
+            &mut arguments,
+            &repo,
+            &session_repo,
+            &missing_project_root,
+            &review_file,
+            &mcp_health_finding,
+        );
+        let selected_repo = if matches!(case.tool.as_str(), "atlas_init" | "atlas_set_project_path")
+        {
+            &session_repo
+        } else {
+            &repo
+        };
+        validate_mcp_compatibility_ownership(case, &arguments, selected_repo)?;
+        prepare_compatibility_side_effect(&case.tool, selected_repo)?;
+        let selected_db = selected_repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+        let before = compatibility_durable_snapshot(selected_repo, &selected_db)?;
+        let mut calls = vec![(id, case.tool.clone(), arguments)];
+        if case.tool == "atlas_set_project_path" {
+            calls.push((
+                session_default_id,
+                "atlas_root".to_string(),
+                serde_json::json!({}),
+            ));
+        }
+        let (batch_stdout, responses) =
+            run_compatibility_mcp_calls(&executable, &repo, &mcp_args, &calls)?;
+        stdout.push_str(&batch_stdout);
+        let after = compatibility_durable_snapshot(selected_repo, &selected_db)?;
+        if case.profile != "toon_success" {
+            return Err(io::Error::other(format!(
+                "MCP success case {} has an invalid behavior profile",
+                case.tool
+            ))
+            .into());
+        }
+        let text = compatibility_mcp_text(&responses, id, &case.tool)?;
+        if text.lines().any(|line| line.trim() == "error:") {
+            return Err(io::Error::other(format!(
+                "MCP success case {} returned an error payload: {text}",
+                case.tool
+            ))
+            .into());
+        }
+        assert_compatibility_fragments(&case.tool, "MCP text", text, &case.required_text)?;
+        assert_compatibility_side_effect(&case.tool, case.side_effect, &before, &after)?;
+        if case.tool == "atlas_set_project_path" {
+            assert_selected_project_root(
+                compatibility_mcp_text(&responses, session_default_id, "session root")?,
+                &session_repo,
+                &repo,
+            )?;
+        }
+        let failure_stdout = replay_mcp_failure_for_tool(
+            case,
+            &fixture.failure_coverage,
+            &missing_project_root,
+            &executable,
+            &repo,
+            &mcp_args,
+            3_000_u64 + u64::try_from(index)?,
+        )?;
+        stdout.push_str(&failure_stdout);
+    }
+
+    for (index, case) in fixture.failure_cases.mcp.iter().enumerate() {
+        let id = 1_000_u64 + u64::try_from(index)?;
+        let mut arguments = case.arguments.clone();
+        resolve_compatibility_value(
+            &mut arguments,
+            &repo,
+            &session_repo,
+            &missing_project_root,
+            &review_file,
+            &mcp_health_finding,
+        );
+        let (batch_stdout, responses) = run_compatibility_mcp_calls(
+            &executable,
+            &repo,
+            &mcp_args,
+            &[(id, case.tool.clone(), arguments)],
+        )?;
+        stdout.push_str(&batch_stdout);
+        if case.profile != "toon_error" {
+            return Err(io::Error::other(format!(
+                "MCP failure case {} does not use toon_error",
+                case.id
+            ))
+            .into());
+        }
+        let text = compatibility_mcp_text(&responses, id, &case.id)?;
+        assert_compatibility_fragments(&case.id, "MCP error", text, &case.required_text)?;
+    }
+
+    let missing_index_repo = temp.path().join("missing-index-repo");
+    fs::create_dir(&missing_index_repo)?;
+    let missing_index_id = 2_001_u64;
+    let (missing_index_stdout, missing_index_responses) = run_compatibility_mcp_calls(
+        &executable,
+        &repo,
+        &mcp_args,
+        &[(
+            missing_index_id,
+            "atlas_overview".to_string(),
+            serde_json::json!({"project_path": missing_index_repo}),
+        )],
+    )?;
+    stdout.push_str(&missing_index_stdout);
+    assert_compatibility_fragments(
+        "MCP missing per-call index",
+        "MCP error",
+        compatibility_mcp_text(&missing_index_responses, missing_index_id, "missing index")?,
+        &["error:".to_string()],
+    )?;
+
+    let (stream_case, stream_profile) = streamed_cli_case
+        .ok_or_else(|| io::Error::other("CLI mcp stream case was not replayed"))?;
+    if stream_case.invocation != "projectatlas mcp"
+        || stream_profile.bounded_stream != "stdin_eof"
+        || stream_profile.stderr != "empty"
+    {
+        return Err(io::Error::other("CLI mcp stream contract drifted").into());
+    }
+    assert_compatibility_fragments(
+        &stream_case.invocation,
+        "stdout",
+        &stdout,
+        &stream_case.required_stdout,
+    )?;
+    if !AtlasStore::open(&db)?
+        .resolved_health_ids()?
+        .iter()
+        .any(|finding_id| finding_id == &mcp_health_finding.0)
+    {
+        return Err(io::Error::other("MCP health resolution was not persisted").into());
+    }
+
+    let mismatch_repo = temp.path().join("mismatch-repo");
+    fs::create_dir(&mismatch_repo)?;
+    compatibility_command()?
+        .current_dir(&mismatch_repo)
+        .args(["init", "--no-scan"])
+        .assert()
+        .success();
+    let mismatch = compatibility_command()?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .arg("--config")
+        .arg(mismatch_repo.join(ATLAS_DIR_NAME).join("config.toml"))
+        .args(["root", "verify"])
+        .output()?;
+    if mismatch.status.success() {
+        return Err(io::Error::other("CLI accepted mismatched database and config roots").into());
+    }
+
+    Ok(())
+}
+
+/// Return a real `ProjectAtlas` command with the compatibility replay timeout applied.
+fn compatibility_command() -> Result<Command, Box<dyn Error>> {
+    let mut command = Command::cargo_bin("projectatlas")?;
+    command.timeout(COMPATIBILITY_COMMAND_TIMEOUT);
+    Ok(command)
+}
+
+/// Create one minimal repository used by compatibility replay.
+fn write_compatibility_replay_repo(
+    repo: &Path,
+    package_name: &str,
+    return_value: &str,
+) -> Result<(), Box<dyn Error>> {
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join("Cargo.toml"),
+        format!("[package]\nname = {package_name:?}\nversion = \"0.1.0\"\nedition = \"2024\"\n"),
+    )?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        format!(
+            "pub fn indexed() -> &'static str {{\n    helper()\n}}\n\nfn helper() -> &'static str {{\n    {return_value:?}\n}}\n"
+        ),
+    )?;
+    Ok(())
+}
+
+/// Capture durable project state without depending on `SQLite` file layout.
+fn compatibility_durable_snapshot(
+    repo: &Path,
+    db: &Path,
+) -> Result<CompatibilityDurableSnapshot, Box<dyn Error>> {
+    let mut files = BTreeMap::new();
+    compatibility_file_digests(repo, repo, &mut files)?;
+    let database = if db.is_file() {
+        let store = AtlasStore::open(db)?;
+        let logical_state = serde_json::to_string(&serde_json::json!({
+            "project_root": store.project_root()?,
+            "nodes": store.load_nodes()?,
+            "symbols": store.load_symbols(None, None, usize::MAX)?,
+            "relations": store.load_symbol_relations(None, None, usize::MAX)?,
+            "resolved_health_ids": store.resolved_health_ids()?,
+        }))?;
+        Some(CompatibilityDatabaseSnapshot {
+            logical_state,
+            usage_events: store.usage_events(None)?.len(),
+        })
+    } else {
+        None
+    };
+    Ok(CompatibilityDurableSnapshot { files, database })
+}
+
+/// Hash repository files recursively while excluding `SQLite`'s physical files.
+fn compatibility_file_digests(
+    repo: &Path,
+    directory: &Path,
+    files: &mut BTreeMap<String, String>,
+) -> Result<(), Box<dyn Error>> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            compatibility_file_digests(repo, &path, files)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let relative = path.strip_prefix(repo)?;
+        let file_name = relative
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if file_name == "projectatlas.db"
+            || file_name == "projectatlas.db-wal"
+            || file_name == "projectatlas.db-shm"
+        {
+            continue;
+        }
+        files.insert(
+            relative.to_string_lossy().replace('\\', "/"),
+            sha256_hex(&fs::read(path)?),
+        );
+    }
+    Ok(())
+}
+
+/// Force idempotent mutation cases to have one observable state transition.
+fn prepare_compatibility_side_effect(invocation: &str, repo: &Path) -> Result<(), Box<dyn Error>> {
+    match invocation {
+        "projectatlas scan" => fs::write(
+            repo.join(SRC_DIR_NAME).join("compatibility_cli_scan.rs"),
+            "pub fn compatibility_cli_scan() {}\n",
+        )?,
+        "atlas_scan" => fs::write(
+            repo.join(SRC_DIR_NAME).join("compatibility_mcp_scan.rs"),
+            "pub fn compatibility_mcp_scan() {}\n",
+        )?,
+        "projectatlas symbols build" => {
+            append_compatibility_symbol(repo, "pub fn compatibility_cli_symbol_refresh() {}\n")?;
+        }
+        "atlas_symbols_build" => {
+            append_compatibility_symbol(repo, "pub fn compatibility_mcp_symbol_refresh() {}\n")?;
+        }
+        "projectatlas watch" => fs::write(
+            repo.join(SRC_DIR_NAME).join("compatibility_cli_watch.rs"),
+            "pub fn compatibility_cli_watch() {}\n",
+        )?,
+        "atlas_watch_once" => fs::write(
+            repo.join(SRC_DIR_NAME).join("compatibility_mcp_watch.rs"),
+            "pub fn compatibility_mcp_watch() {}\n",
+        )?,
+        "projectatlas root set" | "atlas_root_set" => {
+            remove_compatibility_file(&repo.join(ATLAS_DIR_NAME).join("projectatlas.mcp.json"))?;
+        }
+        "projectatlas ignore init-gitignore" | "atlas_ignore_init_gitignore" => {
+            remove_compatibility_file(&repo.join(".gitignore"))?;
+        }
+        "projectatlas map" | "atlas_map" => {
+            remove_compatibility_file(&repo.join(ATLAS_DIR_NAME).join("projectatlas.toon"))?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Append one unique symbol declaration for a symbol-build replay.
+fn append_compatibility_symbol(repo: &Path, declaration: &str) -> Result<(), Box<dyn Error>> {
+    let source_path = repo.join(SRC_DIR_NAME).join("lib.rs");
+    let mut source = fs::read_to_string(&source_path)?;
+    if !source.contains(declaration.trim()) {
+        source.push('\n');
+        source.push_str(declaration);
+        fs::write(source_path, source)?;
+    }
+    Ok(())
+}
+
+/// Remove one fixture artifact when it exists.
+fn remove_compatibility_file(path: &Path) -> Result<(), Box<dyn Error>> {
+    if path.is_file() {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+/// Prove one declared side-effect class against durable pre/post state.
+fn assert_compatibility_side_effect(
+    invocation: &str,
+    side_effect: CompatibilitySideEffect,
+    before: &CompatibilityDurableSnapshot,
+    after: &CompatibilityDurableSnapshot,
+) -> Result<(), Box<dyn Error>> {
+    let before_logical = before
+        .database
+        .as_ref()
+        .map(|database| database.logical_state.as_str());
+    let after_logical = after
+        .database
+        .as_ref()
+        .map(|database| database.logical_state.as_str());
+    let before_usage = before
+        .database
+        .as_ref()
+        .map_or(0, |database| database.usage_events);
+    let after_usage = after
+        .database
+        .as_ref()
+        .map_or(0, |database| database.usage_events);
+    let valid = match side_effect {
+        CompatibilitySideEffect::FilesystemAndDatabase => {
+            before.database.is_none()
+                && after.database.is_some()
+                && before.files != after.files
+                && after_logical.is_some()
+        }
+        CompatibilitySideEffect::Database => {
+            before.files == after.files && before_logical != after_logical
+        }
+        CompatibilitySideEffect::None
+        | CompatibilitySideEffect::Preview
+        | CompatibilitySideEffect::Session => before == after,
+        CompatibilitySideEffect::Telemetry => {
+            before.files == after.files
+                && before_logical == after_logical
+                && after_usage > before_usage
+        }
+        CompatibilitySideEffect::Configuration | CompatibilitySideEffect::Filesystem => {
+            before.database == after.database && before.files != after.files
+        }
+        CompatibilitySideEffect::Stream => true,
+    };
+    if !valid {
+        return Err(io::Error::other(format!(
+            "{invocation} did not satisfy its {side_effect:?} durable side-effect contract\nbefore: {before:#?}\nafter: {after:#?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Replay one bounded Clap failure for every invocable CLI path.
+fn replay_cli_failure_for_invocation(
+    case: &CliBehaviorCase,
+    arguments: &[String],
+    unknown_option: &str,
+    repo: &Path,
+    db: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let before = compatibility_durable_snapshot(repo, db)?;
+    let output = compatibility_command()?
+        .current_dir(repo)
+        .env_remove("CI")
+        .env_remove("GITHUB_ACTIONS")
+        .arg("--db")
+        .arg(db)
+        .args(arguments)
+        .arg(unknown_option)
+        .output()?;
+    let after = compatibility_durable_snapshot(repo, db)?;
+    if output.status.code() != Some(2)
+        || !output.stdout.is_empty()
+        || !String::from_utf8_lossy(&output.stderr).contains(unknown_option)
+        || before != after
+    {
+        return Err(io::Error::other(format!(
+            "{} exhaustive parser failure drifted\nstdout:\n{}\nstderr:\n{}",
+            case.invocation,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Run one or more correlated MCP calls in a fresh bounded stdio session.
+fn run_compatibility_mcp_calls(
+    executable: &Path,
+    cwd: &Path,
+    mcp_args: &[String],
+    calls: &[(u64, String, Value)],
+) -> Result<(String, BTreeMap<u64, Value>), Box<dyn Error>> {
+    let mut messages = vec![
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-compatibility-replay","version":"0.3.26"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#.to_string(),
+    ];
+    messages.extend(calls.iter().map(|(id, tool, arguments)| {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments}
+        })
+        .to_string()
+    }));
+    let stdout = run_mcp_stdio(executable, cwd, mcp_args, &messages)?;
+    let responses = compatibility_mcp_responses(&stdout)?;
+    Ok((stdout, responses))
+}
+
+/// Replay the negative domain contract for every MCP tool where one exists.
+fn replay_mcp_failure_for_tool(
+    case: &McpBehaviorCase,
+    policy: &CompatibilityFailureCoverage,
+    missing_project_root: &Path,
+    executable: &Path,
+    cwd: &Path,
+    mcp_args: &[String],
+    id: u64,
+) -> Result<String, Box<dyn Error>> {
+    if policy
+        .mcp_no_domain_failure_tools
+        .iter()
+        .any(|tool| tool == &case.tool)
+    {
+        return Ok(String::new());
+    }
+    let mut arguments = case.arguments.clone();
+    let required = if policy
+        .mcp_not_found_tools
+        .iter()
+        .any(|tool| tool == &case.tool)
+    {
+        arguments = serde_json::json!({"task_id": "compatibility-unknown-task"});
+        if case.tool == "atlas_task_status" {
+            "lookup: not_found"
+        } else {
+            "result: not_found"
+        }
+    } else {
+        if policy.mcp_missing_project_path != "{{missing_project_root}}" {
+            return Err(io::Error::other("MCP missing-project failure policy drifted").into());
+        }
+        let field = match case.root_selection {
+            CompatibilityRootSelection::PerCallProjectPath
+            | CompatibilityRootSelection::SessionMutation => "project_path",
+            CompatibilityRootSelection::PersistentBinding => "root",
+            _ => {
+                return Err(io::Error::other(format!(
+                    "{} lacks exhaustive MCP failure classification",
+                    case.tool
+                ))
+                .into());
+            }
+        };
+        arguments[field] = Value::String(missing_project_root.to_string_lossy().into_owned());
+        "error:"
+    };
+    let (stdout, responses) = run_compatibility_mcp_calls(
+        executable,
+        cwd,
+        mcp_args,
+        &[(id, case.tool.clone(), arguments)],
+    )?;
+    assert_compatibility_fragments(
+        &format!("{} exhaustive failure", case.tool),
+        "MCP text",
+        compatibility_mcp_text(&responses, id, &case.tool)?,
+        &[required.to_string()],
+    )?;
+    if missing_project_root.exists() {
+        return Err(io::Error::other(format!(
+            "{} failure replay created the missing project root",
+            case.tool
+        ))
+        .into());
+    }
+    Ok(stdout)
+}
+
+/// Compare the selected session root with the exact distinct indexed repository.
+fn assert_selected_project_root(
+    text: &str,
+    expected: &Path,
+    initial: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let normalized_text = text.replace("\\\\", "\\").replace('\\', "/");
+    let expected = fs::canonicalize(expected)?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let expected = expected.trim_start_matches("//?/");
+    let initial = fs::canonicalize(initial)?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let initial = initial.trim_start_matches("//?/");
+    if expected == initial
+        || !normalized_text.contains(&format!("root: {expected:?}"))
+        || normalized_text.contains(&format!("root: {initial:?}"))
+    {
+        return Err(io::Error::other(format!(
+            "MCP session root did not switch from {initial} to {expected}: {text}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Validate that a frozen CLI row's root-selection contract is executable.
+fn validate_cli_compatibility_ownership(
+    case: &CliBehaviorCase,
+    arguments: &[String],
+    repo: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let root_is_valid = match case.root_selection {
+        CompatibilityRootSelection::WorkingDirectory => case.invocation == "projectatlas init",
+        CompatibilityRootSelection::DatabaseRoot
+        | CompatibilityRootSelection::DatabaseAndConfiguration => true,
+        CompatibilityRootSelection::Configuration => matches!(
+            case.invocation.as_str(),
+            "projectatlas config" | "projectatlas map"
+        ),
+        CompatibilityRootSelection::ExplicitPath => {
+            case.invocation == "projectatlas root set"
+                && arguments.iter().any(|argument| Path::new(argument) == repo)
+        }
+        CompatibilityRootSelection::RuntimeIndependent => {
+            matches!(
+                case.invocation.as_str(),
+                "projectatlas runtime-info" | "projectatlas watch-status"
+            )
+        }
+        CompatibilityRootSelection::StdioSession => case.invocation == "projectatlas mcp",
+        CompatibilityRootSelection::PerCallProjectPath
+        | CompatibilityRootSelection::SessionMutation
+        | CompatibilityRootSelection::PersistentBinding => false,
+    };
+    if !root_is_valid {
+        return Err(io::Error::other(format!(
+            "{} has an invalid root-selection compatibility contract",
+            case.invocation
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Validate that a frozen MCP row's root-selection contract is executable.
+fn validate_mcp_compatibility_ownership(
+    case: &McpBehaviorCase,
+    arguments: &Value,
+    repo: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let selected_root = arguments
+        .get("project_path")
+        .and_then(Value::as_str)
+        .map(Path::new);
+    let root_is_valid = match case.root_selection {
+        CompatibilityRootSelection::PerCallProjectPath => selected_root == Some(repo),
+        CompatibilityRootSelection::SessionMutation => {
+            case.tool == "atlas_set_project_path" && selected_root == Some(repo)
+        }
+        CompatibilityRootSelection::PersistentBinding => {
+            case.tool == "atlas_root_set"
+                && arguments.get("root").and_then(Value::as_str).map(Path::new) == Some(repo)
+        }
+        CompatibilityRootSelection::RuntimeIndependent => selected_root.is_none(),
+        CompatibilityRootSelection::WorkingDirectory
+        | CompatibilityRootSelection::DatabaseRoot
+        | CompatibilityRootSelection::Configuration
+        | CompatibilityRootSelection::DatabaseAndConfiguration
+        | CompatibilityRootSelection::ExplicitPath
+        | CompatibilityRootSelection::StdioSession => false,
+    };
+    if !root_is_valid {
+        return Err(io::Error::other(format!(
+            "{} has an invalid root-selection compatibility contract",
+            case.tool
+        ))
+        .into());
+    }
     Ok(())
 }
 
@@ -8690,14 +9734,6 @@ fn run_mcp_stdio(
     args: &[String],
     messages: &[impl AsRef<str>],
 ) -> Result<String, Box<dyn Error>> {
-    let input = format!(
-        "{}\n",
-        messages
-            .iter()
-            .map(AsRef::as_ref)
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
     let mut child = StdCommand::new(executable)
         .current_dir(cwd)
         .args(args)
@@ -8710,10 +9746,7 @@ fn run_mcp_stdio(
         .stdin
         .take()
         .ok_or_else(|| io::Error::other("mcp stdin was not piped"))?;
-    stdin.write_all(input.as_bytes())?;
-    drop(stdin);
-
-    let mut stdout_pipe = child
+    let stdout_pipe = child
         .stdout
         .take()
         .ok_or_else(|| io::Error::other("mcp stdout was not piped"))?;
@@ -8721,9 +9754,18 @@ fn run_mcp_stdio(
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("mcp stderr was not piped"))?;
+    let (stdout_sender, stdout_receiver) = std::sync::mpsc::channel::<Vec<u8>>();
     let stdout_reader = thread::spawn(move || -> io::Result<Vec<u8>> {
+        let mut reader = BufReader::new(stdout_pipe);
         let mut output = Vec::new();
-        stdout_pipe.read_to_end(&mut output)?;
+        loop {
+            let mut line = Vec::new();
+            if IoBufRead::read_until(&mut reader, b'\n', &mut line)? == 0 {
+                break;
+            }
+            output.extend_from_slice(&line);
+            let _receiver_disconnected = stdout_sender.send(line).is_err();
+        }
         Ok(output)
     });
     let stderr_reader = thread::spawn(move || -> io::Result<Vec<u8>> {
@@ -8731,6 +9773,51 @@ fn run_mcp_stdio(
         stderr_pipe.read_to_end(&mut output)?;
         Ok(output)
     });
+
+    let protocol_result = (|| -> Result<(), Box<dyn Error>> {
+        for message in messages {
+            let message = message.as_ref();
+            stdin.write_all(message.as_bytes())?;
+            stdin.write_all(b"\n")?;
+            stdin.flush()?;
+            let request: Value = serde_json::from_str(message)?;
+            let Some(request_id) = request.get("id") else {
+                continue;
+            };
+            let deadline = Instant::now() + COMPATIBILITY_COMMAND_TIMEOUT;
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("projectatlas mcp did not answer request {request_id}"),
+                    )
+                    .into());
+                }
+                let line =
+                    stdout_receiver
+                        .recv_timeout(remaining)
+                        .map_err(|error| match error {
+                            std::sync::mpsc::RecvTimeoutError::Timeout => io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                format!("projectatlas mcp did not answer request {request_id}"),
+                            ),
+                            std::sync::mpsc::RecvTimeoutError::Disconnected => io::Error::other(
+                                "projectatlas mcp stdout closed before its response",
+                            ),
+                        })?;
+                let response: Value = serde_json::from_slice(&line)?;
+                if response.get("id") == Some(request_id) {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    })();
+    drop(stdin);
+    if protocol_result.is_err() && child.try_wait()?.is_none() {
+        child.kill()?;
+    }
 
     let started = Instant::now();
     let status = loop {
@@ -8760,6 +9847,7 @@ fn run_mcp_stdio(
     let stderr = stderr_reader
         .join()
         .map_err(|_panic| io::Error::other("mcp stderr reader panicked"))??;
+    protocol_result?;
     if !status.success() {
         return Err(io::Error::other(format!(
             "projectatlas mcp failed: {}",
@@ -8768,6 +9856,140 @@ fn run_mcp_stdio(
         .into());
     }
     Ok(String::from_utf8(stdout)?)
+}
+
+/// Resolve path placeholders in one compatibility CLI argument.
+fn resolve_compatibility_placeholder(
+    value: &str,
+    repo: &Path,
+    review_file: &Path,
+    health_finding: &(String, String, String),
+) -> String {
+    value
+        .replace("{{project_root}}", &repo.to_string_lossy())
+        .replace("{{purpose_review_file}}", &review_file.to_string_lossy())
+        .replace("{{health_finding_id}}", &health_finding.0)
+        .replace("{{health_finding_category}}", &health_finding.1)
+        .replace("{{health_finding_path}}", &health_finding.2)
+}
+
+/// Resolve path placeholders recursively in one compatibility MCP argument payload.
+fn resolve_compatibility_value(
+    value: &mut Value,
+    repo: &Path,
+    session_repo: &Path,
+    missing_project_root: &Path,
+    review_file: &Path,
+    health_finding: &(String, String, String),
+) {
+    match value {
+        Value::String(text) => {
+            *text = resolve_compatibility_placeholder(text, repo, review_file, health_finding)
+                .replace("{{session_project_root}}", &session_repo.to_string_lossy())
+                .replace(
+                    "{{missing_project_root}}",
+                    &missing_project_root.to_string_lossy(),
+                );
+        }
+        Value::Array(values) => {
+            for value in values {
+                resolve_compatibility_value(
+                    value,
+                    repo,
+                    session_repo,
+                    missing_project_root,
+                    review_file,
+                    health_finding,
+                );
+            }
+        }
+        Value::Object(object) => {
+            for value in object.values_mut() {
+                resolve_compatibility_value(
+                    value,
+                    repo,
+                    session_repo,
+                    missing_project_root,
+                    review_file,
+                    health_finding,
+                );
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+/// Return one active deterministic finding without a related-path dependency.
+fn active_compatibility_health_finding(
+    db: &Path,
+) -> Result<(String, String, String), Box<dyn Error>> {
+    let store = AtlasStore::open(db)?;
+    let resolved = store.resolved_health_ids()?;
+    store
+        .unresolved_health_findings(&resolved)?
+        .into_iter()
+        .find(|finding| finding.related_path.is_none())
+        .map(|finding| (finding.id, finding.category, finding.path))
+        .ok_or_else(|| io::Error::other("compatibility replay has no active health finding").into())
+}
+
+/// Require every case-specific response fragment in one concrete stream.
+fn assert_compatibility_fragments(
+    case: &str,
+    stream: &str,
+    actual: &str,
+    required: &[String],
+) -> Result<(), Box<dyn Error>> {
+    if required.is_empty() {
+        return Err(io::Error::other(format!(
+            "compatibility case {case} has no {stream} assertions"
+        ))
+        .into());
+    }
+    for fragment in required {
+        if !actual.contains(fragment) {
+            return Err(io::Error::other(format!(
+                "compatibility case {case} {stream} lacks {fragment:?}:\n{actual}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Parse real JSON-RPC output and index every response by numeric request ID.
+fn compatibility_mcp_responses(stdout: &str) -> Result<BTreeMap<u64, Value>, Box<dyn Error>> {
+    let mut responses = BTreeMap::new();
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let response: Value = serde_json::from_str(line)?;
+        let Some(id) = response["id"].as_u64() else {
+            continue;
+        };
+        if responses.insert(id, response).is_some() {
+            return Err(io::Error::other(format!("duplicate MCP response id {id}")).into());
+        }
+    }
+    Ok(responses)
+}
+
+/// Return the first RMCP text-content payload for one request ID.
+fn compatibility_mcp_text<'a>(
+    responses: &'a BTreeMap<u64, Value>,
+    id: u64,
+    context: &str,
+) -> Result<&'a str, Box<dyn Error>> {
+    responses
+        .get(&id)
+        .and_then(|response| response.pointer("/result/content/0/text"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "MCP response {id} for {context} has no text content: {:?}; response ids: {:?}",
+                responses.get(&id),
+                responses.keys().collect::<Vec<_>>()
+            ))
+            .into()
+        })
 }
 
 /// Require that a real CLI summary reports a caller for a named function.

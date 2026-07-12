@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "fixture_id": "projectatlas.lexical-edge-cases.v1",
+  "rows": [
+    {
+      "path": "controlled/punctuation.rs",
+      "content": "let route = module::handler;\nlet language = \"C++\";\n"
+    },
+    {
+      "path": "controlled/short.rs",
+      "content": "let x = y;\n"
+    },
+    {
+      "path": "controlled/unicode.rs",
+      "content": "fn Delta_東京() {}\nlet café = Delta_東京();\n"
+    },
+    {
+      "path": "controlled/tokenizer.rs",
+      "content": "const ENDPOINT: &str = \"alpha.beta/gamma\";\n"
+    }
+  ],
+  "cases": [
+    {
+      "id": "punctuation-qualified-name",
+      "class": "punctuation",
+      "mode": "literal",
+      "pattern": "::",
+      "case_sensitive": true,
+      "candidate_policy": "force-fallback",
+      "expected_paths": ["controlled/punctuation.rs"]
+    },
+    {
+      "id": "short-single-character",
+      "class": "short-string",
+      "mode": "literal",
+      "pattern": "x",
+      "case_sensitive": true,
+      "candidate_policy": "force-fallback",
+      "expected_paths": ["controlled/short.rs"]
+    },
+    {
+      "id": "unicode-identifier",
+      "class": "unicode-identifier",
+      "mode": "literal",
+      "pattern": "Delta_東京",
+      "case_sensitive": true,
+      "candidate_policy": "force-fallback",
+      "expected_paths": ["controlled/unicode.rs"]
+    },
+    {
+      "id": "regex-unicode-identifier",
+      "class": "regex",
+      "mode": "regex",
+      "pattern": "fn\\s+Delta_東京",
+      "case_sensitive": true,
+      "candidate_policy": "force-fallback",
+      "expected_paths": ["controlled/unicode.rs"]
+    },
+    {
+      "id": "fuzzy-qualified-name",
+      "class": "fuzzy",
+      "mode": "fuzzy",
+      "pattern": "mdlhandler",
+      "case_sensitive": false,
+      "candidate_policy": "force-fallback",
+      "expected_paths": ["controlled/punctuation.rs"]
+    },
+    {
+      "id": "tokenizer-incompatible-pathlike-literal",
+      "class": "tokenizer-incompatible",
+      "mode": "literal",
+      "pattern": "alpha.beta/gamma",
+      "case_sensitive": true,
+      "candidate_policy": "force-fallback",
+      "expected_paths": ["controlled/tokenizer.rs"]
+    }
+  ]
+}

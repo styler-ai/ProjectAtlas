@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "baseline": {
+    "runtime_version": "0.3.26",
+    "surface_path": "fixtures/contracts/projectatlas-v0.3.26-surface.json",
+    "surface_sha256": "eb0e8cb38e66db6d1300ffbe7b94212639ad98113d63bbcb1aac309700d2cb37"
+  },
+  "contract_sources": {
+    "cli_options_defaults_aliases_and_output_modes": "surface.cli",
+    "mcp_request_schemas_and_required_properties": "surface.mcp",
+    "response_families_and_root_rules": "repository_intelligence_contracts.compatibility"
+  },
+  "tools_list_baseline": {
+    "canonical_compact_utf8_bytes": 18595,
+    "canonical_compact_sha256": "1cec07e4bb2abbd8a0de1d54680cd8b5d2120417eb20c333ef043d5aca677b0b",
+    "description_utf8_bytes": 3515,
+    "input_schema_utf8_bytes": 9084,
+    "estimated_tokens_lower_bound": 4649,
+    "estimated_tokens_upper_bound": 6199
+  },
+  "cli_profiles": {
+    "toon_success": {
+      "exit_code": 0,
+      "stdout": "toon_required_roots",
+      "stderr": "empty",
+      "bounded_stream": "process_exit"
+    },
+    "silent_success": {
+      "exit_code": 0,
+      "stdout": "empty",
+      "stderr": "empty",
+      "bounded_stream": "process_exit"
+    },
+    "json_rpc_stream": {
+      "exit_code": 0,
+      "stdout": "json_lines",
+      "stderr": "empty",
+      "bounded_stream": "stdin_eof"
+    }
+  },
+  "mcp_profiles": {
+    "toon_success": {
+      "transport": "tools_call_result",
+      "content_type": "text",
+      "encoding": "toon",
+      "error_root": "absent"
+    },
+    "toon_error": {
+      "transport": "tools_call_result",
+      "content_type": "text",
+      "encoding": "toon",
+      "error_root": "error"
+    }
+  },
+  "cli_cases": [
+    {"invocation":"projectatlas init","profile":"toon_success","arguments":["init","--force-rescan"],"required_stdout":["init:"],"root_selection":"working_directory","side_effect":"filesystem_and_database"},
+    {"invocation":"projectatlas scan","profile":"toon_success","arguments":["scan","."],"required_stdout":["scan:"],"root_selection":"database_root","side_effect":"database"},
+    {"invocation":"projectatlas config","profile":"toon_success","arguments":["config"],"required_stdout":["config:"],"root_selection":"configuration","side_effect":"none"},
+    {"invocation":"projectatlas overview","profile":"toon_success","arguments":["overview"],"required_stdout":["overview:"],"root_selection":"database_root","side_effect":"telemetry"},
+    {"invocation":"projectatlas folders","profile":"toon_success","arguments":["folders","src"],"required_stdout":["folders[","src"],"root_selection":"database_root","side_effect":"telemetry"},
+    {"invocation":"projectatlas files","profile":"toon_success","arguments":["files","indexed","--file-pattern","*.rs"],"required_stdout":["files[","src/lib.rs"],"root_selection":"database_root","side_effect":"telemetry"},
+    {"invocation":"projectatlas next","profile":"toon_success","arguments":["next","indexed"],"required_stdout":["next:"],"root_selection":"database_root","side_effect":"telemetry"},
+    {"invocation":"projectatlas outline","profile":"toon_success","arguments":["outline","src/lib.rs"],"required_stdout":["outline:","src/lib.rs"],"root_selection":"database_root","side_effect":"telemetry"},
+    {"invocation":"projectatlas summary","profile":"toon_success","arguments":["summary","src/lib.rs"],"required_stdout":["file_summary:","src/lib.rs"],"root_selection":"database_root","side_effect":"telemetry"},
+    {"invocation":"projectatlas search","profile":"toon_success","arguments":["search","indexed"],"required_stdout":["search:","src/lib.rs"],"root_selection":"database_root","side_effect":"telemetry"},
+    {"invocation":"projectatlas slice","profile":"toon_success","arguments":["slice","src/lib.rs","--start-line","1","--end-line","3"],"required_stdout":["slice:","src/lib.rs"],"root_selection":"database_root","side_effect":"telemetry"},
+    {"invocation":"projectatlas symbols build","profile":"toon_success","arguments":["symbols","build","."],"required_stdout":["symbols_build:"],"root_selection":"database_root","side_effect":"database"},
+    {"invocation":"projectatlas symbols list","profile":"toon_success","arguments":["symbols","list","--file","src/lib.rs"],"required_stdout":["symbols[","indexed"],"root_selection":"database_root","side_effect":"telemetry"},
+    {"invocation":"projectatlas symbols relations","profile":"toon_success","arguments":["symbols","relations","--file","src/lib.rs"],"required_stdout":["symbol_relations["],"root_selection":"database_root","side_effect":"telemetry"},
+    {"invocation":"projectatlas symbols slice","profile":"toon_success","arguments":["symbols","slice","src/lib.rs","indexed"],"required_stdout":["slice:","indexed"],"root_selection":"database_root","side_effect":"telemetry"},
+    {"invocation":"projectatlas settings","profile":"toon_success","arguments":["settings"],"required_stdout":["settings:"],"root_selection":"database_and_configuration","side_effect":"none"},
+    {"invocation":"projectatlas root","profile":"toon_success","arguments":["root"],"required_stdout":["root:"],"root_selection":"database_and_configuration","side_effect":"none"},
+    {"invocation":"projectatlas root set","profile":"toon_success","arguments":["root","set","{{project_root}}"],"required_stdout":["root:"],"root_selection":"explicit_path","side_effect":"configuration"},
+    {"invocation":"projectatlas root show","profile":"toon_success","arguments":["root","show"],"required_stdout":["root:"],"root_selection":"database_and_configuration","side_effect":"none"},
+    {"invocation":"projectatlas root verify","profile":"toon_success","arguments":["root","verify"],"required_stdout":["root:","verified: true"],"root_selection":"database_and_configuration","side_effect":"none"},
+    {"invocation":"projectatlas ignore init-gitignore","profile":"toon_success","arguments":["ignore","init-gitignore"],"required_stdout":["gitignore:"],"root_selection":"database_and_configuration","side_effect":"filesystem"},
+    {"invocation":"projectatlas ignore add","profile":"toon_success","arguments":["ignore","add","--kind","dir-name","contract-generated"],"required_stdout":["ignore:"],"root_selection":"database_and_configuration","side_effect":"configuration"},
+    {"invocation":"projectatlas ignore list","profile":"toon_success","arguments":["ignore","list"],"required_stdout":["ignore:","contract-generated"],"root_selection":"database_and_configuration","side_effect":"none"},
+    {"invocation":"projectatlas ignore remove","profile":"toon_success","arguments":["ignore","remove","contract-generated","--kind","dir-name"],"required_stdout":["ignore:"],"root_selection":"database_and_configuration","side_effect":"configuration"},
+    {"invocation":"projectatlas health-check","profile":"toon_success","arguments":["health-check"],"required_stdout":["health:"],"root_selection":"database_root","side_effect":"telemetry"},
+    {"invocation":"projectatlas health resolve","profile":"toon_success","arguments":["health","resolve","{{health_finding_id}}","{{health_finding_category}}","{{health_finding_path}}","--rationale","Compatibility replay fixture."],"required_stdout":["health_resolution:"],"root_selection":"database_root","side_effect":"database"},
+    {"invocation":"projectatlas purpose set","profile":"toon_success","arguments":["purpose","set","src/lib.rs","Compatibility replay fixture library."],"required_stdout":["purpose_set:","src/lib.rs"],"root_selection":"database_root","side_effect":"database"},
+    {"invocation":"projectatlas purpose review","profile":"toon_success","arguments":["purpose","review","--from-file","{{purpose_review_file}}"],"required_stdout":["purpose_review:","failed: 0"],"root_selection":"database_root","side_effect":"preview"},
+    {"invocation":"projectatlas purpose queue","profile":"toon_success","arguments":["purpose","queue"],"required_stdout":["purpose_curation:"],"root_selection":"database_root","side_effect":"none"},
+    {"invocation":"projectatlas lint","profile":"silent_success","arguments":["lint"],"required_stdout":[],"root_selection":"database_and_configuration","side_effect":"none"},
+    {"invocation":"projectatlas token","profile":"toon_success","arguments":["token"],"required_stdout":["token_savings:"],"root_selection":"database_root","side_effect":"none"},
+    {"invocation":"projectatlas parity","profile":"toon_success","arguments":["parity"],"required_stdout":["parity:"],"root_selection":"database_root","side_effect":"none"},
+    {"invocation":"projectatlas parity report","profile":"toon_success","arguments":["parity","report","--profile","repository-intelligence"],"required_stdout":["parity:"],"root_selection":"database_root","side_effect":"none"},
+    {"invocation":"projectatlas watch","profile":"toon_success","arguments":["watch","--once","."],"required_stdout":["watch:"],"root_selection":"database_root","side_effect":"database"},
+    {"invocation":"projectatlas watch-status","profile":"toon_success","arguments":["watch-status"],"required_stdout":["watch_status:"],"root_selection":"runtime_independent","side_effect":"none"},
+    {"invocation":"projectatlas strip-legacy-purpose","profile":"toon_success","arguments":["strip-legacy-purpose","--dry-run","."],"required_stdout":["legacy_purpose_migration:"],"root_selection":"database_root","side_effect":"preview"},
+    {"invocation":"projectatlas reset-index","profile":"toon_success","arguments":["reset-index","--dry-run"],"required_stdout":["reset_index:"],"root_selection":"database_root","side_effect":"preview"},
+    {"invocation":"projectatlas map","profile":"silent_success","arguments":["map","--force"],"required_stdout":[],"root_selection":"configuration","side_effect":"filesystem"},
+    {"invocation":"projectatlas mcp-config","profile":"toon_success","arguments":["mcp-config"],"required_stdout":["mcp_config:"],"root_selection":"database_and_configuration","side_effect":"none"},
+    {"invocation":"projectatlas runtime-info","profile":"toon_success","arguments":["runtime-info"],"required_stdout":["runtime:","ProjectAtlas"],"root_selection":"runtime_independent","side_effect":"none"},
+    {"invocation":"projectatlas mcp","profile":"json_rpc_stream","arguments":["mcp"],"required_stdout":["\"jsonrpc\":\"2.0\""],"root_selection":"stdio_session","side_effect":"stream"}
+  ],
+  "mcp_cases": [
+    {"tool":"atlas_init","profile":"toon_success","arguments":{"project_path":"{{session_project_root}}","force_rescan":true},"required_text":["init:"],"root_selection":"per_call_project_path","side_effect":"filesystem_and_database"},
+    {"tool":"atlas_set_project_path","profile":"toon_success","arguments":{"project_path":"{{session_project_root}}"},"required_text":["project:"],"root_selection":"session_mutation","side_effect":"session"},
+    {"tool":"atlas_scan","profile":"toon_success","arguments":{"project_path":"{{project_root}}"},"required_text":["scan:"],"root_selection":"per_call_project_path","side_effect":"database"},
+    {"tool":"atlas_config","profile":"toon_success","arguments":{"project_path":"{{project_root}}"},"required_text":["config:"],"root_selection":"per_call_project_path","side_effect":"none"},
+    {"tool":"atlas_overview","profile":"toon_success","arguments":{"project_path":"{{project_root}}"},"required_text":["overview:"],"root_selection":"per_call_project_path","side_effect":"telemetry"},
+    {"tool":"atlas_folders","profile":"toon_success","arguments":{"project_path":"{{project_root}}","query":"src"},"required_text":["folders[","src"],"root_selection":"per_call_project_path","side_effect":"telemetry"},
+    {"tool":"atlas_files","profile":"toon_success","arguments":{"project_path":"{{project_root}}","query":"indexed","file_pattern":"*.rs"},"required_text":["files[","src/lib.rs"],"root_selection":"per_call_project_path","side_effect":"telemetry"},
+    {"tool":"atlas_next","profile":"toon_success","arguments":{"project_path":"{{project_root}}","query":"indexed"},"required_text":["next:"],"root_selection":"per_call_project_path","side_effect":"telemetry"},
+    {"tool":"atlas_outline","profile":"toon_success","arguments":{"project_path":"{{project_root}}","file":"src/lib.rs"},"required_text":["outline:","src/lib.rs"],"root_selection":"per_call_project_path","side_effect":"telemetry"},
+    {"tool":"atlas_file_summary","profile":"toon_success","arguments":{"project_path":"{{project_root}}","file":"src/lib.rs"},"required_text":["file_summary:","src/lib.rs"],"root_selection":"per_call_project_path","side_effect":"telemetry"},
+    {"tool":"atlas_search","profile":"toon_success","arguments":{"project_path":"{{project_root}}","pattern":"indexed"},"required_text":["search:","src/lib.rs"],"root_selection":"per_call_project_path","side_effect":"telemetry"},
+    {"tool":"atlas_slice","profile":"toon_success","arguments":{"project_path":"{{project_root}}","file":"src/lib.rs","start_line":1,"end_line":3},"required_text":["slice:","src/lib.rs"],"root_selection":"per_call_project_path","side_effect":"telemetry"},
+    {"tool":"atlas_symbols_build","profile":"toon_success","arguments":{"project_path":"{{project_root}}"},"required_text":["symbols_build:"],"root_selection":"per_call_project_path","side_effect":"database"},
+    {"tool":"atlas_symbols","profile":"toon_success","arguments":{"project_path":"{{project_root}}","file":"src/lib.rs"},"required_text":["symbols[","indexed"],"root_selection":"per_call_project_path","side_effect":"telemetry"},
+    {"tool":"atlas_symbol_relations","profile":"toon_success","arguments":{"project_path":"{{project_root}}","file":"src/lib.rs"},"required_text":["symbol_relations["],"root_selection":"per_call_project_path","side_effect":"telemetry"},
+    {"tool":"atlas_settings","profile":"toon_success","arguments":{"project_path":"{{project_root}}"},"required_text":["settings:","mcp_session:"],"root_selection":"per_call_project_path","side_effect":"none"},
+    {"tool":"atlas_root_set","profile":"toon_success","arguments":{"root":"{{project_root}}"},"required_text":["root:"],"root_selection":"persistent_binding","side_effect":"configuration"},
+    {"tool":"atlas_root","profile":"toon_success","arguments":{"project_path":"{{project_root}}","verify":true},"required_text":["root:","verified: true"],"root_selection":"per_call_project_path","side_effect":"none"},
+    {"tool":"atlas_ignore_init_gitignore","profile":"toon_success","arguments":{"project_path":"{{project_root}}"},"required_text":["gitignore:"],"root_selection":"per_call_project_path","side_effect":"filesystem"},
+    {"tool":"atlas_ignore_add","profile":"toon_success","arguments":{"project_path":"{{project_root}}","kind":"dir-name","value":"contract-mcp-generated"},"required_text":["ignore:","contract-mcp-generated"],"root_selection":"per_call_project_path","side_effect":"configuration"},
+    {"tool":"atlas_ignore_list","profile":"toon_success","arguments":{"project_path":"{{project_root}}"},"required_text":["ignore:"],"root_selection":"per_call_project_path","side_effect":"none"},
+    {"tool":"atlas_ignore_remove","profile":"toon_success","arguments":{"project_path":"{{project_root}}","kind":"dir-name","value":"contract-mcp-generated"},"required_text":["ignore:"],"root_selection":"per_call_project_path","side_effect":"configuration"},
+    {"tool":"atlas_health","profile":"toon_success","arguments":{"project_path":"{{project_root}}"},"required_text":["health:"],"root_selection":"per_call_project_path","side_effect":"telemetry"},
+    {"tool":"atlas_health_resolve","profile":"toon_success","arguments":{"project_path":"{{project_root}}","finding_id":"{{health_finding_id}}","category":"{{health_finding_category}}","path":"{{health_finding_path}}","rationale":"Compatibility replay fixture."},"required_text":["health_resolution:"],"root_selection":"per_call_project_path","side_effect":"database"},
+    {"tool":"atlas_purpose_set","profile":"toon_success","arguments":{"project_path":"{{project_root}}","path":"src/lib.rs","purpose":"Compatibility MCP replay fixture library."},"required_text":["purpose_set:","src/lib.rs"],"root_selection":"per_call_project_path","side_effect":"database"},
+    {"tool":"atlas_purpose_review","profile":"toon_success","arguments":{"project_path":"{{project_root}}","items":[{"path":"src/lib.rs","confirm_existing":true}]},"required_text":["purpose_review:","failed: 0"],"root_selection":"per_call_project_path","side_effect":"preview"},
+    {"tool":"atlas_purpose_queue","profile":"toon_success","arguments":{"project_path":"{{project_root}}"},"required_text":["purpose_curation:"],"root_selection":"per_call_project_path","side_effect":"telemetry"},
+    {"tool":"atlas_lint","profile":"toon_success","arguments":{"project_path":"{{project_root}}"},"required_text":["lint:"],"root_selection":"per_call_project_path","side_effect":"none"},
+    {"tool":"atlas_token_report","profile":"toon_success","arguments":{"project_path":"{{project_root}}"},"required_text":["token_savings:"],"root_selection":"per_call_project_path","side_effect":"none"},
+    {"tool":"atlas_parity_report","profile":"toon_success","arguments":{"project_path":"{{project_root}}"},"required_text":["parity:"],"root_selection":"per_call_project_path","side_effect":"none"},
+    {"tool":"atlas_watch_once","profile":"toon_success","arguments":{"project_path":"{{project_root}}"},"required_text":["watch:"],"root_selection":"per_call_project_path","side_effect":"database"},
+    {"tool":"atlas_watch_status","profile":"toon_success","arguments":{"project_path":"{{project_root}}"},"required_text":["watch_status:"],"root_selection":"per_call_project_path","side_effect":"none"},
+    {"tool":"atlas_strip_legacy_purpose","profile":"toon_success","arguments":{"project_path":"{{project_root}}","dry_run":true},"required_text":["legacy_purpose_migration:"],"root_selection":"per_call_project_path","side_effect":"preview"},
+    {"tool":"atlas_reset_index","profile":"toon_success","arguments":{"project_path":"{{project_root}}","dry_run":true},"required_text":["reset_index:"],"root_selection":"per_call_project_path","side_effect":"preview"},
+    {"tool":"atlas_map","profile":"toon_success","arguments":{"project_path":"{{project_root}}","force":true},"required_text":["map:"],"root_selection":"per_call_project_path","side_effect":"filesystem"},
+    {"tool":"atlas_mcp_config","profile":"toon_success","arguments":{"project_path":"{{project_root}}"},"required_text":["mcp_config:"],"root_selection":"per_call_project_path","side_effect":"none"},
+    {"tool":"atlas_session_brief","profile":"toon_success","arguments":{"project_path":"{{project_root}}","query":"indexed"},"required_text":["session_brief:"],"root_selection":"per_call_project_path","side_effect":"none"},
+    {"tool":"atlas_runtime_info","profile":"toon_success","arguments":{},"required_text":["runtime:","ProjectAtlas"],"root_selection":"runtime_independent","side_effect":"none"},
+    {"tool":"atlas_task_status","profile":"toon_success","arguments":{"task_id":"task-progress-contract"},"required_text":["task_status:","task-progress-contract","lookup: found"],"root_selection":"runtime_independent","side_effect":"none"},
+    {"tool":"atlas_task_cancel","profile":"toon_success","arguments":{"task_id":"task-progress-contract"},"required_text":["task_cancel:","already_finished"],"root_selection":"runtime_independent","side_effect":"none"}
+  ],
+  "output_mode_cases": [
+    {"id":"cli-json-runtime-info","arguments":["--format","json","runtime-info"],"stdout":"json_object","required_fields":["project","version","output_formats","mcp_tools"],"bounded_stream":"process_exit"},
+    {"id":"cli-token-tui","arguments":["token","--view","tui"],"stdout":"bounded_text","required_fragments":["T O T A L   T O K E N S   A V O I D E D","F I L E   R E A D S   A V O I D E D"],"bounded_stream":"process_exit"}
+  ],
+  "default_replay": {
+    "authoritative_source":"surface",
+    "cli_cases_using_omitted_defaults":["projectatlas config","projectatlas files","projectatlas folders","projectatlas health-check","projectatlas lint","projectatlas next","projectatlas outline","projectatlas parity","projectatlas runtime-info","projectatlas search","projectatlas summary","projectatlas symbols list","projectatlas symbols relations","projectatlas token","projectatlas watch-status"],
+    "mcp_tools_using_omitted_defaults":["atlas_config","atlas_file_summary","atlas_files","atlas_folders","atlas_health","atlas_lint","atlas_mcp_config","atlas_next","atlas_outline","atlas_overview","atlas_parity_report","atlas_purpose_queue","atlas_runtime_info","atlas_scan","atlas_search","atlas_session_brief","atlas_settings","atlas_symbol_relations","atlas_symbols","atlas_symbols_build","atlas_token_report","atlas_watch_once","atlas_watch_status"]
+  },
+  "failure_cases": {
+    "cli": [
+      {"id":"slice-missing-range","arguments":["slice","src/lib.rs"],"exit_code":1,"stdout":"empty","stderr_contains":"start-line is required"},
+      {"id":"unsupported-parity-profile","arguments":["parity","--profile","contract-unknown"],"exit_code":1,"stdout":"empty","stderr_contains":"unsupported parity profile"}
+    ],
+    "mcp": [
+      {"id":"missing-indexed-file","tool":"atlas_slice","arguments":{"project_path":"{{project_root}}","file":"missing.rs","start_line":1},"profile":"toon_error","required_text":["error:","missing.rs"]},
+      {"id":"invalid-ignore-kind","tool":"atlas_ignore_add","arguments":{"project_path":"{{project_root}}","kind":"contract-unknown","value":"ignored"},"profile":"toon_error","required_text":["error:","contract-unknown"]}
+    ]
+  },
+  "failure_coverage": {
+    "cli_unknown_option":"--contract-fixture-unknown-option",
+    "mcp_missing_project_path":"{{missing_project_root}}",
+    "mcp_not_found_tools":["atlas_task_cancel","atlas_task_status"],
+    "mcp_no_domain_failure_tools":["atlas_runtime_info"]
+  },
+  "root_selection_cases": [
+    {"id":"cli-explicit-db-and-config-must-agree","layer":"cli","expected":"mismatch_rejected"},
+    {"id":"mcp-per-call-project-requires-local-index","layer":"mcp","expected":"missing_index_rejected"},
+    {"id":"mcp-session-project-mutation","layer":"mcp","expected":"subsequent_calls_use_selected_project"},
+    {"id":"persistent-root-binding","layer":"cli_and_mcp","expected":"db_config_root_verified"}
+  ],
+  "task_behavior": {
+    "status_tool":"atlas_task_status",
+    "cancel_tool":"atlas_task_cancel",
+    "contract_task_id":"task-progress-contract",
+    "contract_cancel_result":"already_finished",
+    "unknown_task_status":"not_found",
+    "unknown_task_cancel":"not_found",
+    "bounded_states":["pending","running","complete","failed","canceled"]
+  },
+  "normal_workflows": {
+    "cli":["projectatlas scan","projectatlas overview","projectatlas folders","projectatlas files","projectatlas summary","projectatlas search","projectatlas slice"],
+    "mcp":["atlas_scan","atlas_overview","atlas_folders","atlas_files","atlas_file_summary","atlas_search","atlas_slice"],
+    "automatic_graph_enrichment":true,
+    "required_extra_graph_calls":0
+  },
+  "hosted_replay": {
+    "state":"required",
+    "platforms":["windows-x64","linux-x64","macos-x64","macos-arm64"]
+  }
+}

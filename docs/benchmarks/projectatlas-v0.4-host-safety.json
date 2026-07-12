@@ -1,0 +1,844 @@
+{
+  "schema_version": 1,
+  "format": "projectatlas.repository-intelligence-host-safety",
+  "artifact_id": "projectatlas-v0.4-repository-intelligence-host-safety",
+  "captured_at_utc": "2026-07-11T22:13:36.1180000Z",
+  "tasks": [
+    "ARRI-2.26",
+    "ARRI-2.27",
+    "ARRI-2.28"
+  ],
+  "task_checkboxes_changed": false,
+  "evidence_state_values": {
+    "proven_local": "The conclusion is reproducible on the bound local source, tool, and host snapshot.",
+    "hosted_required": "The conclusion requires a clean hosted runner or release artifact and is not proven by this workstation.",
+    "not_available": "The capability, implementation, tool, or evidence is not available on the bound snapshot."
+  },
+  "gate_state_values": {
+    "pass": "The bound evidence satisfies this gate.",
+    "pending": "More evidence is required before a pass or blocker decision.",
+    "release_blocker": "v0.4 must not release while this condition remains."
+  },
+  "source_snapshot": {
+    "head_commit": "c672442438404411389ef86e2efd767f3a4b2be0",
+    "head_tree": "cc9bc004837c8843b84151cb269fba41e8944116",
+    "working_tree_state": "dirty-concurrent-repository-intelligence",
+    "claim_eligible": false,
+    "head_lockfile": {
+      "path": "Cargo.lock",
+      "git_blob_sha1": "1ffe081c86ba28a26271beff4064d37be646463c",
+      "sha256": "1e925a59e00fc8c0e82e925e64cf248e16fe08a37809b4923618342c382f073c",
+      "crossbeam_epoch_version": "0.9.18"
+    },
+    "dirty_candidate_lockfile": {
+      "path": "Cargo.lock",
+      "git_blob_sha1": "55b25cd9778b0e4cc7f0603bf7a68e069154812d",
+      "sha256": "4a1bb80ae6b5c7021e703082611013c601f8ce874206d94f4ea24f4d83b112dc",
+      "crossbeam_epoch_version": "0.9.20",
+      "evidence_state": "proven_local",
+      "gate_state": "release_blocker",
+      "release_condition": "Retain the lock update and bind successful audit, deny, workspace, and release checks to the reviewed candidate commit."
+    },
+    "snapshot_rule": "Every mutable host, dependency, binary, and plugin conclusion is valid only for the identified source, lockfile, tool version, platform, and command."
+  },
+  "audit_host": {
+    "id": "windows-development-reference-2026-07-11",
+    "operating_system": "Microsoft Windows 11 Pro 10.0.26200",
+    "architecture": "x86_64",
+    "powershell": "7.6.3",
+    "claim_eligible": false,
+    "claim_exclusion": "This is a dirty development worktree, not a clean hosted release runner.",
+    "tools": {
+      "codex": "0.144.1",
+      "claude_code": "2.1.201",
+      "opencode": "1.17.13",
+      "cargo_audit": "0.22.1",
+      "cargo_deny": "0.19.0",
+      "llvm_readobj": "21.1.8",
+      "cargo_geiger": null,
+      "cargo_vet": null
+    }
+  },
+  "command_evidence": {
+    "binding_id": "windows-dev-c672442-8c66fec8",
+    "host_id": "windows-development-reference-2026-07-11",
+    "head_commit": "c672442438404411389ef86e2efd767f3a4b2be0",
+    "head_tree": "cc9bc004837c8843b84151cb269fba41e8944116",
+    "lockfile_sha256": "8c66fec898d4535a0cdd4f88ff986f206bb53d7d8f6d548cc9f7d5cd2bcc841d",
+    "historical_capture": true,
+    "current_candidate_eligible": false,
+    "current_candidate_exclusion": "These outcomes remain bound to the original lockfile and cannot prove the current candidate lockfile.",
+    "manifest_ref": ".projectatlas/research/v04-results/host-safety/20260711T184252Z/command-observations.json",
+    "manifest_sha256": "709867f2d9bb4790f5c0e8356633efa2c34aa8466a6aaba524c3ad2cfe4d2bb7",
+    "manifest_persistence": "ignored local development evidence; regenerate for commit-bound or hosted gates",
+    "raw_outputs_checked_in": false,
+    "output_hash_contract": "SHA-256 over UTF-8 stdout bytes followed immediately by UTF-8 stderr bytes",
+    "personal_path_policy": "Checked-in invocations use environment templates; exact absolute paths remain only in the ignored raw manifest.",
+    "resolution": [
+      {
+        "tool": "codex",
+        "discovered_by": "Get-Command codex",
+        "discovered_kind": "ExternalScript",
+        "discovered_target": "%APPDATA%/npm/codex.ps1",
+        "executed_via": "cmd.exe",
+        "executed_target": "%APPDATA%/npm/codex.cmd",
+        "executed_sha256": "c54db6755e710c39703f7c37512f9e35ed41042d8080558d2b84b8d2694323c3"
+      },
+      {
+        "tool": "claude",
+        "discovered_by": "Get-Command claude",
+        "discovered_kind": "ExternalScript",
+        "discovered_target": "%APPDATA%/npm/claude.ps1",
+        "executed_via": "cmd.exe",
+        "executed_target": "%APPDATA%/npm/claude.cmd",
+        "executed_sha256": "7999fba95dbffe167d9e0a043f29057979a0518ebe89b60c4fcfc6401ea8c424"
+      },
+      {
+        "tool": "opencode",
+        "discovered_by": "Get-Command opencode",
+        "discovered_kind": "ExternalScript",
+        "discovered_target": "%APPDATA%/npm/opencode.ps1",
+        "executed_via": "cmd.exe",
+        "executed_target": "%APPDATA%/npm/opencode.cmd",
+        "executed_sha256": "b53b698473bfa46e09487e485a7f1ad5b4881f8a8b319d3619aa251f3be8ae10"
+      }
+    ]
+  },
+  "candidate_lock_command_evidence": {
+    "binding_id": "windows-dev-c672442-4a1bb80a-20260711T221227Z",
+    "host_id": "windows-development-reference-2026-07-11",
+    "head_commit": "c672442438404411389ef86e2efd767f3a4b2be0",
+    "head_tree": "cc9bc004837c8843b84151cb269fba41e8944116",
+    "lockfile_sha256": "4a1bb80ae6b5c7021e703082611013c601f8ce874206d94f4ea24f4d83b112dc",
+    "worktree_claim_eligible": false,
+    "claim_exclusion": "Dirty development-worktree observations are local evidence only and must be rerun on the reviewed candidate commit for release eligibility.",
+    "manifest_ref": ".projectatlas/research/v04-results/host-safety/20260711T221227Z/command-observations.json",
+    "manifest_sha256": "0ae527e5d723769e19a9456e94e02be29230fa0c08a724b58bb3e36b43c9087e",
+    "manifest_persistence": "ignored local development evidence; regenerate for commit-bound or hosted gates",
+    "raw_outputs_checked_in": false,
+    "timeout_seconds": 120,
+    "checks": [
+      {
+        "id": "dependency-inventory",
+        "binding_id": "windows-dev-c672442-4a1bb80a-20260711T221227Z",
+        "lockfile_sha256": "4a1bb80ae6b5c7021e703082611013c601f8ce874206d94f4ea24f4d83b112dc",
+        "manifest_observation_id": "dependency-inventory-current-lock",
+        "argv": ["cargo", "metadata", "--locked", "--format-version", "1"],
+        "observed_at_utc": "2026-07-11T22:13:31.3933904Z",
+        "timeout_seconds": 120,
+        "exit_code": 0,
+        "timed_out": false,
+        "duration_ms": 1035,
+        "output_sha256": "25744c698d643f132278496889686f7ac4252ab282477e8571809645ccf3114c",
+        "raw_artifact_ref": ".projectatlas/research/v04-results/host-safety/20260711T221227Z/dependency-inventory-current-lock.output.bin",
+        "result": "293 packages, 7 workspace packages, and 293 resolved nodes for the current candidate lockfile",
+        "evidence_state": "proven_local",
+        "gate_state": "release_blocker",
+        "release_condition": "Rerun and bind the successful command to the reviewed candidate commit."
+      },
+      {
+        "id": "candidate-advisory-audit",
+        "binding_id": "windows-dev-c672442-4a1bb80a-20260711T221227Z",
+        "lockfile_sha256": "4a1bb80ae6b5c7021e703082611013c601f8ce874206d94f4ea24f4d83b112dc",
+        "manifest_observation_id": "candidate-advisory-audit-current-lock",
+        "argv": ["cargo", "audit", "--file", "Cargo.lock", "--deny", "warnings"],
+        "observed_at_utc": "2026-07-11T22:13:31.4315219Z",
+        "timeout_seconds": 120,
+        "exit_code": 0,
+        "timed_out": false,
+        "duration_ms": 4667,
+        "output_sha256": "0c901dec9eaefc9c39a4b841c11834c9c7b338cdef52e1a742a84d579bc60e6e",
+        "raw_artifact_ref": ".projectatlas/research/v04-results/host-safety/20260711T221227Z/candidate-advisory-audit-current-lock.output.bin",
+        "result": "Cargo audit scanned 293 crate dependencies without vulnerabilities or warnings for the current candidate lockfile.",
+        "evidence_state": "proven_local",
+        "gate_state": "release_blocker",
+        "release_condition": "Rerun and bind the successful command to the reviewed candidate commit."
+      },
+      {
+        "id": "candidate-policy-audit",
+        "binding_id": "windows-dev-c672442-4a1bb80a-20260711T221227Z",
+        "lockfile_sha256": "4a1bb80ae6b5c7021e703082611013c601f8ce874206d94f4ea24f4d83b112dc",
+        "manifest_observation_id": "candidate-policy-audit-current-lock",
+        "argv": ["cargo", "deny", "check", "advisories"],
+        "observed_at_utc": "2026-07-11T22:13:31.4168387Z",
+        "timeout_seconds": 120,
+        "exit_code": 0,
+        "timed_out": false,
+        "duration_ms": 4702,
+        "output_sha256": "799fc05e6513bf365cc7565ea51cc5cb9ca6690b1cd1fe7777339be83437131b",
+        "raw_artifact_ref": ".projectatlas/research/v04-results/host-safety/20260711T221227Z/candidate-policy-audit-current-lock.output.bin",
+        "result": "The advisory policy passed for the current candidate lockfile.",
+        "evidence_state": "proven_local",
+        "gate_state": "release_blocker",
+        "release_condition": "Rerun and bind the successful command to the reviewed candidate commit."
+      }
+    ],
+    "unrerun_lock_sensitive_checks": [
+      {
+        "id": "debug-pe-imports",
+        "historical_binding_id": "windows-dev-c672442-8c66fec8",
+        "current_candidate_relevance": "stale",
+        "reason": "The observed debug executable was not rebuilt and re-inspected for the current candidate lockfile.",
+        "evidence_state": "not_available",
+        "gate_state": "release_blocker"
+      }
+    ]
+  },
+  "source_artifacts": [
+    {
+      "id": "workspace-lint-policy",
+      "path": "Cargo.toml",
+      "sha256": "35e024f7d9b50ea2826da79204e40a12b295e9007030d7e5721e77e52fdb63ef",
+      "evidence_state": "proven_local",
+      "gate_state": "pass"
+    },
+    {
+      "id": "codex-plugin-manifest",
+      "path": "plugins/projectatlas/.codex-plugin/plugin.json",
+      "sha256": "6d2de206f3c4b0a14e49c3f698b5dc72b602257c987fc7db71bb839d5d9b9c8a",
+      "evidence_state": "proven_local",
+      "gate_state": "pass"
+    },
+    {
+      "id": "claude-plugin-manifest",
+      "path": "plugins/projectatlas/.claude-plugin/plugin.json",
+      "sha256": "e7e455a0928dff05ad9929fe1973b4e4dc963e2dbfa4d24b52c06501a40499df",
+      "evidence_state": "proven_local",
+      "gate_state": "pass"
+    },
+    {
+      "id": "opencode-template",
+      "path": "plugins/projectatlas/opencode/opencode.json",
+      "sha256": "0e6ee3cf3487006d4dd9f48a485807d852a2c4d240fa4bbcdce61543892d9f94",
+      "evidence_state": "proven_local",
+      "gate_state": "pass"
+    },
+    {
+      "id": "windows-installer",
+      "path": "plugins/projectatlas/scripts/install-runtime.ps1",
+      "sha256": "9b2848f75952a9ad1966588a039f6afac14c47f808f50a5aad4583d3245ed5fd",
+      "evidence_state": "proven_local",
+      "gate_state": "release_blocker"
+    },
+    {
+      "id": "posix-installer",
+      "path": "plugins/projectatlas/scripts/install-runtime.sh",
+      "sha256": "a11374f291287dbfdc9fbc2237769e0c7e2b4dc18393b9953c0fe7ac6a2b1b31",
+      "evidence_state": "proven_local",
+      "gate_state": "release_blocker"
+    }
+  ],
+  "commands": [
+    {
+      "id": "source-identity",
+      "tool": "git",
+      "argv": ["git", "rev-parse", "HEAD"],
+      "resolved_invocation": "git.exe rev-parse HEAD",
+      "exact_invocation_manifest_id": "source-identity",
+      "observed_at_utc": "2026-07-11T18:42:53.1862548Z",
+      "timeout_seconds": 120,
+      "exit_code": 0,
+      "timed_out": false,
+      "output_sha256": "c0c9e55644b4b7816f6298cc02944b48131a5964f6f7a1bb398b59af1a469628",
+      "raw_artifact_ref": ".projectatlas/research/v04-results/host-safety/20260711T184252Z/source-identity.output.bin",
+      "binding_id": "windows-dev-c672442-8c66fec8",
+      "result": "c672442438404411389ef86e2efd767f3a4b2be0",
+      "evidence_state": "proven_local",
+      "gate_state": "pass"
+    },
+    {
+      "id": "codex-version",
+      "tool": "codex",
+      "argv": ["codex", "--version"],
+      "resolved_invocation": "cmd.exe /d /s /c \"\"%APPDATA%/npm/codex.cmd\" --version\"",
+      "exact_invocation_manifest_id": "codex-version",
+      "observed_at_utc": "2026-07-11T18:42:53.2631101Z",
+      "timeout_seconds": 120,
+      "exit_code": 0,
+      "timed_out": false,
+      "output_sha256": "94a47f9404ab2a59e43382c7fb34fcdf97deb3fb10ca762aac23daa699f0db5c",
+      "raw_artifact_ref": ".projectatlas/research/v04-results/host-safety/20260711T184252Z/codex-version.output.bin",
+      "binding_id": "windows-dev-c672442-8c66fec8",
+      "result": "codex-cli 0.144.1",
+      "evidence_state": "proven_local",
+      "gate_state": "pass"
+    },
+    {
+      "id": "codex-plugin-surface",
+      "tool": "codex",
+      "argv": ["codex", "plugin", "--help"],
+      "resolved_invocation": "cmd.exe /d /s /c \"\"%APPDATA%/npm/codex.cmd\" plugin --help\"",
+      "exact_invocation_manifest_id": "codex-plugin-surface",
+      "observed_at_utc": "2026-07-11T18:42:53.4021402Z",
+      "timeout_seconds": 120,
+      "exit_code": 0,
+      "timed_out": false,
+      "output_sha256": "8a9948717913edc2e80e802d2c69a7893461799843f5489096ea3dfb12ce4dae",
+      "raw_artifact_ref": ".projectatlas/research/v04-results/host-safety/20260711T184252Z/codex-plugin-surface.output.bin",
+      "binding_id": "windows-dev-c672442-8c66fec8",
+      "result": "add, list, marketplace, and remove are exposed; this command surface alone does not establish bundled component or native-runtime provisioning capability",
+      "evidence_state": "proven_local",
+      "gate_state": "release_blocker"
+    },
+    {
+      "id": "codex-projectatlas-installation",
+      "tool": "codex",
+      "argv": ["codex", "plugin", "list", "--marketplace", "projectatlas", "--json"],
+      "resolved_invocation": "cmd.exe /d /s /c \"\"%APPDATA%/npm/codex.cmd\" plugin list --marketplace projectatlas --json\"",
+      "exact_invocation_manifest_id": "codex-projectatlas-installation",
+      "observed_at_utc": "2026-07-11T18:42:53.5435161Z",
+      "timeout_seconds": 120,
+      "exit_code": 0,
+      "timed_out": false,
+      "output_sha256": "56afb0eb045d463084949b0e5f796262971574350f8b8ba09ef3ac71291215df",
+      "raw_artifact_ref": ".projectatlas/research/v04-results/host-safety/20260711T184252Z/codex-projectatlas-installation.output.bin",
+      "binding_id": "windows-dev-c672442-8c66fec8",
+      "result": "projectatlas 0.3.26 is installed from the configured Git marketplace; this is not clean-host evidence",
+      "evidence_state": "proven_local",
+      "gate_state": "pass"
+    },
+    {
+      "id": "claude-version",
+      "tool": "claude",
+      "argv": ["claude", "--version"],
+      "resolved_invocation": "cmd.exe /d /s /c \"\"%APPDATA%/npm/claude.cmd\" --version\"",
+      "exact_invocation_manifest_id": "claude-version",
+      "observed_at_utc": "2026-07-11T18:42:53.7371584Z",
+      "timeout_seconds": 120,
+      "exit_code": 0,
+      "timed_out": false,
+      "output_sha256": "7119c9746d285ba93cf0d097c85306151da8b3c9a5a6d60b2bb6b9fdc933f650",
+      "raw_artifact_ref": ".projectatlas/research/v04-results/host-safety/20260711T184252Z/claude-version.output.bin",
+      "binding_id": "windows-dev-c672442-8c66fec8",
+      "result": "2.1.201 (Claude Code)",
+      "evidence_state": "proven_local",
+      "gate_state": "pass"
+    },
+    {
+      "id": "claude-plugin-surface",
+      "tool": "claude",
+      "argv": ["claude", "plugin", "--help"],
+      "resolved_invocation": "cmd.exe /d /s /c \"\"%APPDATA%/npm/claude.cmd\" plugin --help\"",
+      "exact_invocation_manifest_id": "claude-plugin-surface",
+      "observed_at_utc": "2026-07-11T18:42:53.9248561Z",
+      "timeout_seconds": 120,
+      "exit_code": 0,
+      "timed_out": false,
+      "output_sha256": "c453b70a724fdcdb7aba0c22101377025f43290627fb50d68bacf6108d4906dc",
+      "raw_artifact_ref": ".projectatlas/research/v04-results/host-safety/20260711T184252Z/claude-plugin-surface.output.bin",
+      "binding_id": "windows-dev-c672442-8c66fec8",
+      "result": "install, update, and uninstall are exposed; the bound ProjectAtlas manifest is metadata-only and contains no native runtime lifecycle owner",
+      "evidence_state": "proven_local",
+      "gate_state": "release_blocker"
+    },
+    {
+      "id": "opencode-version",
+      "tool": "opencode",
+      "argv": ["opencode", "--version"],
+      "resolved_invocation": "cmd.exe /d /s /c \"\"%APPDATA%/npm/opencode.cmd\" --version\"",
+      "exact_invocation_manifest_id": "opencode-version",
+      "observed_at_utc": "2026-07-11T18:42:54.2941597Z",
+      "timeout_seconds": 120,
+      "exit_code": 0,
+      "timed_out": false,
+      "output_sha256": "248d8d12f7109acfaf3154b351785760bb65d0a1e5f01ece92e31e8537916c81",
+      "raw_artifact_ref": ".projectatlas/research/v04-results/host-safety/20260711T184252Z/opencode-version.output.bin",
+      "binding_id": "windows-dev-c672442-8c66fec8",
+      "result": "1.17.13",
+      "evidence_state": "proven_local",
+      "gate_state": "pass"
+    },
+    {
+      "id": "opencode-host-surface",
+      "tool": "opencode",
+      "argv": ["opencode", "--help"],
+      "resolved_invocation": "cmd.exe /d /s /c \"\"%APPDATA%/npm/opencode.cmd\" --help\"",
+      "exact_invocation_manifest_id": "opencode-host-surface",
+      "observed_at_utc": "2026-07-11T20:03:14.8625022Z",
+      "timeout_seconds": 120,
+      "exit_code": 0,
+      "timed_out": false,
+      "output_sha256": "06acd718d8f4d2028dea2f596c7691d7cc176d1b066ba711808b0d79889dcec1",
+      "raw_artifact_ref": ".projectatlas/research/v04-results/host-safety/20260711T184252Z/opencode-host-surface.output.bin",
+      "binding_id": "windows-dev-c672442-8c66fec8",
+      "result": "the host exposes npm-module plugin installation plus MCP management; ProjectAtlas publishes neither an OpenCode plugin module nor a native-runtime lifecycle bundle and supplies only a disabled absolute-path MCP template",
+      "evidence_state": "proven_local",
+      "gate_state": "release_blocker"
+    },
+    {
+      "id": "dependency-inventory",
+      "tool": "cargo",
+      "argv": ["cargo", "metadata", "--locked", "--format-version", "1"],
+      "resolved_invocation": "cargo.exe metadata --locked --format-version 1",
+      "exact_invocation_manifest_id": "dependency-inventory",
+      "observed_at_utc": "2026-07-11T18:42:55.5810849Z",
+      "timeout_seconds": 120,
+      "exit_code": 0,
+      "timed_out": false,
+      "output_sha256": "96f6c9efb96a4f70dc75f788ea14735c701f71bf56aa4362015067a9b8061de9",
+      "raw_artifact_ref": ".projectatlas/research/v04-results/host-safety/20260711T184252Z/dependency-inventory.output.bin",
+      "binding_id": "windows-dev-c672442-8c66fec8",
+      "current_candidate_relevance": "superseded_by_current_lock_check",
+      "current_candidate_ref": "candidate_lock_command_evidence/dependency-inventory",
+      "result": "historical dependency inventory superseded for current-candidate decisions; current bounded offline locked metadata resolves 293 packages, 7 workspace packages, 286 external packages, and 60 external packages with custom-build targets",
+      "evidence_state": "proven_local",
+      "gate_state": "pass"
+    },
+    {
+      "id": "owned-unsafe-source-scan",
+      "tool": "ripgrep",
+      "argv": [
+        "rg",
+        "-n",
+        "-e",
+        "\\bunsafe\\s*(?:\\{|fn\\b|impl\\b|trait\\b|extern\\b)",
+        "-e",
+        "^\\s*(?:pub(?:\\([^)]*\\))?\\s+)?extern\\s*(?:\"[^\"]+\"\\s*)?\\{",
+        "-e",
+        "#\\s*\\[\\s*link(?:\\s*\\(|\\])",
+        "crates",
+        "--glob",
+        "*.rs"
+      ],
+      "resolved_invocation": "Codex-bundled rg.exe with the recorded argv",
+      "exact_invocation_manifest_id": "owned-unsafe-source-scan",
+      "observed_at_utc": "2026-07-11T18:42:55.9909352Z",
+      "timeout_seconds": 120,
+      "exit_code": 1,
+      "expected_exit_codes": [0, 1],
+      "exit_interpretation": "0 means a Rust unsafe/extern/link construct matched; 1 means no construct matched; any other exit invalidates the evidence.",
+      "timed_out": false,
+      "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_artifact_ref": ".projectatlas/research/v04-results/host-safety/20260711T184252Z/owned-unsafe-source-scan.output.bin",
+      "binding_id": "windows-dev-c672442-8c66fec8",
+      "result": "the targeted Rust construct scan exited 1 with empty stdout and stderr: zero ProjectAtlas-owned unsafe blocks, unsafe declarations, extern blocks, or link attributes matched",
+      "evidence_state": "proven_local",
+      "gate_state": "pass"
+    },
+    {
+      "id": "debug-pe-imports",
+      "tool": "llvm-readobj",
+      "argv": ["llvm-readobj", "--coff-imports", "target/debug/projectatlas.exe"],
+      "resolved_invocation": "llvm-readobj.exe --coff-imports target/debug/projectatlas.exe",
+      "exact_invocation_manifest_id": "debug-pe-imports",
+      "observed_at_utc": "2026-07-11T18:42:56.0299740Z",
+      "timeout_seconds": 120,
+      "exit_code": 0,
+      "timed_out": false,
+      "input_sha256": "9f2a213a17129610c5ad0b59ec8da94fde604a0b9f8b8c5806dab915acdb8a1c",
+      "output_sha256": "680ecefb17502d3f80f1d779e15a5bdf199432301d104b35e09b0dc0620dd69f",
+      "raw_artifact_ref": ".projectatlas/research/v04-results/host-safety/20260711T184252Z/debug-pe-imports.output.bin",
+      "binding_id": "windows-dev-c672442-8c66fec8",
+      "current_candidate_relevance": "stale",
+      "current_candidate_gate_state": "release_blocker",
+      "current_candidate_reason": "The observed debug executable was not rebuilt and re-inspected for the current candidate lockfile.",
+      "result": "debug x86_64 PE imports Windows system libraries, Universal CRT API sets, VCRUNTIME140.dll, and transitive runtime dynamic-loader symbols; no non-system runtime library was observed",
+      "evidence_state": "proven_local",
+      "gate_state": "pass"
+    },
+    {
+      "id": "candidate-advisory-audit",
+      "tool": "cargo-audit",
+      "argv": ["cargo", "audit", "--file", "Cargo.lock", "--deny", "warnings"],
+      "resolved_invocation": "cargo.exe audit --file Cargo.lock --deny warnings",
+      "exact_invocation_manifest_id": "candidate-advisory-audit",
+      "observed_at_utc": "2026-07-11T18:42:56.0663457Z",
+      "timeout_seconds": 120,
+      "exit_code": 0,
+      "timed_out": false,
+      "output_sha256": "06325f212107046f05408bc51840a929f4f11a7d028ca820917ab085db0eebef",
+      "raw_artifact_ref": ".projectatlas/research/v04-results/host-safety/20260711T184252Z/candidate-advisory-audit.output.bin",
+      "binding_id": "windows-dev-c672442-8c66fec8",
+      "current_candidate_relevance": "superseded_by_current_lock_check",
+      "current_candidate_ref": "candidate_lock_command_evidence/candidate-advisory-audit",
+      "result": "0 vulnerabilities in the dirty candidate lockfile",
+      "evidence_state": "proven_local",
+      "gate_state": "release_blocker"
+    },
+    {
+      "id": "candidate-policy-audit",
+      "tool": "cargo-deny",
+      "argv": ["cargo", "deny", "check", "advisories"],
+      "resolved_invocation": "cargo.exe deny check advisories",
+      "exact_invocation_manifest_id": "candidate-policy-audit",
+      "observed_at_utc": "2026-07-11T18:42:59.5475174Z",
+      "timeout_seconds": 120,
+      "exit_code": 0,
+      "timed_out": false,
+      "output_sha256": "799fc05e6513bf365cc7565ea51cc5cb9ca6690b1cd1fe7777339be83437131b",
+      "raw_artifact_ref": ".projectatlas/research/v04-results/host-safety/20260711T184252Z/candidate-policy-audit.output.bin",
+      "binding_id": "windows-dev-c672442-8c66fec8",
+      "current_candidate_relevance": "superseded_by_current_lock_check",
+      "current_candidate_ref": "candidate_lock_command_evidence/candidate-policy-audit",
+      "result": "the advisory policy passed with no vulnerability or warning",
+      "evidence_state": "proven_local",
+      "gate_state": "release_blocker"
+    },
+    {
+      "id": "geiger-availability",
+      "tool": "cargo-geiger",
+      "argv": ["cargo", "geiger", "--version"],
+      "resolved_invocation": "cargo.exe geiger --version",
+      "exact_invocation_manifest_id": "geiger-availability",
+      "observed_at_utc": "2026-07-11T18:43:01.4028718Z",
+      "timeout_seconds": 120,
+      "exit_code": 101,
+      "expected_exit_codes": [0, 101],
+      "exit_interpretation": "101 confirms that the Cargo subcommand is absent on the bound host.",
+      "timed_out": false,
+      "output_sha256": "266ea6e210b1cca1501d564051d083c611f62d19cfaa105556fb8397fe7e7dde",
+      "raw_artifact_ref": ".projectatlas/research/v04-results/host-safety/20260711T184252Z/geiger-availability.output.bin",
+      "binding_id": "windows-dev-c672442-8c66fec8",
+      "result": "cargo-geiger is not installed",
+      "evidence_state": "not_available",
+      "gate_state": "pending"
+    },
+    {
+      "id": "vet-availability",
+      "tool": "cargo-vet",
+      "argv": ["cargo", "vet", "--version"],
+      "resolved_invocation": "cargo.exe vet --version",
+      "exact_invocation_manifest_id": "vet-availability",
+      "observed_at_utc": "2026-07-11T18:43:01.5824561Z",
+      "timeout_seconds": 120,
+      "exit_code": 101,
+      "expected_exit_codes": [0, 101],
+      "exit_interpretation": "101 confirms that the Cargo subcommand is absent on the bound host.",
+      "timed_out": false,
+      "output_sha256": "41016454dac73226bda9111877fcd8e198a59449b22c80ec66657518f5bee3ad",
+      "raw_artifact_ref": ".projectatlas/research/v04-results/host-safety/20260711T184252Z/vet-availability.output.bin",
+      "binding_id": "windows-dev-c672442-8c66fec8",
+      "result": "cargo-vet is not installed",
+      "evidence_state": "not_available",
+      "gate_state": "pending"
+    }
+  ],
+  "plugin_store_lifecycle": {
+    "task_id": "ARRI-2.26",
+    "evidence_state": "proven_local",
+    "gate_state": "release_blocker",
+    "native_install_provisioning": "not_available_in_audited_projectatlas_store_bundles",
+    "manual_installer_does_not_satisfy_one_action_contract": true,
+    "codex_manifest_capability_evidence": {
+      "source_url": "https://developers.openai.com/codex/codex-manual.md",
+      "retrieved_at_utc": "2026-07-11T19:55:00Z",
+      "content_sha256": "e7ed1935fdc89d1f449a9483effce2dae0756015e4104140bdb327a860cbcd4a",
+      "sections": [
+        "Build plugins",
+        "Plugin-provided MCP servers",
+        "Lifecycle hooks"
+      ],
+      "observations": [
+        "A Codex plugin manifest can reference bundled skills, MCP servers, and lifecycle hooks relative to the plugin root.",
+        "Installed plugin MCP servers can be launched from the plugin without a user-supplied transport command.",
+        "Installing or enabling a plugin does not trust plugin hooks; the user must separately review and trust the current hook definition."
+      ],
+      "projectatlas_mcp_servers_declared": false,
+      "projectatlas_hooks_declared": false,
+      "projectatlas_native_runtime_bundled": false,
+      "one_action_provisioning_proven": false,
+      "evidence_state": "proven_local",
+      "gate_state": "release_blocker"
+    },
+    "hosts": [
+      {
+        "host": "codex",
+        "version": "0.144.1",
+        "plugin_lifecycle": ["add", "list", "marketplace-upgrade", "remove"],
+        "projectatlas_bundle": "skills-plus-manual-installer",
+        "host_bundle_capabilities": ["skills", "mcpServers", "hooks"],
+        "hook_trust": "separate-user-review-required",
+        "projectatlas_mcp_servers_declared": false,
+        "projectatlas_hooks_declared": false,
+        "projectatlas_native_runtime_bundled": false,
+        "native_runtime_install_hook": "not-declared-by-projectatlas",
+        "native_runtime_repair_hook": "not-declared-by-projectatlas",
+        "native_runtime_rollback_hook": "not-declared-by-projectatlas",
+        "clean_host_store_e2e": "hosted_required",
+        "evidence_sources": ["codex-plugin-manifest", "windows-installer", "posix-installer", "codex-plugin-surface"],
+        "evidence_state": "proven_local",
+        "gate_state": "release_blocker"
+      },
+      {
+        "host": "claude-code",
+        "version": "2.1.201",
+        "plugin_lifecycle": ["install", "update", "uninstall"],
+        "projectatlas_bundle": "metadata-only-manifest-plus-manual-installer",
+        "projectatlas_mcp_server_declared": false,
+        "projectatlas_native_runtime_bundled": false,
+        "native_runtime_install_hook": "not-declared-by-projectatlas",
+        "clean_host_store_e2e": "hosted_required",
+        "evidence_sources": ["claude-plugin-manifest", "windows-installer", "posix-installer", "claude-plugin-surface"],
+        "evidence_state": "proven_local",
+        "gate_state": "release_blocker"
+      },
+      {
+        "host": "opencode",
+        "version": "1.17.13",
+        "plugin_lifecycle": ["install-npm-module", "update-config"],
+        "projectatlas_bundle": "disabled-absolute-path-mcp-template",
+        "projectatlas_store_lifecycle": "host-plugin-install-exists-but-projectatlas-package-is-not-published",
+        "projectatlas_native_runtime_bundled": false,
+        "native_runtime_install_hook": "not-present-in-projectatlas-package",
+        "clean_host_store_e2e": "hosted_required",
+        "evidence_sources": ["opencode-template", "opencode-host-surface"],
+        "evidence_state": "proven_local",
+        "gate_state": "release_blocker"
+      }
+    ],
+    "release_decision": "Block the one-action claim and v0.4 release until every advertised host path provisions and verifies the matching runtime, skill, and MCP registration from one official store action, or the unsupported host claim is removed before release.",
+    "hidden_manual_step_allowed": false
+  },
+  "host_lifecycle_ownership": {
+    "task_id": "ARRI-2.27",
+    "evidence_state": "proven_local",
+    "gate_state": "release_blocker",
+    "owner": {
+      "workspace_crate": "projectatlas-cli",
+      "planned_module": "host_lifecycle",
+      "status": "selected-not-implemented",
+      "new_crate": false,
+      "trait_or_factory": false,
+      "reason": "The existing CLI crate already owns pre-project runtime, plugin, installer, and MCP host composition."
+    },
+    "rust_mechanism": {
+      "variation": "closed",
+      "representation": ["concrete module", "validated newtypes", "closed enums", "exhaustive transitions", "durable journal records"],
+      "lifecycle_actions": ["install", "update", "repair", "rollback", "remove", "reinstall"],
+      "journal_states": ["planned", "applied", "verified", "compensated"],
+      "managed_artifact_kinds": ["runtime", "skill", "plugin-registration", "mcp-registration"],
+      "selected_sequence": ["plan", "journal-before-state", "apply", "verify", "promote-last-known-good"],
+      "failure_sequence": ["stop", "reverse-compensate", "verify-restored-state", "emit-recovery-command"]
+    },
+    "preservation_contract": {
+      "never_managed": ["project-local database", "authored purposes", "project settings", "project telemetry"],
+      "remove_only": "journaled managed runtime, skill, plugin, and MCP-registration artifacts",
+      "project_data_deletion_requires_separate_confirmation": true
+    },
+    "current_gaps": [
+      "PowerShell and shell scripts duplicate lifecycle policy",
+      "runtime and configuration files are copied or overwritten directly without a durable before-and-after journal",
+      "Codex MCP reconciliation uses remove-then-add without typed reverse compensation",
+      "crash recovery is absent",
+      "last-known-good promotion and recovery are absent",
+      "project-data preservation is not enforced by one typed owner"
+    ],
+    "pattern_fit": {
+      "chosen": "one concrete projectatlas-cli module with closed enums, validated newtypes, exhaustive transitions, and explicit durable recovery",
+      "governing_constraint": "filesystem, plugin-manager, and MCP-registry changes cannot form one atomic transaction",
+      "rejected_alternative": "a new crate, single-implementation lifecycle trait, or factory",
+      "tradeoff": "the CLI crate remains the outer host-integration boundary and must keep policy out of thin shell bootstraps",
+      "principal_risk": "journal ordering or compensation defects could remove a valid installation or project data",
+      "required_verification": ["journal crash-point unit tests", "filesystem and registry integration tests", "clean-host lifecycle E2E", "project-data preservation tests"]
+    },
+    "dependency_candidates": [
+      {
+        "name": "processkit",
+        "version": "2.2.3",
+        "features": ["process-control"],
+        "selection_state": "not_selected_for_host_lifecycle",
+        "development_use": "selected_for_calibration_evidence_supervision",
+        "allowed_claim": "development-evidence-only",
+        "evidence_state": "proven_local",
+        "gate_state": "pending"
+      }
+    ]
+  },
+  "unsafe_native_ffi_inventory": {
+    "task_id": "ARRI-2.28",
+    "evidence_state": "proven_local",
+    "gate_state": "release_blocker",
+    "projectatlas_owned": {
+      "crate_count": 7,
+      "crates": [
+        "projectatlas-lints",
+        "projectatlas-cli",
+        "projectatlas-core",
+        "projectatlas-db",
+        "projectatlas-fs",
+        "projectatlas-service",
+        "projectatlas-symbols"
+      ],
+      "unsafe_policy": "forbid",
+      "unsafe_policy_unconditional": true,
+      "all_crates_inherit_workspace_lints": true,
+      "unsafe_blocks": 0,
+      "extern_blocks": 0,
+      "link_attributes": 0,
+      "evidence_sources": ["workspace-lint-policy", "owned-unsafe-source-scan"],
+      "evidence_state": "proven_local",
+      "gate_state": "pass"
+    },
+    "dependency_graph": {
+      "lockfile_packages": 293,
+      "workspace_packages": 7,
+      "external_packages": 286,
+      "audited_external_custom_build_packages": 60,
+      "derivation_command": ["cargo", "metadata", "--offline", "--locked", "--format-version", "1"],
+      "custom_build_rule": "count unique external metadata packages with at least one target kind equal to custom-build",
+      "boundary_inventory_scope": "preliminary-known-boundaries-and-build-script-risk-signal-not-complete-transitive-unsafe-or-ffi-proof",
+      "complete_transitive_boundary_proof_tasks": ["ARRI-11.18", "ARRI-11.23", "ARRI-11.28"],
+      "evidence_state": "proven_local",
+      "gate_state": "pass"
+    },
+    "native_boundaries": [
+      {
+        "id": "bundled-sqlite",
+        "path": "projectatlas-db -> rusqlite -> libsqlite3-sys",
+        "implementation": "bundled SQLite C compiled by a build script",
+        "safe_wrapper": "rusqlite",
+        "runtime_location": "in-process",
+        "evidence_state": "proven_local",
+        "gate_state": "pass"
+      },
+      {
+        "id": "tree-sitter-runtime-and-grammars",
+        "path": "projectatlas-symbols -> tree-sitter plus 12 grammar crates",
+        "implementation": "Tree-sitter runtime and generated C or C++ grammar sources compiled by build scripts",
+        "safe_wrapper": "tree-sitter Rust API",
+        "runtime_location": "in-process-default-core",
+        "contained": false,
+        "evidence_state": "proven_local",
+        "gate_state": "release_blocker"
+      },
+      {
+        "id": "blake3-optimized-code",
+        "path": "projectatlas-cli/projectatlas-fs -> blake3",
+        "implementation": "target-selected x86 assembly or intrinsic acceleration behind the safe blake3 API",
+        "safe_wrapper": "blake3",
+        "evidence_state": "proven_local",
+        "gate_state": "pass"
+      },
+      {
+        "id": "processkit-development-process-supervision",
+        "path": "projectatlas-cli dev-dependency -> processkit -> windows-sys/libc",
+        "implementation": "maintained safe Rust API over Windows Job Objects, Linux cgroup v2, and POSIX process-group unsafe/FFI boundaries",
+        "safe_wrapper": "processkit 2.2.3 with process-control only",
+        "runtime_location": "test-only calibration evidence runner",
+        "production_runtime_dependency": false,
+        "windows_observation": "Job Object process-tree supervision proven by focused local tests",
+        "linux_macos_observation": "hosted_required",
+        "evidence_state": "proven_local",
+        "gate_state": "pending"
+      },
+      {
+        "id": "windows-runtime-imports",
+        "path": "target/debug/projectatlas.exe",
+        "implementation": "Windows system DLLs, Universal CRT API sets, VCRUNTIME140.dll, and transitive LoadLibrary/GetProcAddress symbols",
+        "non_system_runtime_library_observed": false,
+        "release_binary_checked": false,
+        "evidence_state": "proven_local",
+        "gate_state": "pending"
+      }
+    ],
+    "containment": {
+      "current_projectatlas_owned_process_containment": false,
+      "strength": "none-production-runtime",
+      "windows_job_objects": "not_implemented",
+      "unix_resource_limits_and_parent_watchdog": "not_implemented",
+      "calibration_evidence_containment": "windows-job-object-proven-local",
+      "processkit_selection": "development-evidence-only",
+      "processkit_production_selection": "not_selected",
+      "cross_platform_evidence": "hosted_required",
+      "evidence_state": "proven_local",
+      "gate_state": "release_blocker"
+    },
+    "advisories": [
+      {
+        "id": "RUSTSEC-2026-0204",
+        "package": "crossbeam-epoch",
+        "affected_version": "0.9.18",
+        "dependency_path": "projectatlas-fs -> ignore/rayon family -> crossbeam-epoch",
+        "audited_lockfile_sha256": "1e925a59e00fc8c0e82e925e64cf248e16fe08a37809b4923618342c382f073c",
+        "audited_state": "affected",
+        "candidate_version": "0.9.20",
+        "candidate_lockfile_sha256": "4a1bb80ae6b5c7021e703082611013c601f8ce874206d94f4ea24f4d83b112dc",
+        "candidate_audit": "pass-local-dirty",
+        "candidate_deny": "pass-local-dirty",
+        "evidence_state": "proven_local",
+        "gate_state": "release_blocker",
+        "release_condition": "The fixed lockfile and successful audit, deny, workspace, and release checks must be commit-bound and reviewed."
+      }
+    ],
+    "audit_tool_gaps": [
+      {
+        "tool": "cargo-geiger",
+        "availability": "absent",
+        "fallback_evidence": "workspace forbid lint, owned-source scan, dependency/native inventory, and PE import inspection",
+        "evidence_state": "not_available",
+        "gate_state": "pending"
+      },
+      {
+        "tool": "cargo-vet",
+        "availability": "absent",
+        "fallback_evidence": "cargo-audit, cargo-deny, locked metadata, and reviewed dependency boundaries",
+        "evidence_state": "not_available",
+        "gate_state": "pending"
+      }
+    ]
+  },
+  "release_blockers": [
+    {
+      "id": "host-native-provisioning",
+      "tasks": ["ARRI-2.26", "ARRI-2.27"],
+      "condition": "No audited ProjectAtlas store bundle performs the native install, verification, repair, rollback, and removal contract from one official action.",
+      "evidence_state": "proven_local",
+      "gate_state": "release_blocker"
+    },
+    {
+      "id": "typed-lifecycle-owner-implementation",
+      "tasks": ["ARRI-2.27"],
+      "condition": "The selected projectatlas-cli owner, durable journal, crash recovery, reverse compensation, and last-known-good flow are not implemented.",
+      "evidence_state": "proven_local",
+      "gate_state": "release_blocker"
+    },
+    {
+      "id": "native-worker-containment",
+      "tasks": ["ARRI-2.28"],
+      "condition": "ProjectAtlas-owned native worker containment is absent on Windows, Linux, and macOS.",
+      "evidence_state": "proven_local",
+      "gate_state": "release_blocker"
+    },
+    {
+      "id": "dependency-advisory-commit-evidence",
+      "tasks": ["ARRI-2.28"],
+      "condition": "The local RUSTSEC-2026-0204 remediation is dirty-worktree evidence and is not yet bound to a reviewed candidate commit and full gate run.",
+      "evidence_state": "proven_local",
+      "gate_state": "release_blocker"
+    }
+  ],
+  "hosted_required_evidence": [
+    {
+      "id": "clean-store-lifecycle-matrix",
+      "platforms": ["windows-x86_64", "linux-x86_64", "macos-x86_64", "macos-arm64"],
+      "hosts": ["codex", "claude-code", "opencode"],
+      "required_flow": ["store-install", "runtime-skill-mcp-verify", "atlas-init", "scan", "overview", "update", "repair", "rollback", "remove", "reinstall"],
+      "requirements": ["no pre-existing ProjectAtlas cache", "no manual runtime download", "no PATH edit", "no manual MCP configuration", "matching versions", "semantic assertions", "explicit timeouts"],
+      "evidence_state": "hosted_required",
+      "gate_state": "release_blocker"
+    },
+    {
+      "id": "lifecycle-failure-and-preservation-matrix",
+      "platforms": ["windows-x86_64", "linux-x86_64", "macos-x86_64", "macos-arm64"],
+      "required_flow": ["crash-after-each-journal-step", "reverse-compensation", "last-known-good-recovery", "project-data-preservation", "managed-only-removal"],
+      "evidence_state": "hosted_required",
+      "gate_state": "release_blocker"
+    },
+    {
+      "id": "release-native-import-and-containment-matrix",
+      "platforms": ["windows-x86_64", "linux-x86_64", "macos-x86_64", "macos-arm64"],
+      "required_flow": ["release-binary imported-library audit", "native-boundary inventory", "worker crash", "worker hang", "memory limit", "deadline", "parent death", "cleanup"],
+      "evidence_state": "hosted_required",
+      "gate_state": "release_blocker"
+    }
+  ],
+  "claim_policy": {
+    "one_action_install_claim_allowed": false,
+    "memory_safe_dependency_claim_allowed": false,
+    "platform_containment_claim_allowed": false,
+    "processkit_selection_claim_allowed": false,
+    "owned_rust_unsafe_forbid_claim_allowed": true,
+    "release_allowed": false,
+    "reason": "Local inventory is complete enough to expose blockers, but clean-host lifecycle, typed recovery, release imports, containment, and commit-bound advisory remediation remain unproven."
+  }
+}

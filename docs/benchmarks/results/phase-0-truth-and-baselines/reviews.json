@@ -1,0 +1,201 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "projectatlas.phase-review-record",
+  "phase_id": "phase-0-truth-and-baselines",
+  "task_id": "ARRI-2.29",
+  "authorization": "implementation-readiness-only",
+  "claim_state": "no-claim",
+  "state": "pass",
+  "unresolved_blocking_finding_ids": [],
+  "reviewers": [
+    {
+      "role": "architecture",
+      "state": "resolved",
+      "finding_ids": ["readiness-schema-gaps", "phase-release-scoreboard-coupling"],
+      "evidence_paths": [
+        "docs/benchmarks/projectatlas-v0.4-optional-pack-candidate-readiness.json",
+        "docs/benchmarks/projectatlas-v0.4-phase-scoreboard.json",
+        "crates/projectatlas-cli/src/repository_intelligence_scoreboard_tests.rs",
+        "openspec/changes/advance-rust-repository-intelligence/design.md"
+      ]
+    },
+    {
+      "role": "rust",
+      "state": "resolved",
+      "finding_ids": ["readiness-schema-gaps", "sqlite-string-selection-policy", "evaluator-boundary-gaps", "callable-variable-stable-identity"],
+      "evidence_paths": [
+        "crates/projectatlas-cli/src/optional_pack_candidate_readiness_tests.rs",
+        "crates/projectatlas-cli/src/sqlite_architecture_evaluation.rs",
+        "crates/projectatlas-cli/src/repository_evaluation_runner.rs",
+        "crates/projectatlas-cli/src/git_process_policy.rs",
+        "crates/projectatlas-symbols/src/lib.rs"
+      ]
+    },
+    {
+      "role": "performance",
+      "state": "resolved",
+      "finding_ids": ["sqlite-feasibility-overclaim"],
+      "evidence_paths": [
+        "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json",
+        "openspec/task-verification-plan.json"
+      ]
+    },
+    {
+      "role": "security",
+      "state": "resolved",
+      "finding_ids": ["evaluator-boundary-gaps", "hostile-concurrent-filesystem-containment", "checked-task-evidence-coverage-gap"],
+      "evidence_paths": [
+        ".github/scripts/issue-checklists.py",
+        "crates/projectatlas-cli/src/repository_evaluation_runner.rs",
+        "crates/projectatlas-cli/src/git_process_policy.rs",
+        "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json",
+        "openspec/task-verification-plan.json"
+      ]
+    },
+    {
+      "role": "storage",
+      "state": "resolved",
+      "finding_ids": ["sqlite-string-selection-policy", "sqlite-feasibility-overclaim"],
+      "evidence_paths": [
+        "crates/projectatlas-cli/src/sqlite_architecture_evaluation.rs",
+        "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json"
+      ]
+    },
+    {
+      "role": "platform",
+      "state": "resolved",
+      "finding_ids": ["safety-inventory-overclaim", "hostile-concurrent-filesystem-containment"],
+      "evidence_paths": [
+        "docs/benchmarks/projectatlas-v0.4-host-safety.json",
+        "crates/projectatlas-cli/src/repository_evaluation_runner.rs"
+      ]
+    },
+    {
+      "role": "agent-workflow",
+      "state": "resolved",
+      "finding_ids": ["compatibility-surface-overclaim", "phase-release-scoreboard-coupling", "checked-task-evidence-coverage-gap"],
+      "evidence_paths": [
+        ".github/scripts/issue-checklists.py",
+        "fixtures/contracts/projectatlas-v0.3.26-surface.json",
+        "openspec/task-verification-plan.json",
+        "docs/benchmarks/projectatlas-v0.4-phase-scoreboard.json"
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "finding_id": "readiness-schema-gaps",
+      "subject": "Optional parser and semantic readiness inventories were incomplete or permissive.",
+      "blocking": true,
+      "disposition": "fixed",
+      "evidence_paths": [
+        "docs/benchmarks/projectatlas-v0.4-optional-pack-candidate-readiness.json",
+        "crates/projectatlas-cli/src/optional_pack_candidate_readiness_tests.rs"
+      ],
+      "deferred_to_tasks": []
+    },
+    {
+      "finding_id": "phase-release-scoreboard-coupling",
+      "subject": "Phase 0 readiness was coupled to final release evidence and could not authorize implementation independently.",
+      "blocking": true,
+      "disposition": "fixed",
+      "evidence_paths": [
+        "docs/benchmarks/projectatlas-v0.4-phase-scoreboard.json",
+        "crates/projectatlas-cli/src/repository_intelligence_scoreboard_tests.rs",
+        "openspec/changes/advance-rust-repository-intelligence/design.md",
+        "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+      ],
+      "deferred_to_tasks": []
+    },
+    {
+      "finding_id": "sqlite-feasibility-overclaim",
+      "subject": "The local SQLite feasibility labs were described as full pinned-corpus or pinned-scale decisions.",
+      "blocking": true,
+      "disposition": "narrowed-and-deferred",
+      "evidence_paths": [
+        "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json",
+        "openspec/task-verification-plan.json"
+      ],
+      "deferred_to_tasks": ["ARRI-11.5"]
+    },
+    {
+      "finding_id": "compatibility-surface-overclaim",
+      "subject": "The pre-change surface inventory was described as exhaustive behavioral compatibility proof.",
+      "blocking": true,
+      "disposition": "narrowed-and-deferred",
+      "evidence_paths": [
+        "fixtures/contracts/projectatlas-v0.3.26-surface.json",
+        "openspec/task-verification-plan.json",
+        "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+      ],
+      "deferred_to_tasks": ["ARRI-8.18", "ARRI-11.12"]
+    },
+    {
+      "finding_id": "safety-inventory-overclaim",
+      "subject": "The preliminary locked-dependency safety inventory was described as complete transitive and hosted containment proof.",
+      "blocking": true,
+      "disposition": "narrowed-and-deferred",
+      "evidence_paths": [
+        "docs/benchmarks/projectatlas-v0.4-host-safety.json",
+        "docs/benchmarks/projectatlas-v0.4-phase-scoreboard.json",
+        "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+      ],
+      "deferred_to_tasks": ["ARRI-11.18", "ARRI-11.23", "ARRI-11.28"]
+    },
+    {
+      "finding_id": "sqlite-string-selection-policy",
+      "subject": "SQLite architecture selection depended on a free-form string policy without deterministic correctness-first tie handling.",
+      "blocking": true,
+      "disposition": "fixed",
+      "evidence_paths": [
+        "crates/projectatlas-cli/src/sqlite_architecture_evaluation.rs",
+        "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json"
+      ],
+      "deferred_to_tasks": []
+    },
+    {
+      "finding_id": "evaluator-boundary-gaps",
+      "subject": "Evaluator checkout reads lacked complete byte limits, linked-parent rejection, byte-preserving Unix handling, executable-copy mode preservation and launch coverage, custom-filter ineligibility, and an explicit quiescence boundary.",
+      "blocking": true,
+      "disposition": "fixed",
+      "evidence_paths": [
+        "crates/projectatlas-cli/src/repository_evaluation_runner.rs",
+        "crates/projectatlas-cli/src/git_process_policy.rs",
+        "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json"
+      ],
+      "deferred_to_tasks": []
+    },
+    {
+      "finding_id": "callable-variable-stable-identity",
+      "subject": "Callable-variable extraction did not preserve qualified parent scope in stable identities.",
+      "blocking": true,
+      "disposition": "fixed",
+      "evidence_paths": [
+        "crates/projectatlas-symbols/src/lib.rs"
+      ],
+      "deferred_to_tasks": []
+    },
+    {
+      "finding_id": "checked-task-evidence-coverage-gap",
+      "subject": "Checked v0.4 tasks without implemented verification rows could bypass the normal IssueOps test-link gate.",
+      "blocking": true,
+      "disposition": "fixed",
+      "evidence_paths": [
+        ".github/scripts/issue-checklists.py",
+        "openspec/task-verification-plan.json"
+      ],
+      "deferred_to_tasks": []
+    },
+    {
+      "finding_id": "hostile-concurrent-filesystem-containment",
+      "subject": "A hostile same-user process can still race filesystem ancestry after validation outside the isolated quiescent evaluation contract.",
+      "blocking": false,
+      "disposition": "deferred",
+      "evidence_paths": [
+        "crates/projectatlas-cli/src/repository_evaluation_runner.rs",
+        "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json"
+      ],
+      "deferred_to_tasks": ["ARRI-11.2"]
+    }
+  ]
+}

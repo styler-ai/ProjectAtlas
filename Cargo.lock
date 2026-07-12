@@ -359,9 +359,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.18"
+version = "0.9.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -1345,6 +1345,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "processkit"
+version = "2.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c724f0e631a40e71df1803831d0915a327aa4a13e3a1ceabb63152c99964fc3c"
+dependencies = [
+ "async-trait",
+ "encoding_rs",
+ "libc",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "projectatlas-cli"
 version = "0.3.26"
 dependencies = [
@@ -1355,6 +1371,7 @@ dependencies = [
  "jsonc-parser",
  "notify",
  "predicates",
+ "processkit",
  "projectatlas-core",
  "projectatlas-db",
  "projectatlas-fs",
@@ -1365,6 +1382,7 @@ dependencies = [
  "rayon",
  "regex",
  "rmcp",
+ "rusqlite",
  "scraper",
  "serde",
  "serde_json",
@@ -1383,6 +1401,7 @@ dependencies = [
 name = "projectatlas-core"
 version = "0.3.26"
 dependencies = [
+ "blake3",
  "regex",
  "serde",
  "serde_json",
@@ -1954,6 +1973,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
+name = "socket2"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2122,8 +2151,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
 dependencies = [
  "bytes",
+ "libc",
+ "mio",
  "pin-project-lite",
+ "signal-hook-registry",
+ "socket2",
  "tokio-macros",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

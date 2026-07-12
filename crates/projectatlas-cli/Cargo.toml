@@ -10,6 +10,11 @@ homepage.workspace = true
 name = "projectatlas"
 path = "src/main.rs"
 
+[[example]]
+name = "calibration-evidence-runner"
+path = "examples/calibration-evidence-runner.rs"
+test = true
+
 [dependencies]
 projectatlas-core.workspace = true
 projectatlas-db.workspace = true
@@ -40,10 +45,13 @@ yaml-rust2.workspace = true
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"
+processkit.workspace = true
 rmcp = { workspace = true, features = ["client"] }
+rusqlite.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "process", "sync"] }
 
 [lints]
 workspace = true

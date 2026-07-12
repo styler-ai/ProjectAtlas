@@ -2,13 +2,14 @@
 
 ## Core Rules (All Projects)
 - Keep code changes minimal, clear, and aligned with SOLID / KISS / DRY principles.
+- Name durable artifacts by domain responsibility or behavior. This applies to files, modules, crates, libraries/packages, types, traits, functions, methods, constants/statics, durable variables, commands, schemas, fixtures, and tests. Do not encode implementation chronology such as phases, sprints, `new`/`old`, temporary status, migration order, or predecessor layout unless that chronology is itself the real external protocol, migration, release artifact, or historical subject. Before accepting a name, verify it remains accurate after the current initiative ends.
 - Prefer established frameworks or libraries; document any exception explicitly.
 - Add docstrings or comments only when intent is not obvious; avoid redundant narration.
 - Enforce strong logging, error handling, and security through input validation, environment-based secrets, HTTPS assets, and OWASP-aware design.
 - Follow conventional commits, for example `feat(core): ...`, and link the relevant GitHub issue when committing.
-- When a GitHub issue has an OpenSpec change, mirror `openspec/changes/<id>/tasks.md` into the issue as a visible checklist under an `OpenSpec Tasks` or `OpenSpec Task Checklist` heading, and update checked items before status updates, closure, or release. Keep `openspec/issue-map.json` current and run `.github/scripts/issue-checklists.py` for release/check-in validation. Treat local/GitHub checklist drift as a check-in blocker; random checkboxes outside explicit task-checklist sections must not satisfy the gate.
+- When a GitHub issue has an OpenSpec change, mirror `openspec/changes/<id>/tasks.md` into the issue as a visible checklist under an `OpenSpec Tasks` or `OpenSpec Task Checklist` heading, and update checked items before status updates, closure, or release. Keep `openspec/issue-map.json` current and run `.github/scripts/issue-checklists.py` for release/check-in validation. Before closure, commit the updated OpenSpec artifacts with completed tasks checked and add a clickable exact-commit permalink to the corresponding proposal/design/specs/tasks in the issue. Treat missing/stale links or local/GitHub checklist drift as a check-in blocker; random checkboxes outside explicit task-checklist sections must not satisfy the gate.
 - Run or describe appropriate tests with explicit timeouts; never leave commands hanging.
-- Use MCP tooling before CLI/manual steps when an MCP surface is available; close sessions when finished.
+- For all GitHub operations, always use authenticated `gh`; never use GitHub MCP. The ProjectAtlas `atlas_*` MCP preference below is scoped only to ProjectAtlas repository navigation, not GitHub work.
 - For interactive browser or Electron debugging and manual UI QA loops, use the global `playwright-interactive` skill by default.
 - For code, design, architecture, release, or PR review subagents, use `gpt-5.5` with `xhigh` reasoning. Reserve low-reasoning subagents for purpose creation or correction work only.
 - Keep documentation and specs in sync with behavior; update decision records as needed.
@@ -41,7 +42,8 @@
 ## Rust/Dependency Discipline
 - Prefer official or canonical Rust crates and standard implementations for protocols, formats, parsers, storage, watchers, token tooling, and platform integration before writing custom code.
 - Keep custom Rust code focused on ProjectAtlas-specific product logic, agent workflow policy, and composition between proven libraries.
+- Do not hardcode derived repository metadata such as OpenSpec task totals, GitHub checklist counts, generated-registry totals, or artifact inventory sizes in Rust code or tests when an authoritative artifact can be parsed. Compute and reconcile those values at the test/tooling boundary, and never put OpenSpec or GitHub workflow policy in product runtime behavior.
 - Document any exception to the official/canonical crate preference and cover it with tests.
-- Architecture reviews must explicitly check for unnecessary reimplementation, cross-platform path issues, performance bottlenecks, and drift from agent-first ProjectAtlas workflows.
+- Architecture reviews must explicitly check for unnecessary reimplementation, cross-platform path issues, performance bottlenecks, responsibility-based naming across every owned artifact, and drift from agent-first ProjectAtlas workflows.
 - Do not scatter protocol, schema, status, command, event, or mode strings as inline literals in Rust logic or payload builders. Centralize them at the smallest owning boundary: adapter-local constants/enums/types for adapter-only contracts, service-local constants/enums for service-owned rules, and shared crate modules only for cross-crate public contracts.
 - Prefer typed structs plus `Serialize` enums for JSON/TOON payload schemas and status values. Use constants for repeated command/event keys and match strings; keep one-off human diagnostics or test fixture prose inline when that avoids false abstraction.

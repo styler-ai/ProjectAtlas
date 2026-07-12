@@ -2,9 +2,9 @@
 
 ProjectAtlas already treats `cargo fmt`, workspace check, Clippy with `-D warnings`, plain workspace tests, stable doctests, rustdoc, custom source lints, and ProjectAtlas scan/lint checks as release-blocking work. The same broad sequence appears in `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `.githooks/pre-push`, and `docs/workflow.md`, with E2E assertions in `projectatlas-cli` protecting workflow policy. The current suite does not independently prove nextest execution, source coverage, or source mutation strength, and it does not retain machine-readable evidence that a release can bind to one commit.
 
-The measured all-feature snapshot used to start this change contains 286 runnable non-doctests, 87.75% line coverage, 84.90% region coverage, 86.28% function coverage, and 3,369 missed production lines. The pinned `cargo-mutants` inventory contains 4,911 candidates: 2,189 in `projectatlas-cli`, 951 in `projectatlas-db`, 587 in `projectatlas-service`, 570 in `projectatlas-symbols`, 441 in `projectatlas-core`, 97 in `projectatlas-fs`, and 76 in `projectatlas-lints`. These are baselines, not claims of complete testing. The audited tools are `cargo-nextest` 0.9.140, `cargo-llvm-cov` 0.8.7, and `cargo-mutants` 27.1.0.
+The pinned local all-feature observation used to start this change contains 286 runnable non-doctests and zero ignored tests across nine suites; 24,130 of 27,495 covered lines (87.76%, 3,365 missed), 34,041 of 40,094 covered regions (84.90%), and 2,045 of 2,369 covered functions (86.32%). An earlier `cargo-mutants` audit with the native default call skip contained 4,911 candidates: 2,189 in `projectatlas-cli`, 951 in `projectatlas-db`, 587 in `projectatlas-service`, 570 in `projectatlas-symbols`, 441 in `projectatlas-core`, 97 in `projectatlas-fs`, and 76 in `projectatlas-lints`. Disabling that hidden default produces the current unfiltered 4,931-row observation: 2,205 CLI, 955 database, and the same counts for the other crates, a source/config-explained drift of 20. These local observations are neither hosted platform floors nor claims of complete testing or mutation strength. The audited tools are `cargo-nextest` 0.9.140, `cargo-llvm-cov` 0.8.7, and `cargo-mutants` 27.1.0.
 
-This change affects developer tooling and hosted verification, not ProjectAtlas runtime behavior or MCP/CLI contracts. It must work on every supported release operating system, fail closed when evidence is absent or stale, keep `unsafe_code = "forbid"` and the existing strict Rust gates, and remain practical enough for pull requests. Full mutation testing is therefore a scheduled, manually dispatchable, and release-bound sharded operation rather than a serial step on every edit.
+This change affects developer tooling and hosted verification, not ProjectAtlas runtime behavior or MCP/CLI contracts. It must work on every supported release operating system, fail closed when evidence is absent or stale, keep `unsafe_code = "forbid"` and the existing strict Rust gates, and remain practical enough for pull requests. Full mutation testing is therefore a scheduled, manually dispatchable, and release-bound sharded operation rather than a serial step on every edit. Its repository-wide implementation and evidence campaign follows stabilization of the repository-intelligence architecture and features so broad test work is not invalidated by planned refactoring; focused tests for each new stable behavior remain mandatory when that behavior lands.
 
 ## Goals / Non-Goals
 
@@ -13,10 +13,12 @@ This change affects developer tooling and hosted verification, not ProjectAtlas 
 - Give nextest, stable doctests, LLVM source coverage, and source mutation testing separate blocking conclusions and separate retained evidence.
 - Pin tool versions and declare explicit command, test, mutant, shard, and job timeouts so a missing tool, hung command, empty selection, or incomplete run cannot pass.
 - Establish per-platform line, region, and function floors from measured evidence and raise them monotonically toward near-complete coverage of applicable ProjectAtlas-owned Rust.
+- Enforce the agreed v0.4 hard targets of 98% raw/100% adjusted lines, 95% raw/98% adjusted regions, 98% raw/100% adjusted functions, and 90% raw/95% adjusted viable mutation kills.
 - Require narrowly scoped, reviewed, expiring coverage and mutation exceptions instead of hiding files, crates, or generated outcomes.
 - Require zero missed viable mutants, zero timed-out mutants, and complete disposition for Rust changed by a pull request.
 - Reconcile a deterministic 16-shard full mutation run against one master inventory and ratchet the measured viable kill rate without fabricating an initial score.
 - Keep local, CI, release, documentation, hook, and workflow-policy E2E contracts synchronized.
+- Saturate legacy and refactored repository code, close the agreed adjusted-coverage targets, and run the complete mutation/evidence campaign only against the stabilized repository-intelligence architecture.
 
 **Non-Goals:**
 
@@ -25,6 +27,7 @@ This change affects developer tooling and hosted verification, not ProjectAtlas 
 - Adding Tarpaulin, unstable LLVM doctest instrumentation, a runtime dependency, a new production crate, or a reusable abstraction hierarchy.
 - Replacing existing repository mutation/fault fixtures with source mutation testing, or counting those fixtures as `cargo-mutants` evidence.
 - Making retries, ignored failures, blanket exclusions, or manually edited result summaries a route to green.
+- Delaying focused tests for new stable behavior until the repository-wide coverage campaign.
 
 ## Decisions
 
@@ -54,7 +57,7 @@ Alternative considered: add a dedicated quality-gate crate. Rejected because the
 
 ### 4. Bind every result to its exact inputs
 
-Each retained evidence manifest will identify the commit SHA, target OS and architecture, Rust and LLVM versions, pinned tool version, `Cargo.lock` digest, policy digest, relevant configuration digests, command/profile, source scope, start/completion timestamps, timeout settings, raw artifact digests, and final counts/status. A validator will reject wrong-commit, wrong-platform, wrong-tool, stale-policy, partial, truncated, manually inconsistent, or missing evidence.
+Each retained evidence manifest will identify the canonical `styler-ai/ProjectAtlas` repository, commit SHA, target OS and architecture, Rust and LLVM versions, pinned tool version, `Cargo.lock` digest, policy digest, relevant configuration digests, command/profile, source scope, start/completion timestamps, timeout settings, raw artifact digests, and final typed result/status. A validator will reject wrong-repository, wrong-commit, wrong-platform, wrong-tool, stale-policy, partial, truncated, manually inconsistent, or missing evidence.
 
 GitHub Actions will upload JUnit, LLVM JSON/LCOV or HTML summaries, native mutation output, master/shard inventories, normalized manifests, and concise job summaries with `if: always()` so failures remain diagnosable. Uploading failure evidence does not change the blocking conclusion.
 
@@ -62,9 +65,9 @@ Alternative considered: rely only on GitHub check names. Rejected because a gree
 
 ### 5. Keep coverage ratchets platform-specific and monotonic
 
-Coverage runs independently on each supported release OS and records separate line, region, and function counts/floors. The measured 87.75/84.90/86.28 snapshot may initialize only the platform on which it was produced. Linux and macOS floors must come from retained runs on those platforms before their blocking gates can be declared established; placeholders or copied percentages fail validation.
+Coverage runs independently on each supported release OS and records separate line, region, and function counts/floors. The pinned local 24,130/27,495-line, 34,041/40,094-region, and 2,045/2,369-function observation may initialize only its identified Windows host after trusted retention makes it eligible. Linux and macOS floors must come from retained runs on those platforms before their blocking gates can be declared established; placeholders or copied percentages fail validation.
 
-No pull request may lower a floor, reduce applicable source scope, silently increase exclusions, or relabel uncovered source as non-applicable. A floor may rise only to a value demonstrated by retained passing evidence for the same platform and policy scope. The policy keeps an explicit near-complete target for each coverage dimension and an explicit viable-mutation target. Once agreed, those targets are hard v0.4 CI/review/release gates: an unmet target remains visible with a tracking issue and keeps the pipeline and release blocked; an exception may define an honest adjusted applicability denominator but cannot waive the agreed numeric target.
+No pull request may lower a floor, reduce applicable source scope, silently increase exclusions, or relabel uncovered source as non-applicable. A floor may rise only to a value demonstrated by retained passing evidence for the same platform and policy scope. The agreed hard v0.4 targets are 98% raw/100% adjusted lines, 95% raw/98% adjusted regions, 98% raw/100% adjusted functions, and 90% raw/95% adjusted viable mutation kills. An unmet target remains visible with a tracking issue and keeps CI, review, and release blocked; an exception may define an honest adjusted applicability denominator but cannot waive the agreed numeric target.
 
 Alternative considered: pool platform results into one workspace percentage. Rejected because conditional compilation and platform adapters produce genuinely different executable source sets.
 
@@ -74,7 +77,7 @@ For a pull request, the workflow resolves and records the trusted merge base, as
 
 For the full gate, pinned cargo-mutants first creates an unfiltered raw master inventory using an explicit no-policy-exclusion configuration. The validator applies only exact current policy exceptions to derive a filtered execution inventory and a disjoint excluded inventory, retaining both identities and the generated execution config/filter arguments. Native deterministic `N/16` shards run over the filtered execution inventory against the same commit, policy, tool, and base/execution configuration identities. Aggregation requires `executed candidates union exact policy-excluded candidates == raw master`, with an empty intersection and every raw candidate disposed exactly once. It fails for a missing shard, duplicate or omitted candidate, foreign candidate, inconsistent metadata, command timeout, incomplete result, or unexplained exclusion. The raw and adjusted viable kill rates are both reported; exclusions and unviable candidates never improve the raw metric. The initial full score is set only from a complete retained 16-shard run, then becomes a monotonic floor, while the separately agreed v0.4 target remains a hard CI/release condition.
 
-Alternative considered: require all 4,911 candidates serially on every pull request. Rejected because it would make normal feedback impractical without improving changed-code enforcement; the complete run remains mandatory for scheduled/manual verification and release evidence.
+Alternative considered: require the complete current mutation inventory serially on every pull request. Rejected because it would make normal feedback impractical without improving changed-code enforcement; the complete run remains mandatory for scheduled/manual verification and release evidence.
 
 ### 7. Make timeouts and reruns fail closed
 
@@ -106,6 +109,14 @@ Read-only PR CI runs untrusted branch tests with only `contents`, `issues`, `pul
 
 Alternative considered: accept a passing aggregate CI run as evidence for every task. Rejected because it cannot prove which assertion covers a specific task and allows unrelated green tests to close unverified work.
 
+### 10. Sequence repository-wide saturation after product stabilization
+
+The repository-intelligence change owns architecture, migrations, public contracts, functionality, and the focused tests required by each stable behavior. This change begins its repository-wide implementation only after those boundaries stabilize and no planned broad refactor would invalidate a saturation pass. The existing format, check, strict Clippy, tests, doctests, rustdoc, source lints, and behavior-specific tests continue to run during feature work.
+
+On the stabilized implementation commit, this change first audits legacy and refactored ProjectAtlas-owned Rust, adds the smallest meaningful unit/integration/E2E cases needed for uncovered behavior, and then runs final nextest/doctest, platform coverage, and source-mutation evidence. The complete 16-shard campaign and final task-evidence reconciliation bind to that stabilized source and test scope. This change remains a hard v0.4 release prerequisite; it is not a prerequisite to start repository-intelligence implementation.
+
+Alternative considered: saturate the pre-refactor repository before repository-intelligence work. Rejected because ownership splits, migrations, and service changes would discard or rewrite a material portion of that test effort. This sequencing does not permit untested feature work because focused tests stay coupled to each stable behavior.
+
 ## Risks / Trade-offs
 
 - [Coverage differs across toolchain or operating-system updates] -> Keep per-platform count-based baselines bound to exact versions and require retained evidence before raising a floor or accepting a new baseline.
@@ -120,15 +131,17 @@ Alternative considered: accept a passing aggregate CI run as evidence for every 
 
 ## Migration Plan
 
-1. Check in native nextest/mutants configuration and the typed policy schema with exact audited tool pins and the measured local baseline clearly labeled by platform and provenance.
-2. Add validator unit and fixture tests for parsing, monotonic comparison, expiry, evidence binding, empty selections, native result classification, and 16-shard reconciliation before wiring workflows to it.
-3. Add separate nextest, doctest, per-platform coverage, and changed-mutation jobs with bounded commands and always-uploaded evidence; capture real Linux and macOS coverage baselines rather than copying the local values.
-4. Run a complete deterministic 16-shard mutation baseline, retain all raw outputs, reconcile all 4,911 baseline candidates or explain audited inventory drift, and set the first viable kill-rate floor only from that passing evidence.
-5. Add task-specific test identifiers, the task-evidence ledger validator, and IssueOps/check-in/PR checks before marking any implementation task complete; mirror authoritative checkbox state locally and on GitHub.
-6. Update release prerequisites, pre-push commands, workflow documentation, and E2E policy assertions in the same change so no supported entry point describes a weaker contract.
-7. Enable required branch checks only after the corresponding evidence-producing workflow is present and green. Rollback may disable a newly required branch-check name while preserving artifacts for diagnosis; it must not lower committed floors, delete failures, or silently expand exclusions.
+1. Complete and stabilize the repository-intelligence architecture, migrations, public contracts, functionality, and their focused risk-based tests; resolve planned broad refactors before taking an eligible quality-closure baseline.
+2. Check in native nextest/mutants configuration and the typed policy schema with exact audited tool pins, retaining the earlier local observation as historical pre-stabilization provenance and capturing the stabilized source/test scope separately.
+3. Add validator unit and fixture tests for parsing, monotonic comparison, expiry, evidence binding, empty selections, native result classification, and 16-shard reconciliation before wiring workflows to it.
+4. Add separate nextest, doctest, per-platform coverage, and changed-mutation jobs with bounded commands and always-uploaded evidence; capture real platform baselines against the stabilized commit rather than copying historical local values.
+5. Audit legacy/refactored code and add the smallest meaningful focused unit, integration, and E2E tests required to close the agreed adjusted-coverage targets without broad exclusions or vacuous assertions.
+6. Run the complete deterministic 16-shard mutation campaign only after source and test saturation stabilizes, retain all raw outputs, reconcile the exact current raw master, explain audited inventory drift, and set the first viable kill-rate floor only from passing evidence.
+7. Add task-specific test identifiers, the task-evidence ledger validator, and IssueOps/check-in/PR checks before marking any implementation task complete; mirror authoritative checkbox state locally and on GitHub.
+8. Update release prerequisites, pre-push commands, workflow documentation, and E2E policy assertions in the same change so no supported entry point describes a weaker contract.
+9. Enable required branch checks only after the corresponding evidence-producing workflow is present and green. Rollback may disable a newly required branch-check name while preserving artifacts for diagnosis; it must not lower committed floors, delete failures, or silently expand exclusions.
 
-## Open Questions
+## Resolved Agreements
 
-- What numeric near-complete v0.4 line, region, function, and viable mutation targets will the maintainers approve after the first complete platform and 16-shard evidence sets? The implementation must record explicit targets before claiming the goal, but this design does not invent them from the current incomplete baseline.
-- What artifact retention period is available under repository policy for full mutation evidence? It must cover the release decision window and be recorded in the workflow; a release cannot consume expired evidence.
+- The hard v0.4 targets are 98% raw/100% adjusted line coverage, 95% raw/98% adjusted region coverage, 98% raw/100% adjusted function coverage, and 90% raw/95% adjusted viable mutation kills. Historical floors remain separate monotonic measurements and cannot weaken these targets.
+- Required evidence is retained for 90 days, which exceeds the declared 30-day release-decision window. Expired or unavailable artifacts are ineligible even when an old manifest says they passed.

@@ -1,0 +1,220 @@
+{
+  "schema_version": 1,
+  "task_id": "ARRI-2.4",
+  "overall_state": "partial",
+  "task_complete": false,
+  "observed_at_utc": "2026-07-11T23:35:12.0334748Z",
+  "binding": {
+    "surface_artifact": {
+      "path": "fixtures/contracts/projectatlas-v0.3.26-surface.json",
+      "sha256": "eb0e8cb38e66db6d1300ffbe7b94212639ad98113d63bbcb1aac309700d2cb37"
+    },
+    "behavior_case_artifact": {
+      "path": "fixtures/contracts/projectatlas-v0.3.26-behavior-cases.json",
+      "sha256": "eaedfda70d9a00c8efaa982cfd0902817c993575689921e8b99a831f612ab92f"
+    },
+    "planning_revision": "c672442438404411389ef86e2efd767f3a4b2be0",
+    "planning_tree": "cc9bc004837c8843b84151cb269fba41e8944116",
+    "runtime_source_revision": "d3b3e157f954c7d360d821ed0385762e8b044385",
+    "runtime_source_tree": "3ec62b574e61c861cb562080c10d52c749b78866",
+    "runtime_version": "0.3.26",
+    "runtime_binary_sha256": "c84bf105f3f014f4d025f6b93c99c5b083ba7763bc0c78ade16b5a3c19179158",
+    "host": {
+      "os": "windows-11-professional-10.0.26200",
+      "architecture": "x86_64",
+      "rust_target": "x86_64-pc-windows-msvc",
+      "rustc": "1.93.1 (01f6ddf75 2026-02-11)",
+      "cargo": "1.93.1 (083ac5135 2025-12-15)"
+    }
+  },
+  "reproduction": {
+    "test_id": "ARRI-2.4",
+    "exact_contract_test_command": "cargo test --locked -p projectatlas-cli repository_intelligence_contract_tests::compatibility_contract_preserves_compiled_baseline -- --exact",
+    "exact_behavior_test_command": "cargo test --locked -p projectatlas-cli --test e2e frozen_compatibility_behavior_cases_replay_real_cli_and_mcp -- --exact --test-threads=1",
+    "runtime_help_command_template": "projectatlas <command-path> --help",
+    "runtime_info_command": "projectatlas --format json runtime-info",
+    "timeout_seconds_per_process": 10,
+    "mcp_calls_per_process": 10,
+    "digest_normalization": "UTF-8; CRLF and CR normalized to LF; SHA-256",
+    "help_observation_digest_algorithm": "ordered path NUL exit NUL stdout_sha256 NUL stderr_sha256 NUL stdout_bytes NUL stderr_bytes LF"
+  },
+  "last_local_run": {
+    "state": "passed",
+    "commit_bound": false,
+    "contract_test": {
+      "exit_code": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    "behavior_e2e": {
+      "exit_code": 0,
+      "passed": 1,
+      "failed": 0,
+      "cli_success_cases": 41,
+      "cli_failure_cases": 43,
+      "cli_exhaustive_parser_failure_cases": 41,
+      "mcp_success_cases": 40,
+      "mcp_failure_cases": 41,
+      "mcp_exhaustive_domain_or_not_found_cases": 39,
+      "mcp_explicit_no_domain_failure_tools": 1
+    }
+  },
+  "cli": {
+    "inventory": {
+      "state": "proven_local",
+      "source": "compiled Clap command tree",
+      "rows": 46,
+      "options_defaults_aliases_and_output_modes": "frozen_in_surface_artifact"
+    },
+    "parser_help_replay": {
+      "state": "proven_local",
+      "observations": 46,
+      "exit_codes": [
+        0
+      ],
+      "stderr_empty_observations": 46,
+      "compiled_parser_observation_digest": "3035af0fb2fba38d035103f9efa59235dd20a696960938e259ab23a194b84e4a",
+      "runtime_process_observation_digest": "3c191387016abbd12a9d49343adbfc25dedff50bc8a0057c4cb3f64391c46280"
+    },
+    "generic_error_replay": {
+      "state": "proven_local",
+      "cases": [
+        {
+          "id": "missing-subcommand",
+          "argv": [
+            "projectatlas"
+          ],
+          "error_kind": "DisplayHelpOnMissingArgumentOrSubcommand",
+          "exit_code": 2,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "compiled_stderr_sha256": "08aabd181e00c472821b18505a6bddd404e9f12cd9096234e79347f08dfeabb2",
+          "runtime_stderr_sha256": "f83ae3f82d49484f450e56ad23624c428a77ce1be0710649fb26792bec04f6ec",
+          "stdout_bytes": 0,
+          "compiled_stderr_bytes": 3053,
+          "runtime_stderr_bytes": 3057
+        },
+        {
+          "id": "unknown-root-option",
+          "argv": [
+            "projectatlas",
+            "--contract-fixture-unknown-option"
+          ],
+          "error_kind": "UnknownArgument",
+          "exit_code": 2,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "compiled_stderr_sha256": "5d0bdd20f89e6728702b2af21a62f38b100f2759185c359458a2fc176a4039c1",
+          "runtime_stderr_sha256": "7b533b6a92201ad90fbd97c45979efa603d33b34d813d89dbd85083b04fbe510",
+          "stdout_bytes": 0,
+          "compiled_stderr_bytes": 147,
+          "runtime_stderr_bytes": 141
+        }
+      ]
+    },
+    "runtime_identity_replay": {
+      "state": "proven_local",
+      "exit_code": 0,
+      "stdout_sha256": "5b39b6dbec4d6b169ae909dd560a07ed743b444753fdae17e560d774b8b03a61",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_bytes": 1419,
+      "stderr_bytes": 0,
+      "expected_identity_without_executable_or_tool_list": {
+        "project": "ProjectAtlas",
+        "major_version": 3,
+        "version": "0.3.26",
+        "repository": "https://github.com/styler-ai/ProjectAtlas",
+        "capabilities": [
+          "cli",
+          "mcp",
+          "sqlite",
+          "toon",
+          "symbol-index",
+          "text-search",
+          "watch",
+          "token-telemetry"
+        ],
+        "text_format": "TOON",
+        "output_formats": [
+          "toon",
+          "json"
+        ]
+      }
+    },
+    "command_behavior_replay": {
+      "state": "proven_local",
+      "invocable_paths": 41,
+      "runtime_paths_proven": 41,
+      "command_failure_cases": 43,
+      "output_modes_proven": [
+        "toon",
+        "json",
+        "token-tui",
+        "json-rpc-stdio"
+      ],
+      "root_selection_modes_proven": [
+        "explicit-database-and-config-mismatch-rejection",
+        "working-directory-bootstrap",
+        "persistent-project-binding"
+      ],
+      "side_effects_proven": [
+        "database",
+        "filesystem",
+        "configuration",
+        "preview-preservation",
+        "telemetry"
+      ],
+      "assertion_scope": "per-command exit, stdout/stderr contract, required TOON roots/fields, one bounded parser failure per invocation, focused post-parser failures, and per-invocation durable side-effect snapshots or bounded stream evidence",
+      "remaining_gap": "Normalized exact key/type response goldens and hosted replay remain open."
+    }
+  },
+  "mcp": {
+    "inventory_and_schema_replay": {
+      "state": "proven_local",
+      "source": "RMCP initialize and tools/list against the compiled server",
+      "protocol_version": "2025-11-25",
+      "tools": 40,
+      "request_schemas": "frozen_in_surface_artifact",
+      "canonical_compact_utf8_bytes": 18595,
+      "canonical_compact_sha256": "1cec07e4bb2abbd8a0de1d54680cd8b5d2120417eb20c333ef043d5aca677b0b",
+      "description_utf8_bytes": 3515,
+      "input_schema_utf8_bytes": 9084,
+      "estimated_tokens_lower_bound": 4649,
+      "estimated_tokens_upper_bound": 6199
+    },
+    "tool_behavior_replay": {
+      "state": "proven_local",
+      "tools": 40,
+      "runtime_tools_proven": 40,
+      "domain_failure_cases": 41,
+      "request_response_correlation": "numeric-json-rpc-id",
+      "root_selection_modes_proven": [
+        "per-call-project-path",
+        "session-project-mutation-to-distinct-indexed-root",
+        "persistent-project-binding",
+        "missing-local-index-rejection"
+      ],
+      "task_behavior_proven": [
+        "completed-contract-task-status",
+        "completed-contract-task-cancel-already-finished",
+        "unknown-task-status-not-found",
+        "unknown-task-cancel-not-found"
+      ],
+      "normal_workflow_required_extra_graph_calls": 0,
+      "assertion_scope": "per-tool correlated RMCP text result, required TOON roots/fields, executable missing-project or bounded not-found negative behavior for every applicable tool, explicit no-domain classification, per-call durable side-effect snapshots, defaults, exact selected-root comparison, and bounded task behavior",
+      "remaining_gap": "Normalized exact key/type response goldens and hosted replay remain open."
+    }
+  },
+  "cross_platform_replay": {
+    "state": "hosted_required",
+    "platforms": [
+      "windows-x64",
+      "linux-x64",
+      "macos-x64",
+      "macos-arm64"
+    ]
+  },
+  "pending_gaps": [
+    "normalized-exact-response-key-type-goldens",
+    "cross-platform-replay",
+    "commit-bound-successful-run-artifact"
+  ]
+}

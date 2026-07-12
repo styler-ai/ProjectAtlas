@@ -39,6 +39,40 @@ truthy() {
   esac
 }
 
+require_unlinked_managed_path() {
+  managed_path=$1
+  managed_label=$2
+  if [ -L "$managed_path" ] || [ -h "$managed_path" ]; then
+    printf '%s\n' "$managed_label must not be a symlink: $managed_path" >&2
+    return 1
+  fi
+}
+
+ensure_unlinked_managed_directory() {
+  managed_directory=$1
+  managed_label=$2
+  require_unlinked_managed_path "$managed_directory" "$managed_label" || return 1
+  if [ -e "$managed_directory" ] && [ ! -d "$managed_directory" ]; then
+    printf '%s\n' "$managed_label is not a directory: $managed_directory" >&2
+    return 1
+  fi
+  mkdir -p "$managed_directory" || return 1
+  require_unlinked_managed_path "$managed_directory" "$managed_label" || return 1
+}
+
+publish_managed_file() {
+  prepared_path=$1
+  destination_path=$2
+  managed_label=$3
+  destination_directory=$(dirname -- "$destination_path")
+  require_unlinked_managed_path "$destination_directory" "$managed_label parent" || return 1
+  require_unlinked_managed_path "$destination_path" "$managed_label" || return 1
+  if ! mv -f "$prepared_path" "$destination_path"; then
+    rm -f "$prepared_path"
+    return 1
+  fi
+}
+
 find_projectatlas() {
   if [ -x "$HOME/.local/bin/projectatlas" ] && is_projectatlas_runtime "$HOME/.local/bin/projectatlas"; then
     printf '%s\n' "$HOME/.local/bin/projectatlas"
@@ -706,12 +740,33 @@ install_release_binary() {
     rm -rf "$tmp_dir"
     return 1
   }
-  mkdir -p "$HOME/.local/bin"
-  cp "$tmp_dir/projectatlas/projectatlas" "$HOME/.local/bin/projectatlas" || {
+  ensure_unlinked_managed_directory "$HOME/.local/bin" "ProjectAtlas runtime bin directory" || {
     rm -rf "$tmp_dir"
     return 1
   }
-  chmod +x "$HOME/.local/bin/projectatlas"
+  runtime_target="$HOME/.local/bin/projectatlas"
+  require_unlinked_managed_path "$runtime_target" "ProjectAtlas runtime" || {
+    rm -rf "$tmp_dir"
+    return 1
+  }
+  prepared_runtime=$(mktemp "$HOME/.local/bin/.projectatlas.XXXXXX") || {
+    rm -rf "$tmp_dir"
+    return 1
+  }
+  cp "$tmp_dir/projectatlas/projectatlas" "$prepared_runtime" || {
+    rm -f "$prepared_runtime"
+    rm -rf "$tmp_dir"
+    return 1
+  }
+  chmod +x "$prepared_runtime" || {
+    rm -f "$prepared_runtime"
+    rm -rf "$tmp_dir"
+    return 1
+  }
+  publish_managed_file "$prepared_runtime" "$runtime_target" "ProjectAtlas runtime" || {
+    rm -rf "$tmp_dir"
+    return 1
+  }
   rm -rf "$tmp_dir"
 }
 
@@ -729,8 +784,6 @@ else
       exit 1
     }
     installed_bin="$HOME/.local/bin/projectatlas"
-  elif command -v cargo >/dev/null 2>&1 && [ -f "$project_root/crates/projectatlas-cli/Cargo.toml" ]; then
-    (cd "$project_root" && cargo install --path crates/projectatlas-cli --locked --force)
   elif install_release_binary; then
     installed_bin="$HOME/.local/bin/projectatlas"
   elif command -v cargo >/dev/null 2>&1; then
@@ -763,7 +816,12 @@ quarantine_known_stale_projectatlas_shims "$projectatlas_bin"
 warn_path_shadow "$projectatlas_bin"
 
 atlas_dir="$project_root/.projectatlas"
-mkdir -p "$atlas_dir"
+ensure_unlinked_managed_directory "$atlas_dir" "ProjectAtlas project state directory" || exit 1
+atlas_dir_canonical=$(CDPATH= cd -- "$atlas_dir" && pwd -P)
+if [ "$atlas_dir_canonical" != "$atlas_dir" ]; then
+  printf '%s\n' "ProjectAtlas project state directory escaped the canonical project root: $atlas_dir" >&2
+  exit 1
+fi
 mcp_config_path="$atlas_dir/projectatlas.mcp.json"
 claude_mcp_config_path="$atlas_dir/projectatlas.claude.mcp.json"
 opencode_config_path="$atlas_dir/projectatlas.opencode.json"
@@ -783,7 +841,13 @@ write_mcp_config() {
   if [ -n "$harness" ]; then
     set -- "$@" --harness "$harness"
   fi
-  "$projectatlas_bin" "$@" > "$output_path"
+  require_unlinked_managed_path "$output_path" "ProjectAtlas generated MCP config" || return 1
+  prepared_output=$(mktemp "$atlas_dir/.projectatlas-mcp.XXXXXX") || return 1
+  if ! "$projectatlas_bin" "$@" > "$prepared_output"; then
+    rm -f "$prepared_output"
+    return 1
+  fi
+  publish_managed_file "$prepared_output" "$output_path" "ProjectAtlas generated MCP config"
 }
 
 canonical_path() {

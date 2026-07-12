@@ -1,0 +1,1199 @@
+{
+  "schema_version": 1,
+  "format": "projectatlas.evaluation-manifest",
+  "manifest_id": "projectatlas-v0.4-repository-intelligence-evaluation",
+  "status": "preregistered-pending-corpus-materialization-and-results",
+  "preregistered_at_utc": "2026-07-11T00:00:00Z",
+  "projectatlas": {
+    "planning_commit": "c672442438404411389ef86e2efd767f3a4b2be0",
+    "baseline_runtime_commit": "d3b3e157f954c7d360d821ed0385762e8b044385",
+    "baseline_runtime_tree": "3ec62b574e61c861cb562080c10d52c749b78866",
+    "baseline_runtime_cargo_lock_sha256": "1e925a59e00fc8c0e82e925e64cf248e16fe08a37809b4923618342c382f073c",
+    "cargo_lock_sha256": "4a1bb80ae6b5c7021e703082611013c601f8ce874206d94f4ea24f4d83b112dc",
+    "baseline_release_artifacts": [
+      {
+        "target": "x86_64-pc-windows-msvc",
+        "executable_sha256": "c84bf105f3f014f4d025f6b93c99c5b083ba7763bc0c78ade16b5a3c19179158",
+        "executable_bytes": 56099840,
+        "version": "projectatlas 0.3.26",
+        "build_profile": "release",
+        "provenance": "official ProjectAtlas v0.3.26 standalone Windows release runtime"
+      }
+    ],
+    "future_candidate_commit": null
+  },
+  "reproduction": {
+    "schema_authority": "this-document",
+    "source_eligibility": {
+      "clean_committed_source_required": true,
+      "head_commit_required": true,
+      "dirty_run_status": "exploratory-ineligible",
+      "baseline_runtime_cargo_lock_must_match_baseline_digest": true,
+      "evaluator_cargo_lock_must_match_evaluator_digest": true,
+      "runner_source_must_match_compiled_bytes": true,
+      "required_run_bindings": [
+        "head_commit",
+        "worktree_state_sha256",
+        "cargo_lock_sha256",
+        "runner_source_sha256",
+        "git",
+        "manifest_sha256",
+        "executable_sha256",
+        "command_sha256",
+        "environment",
+        "observed_environment"
+      ]
+    },
+    "repository_evaluation_runner": {
+      "source_path": "crates/projectatlas-cli/src/repository_evaluation_runner.rs",
+      "supervisor_source_path": "crates/projectatlas-cli/src/bounded_process_supervisor.rs",
+      "architecture_evaluation_source_path": "crates/projectatlas-cli/src/sqlite_architecture_evaluation.rs",
+      "lexical_fixture_path": "fixtures/contracts/lexical-search-edge-cases-v1.json",
+      "example_path": "crates/projectatlas-cli/examples/repository-evaluation-runner.rs",
+      "example_name": "repository-evaluation-runner",
+      "build_command": [
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "projectatlas-cli",
+        "--example",
+        "repository-evaluation-runner"
+      ],
+      "eligible_build_profile": "release",
+      "required_arguments": [
+        "--manifest",
+        "--projectatlas",
+        "--source-root",
+        "--git",
+        "--corpora-root",
+        "--output-root",
+        "--run-id"
+      ],
+      "pilot_argument": "--pilot-repetitions",
+      "runtime_policy": "validate the pinned release executable, copy it create-new into the run directory, and execute only that immutable owned copy",
+      "raw_stream_policy": "bounded create-new files with sync, SHA-256, and exact readback",
+      "complete_process_tree_peak_rss": "unavailable-claim-blocking",
+      "os_network_egress_isolation": "unavailable-claim-blocking"
+    },
+    "calibration_runner": {
+      "source_path": "crates/projectatlas-cli/src/calibration_evidence_runner.rs",
+      "example_name": "calibration-evidence-runner",
+      "build_command": [
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "projectatlas-cli",
+        "--example",
+        "calibration-evidence-runner"
+      ],
+      "eligible_build_profile": "release",
+      "debug_assertions_must_be_disabled": true,
+      "build_command_role": "reproduction-instruction-not-execution-proof",
+      "command_surface": [
+        "run",
+        "execute",
+        "workload"
+      ],
+      "public_command": "run",
+      "internal_commands": [
+        "execute",
+        "workload"
+      ],
+      "process_supervision": "processkit-private-process-tree",
+      "workload_supervision": "processkit-private-process-tree",
+      "workload_timeout_source": "calibration.eligible_workloads[].timeout_seconds",
+      "tree_timeout_seconds": 5400,
+      "per_stream_capture_limit_bytes": 8388608,
+      "warmups": 3,
+      "repetitions": 15,
+      "environment_evidence": "name-presence-sha256-only",
+      "raw_environment_transport": "process-environment-only",
+      "allowed_environment_names": [
+        "CARGO_HOME",
+        "COMSPEC",
+        "DEVELOPER_DIR",
+        "HOME",
+        "INCLUDE",
+        "LIB",
+        "LIBPATH",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "PATH",
+        "PATHEXT",
+        "Platform",
+        "PROCESSOR_ARCHITECTURE",
+        "RUSTUP_HOME",
+        "RUSTUP_TOOLCHAIN",
+        "SDKROOT",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "UniversalCRTSdkDir",
+        "UCRTVersion",
+        "VCINSTALLDIR",
+        "VCToolsInstallDir",
+        "WindowsSdkBinPath",
+        "WindowsSdkDir",
+        "WindowsSDKVersion",
+        "WINDIR"
+      ],
+      "forced_environment": {
+        "RUST_BACKTRACE": "0"
+      },
+      "workload_result_transport": "single-use-no-clobber-file-consumed-and-removed",
+      "no_nonces_or_handoffs": true
+    },
+    "containment_eligibility": {
+      "owner": "processkit-private-process-tree",
+      "leader_and_descendants_supervised": true,
+      "deadline_tears_down_complete_tree": true,
+      "parent_death_hardening_requested": true,
+      "output_overflow_status": "ineligible",
+      "timeout_status": "ineligible",
+      "repository_custom_filter_dependency_status": "ineligible",
+      "source_workspace_concurrency_assumption": "isolated-quiescent-no-concurrent-same-user-filesystem-namespace-mutation",
+      "assumption_violation_status": "ineligible",
+      "coordinated_parent_swap_residual": "outside-eligible-run-threat-model",
+      "materialized_entry_read_limit_bytes": 67108864,
+      "materialized_checkout_read_limit_bytes": 268435456,
+      "platform_mechanisms": {
+        "windows": "job-object",
+        "linux": "cgroup-v2-or-process-group",
+        "macos_and_bsd": "process-group"
+      },
+      "process_group_limitation": "trusted-descendants-can-escape-with-setsid"
+    },
+    "evidence_schema": {
+      "schema_version": 1,
+      "artifact_kind_field": "artifact_kind",
+      "claim_status": "not-evaluated",
+      "artifact_kinds": [
+        "projectatlas.calibration.start",
+        "projectatlas.calibration.process",
+        "projectatlas.calibration.failure",
+        "projectatlas.calibration.pilot",
+        "projectatlas.calibration.completion"
+      ],
+      "lifecycle_stages": [
+        "reservation",
+        "provenance",
+        "execution",
+        "verification",
+        "aggregate",
+        "completion"
+      ],
+      "required_fields_by_artifact_kind": {
+        "projectatlas.calibration.start": [
+          "schema_version",
+          "artifact_kind",
+          "run_id",
+          "position",
+          "started_unix_ms",
+          "source",
+          "invocation",
+          "observed_environment",
+          "provenance",
+          "claim_status"
+        ],
+        "projectatlas.calibration.process": [
+          "schema_version",
+          "artifact_kind",
+          "scope",
+          "exit_code",
+          "timed_out",
+          "duration_ns",
+          "output_truncated",
+          "stdout",
+          "stderr",
+          "claim_status"
+        ],
+        "projectatlas.calibration.failure": [
+          "schema_version",
+          "artifact_kind",
+          "stage",
+          "failed_unix_ms",
+          "error",
+          "error_truncated",
+          "claim_status"
+        ],
+        "projectatlas.calibration.pilot": [
+          "schema_version",
+          "artifact_kind",
+          "manifest_id",
+          "manifest_sha256",
+          "run_id",
+          "position",
+          "source_before",
+          "source_after",
+          "invocation",
+          "observed_environment",
+          "samples",
+          "blake3",
+          "sqlite",
+          "claim_status"
+        ],
+        "projectatlas.calibration.completion": [
+          "schema_version",
+          "artifact_kind",
+          "completed_unix_ms",
+          "artifact_sha256",
+          "raw_attempts_sha256",
+          "process_sha256",
+          "sample_count",
+          "claim_status"
+        ]
+      },
+      "nested_binding_schemas": {
+        "source": [
+          "head_commit",
+          "dirty",
+          "worktree_state_sha256",
+          "cargo_lock_sha256",
+          "runner_source_sha256",
+          "git"
+        ],
+        "git": [
+          "path",
+          "sha256",
+          "version"
+        ],
+        "invocation": [
+          "executable",
+          "executable_sha256",
+          "build_profile",
+          "executable_role",
+          "arguments",
+          "command_sha256",
+          "environment"
+        ],
+        "environment_entry": [
+          "name",
+          "present",
+          "value_sha256"
+        ],
+        "observed_environment": [
+          "reference_environment_id",
+          "observed_os_family",
+          "observed_architecture",
+          "controlled_environment_sha256",
+          "executable_sha256"
+        ],
+        "provenance_digest": [
+          "scope",
+          "sha256"
+        ],
+        "process_stream": [
+          "bytes",
+          "file",
+          "sha256"
+        ],
+        "sample": [
+          "workload_id",
+          "phase",
+          "repetition",
+          "started_unix_ms",
+          "duration_ns",
+          "output_sha256"
+        ],
+        "workload_summary": [
+          "workload_id",
+          "measured_samples",
+          "median_ns",
+          "output_sha256"
+        ]
+      },
+      "nullable_fields": {
+        "projectatlas.calibration.process": [
+          "exit_code"
+        ],
+        "environment_entry": [
+          "value_sha256"
+        ]
+      },
+      "plaintext_environment_values_forbidden": true,
+      "retained_stream_bytes_out_of_line": true
+    },
+    "artifact_paths": {
+      "root": ".projectatlas/research/v04-results",
+      "calibration_positions": {
+        "before": {
+          "pilot": ".projectatlas/research/v04-results/calibration-before.json",
+          "raw_attempts": ".projectatlas/research/v04-results/calibration-before-samples.jsonl"
+        },
+        "after": {
+          "pilot": ".projectatlas/research/v04-results/calibration-after.json",
+          "raw_attempts": ".projectatlas/research/v04-results/calibration-after-samples.jsonl"
+        }
+      },
+      "journal_directory_rule": "aggregate-path-with-run-extension",
+      "journal_files": [
+        "start.json",
+        "process.json",
+        "process.stdout",
+        "process.stderr",
+        "failure.json",
+        "completion.json"
+      ],
+      "success_required_present": [
+        "start.json",
+        "process.json",
+        "process.stdout",
+        "process.stderr",
+        "completion.json",
+        "aggregate",
+        "raw-attempts"
+      ],
+      "success_required_absent": [
+        "failure.json"
+      ],
+      "envelope": ".projectatlas/research/v04-results/calibration-envelope.json",
+      "benchmark_run_template": ".projectatlas/research/v04-results/benchmark-runs/<run-id>",
+      "local_ignored_evidence": true,
+      "no_clobber_required": true,
+      "one_journal_per_position": true,
+      "one_completion_marker_per_position": true,
+      "publication_guarantees": [
+        "same-directory-process-visible-no-clobber",
+        "file-sync-all-before-publication-return",
+        "exact-byte-readback",
+        "journal-directory-identity-revalidated-before-and-after-publication",
+        "eligibility-only-after-completion-marker"
+      ],
+      "publication_non_guarantees": [
+        "directory-entry-power-loss-durability",
+        "cross-filesystem-atomicity",
+        "power-loss-transactionality"
+      ],
+      "filesystem_threat_boundary": {
+        "detected_persistent_identity_drift_at_verification_boundary_status": "ineligible",
+        "verification_boundaries": "before-and-after-owned-publication",
+        "concurrent_same_user_swap_and_restore_resistance": false,
+        "privileged_or_kernel_namespace_swap_resistance": false,
+        "trusted_local_workspace_parent_required": true,
+        "trusted_workspace_precondition": "no-preexisting-reparse-ancestry-or-concurrent-namespace-mutation"
+      }
+    },
+    "reference_host_eligibility": {
+      "environment_id": "reference-windows-x86-64",
+      "environment_evidence_must_match": true,
+      "executable_digest_must_match": true,
+      "observed_identity_fields": [
+        "reference_environment_id",
+        "observed_os_family",
+        "observed_architecture",
+        "controlled_environment_sha256",
+        "executable_sha256"
+      ],
+      "unmeasured_host_dimensions_not_claimed": [
+        "cpu-model",
+        "exact-toolchain-version",
+        "physical-core-count",
+        "logical-core-count",
+        "memory-size",
+        "firmware-identity",
+        "power-source-or-scheme",
+        "storage-volume-identity",
+        "exact-os-build"
+      ],
+      "calibration_positions": [
+        "before",
+        "after"
+      ],
+      "both_calibrations_required": true,
+      "uncalibrated_or_identity_mismatched_status": "informational-ineligible"
+    }
+  },
+  "strata": {
+    "small": {
+      "tracked_logical_bytes_max": 1000000
+    },
+    "medium": {
+      "tracked_logical_bytes_min": 1000001,
+      "tracked_logical_bytes_max": 10000000
+    },
+    "large": {
+      "tracked_logical_bytes_min": 10000001
+    }
+  },
+  "corpora": [
+    {
+      "id": "serde-json",
+      "stratum": "small",
+      "repository": "https://github.com/serde-rs/json",
+      "commit": "827a315bf2198558f0325b07bcc1e2cd973aba2f",
+      "tree": "02c7da42d8ac1c7c6e3b67f7cfb84e8e6ad12988",
+      "license": "Apache-2.0 OR MIT",
+      "clean_required": true,
+      "submodules_allowed": false,
+      "lfs_allowed": false,
+      "tracked_files": 92,
+      "tracked_logical_bytes": 733812,
+      "git_modes": {
+        "100644": 92
+      },
+      "submodules": 0,
+      "lfs_pointers": 0,
+      "symlinks": [],
+      "case_fold_collisions": 0,
+      "tree_manifest_sha256": "9bc51962b06faeb5f481ec5d4b66c130b685d740d547021cf2a3737aee29690e",
+      "blob_size_manifest_sha256": "c15014085fd50e61323d0a53db9a04ec26a4440d503c3659b20b7e446421c7da",
+      "canonical_manifest_sha256": "12e089498f3acfe4a5185974e2ffc10cb2a1cebb3d3d2e6771ee0c5028fc5b2a",
+      "materialization_state": "verified"
+    },
+    {
+      "id": "projectatlas-self",
+      "stratum": "medium",
+      "repository": "https://github.com/styler-ai/ProjectAtlas",
+      "commit": "d3b3e157f954c7d360d821ed0385762e8b044385",
+      "tree": "3ec62b574e61c861cb562080c10d52c749b78866",
+      "license": "MIT",
+      "clean_required": true,
+      "submodules_allowed": false,
+      "lfs_allowed": false,
+      "tracked_files": 202,
+      "tracked_logical_bytes": 5093135,
+      "git_modes": {
+        "100644": 199,
+        "100755": 3
+      },
+      "submodules": 0,
+      "lfs_pointers": 0,
+      "symlinks": [],
+      "case_fold_collisions": 0,
+      "tree_manifest_sha256": "73e67c0efd51e0f8cadf7b6bcf0c37713c4dd2b25df9ff672f20b46037250eb9",
+      "blob_size_manifest_sha256": "18045076eb68e2cfaf6bb30e60ec95b6b3dafad55ef04c8ee69708eba846ba51",
+      "canonical_manifest_sha256": "c08a09eaaa87300b66ccb02677fb1e11e1bc03bda2524ee963527e1f2a44542c",
+      "materialization_state": "verified"
+    },
+    {
+      "id": "rust-analyzer",
+      "stratum": "large",
+      "repository": "https://github.com/rust-lang/rust-analyzer",
+      "commit": "cecae478915cf3602a81038dd47301e58a5c6484",
+      "tree": "a04ed5ede028c656b2d3a1ab81bc3ea9e35c0f94",
+      "license": "Apache-2.0 OR MIT",
+      "clean_required": true,
+      "submodules_allowed": false,
+      "lfs_allowed": false,
+      "tracked_files": 2335,
+      "tracked_logical_bytes": 21793329,
+      "git_modes": {
+        "100644": 2331,
+        "100755": 1,
+        "120000": 3
+      },
+      "submodules": 0,
+      "lfs_pointers": 0,
+      "symlinks": [
+        {
+          "path": "AGENTS.md",
+          "target": "CLAUDE.md"
+        },
+        {
+          "path": "lib/lsp-server/LICENSE-APACHE",
+          "target": "../../LICENSE-APACHE"
+        },
+        {
+          "path": "lib/lsp-server/LICENSE-MIT",
+          "target": "../../LICENSE-MIT"
+        }
+      ],
+      "case_fold_collisions": 0,
+      "tree_manifest_sha256": "1daa550845561ef26f85a2db8fb7c7397b3f6c9f0f768f7450ecb7c87a028b6c",
+      "blob_size_manifest_sha256": "2135d3869dfed4ff2be6c0ed08422b903dd00ab88fbdb5b5e13ff8469da858fa",
+      "canonical_manifest_sha256": "4985f193fec7d291509daa851687af3d30eb85e1315615663684e31a09312b43",
+      "materialization_state": "verified"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "default-core",
+      "config_identity": "projectatlas-default-v0.3.26",
+      "optional_packs": [],
+      "network_allowed": false
+    },
+    {
+      "id": "fts-candidate-lab",
+      "config_identity": "fts-candidate-v1",
+      "optional_packs": [],
+      "network_allowed": false
+    },
+    {
+      "id": "native-parser-pack-lab",
+      "config_identity": "native-parser-pack-v1",
+      "optional_packs": [
+        "broad-language-pack"
+      ],
+      "network_allowed": false
+    },
+    {
+      "id": "wasm-parser-pack-lab",
+      "config_identity": "wasm-parser-pack-v1",
+      "optional_packs": [
+        "broad-language-pack"
+      ],
+      "network_allowed": false
+    },
+    {
+      "id": "semantic-pack-lab",
+      "config_identity": "semantic-pack-v1",
+      "optional_packs": [
+        "semantic-pack"
+      ],
+      "network_allowed": false
+    }
+  ],
+  "toolchains": [
+    {
+      "id": "windows-msvc-reference",
+      "declared_rustc": "1.93.1 (01f6ddf75 2026-02-11)",
+      "declared_cargo": "1.93.1 (083ac5135 2025-12-15)",
+      "declared_llvm": "21.1.8",
+      "declared_host": "x86_64-pc-windows-msvc",
+      "observation_state": "preregistered-not-observed-by-calibration-runner",
+      "claim_eligible": false
+    }
+  ],
+  "environments": [
+    {
+      "id": "reference-windows-x86-64",
+      "os_family": "windows",
+      "architecture": "x86_64",
+      "identity_dimensions": [
+        "reference-environment-id",
+        "observed-os-family",
+        "observed-architecture",
+        "controlled-environment-sha256",
+        "executable-sha256"
+      ],
+      "claim_eligible": false,
+      "claim_eligibility_reason": "controlled environment digest, executable digest, calibration pilot, and envelope are pending"
+    }
+  ],
+  "cache_states": {
+    "database-absent-new-process": {
+      "os_file_cache": "uncontrolled",
+      "sqlite_connection": "new-connection",
+      "service_process": "new-process",
+      "mcp_process": "not-applicable",
+      "index": "absent",
+      "warm_process_claim_eligible": false,
+      "cold_cache_claim_eligible": false
+    },
+    "current-index-new-process": {
+      "os_file_cache": "uncontrolled",
+      "sqlite_connection": "new-connection",
+      "service_process": "new-process",
+      "mcp_process": "not-applicable",
+      "index": "restored-current-seed",
+      "warm_process_claim_eligible": false,
+      "cold_cache_claim_eligible": false
+    },
+    "current-index-new-mcp-process": {
+      "os_file_cache": "uncontrolled",
+      "sqlite_connection": "new-connection",
+      "service_process": "new-process",
+      "mcp_process": "new-mcp-process",
+      "index": "restored-current-seed",
+      "warm_process_claim_eligible": false,
+      "cold_cache_claim_eligible": false
+    },
+    "current-index-supervised-architecture-child": {
+      "os_file_cache": "uncontrolled",
+      "sqlite_connection": "new-connection-per-sample",
+      "service_process": "supervised-child-process",
+      "mcp_process": "not-applicable",
+      "index": "read-only-current-seed-plus-output-owned-evaluation-databases",
+      "warm_process_claim_eligible": false,
+      "cold_cache_claim_eligible": false
+    }
+  },
+  "experiment_design": {
+    "sample_unit": "one operation on one corpus/profile/environment/runtime tuple",
+    "strata": [
+      "small",
+      "medium",
+      "large"
+    ],
+    "warmups": 3,
+    "paired_repetitions": 15,
+    "minimum_valid_pairs": 10,
+    "index_worker_counts": [
+      1,
+      8
+    ],
+    "query_concurrency": [
+      1,
+      4,
+      16
+    ],
+    "mixed_workload": {
+      "publication_tasks": 1,
+      "concurrent_readers": 8
+    },
+    "block_order": "AB or BA from the final-byte low bit of SHA-256(projectatlas.evaluation-order.v2 followed by u64-le length-prefixed decoded-seed, UTF-8 cell-id, u64-le repetition, and UTF-8 pair-id fields); 0 selects AB and 1 selects BA",
+    "rng": {
+      "algorithm": "sha256-domain-separated-ordering",
+      "version": "2",
+      "seed_hex": "042b3b999b906526d603fbc1deaf9682ad0c440623ee35bbe143cfd09c77edd3"
+    },
+    "timeout_treatment": "retain as failure and worst-direction infinite ratio; never exclude",
+    "failure_treatment": "any correctness, integrity, containment, compatibility, or required-platform failure blocks the dimension and aggregate exit",
+    "outlier_policy": "retain all preregistered observations; report raw values, median, p50, p95, MAD, and sensitivity without automatic deletion",
+    "confidence_intervals": {
+      "paired_time_rss_and_geometric_means": {
+        "method": "deterministic bias-corrected bootstrap of paired log ratios",
+        "cluster_unit": "repository/run",
+        "resamples": 10000,
+        "confidence": 0.95,
+        "decision_bound": "one-sided adverse"
+      },
+      "latency_percentiles": {
+        "method": "deterministic hierarchical bootstrap",
+        "cluster_levels": [
+          "run",
+          "request"
+        ],
+        "warmup_requests_per_cell": 100,
+        "measured_requests_per_cell": 1000,
+        "resamples": 10000,
+        "confidence": 0.95,
+        "decision_bound": "one-sided adverse"
+      },
+      "accuracy_and_agent_metrics": {
+        "method": "deterministic paired bootstrap",
+        "cluster_unit": "unique fixture/task",
+        "repository_strata": [
+          "small",
+          "medium",
+          "large"
+        ],
+        "stratum_weights": {
+          "small": 1,
+          "medium": 1,
+          "large": 1
+        },
+        "weight_normalization": "normalize the frozen integer weights to sum to one",
+        "resamples": 10000,
+        "confidence": 0.95,
+        "decision_bound": "one-sided adverse"
+      },
+      "seed_derivation": "SHA-256(global seed || metric family || cell ID)"
+    },
+    "independence_policy": "repeated model runs or requests from one fixture or task are one clustered experimental unit, never independent units",
+    "degenerate_sample_policy": "zero denominators, one-class fixtures, bootstrap-degenerate samples, and cells below minimum positive or negative counts are ineligible and never reported as 100 percent",
+    "paired_comparison": {
+      "lower_is_better_ratio": "candidate / baseline",
+      "higher_is_better_difference": "candidate - baseline"
+    },
+    "multiplicity": {
+      "gate_policy": "each required family passes independently; no aggregate compensation",
+      "claim_family_correction": "Holm step-down family-wise error correction",
+      "applies_to": [
+        "required corpora",
+        "required languages",
+        "required relation families",
+        "primary metrics"
+      ],
+      "family_alpha": 0.05,
+      "uncorrected_exploratory_results_cannot_pass_claims": true
+    },
+    "reruns": "only declared infrastructure failure permits a full cell rerun; retain all attempts and never select the best attempt"
+  },
+  "architecture_evaluations": {
+    "schema_version": 1,
+    "lexical_fixture": {
+      "path": "fixtures/contracts/lexical-search-edge-cases-v1.json",
+      "fixture_id": "projectatlas.lexical-edge-cases.v1",
+      "sha256": "2daa7dba61bb9fe8f6f1d8ac88b6aec72dd746775bd42f2f59e0496356050565",
+      "bytes": 2164
+    },
+    "fts_differential": {
+      "source_table": "file_texts",
+      "fts_table": "evaluation_file_text_fts",
+      "tokenizer": "trigram",
+      "corpus_queries": [
+        {
+          "id": "ascii-trigram-pub",
+          "pattern": "pub",
+          "case_sensitive": true,
+          "minimum_matches": 1
+        }
+      ],
+      "exact_order": "path-line-column-text",
+      "forced_fallback_classes": [
+        "punctuation",
+        "short-string",
+        "unicode-identifier",
+        "regex",
+        "fuzzy",
+        "tokenizer-incompatible"
+      ],
+      "timed_query_iterations": 67,
+      "percentile_method": "nearest-rank-ceiling",
+      "warmups": 3,
+      "repetitions": 15,
+      "update_marker": "projectatlas_fts_update_probe_v1",
+      "checkpoint_mode": "truncate",
+      "zero_positive_classes_are_failure": true,
+      "dropped_failures_are_failure": true
+    },
+    "sqlite_strategy": {
+      "source_table": "file_texts",
+      "load_transactions": [
+        {"id": "rows-256", "rows": 256},
+        {"id": "rows-2048", "rows": 2048},
+        {"id": "all-rows", "rows": null}
+      ],
+      "index_sets": ["maintained", "post-load"],
+      "import_modes": ["prepared-batches", "staging-attach-insert-select"],
+      "required_cells": 12,
+      "slot_count": 2,
+      "journal_mode": "wal",
+      "checkpoint_mode": "truncate",
+      "failure_injection": "derived-row-slot-check-after-inactive-replacement-before-flip",
+      "authored_key": "evaluation-authored-record",
+      "authored_value": "preserve-across-publication-and-rollback",
+      "raw_page_writes": "rejected",
+      "warmups": 3,
+      "repetitions": 15,
+      "selection_policy": "highest-correctness-preserving-total-strategy-rows-per-second-then-lowest-stable-cell-id",
+      "dropped_failures_are_failure": true
+    }
+  },
+  "decision_functions": {
+    "correctness": {
+      "method": "Wilson score interval",
+      "confidence": 0.95,
+      "minimum_positive_examples_per_family": 20,
+      "minimum_negative_examples_per_family": 20,
+      "precision_floor": 0.95,
+      "recall_floor": 0.9,
+      "semantic_precision_floor": 0.9,
+      "semantic_recall_floor": 0.8,
+      "decision": "every advertised family lower confidence bound meets its floor"
+    },
+    "non_inferiority": {
+      "performance_ratio_upper": 1.05,
+      "rss_ratio_upper": 1.05,
+      "bytes_ratio_upper": 1.05,
+      "agent_quality_difference_lower": 0,
+      "compatibility_required": true
+    },
+    "superiority": {
+      "cold_index_per_corpus_ratio_upper": 1.10,
+      "cold_index_geometric_mean_ratio_upper": 0.80,
+      "peak_rss_geometric_mean_ratio_upper": 0.80,
+      "structural_retrieval_p95_ratio_upper_exclusive": 1.00,
+      "agent_quality_point_estimate_difference_lower": 0.05,
+      "agent_quality_corrected_bound_lower_exclusive": 0,
+      "minimum_improved_pairs": 12
+    },
+    "absolute_budget": {
+      "decision": "observed p95 or exact byte count is at or below the preregistered limit"
+    },
+    "phase_exit": {
+      "decision": "all required cells are present, eligible, compatible, deterministic, contained, and pass their independent decision; missing or ineligible is failure"
+    }
+  },
+  "calibration": {
+    "state": "preregistered-pilot-pending",
+    "reference_environment": "reference-windows-x86-64",
+    "pilot_role": "freeze raw-time envelopes before implementation measurements",
+    "benchmark_eligibility": {
+      "required_positions": [
+        "before",
+        "after"
+      ],
+      "same_environment_identity_required": true,
+      "same_test_executable_sha256_required": true,
+      "all_attempts_retained": true,
+      "all_attempts_must_succeed": true,
+      "every_workload_median_must_remain_inside_frozen_envelope": true
+    },
+    "eligible_workloads": [
+      {
+        "id": "blake3-512mib",
+        "operation": "hash eight deterministic 64 MiB buffers serially with BLAKE3",
+        "repetitions": 15,
+        "timeout_seconds": 120,
+        "baseline_median_ns": null,
+        "eligible_ratio_min": 0.8,
+        "eligible_ratio_max": 1.25
+      },
+      {
+        "id": "sqlite-100k-batch",
+        "operation": "insert 100000 fixed-width rows into temporary SQLite in one prepared transaction then aggregate by indexed key",
+        "repetitions": 15,
+        "timeout_seconds": 120,
+        "baseline_median_ns": null,
+        "eligible_ratio_min": 0.8,
+        "eligible_ratio_max": 1.25
+      }
+    ],
+    "tolerance_factor": 1.25,
+    "divide_latency_by_calibration": false,
+    "eligibility": "all calibration medians must remain inside their frozen raw-time envelope and environment identity must match"
+  },
+  "latency_goals": [
+    {
+      "id": "sqlite-simple-warm",
+      "boundary": "sqlite",
+      "query_class": "simple-indexed",
+      "p95_goal_ms": 1,
+      "tolerance_factor": 1.25
+    },
+    {
+      "id": "service-three-hop-warm",
+      "boundary": "service",
+      "query_class": "bounded-three-hop",
+      "p95_goal_ms": 50,
+      "tolerance_factor": 1.25
+    },
+    {
+      "id": "mcp-simple-warm",
+      "boundary": "mcp-e2e",
+      "query_class": "simple-indexed",
+      "p95_goal_ms": 50,
+      "tolerance_factor": 1.25
+    },
+    {
+      "id": "mcp-three-hop-warm",
+      "boundary": "mcp-e2e",
+      "query_class": "bounded-three-hop",
+      "p95_goal_ms": 150,
+      "tolerance_factor": 1.25
+    }
+  ],
+  "timing_decomposition": [
+    "process-runtime-state",
+    "transport",
+    "deserialization",
+    "service",
+    "sqlite",
+    "serialization",
+    "response-write"
+  ],
+  "operations": [
+    {
+      "id": "cold-full-scan",
+      "corpora": "all",
+      "profile": "default-core",
+      "cache_state": "database-absent-new-process",
+      "repetitions": 30,
+      "timeout_seconds": 900,
+      "result_schema": "index-result"
+    },
+    {
+      "id": "warm-full-scan",
+      "corpora": "all",
+      "profile": "default-core",
+      "cache_state": "current-index-new-process",
+      "repetitions": 10,
+      "timeout_seconds": 900,
+      "result_schema": "index-result"
+    },
+    {
+      "id": "no-change-scan",
+      "corpora": "all",
+      "profile": "default-core",
+      "cache_state": "current-index-new-process",
+      "repetitions": 10,
+      "timeout_seconds": 300,
+      "result_schema": "index-result"
+    },
+    {
+      "id": "one-file-refresh",
+      "corpora": "all",
+      "profile": "default-core",
+      "cache_state": "current-index-new-process",
+      "repetitions": 10,
+      "timeout_seconds": 300,
+      "result_schema": "incremental-result"
+    },
+    {
+      "id": "lexical-search",
+      "corpora": "all",
+      "profile": "default-core",
+      "cache_state": "current-index-new-process",
+      "repetitions": 15,
+      "timeout_seconds": 30,
+      "result_schema": "query-result"
+    },
+    {
+      "id": "graph-lookup",
+      "corpora": "all",
+      "profile": "default-core",
+      "cache_state": "current-index-new-process",
+      "repetitions": 15,
+      "timeout_seconds": 30,
+      "result_schema": "query-result"
+    },
+    {
+      "id": "mcp-call-flow",
+      "corpora": "all",
+      "profile": "default-core",
+      "cache_state": "current-index-new-mcp-process",
+      "repetitions": 15,
+      "timeout_seconds": 120,
+      "result_schema": "agent-flow-result"
+    },
+    {
+      "id": "fts-differential",
+      "corpora": "all",
+      "profile": "fts-candidate-lab",
+      "cache_state": "current-index-supervised-architecture-child",
+      "repetitions": 15,
+      "timeout_seconds": 120,
+      "result_schema": "fts-result"
+    },
+    {
+      "id": "sqlite-strategy",
+      "corpora": "all",
+      "profile": "default-core",
+      "cache_state": "current-index-supervised-architecture-child",
+      "repetitions": 15,
+      "timeout_seconds": 300,
+      "result_schema": "sqlite-strategy-result"
+    },
+    {
+      "id": "parser-host-native",
+      "corpora": "language-fixtures",
+      "profile": "native-parser-pack-lab",
+      "cache_state": "current-index-new-process",
+      "repetitions": 15,
+      "timeout_seconds": 900,
+      "result_schema": "parser-host-result"
+    },
+    {
+      "id": "parser-host-wasm",
+      "corpora": "language-fixtures",
+      "profile": "wasm-parser-pack-lab",
+      "cache_state": "current-index-new-process",
+      "repetitions": 15,
+      "timeout_seconds": 900,
+      "result_schema": "parser-host-result"
+    },
+    {
+      "id": "semantic-candidate",
+      "corpora": "labeled-retrieval",
+      "profile": "semantic-pack-lab",
+      "cache_state": "current-index-new-process",
+      "repetitions": 15,
+      "timeout_seconds": 900,
+      "result_schema": "semantic-result"
+    }
+  ],
+  "result_schema": {
+    "common": [
+      "schema_version",
+      "artifact_kind",
+      "corpus_id",
+      "operation_id",
+      "sample_kind",
+      "cache_state",
+      "cache_state_evidence",
+      "repetition",
+      "registered_repetitions",
+      "registered_timeout_seconds",
+      "started_unix_ms",
+      "process",
+      "restoration_process",
+      "storage_before",
+      "storage_after",
+      "complete_process_tree_peak_rss_bytes",
+      "package_bytes",
+      "metrics",
+      "error",
+      "success",
+      "claim_status"
+    ],
+    "index_result_metrics": [
+      "result_kind",
+      "retained_storage",
+      "retained_storage_delta_bytes",
+      "logical_written_bytes",
+      "physical_written_bytes",
+      "files",
+      "symbols",
+      "relations"
+    ],
+    "incremental_result_metrics": [
+      "result_kind",
+      "retained_storage",
+      "retained_storage_delta_bytes",
+      "logical_written_bytes",
+      "physical_written_bytes",
+      "changed_files",
+      "symbols",
+      "relations"
+    ],
+    "query_result_metrics": [
+      "result_kind",
+      "returned_rows",
+      "response_bytes"
+    ],
+    "agent_flow_result_metrics": [
+      "result_kind",
+      "mcp_calls_observed",
+      "responses_observed",
+      "estimated_tokens_with_projectatlas",
+      "likely_file_reads_avoided",
+      "response_bytes",
+      "errors"
+    ],
+    "architecture_sample_context": [
+      "global_seed_reference",
+      "global_seed_hex",
+      "stable_cell_identity",
+      "repetition"
+    ],
+    "architecture_child_report": [
+      "schema_version",
+      "operation_id",
+      "metrics",
+      "error",
+      "success"
+    ],
+    "architecture_process_evidence": [
+      "executable",
+      "argv",
+      "command_sha256",
+      "stdin_sha256",
+      "exit_code",
+      "timed_out",
+      "duration_ns",
+      "output_truncated",
+      "stdout",
+      "stderr"
+    ],
+    "raw_stream_evidence": [
+      "path",
+      "bytes",
+      "sha256"
+    ],
+    "fts_result_metrics": [
+      "result_kind",
+      "sample_context",
+      "fixture_id",
+      "corpus_rows",
+      "controlled_edge_rows",
+      "controlled_edge_cases",
+      "fts5_available",
+      "candidate_queries",
+      "forced_fallback_queries",
+      "baseline_positive_matches",
+      "candidate_superset_complete",
+      "exact_rows_and_order_equal",
+      "literal_complete",
+      "punctuation_complete",
+      "short_string_complete",
+      "unicode_complete",
+      "regex_fallback_complete",
+      "fuzzy_fallback_complete",
+      "tokenizer_fallback_complete",
+      "update_restored",
+      "update_observation",
+      "request_observations",
+      "checkpointed_storage_bytes",
+      "index_bytes",
+      "baseline_p50_ns",
+      "baseline_p95_ns",
+      "candidate_p50_ns",
+      "candidate_p95_ns",
+      "failures",
+      "eligible"
+    ],
+    "fts_request_observation": [
+      "query_id",
+      "iteration",
+      "order",
+      "without_fts_ns",
+      "with_fts_ns"
+    ],
+    "fts_update_observation": [
+      "order",
+      "without_fts_ns",
+      "with_fts_ns"
+    ],
+    "sqlite_strategy_result_metrics": [
+      "result_kind",
+      "sample_context",
+      "execution_order",
+      "source_rows",
+      "required_cells",
+      "retained_cells",
+      "successful_cells",
+      "cells",
+      "selected_cell",
+      "all_rollbacks_ok",
+      "all_authored_rows_preserved",
+      "all_active_slots_preserved_on_failure",
+      "failures",
+      "eligible"
+    ],
+    "sqlite_strategy_cell": [
+      "status",
+      "cell_id",
+      "load_transaction",
+      "load_transaction_rows",
+      "index_set",
+      "import_mode",
+      "load_storage_scope",
+      "slot_mode",
+      "source_rows",
+      "prepublication_load_ns",
+      "load_transactions_committed",
+      "publication_ns",
+      "strategy_ns",
+      "rows_per_second",
+      "wal_bytes_before_checkpoint",
+      "checkpointed_storage_bytes",
+      "prepublication_load_bytes",
+      "load_cleanup_ns",
+      "retained_bytes",
+      "cleanup_ns",
+      "reconciliation_ok",
+      "publication_ok",
+      "rollback_ok",
+      "authored_rows_preserved",
+      "active_slot_preserved_on_failure",
+      "inactive_slot_preserved_on_failure",
+      "retained_rollback_slot_preserved",
+      "error"
+    ],
+    "parser_host_result_metrics": [
+      "modes_attempted",
+      "modes_passed",
+      "error_bytes",
+      "throughput_bytes_per_second",
+      "startup_ns",
+      "process_tree_peak_rss_bytes",
+      "package_bytes",
+      "abi_ok",
+      "containment_ok",
+      "platform_ok"
+    ],
+    "semantic_result_metrics": [
+      "mrr",
+      "ndcg_at_10",
+      "recall_at_10",
+      "precision",
+      "deterministic_inputs",
+      "vector_tolerance_ok",
+      "update_ns",
+      "p50_ns",
+      "p95_ns",
+      "process_tree_peak_rss_bytes",
+      "package_bytes",
+      "license_ok",
+      "platform_ok"
+    ]
+  },
+  "measurements": [],
+  "claim_status": "not-measured",
+  "claim_rule": "No absolute or comparative claim is eligible until corpus locks, calibration, all required repetitions, and independent per-dimension decisions pass."
+}

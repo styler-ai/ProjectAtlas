@@ -1,9 +1,19 @@
 //! Purpose: Provide the `ProjectAtlas` 3 command-line adapter.
 
 mod atlas_map;
+#[cfg(test)]
+mod language_capability_registry_tests;
 mod mcp;
+#[cfg(test)]
+mod optional_pack_candidate_readiness_tests;
+#[cfg(test)]
+mod repository_intelligence_contract_tests;
+#[cfg(test)]
+mod repository_intelligence_scoreboard_tests;
 mod runtime;
 mod structural;
+#[cfg(test)]
+mod task_evidence_plan_tests;
 mod token_tui;
 
 use atlas_map::{

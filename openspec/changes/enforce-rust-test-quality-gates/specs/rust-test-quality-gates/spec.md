@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Repository-owned quality policy and pinned tools
-ProjectAtlas SHALL keep one machine-readable Rust test-quality policy that declares the applicable source scope, supported platform identities, exact quality-tool versions, timeout ceilings, coverage floors and agreed targets, viable-mutation floor and agreed target, exception records, raw/filtered inventory metadata, and evidence-binding rules. CI and release workflows SHALL install and verify exactly `cargo-nextest` 0.9.140, `cargo-llvm-cov` 0.8.7, and `cargo-mutants` 27.1.0 until an intentional policy update changes those pins. Every evidence manifest SHALL also record the exact Rust and LLVM versions used; the measured starting environment is Rust 1.93.1 with LLVM 21.1.8, not a portable coverage claim.
+ProjectAtlas SHALL keep one machine-readable Rust test-quality policy that declares the canonical `styler-ai/ProjectAtlas` repository identity, applicable source scope, supported platform identities, exact quality-tool versions, timeout ceilings, coverage floors and agreed targets, viable-mutation floor and agreed target, exception records, raw/filtered inventory metadata, and evidence-binding rules. CI and release workflows SHALL install and verify exactly `cargo-nextest` 0.9.140, `cargo-llvm-cov` 0.8.7, and `cargo-mutants` 27.1.0 until an intentional policy update changes those pins. Every evidence manifest SHALL also record the exact Rust and LLVM versions used; the measured starting environment is Rust 1.93.1 with LLVM 21.1.8, not a portable coverage claim.
 
 #### Scenario: Pinned tools are available
 - **WHEN** a required quality job starts with tool versions matching the repository policy
@@ -44,6 +44,21 @@ Quality-policy and evidence paths SHALL resolve within the explicitly selected r
 #### Scenario: Validation fails
 - **WHEN** a malformed policy or failing evidence set is inspected
 - **THEN** the validator returns a nonzero status without changing source, policy, lockfile, hooks, workflows, or ProjectAtlas index state
+
+### Requirement: Post-stabilization repository-wide quality closure
+The repository-intelligence architecture, migrations, public contracts, and feature behavior SHALL stabilize before this change performs repository-wide legacy/refactored test saturation, final adjusted-coverage closure, the complete 16-shard source-mutation campaign, or final task-evidence reconciliation. Stabilized means the accepted feature behavior is implemented, focused behavior tests pass, blocking architecture findings are resolved, and no planned broad ownership, schema, service, or public-contract refactor is expected to invalidate the evidence. This ordering SHALL NOT defer tests for new stable behavior: each new algorithm, branch, migration, boundary, and public workflow SHALL receive its focused owning-logic unit test and every risk-required integration, CLI/MCP E2E, packaged, or platform test when implemented. The completed quality change SHALL remain a hard v0.4 release prerequisite, not a prerequisite to start feature implementation.
+
+#### Scenario: A stable feature slice is implemented
+- **WHEN** the slice has its focused owning-logic test and every risk-required boundary or public-workflow test but repository-wide saturation has not started
+- **THEN** repository-intelligence implementation may continue while its checklist task remains unchecked until final evidence closure
+
+#### Scenario: Broad quality evidence predates a planned refactor
+- **WHEN** coverage, full-mutation, or final task evidence was produced before a planned ownership, schema, service, or public-contract refactor completed
+- **THEN** that evidence is ineligible for v0.4 closure and must be regenerated against the stabilized source and test scope
+
+#### Scenario: The product architecture is stable
+- **WHEN** accepted feature behavior and focused tests pass with no unresolved blocking architecture finding or planned broad refactor
+- **THEN** the repository-wide saturation, adjusted-coverage, full-mutation, and final evidence sequence may begin
 
 ### Requirement: Independent blocking quality conclusions
 CI SHALL expose separate blocking conclusions for non-doctest nextest execution, stable doctests, LLVM source coverage, and changed-source mutation. A passing job in one dimension SHALL NOT satisfy, skip, or overwrite a failure in another. Existing format, workspace check, strict Clippy, rustdoc, source-lint, dependency, ProjectAtlas scan, and ProjectAtlas lint gates SHALL remain blocking and warning-free.
@@ -101,7 +116,7 @@ Doctests SHALL run independently with stable `cargo test --doc --workspace --all
 ### Requirement: Platform-specific LLVM coverage evidence
 Coverage SHALL run through pinned `cargo-llvm-cov` with matching `llvm-tools-preview` on every supported release operating-system identity and SHALL export machine-readable LLVM JSON plus a human-reviewable report. Each platform SHALL report covered and total lines, regions, and functions separately, together with missed counts and source scope. Cross-platform pooling and substitution SHALL be forbidden.
 
-The measured starting snapshot is 87.75% lines, 84.90% regions, 86.28% functions, and 3,369 missed production lines. It SHALL initialize only the platform and exact scope identified by its retained provenance. Linux, macOS, or another platform without retained baseline evidence SHALL remain unestablished and blocking; its floors SHALL NOT be copied from the measured host.
+The pinned local starting observation is 24,130 of 27,495 lines (87.76%, 3,365 missed), 34,041 of 40,094 regions (84.90%), and 2,045 of 2,369 functions (86.32%). It SHALL initialize only the platform and exact scope identified by retained eligible provenance; until then it remains an observation, not a floor. Linux, macOS, or another platform without retained baseline evidence SHALL remain unestablished and blocking; its floors SHALL NOT be copied from the measured host.
 
 #### Scenario: Every platform meets all floors
 - **WHEN** each supported platform produces complete evidence whose line, region, and function counts meet that platform's committed floors
@@ -117,10 +132,10 @@ The measured starting snapshot is 87.75% lines, 84.90% regions, 86.28% functions
 
 #### Scenario: The initial snapshot is reported
 - **WHEN** documentation or a job summary presents the measured starting percentages
-- **THEN** it labels the originating platform, commit, scope, toolchain, and 3,369 missed production lines and does not call the result complete coverage
+- **THEN** it labels the originating platform, commit, scope, toolchain, exact covered/total counts, and 3,365 missed production lines and does not call the result complete coverage
 
 ### Requirement: Monotonic coverage ratchets and explicit targets
-The policy SHALL store numeric line, region, and function floors and near-complete agreed targets for every supported platform. A policy update SHALL NOT lower a floor, reduce source scope, increase an exception's reach, or relabel uncovered production Rust as non-applicable. A floor SHALL rise only to a value demonstrated by retained passing evidence with the same platform and scope. CI and release SHALL fail any dimension below its floor. Once the v0.4 targets are agreed, the PR-review and release profiles SHALL also fail any dimension below its target; a tracking issue or expiring target-gap record SHALL document work but SHALL NOT make an unmet target pass. Public 100% language SHALL be allowed only when the corresponding raw or explicitly adjusted count is actually complete and its exceptions are disclosed.
+The policy SHALL store numeric line, region, and function floors and the agreed hard v0.4 targets for every supported platform: 98% raw/100% adjusted lines, 95% raw/98% adjusted regions, and 98% raw/100% adjusted functions. A policy update SHALL NOT lower a floor, reduce source scope, increase an exception's reach, or relabel uncovered production Rust as non-applicable. A floor SHALL rise only to a value demonstrated by retained passing evidence with the same platform and scope. CI and release SHALL fail any dimension below its floor. PR-review and release profiles SHALL also fail any dimension below its target; a tracking issue or expiring target-gap record SHALL document work but SHALL NOT make an unmet target pass. Public 100% language SHALL be allowed only when the corresponding raw or explicitly adjusted count is actually complete and its exceptions are disclosed.
 
 #### Scenario: A floor is lowered
 - **WHEN** a pull request changes any platform coverage floor below its merge-base value
@@ -158,7 +173,7 @@ Every coverage or mutation exception SHALL be machine-readable, narrowly identif
 - **THEN** validation fails and requires removal or an intentional reviewed update
 
 ### Requirement: Commit-bound retained evidence
-Every required gate SHALL produce a normalized manifest that binds results to repository root identity, commit SHA, target OS/architecture, Rust/LLVM and quality-tool versions, `Cargo.lock` digest, policy and native-config digests, command/profile, applicable scope, timeout policy, start/completion timestamps, raw artifact digests, and final counts/status. Wrong-commit, stale, partial, truncated, internally inconsistent, or manually unverifiable evidence SHALL fail validation.
+Every required gate SHALL produce a normalized manifest that binds results to the canonical repository identity, repository root identity, commit SHA, target OS/architecture, Rust/LLVM and quality-tool versions, `Cargo.lock` digest, policy and native-config digests, command/profile, applicable scope, timeout policy, start/completion timestamps, raw artifact digests, and a typed gate-specific result/status. Wrong-repository, wrong-commit, stale, partial, truncated, internally inconsistent, or manually unverifiable evidence SHALL fail validation. Required artifacts SHALL be retained for 90 days, exceeding the 30-day release-decision window; expired or unavailable evidence SHALL fail.
 
 Required raw and normalized artifacts SHALL upload with `if: always()` and explicit retention even when the gate fails. At minimum, this includes nextest JUnit, doctest logs/status, LLVM JSON and a human-readable coverage report, mutation master/shard inventories and native outcomes, normalized manifests, and failure diagnostics. Artifact upload SHALL NOT convert the originating gate to success.
 
@@ -204,7 +219,7 @@ Every pull request that changes applicable ProjectAtlas-owned Rust SHALL resolve
 ### Requirement: Deterministic full mutation inventory and 16-shard reconciliation
 A full source-mutation run SHALL generate one pinned unfiltered raw `cargo-mutants --list --json` master inventory for the exact commit, source/generator policy, no-policy-exclusion config, and tool version. Because native config exclusions remove candidates before listing, reviewed quality exceptions SHALL NOT be present in that raw-list configuration. The validator SHALL apply only exact valid policy exceptions to produce a disjoint excluded inventory and filtered execution inventory, with retained filter/config identities. Exactly 16 deterministic native shards SHALL execute the filtered inventory. Aggregate reconciliation SHALL prove that every filtered candidate appears exactly once across shard outcomes, no excluded candidate executes, and the disjoint union of filtered plus exact excluded candidates equals the raw master. Missing, duplicate, omitted, foreign, inconsistently filtered, cancelled, or timed-out required shards and incomplete native outcomes SHALL fail.
 
-The measured starting inventory is 4,911 candidates: 2,189 CLI, 951 DB, 587 service, 570 symbols, 441 core, 97 filesystem, and 76 lint candidates. The first implemented full run SHALL reconcile to that snapshot or retain a source/tool/config-backed explanation for measured drift; it SHALL NOT force the old count into current evidence.
+The earlier audit inventory is 4,911 candidates: 2,189 CLI, 951 DB, 587 service, 570 symbols, 441 core, 97 filesystem, and 76 lint candidates. It used cargo-mutants' native default call skip. The current unfiltered observation disables that default and contains 4,931 candidates: 2,205 CLI, 955 DB, and unchanged counts for the other crates. The first implemented full run SHALL reconcile its exact current master and retain source/tool/config-backed evidence for any drift; it SHALL NOT force either observed count into current evidence.
 
 #### Scenario: All shards reconcile
 - **WHEN** all 16 shards complete against the same raw/filtered identities and their candidate union plus exact excluded inventory equals the raw master with no duplicate or overlap
@@ -218,12 +233,12 @@ The measured starting inventory is 4,911 candidates: 2,189 CLI, 951 DB, 587 serv
 - **WHEN** shard union contains a duplicate, omission, or candidate absent from the master
 - **THEN** aggregation fails with the candidate and shard identities
 
-#### Scenario: Current inventory differs from 4,911
+#### Scenario: Current inventory differs from an earlier observation
 - **WHEN** the pinned current master inventory differs from the measured starting snapshot because source, policy, config, or tool identity changed
 - **THEN** the run reports and explains the drift from native evidence instead of fabricating parity
 
 ### Requirement: Full mutation disposition and monotonic viable kill-rate
-The full mutation aggregate SHALL classify every raw-master candidate into exactly one executed native outcome or exact policy-excluded outcome, report caught, missed, timed-out, unviable, excluded, and unresolved counts separately, and compute both raw and adjusted viable kill rates without allowing exclusions, unviable candidates, missing candidates, or unresolved outcomes to improve the raw metric. A command or shard timeout SHALL fail the run. The first floor SHALL be established only from a complete retained 16-shard run; later floors SHALL be monotonic and SHALL rise only from retained passing evidence. The policy SHALL also contain an explicit agreed v0.4 viable-mutation target; once agreed, CI/review and release SHALL fail below it, and no target-gap record SHALL waive it.
+The full mutation aggregate SHALL classify every raw-master candidate into exactly one executed native outcome or exact policy-excluded outcome, report caught, missed, timed-out, unviable, excluded, and unresolved counts separately, and compute both raw and adjusted viable kill rates without allowing exclusions, unviable candidates, missing candidates, or unresolved outcomes to improve the raw metric. A command or shard timeout SHALL fail the run. The first floor SHALL be established only from a complete retained 16-shard run; later floors SHALL be monotonic and SHALL rise only from retained passing evidence. The agreed hard v0.4 viable-mutation targets are 90% raw and 95% adjusted; CI, review, and release SHALL fail below either target, and no target-gap record SHALL waive it.
 
 #### Scenario: Agreed mutation target is missed
 - **WHEN** a complete aggregate meets its historical mutation floor but its agreed raw or adjusted viable-mutation target is not met
@@ -336,6 +351,8 @@ After a passing run, one metadata-only closure commit MAY change only `tasks.md`
 
 `tasks.md` and its mapped GitHub checklist SHALL remain synchronized before check-in, status reporting, task completion, or PR review. Check-in and PR policy SHALL reject a missing or duplicate identifier, absent/failed/stale evidence, evidence whose tested commit or covered-input digest does not match the permitted state, an orphan ledger row, a completed task without all required successful runs, a closure commit that changes covered inputs, or local/remote checkbox drift.
 
+Each mapped issue SHALL also expose clickable full-commit-SHA permalinks to the corresponding committed OpenSpec proposal, design, capability specifications, and task list. IssueOps SHALL resolve those links through the GitHub API, verify the mapped repository/change paths and referenced commit, and compare the committed task content with the authoritative local/remote checklist state. Missing, abbreviated-SHA, branch-only, foreign-repository, wrong-change, nonexistent, stale, or content-mismatched links SHALL block check-in, PR review, issue closure, and release.
+
 Pull-request IssueOps SHALL resolve the GitHub issues explicitly linked by that PR and validate only the deterministic task ranges those issues authoritatively own. Every declared in-scope task SHALL be complete with current evidence, and changed artifacts SHALL be attributable to that declared scope. An unlinked PR, ambiguous range ownership, changed artifact outside scope, reordered task, duplicate task, extra remote task, or missing remote task SHALL fail. Other incomplete issues in the same release milestone SHALL NOT block an otherwise complete incremental PR. Release IssueOps SHALL retain full-milestone validation and SHALL block packaging until every authoritative issue/range and evidence record in the release milestone is complete.
 
 PR validation SHALL execute untrusted branch tests only with read permissions and SHALL NOT use `pull_request_target` or another write-token path. A managed evidence renderer MAY run after a completed CI workflow only from trusted default-branch code with narrowly scoped `contents: read`, `actions: read`, `pull-requests: read`, and `issues: write`. Before updating an exact versioned marker, it SHALL validate source repository, source event, head repository/SHA, run ID/attempt, job conclusion, evidence schema/size/digests, and artifact identity. It SHALL escape Markdown cells, remain idempotent under retries/concurrent runs, never execute artifact/issue content, and refuse untrusted fork writeback without an explicitly authorized trusted run.
@@ -359,6 +376,10 @@ PR validation SHALL execute untrusted branch tests only with read permissions an
 #### Scenario: Local and GitHub states drift
 - **WHEN** a task checkbox or evidence-backed completion state differs between `tasks.md` and its authoritative GitHub issue
 - **THEN** checklist validation fails before check-in, status reporting, closure, release, or PR review
+
+#### Scenario: An issue links an uncommitted or stale specification
+- **WHEN** a mapped issue omits its OpenSpec links or references a branch, abbreviated/foreign/wrong commit, wrong change path, missing artifact, or task content that differs from the authoritative committed checklist
+- **THEN** IssueOps fails and names the invalid link before check-in, PR review, issue closure, or release
 
 #### Scenario: Incremental PR shares an incomplete release milestone
 - **WHEN** a PR links one authoritative phase issue whose declared tasks and evidence are complete while unrelated v0.4 issues remain open

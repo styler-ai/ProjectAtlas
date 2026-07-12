@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "projectatlas.optional-pack-candidate-readiness",
+  "claim_status": "preregistered-not-ready",
+  "selection_rule": "No parser host, ANN index, or local model is selected until every required input and measurement is retained and eligible.",
+  "parser_host": {
+    "owner_task": "ARRI-2.14",
+    "selection_state": "blocked",
+    "selected_candidate": null,
+    "required_dimensions": [
+      "correctness",
+      "throughput",
+      "process-tree-rss",
+      "startup",
+      "package-size",
+      "abi-compatibility",
+      "containment",
+      "release-portability"
+    ],
+    "dimension_metrics": {
+      "correctness": ["modes_attempted", "modes_passed", "error_bytes"],
+      "throughput": ["throughput_bytes_per_second"],
+      "process-tree-rss": ["process_tree_peak_rss_bytes"],
+      "startup": ["startup_ns"],
+      "package-size": ["package_bytes"],
+      "abi-compatibility": ["abi_ok"],
+      "containment": ["containment_ok"],
+      "release-portability": ["platform_ok"]
+    },
+    "candidates": [
+      {
+        "candidate_id": "native-tree-sitter-compiled-grammars",
+        "candidate_kind": "parser-host",
+        "parser_mode": "trusted-native-grammar-crates",
+        "readiness": "input-ready-measurement-pending",
+        "runner_operation_id": "parser-host-native",
+        "result_schema": "parser-host-result",
+        "profile": "native-parser-pack-lab",
+        "fixture_root": "fixtures/languages",
+        "packages": [
+          {"name":"tree-sitter-c","version":"0.24.2","checksum_sha256":"a9b2eb57a55fed6b00812912e730b7a275cf4fe98bfd6a5d76263d4438371728","language":"c","fixture":"fixtures/languages/c/runner.c"},
+          {"name":"tree-sitter-c-sharp","version":"0.23.5","checksum_sha256":"c1aac67f1ad71de1d6d39708d34811081c26dfa495658de6c14c34200849357c","language":"csharp","fixture":"fixtures/languages/csharp/Runner.cs"},
+          {"name":"tree-sitter-cpp","version":"0.23.4","checksum_sha256":"df2196ea9d47b4ab4a31b9297eaa5a5d19a0b121dceb9f118f6790ad0ab94743","language":"cpp","fixture":"fixtures/languages/cpp/runner.cpp"},
+          {"name":"tree-sitter-go","version":"0.25.0","checksum_sha256":"c8560a4d2f835cc0d4d2c2e03cbd0dde2f6114b43bc491164238d333e28b16ea","language":"go","fixture":"fixtures/languages/go/service.go"},
+          {"name":"tree-sitter-java","version":"0.23.5","checksum_sha256":"0aa6cbcdc8c679b214e616fd3300da67da0e492e066df01bcf5a5921a71e90d6","language":"java","fixture":"fixtures/languages/java/AtlasService.java"},
+          {"name":"tree-sitter-javascript","version":"0.25.0","checksum_sha256":"68204f2abc0627a90bdf06e605f5c470aa26fdcb2081ea553a04bdad756693f5","language":"javascript","fixture":"fixtures/languages/javascript/service.js"},
+          {"name":"tree-sitter-kotlin-ng","version":"1.1.0","checksum_sha256":"e800ebbda938acfbf224f4d2c34947a31994b1295ee6e819b65226c7b51b4450","language":"kotlin","fixture":"fixtures/languages/kotlin/Runner.kt"},
+          {"name":"tree-sitter-objc","version":"3.0.2","checksum_sha256":"9ca8bb556423fc176f0535e79d525f783a6684d3c9da81bf9d905303c129e1d2","language":"objective-c","fixture":"fixtures/languages/objective-c/UserManager.m"},
+          {"name":"tree-sitter-python","version":"0.25.0","checksum_sha256":"6bf85fd39652e740bf60f46f4cda9492c3a9ad75880575bf14960f775cb74a1c","language":"python","fixture":"fixtures/languages/python/builder.py"},
+          {"name":"tree-sitter-rust","version":"0.24.2","checksum_sha256":"439e577dbe07423ec2582ac62c7531120dbfccfa6e5f92406f93dd271a120e45","language":"rust","fixture":"fixtures/languages/rust/lib.rs"},
+          {"name":"tree-sitter-typescript","version":"0.23.2","checksum_sha256":"6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff","language":"typescript","fixture":"fixtures/languages/typescript/service.ts"},
+          {"name":"tree-sitter-zig","version":"1.1.2","checksum_sha256":"ab11fc124851b0db4dd5e55983bbd9631192e93238389dcd44521715e5d53e28","language":"zig","fixture":"fixtures/languages/zig/runner.zig"}
+        ],
+        "missing_evidence": ["paired-measurements", "complete-process-tree-rss", "packaged-platform-runs"]
+      },
+      {
+        "candidate_id": "tree-sitter-wasm-grammar-pack",
+        "candidate_kind": "parser-host",
+        "parser_mode": "versioned-wasm-grammar-pack",
+        "readiness": "blocked-missing-pack-artifact",
+        "runner_operation_id": "parser-host-wasm",
+        "result_schema": "parser-host-result",
+        "profile": "wasm-parser-pack-lab",
+        "runtime_package": {
+          "name": "tree-sitter",
+          "version": "0.26.9",
+          "feature": "wasm",
+          "checksum_sha256": "4dab76d0b724ba557954125188cf0633a1ca43199ced82d95c7b9c32cc3de1f3"
+        },
+        "grammar_pack_manifest": null,
+        "missing_evidence": ["versioned-pack-manifest", "artifact-digests", "paired-measurements", "complete-process-tree-rss", "packaged-platform-runs"]
+      }
+    ],
+    "blockers": [
+      {"code":"wasm-pack-manifest-missing","owner_tasks":["ARRI-5.1","ARRI-5.7","ARRI-5.16"]},
+      {"code":"parser-candidate-runner-not-executable","owner_tasks":["ARRI-5.8","ARRI-11.5"]},
+      {"code":"hosted-portability-evidence-missing","owner_tasks":["ARRI-5.14","ARRI-11.5","ARRI-11.23"]}
+    ]
+  },
+  "semantic_pack": {
+    "owner_task": "ARRI-2.15",
+    "selection_state": "blocked-pending-evaluation",
+    "selected_ann_candidate": null,
+    "selected_model_candidate": null,
+    "required_dimensions": [
+      "mrr",
+      "ndcg-at-10",
+      "recall-at-10",
+      "precision",
+      "deterministic-model-inputs",
+      "vector-tolerance",
+      "licensing",
+      "package-size",
+      "platform-support",
+      "update-cost",
+      "process-tree-rss",
+      "p50-latency",
+      "p95-latency"
+    ],
+    "dimension_metrics": {
+      "mrr": ["mrr"],
+      "ndcg-at-10": ["ndcg_at_10"],
+      "recall-at-10": ["recall_at_10"],
+      "precision": ["precision"],
+      "deterministic-model-inputs": ["deterministic_inputs"],
+      "vector-tolerance": ["vector_tolerance_ok"],
+      "licensing": ["license_ok"],
+      "package-size": ["package_bytes"],
+      "platform-support": ["platform_ok"],
+      "update-cost": ["update_ns"],
+      "process-tree-rss": ["process_tree_peak_rss_bytes"],
+      "p50-latency": ["p50_ns"],
+      "p95-latency": ["p95_ns"]
+    },
+    "candidate_shortlist": [
+      {"candidate_id":"hnsw-rs-0.3.4","candidate_kind":"ann-index","readiness":"not-materialized","crate":"hnsw_rs","version":"0.3.4","license":"MIT/Apache-2.0","crate_sha256":"43a5258f079b97bf2e8311ff9579e903c899dcbac0d9a138d62e9a066778bd07","crate_bytes":72119},
+      {"candidate_id":"instant-distance-0.6.1","candidate_kind":"ann-index","readiness":"not-materialized","crate":"instant-distance","version":"0.6.1","license":"MIT OR Apache-2.0","crate_sha256":"8c619cdaa30bb84088963968bee12a45ea5fbbf355f2c021bcd15589f5ca494a","crate_bytes":15734},
+      {"candidate_id":"candle-transformers-0.11.0","candidate_kind":"local-model-runtime","readiness":"not-materialized","crate":"candle-transformers","version":"0.11.0","license":"MIT OR Apache-2.0","crate_sha256":"3bcbbf7ff00ff6fe2af22b93600195917fe90e90ff48424a140d1a926c44b1c1","crate_bytes":515399},
+      {"candidate_id":"fastembed-5.17.2","candidate_kind":"local-model-runtime","readiness":"not-materialized","crate":"fastembed","version":"5.17.2","license":"Apache-2.0","crate_sha256":"545e4fb17fc48768ff36c2a3854aa5b0b809d0ed595ab5530fa8ac94f31bd0ea","crate_bytes":448141}
+    ],
+    "labeled_retrieval_corpus": null,
+    "model_input_contract": null,
+    "vector_tolerance_contract": null,
+    "runner_operation_id": "semantic-candidate",
+    "result_schema": "semantic-result",
+    "profile": "semantic-pack-lab",
+    "default_core_fallback": "structural-and-lexical-remain-authoritative",
+    "blockers": [
+      {"code":"labeled-retrieval-corpus-missing","owner_tasks":["ARRI-10.7","ARRI-10.9"]},
+      {"code":"model-input-and-vector-contracts-missing","owner_tasks":["ARRI-10.5","ARRI-10.6"]},
+      {"code":"semantic-candidate-runner-not-executable","owner_tasks":["ARRI-10.4","ARRI-10.9","ARRI-11.5"]},
+      {"code":"hosted-resource-evidence-missing","owner_tasks":["ARRI-10.9","ARRI-11.5","ARRI-11.18","ARRI-11.23"]}
+    ]
+  }
+}

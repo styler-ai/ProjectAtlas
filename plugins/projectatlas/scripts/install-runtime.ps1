@@ -297,6 +297,73 @@ function Confirm-ProjectAtlasBareCommandResolution {
     Write-Warning "Active process still resolves bare 'projectatlas' to $commandPath version '$commandVersion', not the verified runtime $VerifiedPath. Generated MCP configs use the absolute runtime; restart Codex or the shell, put $(Split-Path -Parent $VerifiedPath) first on PATH, or remove the obsolete shim before relying on bare projectatlas."
 }
 
+function Assert-ProjectAtlasUnlinkedManagedPath {
+    param(
+        [string]$Path,
+        [string]$Label
+    )
+    $item = Get-Item -Force -LiteralPath $Path -ErrorAction SilentlyContinue
+    if (-not $item) {
+        return
+    }
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "$Label must not be a symlink, junction, or reparse point: $Path"
+    }
+}
+
+function Publish-ProjectAtlasManagedFile {
+    param(
+        [string]$PreparedPath,
+        [string]$DestinationPath,
+        [string]$Label
+    )
+    $directory = Split-Path -Parent $DestinationPath
+    Assert-ProjectAtlasUnlinkedManagedPath $directory "$Label parent"
+    Assert-ProjectAtlasUnlinkedManagedPath $DestinationPath $Label
+    $backupPath = $null
+    try {
+        if (Test-Path -LiteralPath $DestinationPath) {
+            $backupPath = Join-Path $directory ("." + [System.IO.Path]::GetFileName($DestinationPath) + "." + [guid]::NewGuid().ToString("N") + ".bak")
+            [System.IO.File]::Replace($PreparedPath, $DestinationPath, $backupPath, $true)
+        }
+        else {
+            [System.IO.File]::Move($PreparedPath, $DestinationPath)
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $PreparedPath -Force -ErrorAction SilentlyContinue
+        if ($backupPath) {
+            Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Copy-ProjectAtlasManagedFile {
+    param(
+        [string]$SourcePath,
+        [string]$DestinationPath,
+        [string]$Label
+    )
+    $directory = Split-Path -Parent $DestinationPath
+    Assert-ProjectAtlasUnlinkedManagedPath $directory "$Label parent"
+    $temporaryPath = Join-Path $directory ("." + [System.IO.Path]::GetFileName($DestinationPath) + "." + [guid]::NewGuid().ToString("N") + ".tmp")
+    try {
+        Copy-Item -LiteralPath $SourcePath -Destination $temporaryPath
+        $stream = [System.IO.File]::Open($temporaryPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            $stream.Flush($true)
+        }
+        finally {
+            $stream.Dispose()
+        }
+        Publish-ProjectAtlasManagedFile $temporaryPath $DestinationPath $Label
+    }
+    catch {
+        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
 function Sync-ProjectAtlasRuntimeToLocalAppData {
     param(
         [string]$FilePath,
@@ -306,11 +373,14 @@ function Sync-ProjectAtlasRuntimeToLocalAppData {
         return $null
     }
     $installDir = Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin"
+    Assert-ProjectAtlasUnlinkedManagedPath (Join-Path $env:LOCALAPPDATA "ProjectAtlas") "ProjectAtlas runtime directory"
+    Assert-ProjectAtlasUnlinkedManagedPath $installDir "ProjectAtlas runtime bin directory"
     New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+    Assert-ProjectAtlasUnlinkedManagedPath $installDir "ProjectAtlas runtime bin directory"
     $target = Join-Path $installDir "projectatlas.exe"
     if ((Get-NormalizedPathEntry $FilePath) -ne (Get-NormalizedPathEntry $target)) {
         try {
-            Copy-Item -LiteralPath $FilePath -Destination $target -Force
+            Copy-ProjectAtlasManagedFile $FilePath $target "ProjectAtlas stable runtime"
         }
         catch {
             Write-Warning "ProjectAtlas LocalAppData mirror skipped because ${target} is locked: $($_.Exception.Message) Close any running ProjectAtlas or Codex session using that file, then rerun this installer. Codex MCP and generated configs continue to use verified runtime $FilePath."
@@ -1001,8 +1071,14 @@ function Get-ReleaseRuntimeInstallPath {
         $runtimeVersion = "unknown"
     }
     $safeVersion = $runtimeVersion -replace '[^A-Za-z0-9_.-]', '_'
+    $runtimeRoot = Join-Path $env:LOCALAPPDATA "ProjectAtlas"
+    $runtimeVersions = Join-Path $runtimeRoot "runtimes"
     $installDir = Join-Path $env:LOCALAPPDATA "ProjectAtlas\runtimes\$safeVersion\x86_64-pc-windows-msvc"
+    Assert-ProjectAtlasUnlinkedManagedPath $runtimeRoot "ProjectAtlas runtime directory"
+    Assert-ProjectAtlasUnlinkedManagedPath $runtimeVersions "ProjectAtlas versioned runtime directory"
+    Assert-ProjectAtlasUnlinkedManagedPath $installDir "ProjectAtlas release runtime directory"
     New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+    Assert-ProjectAtlasUnlinkedManagedPath $installDir "ProjectAtlas release runtime directory"
     return Join-Path $installDir "projectatlas.exe"
 }
 
@@ -1078,7 +1154,7 @@ function Install-ReleaseBinary {
         if (-not $binary) {
             throw "Release archive did not contain projectatlas.exe"
         }
-        Copy-Item -LiteralPath $binary.FullName -Destination $target -Force
+        Copy-ProjectAtlasManagedFile $binary.FullName $target "ProjectAtlas release runtime"
         if (-not (Test-ProjectAtlasRuntime $target $Version)) {
             throw "Release archive produced an invalid runtime for ProjectAtlas ${Version}: $target"
         }
@@ -1123,7 +1199,6 @@ if ($RuntimePath) {
 }
 else {
     $cargo = Find-Cargo
-    $sourceManifest = Join-Path $ProjectRoot "crates\projectatlas-cli\Cargo.toml"
     $installedBinary = $null
 
     if ($releaseBinaryOnly) {
@@ -1133,15 +1208,6 @@ else {
         }
         if (-not (Test-ProjectAtlasRuntime $installedBinary $ProjectAtlasVersion)) {
             throw "ProjectAtlas release-binary install produced an invalid runtime for ${ProjectAtlasVersion}: $installedBinary"
-        }
-    }
-    elseif ($cargo -and (Test-Path -LiteralPath $sourceManifest)) {
-        Push-Location $ProjectRoot
-        try {
-            Invoke-Checked $cargo @("install", "--path", "crates/projectatlas-cli", "--locked", "--force")
-        }
-        finally {
-            Pop-Location
         }
     }
     else {
@@ -1173,7 +1239,9 @@ Quarantine-ProjectAtlasStaleShims $projectAtlas $ProjectAtlasVersion
 Write-ProjectAtlasPathShadowReport $projectAtlas $ProjectAtlasVersion
 
 $atlasDir = Join-Path $ProjectRoot ".projectatlas"
+Assert-ProjectAtlasUnlinkedManagedPath $atlasDir "ProjectAtlas project state directory"
 New-Item -ItemType Directory -Force -Path $atlasDir | Out-Null
+Assert-ProjectAtlasUnlinkedManagedPath $atlasDir "ProjectAtlas project state directory"
 $dbPath = Join-Path $atlasDir "projectatlas.db"
 $projectConfigPath = Join-Path $atlasDir "config.toml"
 $flatConfigPath = Join-Path $ProjectRoot "projectatlas.toml"
@@ -1203,7 +1271,18 @@ function Write-ProjectAtlasMcpConfig {
     }
     $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
     $mcpConfigText = ($mcpConfig -join [Environment]::NewLine) + [Environment]::NewLine
-    [System.IO.File]::WriteAllText($OutputPath, $mcpConfigText, $utf8NoBom)
+    Assert-ProjectAtlasUnlinkedManagedPath $OutputPath "ProjectAtlas generated MCP config"
+    $temporaryPath = Join-Path $atlasDir ("." + [System.IO.Path]::GetFileName($OutputPath) + "." + [guid]::NewGuid().ToString("N") + ".tmp")
+    $bytes = $utf8NoBom.GetBytes($mcpConfigText)
+    $stream = New-Object System.IO.FileStream -ArgumentList @($temporaryPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    try {
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    }
+    finally {
+        $stream.Dispose()
+    }
+    Publish-ProjectAtlasManagedFile $temporaryPath $OutputPath "ProjectAtlas generated MCP config"
 }
 
 Write-ProjectAtlasMcpConfig $mcpConfigPath $null

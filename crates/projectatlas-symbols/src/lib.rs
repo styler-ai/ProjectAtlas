@@ -1324,9 +1324,66 @@ fn named_text(node: Node<'_>, content: &str) -> Option<String> {
 
 /// Build a compact declaration signature for a node.
 fn declaration_signature(node: Node<'_>, content: &str) -> String {
-    let raw = node_text(node, content).unwrap_or_default();
-    let first_line = raw.lines().next().unwrap_or("").trim();
-    compact_text(first_line)
+    let header_end = declaration_body_start(node).unwrap_or_else(|| node.end_byte());
+    let mut signature = String::new();
+    append_declaration_tokens(node, content, header_end, &mut signature);
+    if signature.is_empty() {
+        node_text(node, content).map_or_else(String::new, |raw| compact_text(&raw))
+    } else {
+        signature
+    }
+}
+
+/// Return the byte at which executable or member body syntax begins.
+fn declaration_body_start(node: Node<'_>) -> Option<usize> {
+    if declaration_has_direct_callable_initializer(node)
+        && let Some(initializer) = first_variable_initializer(node)
+        && let Some(body) = initializer.child_by_field_name("body")
+    {
+        return Some(body.start_byte());
+    }
+    if let Some(body) = node.child_by_field_name("body") {
+        return Some(body.start_byte());
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .find(|child| {
+            matches!(
+                child.kind(),
+                "block" | "compound_statement" | "statement_block"
+            ) || child.kind().ends_with("_body")
+        })
+        .map(|body| body.start_byte())
+}
+
+/// Append non-comment leaf tokens before a declaration body in source order.
+fn append_declaration_tokens(
+    node: Node<'_>,
+    content: &str,
+    header_end: usize,
+    signature: &mut String,
+) {
+    if node.start_byte() >= header_end || node.kind().contains("comment") {
+        return;
+    }
+    if node.child_count() == 0 {
+        if node.end_byte() <= header_end
+            && let Some(token) = node_text(node, content)
+        {
+            let token = token.trim();
+            if !token.is_empty() {
+                if !signature.is_empty() {
+                    signature.push(' ');
+                }
+                signature.push_str(token);
+            }
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        append_declaration_tokens(child, content, header_end, signature);
+    }
 }
 
 /// Return whether a declaration is exported or publicly visible.
@@ -1777,7 +1834,52 @@ mod tests {
     use super::{
         MAX_SYMBOLS_PER_FILE, extract_fallback_graph, extract_symbol_graph, specialized_languages,
     };
-    use projectatlas_core::symbols::{ParserKind, RelationKind, SymbolKind};
+    use projectatlas_core::graph::{
+        EntityKey, EntitySelector, IdentityText, ProjectInstanceId, RepositoryFilePath,
+    };
+    use projectatlas_core::symbols::{CodeSymbol, ParserKind, RelationKind, SymbolKind};
+
+    fn parser_declaration_identity(
+        project: ProjectInstanceId,
+        symbols: &[CodeSymbol],
+        expected_parent: &str,
+        signature_fragment: &str,
+    ) -> Option<(EntityKey, usize)> {
+        let symbol = symbols.iter().find(|symbol| {
+            symbol.kind == SymbolKind::Method
+                && symbol.name == "run"
+                && symbol.parent.as_deref() == Some(expected_parent)
+                && symbol.signature.contains(signature_fragment)
+        })?;
+        if symbol.parser != ParserKind::TreeSitter {
+            return None;
+        }
+        let parent = symbol.parent.as_deref()?;
+        let selector = EntitySelector::Declaration {
+            path: RepositoryFilePath::try_from(symbol.path.as_str()).ok()?,
+            qualified_name: IdentityText::try_from(format!("{parent}::{}", symbol.name)).ok()?,
+            signature: Some(IdentityText::try_from(symbol.signature.as_str()).ok()?),
+        };
+        Some((EntityKey::new(project, &selector), symbol.line_start))
+    }
+
+    fn parser_function_identity(
+        project: ProjectInstanceId,
+        symbols: &[CodeSymbol],
+        expected_name: &str,
+    ) -> Option<(EntityKey, String)> {
+        let symbol = symbols.iter().find(|symbol| {
+            symbol.kind == SymbolKind::Function
+                && symbol.name == expected_name
+                && symbol.parser == ParserKind::TreeSitter
+        })?;
+        let selector = EntitySelector::Declaration {
+            path: RepositoryFilePath::try_from(symbol.path.as_str()).ok()?,
+            qualified_name: IdentityText::try_from(symbol.name.as_str()).ok()?,
+            signature: Some(IdentityText::try_from(symbol.signature.as_str()).ok()?),
+        };
+        Some((EntityKey::new(project, &selector), symbol.signature.clone()))
+    }
 
     #[test]
     fn extracts_rust_symbols_and_calls() {
@@ -1814,6 +1916,129 @@ fn helper() {}
         assert!(graph.relations.iter().any(|relation| {
             relation.kind == RelationKind::Calls && relation.target_name.contains("helper")
         }));
+    }
+
+    #[test]
+    fn parser_backed_declaration_identity_survives_header_format_and_line_movement() {
+        let before_source = r"
+struct Left;
+
+impl Left {
+    pub fn run(&self, value: i32) -> i32 {
+        value + 1
+    }
+}
+
+struct Right;
+
+impl Right {
+    pub fn run(&self, value: i32) -> i32 {
+        value - 1
+    }
+}
+";
+        let after_source = r"
+// Moving and reformatting a declaration header must not change identity.
+
+struct Left;
+
+
+impl Left {
+    pub fn run(
+        &self,
+        value: i32
+    ) -> i32 {
+        (value
+            + 1)
+    }
+}
+
+
+struct Right;
+
+impl Right {
+    pub fn run(
+        &self,
+        value: i32
+    ) -> i32 {
+        value
+            - 1
+    }
+}
+";
+
+        let before = extract_symbol_graph("src/lib.rs", Some("rust"), before_source);
+        let after = extract_symbol_graph("src/lib.rs", Some("rust"), after_source);
+        assert_eq!(before.parser, ParserKind::TreeSitter);
+        assert_eq!(after.parser, ParserKind::TreeSitter);
+
+        let project = ProjectInstanceId::from_bytes([7; 16]);
+        assert!(project.is_ok(), "fixture project identity must be valid");
+        let Ok(project) = project else {
+            return;
+        };
+        let identities = (
+            parser_declaration_identity(project, &before.symbols, "Left", "i32"),
+            parser_declaration_identity(project, &after.symbols, "Left", "i32"),
+            parser_declaration_identity(project, &before.symbols, "Right", "i32"),
+            parser_declaration_identity(project, &after.symbols, "Right", "i32"),
+        );
+        assert!(
+            identities.0.is_some()
+                && identities.1.is_some()
+                && identities.2.is_some()
+                && identities.3.is_some(),
+            "expected canonical parser-backed identities for every method fixture",
+        );
+        let (
+            Some((before_left_i32_key, before_left_i32_line)),
+            Some((after_left_i32_key, after_left_i32_line)),
+            Some((before_right_i32_key, before_right_i32_line)),
+            Some((after_right_i32_key, after_right_i32_line)),
+        ) = identities
+        else {
+            return;
+        };
+
+        assert_ne!(before_left_i32_line, after_left_i32_line);
+        assert_ne!(before_right_i32_line, after_right_i32_line);
+        assert_eq!(before_left_i32_key, after_left_i32_key);
+        assert_eq!(before_right_i32_key, after_right_i32_key);
+        assert_ne!(before_left_i32_key, before_right_i32_key);
+    }
+
+    #[test]
+    fn parser_backed_java_overloads_have_distinct_identity() {
+        let source = r"
+class Runner {
+    int run(int value) {
+        return value;
+    }
+
+    String run(String value) {
+        return value;
+    }
+}
+";
+        let graph = extract_symbol_graph("src/Runner.java", Some("java"), source);
+        assert_eq!(graph.parser, ParserKind::TreeSitter);
+
+        let project = ProjectInstanceId::from_bytes([8; 16]);
+        assert!(project.is_ok(), "fixture project identity must be valid");
+        let Ok(project) = project else {
+            return;
+        };
+        let numeric = parser_declaration_identity(project, &graph.symbols, "Runner", "int value");
+        let textual =
+            parser_declaration_identity(project, &graph.symbols, "Runner", "String value");
+        assert!(
+            numeric.is_some() && textual.is_some(),
+            "expected both parser-backed Java overload identities",
+        );
+        let (Some((numeric, _)), Some((textual, _))) = (numeric, textual) else {
+            return;
+        };
+        assert_ne!(numeric, textual);
     }
 
     #[test]
@@ -2138,6 +2363,53 @@ const helper = function helperFactory() { return createThing(); };
                 "callable constant {name} should remain function-like"
             );
         }
+    }
+
+    #[test]
+    fn javascript_callable_identity_excludes_implementation_body() {
+        let before = extract_symbol_graph(
+            "src/run.ts",
+            Some("typescript"),
+            "export const run = (value: number): number => { return value + 1; };",
+        );
+        let body_changed = extract_symbol_graph(
+            "src/run.ts",
+            Some("typescript"),
+            "export const run = (value: number): number => { return value * 20; };",
+        );
+        let declaration_changed = extract_symbol_graph(
+            "src/run.ts",
+            Some("typescript"),
+            "export const run = (value: string): number => { return value.length; };",
+        );
+        let project = ProjectInstanceId::from_bytes([9; 16]);
+        assert!(project.is_ok(), "fixture project identity must be valid");
+        let Ok(project) = project else {
+            return;
+        };
+        let identities = (
+            parser_function_identity(project, &before.symbols, "run"),
+            parser_function_identity(project, &body_changed.symbols, "run"),
+            parser_function_identity(project, &declaration_changed.symbols, "run"),
+        );
+        assert!(
+            identities.0.is_some() && identities.1.is_some() && identities.2.is_some(),
+            "expected parser-backed callable identities for every fixture",
+        );
+        let (
+            Some((before_key, before_signature)),
+            Some((body_key, body_signature)),
+            Some((declaration_key, declaration_signature)),
+        ) = identities
+        else {
+            return;
+        };
+
+        assert_eq!(before_signature, body_signature);
+        assert!(!before_signature.contains("return"));
+        assert_eq!(before_key, body_key);
+        assert_ne!(before_signature, declaration_signature);
+        assert_ne!(before_key, declaration_key);
     }
 
     #[test]
@@ -2784,7 +3056,8 @@ task('publishE2E') {}
         assert!(objc_graph.symbols.iter().any(|symbol| {
             symbol.kind == SymbolKind::Method
                 && symbol.name == "run"
-                && symbol.signature.contains('{')
+                && symbol.signature.contains("run")
+                && !symbol.signature.contains('{')
         }));
     }
 

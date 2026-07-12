@@ -1,0 +1,1288 @@
+{
+  "schema_version": 1,
+  "format": "projectatlas.task-verification-plan",
+  "scope": {
+    "milestone": "v0.4.0-00",
+    "changes": [
+      "advance-rust-repository-intelligence",
+      "enforce-rust-test-quality-gates"
+    ]
+  },
+  "task_sources": [
+    {
+      "change": "advance-rust-repository-intelligence",
+      "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md",
+      "test_id_prefix": "UT:ARRI-"
+    },
+    {
+      "change": "enforce-rust-test-quality-gates",
+      "path": "openspec/changes/enforce-rust-test-quality-gates/tasks.md",
+      "test_id_prefix": "TQG-UT-"
+    }
+  ],
+  "row_schema": {
+    "required_fields": [
+      "change",
+      "task_id",
+      "requirement",
+      "scenario",
+      "owner",
+      "changed_artifacts",
+      "risk",
+      "required_evidence_layers",
+      "timeout_seconds",
+      "unit_test",
+      "result"
+    ],
+    "unit_test_required_fields": [
+      "test_id",
+      "function",
+      "command",
+      "assertion",
+      "covered_inputs",
+      "state"
+    ],
+    "result_required_fields": [
+      "state",
+      "implementation_commit",
+      "covered_input_digest",
+      "run_identity",
+      "artifact_digest"
+    ],
+    "command_representation": "executable-and-argument-array",
+    "shell_command_strings_allowed": false,
+    "zero_selected_tests_is_success": false
+  },
+  "row_materialization": {
+    "strategy": "authoritative-task-text-plus-owner-range-defaults",
+    "requirement_source": "authoritative-task-description",
+    "scenario_template": "Complete {change}:{task_id} and verify its authoritative acceptance statement.",
+    "initial_unit_test_state": "definition_pending_stable_implementation",
+    "initial_result_state": "not_started",
+    "explicit_override_sources": [
+      "stable_row_overrides",
+      "planned_row_definitions"
+    ],
+    "timeout_seconds_by_risk": {
+      "L1-pure-domain": 300,
+      "L2-persistence-cross-crate": 600,
+      "L3-public-process-workflow": 1200,
+      "L4-platform-release-security": 1800
+    },
+    "null_until_stable_implementation": [
+      "unit_test.function",
+      "unit_test.command",
+      "result.implementation_commit",
+      "result.covered_input_digest",
+      "result.run_identity",
+      "result.artifact_digest"
+    ]
+  },
+  "risk_levels": [
+    "L1-pure-domain",
+    "L2-persistence-cross-crate",
+    "L3-public-process-workflow",
+    "L4-platform-release-security"
+  ],
+  "evidence_layers": {
+    "unit": "Focused owning-logic or artifact-policy test selected exactly once.",
+    "integration": "Changed crate, database, filesystem, process, or service boundary.",
+    "e2e": "Changed CLI, MCP, installer, or other public workflow.",
+    "platform": "Every affected supported operating-system or packaging boundary.",
+    "property": "Generated invariants for identities, ordering, bounds, or serialization.",
+    "fuzz": "Malformed or adversarial input at parser, migration, path, or protocol boundaries.",
+    "benchmark": "Pinned comparative evidence for performance, resource, accuracy, or agent claims.",
+    "packaged_smoke": "Actually installed release artifact exercised through real CLI and stdio MCP against project-local SQLite populated from a small real repository."
+  },
+  "owner_ranges": [
+    { "change": "advance-rust-repository-intelligence", "first_task": "1.1", "last_task": "1.6", "owner": "planning-and-issueops", "risk": "L1-pure-domain", "default_layers": ["unit"], "planned_artifacts": ["openspec/changes/advance-rust-repository-intelligence", "openspec/issue-map.json"] },
+    { "change": "advance-rust-repository-intelligence", "first_task": "2.1", "last_task": "2.31", "owner": "repository-intelligence-contracts-and-evaluation", "risk": "L4-platform-release-security", "default_layers": ["unit", "benchmark"], "planned_artifacts": ["docs/benchmarks", "fixtures/contracts", "openspec/task-verification-plan.json"] },
+    { "change": "advance-rust-repository-intelligence", "first_task": "3.1", "last_task": "3.10", "owner": "rust-ownership-and-module-boundaries", "risk": "L2-persistence-cross-crate", "default_layers": ["unit", "integration"], "planned_artifacts": ["crates/projectatlas-core", "crates/projectatlas-db", "crates/projectatlas-service", "crates/projectatlas-cli"] },
+    { "change": "advance-rust-repository-intelligence", "first_task": "4.1", "last_task": "4.25", "owner": "graph-schema-and-storage", "risk": "L4-platform-release-security", "default_layers": ["unit", "integration", "e2e", "property", "fuzz"], "planned_artifacts": ["crates/projectatlas-core", "crates/projectatlas-db", "crates/projectatlas-service"] },
+    { "change": "advance-rust-repository-intelligence", "first_task": "5.1", "last_task": "5.18", "owner": "language-registry-and-parser-pack", "risk": "L4-platform-release-security", "default_layers": ["unit", "integration", "platform", "benchmark", "packaged_smoke"], "planned_artifacts": ["crates/projectatlas-core", "crates/projectatlas-symbols", "plugins/projectatlas"] },
+    { "change": "advance-rust-repository-intelligence", "first_task": "6.1", "last_task": "6.19", "owner": "semantic-providers", "risk": "L3-public-process-workflow", "default_layers": ["unit", "integration", "e2e", "property", "benchmark"], "planned_artifacts": ["crates/projectatlas-symbols", "crates/projectatlas-service"] },
+    { "change": "advance-rust-repository-intelligence", "first_task": "7.1", "last_task": "7.23", "owner": "incremental-index-and-worker-integrity", "risk": "L4-platform-release-security", "default_layers": ["unit", "integration", "e2e", "property", "fuzz", "platform", "benchmark"], "planned_artifacts": ["crates/projectatlas-fs", "crates/projectatlas-db", "crates/projectatlas-cli"] },
+    { "change": "advance-rust-repository-intelligence", "first_task": "8.1", "last_task": "8.25", "owner": "retrieval-and-graph-analysis", "risk": "L3-public-process-workflow", "default_layers": ["unit", "integration", "e2e", "property", "benchmark"], "planned_artifacts": ["crates/projectatlas-service", "crates/projectatlas-cli"] },
+    { "change": "advance-rust-repository-intelligence", "first_task": "9.1", "last_task": "9.17", "owner": "enrichments-and-federation", "risk": "L4-platform-release-security", "default_layers": ["unit", "integration", "e2e", "property", "fuzz", "platform", "benchmark"], "planned_artifacts": ["crates/projectatlas-symbols", "crates/projectatlas-service", "crates/projectatlas-cli"] },
+    { "change": "advance-rust-repository-intelligence", "first_task": "10.1", "last_task": "10.16", "owner": "optional-semantic-pack-and-snapshots", "risk": "L4-platform-release-security", "default_layers": ["unit", "integration", "e2e", "property", "fuzz", "platform", "benchmark", "packaged_smoke"], "planned_artifacts": ["crates/projectatlas-db", "crates/projectatlas-service", "crates/projectatlas-cli", "plugins/projectatlas"] },
+    { "change": "advance-rust-repository-intelligence", "first_task": "11.1", "last_task": "11.39", "owner": "compatibility-release-and-plugin-lifecycle", "risk": "L4-platform-release-security", "default_layers": ["unit", "integration", "e2e", "platform", "benchmark", "packaged_smoke"], "planned_artifacts": ["crates", ".github", "docs", "plugins/projectatlas"] },
+    { "change": "enforce-rust-test-quality-gates", "first_task": "1.1", "last_task": "1.7", "owner": "quality-policy", "risk": "L4-platform-release-security", "default_layers": ["unit"], "planned_artifacts": [".config", ".cargo", "docs", "openspec"] },
+    { "change": "enforce-rust-test-quality-gates", "first_task": "2.1", "last_task": "2.8", "owner": "task-evidence-and-issueops", "risk": "L4-platform-release-security", "default_layers": ["unit", "integration", "e2e"], "planned_artifacts": ["openspec", ".github/scripts", ".github/workflows"] },
+    { "change": "enforce-rust-test-quality-gates", "first_task": "3.1", "last_task": "3.8", "owner": "typed-quality-validator", "risk": "L3-public-process-workflow", "default_layers": ["unit", "integration", "e2e", "property"], "planned_artifacts": ["crates/projectatlas-lints"] },
+    { "change": "enforce-rust-test-quality-gates", "first_task": "4.1", "last_task": "4.7", "owner": "nextest-and-doctest", "risk": "L4-platform-release-security", "default_layers": ["unit", "integration", "platform"], "planned_artifacts": [".config", ".github/workflows"] },
+    { "change": "enforce-rust-test-quality-gates", "first_task": "5.1", "last_task": "5.9", "owner": "coverage-ratchets", "risk": "L4-platform-release-security", "default_layers": ["unit", "integration", "platform"], "planned_artifacts": [".github/workflows", "docs", "openspec"] },
+    { "change": "enforce-rust-test-quality-gates", "first_task": "6.1", "last_task": "6.7", "owner": "pull-request-mutation", "risk": "L4-platform-release-security", "default_layers": ["unit", "integration", "e2e"], "planned_artifacts": [".cargo", ".github/workflows", "crates/projectatlas-lints"] },
+    { "change": "enforce-rust-test-quality-gates", "first_task": "7.1", "last_task": "7.10", "owner": "full-mutation-shards", "risk": "L4-platform-release-security", "default_layers": ["unit", "integration", "platform", "benchmark"], "planned_artifacts": [".cargo", ".github/workflows", "crates/projectatlas-lints"] },
+    { "change": "enforce-rust-test-quality-gates", "first_task": "8.1", "last_task": "8.7", "owner": "ci-release-required-checks", "risk": "L4-platform-release-security", "default_layers": ["unit", "e2e", "platform"], "planned_artifacts": [".github/workflows", ".github/scripts"] },
+    { "change": "enforce-rust-test-quality-gates", "first_task": "9.1", "last_task": "9.5", "owner": "local-quality-workflow", "risk": "L3-public-process-workflow", "default_layers": ["unit", "integration"], "planned_artifacts": [".githooks", "docs"] },
+    { "change": "enforce-rust-test-quality-gates", "first_task": "10.1", "last_task": "10.13", "owner": "final-quality-closure", "risk": "L4-platform-release-security", "default_layers": ["unit", "integration", "e2e", "platform", "benchmark", "packaged_smoke"], "planned_artifacts": ["crates", ".github", "docs", "openspec"] }
+  ],
+  "unit_test_exemptions": [
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "1.1",
+      "scope": "unit-test-link-only",
+      "reason": "Planning-only OpenSpec proposal, design, specification, and task authoring changed no executable behavior."
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "1.2",
+      "scope": "unit-test-link-only",
+      "reason": "Creating the planning issue was a one-time tracker mutation with no executable repository behavior."
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "1.3",
+      "scope": "unit-test-link-only",
+      "reason": "Issue-map registration is tracker metadata validated live by IssueOps rather than executable product behavior."
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "1.4",
+      "scope": "unit-test-link-only",
+      "reason": "Initial checklist mirroring is GitHub tracker state validated live by IssueOps rather than executable product behavior."
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "1.5",
+      "scope": "unit-test-link-only",
+      "reason": "This task records successful validation command execution and adds no independently testable behavior."
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "1.6",
+      "scope": "unit-test-link-only",
+      "reason": "The planning-diff publication review was a one-time repository-state inspection with no durable executable behavior."
+    }
+  ],
+  "stable_row_overrides": [
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.1",
+      "requirement": "The binding ProjectAtlas capability delivery inventory maps every accepted behavior to stable ownership, pack, public surface, fixture, platform, evidence state, and measurable acceptance data.",
+      "scenario": "The live capability registry and adversarial in-memory mutations are checked for a nonempty inventory, unique stable IDs, declared totals, exact required platforms, known packs, nonempty owners, surfaces, fixtures, acceptance rules, and honest pending evidence.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": [
+        "docs/benchmarks/projectatlas-v0.4-capability-registry.json",
+        "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs",
+        "openspec/changes/advance-rust-repository-intelligence/proposal.md",
+        "openspec/changes/advance-rust-repository-intelligence/design.md",
+        "openspec/changes/advance-rust-repository-intelligence/tasks.md",
+        "openspec/task-verification-plan.json"
+      ],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.1",
+        "function": "repository_intelligence_contract_tests::capability_inventory_is_binding_and_owned",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::capability_inventory_is_binding_and_owned", "--", "--exact"] },
+        "assertion": "The binding registry passes, while empty inventories, duplicate capability IDs, blank owners, unknown packs, empty public surfaces, empty fixtures, blank acceptance rules, and a reduced four-platform matrix all fail without trusting a copied capability total.",
+        "covered_inputs": [
+          "binding registry identity",
+          "capability rows and declared count reconciliation",
+          "stable capability IDs",
+          "pack ownership",
+          "public surfaces",
+          "fixture identities",
+          "measurable acceptance rules",
+          "pending evidence and advertisement state",
+          "Windows, Linux, macOS arm64, and macOS x86-64 platform identities",
+          "eight adversarial mutation classes"
+        ],
+        "state": "implemented_uncommitted"
+      },
+      "result": {
+        "state": "pending_commit_bound_run",
+        "implementation_commit": null,
+        "covered_input_digest": null,
+        "run_identity": null,
+        "artifact_digest": null
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.2",
+      "requirement": "The accepted language inventory is an exact ProjectAtlas-owned 212-mode union with 207 normalized parser capabilities, all 63 current public modes retained, and no unsupported achieved or advertised claim.",
+      "scenario": "The live candidate and adversarial in-memory mutations are checked against fixed capability IDs, standard-name aliases, dialect distinctions, parser reuse, ownership, fixtures, platforms, evidence state, and digest.",
+      "owner": "language-capability-registry-contract",
+      "changed_artifacts": [
+        "docs/benchmarks/projectatlas-v0.4-capability-registry.json",
+        "crates/projectatlas-cli/src/language_capability_registry_tests.rs",
+        "crates/projectatlas-cli/src/main.rs",
+        "openspec/changes/advance-rust-repository-intelligence/proposal.md",
+        "openspec/changes/advance-rust-repository-intelligence/design.md",
+        "openspec/changes/advance-rust-repository-intelligence/tasks.md",
+        "openspec/changes/advance-rust-repository-intelligence/specs/language-intelligence-registry/spec.md",
+        "openspec/task-verification-plan.json"
+      ],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.2",
+        "function": "language_capability_registry_tests::accepted_language_union_rejects_contract_mutations",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "language_capability_registry_tests::accepted_language_union_rejects_contract_mutations", "--", "--exact"] },
+        "assertion": "The valid pending candidate passes, while count-only parity, a missing required entry, duplicate IDs, fake aliases, absent fixtures/owners/platforms, inconsistent shared-parser ownership, count-preserving fake parser reuse, unsupported claims, and current-mode shrinkage all fail.",
+        "covered_inputs": ["212 accepted modes", "207 normalized parser capabilities", "160 fixed crosswalk entries", "11 standard-name aliases", "two CFML dialect modes", "63 current public modes", "complete four-entry multi-mode parser map", "per-mode ownership, fixtures, and four-platform matrix", "shared-parser ownership consistency", "candidate evidence and advertisement state", "accepted-set digest", "11 negative mutation classes"],
+        "state": "implemented_uncommitted"
+      },
+      "result": {
+        "state": "pending_commit_bound_run",
+        "implementation_commit": null,
+        "covered_input_digest": null,
+        "run_identity": null,
+        "artifact_digest": null
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.3",
+      "requirement": "Every accepted entity, relation, enrichment, search, analysis, federation, snapshot, incremental, agent-workflow, and pack family has owned default-core or optional placement plus a measurable completion rule.",
+      "scenario": "The binding capability registry and adversarial mutations are checked for exact family coverage, complete per-row ownership and acceptance data, and a closed installation policy that keeps broad-language and semantic packs optional while default core stays installed.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": [
+        "docs/benchmarks/projectatlas-v0.4-capability-registry.json",
+        "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs",
+        "openspec/changes/advance-rust-repository-intelligence/tasks.md",
+        "openspec/task-verification-plan.json"
+      ],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.3",
+        "function": "repository_intelligence_contract_tests::capability_family_contract_has_measurable_completion",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::capability_family_contract_has_measurable_completion", "--", "--exact"] },
+        "assertion": "The valid ten-family registry and its per-capability ownership/acceptance data pass; removing a required family, installing the optional semantic pack by default, or making default core optional fails.",
+        "covered_inputs": [
+          "agent-workflow capabilities",
+          "analysis capabilities",
+          "enrichment capabilities",
+          "entity capabilities",
+          "federation capabilities",
+          "incremental capabilities",
+          "pack capabilities",
+          "relation capabilities",
+          "search capabilities",
+          "snapshot capabilities",
+          "default-core installation policy",
+          "broad-language and semantic optional-pack policy",
+          "three adversarial mutation classes"
+        ],
+        "state": "implemented_uncommitted"
+      },
+      "result": {
+        "state": "pending_commit_bound_run",
+        "implementation_commit": null,
+        "covered_input_digest": null,
+        "run_identity": null,
+        "artifact_digest": null
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.4",
+      "requirement": "The compiled pre-change ProjectAtlas CLI and MCP surface, schema families, root-selection rules, and recorded normal atlas-first workflows are frozen in a machine-readable inventory without claiming that later exact-output and hosted replay gates are complete.",
+      "scenario": "The frozen CLI tree, MCP tools/list schemas, protocol version, recorded schema families, root rules, normal workflows, behavior cases, and artifact digests are reconciled against the compiled runtime while complete execution defaults, exact response fields and types, error replay, and hosted old-client replay remain explicit later gaps.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": [
+        "fixtures/contracts/projectatlas-v0.3.26-surface.json",
+        "fixtures/contracts/projectatlas-v0.3.26-behavior-cases.json",
+        "fixtures/contracts/projectatlas-v0.3.26-compatibility-evidence.json",
+        "docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json",
+        "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs",
+        "openspec/task-verification-plan.json"
+      ],
+      "risk": "L3-public-process-workflow",
+      "required_evidence_layers": ["unit", "integration", "e2e"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.4",
+        "function": "repository_intelligence_contract_tests::compatibility_contract_preserves_compiled_baseline",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::compatibility_contract_preserves_compiled_baseline", "--", "--exact"] },
+        "assertion": "Every frozen CLI row and MCP tool matches the compiled surface, all invocable commands/tools map to recorded schema/default families, artifact/revision digests and behavior evidence reconcile, normal workflows add zero mandatory graph calls, and complete execution defaults plus later exact field/type, error, and hosted replay gaps remain explicitly partial.",
+        "covered_inputs": [
+          "compiled CLI command and help tree",
+          "all invocable CLI paths",
+          "compiled MCP tools/list schemas",
+          "negotiated MCP protocol version",
+          "recorded CLI and MCP schema/default families",
+          "root-selection and normal-workflow rules",
+          "behavior-case and surface artifact digests",
+          "runtime identity and local replay evidence",
+          "allowlisted additive analysis surfaces",
+          "explicit complete-default, exact-golden, error-replay, and hosted-replay gaps"
+        ],
+        "state": "implemented_uncommitted"
+      },
+      "result": {
+        "state": "pending_commit_bound_run",
+        "implementation_commit": null,
+        "covered_input_digest": null,
+        "run_identity": null,
+        "artifact_digest": null
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.5",
+      "requirement": "One authoritative machine-readable evaluation manifest binds the ProjectAtlas source, pinned corpora, configurations, toolchains, commands, timeouts, hardware, operating systems, experiment design, and result schemas without presenting preregistered fields as observed evidence.",
+      "scenario": "The manifest authority, clean-source rules, source and executable digests, three pinned corpus strata, configuration identities, declared toolchain, controlled environments, repetitions, containment, operation commands, timeouts, hardware/OS evidence schema, and no-claim state are validated against the owning ProjectAtlas contract.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": [
+        "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json",
+        "docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json",
+        "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs",
+        "openspec/task-verification-plan.json"
+      ],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.5",
+        "function": "repository_intelligence_contract_tests::evaluation_manifest_defines_reproduction_fields",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::evaluation_manifest_defines_reproduction_fields", "--", "--exact"] },
+        "assertion": "The single authoritative manifest is fail-closed and non-vacuous: it binds source, Cargo.lock, runner, executable, command, environment, configuration, corpus, experiment, containment, and result-schema identities; distinguishes declared from observed toolchain and host evidence; and retains a no-claim state until eligible measurements exist.",
+        "covered_inputs": [
+          "authoritative manifest and owning contract reference",
+          "ProjectAtlas source, Cargo.lock, runner, executable, command, and environment bindings",
+          "clean-source and dirty-run eligibility",
+          "small, medium, and large pinned corpus identities",
+          "configuration and toolchain declarations",
+          "controlled environment and containment policy",
+          "three warmups and fifteen registered repetitions",
+          "operation commands and timeouts",
+          "hardware and operating-system evidence schema",
+          "result schemas and no-claim state"
+        ],
+        "state": "implemented_uncommitted"
+      },
+      "result": {
+        "state": "pending_commit_bound_run",
+        "implementation_commit": null,
+        "covered_input_digest": null,
+        "run_identity": null,
+        "artifact_digest": null
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.6",
+      "requirement": "The frozen baseline and workload contract remains explicitly unmeasured until the eligible capture in 11.5 and cannot present preregistered fields as observed evidence.",
+      "scenario": "The owning contract and evaluation manifest are checked for the complete baseline workload inventory, pending candidate and calibration measurements, and a no-claim state before final capture.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": [
+        "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json",
+        "docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json",
+        "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs",
+        "openspec/task-verification-plan.json"
+      ],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.6",
+        "function": "repository_intelligence_contract_tests::baseline_contract_rejects_unmeasured_claims",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::baseline_contract_rejects_unmeasured_claims", "--", "--exact"] },
+        "assertion": "The baseline contract retains pending evidence for ARRI-2.6, contains no observed measurements or future candidate commit, and leaves every eligible calibration baseline median unset until the final campaign.",
+        "covered_inputs": [
+          "ARRI-2.6 pending-evidence ownership",
+          "empty authoritative measurement inventory",
+          "not-measured claim state",
+          "absent future candidate commit",
+          "unset eligible calibration baseline medians"
+        ],
+        "state": "implemented_uncommitted"
+      },
+      "result": {
+        "state": "pending_commit_bound_run",
+        "implementation_commit": null,
+        "covered_input_digest": null,
+        "run_identity": null,
+        "artifact_digest": null
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.7",
+      "requirement": "Canonical graph snapshots make full/incremental, worker-count, repeated-run, and supported-platform comparisons mechanical while excluding only declared storage, timing, row, and telemetry metadata.",
+      "scenario": "Full and incremental golden records with different row, slot, epoch, time, telemetry, ordering, path-separator, and line-ending representations canonicalize identically, while a semantic relation-kind change remains visible at the first deterministic difference.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": [
+        "docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json",
+        "fixtures/contracts/projectatlas-v0.4-canonical-graph.json",
+        "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs",
+        "openspec/task-verification-plan.json"
+      ],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.7",
+        "function": "repository_intelligence_contract_tests::graph_snapshot_contract_is_mechanical",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::graph_snapshot_contract_is_mechanical", "--", "--exact"] },
+        "assertion": "The contract fixes the accepted record-family and comparison inventories, exact unstable-field exclusions, stable-identity and first-difference rules; the executable canonicalizer then normalizes entity/relation paths, line endings, object keys, and record order so full and incremental snapshots compare equal while the first semantic relation difference remains actionable.",
+        "covered_inputs": [
+          "entity and relation canonical records",
+          "row, slot, epoch, timestamp, duration, task, session, and telemetry exclusions",
+          "stable graph identity retention",
+          "root-relative forward-slash path normalization",
+          "LF canonical line endings",
+          "record and object-key ordering",
+          "full versus incremental equivalence",
+          "semantic relation-kind difference and deterministic first difference",
+          "full/incremental, worker-count, repeated-run, and supported-platform comparison inventory"
+        ],
+        "state": "implemented_uncommitted"
+      },
+      "result": {
+        "state": "pending_commit_bound_run",
+        "implementation_commit": null,
+        "covered_input_digest": null,
+        "run_identity": null,
+        "artifact_digest": null
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.8",
+      "requirement": "One ProjectAtlas core owner defines the fixed typed default-core hard-budget inventory, units, ceilings, and truthful runtime-enforced or advisory status for indexing, query, output, memory, and cancellation resources.",
+      "scenario": "The machine-readable runtime budget rows reconcile exactly with the typed Rust owner, configuration cannot promote advisory resources to runtime-enforced, and value, status, omission, or duplicate drift fails closed.",
+      "owner": "default-core-budget-contract",
+      "changed_artifacts": [
+        "crates/projectatlas-core/src/budget.rs",
+        "crates/projectatlas-core/src/graph.rs",
+        "crates/projectatlas-core/src/lib.rs",
+        "docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json",
+        "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs",
+        "openspec/task-verification-plan.json"
+      ],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.8",
+        "function": "repository_intelligence_contract_tests::default_core_budget_contract_matches_typed_limits",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::default_core_budget_contract_matches_typed_limits", "--", "--exact"] },
+        "assertion": "The typed owner and machine contract agree on every budget ID, hard ceiling, unit, and enforcement status; resolution-candidate retention is runtime-enforced, unfinished resources remain advisory, caller configuration cannot promote advisory status, and wrong values, false status, or duplicate rows fail.",
+        "covered_inputs": [
+          "source file bytes and AST depth",
+          "symbols, relations, and resolution candidates",
+          "worker count, stage time, and working memory",
+          "query depth, visited nodes, expanded edges, and returned rows",
+          "response bytes, cancellation polling, and cancellation grace",
+          "typed units and hard ceilings",
+          "runtime-enforced and advisory states",
+          "advisory configuration no-promotion invariant",
+          "wrong-value, false-status, and duplicate-row mutations"
+        ],
+        "state": "implemented_uncommitted"
+      },
+      "result": {
+        "state": "pending_commit_bound_run",
+        "implementation_commit": null,
+        "covered_input_digest": null,
+        "run_identity": null,
+        "artifact_digest": null
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.9",
+      "requirement": "Optional parser and semantic packs have separate positive hard-limit catalogs and cannot spend or weaken default-core allowances.",
+      "scenario": "Both accepted optional-pack identities remain disabled and removable, expose every required hard-limit field, and retain an explicitly unmeasured state until pack-specific evidence exists.",
+      "owner": "optional-pack-budget-contract",
+      "changed_artifacts": [
+        "docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json",
+        "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs",
+        "openspec/task-verification-plan.json"
+      ],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.9",
+        "function": "repository_intelligence_contract_tests::optional_pack_budget_contract_is_separate_and_unmeasured",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::optional_pack_budget_contract_is_separate_and_unmeasured", "--", "--exact"] },
+        "assertion": "The parser and semantic pack budgets are separate, disabled and removable by default, cannot borrow default-core allowance, contain the exact positive hard-limit field catalog, and remain preregistered-not-measured.",
+        "covered_inputs": [
+          "broad-language pack identity",
+          "semantic pack identity",
+          "required hard-limit field catalog",
+          "positive hard ceilings",
+          "default-disabled and removable lifecycle",
+          "default-core allowance isolation",
+          "preregistered-not-measured state"
+        ],
+        "state": "implemented_uncommitted"
+      },
+      "result": {
+        "state": "pending_commit_bound_run",
+        "implementation_commit": null,
+        "covered_input_digest": null,
+        "run_identity": null,
+        "artifact_digest": null
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.10",
+      "requirement": "The repository evaluation pre-registers exact experimental units, strata, sample counts, deterministic ordering, failure and rerun handling, confidence intervals, comparison directions, denominator floors, multiplicity correction, and dimension-specific decisions before observing results.",
+      "scenario": "The closed manifest and typed evaluator agree on the complete statistical plan, a fixed-width SHA-256 golden ordering vector, 30 cold launches, paired and latency minimums, exact performance and resource margins, and the five-point agent-quality gate; controlled policy mutations fail.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": [
+        "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json",
+        "crates/projectatlas-cli/src/repository_evaluation_runner.rs",
+        "crates/projectatlas-cli/src/sqlite_architecture_evaluation.rs",
+        "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs",
+        "openspec/task-verification-plan.json"
+      ],
+      "risk": "L4-platform-release-security",
+      "required_evidence_layers": ["unit", "benchmark"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.10",
+        "function": "repository_intelligence_contract_tests::statistics_contract_preregisters_decisions",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::statistics_contract_preregisters_decisions", "--", "--exact"] },
+        "assertion": "The complete pre-result statistical manifest passes; obsolete ordering identity or encoding, insufficient paired or cold samples, best-run selection, generic superiority margins, missing five-point agent-quality improvement, and missing negative denominators fail.",
+        "covered_inputs": [
+          "fixed three-strata experimental units",
+          "three warmups, 15 paired repetitions, 10 valid pairs, and 30 cold launches",
+          "versioned fixed-width SHA-256 ordering contract",
+          "timeouts, failures, outliers, independence, degenerate samples, and reruns",
+          "paired, hierarchical latency, and accuracy bootstrap plans",
+          "paired comparison directions and Holm correction",
+          "positive and negative correctness denominators",
+          "per-corpus and geometric-mean cold-index limits",
+          "geometric-mean peak RSS and exclusive retrieval p95 limits",
+          "five-point agent-quality point estimate and corrected positive lower bound",
+          "eight controlled negative mutations"
+        ],
+        "state": "implemented_uncommitted"
+      },
+      "result": {
+        "state": "pending_commit_bound_run",
+        "implementation_commit": null,
+        "covered_input_digest": null,
+        "run_identity": null,
+        "artifact_digest": null
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.11",
+      "requirement": "Boundary-specific raw latency goals, calibration eligibility, and tolerance remain preregistered without normalizing measured latency or claiming an unrun result.",
+      "scenario": "The evaluation manifest is checked for distinct SQLite, service, and MCP goals, exact workload boundaries, before-and-after calibration, raw timing components, repetition and timeout policy, and fail-closed pending results.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": [
+        "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json",
+        "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs",
+        "openspec/task-verification-plan.json"
+      ],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.11",
+        "function": "repository_intelligence_contract_tests::latency_contract_has_absolute_boundary_goals",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::latency_contract_has_absolute_boundary_goals", "--", "--exact"] },
+        "assertion": "Distinct raw SQLite, service, and MCP goals, measured transport and execution components, before-and-after calibration, the fixed tolerance ceiling, repetitions, timeouts, and pending eligibility remain exact and fail closed.",
+        "covered_inputs": [
+          "simple and bounded-three-hop SQLite and service goals",
+          "equivalent end-to-end MCP goals",
+          "transport, serialization, runtime-state, and query timing components",
+          "before-and-after calibration positions",
+          "non-normalizing tolerance policy",
+          "registered repetitions and timeout",
+          "pending benchmark eligibility"
+        ],
+        "state": "implemented_uncommitted"
+      },
+      "result": {
+        "state": "pending_commit_bound_run",
+        "implementation_commit": null,
+        "covered_input_digest": null,
+        "run_identity": null,
+        "artifact_digest": null
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.12",
+      "requirement": "A deterministic real-SQLite feasibility lab measures lexical search with and without optional FTS5 candidate acceleration while exact verification preserves every required query class; it does not substitute for the pinned-corpus campaign in 11.5.",
+      "scenario": "A schema-shaped synthetic SQLite corpus and controlled lexical fixture run through individually supervised timeout-bound architecture samples, compare exact full scans with FTS5 trigram candidates, retain forced fallbacks and raw order-tagged request observations, measure equivalent source-only and source-plus-FTS updates, restore canonical source and FTS content exactly, and emit feasibility-only paired storage, incremental-index, and p50/p95 timing metrics.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": [
+        "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json",
+        "fixtures/contracts/lexical-search-edge-cases-v1.json",
+        "crates/projectatlas-cli/src/bounded_process_supervisor.rs",
+        "crates/projectatlas-cli/src/sqlite_architecture_evaluation.rs",
+        "crates/projectatlas-cli/src/repository_evaluation_runner.rs",
+        "crates/projectatlas-cli/examples/repository-evaluation-runner.rs",
+        "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs",
+        "openspec/task-verification-plan.json"
+      ],
+      "risk": "L2-persistence-cross-crate",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.12",
+        "function": "sqlite_architecture_evaluation::tests::fts_differential_is_complete_and_nonvacuous",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "--example", "repository-evaluation-runner", "sqlite_architecture_evaluation::tests::fts_differential_is_complete_and_nonvacuous", "--", "--exact"] },
+        "assertion": "The feasibility FTS5/trigram differential is eligible and non-vacuous; literal candidates are a complete superset joined back to authoritative content, exact rows and order match, required fallback classes remain correct, equivalent transactional updates restore canonical source and FTS contents exactly, and the manifest-bound result schema retains sample identity, deterministic pair order, every raw paired request timing, paired update timings, paired checkpointed storage, checked incremental FTS bytes, and p50/p95 metrics derived from the retained requests.",
+        "covered_inputs": [
+          "synthetic indexed file_text rows with real schema shape",
+          "pinned lexical edge-case fixture and digest",
+          "literal FTS5 trigram candidates plus exact verification",
+          "punctuation fallback",
+          "short-string fallback",
+          "Unicode-identifier fallback",
+          "regex and fuzzy fallbacks",
+          "tokenizer-incompatible fallback",
+          "manifest-bound deterministic sample identity and SHA-256-derived AB/BA order",
+          "complete order-tagged raw request observations without fastest-subset selection",
+          "paired source-only and source-plus-FTS update visibility and exact canonical restoration",
+          "paired checkpointed database, WAL, SHM, and total storage without and with FTS",
+          "checked incremental FTS index bytes",
+          "baseline and candidate p50/p95 nanoseconds"
+        ],
+        "state": "implemented_uncommitted"
+      },
+      "result": {
+        "state": "pending_commit_bound_run",
+        "implementation_commit": null,
+        "covered_input_digest": null,
+        "run_identity": null,
+        "artifact_digest": null
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.13",
+      "requirement": "A deterministic real-SQLite feasibility lab exercises prepared batches, transaction sizes, index timing, staging import, two-slot publication, WAL behavior, cleanup, and rollback before implementation; the pinned-scale selection campaign remains in 11.5.",
+      "scenario": "A synthetic 2,053-row closed 3 x 2 x 2 matrix exercises three committed prepublication load-transaction sizes, same-database prepared and external staging load sources, maintained and post-load indexes, one atomic inactive-slot replacement/reconciliation/slot-flip publication transaction, injected failure before the flip, retained rollback data, authored-row preservation, load-source and retained-storage accounting, deterministic seeded cell order, and WAL cleanup as feasibility evidence rather than a release performance campaign.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": [
+        "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json",
+        "crates/projectatlas-cli/src/bounded_process_supervisor.rs",
+        "crates/projectatlas-cli/src/sqlite_architecture_evaluation.rs",
+        "crates/projectatlas-cli/src/repository_evaluation_runner.rs",
+        "crates/projectatlas-cli/examples/repository-evaluation-runner.rs",
+        "openspec/task-verification-plan.json"
+      ],
+      "risk": "L2-persistence-cross-crate",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 600,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.13",
+        "function": "sqlite_architecture_evaluation::tests::sqlite_strategy_matrix_preserves_slots_and_authored_data",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "--example", "repository-evaluation-runner", "sqlite_architecture_evaluation::tests::sqlite_strategy_matrix_preserves_slots_and_authored_data", "--", "--exact"] },
+        "assertion": "The exact twelve-cell matrix is unique, deterministic, and non-vacuous; every cell commits its registered prepublication load transactions, records the load-source scope/count/bytes/timing, publishes replacement plus reconciliation plus slot/epoch flip in one RAII transaction, rolls injected failure back to both prior slots and metadata, preserves authored rows, retains the previous active slot after success, truncates WAL state, reconciles storage and both load/slot cleanup, and serializes every manifest-owned field.",
+        "covered_inputs": [
+          "2053 deterministic source rows",
+          "256-row, 2048-row, and all-row committed prepublication load transactions",
+          "same-database prepared load and external staging load modes",
+          "maintained-during-load and post-load secondary indexes",
+          "prepublication load construction, transaction count, storage scope, attachment, import, and cleanup timing",
+          "single-transaction inactive-slot replacement, reconciliation, and metadata flip",
+          "post-replacement pre-flip failure injection and RAII rollback",
+          "active and retained rollback-slot rows plus slot/epoch metadata",
+          "authored-row preservation",
+          "WAL checkpoint and truncation",
+          "physical load-source, retained-storage, and cleanup evidence",
+          "manifest-bound sample identity and deterministic seeded twelve-cell execution order"
+        ],
+        "state": "implemented_uncommitted"
+      },
+      "result": {
+        "state": "pending_commit_bound_run",
+        "implementation_commit": null,
+        "covered_input_digest": null,
+        "run_identity": null,
+        "artifact_digest": null
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.14",
+      "requirement": "The closed native-grammar and versioned-WASM parser-host candidate inventory binds exact dependencies, fixtures, evaluation metrics, containment, ABI, portability, and fail-closed readiness without selecting or advertising a host.",
+      "scenario": "Typed candidate evidence is reconciled against projectatlas-symbols grammar dependencies, Cargo.lock, non-vacuous language fixtures, exact manifest metric sets, and blocker ownership; omitted packages/metrics, incorrect owners, unknown fields, premature evidence, and selection claims fail.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": [
+        "docs/benchmarks/projectatlas-v0.4-optional-pack-candidate-readiness.json",
+        "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json",
+        "crates/projectatlas-cli/src/optional_pack_candidate_readiness_tests.rs",
+        "crates/projectatlas-symbols/Cargo.toml",
+        "Cargo.lock",
+        "fixtures/languages/python/builder.py",
+        "fixtures/languages/README.md",
+        "openspec/task-verification-plan.json"
+      ],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.14",
+        "function": "optional_pack_candidate_readiness_tests::arri_2_14_parser_host_candidates_fail_closed_until_ready",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "optional_pack_candidate_readiness_tests::arri_2_14_parser_host_candidates_fail_closed_until_ready", "--", "--exact"] },
+        "assertion": "The exact compiled native grammar set and versioned-WASM candidate are pinned to lockfile, fixture, manifest operation/profile/schema, metric, containment, ABI, portability, and blocker ownership contracts while all selection evidence remains pending; controlled omissions, unknown fields, ownership drift, and premature readiness fail.",
+        "covered_inputs": [
+          "exact projectatlas-symbols native grammar dependency set including Python",
+          "Cargo.lock versions and checksums",
+          "non-vacuous per-language fixtures",
+          "native and versioned-WASM candidate identities",
+          "exact parser-host evaluation dimensions and result metrics",
+          "containment, ABI, package, startup, memory, throughput, and platform requirements",
+          "blocker task ownership",
+          "closed serde schema and durable readiness states",
+          "no-selection and no-advertisement state",
+          "adversarial package, metric, owner, unknown-field, and readiness mutations"
+        ],
+        "state": "implemented_uncommitted"
+      },
+      "result": {
+        "state": "pending_commit_bound_run",
+        "implementation_commit": null,
+        "covered_input_digest": null,
+        "run_identity": null,
+        "artifact_digest": null
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.15",
+      "requirement": "The optional ANN/local-model candidate gate binds exact pinned sources, labeled-evaluation inputs, vector tolerance, licensing, package/platform/resource metrics, update cost, and deterministic no-selection behavior until Section 10 and final campaign evidence exists.",
+      "scenario": "Typed semantic candidate evidence is reconciled against Cargo.lock and the exact semantic result schema while labeled corpus, normalized model inputs, vector tolerance, integration, hosted resources, and measurements remain explicit blockers; omissions, schema drift, unknown fields, incorrect owners, or selection claims fail.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": [
+        "docs/benchmarks/projectatlas-v0.4-optional-pack-candidate-readiness.json",
+        "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json",
+        "crates/projectatlas-cli/src/optional_pack_candidate_readiness_tests.rs",
+        "Cargo.lock",
+        "openspec/task-verification-plan.json"
+      ],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.15",
+        "function": "optional_pack_candidate_readiness_tests::arri_2_15_semantic_candidates_fail_closed_until_labeled",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "optional_pack_candidate_readiness_tests::arri_2_15_semantic_candidates_fail_closed_until_labeled", "--", "--exact"] },
+        "assertion": "Every pinned ANN and local-model candidate remains blocked pending labeled retrieval, deterministic model-input, vector-tolerance, integration, hosted-resource, and final measurement evidence; exact semantic metrics, licenses, package/platform/resource dimensions, checksums, and task owners are closed and controlled mutations fail.",
+        "covered_inputs": [
+          "four pinned ANN/local-model candidate source tuples",
+          "Cargo.lock versions, checksums, and licenses",
+          "exact semantic evaluation dimensions and result metrics",
+          "MRR, nDCG@10, recall@10, deterministic-input, vector-tolerance, package, platform, update-cost, memory, and p50/p95 requirements",
+          "labeled corpus and model-input blockers",
+          "integration, hosted-resource, and final-campaign ownership",
+          "default-core lexical/graph fallback",
+          "closed serde schema and durable blocked-pending-evaluation state",
+          "no-selection and no-advertisement state",
+          "adversarial candidate, metric, owner, unknown-field, and readiness mutations"
+        ],
+        "state": "implemented_uncommitted"
+      },
+      "result": {
+        "state": "pending_commit_bound_run",
+        "implementation_commit": null,
+        "covered_input_digest": null,
+        "run_identity": null,
+        "artifact_digest": null
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.16",
+      "requirement": "Implementation-enabling architecture decisions are complete, typed, and accepted while benchmark-dependent parser-host and optional-semantic selections remain explicitly provisional.",
+      "scenario": "The architecture decision inventory is checked for unique required topics, nonempty decision fields, closed accepted or provisional states, and exact provisional ownership for benchmark-dependent selections.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": [
+        "docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json",
+        "openspec/changes/advance-rust-repository-intelligence/design.md",
+        "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs",
+        "openspec/task-verification-plan.json"
+      ],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.16",
+        "function": "repository_intelligence_contract_tests::architecture_decision_contract_tracks_pending_decisions",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::architecture_decision_contract_tracks_pending_decisions", "--", "--exact"] },
+        "assertion": "The exact architecture topic inventory has unique nonempty decisions with closed accepted or provisional states, and only benchmark-dependent parser-host and optional-semantic choices remain provisional.",
+        "covered_inputs": [
+          "typed graph layout",
+          "correctness-authoritative lexical fallback",
+          "two-slot epoch publication",
+          "semantic provider boundaries",
+          "benchmark corpus and hardware",
+          "rollback retention",
+          "provisional parser-host selection",
+          "provisional optional-semantic selection"
+        ],
+        "state": "implemented_uncommitted"
+      },
+      "result": {
+        "state": "pending_commit_bound_run",
+        "implementation_commit": null,
+        "covered_input_digest": null,
+        "run_identity": null,
+        "artifact_digest": null
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.17",
+      "requirement": "The one-page scoreboard preserves independent correctness, compatibility, determinism, containment, performance, resource, write, byte, latency, workflow, complexity, and public-surface decisions.",
+      "scenario": "Every scoreboard dimension and source/decision/schema reference is validated and current counts are recomputed.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": ["docs/benchmarks/projectatlas-v0.4-phase-scoreboard.json", "crates/projectatlas-cli/src/repository_intelligence_scoreboard_tests.rs"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.17",
+        "function": "repository_intelligence_scoreboard_tests::checked_scoreboard_is_reproducible_source_projection",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_scoreboard_tests::checked_scoreboard_is_reproducible_source_projection", "--", "--exact"] },
+        "assertion": "Every required semantic dimension has valid source, result-schema, and decision references; exact ID catalogs, derived group counts, and current blockers reconcile; rendering cannot hide failures.",
+        "covered_inputs": ["scoreboard schema", "exact source-contract catalog", "exact decision-function catalog", "exact result-schema catalog", "exact dimension ID and group catalog", "one-page rendering contract"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.18",
+      "requirement": "Final v0.4 release acceptance is a strict conjunction that blocks every missing, ineligible, informational, pending, failing, or hosted-required result, while Phase 0 implementation readiness depends only on its separate four-gate contract.",
+      "scenario": "A closed release-dimension state table and checked-in current artifact are evaluated without aggregate compensation, and deferred release evidence is proven unable to block an otherwise ready Phase 0.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": ["docs/benchmarks/projectatlas-v0.4-phase-scoreboard.json", "crates/projectatlas-cli/src/repository_intelligence_scoreboard_tests.rs"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.18",
+        "function": "repository_intelligence_scoreboard_tests::every_non_pass_state_blocks_release_acceptance",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_scoreboard_tests::every_non_pass_state_blocks_release_acceptance", "--", "--exact"] },
+        "assertion": "Each non-pass state, a missing required dimension, or missing hosted evidence blocks final release acceptance; only the complete all-pass release fixture passes, while the independently tested four-gate Phase 0 contract remains no-claim and unaffected by deferred release evidence.",
+        "covered_inputs": ["six closed release-dimension states", "missing release dimension", "hosted release-evidence gap", "all-pass release fixture", "separate four-gate Phase 0 readiness contract", "current complete release decision catalog"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.19",
+      "requirement": "The simplicity contract preserves every existing public name, permits only three optional analysis surfaces, adds no normal-workflow call, rejects a custom query language and speculative crates, keeps optional packs disabled and removable, and bounds response growth.",
+      "scenario": "The binding simplicity catalog is checked for the exact allowed CLI/MCP additions, zero required workflow calls, pack lifecycle defaults, crate rule, response/token ceilings, and closed phase-exit disposition set.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": ["docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json", "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs", "openspec/task-verification-plan.json"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.19",
+        "function": "repository_intelligence_contract_tests::simplicity_contract_bounds_surface_growth",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::simplicity_contract_bounds_surface_growth", "--", "--exact"] },
+        "assertion": "Public names remain frozen; only architecture, impact, and trace CLI/MCP surfaces are allowed; normal workflows add zero calls; optional packs remain disabled and removable; no speculative crate is permitted; response and workflow byte/token ceilings plus the four phase-exit dispositions are exact.",
+        "covered_inputs": ["existing-name preservation", "allowed CLI and MCP analysis surfaces", "normal workflow call growth", "custom query-language prohibition", "optional-pack defaults and removal", "new-crate ownership rule", "response and workflow byte/token ceilings", "phase-exit disposition catalog"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.20",
+      "requirement": "Every phase exit has one compact KISS/DRY/ownership review covering code, dependencies, configuration, outputs, traits, dynamic dispatch, and abstractions with closed dispositions and fail-closed blocking behavior.",
+      "scenario": "The canonical review schema and mutations that omit a scope, add a disposition, weaken defer evidence, or permit blocking findings are validated.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": ["docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json", "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs", "openspec/task-verification-plan.json"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.20",
+        "function": "repository_intelligence_contract_tests::arri_2_20_phase_exit_ownership_review_is_binding",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::arri_2_20_phase_exit_ownership_review_is_binding", "--", "--exact"] },
+        "assertion": "The review is mandatory at every phase exit; all seven scopes, four dispositions, record fields, disposition-specific completion requirements, and zero-blocker pass rule are exact; permissive mutations fail.",
+        "covered_inputs": ["required phase-exit scopes", "closed disposition catalog", "phase/scope/finding record fields", "disposition completion evidence", "blocking-finding behavior", "adversarial schema mutations"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.21",
+      "requirement": "Risk-based verification schema and initial ownership cover every v0.4 task without fabricated test commands.",
+      "scenario": "The plan is expanded against both authoritative task files.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": ["openspec/task-verification-plan.json", "crates/projectatlas-cli/src/task_evidence_plan_tests.rs", "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.21",
+        "function": "task_evidence_plan_tests::every_v04_task_materializes_one_complete_initial_evidence_row",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "task_evidence_plan_tests::every_v04_task_materializes_one_complete_initial_evidence_row", "--", "--exact"] },
+        "assertion": "Every authoritative task and unique test ID materializes one complete initial row from one owner range; no pending row fabricates a successful command or result.",
+        "covered_inputs": ["both v0.4 tasks.md files", "owner ranges", "row schema"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.22",
+      "requirement": "Final evidence validation fails closed and remains owned by the post-stabilization quality change.",
+      "scenario": "Invalid evidence classes and premature activation are inspected.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": ["openspec/task-verification-plan.json", "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.22",
+        "function": "repository_intelligence_contract_tests::arri_2_22_validator_contract_rejects_invalid_evidence",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::arri_2_22_validator_contract_rejects_invalid_evidence", "--", "--exact"] },
+        "assertion": "Every required invalid evidence class is fail-closed and implementation/final execution are assigned to #309 after stabilization.",
+        "covered_inputs": ["validator rejection catalog", "activation owner", "execution order"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.23",
+      "requirement": "Focused behavior tests land with each stable slice and whole-repository saturation remains last.",
+      "scenario": "Execution-order policy is inspected for a feature slice and final quality closure.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": ["openspec/task-verification-plan.json", "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.23",
+        "function": "repository_intelligence_contract_tests::arri_2_23_behavior_tests_precede_saturation",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::arri_2_23_behavior_tests_precede_saturation", "--", "--exact"] },
+        "assertion": "The plan requires focused unit/risk layers in-slice and forbids coverage or full mutation before functional stabilization.",
+        "covered_inputs": ["execution order", "required evidence policy"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.24",
+      "requirement": "The final validator and IssueOps self-test catalog contains every specified failure class.",
+      "scenario": "The catalog is compared with the required invalid and valid fixture identities.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": ["openspec/task-verification-plan.json", "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.24",
+        "function": "repository_intelligence_contract_tests::arri_2_24_self_test_catalog_is_complete",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::arri_2_24_self_test_catalog_is_complete", "--", "--exact"] },
+        "assertion": "The catalog includes all valid, missing, stale, drift, dependency, retry, vacuity, and timeout fixtures without claiming they already executed.",
+        "covered_inputs": ["self-test fixture catalog"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.25",
+      "requirement": "IssueOps and evidence ownership are explicit while final activation remains post-stabilization.",
+      "scenario": "The local issue map and authoritative issue ownership are inspected.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": ["openspec/task-verification-plan.json", "openspec/issue-map.json", "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.25",
+        "function": "repository_intelligence_contract_tests::arri_2_25_issueops_ownership_is_explicit",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::arri_2_25_issueops_ownership_is_explicit", "--", "--exact"] },
+        "assertion": "Issues #308 and #309 are authoritative for their changes, checklists remain synchronized, and review/closure activation is owned by #309.",
+        "covered_inputs": ["issue map", "IssueOps ownership", "activation order"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.26",
+      "requirement": "Official host lifecycle capability is recorded without hiding a manual native-runtime step.",
+      "scenario": "Codex, Claude Code, and OpenCode ProjectAtlas store paths are evaluated against the one-action clean-host contract.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": ["docs/benchmarks/projectatlas-v0.4-host-safety.json", "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.26",
+        "function": "repository_intelligence_contract_tests::arri_2_26_host_capability_truth_table_rejects_hidden_manual_steps",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::arri_2_26_host_capability_truth_table_rejects_hidden_manual_steps", "--", "--exact"] },
+        "assertion": "The host truth table accepts the current release blocker and rejects undeclared, missing, stale, or falsely passing provisioning evidence.",
+        "covered_inputs": ["three host versions and manifests", "closed evidence/gate states", "four-platform hosted lifecycle matrix", "hidden manual-step policy"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.27",
+      "requirement": "One concrete typed ProjectAtlas owner defines non-atomic host lifecycle recovery and project-data preservation.",
+      "scenario": "The lifecycle ownership artifact is checked for closed states, one owner, no speculative crate/trait, reverse compensation, and preserved project data.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": ["docs/benchmarks/projectatlas-v0.4-host-safety.json", "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.27",
+        "function": "repository_intelligence_contract_tests::arri_2_27_lifecycle_owner_is_single_typed_and_preserving",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::arri_2_27_lifecycle_owner_is_single_typed_and_preserving", "--", "--exact"] },
+        "assertion": "The selected projectatlas-cli owner and preservation state machine are accepted while malformed, missing, stale, or prematurely passing ownership is rejected.",
+        "covered_inputs": ["owner and module", "closed lifecycle actions and journal states", "project-data preservation", "unselected process candidate"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.28",
+      "requirement": "Owned unsafe-forbid proof plus the preliminary known native, advisory, import, audit-tool, and containment risk inventory remain explicit and fail closed without claiming complete transitive proof.",
+      "scenario": "The safety artifact is reconciled with the current lockfile, discloses unavailable complete transitive-unsafe tooling and inventory limits, and retains the required Section 11 blockers.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": ["Cargo.lock", "docs/benchmarks/projectatlas-v0.4-host-safety.json", "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs"],
+      "risk": "L2-persistence-cross-crate",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.28",
+        "function": "repository_intelligence_contract_tests::arri_2_28_safety_inventory_fails_closed_on_advisory_or_missing_evidence",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::arri_2_28_safety_inventory_fails_closed_on_advisory_or_missing_evidence", "--", "--exact"] },
+        "assertion": "Owned safety, locked dependency/build-script risk signals, known native boundaries, audit-tool gaps, and current advisory remediation are bound to exact evidence without claiming complete transitive unsafe/FFI coverage; malformed states, missing advisories, stale lockfiles, hidden inventory limits, and hidden containment blockers fail.",
+        "covered_inputs": ["seven owned crates", "293-package dependency graph derived from bounded offline locked Cargo metadata", "preliminary five-known-boundary inventory including dev-only process supervision", "explicit missing cargo-geiger/cargo-vet and complete-transitive-proof deferral", "current Cargo.lock digest", "production containment and hosted-import blockers"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.29",
+      "requirement": "Every required Phase 0 architecture, Rust, performance, security, storage, platform, and agent-workflow review has a visible, fail-closed disposition before implementation readiness passes, without converting local readiness evidence into a release claim.",
+      "scenario": "A typed checked-in review record reconciles the exact reviewer-role and finding catalogs, repository-local evidence, closed dispositions, task-owned deferrals, zero unresolved blockers, and the bounded evaluator containment contract; hosted Unix regressions bind the final Phase 0 checkpoint before the task is checked.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": [".github/scripts/issue-checklists.py", "docs/benchmarks/results/phase-0-truth-and-baselines/reviews.json", "docs/benchmarks/projectatlas-v0.4-phase-scoreboard.json", "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json", "crates/projectatlas-cli/src/repository_evaluation_runner.rs", "crates/projectatlas-cli/src/git_process_policy.rs", "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs", "openspec/task-verification-plan.json"],
+      "risk": "L4-platform-release-security",
+      "required_evidence_layers": ["unit", "integration", "platform"],
+      "timeout_seconds": 1800,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.29",
+        "function": "repository_intelligence_contract_tests::arri_2_29_phase_review_and_evaluator_boundaries_are_closed",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::arri_2_29_phase_review_and_evaluator_boundaries_are_closed", "--", "--exact"] },
+        "assertion": "Exactly seven unique resolved reviewer roles cover the exact ten-finding Phase 0 ledger; every evidence path is normalized, repository-local, unique, and present; fixed findings have no deferral while narrowed/deferred findings have valid OpenSpec owners; checked v0.4 tasks cannot bypass implemented-test or explicit-exemption policy; no blocking finding remains open; no product/release claim is accepted; callable-variable identities retain qualified scope; and evaluator filter, concurrency, residual, path, executable-copy mode, and byte-limit policy remains fail-closed.",
+        "covered_inputs": ["seven closed reviewer roles", "ten required Phase 0 findings", "three closed dispositions", "repository-local evidence paths", "authoritative ARRI task owners", "checked-task implemented-test or explicit-exemption coverage", "callable-variable qualified stable identity", "zero unresolved blockers", "implementation-readiness-only and no-claim states", "bounded materialized checkout reads", "linked/reparse ancestry rejection", "byte-preserving Unix paths and symlink targets", "executable-copy mode preservation and launch coverage", "custom-filter ineligibility", "isolated quiescent workspace assumption", "hostile same-user filesystem residual deferred to ARRI-11.2"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.30",
+      "requirement": "The separately mapped Rust quality change is a final v0.4 release prerequisite after feature stabilization, never a prerequisite to implement repository-intelligence behavior.",
+      "scenario": "Feature and quality OpenSpec contracts, issue ownership, required native quality tools, mutation semantics, and the final release-tail order are reconciled and fail closed under contract drift.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": ["crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs", "openspec/task-verification-plan.json"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.30",
+        "function": "repository_intelligence_contract_tests::arri_2_30_quality_release_prerequisite_is_ordered",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::arri_2_30_quality_release_prerequisite_is_ordered", "--", "--exact"] },
+        "assertion": "Issues 308 and 309, post-stabilization activation, independent nextest/doctest/LLVM coverage/source-mutation evidence, distinct repository-fault fixtures, and final documentation-before-IssueOps ordering agree across both OpenSpec changes regardless of task checkbox state; five contract mutations fail.",
+        "covered_inputs": ["OpenSpec issue map", "repository-intelligence execution order and release tasks", "Rust quality proposal, design, specification, and tasks", "checked and unchecked quality-task states", "task verification-plan release tail", "wrong-issue, premature-order, missing-doctest, conflated-mutation, and misplaced-IssueOps mutations"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "2.31",
+      "requirement": "Every detailed and issue-facing pre-mortem mitigation is owned by executable OpenSpec tasks rather than untracked prose.",
+      "scenario": "The stable PM ledger and authoritative task list are checked for unique risk IDs, nonempty actions, at least one task owner, and valid task references.",
+      "owner": "repository-intelligence-contracts-and-evaluation",
+      "changed_artifacts": ["openspec/changes/advance-rust-repository-intelligence/design.md", "openspec/changes/advance-rust-repository-intelligence/tasks.md", "openspec/task-verification-plan.json", "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs", "GitHub issue #308"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-2.31",
+        "function": "repository_intelligence_contract_tests::arri_2_31_pre_mortem_mitigations_are_task_owned",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::arri_2_31_pre_mortem_mitigations_are_task_owned", "--", "--exact"] },
+        "assertion": "All 29 PM rows have unique stable IDs, concrete mitigation actions, and one or more references to existing ARRI tasks; missing actions, orphan rows, duplicate IDs, and unknown task references fail.",
+        "covered_inputs": ["29 detailed design pre-mortem rows", "228 authoritative repository-intelligence tasks", "issue-facing mitigation ownership"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    }
+  ],
+  "planned_row_definitions": [
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "11.37",
+      "requirement": "Agent-facing formats are selected from measured context efficiency and compatibility evidence, while the versioned ProjectAtlas TOON contract remains self-contained in the plugin and JSON interoperability remains intact.",
+      "scenario": "The final payload audit, typed serialization contract, runtime capability report, bundled TOON reference, installer drift check, and representative CLI/MCP token evidence are validated together.",
+      "owner": "compatibility-release-and-plugin-lifecycle",
+      "changed_artifacts": ["crates/projectatlas-cli", "crates/projectatlas-core", "plugins/projectatlas", "docs/format.md", "docs/benchmarks"],
+      "risk": "L4-platform-release-security",
+      "required_evidence_layers": ["unit", "integration", "e2e", "platform", "benchmark", "packaged_smoke"],
+      "timeout_seconds": 1800,
+      "unit_test": {
+        "test_id": "UT:ARRI-11.37",
+        "function": null,
+        "command": null,
+        "assertion": "The versioned plugin reference, runtime contract, typed TOON/JSON schemas, installer drift policy, and measured payload decisions agree without forcing TOON where JSON is clearer or compatibility requires JSON.",
+        "covered_inputs": ["all agent-facing CLI payload families", "all MCP result families", "JSON compatibility mode", "versioned plugin TOON reference and examples", "runtime information", "Windows and POSIX installer verification", "representative token evidence"],
+        "state": "planned_not_implemented"
+      },
+      "result": { "state": "not_started", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "11.38",
+      "requirement": "The public README and ProjectAtlas front page describe the completed v0.4 product accurately, retain Ani, and derive every measurable or comparative statement from eligible release evidence.",
+      "scenario": "Content, claims, installation instructions, links, assets, and rendered desktop/mobile documentation are validated only after the feature and mapped quality changes pass.",
+      "owner": "compatibility-release-and-plugin-lifecycle",
+      "changed_artifacts": ["README.md", "docs/index.md", "docs/assets", "docs/benchmarks", ".github/workflows/04-docs.yml"],
+      "risk": "L3-public-process-workflow",
+      "required_evidence_layers": ["unit", "integration", "e2e"],
+      "timeout_seconds": 1800,
+      "unit_test": {
+        "test_id": "UT:ARRI-11.38",
+        "function": null,
+        "command": null,
+        "assertion": "README and front-page claims match retained v0.4 evidence; installation and host/language/graph behavior are current; Ani, links, and assets resolve; unsupported superlatives fail.",
+        "covered_inputs": ["README.md", "docs/index.md", "Ani mascot asset", "supported host and language manifests", "plugin-store installation contract", "graph-aware workflow contract", "benchmark and token evidence", "rendered desktop and mobile pages"],
+        "state": "planned_not_implemented"
+      },
+      "result": { "state": "not_started", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    }
+  ],
+  "validator_contract": {
+    "implementation_change": "enforce-rust-test-quality-gates",
+    "implementation_issue": 309,
+    "activation": "after_repository_intelligence_stabilization",
+    "checked_task_requires_current_success": true,
+    "review_request_requires_all_scoped_tasks_complete": true,
+    "reject": [
+      "missing",
+      "skipped",
+      "flaky",
+      "timed_out",
+      "zero_tests_selected",
+      "exit_only_assertion",
+      "retry_only_success",
+      "failed",
+      "stale_for_commit",
+      "covered_input_drift",
+      "wrong_test_identity",
+      "under_classified_risk",
+      "missing_required_layer",
+      "invalid_not_applicable",
+      "orphaned_evidence",
+      "local_remote_drift",
+      "unchecked_dependency",
+      "missing_openspec_permalink",
+      "branch_only_openspec_permalink",
+      "abbreviated_sha_openspec_permalink",
+      "foreign_repository_openspec_permalink",
+      "wrong_change_openspec_permalink",
+      "nonexistent_openspec_permalink",
+      "stale_openspec_permalink",
+      "content_mismatched_openspec_permalink"
+    ]
+  },
+  "self_test_fixtures": [
+    "valid_complete_evidence",
+    "missing_task_row",
+    "missing_unit_test_id",
+    "missing_successful_run",
+    "stale_successful_run",
+    "under_classified_risk",
+    "missing_required_layer",
+    "invalid_not_applicable_unit_test",
+    "local_remote_drift",
+    "unchecked_dependency",
+    "exit_only_assertion",
+    "retry_only_success",
+    "zero_tests_selected",
+    "timeout_failure",
+    "valid_full_sha_openspec_permalinks",
+    "missing_openspec_permalink",
+    "branch_only_openspec_permalink",
+    "abbreviated_sha_openspec_permalink",
+    "foreign_repository_openspec_permalink",
+    "wrong_change_openspec_permalink",
+    "nonexistent_openspec_permalink",
+    "stale_openspec_permalink",
+    "content_mismatched_openspec_permalink"
+  ],
+  "issueops": {
+    "issue_map": "openspec/issue-map.json",
+    "authoritative_issues": {
+      "advance-rust-repository-intelligence": 308,
+      "enforce-rust-test-quality-gates": 309
+    },
+    "checklist_heading": "OpenSpec Task Checklist",
+    "local_and_remote_state_must_match": true,
+    "openspec_permalink_policy": {
+      "repository": "styler-ai/ProjectAtlas",
+      "required_artifacts": ["proposal.md", "design.md", "tasks.md"],
+      "required_spec_collection": {
+        "link_path": "specs",
+        "link_kind": "full_sha_tree",
+        "enumeration": "github_git_tree_recursive",
+        "file_pattern": "specs/**/*.md",
+        "every_matching_file_must_resolve": true
+      },
+      "commit_identity": "full_40_hex_sha",
+      "resolution": "github_api",
+      "path_template": "openspec/changes/{change}/{artifact}",
+      "linked_content_must_match_authoritative_state": true,
+      "branch_links_allowed": false,
+      "abbreviated_shas_allowed": false
+    },
+    "evidence_rendering_owner": "enforce-rust-test-quality-gates",
+    "final_gate_activation": "after_repository_intelligence_stabilization"
+  },
+  "execution_order": {
+    "stable_behavior_requires_focused_unit_test": true,
+    "risk_required_layers_run_with_behavior": true,
+    "phase_boundary_local_gates_run_first": true,
+    "phase_boundary_hosted_github_actions_required": true,
+    "phase_boundary_evidence_issue": 308,
+    "phase_boundary_evidence_fields": ["implementation_commit", "run_identity"],
+    "required_hosted_phase_job_outcomes": ["success"],
+    "repository_wide_saturation_change": "enforce-rust-test-quality-gates",
+    "repository_wide_saturation_position": "last_implementation_code_phase_before_public_docs_and_closeout",
+    "release_tail": [
+      "ARRI-11.37",
+      "TQG-1.1-through-10.9",
+      "ARRI-11.38",
+      "TQG-10.10",
+      "ARRI-11.39",
+      "TQG-10.11",
+      "TQG-10.12",
+      "TQG-10.13"
+    ],
+    "full_coverage_before_stabilization": false,
+    "full_mutation_before_stabilization": false
+  }
+}

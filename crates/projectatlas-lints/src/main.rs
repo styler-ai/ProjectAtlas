@@ -14,11 +14,12 @@ use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{
-    Expr, ExprLit, ExprMethodCall, ImplItemFn, ItemConst, ItemFn, ItemMod, ItemStatic, Lit, LitStr,
-    Macro, Meta, Token,
+    BinOp, Expr, ExprAssign, ExprBinary, ExprLit, ExprMethodCall, ExprStruct, ImplItemFn,
+    ItemConst, ItemFn, ItemMod, ItemStatic, Lit, LitInt, LitStr, Local, Macro, Member, Meta, Pat,
+    Token,
 };
 
-/// Subcommand that runs strict string-contract linting.
+/// Subcommand that runs strict source-contract linting, including string ownership.
 const COMMAND_STRICT_STRINGS: &str = "strict-strings";
 /// Successful process exit.
 const EXIT_OK: u8 = 0;
@@ -201,6 +202,16 @@ const REPEATED_PATH_JOIN_RULES: &[PathJoinLiteralRule] = &[PathJoinLiteralRule {
     allowed_repeated_literals: E2E_ALLOWED_REPEATED_PATH_JOIN_LITERALS,
 }];
 
+/// Rust planning owners where mutable task/checklist totals must remain derived.
+const TASK_METADATA_LITERAL_RULE: TaskMetadataLiteralRule = TaskMetadataLiteralRule {
+    id: "mutable-task-metadata-literal",
+    description: "Mutable OpenSpec task and GitHub checklist totals must be derived from their owning artifacts instead of duplicated as Rust integer literals.",
+    paths: &[
+        "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs",
+        "crates/projectatlas-cli/src/task_evidence_plan_tests.rs",
+    ],
+};
+
 /// Run the cargo-adjacent `ProjectAtlas` lint command.
 fn main() -> ExitCode {
     match run(env::args_os().skip(1), &current_dir()) {
@@ -265,7 +276,7 @@ fn help() -> Result<(), LintError> {
     let mut stdout = io::stdout().lock();
     writeln!(
         stdout,
-        "Usage: cargo projectatlas-lints {COMMAND_STRICT_STRINGS}\n\nCommands:\n  {COMMAND_STRICT_STRINGS}  Fail on inline Rust string literals protected by ProjectAtlas contract rules."
+        "Usage: cargo projectatlas-lints {COMMAND_STRICT_STRINGS}\n\nCommands:\n  {COMMAND_STRICT_STRINGS}  Fail on ProjectAtlas source-contract literals and duplicated mutable task counts."
     )
     .map_err(LintError::Io)
 }
@@ -297,9 +308,21 @@ fn run_strict_strings(root: &Path) -> Result<(), LintError> {
             )?);
         }
     }
+    for relative_path in TASK_METADATA_LITERAL_RULE.paths {
+        let path = root.join(relative_path);
+        let source = fs::read_to_string(&path).map_err(|source| LintError::ReadFile {
+            path: path.clone(),
+            source,
+        })?;
+        violations.extend(lint_mutable_task_metadata_literals(
+            relative_path,
+            &TASK_METADATA_LITERAL_RULE,
+            &source,
+        )?);
+    }
     if violations.is_empty() {
         let mut stdout = io::stdout().lock();
-        writeln!(stdout, "projectatlas-lints: strict string contracts passed")
+        writeln!(stdout, "projectatlas-lints: strict source contracts passed")
             .map_err(LintError::Io)
     } else {
         Err(LintError::Violations(violations))
@@ -311,7 +334,7 @@ fn lint_source(
     relative_path: &str,
     rule: &'static StringLiteralRule,
     source: &str,
-) -> Result<Vec<StringLiteralViolation>, LintError> {
+) -> Result<Vec<SourceLiteralViolation>, LintError> {
     let file = syn::parse_file(source).map_err(|source| LintError::Parse {
         path: relative_path.to_string(),
         source,
@@ -331,7 +354,7 @@ fn lint_repeated_path_join_literals(
     relative_path: &str,
     rule: &'static PathJoinLiteralRule,
     source: &str,
-) -> Result<Vec<StringLiteralViolation>, LintError> {
+) -> Result<Vec<SourceLiteralViolation>, LintError> {
     let file = syn::parse_file(source).map_err(|source| LintError::Parse {
         path: relative_path.to_string(),
         source,
@@ -358,7 +381,7 @@ fn lint_repeated_path_join_literals(
                     .iter()
                     .any(|allowed| *allowed == occurrence.literal)
         })
-        .map(|occurrence| StringLiteralViolation {
+        .map(|occurrence| SourceLiteralViolation {
             path: relative_path.to_string(),
             line: occurrence.line,
             column: occurrence.column,
@@ -368,6 +391,25 @@ fn lint_repeated_path_join_literals(
         })
         .collect();
     Ok(violations)
+}
+
+/// Parse one Rust source file and reject duplicated mutable task metadata totals.
+fn lint_mutable_task_metadata_literals(
+    relative_path: &str,
+    rule: &'static TaskMetadataLiteralRule,
+    source: &str,
+) -> Result<Vec<SourceLiteralViolation>, LintError> {
+    let file = syn::parse_file(source).map_err(|source| LintError::Parse {
+        path: relative_path.to_string(),
+        source,
+    })?;
+    let mut visitor = TaskMetadataLiteralVisitor {
+        relative_path,
+        rule,
+        violations: Vec::new(),
+    };
+    visitor.visit_file(&file);
+    Ok(visitor.violations)
 }
 
 /// Path-scoped rule for protected exact string literals.
@@ -400,9 +442,20 @@ struct PathJoinLiteralRule {
     allowed_repeated_literals: &'static [&'static str],
 }
 
+/// Path-scoped rule for mutable repository task/checklist totals.
+#[derive(Clone, Copy, Debug)]
+struct TaskMetadataLiteralRule {
+    /// Stable rule identifier printed in diagnostics.
+    id: &'static str,
+    /// Human-readable rule description printed in diagnostics.
+    description: &'static str,
+    /// Repository-relative Rust source files protected by this rule.
+    paths: &'static [&'static str],
+}
+
 /// One source-aware string-contract violation.
 #[derive(Debug)]
-struct StringLiteralViolation {
+struct SourceLiteralViolation {
     /// Repository-relative source path.
     path: String,
     /// One-based source line.
@@ -417,11 +470,11 @@ struct StringLiteralViolation {
     description: &'static str,
 }
 
-impl Display for StringLiteralViolation {
+impl Display for SourceLiteralViolation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{}:{}:{}: {}: inline string literal {:?}; {}",
+            "{}:{}:{}: {}: inline literal {:?}; {}",
             self.path, self.line, self.column, self.rule_id, self.literal, self.description
         )
     }
@@ -436,7 +489,34 @@ struct StringLiteralVisitor<'a> {
     /// Nesting depth for allowed centralization declarations.
     centralized_depth: usize,
     /// Collected violations.
-    violations: Vec<StringLiteralViolation>,
+    violations: Vec<SourceLiteralViolation>,
+}
+
+/// Syntax visitor that finds integer literals coupled to mutable task metadata.
+struct TaskMetadataLiteralVisitor<'a> {
+    /// Repository-relative source path.
+    relative_path: &'a str,
+    /// Rule used by this visitor.
+    rule: &'static TaskMetadataLiteralRule,
+    /// Collected violations.
+    violations: Vec<SourceLiteralViolation>,
+}
+
+/// Strength of a task-metadata signal found in a Rust expression.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum TaskMetadataSignal {
+    /// No task/checklist metadata is referenced.
+    None,
+    /// A task collection is referenced without claiming it is a total field.
+    Collection,
+    /// An explicit task/checklist total, count, or expected-count field is referenced.
+    Count,
+}
+
+/// Syntax visitor that classifies task-metadata references without reading prose.
+struct TaskMetadataSignalVisitor {
+    /// Strongest signal observed in the expression.
+    signal: TaskMetadataSignal,
 }
 
 /// One `.join("literal")` occurrence found by the path-join rule.
@@ -518,7 +598,7 @@ impl StringLiteralVisitor<'_> {
             return;
         }
         let location = literal.span().start();
-        self.violations.push(StringLiteralViolation {
+        self.violations.push(SourceLiteralViolation {
             path: self.relative_path.to_string(),
             line: location.line,
             column: location.column + 1,
@@ -598,6 +678,221 @@ impl StringLiteralVisitor<'_> {
             }
             Meta::List(_) | Meta::NameValue(_) => false,
         }
+    }
+}
+
+impl TaskMetadataLiteralVisitor<'_> {
+    /// Record a literal when the paired expression owns mutable task metadata.
+    fn record_expression_pair(&mut self, metadata: &Expr, literal: &Expr) {
+        let Some((literal, value)) = unsigned_integer_literal(literal) else {
+            return;
+        };
+        self.record_literal(task_metadata_signal(metadata), literal, value);
+    }
+
+    /// Record a literal assigned to a task-count-like Rust identifier.
+    fn record_named_literal(&mut self, name: &str, expression: &Expr) {
+        let Some((literal, value)) = unsigned_integer_literal(expression) else {
+            return;
+        };
+        self.record_literal(task_metadata_identifier_signal(name), literal, value);
+    }
+
+    /// Emit one violation, allowing only zero/one collection-cardinality invariants.
+    fn record_literal(&mut self, signal: TaskMetadataSignal, literal: &LitInt, value: u128) {
+        if signal == TaskMetadataSignal::None
+            || (signal == TaskMetadataSignal::Collection && value <= 1)
+        {
+            return;
+        }
+        let location = literal.span().start();
+        self.violations.push(SourceLiteralViolation {
+            path: self.relative_path.to_string(),
+            line: location.line,
+            column: location.column + 1,
+            rule_id: self.rule.id,
+            literal: literal.base10_digits().to_string(),
+            description: self.rule.description,
+        });
+    }
+}
+
+impl<'ast> Visit<'ast> for TaskMetadataLiteralVisitor<'_> {
+    /// Inspect both sides of comparisons for a metadata expression and integer literal.
+    fn visit_expr_binary(&mut self, expression: &'ast ExprBinary) {
+        if matches!(
+            expression.op,
+            BinOp::Eq(_) | BinOp::Ne(_) | BinOp::Lt(_) | BinOp::Le(_) | BinOp::Gt(_) | BinOp::Ge(_)
+        ) {
+            self.record_expression_pair(&expression.left, &expression.right);
+            self.record_expression_pair(&expression.right, &expression.left);
+        }
+        visit::visit_expr_binary(self, expression);
+    }
+
+    /// Inspect assignments such as `expected_tasks = 228`.
+    fn visit_expr_assign(&mut self, expression: &'ast ExprAssign) {
+        self.record_expression_pair(&expression.left, &expression.right);
+        visit::visit_expr_assign(self, expression);
+    }
+
+    /// Inspect typed struct fields such as `expected_tasks: 228`.
+    fn visit_expr_struct(&mut self, expression: &'ast ExprStruct) {
+        for field in &expression.fields {
+            if let Member::Named(name) = &field.member {
+                self.record_named_literal(&name.to_string(), &field.expr);
+            }
+        }
+        visit::visit_expr_struct(self, expression);
+    }
+
+    /// Inspect integer constants whose names explicitly own task metadata.
+    fn visit_item_const(&mut self, item: &'ast ItemConst) {
+        self.record_named_literal(&item.ident.to_string(), &item.expr);
+        visit::visit_item_const(self, item);
+    }
+
+    /// Inspect local integer bindings whose names explicitly own task metadata.
+    fn visit_local(&mut self, local: &'ast Local) {
+        if let Some(identifier) = task_metadata_binding_identifier(&local.pat)
+            && let Some(initializer) = &local.init
+        {
+            self.record_named_literal(&identifier.to_string(), &initializer.expr);
+        }
+        visit::visit_local(self, local);
+    }
+
+    /// Inspect assertion macro expressions because `syn` does not visit macro token bodies.
+    fn visit_macro(&mut self, macro_call: &'ast Macro) {
+        let macro_name = macro_call
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string());
+        match macro_name.as_deref() {
+            Some("assert_eq" | "assert_ne" | "debug_assert_eq" | "debug_assert_ne") => {
+                let parser = Punctuated::<Expr, Token![,]>::parse_terminated;
+                if let Ok(arguments) = parser.parse2(macro_call.tokens.clone()) {
+                    let mut arguments = arguments.iter();
+                    if let (Some(left), Some(right)) = (arguments.next(), arguments.next()) {
+                        self.record_expression_pair(left, right);
+                        self.record_expression_pair(right, left);
+                    }
+                }
+            }
+            Some("assert" | "debug_assert") => {
+                if let Ok(expression) = syn::parse2::<Expr>(macro_call.tokens.clone()) {
+                    self.visit_expr(&expression);
+                }
+            }
+            _ => {}
+        }
+        visit::visit_macro(self, macro_call);
+    }
+}
+
+/// Return the identifier owned by a plain or type-annotated local binding.
+fn task_metadata_binding_identifier(pattern: &Pat) -> Option<&syn::Ident> {
+    match pattern {
+        Pat::Ident(binding) => Some(&binding.ident),
+        Pat::Paren(parenthesized) => task_metadata_binding_identifier(&parenthesized.pat),
+        Pat::Reference(reference) => task_metadata_binding_identifier(&reference.pat),
+        Pat::Type(typed) => task_metadata_binding_identifier(&typed.pat),
+        _ => None,
+    }
+}
+
+impl<'ast> Visit<'ast> for TaskMetadataSignalVisitor {
+    /// Classify Rust identifiers that denote task collections or explicit counts.
+    fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
+        for segment in &expression.path.segments {
+            self.signal = self
+                .signal
+                .max(task_metadata_identifier_signal(&segment.ident.to_string()));
+        }
+        visit::visit_expr_path(self, expression);
+    }
+
+    /// Classify string-indexed schema fields without scanning comments or diagnostics.
+    fn visit_expr_index(&mut self, expression: &'ast syn::ExprIndex) {
+        if let Expr::Lit(ExprLit {
+            lit: Lit::Str(field),
+            ..
+        }) = expression.index.as_ref()
+        {
+            self.signal = self.signal.max(task_metadata_field_signal(&field.value()));
+        }
+        visit::visit_expr_index(self, expression);
+    }
+}
+
+/// Return the task-metadata signal carried by one parsed expression.
+fn task_metadata_signal(expression: &Expr) -> TaskMetadataSignal {
+    let mut visitor = TaskMetadataSignalVisitor {
+        signal: TaskMetadataSignal::None,
+    };
+    visitor.visit_expr(expression);
+    visitor.signal
+}
+
+/// Classify one Rust identifier as mutable task metadata or an ordinary name.
+fn task_metadata_identifier_signal(identifier: &str) -> TaskMetadataSignal {
+    let normalized = identifier.to_ascii_lowercase();
+    let words = normalized.split('_').collect::<Vec<_>>();
+    let names_tasks = words
+        .iter()
+        .any(|word| matches!(*word, "task" | "tasks" | "checklist" | "checklists"));
+    let names_count = words.iter().any(|word| {
+        matches!(
+            *word,
+            "count"
+                | "counts"
+                | "total"
+                | "totals"
+                | "expected"
+                | "checked"
+                | "unchecked"
+                | "completed"
+                | "remaining"
+        )
+    });
+    if names_tasks && names_count {
+        TaskMetadataSignal::Count
+    } else if names_tasks
+        || matches!(
+            normalized.as_str(),
+            "intelligence" | "quality" | "stable_rows"
+        )
+    {
+        TaskMetadataSignal::Collection
+    } else {
+        TaskMetadataSignal::None
+    }
+}
+
+/// Classify a parsed schema field used by the task-evidence plan.
+fn task_metadata_field_signal(field: &str) -> TaskMetadataSignal {
+    match field {
+        "total_tasks" | "expected_tasks" | "checked_tasks" | "unchecked_tasks"
+        | "completed_tasks" | "remaining_tasks" | "checklist_total" => TaskMetadataSignal::Count,
+        "task_sources" | "stable_row_overrides" => TaskMetadataSignal::Collection,
+        other => task_metadata_identifier_signal(other),
+    }
+}
+
+/// Return a direct unsigned integer literal, unwrapping only transparent grouping.
+fn unsigned_integer_literal(expression: &Expr) -> Option<(&LitInt, u128)> {
+    match expression {
+        Expr::Group(group) => unsigned_integer_literal(&group.expr),
+        Expr::Paren(paren) => unsigned_integer_literal(&paren.expr),
+        Expr::Lit(ExprLit {
+            lit: Lit::Int(literal),
+            ..
+        }) => literal
+            .base10_parse::<u128>()
+            .ok()
+            .map(|value| (literal, value)),
+        _ => None,
     }
 }
 
@@ -684,7 +979,7 @@ enum LintError {
         source: syn::Error,
     },
     /// Strict string-contract violations.
-    Violations(Vec<StringLiteralViolation>),
+    Violations(Vec<SourceLiteralViolation>),
 }
 
 impl Display for LintError {
@@ -697,7 +992,7 @@ impl Display for LintError {
             }
             Self::Parse { path, source } => write!(formatter, "failed to parse {path}: {source}"),
             Self::Violations(violations) => {
-                write!(formatter, "{} strict string violations", violations.len())
+                write!(formatter, "{} strict source violations", violations.len())
             }
         }
     }
@@ -708,11 +1003,11 @@ impl std::error::Error for LintError {}
 /// Write all strict string-contract diagnostics.
 fn write_violations(
     writer: &mut impl Write,
-    violations: &[StringLiteralViolation],
+    violations: &[SourceLiteralViolation],
 ) -> io::Result<()> {
     writeln!(
         writer,
-        "projectatlas-lints: {} strict string contract violation(s)",
+        "projectatlas-lints: {} strict source contract violation(s)",
         violations.len()
     )?;
     for violation in violations {
@@ -725,7 +1020,8 @@ fn write_violations(
 mod tests {
     use super::{
         E2E_FIXTURE_PATH_LITERALS, MCP_PROJECT_SCHEMA_LITERALS, PathJoinLiteralRule,
-        StringLiteralRule, lint_repeated_path_join_literals, lint_source,
+        StringLiteralRule, TASK_METADATA_LITERAL_RULE, lint_mutable_task_metadata_literals,
+        lint_repeated_path_join_literals, lint_source,
     };
     use std::io;
 
@@ -774,6 +1070,80 @@ mod tests {
         } else {
             Err(io::Error::other(message.to_string()).into())
         }
+    }
+
+    /// Mutable task totals are rejected without encoding the repository's current counts.
+    #[test]
+    fn task_metadata_lint_flags_duplicated_repository_totals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let violations = lint_mutable_task_metadata_literals(
+            "demo.rs",
+            &TASK_METADATA_LITERAL_RULE,
+            r#"
+fn validate(plan: &serde_json::Value, intelligence: &[String]) {
+    let expected_tasks: usize = 78;
+    let _ = intelligence.len() == 228;
+    let _ = plan["scope"]["total_tasks"] == 306;
+    assert_eq!(intelligence.len(), 229);
+    assert!(plan["scope"]["total_tasks"] == 307);
+    let _ = expected_tasks;
+}
+"#,
+        )?;
+        require(
+            violations.len() == 5,
+            &format!("expected every duplicated task total to be flagged, got {violations:?}"),
+        )?;
+        let literals = violations
+            .iter()
+            .map(|violation| violation.literal.as_str())
+            .collect::<Vec<_>>();
+        require(
+            literals == ["78", "228", "306", "229", "307"],
+            "task-total diagnostics did not preserve source order",
+        )?;
+        Ok(())
+    }
+
+    /// Derived totals and per-task zero/one cardinality invariants remain valid.
+    #[test]
+    fn task_metadata_lint_allows_derived_counts_and_cardinality_invariants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let violations = lint_mutable_task_metadata_literals(
+            "demo.rs",
+            &TASK_METADATA_LITERAL_RULE,
+            r#"
+fn validate(plan: &serde_json::Value, tasks: &[String], source_tasks: &[String]) {
+    let matching_tasks = tasks.iter().filter(|task| !task.is_empty()).collect::<Vec<_>>();
+    let _ = tasks.len() == source_tasks.len();
+    let _ = plan["scope"]["total_tasks"] == source_tasks.len();
+    let _ = matching_tasks.len() == 1;
+}
+"#,
+        )?;
+        require(
+            violations.is_empty(),
+            "derived task totals or per-task cardinality were flagged",
+        )?;
+        Ok(())
+    }
+
+    /// Comments and diagnostic prose cannot trigger the syntax-aware task-total rule.
+    #[test]
+    fn task_metadata_lint_ignores_comments_and_prose() -> Result<(), Box<dyn std::error::Error>> {
+        let violations = lint_mutable_task_metadata_literals(
+            "demo.rs",
+            &TASK_METADATA_LITERAL_RULE,
+            r#"
+// total_tasks == 999 and checklist_total == 998 are prose, not policy.
+fn diagnostic() -> &'static str { "expected_tasks was previously 997" }
+"#,
+        )?;
+        require(
+            violations.is_empty(),
+            "task-total prose was treated as Rust policy",
+        )?;
+        Ok(())
     }
 
     /// Macro literals are parsed and reported as protected schema strings.

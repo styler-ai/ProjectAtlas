@@ -1,0 +1,5313 @@
+{
+  "schema_version": 2,
+  "format": "projectatlas.capability-registry",
+  "registry_id": "projectatlas-v0.4-candidate-212x207",
+  "status": "candidate-pending-evidence",
+  "binding_role": "delivery-inventory",
+  "accepted_set_policy": {
+    "minimum_runnable_modes": 212,
+    "minimum_normalized_parser_capabilities": 207,
+    "target_runnable_modes": 212,
+    "target_normalized_parser_capabilities": 207,
+    "aliases_count_toward_modes": false,
+    "shared_fallback_counts_as_parser": false,
+    "advertisement_requires_achieved_manifest": true,
+    "minimum_current_public_modes": 63
+  },
+  "required_platforms": [
+    "windows-x86_64",
+    "linux-x86_64",
+    "macos-aarch64",
+    "macos-x86_64"
+  ],
+  "packs": [
+    {
+      "pack_id": "default-core",
+      "required": true,
+      "installed_by_default": true,
+      "process": "projectatlas",
+      "network_during_scan_or_query": false,
+      "language_owner": "projectatlas-symbols"
+    },
+    {
+      "pack_id": "broad-language-pack",
+      "required_for_accepted_breadth": true,
+      "installed_by_default": false,
+      "process": "supervised-worker",
+      "network_during_scan_or_query": false,
+      "language_owner": "broad-language-pack-worker"
+    },
+    {
+      "pack_id": "semantic-pack",
+      "required": false,
+      "installed_by_default": false,
+      "process": "supervised-worker",
+      "network_during_scan_or_query": false
+    }
+  ],
+  "detection_policy": {
+    "precedence": [
+      "exact-filename",
+      "compound-extension",
+      "extension",
+      "shebang",
+      "content-signature",
+      "project-context"
+    ],
+    "custom_language": false,
+    "ambiguity_requires_named_resolver": true,
+    "aliases_acyclic": true
+  },
+  "claim_types": {
+    "detected": {
+      "evidence": "per-mode real-process detection fixture on every required platform"
+    },
+    "parsed": {
+      "evidence": "bounded parser fixture with error-byte accounting, digest, ABI, and containment"
+    },
+    "symbols": {
+      "evidence": "per-language labeled facts with precision >= 0.95 and recall >= 0.90"
+    },
+    "semantic": {
+      "evidence": "per-provider labeled resolution with precision >= 0.90 and recall >= 0.80"
+    },
+    "benchmarked": {
+      "evidence": "eligible pinned throughput, RSS, startup, package, and containment result"
+    }
+  },
+  "counts": {
+    "modes": 212,
+    "normalized_parser_capabilities": 207,
+    "capabilities": 66,
+    "accepted_language_crosswalk_entries": 160,
+    "current_public_modes": 63
+  },
+  "mode_defaults": {
+    "accepted_delivery_target": true,
+    "alias_of": null,
+    "detection_rule_id_template": "detect.{public_mode}",
+    "fixture_id_templates": [
+      "lang.{public_mode}.valid",
+      "lang.{public_mode}.malformed"
+    ],
+    "required_claims": [
+      "detected",
+      "parsed"
+    ],
+    "achieved_claims": [],
+    "evidence_state": "pending",
+    "advertisement": "blocked-until-achieved-manifest",
+    "owner_source": "pack.language_owner",
+    "required_platforms_source": "registry.required_platforms",
+    "allowed_override_fields": [
+      "accepted_delivery_target",
+      "alias_of",
+      "detection_rule_id",
+      "fixture_ids",
+      "required_claims",
+      "achieved_claims",
+      "evidence_state",
+      "advertisement",
+      "owner",
+      "required_platforms"
+    ]
+  },
+  "modes": [
+    {
+      "mode_id": "mode.ada",
+      "public_mode": "ada",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.ada",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.agda",
+      "public_mode": "agda",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.agda",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.apex",
+      "public_mode": "apex",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.apex",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.arduino",
+      "public_mode": "arduino",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.arduino",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.asciidoc",
+      "public_mode": "asciidoc",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.asciidoc",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.asm",
+      "public_mode": "asm",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.asm",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.astro",
+      "public_mode": "astro",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.astro",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.awk",
+      "public_mode": "awk",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.awk",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.bash",
+      "public_mode": "bash",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.bash",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.batch",
+      "public_mode": "batch",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.batch",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.beancount",
+      "public_mode": "beancount",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.beancount",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.bibtex",
+      "public_mode": "bibtex",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.bibtex",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.bicep",
+      "public_mode": "bicep",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.bicep",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.bitbake",
+      "public_mode": "bitbake",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.bitbake",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.blade",
+      "public_mode": "blade",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.blade",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.c",
+      "public_mode": "c",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.c",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.c3",
+      "public_mode": "c3",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.c3",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.cairo",
+      "public_mode": "cairo",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.cairo",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.capnp",
+      "public_mode": "capnp",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.capnp",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.cargo-lock",
+      "public_mode": "cargo-lock",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.cargo-lock",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.cargo-manifest",
+      "public_mode": "cargo-manifest",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.cargo-manifest",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.cel",
+      "public_mode": "cel",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.cel",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.cfml-script",
+      "public_mode": "cfml-script",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.cfml-script",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.cfml-tag",
+      "public_mode": "cfml-tag",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.cfml-tag",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.circom",
+      "public_mode": "circom",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.circom",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.clojure",
+      "public_mode": "clojure",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.clojure",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.cmake",
+      "public_mode": "cmake",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.cmake",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.cobol",
+      "public_mode": "cobol",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.cobol",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.common-lisp",
+      "public_mode": "common-lisp",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.common-lisp",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.config",
+      "public_mode": "config",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.config",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.cpp",
+      "public_mode": "cpp",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.cpp",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.crystal",
+      "public_mode": "crystal",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.crystal",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.csharp",
+      "public_mode": "csharp",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.csharp",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.css",
+      "public_mode": "css",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.css",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.csv",
+      "public_mode": "csv",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.csv",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.cuda",
+      "public_mode": "cuda",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.cuda",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.cue",
+      "public_mode": "cue",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.cue",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.d",
+      "public_mode": "d",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.d",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.dart",
+      "public_mode": "dart",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.dart",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.devicetree",
+      "public_mode": "devicetree",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.devicetree",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.dhall",
+      "public_mode": "dhall",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.dhall",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.diff",
+      "public_mode": "diff",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.diff",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.dockerfile",
+      "public_mode": "dockerfile",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.dockerfile",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.dot",
+      "public_mode": "dot",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.dot",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.dotenv",
+      "public_mode": "dotenv",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.dotenv",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.ejs",
+      "public_mode": "ejs",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.ejs",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.elisp",
+      "public_mode": "elisp",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.elisp",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.elixir",
+      "public_mode": "elixir",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.elixir",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.elm",
+      "public_mode": "elm",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.elm",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.erb",
+      "public_mode": "erb",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.erb",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.erlang",
+      "public_mode": "erlang",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.erlang",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.fennel",
+      "public_mode": "fennel",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.fennel",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.fish",
+      "public_mode": "fish",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.fish",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.form",
+      "public_mode": "form",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.form",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.fortran",
+      "public_mode": "fortran",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.fortran",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.freemarker",
+      "public_mode": "freemarker",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.freemarker",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.fsharp",
+      "public_mode": "fsharp",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.fsharp",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.func",
+      "public_mode": "func",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.func",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.gdscript",
+      "public_mode": "gdscript",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.gdscript",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.gitattributes",
+      "public_mode": "gitattributes",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.gitattributes",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.gitignore",
+      "public_mode": "gitignore",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.gitignore",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.gleam",
+      "public_mode": "gleam",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.gleam",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.glsl",
+      "public_mode": "glsl",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.glsl",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.gn",
+      "public_mode": "gn",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.gn",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.gnuplot",
+      "public_mode": "gnuplot",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.gnuplot",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.go",
+      "public_mode": "go",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.go",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.go-mod",
+      "public_mode": "go-mod",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.go-mod",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.go-template",
+      "public_mode": "go-template",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.go-template",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.graphql",
+      "public_mode": "graphql",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.graphql",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.groovy",
+      "public_mode": "groovy",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.groovy",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.gsp",
+      "public_mode": "gsp",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.gsp",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.h",
+      "public_mode": "h",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.c",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.hack",
+      "public_mode": "hack",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.hack",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.handlebars",
+      "public_mode": "handlebars",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.handlebars",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.hare",
+      "public_mode": "hare",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.hare",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.haskell",
+      "public_mode": "haskell",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.haskell",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.haxe",
+      "public_mode": "haxe",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.haxe",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.hcl",
+      "public_mode": "hcl",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.hcl",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.heex",
+      "public_mode": "heex",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.heex",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.hjson",
+      "public_mode": "hjson",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.hjson",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.hlsl",
+      "public_mode": "hlsl",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.hlsl",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.hpp",
+      "public_mode": "hpp",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.cpp",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.html",
+      "public_mode": "html",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.html",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.http",
+      "public_mode": "http",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.http",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.hyprlang",
+      "public_mode": "hyprlang",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.hyprlang",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.idris",
+      "public_mode": "idris",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.idris",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.ini",
+      "public_mode": "ini",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.ini",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.ispc",
+      "public_mode": "ispc",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.ispc",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.janet",
+      "public_mode": "janet",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.janet",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.java",
+      "public_mode": "java",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.java",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.javascript",
+      "public_mode": "javascript",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.javascript",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.jinja2",
+      "public_mode": "jinja2",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.jinja2",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.jq",
+      "public_mode": "jq",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.jq",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.jsdoc",
+      "public_mode": "jsdoc",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.jsdoc",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.json",
+      "public_mode": "json",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.json",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.json5",
+      "public_mode": "json5",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.json5",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.jsonnet",
+      "public_mode": "jsonnet",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.jsonnet",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.jsp",
+      "public_mode": "jsp",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.jsp",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.jsp-tag",
+      "public_mode": "jsp-tag",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.jsp-tag",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.julia",
+      "public_mode": "julia",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.julia",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.just",
+      "public_mode": "just",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.just",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.kcl",
+      "public_mode": "kcl",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.kcl",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.kconfig",
+      "public_mode": "kconfig",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.kconfig",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.kdl",
+      "public_mode": "kdl",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.kdl",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.kotlin",
+      "public_mode": "kotlin",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.kotlin",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.kubernetes",
+      "public_mode": "kubernetes",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.yaml",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.kustomize",
+      "public_mode": "kustomize",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.yaml",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.latex",
+      "public_mode": "latex",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.latex",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.lean",
+      "public_mode": "lean",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.lean",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.ledger",
+      "public_mode": "ledger",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.ledger",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.linker-script",
+      "public_mode": "linker-script",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.linker-script",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.liquid",
+      "public_mode": "liquid",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.liquid",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.llvm",
+      "public_mode": "llvm",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.llvm",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.lua",
+      "public_mode": "lua",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.lua",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.luau",
+      "public_mode": "luau",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.luau",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.magik",
+      "public_mode": "magik",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.magik",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.magma",
+      "public_mode": "magma",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.magma",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.makefile",
+      "public_mode": "makefile",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.makefile",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.markdown",
+      "public_mode": "markdown",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.markdown",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.matlab",
+      "public_mode": "matlab",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.matlab",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.mermaid",
+      "public_mode": "mermaid",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.mermaid",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.meson",
+      "public_mode": "meson",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.meson",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.mlir",
+      "public_mode": "mlir",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.mlir",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.mojo",
+      "public_mode": "mojo",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.mojo",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.move",
+      "public_mode": "move",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.move",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.mustache",
+      "public_mode": "mustache",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.mustache",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.nasm",
+      "public_mode": "nasm",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.nasm",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.nginx",
+      "public_mode": "nginx",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.nginx",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.nickel",
+      "public_mode": "nickel",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.nickel",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.nim",
+      "public_mode": "nim",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.nim",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.ninja",
+      "public_mode": "ninja",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.ninja",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.nix",
+      "public_mode": "nix",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.nix",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.nushell",
+      "public_mode": "nushell",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.nushell",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.objective-c",
+      "public_mode": "objective-c",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.objective-c",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.ocaml",
+      "public_mode": "ocaml",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.ocaml",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.odin",
+      "public_mode": "odin",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.odin",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.openscad",
+      "public_mode": "openscad",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.openscad",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.org",
+      "public_mode": "org",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.org",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.pascal",
+      "public_mode": "pascal",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.pascal",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.perl",
+      "public_mode": "perl",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.perl",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.php",
+      "public_mode": "php",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.php",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.pine-script",
+      "public_mode": "pine-script",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.pine-script",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.pkl",
+      "public_mode": "pkl",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.pkl",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.po",
+      "public_mode": "po",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.po",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.pony",
+      "public_mode": "pony",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.pony",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.postscript",
+      "public_mode": "postscript",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.postscript",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.powershell",
+      "public_mode": "powershell",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.powershell",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.prisma",
+      "public_mode": "prisma",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.prisma",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.prolog",
+      "public_mode": "prolog",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.prolog",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.promql",
+      "public_mode": "promql",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.promql",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.properties",
+      "public_mode": "properties",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.properties",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.protobuf",
+      "public_mode": "protobuf",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.protobuf",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.prql",
+      "public_mode": "prql",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.prql",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.pug",
+      "public_mode": "pug",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.pug",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.puppet",
+      "public_mode": "puppet",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.puppet",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.purescript",
+      "public_mode": "purescript",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.purescript",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.python",
+      "public_mode": "python",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.python",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.ql",
+      "public_mode": "ql",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.ql",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.qmljs",
+      "public_mode": "qmljs",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.qmljs",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.r",
+      "public_mode": "r",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.r",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.racket",
+      "public_mode": "racket",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.racket",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.regex",
+      "public_mode": "regex",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.regex",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.rego",
+      "public_mode": "rego",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.rego",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.requirements",
+      "public_mode": "requirements",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.requirements",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.rescript",
+      "public_mode": "rescript",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.rescript",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.ron",
+      "public_mode": "ron",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.ron",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.rst",
+      "public_mode": "rst",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.rst",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.ruby",
+      "public_mode": "ruby",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.ruby",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.rust",
+      "public_mode": "rust",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.rust",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.rust-build-script",
+      "public_mode": "rust-build-script",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.rust",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.scala",
+      "public_mode": "scala",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.scala",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.scheme",
+      "public_mode": "scheme",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.scheme",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.scss",
+      "public_mode": "scss",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.scss",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.shell",
+      "public_mode": "shell",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.shell",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.slang",
+      "public_mode": "slang",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.slang",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.smali",
+      "public_mode": "smali",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.smali",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.smithy",
+      "public_mode": "smithy",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.smithy",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.solidity",
+      "public_mode": "solidity",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.solidity",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.soql",
+      "public_mode": "soql",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.soql",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.sosl",
+      "public_mode": "sosl",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.sosl",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.sparql",
+      "public_mode": "sparql",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.sparql",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.sql",
+      "public_mode": "sql",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.sql",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.squirrel",
+      "public_mode": "squirrel",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.squirrel",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.ssh-config",
+      "public_mode": "ssh-config",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.ssh-config",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.starlark",
+      "public_mode": "starlark",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.starlark",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.svelte",
+      "public_mode": "svelte",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.svelte",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.sway",
+      "public_mode": "sway",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.sway",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.swift",
+      "public_mode": "swift",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.swift",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.systemverilog",
+      "public_mode": "systemverilog",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.systemverilog",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.tablegen",
+      "public_mode": "tablegen",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.tablegen",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.tcl",
+      "public_mode": "tcl",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.tcl",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.teal",
+      "public_mode": "teal",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.teal",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.templ",
+      "public_mode": "templ",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.templ",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.text",
+      "public_mode": "text",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.text",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.thrift",
+      "public_mode": "thrift",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.thrift",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.tlaplus",
+      "public_mode": "tlaplus",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.tlaplus",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.toml",
+      "public_mode": "toml",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.toml",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.toon",
+      "public_mode": "toon",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.toon",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.tsx",
+      "public_mode": "tsx",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.tsx",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.typescript",
+      "public_mode": "typescript",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.typescript",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.typst",
+      "public_mode": "typst",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.typst",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.verilog",
+      "public_mode": "verilog",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.verilog",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.vhdl",
+      "public_mode": "vhdl",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.vhdl",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.vim",
+      "public_mode": "vim",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.vim",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.vue",
+      "public_mode": "vue",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.vue",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.wgsl",
+      "public_mode": "wgsl",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.wgsl",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.wit",
+      "public_mode": "wit",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.wit",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.wolfram",
+      "public_mode": "wolfram",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.wolfram",
+      "pack_id": "broad-language-pack"
+    },
+    {
+      "mode_id": "mode.xml",
+      "public_mode": "xml",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.xml",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.yaml",
+      "public_mode": "yaml",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.yaml",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.zig",
+      "public_mode": "zig",
+      "origin": "v0.3.26-public-mode",
+      "parser_id": "parse.zig",
+      "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.zsh",
+      "public_mode": "zsh",
+      "origin": "accepted-language-set",
+      "parser_id": "parse.zsh",
+      "pack_id": "broad-language-pack"
+    }
+  ],
+  "parser_defaults": {
+    "kind": "tree-sitter-or-vetted-parser",
+    "grammar_symbol": null,
+    "tree_sitter_abi": null,
+    "asset_id_template": "asset.{parser_suffix}",
+    "query_pack_id_template": "queries.{parser_suffix}",
+    "evidence_state": "pending-asset-fixture-and-platform-verification",
+    "advertised": false,
+    "owner_source": "pack.language_owner",
+    "required_platforms_source": "registry.required_platforms",
+    "allowed_override_fields": [
+      "kind",
+      "grammar_symbol",
+      "tree_sitter_abi",
+      "asset_id",
+      "query_pack_id",
+      "evidence_state",
+      "advertised",
+      "owner",
+      "required_platforms"
+    ]
+  },
+  "parsers": [
+    {
+      "parser_id": "parse.ada",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "ada"
+      ]
+    },
+    {
+      "parser_id": "parse.agda",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "agda"
+      ]
+    },
+    {
+      "parser_id": "parse.apex",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "apex"
+      ]
+    },
+    {
+      "parser_id": "parse.arduino",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "arduino"
+      ]
+    },
+    {
+      "parser_id": "parse.asciidoc",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "asciidoc"
+      ]
+    },
+    {
+      "parser_id": "parse.asm",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "asm"
+      ]
+    },
+    {
+      "parser_id": "parse.astro",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "astro"
+      ]
+    },
+    {
+      "parser_id": "parse.awk",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "awk"
+      ]
+    },
+    {
+      "parser_id": "parse.bash",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "bash"
+      ]
+    },
+    {
+      "parser_id": "parse.batch",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "batch"
+      ]
+    },
+    {
+      "parser_id": "parse.beancount",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "beancount"
+      ]
+    },
+    {
+      "parser_id": "parse.bibtex",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "bibtex"
+      ]
+    },
+    {
+      "parser_id": "parse.bicep",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "bicep"
+      ]
+    },
+    {
+      "parser_id": "parse.bitbake",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "bitbake"
+      ]
+    },
+    {
+      "parser_id": "parse.blade",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "blade"
+      ]
+    },
+    {
+      "parser_id": "parse.c",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "c",
+        "h"
+      ]
+    },
+    {
+      "parser_id": "parse.c3",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "c3"
+      ]
+    },
+    {
+      "parser_id": "parse.cairo",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "cairo"
+      ]
+    },
+    {
+      "parser_id": "parse.capnp",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "capnp"
+      ]
+    },
+    {
+      "parser_id": "parse.cargo-lock",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "cargo-lock"
+      ],
+      "overrides": {
+        "kind": "builtin-manifest"
+      }
+    },
+    {
+      "parser_id": "parse.cargo-manifest",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "cargo-manifest"
+      ],
+      "overrides": {
+        "kind": "builtin-manifest"
+      }
+    },
+    {
+      "parser_id": "parse.cel",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "cel"
+      ]
+    },
+    {
+      "parser_id": "parse.cfml-script",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "cfml-script"
+      ]
+    },
+    {
+      "parser_id": "parse.cfml-tag",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "cfml-tag"
+      ]
+    },
+    {
+      "parser_id": "parse.circom",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "circom"
+      ]
+    },
+    {
+      "parser_id": "parse.clojure",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "clojure"
+      ]
+    },
+    {
+      "parser_id": "parse.cmake",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "cmake"
+      ]
+    },
+    {
+      "parser_id": "parse.cobol",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "cobol"
+      ]
+    },
+    {
+      "parser_id": "parse.common-lisp",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "common-lisp"
+      ]
+    },
+    {
+      "parser_id": "parse.config",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "config"
+      ]
+    },
+    {
+      "parser_id": "parse.cpp",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "cpp",
+        "hpp"
+      ]
+    },
+    {
+      "parser_id": "parse.crystal",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "crystal"
+      ]
+    },
+    {
+      "parser_id": "parse.csharp",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "csharp"
+      ]
+    },
+    {
+      "parser_id": "parse.css",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "css"
+      ]
+    },
+    {
+      "parser_id": "parse.csv",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "csv"
+      ]
+    },
+    {
+      "parser_id": "parse.cuda",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "cuda"
+      ]
+    },
+    {
+      "parser_id": "parse.cue",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "cue"
+      ]
+    },
+    {
+      "parser_id": "parse.d",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "d"
+      ]
+    },
+    {
+      "parser_id": "parse.dart",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "dart"
+      ]
+    },
+    {
+      "parser_id": "parse.devicetree",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "devicetree"
+      ]
+    },
+    {
+      "parser_id": "parse.dhall",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "dhall"
+      ]
+    },
+    {
+      "parser_id": "parse.diff",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "diff"
+      ]
+    },
+    {
+      "parser_id": "parse.dockerfile",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "dockerfile"
+      ]
+    },
+    {
+      "parser_id": "parse.dot",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "dot"
+      ]
+    },
+    {
+      "parser_id": "parse.dotenv",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "dotenv"
+      ]
+    },
+    {
+      "parser_id": "parse.ejs",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "ejs"
+      ]
+    },
+    {
+      "parser_id": "parse.elisp",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "elisp"
+      ]
+    },
+    {
+      "parser_id": "parse.elixir",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "elixir"
+      ]
+    },
+    {
+      "parser_id": "parse.elm",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "elm"
+      ]
+    },
+    {
+      "parser_id": "parse.erb",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "erb"
+      ]
+    },
+    {
+      "parser_id": "parse.erlang",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "erlang"
+      ]
+    },
+    {
+      "parser_id": "parse.fennel",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "fennel"
+      ]
+    },
+    {
+      "parser_id": "parse.fish",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "fish"
+      ]
+    },
+    {
+      "parser_id": "parse.form",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "form"
+      ]
+    },
+    {
+      "parser_id": "parse.fortran",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "fortran"
+      ]
+    },
+    {
+      "parser_id": "parse.freemarker",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "freemarker"
+      ]
+    },
+    {
+      "parser_id": "parse.fsharp",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "fsharp"
+      ]
+    },
+    {
+      "parser_id": "parse.func",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "func"
+      ]
+    },
+    {
+      "parser_id": "parse.gdscript",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "gdscript"
+      ]
+    },
+    {
+      "parser_id": "parse.gitattributes",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "gitattributes"
+      ]
+    },
+    {
+      "parser_id": "parse.gitignore",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "gitignore"
+      ]
+    },
+    {
+      "parser_id": "parse.gleam",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "gleam"
+      ]
+    },
+    {
+      "parser_id": "parse.glsl",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "glsl"
+      ]
+    },
+    {
+      "parser_id": "parse.gn",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "gn"
+      ]
+    },
+    {
+      "parser_id": "parse.gnuplot",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "gnuplot"
+      ]
+    },
+    {
+      "parser_id": "parse.go",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "go"
+      ]
+    },
+    {
+      "parser_id": "parse.go-mod",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "go-mod"
+      ]
+    },
+    {
+      "parser_id": "parse.go-template",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "go-template"
+      ]
+    },
+    {
+      "parser_id": "parse.graphql",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "graphql"
+      ]
+    },
+    {
+      "parser_id": "parse.groovy",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "groovy"
+      ]
+    },
+    {
+      "parser_id": "parse.gsp",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "gsp"
+      ]
+    },
+    {
+      "parser_id": "parse.hack",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "hack"
+      ]
+    },
+    {
+      "parser_id": "parse.handlebars",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "handlebars"
+      ]
+    },
+    {
+      "parser_id": "parse.hare",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "hare"
+      ]
+    },
+    {
+      "parser_id": "parse.haskell",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "haskell"
+      ]
+    },
+    {
+      "parser_id": "parse.haxe",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "haxe"
+      ]
+    },
+    {
+      "parser_id": "parse.hcl",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "hcl"
+      ]
+    },
+    {
+      "parser_id": "parse.heex",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "heex"
+      ]
+    },
+    {
+      "parser_id": "parse.hjson",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "hjson"
+      ]
+    },
+    {
+      "parser_id": "parse.hlsl",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "hlsl"
+      ]
+    },
+    {
+      "parser_id": "parse.html",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "html"
+      ]
+    },
+    {
+      "parser_id": "parse.http",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "http"
+      ]
+    },
+    {
+      "parser_id": "parse.hyprlang",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "hyprlang"
+      ]
+    },
+    {
+      "parser_id": "parse.idris",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "idris"
+      ]
+    },
+    {
+      "parser_id": "parse.ini",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "ini"
+      ]
+    },
+    {
+      "parser_id": "parse.ispc",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "ispc"
+      ]
+    },
+    {
+      "parser_id": "parse.janet",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "janet"
+      ]
+    },
+    {
+      "parser_id": "parse.java",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "java"
+      ]
+    },
+    {
+      "parser_id": "parse.javascript",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "javascript"
+      ]
+    },
+    {
+      "parser_id": "parse.jinja2",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "jinja2"
+      ]
+    },
+    {
+      "parser_id": "parse.jq",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "jq"
+      ]
+    },
+    {
+      "parser_id": "parse.jsdoc",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "jsdoc"
+      ]
+    },
+    {
+      "parser_id": "parse.json",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "json"
+      ]
+    },
+    {
+      "parser_id": "parse.json5",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "json5"
+      ]
+    },
+    {
+      "parser_id": "parse.jsonnet",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "jsonnet"
+      ]
+    },
+    {
+      "parser_id": "parse.jsp",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "jsp"
+      ]
+    },
+    {
+      "parser_id": "parse.jsp-tag",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "jsp-tag"
+      ]
+    },
+    {
+      "parser_id": "parse.julia",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "julia"
+      ]
+    },
+    {
+      "parser_id": "parse.just",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "just"
+      ]
+    },
+    {
+      "parser_id": "parse.kcl",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "kcl"
+      ]
+    },
+    {
+      "parser_id": "parse.kconfig",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "kconfig"
+      ]
+    },
+    {
+      "parser_id": "parse.kdl",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "kdl"
+      ]
+    },
+    {
+      "parser_id": "parse.kotlin",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "kotlin"
+      ]
+    },
+    {
+      "parser_id": "parse.latex",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "latex"
+      ]
+    },
+    {
+      "parser_id": "parse.lean",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "lean"
+      ]
+    },
+    {
+      "parser_id": "parse.ledger",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "ledger"
+      ]
+    },
+    {
+      "parser_id": "parse.linker-script",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "linker-script"
+      ]
+    },
+    {
+      "parser_id": "parse.liquid",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "liquid"
+      ]
+    },
+    {
+      "parser_id": "parse.llvm",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "llvm"
+      ]
+    },
+    {
+      "parser_id": "parse.lua",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "lua"
+      ]
+    },
+    {
+      "parser_id": "parse.luau",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "luau"
+      ]
+    },
+    {
+      "parser_id": "parse.magik",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "magik"
+      ]
+    },
+    {
+      "parser_id": "parse.magma",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "magma"
+      ]
+    },
+    {
+      "parser_id": "parse.makefile",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "makefile"
+      ]
+    },
+    {
+      "parser_id": "parse.markdown",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "markdown"
+      ]
+    },
+    {
+      "parser_id": "parse.matlab",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "matlab"
+      ]
+    },
+    {
+      "parser_id": "parse.mermaid",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "mermaid"
+      ]
+    },
+    {
+      "parser_id": "parse.meson",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "meson"
+      ]
+    },
+    {
+      "parser_id": "parse.mlir",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "mlir"
+      ]
+    },
+    {
+      "parser_id": "parse.mojo",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "mojo"
+      ]
+    },
+    {
+      "parser_id": "parse.move",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "move"
+      ]
+    },
+    {
+      "parser_id": "parse.mustache",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "mustache"
+      ]
+    },
+    {
+      "parser_id": "parse.nasm",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "nasm"
+      ]
+    },
+    {
+      "parser_id": "parse.nginx",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "nginx"
+      ]
+    },
+    {
+      "parser_id": "parse.nickel",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "nickel"
+      ]
+    },
+    {
+      "parser_id": "parse.nim",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "nim"
+      ]
+    },
+    {
+      "parser_id": "parse.ninja",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "ninja"
+      ]
+    },
+    {
+      "parser_id": "parse.nix",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "nix"
+      ]
+    },
+    {
+      "parser_id": "parse.nushell",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "nushell"
+      ]
+    },
+    {
+      "parser_id": "parse.objective-c",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "objective-c"
+      ]
+    },
+    {
+      "parser_id": "parse.ocaml",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "ocaml"
+      ]
+    },
+    {
+      "parser_id": "parse.odin",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "odin"
+      ]
+    },
+    {
+      "parser_id": "parse.openscad",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "openscad"
+      ]
+    },
+    {
+      "parser_id": "parse.org",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "org"
+      ]
+    },
+    {
+      "parser_id": "parse.pascal",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "pascal"
+      ]
+    },
+    {
+      "parser_id": "parse.perl",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "perl"
+      ]
+    },
+    {
+      "parser_id": "parse.php",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "php"
+      ]
+    },
+    {
+      "parser_id": "parse.pine-script",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "pine-script"
+      ]
+    },
+    {
+      "parser_id": "parse.pkl",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "pkl"
+      ]
+    },
+    {
+      "parser_id": "parse.po",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "po"
+      ]
+    },
+    {
+      "parser_id": "parse.pony",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "pony"
+      ]
+    },
+    {
+      "parser_id": "parse.postscript",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "postscript"
+      ]
+    },
+    {
+      "parser_id": "parse.powershell",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "powershell"
+      ]
+    },
+    {
+      "parser_id": "parse.prisma",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "prisma"
+      ]
+    },
+    {
+      "parser_id": "parse.prolog",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "prolog"
+      ]
+    },
+    {
+      "parser_id": "parse.promql",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "promql"
+      ]
+    },
+    {
+      "parser_id": "parse.properties",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "properties"
+      ]
+    },
+    {
+      "parser_id": "parse.protobuf",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "protobuf"
+      ]
+    },
+    {
+      "parser_id": "parse.prql",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "prql"
+      ]
+    },
+    {
+      "parser_id": "parse.pug",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "pug"
+      ]
+    },
+    {
+      "parser_id": "parse.puppet",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "puppet"
+      ]
+    },
+    {
+      "parser_id": "parse.purescript",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "purescript"
+      ]
+    },
+    {
+      "parser_id": "parse.python",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "python"
+      ]
+    },
+    {
+      "parser_id": "parse.ql",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "ql"
+      ]
+    },
+    {
+      "parser_id": "parse.qmljs",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "qmljs"
+      ]
+    },
+    {
+      "parser_id": "parse.r",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "r"
+      ]
+    },
+    {
+      "parser_id": "parse.racket",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "racket"
+      ]
+    },
+    {
+      "parser_id": "parse.regex",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "regex"
+      ]
+    },
+    {
+      "parser_id": "parse.rego",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "rego"
+      ]
+    },
+    {
+      "parser_id": "parse.requirements",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "requirements"
+      ]
+    },
+    {
+      "parser_id": "parse.rescript",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "rescript"
+      ]
+    },
+    {
+      "parser_id": "parse.ron",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "ron"
+      ]
+    },
+    {
+      "parser_id": "parse.rst",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "rst"
+      ]
+    },
+    {
+      "parser_id": "parse.ruby",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "ruby"
+      ]
+    },
+    {
+      "parser_id": "parse.rust",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "rust",
+        "rust-build-script"
+      ]
+    },
+    {
+      "parser_id": "parse.scala",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "scala"
+      ]
+    },
+    {
+      "parser_id": "parse.scheme",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "scheme"
+      ]
+    },
+    {
+      "parser_id": "parse.scss",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "scss"
+      ]
+    },
+    {
+      "parser_id": "parse.shell",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "shell"
+      ]
+    },
+    {
+      "parser_id": "parse.slang",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "slang"
+      ]
+    },
+    {
+      "parser_id": "parse.smali",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "smali"
+      ]
+    },
+    {
+      "parser_id": "parse.smithy",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "smithy"
+      ]
+    },
+    {
+      "parser_id": "parse.solidity",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "solidity"
+      ]
+    },
+    {
+      "parser_id": "parse.soql",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "soql"
+      ]
+    },
+    {
+      "parser_id": "parse.sosl",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "sosl"
+      ]
+    },
+    {
+      "parser_id": "parse.sparql",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "sparql"
+      ]
+    },
+    {
+      "parser_id": "parse.sql",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "sql"
+      ]
+    },
+    {
+      "parser_id": "parse.squirrel",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "squirrel"
+      ]
+    },
+    {
+      "parser_id": "parse.ssh-config",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "ssh-config"
+      ]
+    },
+    {
+      "parser_id": "parse.starlark",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "starlark"
+      ]
+    },
+    {
+      "parser_id": "parse.svelte",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "svelte"
+      ]
+    },
+    {
+      "parser_id": "parse.sway",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "sway"
+      ]
+    },
+    {
+      "parser_id": "parse.swift",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "swift"
+      ]
+    },
+    {
+      "parser_id": "parse.systemverilog",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "systemverilog"
+      ]
+    },
+    {
+      "parser_id": "parse.tablegen",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "tablegen"
+      ]
+    },
+    {
+      "parser_id": "parse.tcl",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "tcl"
+      ]
+    },
+    {
+      "parser_id": "parse.teal",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "teal"
+      ]
+    },
+    {
+      "parser_id": "parse.templ",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "templ"
+      ]
+    },
+    {
+      "parser_id": "parse.text",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "text"
+      ]
+    },
+    {
+      "parser_id": "parse.thrift",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "thrift"
+      ]
+    },
+    {
+      "parser_id": "parse.tlaplus",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "tlaplus"
+      ]
+    },
+    {
+      "parser_id": "parse.toml",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "toml"
+      ]
+    },
+    {
+      "parser_id": "parse.toon",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "toon"
+      ]
+    },
+    {
+      "parser_id": "parse.tsx",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "tsx"
+      ]
+    },
+    {
+      "parser_id": "parse.typescript",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "typescript"
+      ]
+    },
+    {
+      "parser_id": "parse.typst",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "typst"
+      ]
+    },
+    {
+      "parser_id": "parse.verilog",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "verilog"
+      ]
+    },
+    {
+      "parser_id": "parse.vhdl",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "vhdl"
+      ]
+    },
+    {
+      "parser_id": "parse.vim",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "vim"
+      ]
+    },
+    {
+      "parser_id": "parse.vue",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "vue"
+      ]
+    },
+    {
+      "parser_id": "parse.wgsl",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "wgsl"
+      ]
+    },
+    {
+      "parser_id": "parse.wit",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "wit"
+      ]
+    },
+    {
+      "parser_id": "parse.wolfram",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "wolfram"
+      ]
+    },
+    {
+      "parser_id": "parse.xml",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "xml"
+      ]
+    },
+    {
+      "parser_id": "parse.yaml",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "kubernetes",
+        "kustomize",
+        "yaml"
+      ]
+    },
+    {
+      "parser_id": "parse.zig",
+      "pack_id": "default-core",
+      "normalized_modes": [
+        "zig"
+      ]
+    },
+    {
+      "parser_id": "parse.zsh",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "zsh"
+      ]
+    }
+  ],
+  "capabilities": [
+    {
+      "capability_id": "agent.automatic-graph-enrichment",
+      "family": "agent-workflow",
+      "owner": "projectatlas-service",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_overview",
+        "atlas_folders",
+        "atlas_files",
+        "atlas_file_summary",
+        "atlas_search",
+        "atlas_symbols",
+        "atlas_symbol_relations",
+        "atlas_settings"
+      ],
+      "fixture_ids": [
+        "agent.automatic"
+      ],
+      "acceptance_rule": "existing calls gain bounded graph ranking/digests with zero required new calls",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "agent.graph-capabilities",
+      "family": "agent-workflow",
+      "owner": "projectatlas-service",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_settings"
+      ],
+      "fixture_ids": [
+        "agent.settings"
+      ],
+      "acceptance_rule": "live schema, coverage, achieved capability digest, and pack states come from one typed source",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "analysis.architecture",
+      "family": "analysis",
+      "owner": "projectatlas-service",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_architecture"
+      ],
+      "fixture_ids": [
+        "analysis.architecture"
+      ],
+      "acceptance_rule": "bounded architecture summary is evidence-bearing and deterministic",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "analysis.dead-code-candidate",
+      "family": "analysis",
+      "owner": "projectatlas-service",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "analysis.dead-code"
+      ],
+      "acceptance_rule": "candidate output is conservative, evidence-bearing, and never advertised as a safety proof",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "analysis.dependency",
+      "family": "analysis",
+      "owner": "projectatlas-service",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_file_summary",
+        "atlas_symbol_relations"
+      ],
+      "fixture_ids": [
+        "analysis.dependency"
+      ],
+      "acceptance_rule": "automatic dependency ranking improves labeled agent tasks without extra required calls",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "analysis.impact",
+      "family": "analysis",
+      "owner": "projectatlas-service",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_impact"
+      ],
+      "fixture_ids": [
+        "analysis.impact"
+      ],
+      "acceptance_rule": "bounded inbound/outbound impact fixtures meet accuracy and cursor rules",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "analysis.trace",
+      "family": "analysis",
+      "owner": "projectatlas-service",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_trace"
+      ],
+      "fixture_ids": [
+        "analysis.trace"
+      ],
+      "acceptance_rule": "node-simple paths obey depth, visit, output, cancellation, and cursor bounds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "enrichment.config-environment",
+      "family": "enrichment",
+      "owner": "projectatlas-symbols",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_overview",
+        "atlas_folders",
+        "atlas_files",
+        "atlas_file_summary",
+        "atlas_search",
+        "atlas_symbols",
+        "atlas_symbol_relations",
+        "atlas_settings"
+      ],
+      "fixture_ids": [
+        "enrichment.config"
+      ],
+      "acceptance_rule": "typed config/environment evidence passes without retaining secret literals",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "enrichment.history-coupling",
+      "family": "enrichment",
+      "owner": "projectatlas-service",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_overview",
+        "atlas_folders",
+        "atlas_files",
+        "atlas_file_summary",
+        "atlas_search",
+        "atlas_symbols",
+        "atlas_symbol_relations",
+        "atlas_settings"
+      ],
+      "fixture_ids": [
+        "enrichment.history"
+      ],
+      "acceptance_rule": "inferred history evidence is labeled and meets labeled-corpus thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "enrichment.infrastructure",
+      "family": "enrichment",
+      "owner": "projectatlas-symbols",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_overview",
+        "atlas_folders",
+        "atlas_files",
+        "atlas_file_summary",
+        "atlas_search",
+        "atlas_symbols",
+        "atlas_symbol_relations",
+        "atlas_settings"
+      ],
+      "fixture_ids": [
+        "enrichment.infrastructure"
+      ],
+      "acceptance_rule": "IaC and deployment fixtures meet family thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "enrichment.package-manifest",
+      "family": "enrichment",
+      "owner": "projectatlas-symbols",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_overview",
+        "atlas_folders",
+        "atlas_files",
+        "atlas_file_summary",
+        "atlas_search",
+        "atlas_symbols",
+        "atlas_symbol_relations",
+        "atlas_settings"
+      ],
+      "fixture_ids": [
+        "enrichment.package"
+      ],
+      "acceptance_rule": "canonical manifest parser fixtures pass",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "enrichment.route-service",
+      "family": "enrichment",
+      "owner": "projectatlas-symbols",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_overview",
+        "atlas_folders",
+        "atlas_files",
+        "atlas_file_summary",
+        "atlas_search",
+        "atlas_symbols",
+        "atlas_symbol_relations",
+        "atlas_settings"
+      ],
+      "fixture_ids": [
+        "enrichment.route"
+      ],
+      "acceptance_rule": "per-protocol positive, negative, ambiguous, and secret-redaction fixtures pass",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "enrichment.similarity",
+      "family": "enrichment",
+      "owner": "projectatlas-service",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_overview",
+        "atlas_folders",
+        "atlas_files",
+        "atlas_file_summary",
+        "atlas_search",
+        "atlas_symbols",
+        "atlas_symbol_relations",
+        "atlas_settings"
+      ],
+      "fixture_ids": [
+        "enrichment.similarity"
+      ],
+      "acceptance_rule": "candidate recall and exact-similarity precision thresholds pass",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "enrichment.test-production",
+      "family": "enrichment",
+      "owner": "projectatlas-symbols",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_overview",
+        "atlas_folders",
+        "atlas_files",
+        "atlas_file_summary",
+        "atlas_search",
+        "atlas_symbols",
+        "atlas_symbol_relations",
+        "atlas_settings"
+      ],
+      "fixture_ids": [
+        "enrichment.test"
+      ],
+      "acceptance_rule": "test-to-production precision and abstention thresholds pass",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "entity.channel",
+      "family": "entity",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_file_summary",
+        "atlas_symbol_relations"
+      ],
+      "fixture_ids": [
+        "graph.entity.channel"
+      ],
+      "acceptance_rule": "typed channel identity round-trips with stable key and source evidence",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "entity.configuration",
+      "family": "entity",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_file_summary",
+        "atlas_symbol_relations"
+      ],
+      "fixture_ids": [
+        "graph.entity.configuration"
+      ],
+      "acceptance_rule": "typed configuration identity round-trips with stable key and source evidence",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "entity.declaration",
+      "family": "entity",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_file_summary",
+        "atlas_symbol_relations"
+      ],
+      "fixture_ids": [
+        "graph.entity.declaration"
+      ],
+      "acceptance_rule": "typed declaration identity round-trips with stable key and source evidence",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "entity.endpoint",
+      "family": "entity",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_file_summary",
+        "atlas_symbol_relations"
+      ],
+      "fixture_ids": [
+        "graph.entity.endpoint"
+      ],
+      "acceptance_rule": "typed endpoint identity round-trips with stable key and source evidence",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "entity.environment",
+      "family": "entity",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_file_summary",
+        "atlas_symbol_relations"
+      ],
+      "fixture_ids": [
+        "graph.entity.environment"
+      ],
+      "acceptance_rule": "typed environment identity round-trips with stable key and source evidence",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "entity.external",
+      "family": "entity",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_file_summary",
+        "atlas_symbol_relations"
+      ],
+      "fixture_ids": [
+        "graph.entity.external"
+      ],
+      "acceptance_rule": "typed external identity round-trips with stable key and source evidence",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "entity.file",
+      "family": "entity",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_file_summary",
+        "atlas_symbol_relations"
+      ],
+      "fixture_ids": [
+        "graph.entity.file"
+      ],
+      "acceptance_rule": "typed file identity round-trips with stable key and source evidence",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "entity.folder",
+      "family": "entity",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_file_summary",
+        "atlas_symbol_relations"
+      ],
+      "fixture_ids": [
+        "graph.entity.folder"
+      ],
+      "acceptance_rule": "typed folder identity round-trips with stable key and source evidence",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "entity.infrastructure",
+      "family": "entity",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_file_summary",
+        "atlas_symbol_relations"
+      ],
+      "fixture_ids": [
+        "graph.entity.infrastructure"
+      ],
+      "acceptance_rule": "typed infrastructure identity round-trips with stable key and source evidence",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "entity.module",
+      "family": "entity",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_file_summary",
+        "atlas_symbol_relations"
+      ],
+      "fixture_ids": [
+        "graph.entity.module"
+      ],
+      "acceptance_rule": "typed module identity round-trips with stable key and source evidence",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "entity.package",
+      "family": "entity",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_file_summary",
+        "atlas_symbol_relations"
+      ],
+      "fixture_ids": [
+        "graph.entity.package"
+      ],
+      "acceptance_rule": "typed package identity round-trips with stable key and source evidence",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "entity.reference",
+      "family": "entity",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_file_summary",
+        "atlas_symbol_relations"
+      ],
+      "fixture_ids": [
+        "graph.entity.reference"
+      ],
+      "acceptance_rule": "typed reference identity round-trips with stable key and source evidence",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "entity.repository",
+      "family": "entity",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_file_summary",
+        "atlas_symbol_relations"
+      ],
+      "fixture_ids": [
+        "graph.entity.repository"
+      ],
+      "acceptance_rule": "typed repository identity round-trips with stable key and source evidence",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "entity.route",
+      "family": "entity",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_file_summary",
+        "atlas_symbol_relations"
+      ],
+      "fixture_ids": [
+        "graph.entity.route"
+      ],
+      "acceptance_rule": "typed route identity round-trips with stable key and source evidence",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "entity.test",
+      "family": "entity",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_file_summary",
+        "atlas_symbol_relations"
+      ],
+      "fixture_ids": [
+        "graph.entity.test"
+      ],
+      "acceptance_rule": "typed test identity round-trips with stable key and source evidence",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "federation.cross-repository-resolution",
+      "family": "federation",
+      "owner": "projectatlas-service",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations"
+      ],
+      "fixture_ids": [
+        "federation.resolve"
+      ],
+      "acceptance_rule": "per-protocol cross-root precision/recall and isolation thresholds pass",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "federation.explicit-root-query",
+      "family": "federation",
+      "owner": "projectatlas-service",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_search",
+        "atlas_impact",
+        "atlas_trace"
+      ],
+      "fixture_ids": [
+        "federation.root"
+      ],
+      "acceptance_rule": "every request supplies ordered roots and all roots validate read-only",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "incremental.coverage",
+      "family": "incremental",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_settings",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "incremental.coverage"
+      ],
+      "acceptance_rule": "caps and failures produce exact partial/truncated coverage",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "incremental.full-equivalence",
+      "family": "incremental",
+      "owner": "projectatlas-db",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_overview",
+        "atlas_folders",
+        "atlas_files",
+        "atlas_file_summary",
+        "atlas_search",
+        "atlas_symbols",
+        "atlas_symbol_relations",
+        "atlas_settings"
+      ],
+      "fixture_ids": [
+        "incremental.equivalence"
+      ],
+      "acceptance_rule": "canonical full and incremental graph snapshots are byte-identical",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "incremental.two-slot-publication",
+      "family": "incremental",
+      "owner": "projectatlas-db",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_settings"
+      ],
+      "fixture_ids": [
+        "incremental.slot"
+      ],
+      "acceptance_rule": "failure injection proves atomic active-slot/epoch publication",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "pack.broad-language",
+      "family": "pack",
+      "owner": "projectatlas-cli",
+      "pack_id": "broad-language-pack",
+      "public_surfaces": [
+        "atlas_settings"
+      ],
+      "fixture_ids": [
+        "pack.language"
+      ],
+      "acceptance_rule": "install, verify, offline parse, containment, update, rollback, remove, and default-core absence pass",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "pack.semantic",
+      "family": "pack",
+      "owner": "projectatlas-cli",
+      "pack_id": "semantic-pack",
+      "public_surfaces": [
+        "atlas_settings",
+        "atlas_search"
+      ],
+      "fixture_ids": [
+        "pack.semantic"
+      ],
+      "acceptance_rule": "typed lifecycle, labeled value, resource, privacy, rollback, and removal gates pass",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.calls",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.calls"
+      ],
+      "acceptance_rule": "calls reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.channel",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.channel"
+      ],
+      "acceptance_rule": "channel reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.co-changes",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.co-changes"
+      ],
+      "acceptance_rule": "co-changes reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.configures",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.configures"
+      ],
+      "acceptance_rule": "configures reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.contains",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.contains"
+      ],
+      "acceptance_rule": "contains reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.cross-repository",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.cross-repository"
+      ],
+      "acceptance_rule": "cross-repository reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.declares",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.declares"
+      ],
+      "acceptance_rule": "declares reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.depends",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.depends"
+      ],
+      "acceptance_rule": "depends reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.deploys",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.deploys"
+      ],
+      "acceptance_rule": "deploys reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.exports",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.exports"
+      ],
+      "acceptance_rule": "exports reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.generates",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.generates"
+      ],
+      "acceptance_rule": "generates reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.implements",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.implements"
+      ],
+      "acceptance_rule": "implements reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.imports",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.imports"
+      ],
+      "acceptance_rule": "imports reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.inherits",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.inherits"
+      ],
+      "acceptance_rule": "inherits reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.overrides",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.overrides"
+      ],
+      "acceptance_rule": "overrides reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.reads",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.reads"
+      ],
+      "acceptance_rule": "reads reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.references",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.references"
+      ],
+      "acceptance_rule": "references reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.routes",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.routes"
+      ],
+      "acceptance_rule": "routes reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.rpc",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.rpc"
+      ],
+      "acceptance_rule": "rpc reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.similar",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.similar"
+      ],
+      "acceptance_rule": "similar reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.tests",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.tests"
+      ],
+      "acceptance_rule": "tests reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "relation.writes",
+      "family": "relation",
+      "owner": "projectatlas-core",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_symbol_relations",
+        "atlas_file_summary"
+      ],
+      "fixture_ids": [
+        "graph.relation.writes"
+      ],
+      "acceptance_rule": "writes reaches its per-family precision, recall, coverage, evidence, and incremental invalidation thresholds",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "search.fts-candidate",
+      "family": "search",
+      "owner": "projectatlas-db",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_search",
+        "atlas_settings"
+      ],
+      "fixture_ids": [
+        "search.fts"
+      ],
+      "acceptance_rule": "FTS candidate mode is exact-verified and never loses authoritative lexical matches",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "search.fuzzy",
+      "family": "search",
+      "owner": "projectatlas-service",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_search"
+      ],
+      "fixture_ids": [
+        "search.fuzzy"
+      ],
+      "acceptance_rule": "deterministic fuzzy ordering and frozen compatibility pass",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "search.hybrid-semantic",
+      "family": "search",
+      "owner": "projectatlas-service",
+      "pack_id": "semantic-pack",
+      "public_surfaces": [
+        "atlas_search",
+        "atlas_settings"
+      ],
+      "fixture_ids": [
+        "search.hybrid"
+      ],
+      "acceptance_rule": "labeled IR quality and lexical completeness pass",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "search.literal",
+      "family": "search",
+      "owner": "projectatlas-service",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_search"
+      ],
+      "fixture_ids": [
+        "search.literal"
+      ],
+      "acceptance_rule": "complete literal results equal the frozen baseline",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "search.regex",
+      "family": "search",
+      "owner": "projectatlas-service",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_search"
+      ],
+      "fixture_ids": [
+        "search.regex"
+      ],
+      "acceptance_rule": "bounded regex results equal the frozen baseline",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "snapshot.export",
+      "family": "snapshot",
+      "owner": "projectatlas-db",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "projectatlas snapshot export"
+      ],
+      "fixture_ids": [
+        "snapshot.export"
+      ],
+      "acceptance_rule": "online backup snapshot digest and metadata reconcile",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "snapshot.import",
+      "family": "snapshot",
+      "owner": "projectatlas-db",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "projectatlas snapshot import"
+      ],
+      "fixture_ids": [
+        "snapshot.import"
+      ],
+      "acceptance_rule": "temporary-path validation rejects corrupt, stale, oversized, traversal, and wrong-root input",
+      "evidence_state": "pending",
+      "advertised": false
+    },
+    {
+      "capability_id": "snapshot.rollback",
+      "family": "snapshot",
+      "owner": "projectatlas-db",
+      "pack_id": "default-core",
+      "public_surfaces": [
+        "atlas_settings"
+      ],
+      "fixture_ids": [
+        "snapshot.rollback"
+      ],
+      "acceptance_rule": "previous active derived slot remains eligible and authored data is preserved",
+      "evidence_state": "pending",
+      "advertised": false
+    }
+  ],
+  "achieved_manifest": null,
+  "achieved_manifest_reason": "No breadth or capability claim is advertised until asset locks, fixtures, benchmarks, and required-platform evidence pass.",
+  "accepted_language_crosswalk": {
+    "identity": "projectatlas-accepted-language-set-212",
+    "entries": [
+      {
+        "accepted_name_id": "accepted.ada",
+        "standard_name": "Ada",
+        "dialect": null,
+        "mode_id": "mode.ada",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.agda",
+        "standard_name": "Agda",
+        "dialect": null,
+        "mode_id": "mode.agda",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.apex",
+        "standard_name": "Apex",
+        "dialect": null,
+        "mode_id": "mode.apex",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.assembly",
+        "standard_name": "Assembly",
+        "dialect": null,
+        "mode_id": "mode.asm",
+        "mapping": "standard-name-alias"
+      },
+      {
+        "accepted_name_id": "accepted.astro",
+        "standard_name": "Astro",
+        "dialect": null,
+        "mode_id": "mode.astro",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.awk",
+        "standard_name": "AWK",
+        "dialect": null,
+        "mode_id": "mode.awk",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.bash",
+        "standard_name": "Bash",
+        "dialect": null,
+        "mode_id": "mode.bash",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.beancount",
+        "standard_name": "Beancount",
+        "dialect": null,
+        "mode_id": "mode.beancount",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.bibtex",
+        "standard_name": "BibTeX",
+        "dialect": null,
+        "mode_id": "mode.bibtex",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.bicep",
+        "standard_name": "Bicep",
+        "dialect": null,
+        "mode_id": "mode.bicep",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.bitbake",
+        "standard_name": "BitBake",
+        "dialect": null,
+        "mode_id": "mode.bitbake",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.blade",
+        "standard_name": "Blade",
+        "dialect": null,
+        "mode_id": "mode.blade",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.c",
+        "standard_name": "C",
+        "dialect": null,
+        "mode_id": "mode.c",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.cairo",
+        "standard_name": "Cairo",
+        "dialect": null,
+        "mode_id": "mode.cairo",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.capn-proto",
+        "standard_name": "Cap'n Proto",
+        "dialect": null,
+        "mode_id": "mode.capnp",
+        "mapping": "standard-name-alias"
+      },
+      {
+        "accepted_name_id": "accepted.cfml-script",
+        "standard_name": "CFML",
+        "dialect": "script",
+        "mode_id": "mode.cfml-script",
+        "mapping": "dialect-mode"
+      },
+      {
+        "accepted_name_id": "accepted.cfml-tag",
+        "standard_name": "CFML",
+        "dialect": "tag",
+        "mode_id": "mode.cfml-tag",
+        "mapping": "dialect-mode"
+      },
+      {
+        "accepted_name_id": "accepted.clojure",
+        "standard_name": "Clojure",
+        "dialect": null,
+        "mode_id": "mode.clojure",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.cmake",
+        "standard_name": "CMake",
+        "dialect": null,
+        "mode_id": "mode.cmake",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.cobol",
+        "standard_name": "COBOL",
+        "dialect": null,
+        "mode_id": "mode.cobol",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.common-lisp",
+        "standard_name": "Common Lisp",
+        "dialect": null,
+        "mode_id": "mode.common-lisp",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.cpp",
+        "standard_name": "C++",
+        "dialect": null,
+        "mode_id": "mode.cpp",
+        "mapping": "standard-name-alias"
+      },
+      {
+        "accepted_name_id": "accepted.crystal",
+        "standard_name": "Crystal",
+        "dialect": null,
+        "mode_id": "mode.crystal",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.csharp",
+        "standard_name": "C#",
+        "dialect": null,
+        "mode_id": "mode.csharp",
+        "mapping": "standard-name-alias"
+      },
+      {
+        "accepted_name_id": "accepted.css",
+        "standard_name": "CSS",
+        "dialect": null,
+        "mode_id": "mode.css",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.csv",
+        "standard_name": "CSV",
+        "dialect": null,
+        "mode_id": "mode.csv",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.cuda",
+        "standard_name": "CUDA",
+        "dialect": null,
+        "mode_id": "mode.cuda",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.d",
+        "standard_name": "D",
+        "dialect": null,
+        "mode_id": "mode.d",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.dart",
+        "standard_name": "Dart",
+        "dialect": null,
+        "mode_id": "mode.dart",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.devicetree",
+        "standard_name": "DeviceTree",
+        "dialect": null,
+        "mode_id": "mode.devicetree",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.diff",
+        "standard_name": "Diff",
+        "dialect": null,
+        "mode_id": "mode.diff",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.dockerfile",
+        "standard_name": "Dockerfile",
+        "dialect": null,
+        "mode_id": "mode.dockerfile",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.dotenv",
+        "standard_name": "DotEnv",
+        "dialect": null,
+        "mode_id": "mode.dotenv",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.elixir",
+        "standard_name": "Elixir",
+        "dialect": null,
+        "mode_id": "mode.elixir",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.elm",
+        "standard_name": "Elm",
+        "dialect": null,
+        "mode_id": "mode.elm",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.emacs-lisp",
+        "standard_name": "Emacs Lisp",
+        "dialect": null,
+        "mode_id": "mode.elisp",
+        "mapping": "standard-name-alias"
+      },
+      {
+        "accepted_name_id": "accepted.erlang",
+        "standard_name": "Erlang",
+        "dialect": null,
+        "mode_id": "mode.erlang",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.fennel",
+        "standard_name": "Fennel",
+        "dialect": null,
+        "mode_id": "mode.fennel",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.fish",
+        "standard_name": "Fish",
+        "dialect": null,
+        "mode_id": "mode.fish",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.form",
+        "standard_name": "FORM",
+        "dialect": null,
+        "mode_id": "mode.form",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.fortran",
+        "standard_name": "Fortran",
+        "dialect": null,
+        "mode_id": "mode.fortran",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.fsharp",
+        "standard_name": "F#",
+        "dialect": null,
+        "mode_id": "mode.fsharp",
+        "mapping": "standard-name-alias"
+      },
+      {
+        "accepted_name_id": "accepted.func",
+        "standard_name": "FunC",
+        "dialect": null,
+        "mode_id": "mode.func",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.gdscript",
+        "standard_name": "GDScript",
+        "dialect": null,
+        "mode_id": "mode.gdscript",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.gitattributes",
+        "standard_name": "gitattributes",
+        "dialect": null,
+        "mode_id": "mode.gitattributes",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.gitignore",
+        "standard_name": "gitignore",
+        "dialect": null,
+        "mode_id": "mode.gitignore",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.gleam",
+        "standard_name": "Gleam",
+        "dialect": null,
+        "mode_id": "mode.gleam",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.glsl",
+        "standard_name": "GLSL",
+        "dialect": null,
+        "mode_id": "mode.glsl",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.gn",
+        "standard_name": "GN",
+        "dialect": null,
+        "mode_id": "mode.gn",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.go",
+        "standard_name": "Go",
+        "dialect": null,
+        "mode_id": "mode.go",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.go-mod",
+        "standard_name": "Go Mod",
+        "dialect": null,
+        "mode_id": "mode.go-mod",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.go-template",
+        "standard_name": "Go Template",
+        "dialect": null,
+        "mode_id": "mode.go-template",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.graphql",
+        "standard_name": "GraphQL",
+        "dialect": null,
+        "mode_id": "mode.graphql",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.groovy",
+        "standard_name": "Groovy",
+        "dialect": null,
+        "mode_id": "mode.groovy",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.hare",
+        "standard_name": "Hare",
+        "dialect": null,
+        "mode_id": "mode.hare",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.haskell",
+        "standard_name": "Haskell",
+        "dialect": null,
+        "mode_id": "mode.haskell",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.hcl",
+        "standard_name": "HCL",
+        "dialect": null,
+        "mode_id": "mode.hcl",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.hlsl",
+        "standard_name": "HLSL",
+        "dialect": null,
+        "mode_id": "mode.hlsl",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.html",
+        "standard_name": "HTML",
+        "dialect": null,
+        "mode_id": "mode.html",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.hyprlang",
+        "standard_name": "Hyprlang",
+        "dialect": null,
+        "mode_id": "mode.hyprlang",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.ini",
+        "standard_name": "INI",
+        "dialect": null,
+        "mode_id": "mode.ini",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.ispc",
+        "standard_name": "ISPC",
+        "dialect": null,
+        "mode_id": "mode.ispc",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.janet",
+        "standard_name": "Janet",
+        "dialect": null,
+        "mode_id": "mode.janet",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.java",
+        "standard_name": "Java",
+        "dialect": null,
+        "mode_id": "mode.java",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.javascript",
+        "standard_name": "JavaScript",
+        "dialect": null,
+        "mode_id": "mode.javascript",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.jinja2",
+        "standard_name": "Jinja2",
+        "dialect": null,
+        "mode_id": "mode.jinja2",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.jsdoc",
+        "standard_name": "JSDoc",
+        "dialect": null,
+        "mode_id": "mode.jsdoc",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.json",
+        "standard_name": "JSON",
+        "dialect": null,
+        "mode_id": "mode.json",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.json5",
+        "standard_name": "JSON5",
+        "dialect": null,
+        "mode_id": "mode.json5",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.jsonnet",
+        "standard_name": "Jsonnet",
+        "dialect": null,
+        "mode_id": "mode.jsonnet",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.julia",
+        "standard_name": "Julia",
+        "dialect": null,
+        "mode_id": "mode.julia",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.just",
+        "standard_name": "Just",
+        "dialect": null,
+        "mode_id": "mode.just",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.kconfig",
+        "standard_name": "Kconfig",
+        "dialect": null,
+        "mode_id": "mode.kconfig",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.kdl",
+        "standard_name": "KDL",
+        "dialect": null,
+        "mode_id": "mode.kdl",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.kotlin",
+        "standard_name": "Kotlin",
+        "dialect": null,
+        "mode_id": "mode.kotlin",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.kubernetes",
+        "standard_name": "Kubernetes",
+        "dialect": null,
+        "mode_id": "mode.kubernetes",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.kustomize",
+        "standard_name": "Kustomize",
+        "dialect": null,
+        "mode_id": "mode.kustomize",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.lean",
+        "standard_name": "Lean",
+        "dialect": null,
+        "mode_id": "mode.lean",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.linker-script",
+        "standard_name": "Linker Script",
+        "dialect": null,
+        "mode_id": "mode.linker-script",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.liquid",
+        "standard_name": "Liquid",
+        "dialect": null,
+        "mode_id": "mode.liquid",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.llvm-ir",
+        "standard_name": "LLVM IR",
+        "dialect": null,
+        "mode_id": "mode.llvm",
+        "mapping": "standard-name-alias"
+      },
+      {
+        "accepted_name_id": "accepted.lua",
+        "standard_name": "Lua",
+        "dialect": null,
+        "mode_id": "mode.lua",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.luau",
+        "standard_name": "Luau",
+        "dialect": null,
+        "mode_id": "mode.luau",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.magma",
+        "standard_name": "Magma",
+        "dialect": null,
+        "mode_id": "mode.magma",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.makefile",
+        "standard_name": "Makefile",
+        "dialect": null,
+        "mode_id": "mode.makefile",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.markdown",
+        "standard_name": "Markdown",
+        "dialect": null,
+        "mode_id": "mode.markdown",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.matlab",
+        "standard_name": "MATLAB",
+        "dialect": null,
+        "mode_id": "mode.matlab",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.mermaid",
+        "standard_name": "Mermaid",
+        "dialect": null,
+        "mode_id": "mode.mermaid",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.meson",
+        "standard_name": "Meson",
+        "dialect": null,
+        "mode_id": "mode.meson",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.mojo",
+        "standard_name": "Mojo",
+        "dialect": null,
+        "mode_id": "mode.mojo",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.move",
+        "standard_name": "Move",
+        "dialect": null,
+        "mode_id": "mode.move",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.nasm",
+        "standard_name": "NASM",
+        "dialect": null,
+        "mode_id": "mode.nasm",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.nickel",
+        "standard_name": "Nickel",
+        "dialect": null,
+        "mode_id": "mode.nickel",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.nim",
+        "standard_name": "Nim",
+        "dialect": null,
+        "mode_id": "mode.nim",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.nix",
+        "standard_name": "Nix",
+        "dialect": null,
+        "mode_id": "mode.nix",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.objective-c",
+        "standard_name": "Objective-C",
+        "dialect": null,
+        "mode_id": "mode.objective-c",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.ocaml",
+        "standard_name": "OCaml",
+        "dialect": null,
+        "mode_id": "mode.ocaml",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.odin",
+        "standard_name": "Odin",
+        "dialect": null,
+        "mode_id": "mode.odin",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.pascal",
+        "standard_name": "Pascal",
+        "dialect": null,
+        "mode_id": "mode.pascal",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.perl",
+        "standard_name": "Perl",
+        "dialect": null,
+        "mode_id": "mode.perl",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.php",
+        "standard_name": "PHP",
+        "dialect": null,
+        "mode_id": "mode.php",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.pine-script",
+        "standard_name": "PineScript",
+        "dialect": null,
+        "mode_id": "mode.pine-script",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.pkl",
+        "standard_name": "Pkl",
+        "dialect": null,
+        "mode_id": "mode.pkl",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.po",
+        "standard_name": "PO",
+        "dialect": null,
+        "mode_id": "mode.po",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.pony",
+        "standard_name": "Pony",
+        "dialect": null,
+        "mode_id": "mode.pony",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.powershell",
+        "standard_name": "PowerShell",
+        "dialect": null,
+        "mode_id": "mode.powershell",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.prisma",
+        "standard_name": "Prisma",
+        "dialect": null,
+        "mode_id": "mode.prisma",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.properties",
+        "standard_name": "Properties",
+        "dialect": null,
+        "mode_id": "mode.properties",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.protobuf",
+        "standard_name": "Protobuf",
+        "dialect": null,
+        "mode_id": "mode.protobuf",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.puppet",
+        "standard_name": "Puppet",
+        "dialect": null,
+        "mode_id": "mode.puppet",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.purescript",
+        "standard_name": "PureScript",
+        "dialect": null,
+        "mode_id": "mode.purescript",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.python",
+        "standard_name": "Python",
+        "dialect": null,
+        "mode_id": "mode.python",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.qml",
+        "standard_name": "QML",
+        "dialect": null,
+        "mode_id": "mode.qmljs",
+        "mapping": "standard-name-alias"
+      },
+      {
+        "accepted_name_id": "accepted.r",
+        "standard_name": "R",
+        "dialect": null,
+        "mode_id": "mode.r",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.racket",
+        "standard_name": "Racket",
+        "dialect": null,
+        "mode_id": "mode.racket",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.regex",
+        "standard_name": "Regex",
+        "dialect": null,
+        "mode_id": "mode.regex",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.requirements",
+        "standard_name": "Requirements",
+        "dialect": null,
+        "mode_id": "mode.requirements",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.rescript",
+        "standard_name": "ReScript",
+        "dialect": null,
+        "mode_id": "mode.rescript",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.restructured-text",
+        "standard_name": "reStructuredText",
+        "dialect": null,
+        "mode_id": "mode.rst",
+        "mapping": "standard-name-alias"
+      },
+      {
+        "accepted_name_id": "accepted.ron",
+        "standard_name": "RON",
+        "dialect": null,
+        "mode_id": "mode.ron",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.ruby",
+        "standard_name": "Ruby",
+        "dialect": null,
+        "mode_id": "mode.ruby",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.rust",
+        "standard_name": "Rust",
+        "dialect": null,
+        "mode_id": "mode.rust",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.scala",
+        "standard_name": "Scala",
+        "dialect": null,
+        "mode_id": "mode.scala",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.scheme",
+        "standard_name": "Scheme",
+        "dialect": null,
+        "mode_id": "mode.scheme",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.scss",
+        "standard_name": "SCSS",
+        "dialect": null,
+        "mode_id": "mode.scss",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.slang",
+        "standard_name": "Slang",
+        "dialect": null,
+        "mode_id": "mode.slang",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.smali",
+        "standard_name": "Smali",
+        "dialect": null,
+        "mode_id": "mode.smali",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.smithy",
+        "standard_name": "Smithy",
+        "dialect": null,
+        "mode_id": "mode.smithy",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.solidity",
+        "standard_name": "Solidity",
+        "dialect": null,
+        "mode_id": "mode.solidity",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.soql",
+        "standard_name": "SOQL",
+        "dialect": null,
+        "mode_id": "mode.soql",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.sosl",
+        "standard_name": "SOSL",
+        "dialect": null,
+        "mode_id": "mode.sosl",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.sql",
+        "standard_name": "SQL",
+        "dialect": null,
+        "mode_id": "mode.sql",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.squirrel",
+        "standard_name": "Squirrel",
+        "dialect": null,
+        "mode_id": "mode.squirrel",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.ssh-config",
+        "standard_name": "SSH Config",
+        "dialect": null,
+        "mode_id": "mode.ssh-config",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.starlark",
+        "standard_name": "Starlark",
+        "dialect": null,
+        "mode_id": "mode.starlark",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.svelte",
+        "standard_name": "Svelte",
+        "dialect": null,
+        "mode_id": "mode.svelte",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.sway",
+        "standard_name": "Sway",
+        "dialect": null,
+        "mode_id": "mode.sway",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.swift",
+        "standard_name": "Swift",
+        "dialect": null,
+        "mode_id": "mode.swift",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.systemverilog",
+        "standard_name": "SystemVerilog",
+        "dialect": null,
+        "mode_id": "mode.systemverilog",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.tablegen",
+        "standard_name": "TableGen",
+        "dialect": null,
+        "mode_id": "mode.tablegen",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.tcl",
+        "standard_name": "Tcl",
+        "dialect": null,
+        "mode_id": "mode.tcl",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.teal",
+        "standard_name": "Teal",
+        "dialect": null,
+        "mode_id": "mode.teal",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.templ",
+        "standard_name": "Templ",
+        "dialect": null,
+        "mode_id": "mode.templ",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.thrift",
+        "standard_name": "Thrift",
+        "dialect": null,
+        "mode_id": "mode.thrift",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.tlaplus",
+        "standard_name": "TLA+",
+        "dialect": null,
+        "mode_id": "mode.tlaplus",
+        "mapping": "standard-name-alias"
+      },
+      {
+        "accepted_name_id": "accepted.toml",
+        "standard_name": "TOML",
+        "dialect": null,
+        "mode_id": "mode.toml",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.tsx",
+        "standard_name": "TSX",
+        "dialect": null,
+        "mode_id": "mode.tsx",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.typescript",
+        "standard_name": "TypeScript",
+        "dialect": null,
+        "mode_id": "mode.typescript",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.typst",
+        "standard_name": "Typst",
+        "dialect": null,
+        "mode_id": "mode.typst",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.verilog",
+        "standard_name": "Verilog",
+        "dialect": null,
+        "mode_id": "mode.verilog",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.vhdl",
+        "standard_name": "VHDL",
+        "dialect": null,
+        "mode_id": "mode.vhdl",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.vimscript",
+        "standard_name": "VimScript",
+        "dialect": null,
+        "mode_id": "mode.vim",
+        "mapping": "standard-name-alias"
+      },
+      {
+        "accepted_name_id": "accepted.vue",
+        "standard_name": "Vue",
+        "dialect": null,
+        "mode_id": "mode.vue",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.wgsl",
+        "standard_name": "WGSL",
+        "dialect": null,
+        "mode_id": "mode.wgsl",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.wit",
+        "standard_name": "WIT",
+        "dialect": null,
+        "mode_id": "mode.wit",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.wolfram",
+        "standard_name": "Wolfram",
+        "dialect": null,
+        "mode_id": "mode.wolfram",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.xml",
+        "standard_name": "XML",
+        "dialect": null,
+        "mode_id": "mode.xml",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.yaml",
+        "standard_name": "YAML",
+        "dialect": null,
+        "mode_id": "mode.yaml",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.zig",
+        "standard_name": "Zig",
+        "dialect": null,
+        "mode_id": "mode.zig",
+        "mapping": "canonical-mode"
+      },
+      {
+        "accepted_name_id": "accepted.zsh",
+        "standard_name": "Zsh",
+        "dialect": null,
+        "mode_id": "mode.zsh",
+        "mapping": "canonical-mode"
+      }
+    ]
+  },
+  "accepted_set_digest_algorithm": "sha256",
+  "accepted_set_digest": "7355cfc034910c87839afe946bdd6c2418766c1792d12a404d2a58586fec8806"
+}

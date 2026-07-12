@@ -1,0 +1,727 @@
+{
+  "format": "projectatlas.repository-intelligence-contracts",
+  "schema_version": 1,
+  "contract_id": "projectatlas-v0.4-repository-intelligence",
+  "delivery_status": {
+    "tasks_checked": false,
+    "ARRI-2.4": {
+      "status": "partial",
+      "delivered": ["compiled CLI command/argument/help inventory", "compiled MCP request schemas and negotiated protocol", "response-family roots", "one exhaustive parser-failure replay per CLI invocation", "one executable domain/not-found classification per MCP tool", "durable side-effect snapshots", "distinct indexed-root MCP session mutation", "root and normal-workflow rules", "allowlisted additive analysis surface"],
+      "remaining": ["normalized exact CLI and MCP response field/type goldens", "complete execution-default inventory", "hosted old-client replay evidence"]
+    },
+    "ARRI-2.5": {
+      "status": "partial",
+      "delivered": ["single authoritative evaluation manifest", "pinned ProjectAtlas and three-stratum corpus identities", "exact locked release calibration command", "clean-source and executable binding contract", "reference-host and before/after calibration eligibility contract", "operation and result schema"],
+      "remaining": ["claim-eligible runner image, firmware, power-scheme, and storage identity", "clean committed pilot executable evidence", "raw calibration pilot and frozen envelope"]
+    },
+    "ARRI-2.6": {
+      "status": "implemented_uncommitted",
+      "delivered": ["pinned prior-release executable identity", "pinned small, medium, and large corpus identities", "required operation cells", "required result metric families", "exploratory instrumentation pilot", "explicit no-claim state"],
+      "remaining": ["ARRI-11.5 full eligible cold/warm/index/query/resource/token/read/MCP baseline capture", "commit-bound successful task evidence before release closure"]
+    },
+    "ARRI-2.7": {
+      "status": "implemented_uncommitted",
+      "delivered": ["canonical record set", "normalization and ordering contract", "unstable-field exclusions", "comparison matrix", "executable canonicalizer", "full/incremental equivalence and semantic first-difference golden fixture"],
+      "remaining": ["production full/incremental, worker-count, repeated-run, and hosted-platform evidence assigned to ARRI-7.8, ARRI-7.9, and ARRI-11.5"]
+    },
+    "ARRI-2.8": {
+      "status": "implemented_uncommitted",
+      "delivered": ["responsibility-owned typed default-core budget catalog", "machine-readable budget IDs, values, units, policy, and honest enforced-versus-advisory status", "owner-derived enforcement that callers cannot promote", "separate default-core release limits", "optional-pack manifest requirements"],
+      "remaining": ["later feature tasks implement and measure ceilings that remain honestly advisory", "commit-bound successful task evidence before release closure"]
+    },
+    "ARRI-2.9": {
+      "status": "implemented_uncommitted",
+      "delivered": ["separate numeric hard ceilings for broad-language and semantic packs", "no borrowing from default-core allowances", "disabled-by-default and removable lifecycle policy"],
+      "remaining": ["later pack tasks implement and measure every hard ceiling", "required-platform packaged evidence remains a release gate", "commit-bound successful task evidence before release closure"]
+    },
+    "ARRI-2.16": {
+      "status": "implemented_uncommitted",
+      "delivered": ["accepted typed-graph, publication, semantic-boundary, optional-pack, and rollback decisions", "correctness-authoritative lexical fallback", "provisional parser-host, FTS acceleration, corpus, and hardware decisions with explicit owning blockers"],
+      "remaining": ["ARRI-5.14 and ARRI-11.5 parser-host selection evidence", "ARRI-10.3 through ARRI-10.9 optional-semantic selection evidence", "ARRI-11.5 eligible corpus and runner campaign", "commit-bound successful task evidence before release closure"]
+    },
+    "ARRI-2.19": {
+      "status": "implemented_uncommitted",
+      "delivered": ["public-name, tool-count, workflow-call, query-language, optional-pack, crate, and response-growth simplicity budgets"],
+      "remaining": ["final adapter enforcement remains owned by the later compatibility and workflow gates", "commit-bound successful task evidence before release closure"]
+    },
+    "ARRI-2.20": {
+      "status": "implemented_uncommitted",
+      "delivered": ["closed phase-exit ownership-review scope", "required finding dispositions and completion evidence", "fail-closed blocking-finding behavior"],
+      "remaining": ["commit-bound successful task evidence before task closure"]
+    }
+  },
+  "compatibility": {
+    "baseline": {
+      "runtime_version": "0.3.26",
+      "planning_commit": "c672442438404411389ef86e2efd767f3a4b2be0",
+      "runtime_source_commit": "d3b3e157f954c7d360d821ed0385762e8b044385",
+      "source_tree": "cc9bc004837c8843b84151cb269fba41e8944116",
+      "runtime_paths_dirty": false
+    },
+    "cli": {
+      "atlas_first_workflow": [
+        "scan",
+        "overview",
+        "folders",
+        "files",
+        "summary_or_outline",
+        "search_if_needed",
+        "slice"
+      ],
+      "output": {
+        "default_mode": "toon",
+        "modes": [
+          "toon",
+          "json"
+        ],
+        "success_exit": 0,
+        "clap_usage_exit": 2,
+        "command_failure_contract": "command_specific",
+        "failure_stream_contract": "command_specific",
+        "diagnostic_prefix_contract": "not_universal",
+        "coverage_status": "partial_until_golden_replay"
+      },
+      "response_family_by_invocation": {
+        "projectatlas config": "config",
+        "projectatlas files": "ranked_files",
+        "projectatlas folders": "ranked_folders",
+        "projectatlas health resolve": "health_resolution",
+        "projectatlas health-check": "health",
+        "projectatlas ignore add": "ignore",
+        "projectatlas ignore init-gitignore": "gitignore",
+        "projectatlas ignore list": "ignore",
+        "projectatlas ignore remove": "ignore",
+        "projectatlas init": "init",
+        "projectatlas lint": "lint",
+        "projectatlas map": "map",
+        "projectatlas mcp": "json_rpc_stream",
+        "projectatlas mcp-config": "mcp_config",
+        "projectatlas next": "next",
+        "projectatlas outline": "outline",
+        "projectatlas overview": "overview",
+        "projectatlas parity": "parity",
+        "projectatlas parity report": "parity",
+        "projectatlas purpose queue": "purpose_curation",
+        "projectatlas purpose review": "purpose_review",
+        "projectatlas purpose set": "purpose_set",
+        "projectatlas reset-index": "reset_index",
+        "projectatlas root": "root",
+        "projectatlas root set": "root",
+        "projectatlas root show": "root",
+        "projectatlas root verify": "root",
+        "projectatlas runtime-info": "runtime_info",
+        "projectatlas scan": "scan",
+        "projectatlas search": "search",
+        "projectatlas settings": "settings",
+        "projectatlas slice": "code_slice",
+        "projectatlas strip-legacy-purpose": "legacy_purpose_migration",
+        "projectatlas summary": "file_summary",
+        "projectatlas symbols build": "symbols_build",
+        "projectatlas symbols list": "symbols",
+        "projectatlas symbols relations": "symbol_relations",
+        "projectatlas symbols slice": "symbol_slice",
+        "projectatlas token": "token_savings_or_tui",
+        "projectatlas watch": "watch_stream",
+        "projectatlas watch-status": "watch_status"
+      },
+      "root_selection": [
+        "--db selects the project-local SQLite database and defaults to .projectatlas/projectatlas.db",
+        "--config may select a project configuration and must agree with the database root",
+        "path-bearing commands validate repository-relative paths against the selected root",
+        "root set is the explicit persistent project binding operation",
+        "nearest-project routing is opt-in only"
+      ]
+    },
+    "mcp": {
+      "transport": "stdio",
+      "protocol_version": "2025-11-25",
+      "required_extra_graph_calls": 0,
+      "response": {
+        "success_transport": "rmcp_text_content",
+        "success_encoding": "toon",
+        "error_transport": "rmcp_text_content",
+        "error_root": "error",
+        "error_required_fields": [
+          "message"
+        ]
+      },
+      "success_root_by_tool": {
+        "atlas_config": "config",
+        "atlas_file_summary": "file_summary",
+        "atlas_files": "files",
+        "atlas_folders": "folders",
+        "atlas_health": "health",
+        "atlas_health_resolve": "health_resolution",
+        "atlas_ignore_add": "ignore",
+        "atlas_ignore_init_gitignore": "gitignore",
+        "atlas_ignore_list": "ignore",
+        "atlas_ignore_remove": "ignore",
+        "atlas_init": "init",
+        "atlas_lint": "lint",
+        "atlas_map": "map",
+        "atlas_mcp_config": "mcp_config",
+        "atlas_next": "next",
+        "atlas_outline": "outline",
+        "atlas_overview": "overview",
+        "atlas_parity_report": "parity",
+        "atlas_purpose_queue": "purpose_curation",
+        "atlas_purpose_review": "purpose_review",
+        "atlas_purpose_set": "purpose_set",
+        "atlas_reset_index": "reset_index",
+        "atlas_root": "root",
+        "atlas_root_set": "root",
+        "atlas_runtime_info": "runtime_info",
+        "atlas_scan": "scan",
+        "atlas_search": "search",
+        "atlas_session_brief": "session_brief",
+        "atlas_set_project_path": "project",
+        "atlas_settings": "settings_and_mcp_session",
+        "atlas_slice": "code_slice",
+        "atlas_strip_legacy_purpose": "legacy_purpose_migration",
+        "atlas_symbol_relations": "symbol_relations",
+        "atlas_symbols": "symbols",
+        "atlas_symbols_build": "symbols_build",
+        "atlas_task_cancel": "task_cancel",
+        "atlas_task_status": "task_status",
+        "atlas_token_report": "token_savings",
+        "atlas_watch_once": "watch",
+        "atlas_watch_status": "watch_status"
+      },
+      "default_contract_status": "partial_until_behavior_replay",
+      "defaults_by_tool": {
+        "atlas_config": {},
+        "atlas_file_summary": {"nearest_project": false, "limit": 25},
+        "atlas_files": {"query": "", "folder": null, "nearest_project": false, "file_pattern": null, "include_content": false, "limit": 10},
+        "atlas_folders": {"query": "", "limit": 10},
+        "atlas_health": {"start_index": 0, "limit": 50, "limit_cap": 200, "category": null, "severity": null, "path_prefix": null, "summary_only": false, "source_only": false},
+        "atlas_health_resolve": {"related_path": null},
+        "atlas_ignore_add": {"kind": "required_at_validation"},
+        "atlas_ignore_init_gitignore": {},
+        "atlas_ignore_list": {},
+        "atlas_ignore_remove": {"kind": null},
+        "atlas_init": {"no_scan": false, "force_rescan": false, "text_index_max_bytes": "effective_config_or_2000000"},
+        "atlas_lint": {"strict_folders": false, "purpose_level": "low", "report_untracked": false, "strict_untracked": false},
+        "atlas_map": {"json": false, "force": false},
+        "atlas_mcp_config": {"server_name": "projectatlas", "harness": "mcp-json", "nearest_project": false},
+        "atlas_next": {"query": "", "limit": 3},
+        "atlas_outline": {"nearest_project": false, "lines": 12},
+        "atlas_overview": {},
+        "atlas_parity_report": {"profile": "repository-intelligence"},
+        "atlas_purpose_queue": {"start_index": 0, "limit": 50, "limit_cap": 200, "summary_only": false, "include_assets": false, "include_low_priority_files": false},
+        "atlas_purpose_review": {"apply": false},
+        "atlas_purpose_set": {},
+        "atlas_reset_index": {"apply": false, "dry_run": false, "include_mcp_config": false},
+        "atlas_root": {"verify": false},
+        "atlas_root_set": {"nearest_project": false},
+        "atlas_runtime_info": {},
+        "atlas_scan": {"path": "selected_project_root", "nearest_project": false, "max_bytes": 2000000, "max_workers": "rayon_auto", "timeout_seconds": null, "text_index_max_bytes": "effective_config_or_2000000"},
+        "atlas_search": {"regex": false, "fuzzy": false, "case_sensitive": false, "file_pattern": null, "context_lines": 0, "start_index": 0, "limit": 20},
+        "atlas_session_brief": {"query": "", "folder_limit": 5, "file_limit": 5, "blocker_limit": 5},
+        "atlas_set_project_path": {},
+        "atlas_settings": {},
+        "atlas_slice": {"nearest_project": false, "start_line": null, "end_line": null, "symbol": null, "symbol_parent": null, "symbol_kind": null, "symbol_line": null},
+        "atlas_strip_legacy_purpose": {"path": "selected_project_root", "nearest_project": false, "apply": false, "dry_run": false, "strip_source_headers": "effective_config_present"},
+        "atlas_symbol_relations": {"nearest_project": false, "file": null, "query": null, "limit": 50},
+        "atlas_symbols": {"nearest_project": false, "file": null, "query": null, "limit": 50},
+        "atlas_symbols_build": {"path": "selected_project_root", "nearest_project": false, "max_bytes": 2000000, "max_workers": "rayon_auto", "timeout_seconds": null, "text_index_max_bytes": "effective_config_or_2000000"},
+        "atlas_task_cancel": {},
+        "atlas_task_status": {},
+        "atlas_token_report": {"session": null, "include_chart": false, "trend_window": null, "theme": "dark"},
+        "atlas_watch_once": {"path": "selected_project_root", "nearest_project": false, "max_workers": "rayon_auto", "timeout_seconds": null, "text_index_max_bytes": "effective_config_or_2000000"},
+        "atlas_watch_status": {}
+      },
+      "root_selection": {
+        "default": "active_session_project",
+        "per_call": "optional_project_path",
+        "session_mutation_tool": "atlas_set_project_path",
+        "persistent_binding_tool": "atlas_root_set",
+        "nearest_project": "explicit_opt_in",
+        "concurrent_hosts": "prefer_per_call_project_path"
+      },
+      "normal_workflow": [
+        "atlas_scan",
+        "atlas_overview",
+        "atlas_folders",
+        "atlas_files",
+        "atlas_file_summary_or_atlas_outline",
+        "atlas_search_if_needed",
+        "atlas_slice"
+      ],
+      "automatic_graph_enrichment": true
+    },
+    "surface_inventory": {
+      "path": "fixtures/contracts/projectatlas-v0.3.26-surface.json",
+      "schema_version": 1,
+      "cli_command_count": 46,
+      "mcp_tool_count": 40
+    }
+  },
+  "evaluation_manifest": {
+    "authoritative_artifact": "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json",
+    "format": "projectatlas.evaluation-manifest",
+    "schema_version": 1,
+    "embedded_copy_allowed": false,
+    "validation_owner": "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs"
+  },
+  "graph_snapshot": {
+    "format": "canonical-json-lines-v1",
+    "encoding": "utf-8",
+    "path_separator": "/",
+    "map_key_order": "unicode-code-point",
+    "records": [
+      "entity",
+      "relation",
+      "evidence",
+      "coverage",
+      "lexical_row"
+    ],
+      "record_order": [
+        "record_kind",
+        "project_identity",
+        "stable_key",
+        "relation_kind",
+        "source_stable_key",
+        "target_stable_key",
+        "evidence_key",
+        "origin_identity",
+        "coverage_path",
+        "coverage_stage",
+        "lexical_path",
+        "lexical_term",
+        "normalized_path",
+        "line_start",
+        "line_end",
+        "discriminator",
+        "canonical_record_bytes"
+    ],
+    "normalize": [
+      "repository paths to validated root-relative forward-slash form",
+      "object keys by Unicode code point",
+      "closed enum values to their stable serialized spelling",
+      "sets and rows by the complete record_order tuple",
+      "missing optional values to JSON null rather than omission",
+      "line endings to LF only in canonical serialized output"
+    ],
+    "exclude_fields": [
+      "row_id",
+      "slot_id",
+      "active_slot",
+      "active_epoch",
+      "last_changed_epoch",
+      "created_at",
+      "updated_at",
+      "started_at",
+      "finished_at",
+      "duration_ns",
+      "telemetry",
+      "task_id",
+      "session_id"
+    ],
+    "semantic_exclusions": [
+      "ann_node_id",
+      "ann_topology",
+      "ann_insertion_order",
+      "ann_serialized_layout"
+    ],
+    "comparisons": [
+      "full_vs_incremental",
+      "worker_1_vs_n",
+      "repeated_run",
+      "supported_platform"
+    ],
+    "first_difference": true,
+    "stable_identity_required": true
+  },
+  "budgets": {
+    "enforcement_values": [
+      "runtime_enforced",
+      "release_gate_planned",
+      "advisory_until_implemented",
+      "pack_manifest_required"
+    ],
+    "default_core": {
+      "runtime_limits": [
+        {
+          "id": "source_file_bytes",
+          "value": 2000000,
+          "unit": "bytes",
+          "policy": "hard_ceiling",
+          "enforcement": "advisory_until_implemented"
+        },
+        {
+          "id": "ast_depth",
+          "value": 256,
+          "unit": "nodes",
+          "policy": "hard_ceiling",
+          "enforcement": "advisory_until_implemented"
+        },
+        {
+          "id": "symbols_per_file",
+          "value": 50000,
+          "unit": "symbols",
+          "policy": "hard_ceiling",
+          "enforcement": "advisory_until_implemented"
+        },
+        {
+          "id": "relations_per_file",
+          "value": 250000,
+          "unit": "relations",
+          "policy": "hard_ceiling",
+          "enforcement": "advisory_until_implemented"
+        },
+        {
+          "id": "resolution_candidates",
+          "value": 64,
+          "unit": "candidates",
+          "policy": "hard_ceiling",
+          "enforcement": "runtime_enforced"
+        },
+        {
+          "id": "worker_count",
+          "value": 16,
+          "unit": "workers",
+          "policy": "hard_ceiling",
+          "enforcement": "advisory_until_implemented"
+        },
+        {
+          "id": "stage_time",
+          "value": 300000,
+          "unit": "milliseconds",
+          "policy": "hard_ceiling",
+          "enforcement": "advisory_until_implemented"
+        },
+        {
+          "id": "working_memory",
+          "value": 536870912,
+          "unit": "bytes",
+          "policy": "hard_ceiling",
+          "enforcement": "advisory_until_implemented"
+        },
+        {
+          "id": "query_depth",
+          "value": 3,
+          "unit": "hops",
+          "policy": "hard_ceiling",
+          "enforcement": "advisory_until_implemented"
+        },
+        {
+          "id": "visited_nodes",
+          "value": 50000,
+          "unit": "nodes",
+          "policy": "hard_ceiling",
+          "enforcement": "advisory_until_implemented"
+        },
+        {
+          "id": "expanded_edges",
+          "value": 200000,
+          "unit": "edges",
+          "policy": "hard_ceiling",
+          "enforcement": "advisory_until_implemented"
+        },
+        {
+          "id": "returned_rows",
+          "value": 1000,
+          "unit": "rows",
+          "policy": "hard_ceiling",
+          "enforcement": "advisory_until_implemented"
+        },
+        {
+          "id": "response_bytes",
+          "value": 1048576,
+          "unit": "bytes",
+          "policy": "hard_ceiling",
+          "enforcement": "advisory_until_implemented"
+        },
+        {
+          "id": "cancellation_poll",
+          "value": 25,
+          "unit": "milliseconds",
+          "policy": "hard_ceiling",
+          "enforcement": "advisory_until_implemented"
+        },
+        {
+          "id": "cancellation_grace",
+          "value": 1000,
+          "unit": "milliseconds",
+          "policy": "hard_ceiling",
+          "enforcement": "advisory_until_implemented"
+        }
+      ],
+      "release_limits": [
+        {
+          "id": "stripped_executable",
+          "value": 50331648,
+          "unit": "bytes",
+          "policy": "hard_ceiling",
+          "enforcement": "release_gate_planned"
+        },
+        {
+          "id": "installed_payload",
+          "value": 67108864,
+          "unit": "bytes",
+          "policy": "hard_ceiling",
+          "enforcement": "release_gate_planned"
+        },
+        {
+          "id": "cold_runtime_info_p95",
+          "value": 250,
+          "unit": "milliseconds",
+          "policy": "hard_ceiling",
+          "enforcement": "release_gate_planned"
+        },
+        {
+          "id": "cold_mcp_ready_p95",
+          "value": 500,
+          "unit": "milliseconds",
+          "policy": "hard_ceiling",
+          "enforcement": "release_gate_planned"
+        },
+        {
+          "id": "idle_mcp_rss",
+          "value": 100663296,
+          "unit": "bytes",
+          "policy": "hard_ceiling",
+          "enforcement": "release_gate_planned"
+        },
+        {
+          "id": "no_pack_scan_peak_rss",
+          "value": 536870912,
+          "unit": "bytes",
+          "policy": "hard_ceiling",
+          "enforcement": "release_gate_planned"
+        }
+      ]
+    },
+    "optional_pack_contract": {
+      "disabled_by_default": true,
+      "may_spend_default_core_allowance": false,
+      "required_limit_fields": [
+        "input_bytes",
+        "stage_time_ms",
+        "memory_bytes",
+        "output_bytes",
+        "executable_bytes",
+        "installed_bytes",
+        "startup_p95_ms",
+        "active_rss_bytes",
+        "cancellation_grace_ms"
+      ],
+      "required_manifest_fields": [
+        "pack_id",
+        "version",
+        "platform",
+        "digest",
+        "license",
+        "limits",
+        "enforcement"
+      ],
+      "accepted_pack_budgets": [
+        {
+          "pack_id": "broad-language-pack",
+          "status": "preregistered_not_measured",
+          "limits": {
+            "input_bytes": 2000000,
+            "stage_time_ms": 300000,
+            "memory_bytes": 1610612736,
+            "output_bytes": 67108864,
+            "executable_bytes": 134217728,
+            "installed_bytes": 805306368,
+            "startup_p95_ms": 2000,
+            "active_rss_bytes": 1073741824,
+            "cancellation_grace_ms": 2000
+          },
+          "enforcement": "pack_manifest_required",
+          "may_borrow_default_core_allowance": false,
+          "disabled_by_default": true,
+          "removable": true
+        },
+        {
+          "pack_id": "semantic-pack",
+          "status": "preregistered_not_measured",
+          "limits": {
+            "input_bytes": 2000000,
+            "stage_time_ms": 900000,
+            "memory_bytes": 4294967296,
+            "output_bytes": 268435456,
+            "executable_bytes": 134217728,
+            "installed_bytes": 1610612736,
+            "startup_p95_ms": 5000,
+            "active_rss_bytes": 3221225472,
+            "cancellation_grace_ms": 5000
+          },
+          "enforcement": "pack_manifest_required",
+          "may_borrow_default_core_allowance": false,
+          "disabled_by_default": true,
+          "removable": true
+        }
+      ],
+      "selection_rule": "a pack remains unaccepted and unadvertised until every hard ceiling is measured on every required platform and runtime clamps plus lifecycle tests pass"
+    }
+  },
+  "architecture_decisions": [
+    {
+      "id": "ADR-04-01",
+      "status": "provisional",
+      "topic": "parser_host",
+      "decision": "Keep trusted core parsers in the default runtime and execute broad grammar artifacts only in a separately installed supervised pack process; select WASM without WASI capabilities or a vetted native worker only from the registered comparison.",
+      "alternative": "runtime compilation or unverified in-process dynamic libraries",
+      "risk": "pack isolation can cost throughput",
+      "verification": "real-process correctness, containment, timeout, RSS, and throughput gates",
+      "blocking_evidence": ["ARRI-2.14 parser-host benchmark and containment decision"]
+    },
+    {
+      "id": "ADR-04-02",
+      "status": "accepted",
+      "topic": "typed_graph_layout",
+      "decision": "Own closed graph identities, relations, evidence, coverage, and limits as Rust types and use typed SQLite rows; select arenas, interning, and internal numeric layouts only where profiles justify them.",
+      "alternative": "generic object graph and JSON property bags",
+      "risk": "schema migrations require deliberate compatibility work",
+      "verification": "typed fixtures, migration reconciliation, canonical snapshot equivalence, and profiles"
+    },
+    {
+      "id": "ADR-04-03",
+      "status": "provisional",
+      "topic": "fts_acceleration",
+      "decision": "Keep deterministic lexical matching authoritative and permit FTS5 only as a preflighted candidate accelerator with exact verification and an honest fallback reason.",
+      "alternative": "make FTS availability or ranking authoritative",
+      "risk": "unsupported query classes can create false negatives",
+      "verification": "with-without differential tests for literal, regex, fuzzy, Unicode, punctuation, and short queries",
+      "blocking_evidence": ["ARRI-2.12 FTS completeness, cost, and latency benchmark"]
+    },
+    {
+      "id": "ADR-04-04",
+      "status": "accepted",
+      "topic": "publication",
+      "decision": "Publish structural and lexical derived data through exactly two live slots and monotonically advancing epochs; full scans stage separately and flip atomically, while incremental updates change only affected rows in one transaction.",
+      "alternative": "whole-graph rewrite or append-only overlay chain",
+      "risk": "slot reconciliation defects can expose stale or partial data",
+      "verification": "failure injection, full-incremental equivalence, rollback, and concurrent reader tests"
+    },
+    {
+      "id": "ADR-04-05",
+      "status": "accepted",
+      "topic": "semantic_provider_boundary",
+      "decision": "Use normalized typed facts plus small language-owned resolution providers; keep common logic concrete and add a narrow trait only for the demonstrated provider boundary.",
+      "alternative": "one handwritten pseudo-language-server hierarchy",
+      "risk": "shared interfaces can accumulate language branches",
+      "verification": "provider-local positive, negative, ambiguity, malformed, external, and cross-file tests"
+    },
+    {
+      "id": "ADR-04-06",
+      "status": "accepted",
+      "topic": "optional_semantic_pack",
+      "decision": "Keep ANN, model, tokenizer, preprocessing, and vector storage in a separately installed pack that is disabled by default and never blocks structural publication; no backend or model is selected before labeled evaluation.",
+      "alternative": "bundle a model and linearly scan every vector",
+      "risk": "optional complexity may not improve agent outcomes",
+      "verification": "labeled retrieval, lifecycle, resource, offline, removal, and cross-platform gates"
+    },
+    {
+      "id": "ADR-04-07",
+      "status": "provisional",
+      "topic": "benchmark_corpus_and_hardware",
+      "decision": "Use immutable public small, medium, and large corpus commits; record local hosts as ineligible observations until a release runner class and calibration envelope are pinned before results, and compare paired runs on the same host without dividing latency by calibration.",
+      "alternative": "single workstation timing or post-result normalization",
+      "risk": "host variance can dominate small latency differences",
+      "verification": "manifest validation, paired repetitions, raw timings, and eligibility checks",
+      "blocking_evidence": ["ARRI-2.5 corpus pins", "ARRI-2.11 eligible runner and calibration envelope"]
+    },
+    {
+      "id": "ADR-04-08",
+      "status": "accepted",
+      "topic": "rollback_retention",
+      "decision": "Retain exactly the previously active full-publication slot until the next successful full publication needs it or explicit bounded cleanup removes eligibility; authored data remains outside derived slots.",
+      "alternative": "unbounded historical slot chains",
+      "risk": "the retained slot is not arbitrary point-in-time history",
+      "verification": "rollback eligibility, reuse, cleanup, and authored-row preservation tests"
+    }
+  ],
+  "simplicity": {
+    "preserve_existing_public_names": true,
+    "max_new_analysis_tools": 3,
+    "allowed_new_analysis_tools": [
+      "atlas_architecture",
+      "atlas_impact",
+      "atlas_trace"
+    ],
+    "allowed_new_analysis_cli_commands": [
+      "projectatlas architecture",
+      "projectatlas impact",
+      "projectatlas trace"
+    ],
+    "custom_query_language": false,
+    "normal_workflow_new_required_calls": 0,
+    "optional_packs_disabled_by_default": true,
+    "optional_packs_removable": true,
+    "new_crate_rule": "demonstrated ownership boundary and independent consumer required",
+    "program_new_crates_without_independent_consumer": 0,
+    "default_graph_enrichment_max_bytes": 512,
+    "default_graph_enrichment_max_tokens": 128,
+    "frozen_workflow_growth_max_bytes": 1536,
+    "frozen_workflow_growth_max_tokens": 384,
+    "phase_exit_review": [
+      "delete",
+      "consolidate",
+      "defer",
+      "keep_optional"
+    ],
+    "phase_exit_ownership_review": {
+      "required_at_every_phase_exit": true,
+      "required_scope_ids": [
+        "code",
+        "dependencies",
+        "configuration",
+        "outputs",
+        "traits",
+        "dynamic_dispatch",
+        "abstractions"
+      ],
+      "dispositions_pointer": "/simplicity/phase_exit_review",
+      "phase_record_required_fields": [
+        "phase_id",
+        "reviewed_commit",
+        "reviewer",
+        "scope_results",
+        "findings",
+        "blocking_finding_count",
+        "state"
+      ],
+      "scope_record_required_fields": [
+        "scope_id",
+        "reviewed",
+        "finding_ids"
+      ],
+      "finding_required_fields": [
+        "finding_id",
+        "scope_id",
+        "subject",
+        "disposition",
+        "rationale",
+        "owner",
+        "completion_evidence",
+        "blocking"
+      ],
+      "disposition_completion_requirements": {
+        "delete": ["absence_evidence"],
+        "consolidate": ["canonical_owner", "replacement_evidence"],
+        "defer": ["owner", "tracking_reference", "trigger"],
+        "keep_optional": ["disabled_by_default_evidence", "removal_evidence"]
+      },
+      "blocking_finding_behavior": {
+        "missing_review_blocks_exit": true,
+        "missing_scope_blocks_exit": true,
+        "undispositioned_finding_blocks_exit": true,
+        "unsatisfied_completion_requirements_block_exit": true,
+        "pass_requires_zero_blocking_findings": true,
+        "blocked_state": "blocked",
+        "pass_state": "pass"
+      }
+    },
+    "rejected_mechanisms": [
+      "single-implementation factories",
+      "inheritance emulation",
+      "service locator",
+      "custom graph query language",
+      "mandatory optional-pack orchestration"
+    ]
+  }
+}
