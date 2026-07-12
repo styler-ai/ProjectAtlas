@@ -1151,6 +1151,46 @@
         "state": "implemented_uncommitted"
       },
       "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "3.2",
+      "requirement": "The first graph feature touch extracts only the focused projectatlas-core graph ownership while preserving the legacy relation contract and public behavior.",
+      "scenario": "The responsibility-named graph module remains the smallest concrete core owner, reuses the existing symbols relation contract, and converts every exhaustive legacy relation variant without changing its serialized value.",
+      "owner": "rust-ownership-and-module-boundaries",
+      "changed_artifacts": ["crates/projectatlas-core/Cargo.toml", "crates/projectatlas-core/src/graph.rs", "crates/projectatlas-core/src/lib.rs", "openspec/task-verification-plan.json"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-3.2",
+        "function": "graph::tests::graph_relations_preserve_legacy_compatibility",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-core", "graph::tests::graph_relations_preserve_legacy_compatibility", "--", "--exact"] },
+        "assertion": "The focused core graph module preserves the complete four-variant legacy RelationKind conversion and exact serialized spellings without adding a parallel relation contract or speculative runtime abstraction.",
+        "covered_inputs": ["projectatlas-core graph module boundary", "legacy Contains relation", "legacy Imports relation", "legacy Calls relation", "legacy DependsOn relation", "GraphRelationKind conversion", "stable relation serialization"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "4.1",
+      "requirement": "Centralized typed graph and hard-budget contracts live in the smallest core owners while service use-case contracts remain outside core and the service-to-database-to-core dependency direction is preserved.",
+      "scenario": "A generation-neutral graph fact composes validated entity identity and selector, parser provenance, a project-scoped logical relation, evidence occurrences, finite confidence, and structural slot/epoch stamping; the focused graph suite separately exercises resolution candidates, coverage, typed budgets, serialization, and compatibility.",
+      "owner": "typed-graph-domain-contracts",
+      "changed_artifacts": ["crates/projectatlas-core/Cargo.toml", "crates/projectatlas-core/src/budget.rs", "crates/projectatlas-core/src/graph.rs", "crates/projectatlas-core/src/lib.rs", "openspec/task-verification-plan.json"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-4.1",
+        "function": "graph::tests::resolved_graph_facts_are_generation_neutral_and_project_scoped",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-core", "graph::tests::resolved_graph_facts_are_generation_neutral_and_project_scoped", "--", "--exact"] },
+        "assertion": "Typed core graph facts compose entity selectors, stable identities, parser origin, relation kind, target scope, evidence, confidence, completeness, slot, and epoch while rejecting cross-project internal targets; adjacent focused graph tests retain candidate, resolution-state, coverage, hard-budget, and serialization invariants.",
+        "covered_inputs": ["ProjectInstanceId and EntitySelector", "GraphEntityFact and GraphEntityKind", "ParserOrigin", "GraphRelationKind and LogicalRelationRecord", "RelationEvidence and EvidenceClass", "ConfidenceClass and Completeness", "ResolutionTarget internal scope", "cross-project target rejection", "StructuralSlot and IndexEpoch", "focused candidate, resolution, coverage, budget, and serialization suite"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
     }
   ],
   "planned_row_definitions": [
