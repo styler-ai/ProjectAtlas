@@ -90,9 +90,12 @@ fn powershell_installer_rejects_a_project_state_junction() -> Result<(), Box<dyn
         !output.status.success(),
         "installer accepted a project-state junction",
     )?;
+    let normalized_stderr = String::from_utf8_lossy(&output.stderr)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     require(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("must not be a symlink, junction, or reparse point"),
+        normalized_stderr.contains("must not be a symlink, junction, or reparse point"),
         format!(
             "installer did not explain the rejected junction: {}",
             String::from_utf8_lossy(&output.stderr)

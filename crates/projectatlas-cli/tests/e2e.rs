@@ -3070,9 +3070,13 @@ fn plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails()
         String::from_utf8_lossy(&installer_output.stdout),
         String::from_utf8_lossy(&installer_output.stderr)
     );
-    let reported_install_failure = installer_output_text
+    let normalized_installer_output = installer_output_text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let reported_install_failure = normalized_installer_output
         .contains("Codex ProjectAtlas plugin update failed: could not install projectatlas plugin");
-    let reported_version_mismatch = installer_output_text
+    let reported_version_mismatch = normalized_installer_output
         .contains("Codex ProjectAtlas plugin update failed: installed projectatlas plugin version");
     if !reported_install_failure && !reported_version_mismatch {
         return Err(io::Error::other(format!(
