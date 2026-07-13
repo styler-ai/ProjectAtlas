@@ -576,7 +576,20 @@ fn verification_plan_accepts_declared_task_test_anchors() -> Result<(), Box<dyn 
 fn task_evidence_metadata_paths_are_narrow() {
     assert!(task_evidence_metadata_path("openspec/task-evidence.json"));
     assert!(task_evidence_metadata_path(
+        "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+    ));
+    assert!(task_evidence_metadata_path(
         "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-a95a9de.json"
+    ));
+    assert!(!task_evidence_metadata_path("openspec/tasks.md"));
+    assert!(!task_evidence_metadata_path(
+        "openspec/changes/advance-rust-repository-intelligence/design.md"
+    ));
+    assert!(!task_evidence_metadata_path(
+        "openspec/changes/advance-rust-repository-intelligence/nested/tasks.md"
+    ));
+    assert!(!task_evidence_metadata_path(
+        "openspec/changes/-invalid/tasks.md"
     ));
     assert!(!task_evidence_metadata_path(
         "openspec/task-verification.json"

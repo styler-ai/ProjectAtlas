@@ -562,6 +562,17 @@ fn task_evidence_metadata_path(path: &str) -> bool {
     if path == "openspec/task-evidence.json" {
         return true;
     }
+    if let Some(change) = path
+        .strip_prefix("openspec/changes/")
+        .and_then(|path| path.strip_suffix("/tasks.md"))
+    {
+        let mut bytes = change.bytes();
+        return bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            && bytes
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    }
     let Some(name) = path.strip_prefix("docs/benchmarks/results/") else {
         return false;
     };
