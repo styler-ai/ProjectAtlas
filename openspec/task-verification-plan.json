@@ -1280,6 +1280,46 @@
         "state": "implemented_uncommitted"
       },
       "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "4.9",
+      "requirement": "The ledger-assigned typed repository graph migration installs entity, relation, evidence, resolution, and coverage storage while preserving authored and compatibility data.",
+      "scenario": "A valid pre-graph schema migrates transactionally, retains authored metadata and compatibility rows, reconciles the typed graph inventory, and rolls every schema and data effect back when verification fails.",
+      "owner": "graph-schema-and-storage",
+      "changed_artifacts": ["crates/projectatlas-db/src/schema.rs", "openspec/changes/advance-rust-repository-intelligence/tasks.md", "openspec/task-verification-plan.json"],
+      "risk": "L2-persistence-cross-crate",
+      "required_evidence_layers": ["unit", "integration"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-4.9",
+        "function": "schema::tests::task_arri_ut_arri_4_9",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "--workspace", "--all-features", "task_arri_ut_arri_4_9"] },
+        "assertion": "Verify implement the ledger-assigned typed entity/relation/evidence/coverage migration while retaining every required compatibility field and authored table.",
+        "covered_inputs": ["immutable migration inventory allocation", "typed graph table and index contracts", "relation, evidence, resolution, and coverage constraints", "authored metadata and compatibility-row preservation", "migration-ledger advancement", "injected verification rollback"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "4.10",
+      "requirement": "The ledger-assigned structural publication migration installs exactly two immutable physical slot identities and one validated active-slot and epoch record.",
+      "scenario": "A valid typed-graph schema migrates transactionally to slots a and b with slot a active at epoch zero, rejects invalid slot or singleton mutations, preserves existing rows, and rolls every migration effect back when verification fails.",
+      "owner": "graph-schema-and-storage",
+      "changed_artifacts": ["crates/projectatlas-db/src/schema.rs", "openspec/changes/advance-rust-repository-intelligence/tasks.md", "openspec/task-verification-plan.json"],
+      "risk": "L2-persistence-cross-crate",
+      "required_evidence_layers": ["unit", "integration"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-4.10",
+        "function": "schema::tests::task_arri_ut_arri_4_10",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "--workspace", "--all-features", "task_arri_ut_arri_4_10"] },
+        "assertion": "Verify implement the ledger-assigned two-slot schema with exactly two physical derived-data slots and singleton `(active_slot, active_epoch)` publication metadata.",
+        "covered_inputs": ["immutable migration inventory allocation", "exact structural slot identities a and b", "singleton active-slot and epoch constraints", "slot and singleton guard inventory", "authored, compatibility, lexical, and coverage-row preservation", "current-schema reopen verification", "injected verification rollback"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
     }
   ],
   "planned_row_definitions": [
