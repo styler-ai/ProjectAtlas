@@ -1400,6 +1400,86 @@
         "state": "implemented_uncommitted"
       },
       "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "4.14",
+      "requirement": "Incremental storage mutates only the affected active-slot structural closure and advances the epoch atomically without a third slot or whole-graph copy.",
+      "scenario": "A validated one-file delta invalidates and replaces affected graph, evidence, coverage, lexical, and compatibility state under one immediate transaction, keeps the inactive rollback slot byte-for-byte intact, advances the active epoch once, and rolls every row plus signature and publication metadata back when a late mutation fails.",
+      "owner": "graph-schema-and-storage",
+      "changed_artifacts": ["crates/projectatlas-db/src/lib.rs", "crates/projectatlas-db/src/structural_publication.rs", "crates/projectatlas-cli/src/runtime.rs", "crates/projectatlas-cli/tests/e2e.rs", "openspec/changes/advance-rust-repository-intelligence/design.md", "openspec/changes/advance-rust-repository-intelligence/tasks.md", "openspec/task-verification-plan.json", "openspec/task-verification.json"],
+      "risk": "L4-platform-release-security",
+      "required_evidence_layers": ["unit", "integration", "e2e"],
+      "timeout_seconds": 600,
+      "unit_test": {
+        "test_id": "UT:ARRI-4.14",
+        "function": "structural_publication::tests::task_arri_ut_arri_4_14",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-db", "--all-features", "structural_publication::tests::task_arri_ut_arri_4_14", "--", "--exact"] },
+        "assertion": "The store-owned incremental delta preserves the active slot, advances the epoch exactly once after affected-row mutation, invalidates affected typed and lexical rows, retains the inactive slot, and proves late-failure rollback of rows, signature, and publication metadata.",
+        "covered_inputs": ["concrete IncrementalStructuralDelta", "BEGIN IMMEDIATE transaction ownership", "captured base slot and epoch", "affected active-slot graph and evidence invalidation", "affected coverage and lexical mutation", "compatibility node and summary mutation", "retained inactive rollback slot", "publication-row-last epoch advance", "injected late mutation failure rollback", "absence of a third slot or whole-graph copy"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "7.7",
+      "requirement": "The runtime publishes one complete incremental structural delta against the active slot so node, graph, evidence, coverage, lexical, parser, summary, and purpose compatibility state becomes visible with one new epoch.",
+      "scenario": "A real one-file watch refresh scans and parses before publication, revalidates the content and Git signature, then exposes updated lexical, symbol, and summary state together at the same slot and next epoch; database-level late failure exposes none of the prepared state and the epoch itself makes any prior semantic tuple stale.",
+      "owner": "incremental-index-and-worker-integrity",
+      "changed_artifacts": ["crates/projectatlas-cli/src/runtime.rs", "crates/projectatlas-cli/src/runtime/full_scan.rs", "crates/projectatlas-cli/tests/e2e.rs", "crates/projectatlas-db/src/lib.rs", "crates/projectatlas-db/src/structural_publication.rs", "openspec/changes/advance-rust-repository-intelligence/design.md", "openspec/changes/advance-rust-repository-intelligence/tasks.md", "openspec/task-verification-plan.json", "openspec/task-verification.json"],
+      "risk": "L4-platform-release-security",
+      "required_evidence_layers": ["unit", "integration", "e2e"],
+      "timeout_seconds": 600,
+      "unit_test": {
+        "test_id": "UT:ARRI-7.7",
+        "function": "structural_publication::tests::task_arri_ut_arri_7_7",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "--workspace", "--all-features", "task_arri_ut_arri_7_7"] },
+        "assertion": "Coupled database and real-process watch proofs show one-transaction visibility for affected lexical, symbol, summary, purpose, graph, evidence, and coverage state, one same-slot epoch advance, source/Git revalidation, inactive-slot retention, and complete rollback on late failure.",
+        "covered_inputs": ["full-repository change discovery", "prepared affected lexical rows", "parallel parser work before live mutation", "prepared symbol and summary compatibility rows", "pre-publication content and Git signature revalidation", "active-slot typed graph dependency invalidation", "one immediate live transaction", "same-slot next epoch", "prior semantic tuple staleness by epoch", "real CLI watch lexical, symbol, and summary visibility", "late-failure rollback"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "7.18",
+      "requirement": "Versioned content and Git state signatures persist with publication and coalesce repeated identical dirty states across processes before any live mutation.",
+      "scenario": "A real Git repository publishes content and Git-only index-state changes once, skips repeated unchanged states, and detects a Git-only transition through a long-running notify process after an observed readiness publication; two barrier-raced AtlasStore connections and two concurrent CLI processes coalesce the same target to one epoch without a busy failure.",
+      "owner": "incremental-index-and-worker-integrity",
+      "changed_artifacts": ["crates/projectatlas-cli/src/runtime.rs", "crates/projectatlas-cli/src/runtime/full_scan.rs", "crates/projectatlas-cli/tests/e2e.rs", "crates/projectatlas-db/src/schema.rs", "crates/projectatlas-db/src/structural_publication.rs", "openspec/changes/advance-rust-repository-intelligence/design.md", "openspec/changes/advance-rust-repository-intelligence/tasks.md", "openspec/task-verification-plan.json", "openspec/task-verification.json"],
+      "risk": "L4-platform-release-security",
+      "required_evidence_layers": ["unit", "integration", "e2e"],
+      "timeout_seconds": 600,
+      "unit_test": {
+        "test_id": "UT:ARRI-7.18",
+        "function": "structural_publication::tests::task_arri_ut_arri_7_18",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "--workspace", "--all-features", "task_arri_ut_arri_7_18"] },
+        "assertion": "Versioned content and Git revision, index, and worktree identity is persisted atomically; identical target signatures coalesce under the database write lock during a concurrent two-connection race and two concurrent CLI processes without row writes, busy failures, or epoch amplification, while notify mode schedules Git-only signature checks even without a relevant source event.",
+        "covered_inputs": ["versioned length-delimited signature", "sorted normalized node content identity", "shell-free Git revision and cached/worktree diff arguments", "full-scan signature initialization", "signature and epoch atomic commit", "inside-transaction target recheck", "concurrent read-only schema preflight", "concurrent two-connection per-project coalescing", "concurrent two-process CLI coalescing", "Git-only state transition", "content transition", "observed notify readiness publication", "scheduled notify-mode Git-only check", "unchanged follow-up notify interval", "repeated unchanged staged and dirty watch cycles"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "7.19",
+      "requirement": "No-change incremental work writes zero main-database and WAL bytes, while one-file publication writes only the affected closure and remains below a whole-database rewrite bound.",
+      "scenario": "After checkpointing small and materially larger databases with unrelated lexical and graph rows, an identical signature preserves exact main and WAL bytes; the same one-file delta appends only complete WAL frames, remains below a whole-database rewrite in each fixture, stays within a fixed additive frame bound as unrelated state grows, preserves unrelated active rows, and leaves every inactive-slot count unchanged.",
+      "owner": "incremental-index-and-worker-integrity",
+      "changed_artifacts": ["crates/projectatlas-cli/src/runtime.rs", "crates/projectatlas-db/src/structural_publication.rs", "openspec/changes/advance-rust-repository-intelligence/design.md", "openspec/changes/advance-rust-repository-intelligence/tasks.md", "openspec/task-verification-plan.json", "openspec/task-verification.json"],
+      "risk": "L4-platform-release-security",
+      "required_evidence_layers": ["unit", "integration", "benchmark"],
+      "timeout_seconds": 600,
+      "unit_test": {
+        "test_id": "UT:ARRI-7.19",
+        "function": "structural_publication::tests::task_arri_ut_arri_7_19",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-db", "--all-features", "structural_publication::tests::task_arri_ut_arri_7_19", "--", "--exact", "--nocapture"] },
+        "assertion": "Checkpointed small-versus-large file-backed evidence proves an identical target signature preserves exact main-DB and WAL byte identity, while the same one-file publication appends complete WAL frames below a whole-database page rewrite and within a fixed additive bound as unrelated graph and lexical state grows, preserves unrelated active rows, and writes no inactive-slot rows.",
+        "covered_inputs": ["checkpointed main database bytes", "checkpointed WAL bytes", "no-change target-signature short circuit", "exact no-change main-database byte identity", "exact no-change WAL byte identity", "exact one-file main-database byte identity before checkpoint", "small and large unrelated graph fixtures", "small and large unrelated lexical fixtures", "one-file affected-path invalidation", "complete appended SQLite WAL frames", "whole-database page bound", "fixed B-tree-depth and page-placement frame allowance", "unrelated active lexical row retention", "inactive-slot count retention"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
     }
   ],
   "planned_row_definitions": [

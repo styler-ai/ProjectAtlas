@@ -1,11 +1,19 @@
-//! Parent-owned staging and atomic publication for full structural scans.
+//! Parent-owned atomic publication for full scans and incremental structural deltas.
 
-use crate::{AtlasStore, DbError, DbResult, normalize_metadata_path, schema, sqlite_read_uri};
+use crate::{
+    AtlasStore, DbError, DbResult, IndexedFileText, clear_node_summary_in_connection,
+    clear_source_index_in_connection, mark_paths_absent_in_connection,
+    node_id_for_path_in_connection, normalize_metadata_path, replace_symbol_graph_in_connection,
+    schema, set_node_summary_in_connection, set_suggested_purpose_in_connection,
+    sql_string_literals, sqlite_read_uri, upsert_file_text_for_publication, upsert_node,
+};
 use projectatlas_core::graph::{IndexEpoch, ProjectInstanceId, PublicationState, StructuralSlot};
+use projectatlas_core::symbols::SymbolGraph;
+use projectatlas_core::{AGENT_REVIEWED_SOURCE_VALUES, Node, PurposeSource, PurposeStatus};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -25,6 +33,8 @@ const GRAPH_RESOLUTION_CANDIDATES_TABLE: &str = "graph_resolution_candidates";
 const GRAPH_COVERAGE_TABLE: &str = "graph_coverage";
 /// Slot-bound authoritative lexical source table.
 const FILE_TEXTS_TABLE: &str = "file_texts";
+/// Versioned content and VCS identity of the last published structural generation.
+const STRUCTURAL_STATE_SIGNATURE_KEY: &str = "structural_state_signature_v1";
 
 /// Every core structural table whose source and target counts must reconcile.
 const STRUCTURAL_TABLES: [&str; 7] = [
@@ -62,6 +72,93 @@ pub struct StructuralStaging {
     project_root: String,
     /// Authored purpose rows used to detect and preserve concurrent updates.
     base_purposes: BTreeMap<String, PurposeRow>,
+}
+
+/// One validated active-slot delta ready for atomic structural publication.
+#[derive(Debug)]
+pub struct IncrementalStructuralDelta {
+    /// Canonical project root this delta is allowed to mutate.
+    pub project_root: PathBuf,
+    /// Slot and epoch used while the delta was planned.
+    pub base_publication: PublicationState,
+    /// Last-published signature used while the delta was planned.
+    pub base_state_signature: Option<String>,
+    /// Complete content and VCS signature represented by the delta.
+    pub target_state_signature: String,
+    /// Exact paths whose derived dependency closure must be invalidated.
+    pub affected_paths: Vec<String>,
+    /// Current scan rows to insert or update.
+    pub nodes: Vec<Node>,
+    /// Missing paths whose rows and descendants must become absent.
+    pub absent_paths: Vec<String>,
+    /// Current UTF-8 lexical rows for affected paths.
+    pub file_texts: Vec<IndexedFileText>,
+    /// Parser-owned compatibility mutations for affected files.
+    pub source_mutations: Vec<IncrementalSourceMutation>,
+    /// Structural summary mutations applied after parser mutations.
+    pub summary_mutations: Vec<IncrementalSummaryMutation>,
+    /// Durable built-in purposes that may replace only non-approved state.
+    pub built_in_purposes: Vec<IncrementalBuiltInPurpose>,
+}
+
+/// Parser-owned compatibility mutation for one affected source file.
+#[derive(Debug)]
+pub enum IncrementalSourceMutation {
+    /// Replace the file's parser graph and observed summary together.
+    Replace {
+        /// Complete parser graph for the affected path.
+        graph: SymbolGraph,
+        /// Observed parser summary for the affected path.
+        summary: String,
+        /// Optional generated purpose suggestion.
+        purpose_suggestion: Option<String>,
+    },
+    /// Clear stale parser output, optionally preserving a structural summary.
+    Clear {
+        /// Repository-relative affected path.
+        path: String,
+        /// Whether the node-level summary belongs to another structural producer.
+        preserve_node_summary: bool,
+    },
+}
+
+/// Structural-summary mutation for one affected file.
+#[derive(Debug)]
+pub enum IncrementalSummaryMutation {
+    /// Set the observed summary and optional generated purpose suggestion.
+    Set {
+        /// Repository-relative affected path.
+        path: String,
+        /// Deterministic observed summary.
+        summary: String,
+        /// Optional generated purpose suggestion.
+        purpose_suggestion: Option<String>,
+    },
+    /// Remove a stale observed summary.
+    Clear {
+        /// Repository-relative affected path.
+        path: String,
+    },
+}
+
+/// Built-in purpose assignment owned by runtime policy.
+#[derive(Debug)]
+pub struct IncrementalBuiltInPurpose {
+    /// Repository-relative built-in path.
+    pub path: String,
+    /// Durable built-in purpose text.
+    pub purpose: String,
+    /// Durable source identity for the purpose.
+    pub source: PurposeSource,
+}
+
+/// Outcome of attempting to publish one incremental structural delta.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IncrementalPublication {
+    /// The delta committed and advanced the active epoch exactly once.
+    Published(PublicationState),
+    /// Another process already published the exact target signature.
+    Unchanged(PublicationState),
 }
 
 impl StructuralStaging {
@@ -138,6 +235,7 @@ impl AtlasStore {
         })?;
         self.connection
             .execute("VACUUM main INTO ?1", [staging_text])?;
+        clear_staging_structural_state_signature(staging_path)?;
 
         let staging = StructuralStaging {
             path: staging_path.to_path_buf(),
@@ -232,6 +330,125 @@ impl AtlasStore {
     pub fn publication_state(&self) -> DbResult<PublicationState> {
         load_publication_state(&self.connection)
     }
+
+    /// Read the versioned content and VCS signature of the active generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when metadata cannot be read.
+    pub fn structural_state_signature(&self) -> DbResult<Option<String>> {
+        load_metadata(&self.connection, None, STRUCTURAL_STATE_SIGNATURE_KEY)
+    }
+
+    /// Store a structural state signature in the exact staging database before sealing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the signature is empty or metadata cannot be written.
+    pub fn set_staged_structural_state_signature(
+        &self,
+        staging: &StructuralStaging,
+        signature: &str,
+    ) -> DbResult<()> {
+        require_structural_state_signature(signature)?;
+        validate_staging_identity(&self.connection, staging)?;
+        upsert_structural_state_signature(&self.connection, signature)
+    }
+
+    /// Atomically apply one affected-row delta to the active structural slot.
+    ///
+    /// The retained inactive slot is never read, copied, or mutated. The target
+    /// signature is checked again after acquiring the per-database write lock so
+    /// concurrent processes that planned the same state coalesce without writes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the project root, base slot/epoch, base signature,
+    /// affected rows, reconciliation, or final publication metadata is invalid.
+    /// Every error rolls back all compatibility and structural row mutations.
+    pub fn publish_incremental_structural_delta(
+        &mut self,
+        delta: &IncrementalStructuralDelta,
+    ) -> DbResult<IncrementalPublication> {
+        require_structural_state_signature(&delta.target_state_signature)?;
+        validate_incremental_delta(delta)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let live_publication = load_publication_state(&transaction)?;
+        let live_signature = load_metadata(&transaction, None, STRUCTURAL_STATE_SIGNATURE_KEY)?;
+        if live_signature.as_deref() == Some(delta.target_state_signature.as_str()) {
+            return Ok(IncrementalPublication::Unchanged(live_publication));
+        }
+        if live_publication != delta.base_publication {
+            return Err(publication_error(format!(
+                "live publication changed while incremental work was planned: expected {:?}, found {:?}",
+                delta.base_publication, live_publication
+            )));
+        }
+        if live_signature != delta.base_state_signature {
+            return Err(publication_error(format!(
+                "live structural signature changed while incremental work was planned: expected {:?}, found {:?}",
+                delta.base_state_signature, live_signature
+            )));
+        }
+        bind_incremental_project_root(&transaction, &delta.project_root)?;
+
+        let next_publication = live_publication
+            .next_incremental()
+            .map_err(|error| publication_error(error.to_string()))?;
+        let active_slot = slot_text(live_publication.active_slot);
+        let next_epoch = i64::try_from(next_publication.active_epoch.get()).map_err(|source| {
+            publication_error(format!(
+                "incremental publication epoch exceeds SQLite INTEGER: {source}"
+            ))
+        })?;
+
+        invalidate_structural_paths(&transaction, active_slot, &delta.affected_paths)?;
+        for node in &delta.nodes {
+            upsert_node(&transaction, node)?;
+        }
+        for purpose in &delta.built_in_purposes {
+            set_built_in_purpose(&transaction, purpose)?;
+        }
+        mark_paths_absent_in_connection(&transaction, &delta.absent_paths)?;
+        for text in &delta.file_texts {
+            upsert_file_text_for_publication(&transaction, text, active_slot, next_epoch)?;
+        }
+        for mutation in &delta.source_mutations {
+            apply_incremental_source_mutation(&transaction, mutation)?;
+        }
+        for mutation in &delta.summary_mutations {
+            apply_incremental_summary_mutation(&transaction, mutation)?;
+        }
+
+        upsert_structural_state_signature(&transaction, &delta.target_state_signature)?;
+        let changed = transaction.execute(
+            "UPDATE graph_publication_state
+             SET active_epoch = ?1
+             WHERE singleton = 1 AND active_slot = ?2 AND active_epoch = ?3",
+            params![
+                next_epoch,
+                active_slot,
+                i64::try_from(live_publication.active_epoch.get()).map_err(|source| {
+                    publication_error(format!("base epoch exceeds SQLite INTEGER: {source}"))
+                })?
+            ],
+        )?;
+        if changed != 1 {
+            return Err(publication_error(
+                "publication singleton changed before the incremental epoch advance",
+            ));
+        }
+        if load_publication_state(&transaction)? != next_publication {
+            return Err(publication_error(
+                "publication singleton did not reconcile after the incremental epoch advance",
+            ));
+        }
+        schema::verify_current_schema(&transaction)?;
+        transaction.commit()?;
+        Ok(IncrementalPublication::Published(next_publication))
+    }
 }
 
 /// Attach a sealed staging database without granting publication code write access.
@@ -244,6 +461,284 @@ fn attach_structural_staging_read_only(
         [sqlite_read_uri(staging_path, true)],
     )?;
     Ok(())
+}
+
+/// Reject an absent or ambiguous structural state identity.
+fn require_structural_state_signature(signature: &str) -> DbResult<()> {
+    if signature.trim().is_empty() {
+        return Err(publication_error(
+            "structural state signature must not be empty",
+        ));
+    }
+    Ok(())
+}
+
+/// Remove the copied live-generation signature so every stage must set its own identity.
+fn clear_staging_structural_state_signature(staging_path: &Path) -> DbResult<()> {
+    let staging = Connection::open_with_flags(staging_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    staging.execute(
+        "DELETE FROM metadata WHERE key = ?1",
+        [STRUCTURAL_STATE_SIGNATURE_KEY],
+    )?;
+    let busy = staging.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+        row.get::<_, i64>(0)
+    })?;
+    if busy != 0 {
+        return Err(publication_error(format!(
+            "staging signature reset WAL checkpoint remained busy: {busy}"
+        )));
+    }
+    Ok(())
+}
+
+/// Store the last-published structural identity within the caller's write boundary.
+fn upsert_structural_state_signature(connection: &Connection, signature: &str) -> DbResult<()> {
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES(?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![STRUCTURAL_STATE_SIGNATURE_KEY, signature],
+    )?;
+    Ok(())
+}
+
+/// Reject malformed or out-of-closure incremental mutations before taking the write lock.
+fn validate_incremental_delta(delta: &IncrementalStructuralDelta) -> DbResult<()> {
+    let mut unique_affected_paths = HashSet::new();
+    for path in &delta.affected_paths {
+        require_normalized_delta_path(path, "affected path")?;
+        if !unique_affected_paths.insert(path.as_str()) {
+            return Err(publication_error(format!(
+                "incremental delta repeats affected path {path:?}"
+            )));
+        }
+    }
+
+    for node in &delta.nodes {
+        require_path_in_affected_closure(delta, &node.path, "node")?;
+    }
+    for path in &delta.absent_paths {
+        require_path_in_affected_closure(delta, path, "absent path")?;
+    }
+    for text in &delta.file_texts {
+        require_path_in_affected_closure(delta, &text.path, "lexical row")?;
+    }
+    for mutation in &delta.source_mutations {
+        let path = match mutation {
+            IncrementalSourceMutation::Replace { graph, .. } => &graph.path,
+            IncrementalSourceMutation::Clear { path, .. } => path,
+        };
+        require_path_in_affected_closure(delta, path, "source mutation")?;
+    }
+    for mutation in &delta.summary_mutations {
+        let path = match mutation {
+            IncrementalSummaryMutation::Set { path, .. }
+            | IncrementalSummaryMutation::Clear { path } => path,
+        };
+        require_path_in_affected_closure(delta, path, "summary mutation")?;
+    }
+    for purpose in &delta.built_in_purposes {
+        require_path_in_affected_closure(delta, &purpose.path, "built-in purpose")?;
+    }
+    Ok(())
+}
+
+/// Require one canonical repository key and reject path traversal or native separators.
+fn require_normalized_delta_path(path: &str, role: &str) -> DbResult<()> {
+    let valid = path == "."
+        || (!path.is_empty()
+            && !path.starts_with('/')
+            && !path.ends_with('/')
+            && !path.contains('\\')
+            && path
+                .split('/')
+                .all(|component| !component.is_empty() && component != "." && component != ".."));
+    if valid {
+        Ok(())
+    } else {
+        Err(publication_error(format!(
+            "incremental delta {role} is not a normalized repository path: {path:?}"
+        )))
+    }
+}
+
+/// Require every prepared mutation to remain inside the declared affected closure.
+fn require_path_in_affected_closure(
+    delta: &IncrementalStructuralDelta,
+    path: &str,
+    role: &str,
+) -> DbResult<()> {
+    require_normalized_delta_path(path, role)?;
+    if delta
+        .affected_paths
+        .iter()
+        .any(|affected| path_is_within_affected_path(path, affected))
+    {
+        Ok(())
+    } else {
+        Err(publication_error(format!(
+            "incremental delta {role} {path:?} is outside the declared affected closure"
+        )))
+    }
+}
+
+/// Return whether one repository key is equal to or below an affected path.
+fn path_is_within_affected_path(path: &str, affected: &str) -> bool {
+    affected == "."
+        || path == affected
+        || path
+            .strip_prefix(affected)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+/// Bind or validate the canonical project root for incremental publication.
+fn bind_incremental_project_root(
+    transaction: &Transaction<'_>,
+    project_root: &Path,
+) -> DbResult<()> {
+    let requested = normalize_metadata_path(project_root);
+    match load_project_root(transaction, None)? {
+        Some(live) if live != requested => Err(publication_error(format!(
+            "live project root does not match the incremental delta root: live={live:?}, requested={requested:?}"
+        ))),
+        Some(_) => Ok(()),
+        None => {
+            transaction.execute(
+                "INSERT INTO metadata(key, value) VALUES('project_root', ?1)",
+                [&requested],
+            )?;
+            Ok(())
+        }
+    }
+}
+
+/// Invalidate only affected active-slot typed graph, coverage, evidence, and lexical rows.
+fn invalidate_structural_paths(
+    transaction: &Transaction<'_>,
+    active_slot: &str,
+    paths: &[String],
+) -> DbResult<()> {
+    for path in paths {
+        if path.is_empty() {
+            continue;
+        }
+        if path == "." {
+            for table in STRUCTURAL_DELETE_ORDER {
+                transaction.execute(
+                    &format!("DELETE FROM {table} WHERE structural_slot = ?1"),
+                    [active_slot],
+                )?;
+            }
+            continue;
+        }
+        let descendants = crate::sqlite_descendant_pattern(path);
+        transaction.execute(
+            "DELETE FROM graph_evidence_occurrences
+             WHERE structural_slot = ?1
+               AND (origin_repository_path = ?2 OR origin_repository_path LIKE ?3 ESCAPE '\\')",
+            params![active_slot, path, descendants],
+        )?;
+        transaction.execute(
+            "DELETE FROM graph_resolution_occurrences
+             WHERE structural_slot = ?1
+               AND (origin_repository_path = ?2 OR origin_repository_path LIKE ?3 ESCAPE '\\')",
+            params![active_slot, path, descendants],
+        )?;
+        transaction.execute(
+            "DELETE FROM graph_coverage
+             WHERE structural_slot = ?1
+               AND (repository_path = ?2 OR repository_path LIKE ?3 ESCAPE '\\')",
+            params![active_slot, path, descendants],
+        )?;
+        transaction.execute(
+            "DELETE FROM graph_entities
+             WHERE structural_slot = ?1
+               AND (repository_path = ?2 OR repository_path LIKE ?3 ESCAPE '\\')",
+            params![active_slot, path, descendants],
+        )?;
+        transaction.execute(
+            "DELETE FROM file_texts
+             WHERE structural_slot = ?1
+               AND (path = ?2 OR path LIKE ?3 ESCAPE '\\')",
+            params![active_slot, path, descendants],
+        )?;
+    }
+    Ok(())
+}
+
+/// Apply one runtime-owned built-in purpose without replacing approved authored state.
+fn set_built_in_purpose(
+    connection: &Connection,
+    purpose: &IncrementalBuiltInPurpose,
+) -> DbResult<()> {
+    let node_id = node_id_for_path_in_connection(connection, &purpose.path)?;
+    let reviewed_sources = sql_string_literals(AGENT_REVIEWED_SOURCE_VALUES);
+    let missing = PurposeStatus::Missing.as_str();
+    let suggested = PurposeStatus::Suggested.as_str();
+    let stale = PurposeStatus::Stale.as_str();
+    let sql = format!(
+        "INSERT INTO purposes(node_id, purpose, source, status, updated_at)
+         VALUES(?1, ?2, ?3, 'approved', CURRENT_TIMESTAMP)
+         ON CONFLICT(node_id) DO UPDATE SET
+             purpose = excluded.purpose,
+             source = excluded.source,
+             status = 'approved',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE purposes.status IN ('{missing}', '{suggested}')
+            OR (purposes.status = '{stale}'
+                AND purposes.source NOT IN ({reviewed_sources}))"
+    );
+    connection.execute(
+        &sql,
+        params![node_id, purpose.purpose, purpose.source.to_string()],
+    )?;
+    Ok(())
+}
+
+/// Apply one parser-owned compatibility mutation inside the publication transaction.
+fn apply_incremental_source_mutation(
+    connection: &Connection,
+    mutation: &IncrementalSourceMutation,
+) -> DbResult<()> {
+    match mutation {
+        IncrementalSourceMutation::Replace {
+            graph,
+            summary,
+            purpose_suggestion,
+        } => {
+            set_node_summary_in_connection(connection, &graph.path, summary)?;
+            if let Some(suggestion) = purpose_suggestion {
+                set_suggested_purpose_in_connection(connection, &graph.path, suggestion)?;
+            }
+            replace_symbol_graph_in_connection(connection, graph)
+        }
+        IncrementalSourceMutation::Clear {
+            path,
+            preserve_node_summary,
+        } => clear_source_index_in_connection(connection, path, *preserve_node_summary),
+    }
+}
+
+/// Apply one structural-summary mutation inside the publication transaction.
+fn apply_incremental_summary_mutation(
+    connection: &Connection,
+    mutation: &IncrementalSummaryMutation,
+) -> DbResult<()> {
+    match mutation {
+        IncrementalSummaryMutation::Set {
+            path,
+            summary,
+            purpose_suggestion,
+        } => {
+            set_node_summary_in_connection(connection, path, summary)?;
+            if let Some(suggestion) = purpose_suggestion {
+                set_suggested_purpose_in_connection(connection, path, suggestion)?;
+            }
+            Ok(())
+        }
+        IncrementalSummaryMutation::Clear { path } => {
+            clear_node_summary_in_connection(connection, path)
+        }
+    }
 }
 
 /// Run the one parent transaction against an already attached validated stage.
@@ -261,6 +756,14 @@ fn publish_attached(
     }
     validate_attached_identity(&transaction, staging)?;
     bind_live_project_root(&transaction, staging)?;
+    let signature = load_metadata(
+        &transaction,
+        Some(STAGING_SCHEMA),
+        STRUCTURAL_STATE_SIGNATURE_KEY,
+    )?
+    .ok_or_else(|| publication_error("staging structural state signature is missing"))?;
+    require_structural_state_signature(&signature)?;
+    upsert_structural_state_signature(&transaction, &signature)?;
 
     let next_publication = live_publication
         .next_full()
@@ -936,6 +1439,13 @@ mod tests {
     use projectatlas_core::{Node, NodeKind, PurposeSource};
     use std::error::Error;
     use std::io;
+    use std::io::Write as _;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    // Fixed allowance for extra B-tree interior/page-placement touches in the
+    // larger fixture; it must not grow with the unrelated-row multiplier.
+    const MAX_UNRELATED_SCALE_FRAME_DELTA: usize = 12;
 
     #[test]
     fn task_arri_ut_arri_4_12() -> Result<(), Box<dyn Error>> {
@@ -945,6 +1455,503 @@ mod tests {
     #[test]
     fn task_arri_ut_arri_7_6() -> Result<(), Box<dyn Error>> {
         prove_parent_owned_full_scan_publication()
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_14() -> Result<(), Box<dyn Error>> {
+        prove_incremental_publication_atomicity()
+    }
+
+    #[test]
+    fn task_arri_ut_arri_7_7() -> Result<(), Box<dyn Error>> {
+        prove_incremental_publication_atomicity()
+    }
+
+    #[test]
+    fn task_arri_ut_arri_7_18() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let db_path = temp.path().join("coalescing.db");
+        fs::create_dir(&root)?;
+        let mut setup = AtlasStore::open(&db_path)?;
+        setup.set_project_root(&root)?;
+        setup.replace_scan(&[file_node("src/lib.rs", "base-hash")])?;
+        setup.replace_file_texts_for_paths(
+            &["src/lib.rs".to_owned()],
+            &[file_text("src/lib.rs", "base content")],
+        )?;
+        upsert_structural_state_signature(&setup.connection, "git-content-base")?;
+        let base = setup.publication_state()?;
+        let base_signature = setup.structural_state_signature()?;
+        drop(setup);
+
+        let first_store = AtlasStore::open(&db_path)?;
+        let second_store = AtlasStore::open(&db_path)?;
+        let barrier = Arc::new(Barrier::new(3));
+        let spawn_publication = |worker: &'static str, mut store: AtlasStore| {
+            let barrier = Arc::clone(&barrier);
+            let root = root.clone();
+            let base_signature = base_signature.clone();
+            thread::spawn(move || -> Result<IncrementalPublication, String> {
+                let delta = test_incremental_delta(
+                    &root,
+                    base,
+                    base_signature,
+                    "git-content-dirty",
+                    "dirty-hash",
+                    "dirty content",
+                );
+                barrier.wait();
+                store
+                    .publish_incremental_structural_delta(&delta)
+                    .map_err(|error| format!("{worker} publication failed: {error}"))
+            })
+        };
+        let first = spawn_publication("first concurrent connection", first_store);
+        let second = spawn_publication("second concurrent connection", second_store);
+        barrier.wait();
+        let first = first
+            .join()
+            .map_err(|_panic| io::Error::other("first concurrent publication panicked"))?
+            .map_err(io::Error::other)?;
+        let second = second
+            .join()
+            .map_err(|_panic| io::Error::other("second concurrent publication panicked"))?
+            .map_err(io::Error::other)?;
+        let published_state = base.next_incremental()?;
+        let published_count = [&first, &second]
+            .into_iter()
+            .filter(|outcome| matches!(outcome, IncrementalPublication::Published(_)))
+            .count();
+        let unchanged_count = [&first, &second]
+            .into_iter()
+            .filter(|outcome| matches!(outcome, IncrementalPublication::Unchanged(_)))
+            .count();
+        require_eq(&published_count, &1, "concurrent published outcome count")?;
+        require_eq(&unchanged_count, &1, "concurrent unchanged outcome count")?;
+        for outcome in [&first, &second] {
+            let state = match outcome {
+                IncrementalPublication::Published(state)
+                | IncrementalPublication::Unchanged(state) => state,
+            };
+            require_eq(state, &published_state, "concurrent publication state")?;
+        }
+
+        let mut final_store = AtlasStore::open(&db_path)?;
+        let repeated_delta = test_incremental_delta(
+            &root,
+            base,
+            base_signature,
+            "git-content-dirty",
+            "dirty-hash",
+            "dirty content",
+        );
+        require_eq(
+            &final_store.publish_incremental_structural_delta(&repeated_delta)?,
+            &IncrementalPublication::Unchanged(published_state),
+            "repeated identical dirty-state coalescing",
+        )?;
+        require_eq(
+            &final_store.publication_state()?,
+            &published_state,
+            "coalesced dirty state epoch",
+        )?;
+        require_eq(
+            &final_store.structural_state_signature()?,
+            &Some("git-content-dirty".to_owned()),
+            "coalesced dirty state signature",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn task_arri_ut_arri_7_19() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let small =
+            measure_incremental_wal_frames(&root, &temp.path().join("write-gate-small.db"), 24)?;
+        let large =
+            measure_incremental_wal_frames(&root, &temp.path().join("write-gate-large.db"), 400)?;
+        require(
+            large.database_pages >= small.database_pages.saturating_mul(8),
+            "large unrelated graph fixture did not materially exceed the small fixture",
+        )?;
+        require(
+            large.appended_frames
+                <= small
+                    .appended_frames
+                    .saturating_add(MAX_UNRELATED_SCALE_FRAME_DELTA),
+            "one-file WAL frames scaled with unrelated graph size",
+        )?;
+        writeln!(
+            io::stdout().lock(),
+            "ARRI-7.19 WAL frames: small_pages={}, small_frames={}, large_pages={}, large_frames={}, fixed_frame_allowance={MAX_UNRELATED_SCALE_FRAME_DELTA}",
+            small.database_pages,
+            small.appended_frames,
+            large.database_pages,
+            large.appended_frames,
+        )?;
+        Ok(())
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct WriteGateMeasurement {
+        appended_frames: usize,
+        database_pages: usize,
+    }
+
+    fn measure_incremental_wal_frames(
+        root: &Path,
+        db_path: &Path,
+        unrelated_count: usize,
+    ) -> Result<WriteGateMeasurement, Box<dyn Error>> {
+        let mut store = AtlasStore::open(db_path)?;
+        store.set_project_root(root)?;
+        store
+            .connection
+            .pragma_update(None, "wal_autocheckpoint", 0)?;
+
+        let mut nodes = vec![file_node("src/lib.rs", "base-hash")];
+        nodes.extend(
+            (0..unrelated_count)
+                .map(|index| file_node(&format!("src/file-{index:03}.rs"), "base-hash")),
+        );
+        let texts = nodes
+            .iter()
+            .map(|node| file_text(&node.path, &"x".repeat(4096)))
+            .collect::<Vec<_>>();
+        store.replace_scan(&nodes)?;
+        store.replace_file_texts_for_paths(
+            &nodes
+                .iter()
+                .map(|node| node.path.clone())
+                .collect::<Vec<_>>(),
+            &texts,
+        )?;
+        let transaction = store.connection.transaction()?;
+        for node in &nodes {
+            insert_graph_entity(&transaction, &node.path, &node.path)?;
+        }
+        transaction.commit()?;
+        upsert_structural_state_signature(&store.connection, "write-base")?;
+        checkpoint(&store.connection)?;
+
+        let base = store.publication_state()?;
+        let no_change = IncrementalStructuralDelta {
+            project_root: root.to_path_buf(),
+            base_publication: base,
+            base_state_signature: Some("write-base".to_owned()),
+            target_state_signature: "write-base".to_owned(),
+            affected_paths: Vec::new(),
+            nodes: Vec::new(),
+            absent_paths: Vec::new(),
+            file_texts: Vec::new(),
+            source_mutations: Vec::new(),
+            summary_mutations: Vec::new(),
+            built_in_purposes: Vec::new(),
+        };
+        let db_before = fs::read(db_path)?;
+        let wal_path = sqlite_sidecar_path(db_path, "-wal");
+        let wal_before = read_optional_file(&wal_path)?;
+        require_eq(
+            &store.publish_incremental_structural_delta(&no_change)?,
+            &IncrementalPublication::Unchanged(base),
+            "no-change publication outcome",
+        )?;
+        require_eq(
+            &fs::read(db_path)?,
+            &db_before,
+            "no-change main database byte identity",
+        )?;
+        require_eq(
+            &read_optional_file(&wal_path)?,
+            &wal_before,
+            "no-change WAL byte identity",
+        )?;
+
+        let inactive_before = structural_counts(&store.connection, StructuralSlot::B)?;
+        let one_file = test_incremental_delta(
+            root,
+            base,
+            Some("write-base".to_owned()),
+            "write-one-file",
+            "changed-hash",
+            "changed content",
+        );
+        require(
+            matches!(
+                store.publish_incremental_structural_delta(&one_file)?,
+                IncrementalPublication::Published(_)
+            ),
+            "one-file delta did not publish",
+        )?;
+        require_eq(
+            &fs::read(db_path)?,
+            &db_before,
+            "one-file main database byte identity before checkpoint",
+        )?;
+        let wal_after = read_optional_file(&wal_path)?;
+        require(
+            wal_after.starts_with(&wal_before),
+            "one-file update did not append to the checkpointed WAL",
+        )?;
+        let page_size = store
+            .connection
+            .query_row("PRAGMA page_size", [], |row| row.get::<_, usize>(0))?;
+        let wal_frame_size = page_size.saturating_add(24);
+        let appended_wal_bytes = wal_after.len().saturating_sub(wal_before.len());
+        require(
+            appended_wal_bytes >= 32 && (appended_wal_bytes - 32) % wal_frame_size == 0,
+            "one-file WAL bytes did not form a header plus complete SQLite frames",
+        )?;
+        let appended_frames = (appended_wal_bytes - 32) / wal_frame_size;
+        require(
+            appended_frames > 0,
+            "one-file update appended no WAL frames",
+        )?;
+        let whole_database_pages = db_before.len().div_ceil(page_size);
+        require(
+            appended_frames < whole_database_pages,
+            "one-file WAL frames did not stay below a whole-database rewrite",
+        )?;
+        require_eq(
+            &structural_counts(&store.connection, StructuralSlot::B)?,
+            &inactive_before,
+            "one-file update retained inactive-slot bytes",
+        )?;
+        require(
+            store
+                .load_file_text(&format!(
+                    "src/file-{:03}.rs",
+                    unrelated_count.saturating_sub(1)
+                ))?
+                .is_some(),
+            "one-file update rewrote or lost an unrelated lexical row",
+        )?;
+        Ok(WriteGateMeasurement {
+            appended_frames,
+            database_pages: whole_database_pages,
+        })
+    }
+
+    fn prove_incremental_publication_atomicity() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(&root)?;
+        store.replace_scan(&[file_node("src/lib.rs", "base-hash")])?;
+        store.replace_file_texts_for_paths(
+            &["src/lib.rs".to_owned()],
+            &[file_text("src/lib.rs", "base content")],
+        )?;
+        store.set_purpose(
+            "src/lib.rs",
+            "Preserve authored incremental intent.",
+            PurposeSource::Agent,
+        )?;
+        store.connection.execute(
+            "INSERT INTO file_texts(
+                 path, content_hash, byte_count, line_count, content,
+                 structural_slot, last_changed_epoch
+             ) VALUES('rollback.rs', 'rollback', 8, 1, 'rollback', 'b', 0)",
+            [],
+        )?;
+        insert_graph_entity(&store.connection, "affected", "src/lib.rs")?;
+        upsert_structural_state_signature(&store.connection, "atomic-base")?;
+        let inactive_before = structural_counts(&store.connection, StructuralSlot::B)?;
+        let base = store.publication_state()?;
+        let mut delta = test_incremental_delta(
+            &root,
+            base,
+            Some("atomic-base".to_owned()),
+            "atomic-next",
+            "next-hash",
+            "next content",
+        );
+        let mut out_of_closure = test_incremental_delta(
+            &root,
+            base,
+            Some("atomic-base".to_owned()),
+            "atomic-invalid-closure",
+            "invalid-hash",
+            "invalid content",
+        );
+        out_of_closure
+            .file_texts
+            .push(file_text("src/unrelated.rs", "out of closure"));
+        let closure_error = match store.publish_incremental_structural_delta(&out_of_closure) {
+            Err(error) => error,
+            Ok(publication) => {
+                return Err(format!(
+                    "out-of-closure delta published unexpectedly: {publication:?}"
+                )
+                .into());
+            }
+        };
+        require(
+            closure_error.to_string().contains("affected closure"),
+            "out-of-closure rejection lost its cause",
+        )?;
+        require_eq(
+            &store.publication_state()?,
+            &base,
+            "publication state after out-of-closure rejection",
+        )?;
+        require_eq(
+            &store.structural_state_signature()?,
+            &Some("atomic-base".to_owned()),
+            "signature after out-of-closure rejection",
+        )?;
+        delta.summary_mutations = vec![IncrementalSummaryMutation::Set {
+            path: "src/lib.rs".to_owned(),
+            summary: "Updated compatibility summary.".to_owned(),
+            purpose_suggestion: Some("Describe the updated compatibility source.".to_owned()),
+        }];
+        delta.built_in_purposes = vec![IncrementalBuiltInPurpose {
+            path: "src/lib.rs".to_owned(),
+            purpose: "Replace authored intent incorrectly.".to_owned(),
+            source: PurposeSource::Imported,
+        }];
+        let publication = match store.publish_incremental_structural_delta(&delta)? {
+            IncrementalPublication::Published(state) => state,
+            IncrementalPublication::Unchanged(state) => {
+                return Err(format!("incremental delta coalesced unexpectedly: {state:?}").into());
+            }
+        };
+        require_eq(
+            &publication.active_slot,
+            &StructuralSlot::A,
+            "incremental slot",
+        )?;
+        require_eq(
+            &publication.active_epoch,
+            &IndexEpoch::new(1),
+            "incremental epoch",
+        )?;
+        require_eq(
+            &require_some(store.load_file_text("src/lib.rs")?, "published text")?.content,
+            &"next content".to_owned(),
+            "published lexical content",
+        )?;
+        require_eq(
+            &structural_counts(&store.connection, StructuralSlot::B)?,
+            &inactive_before,
+            "retained inactive slot",
+        )?;
+        require_eq(
+            &store.connection.query_row(
+                "SELECT COUNT(*) FROM graph_entities
+                 WHERE structural_slot = 'a' AND repository_path = 'src/lib.rs'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            &0,
+            "affected typed graph invalidation",
+        )?;
+        require_eq(
+            &store.structural_state_signature()?,
+            &Some("atomic-next".to_owned()),
+            "published structural signature",
+        )?;
+        let published_node =
+            require_some(store.load_node_by_path("src/lib.rs")?, "published node")?;
+        require_eq(
+            &published_node.purpose.purpose,
+            &Some("Preserve authored incremental intent.".to_owned()),
+            "stale authored purpose text",
+        )?;
+        require_eq(
+            &published_node.purpose.source,
+            &PurposeSource::Agent,
+            "stale authored purpose source",
+        )?;
+        require_eq(
+            &published_node.purpose.status,
+            &PurposeStatus::Stale,
+            "stale authored purpose status",
+        )?;
+
+        let stable_node = require_some(store.load_node_by_path("src/lib.rs")?, "stable node")?;
+        let stable_text = require_some(store.load_file_text("src/lib.rs")?, "stable text")?;
+        let stable_state = store.publication_state()?;
+        let stable_inactive = structural_counts(&store.connection, StructuralSlot::B)?;
+        let mut failing = test_incremental_delta(
+            &root,
+            stable_state,
+            Some("atomic-next".to_owned()),
+            "atomic-failure",
+            "failure-hash",
+            "failure content",
+        );
+        failing.summary_mutations = vec![IncrementalSummaryMutation::Clear {
+            path: "src/missing.rs".to_owned(),
+        }];
+        failing.affected_paths.push("src/missing.rs".to_owned());
+        require(
+            store
+                .publish_incremental_structural_delta(&failing)
+                .is_err(),
+            "late incremental failure unexpectedly committed",
+        )?;
+        require_eq(
+            &store.publication_state()?,
+            &stable_state,
+            "publication state after late rollback",
+        )?;
+        require_eq(
+            &store.structural_state_signature()?,
+            &Some("atomic-next".to_owned()),
+            "signature after late rollback",
+        )?;
+        require_eq(
+            &require_some(store.load_node_by_path("src/lib.rs")?, "rolled-back node")?.node,
+            &stable_node.node,
+            "compatibility node after late rollback",
+        )?;
+        require_eq(
+            &require_some(store.load_file_text("src/lib.rs")?, "rolled-back text")?,
+            &stable_text,
+            "lexical row after late rollback",
+        )?;
+        require_eq(
+            &structural_counts(&store.connection, StructuralSlot::B)?,
+            &stable_inactive,
+            "inactive slot after late rollback",
+        )?;
+        Ok(())
+    }
+
+    fn test_incremental_delta(
+        root: &Path,
+        base_publication: PublicationState,
+        base_state_signature: Option<String>,
+        target_state_signature: &str,
+        hash: &str,
+        content: &str,
+    ) -> IncrementalStructuralDelta {
+        IncrementalStructuralDelta {
+            project_root: root.to_path_buf(),
+            base_publication,
+            base_state_signature,
+            target_state_signature: target_state_signature.to_owned(),
+            affected_paths: vec!["src/lib.rs".to_owned()],
+            nodes: vec![file_node("src/lib.rs", hash)],
+            absent_paths: Vec::new(),
+            file_texts: vec![file_text("src/lib.rs", content)],
+            source_mutations: Vec::new(),
+            summary_mutations: Vec::new(),
+            built_in_purposes: Vec::new(),
+        }
+    }
+
+    fn read_optional_file(path: &Path) -> io::Result<Vec<u8>> {
+        match fs::read(path) {
+            Ok(bytes) => Ok(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
     }
 
     fn prove_parent_owned_full_scan_publication() -> Result<(), Box<dyn Error>> {
@@ -982,6 +1989,7 @@ mod tests {
         )?;
         insert_graph_entity(&stage.connection, "new", "src/new.rs")?;
         let staged_counts = structural_counts(&stage.connection, StructuralSlot::A)?;
+        stage.set_staged_structural_state_signature(&staging, "full-next")?;
         stage.seal_structural_staging(&staging)?;
         drop(stage);
         prove_staging_attachment_is_read_only(&live, &staging)?;
@@ -1014,6 +2022,11 @@ mod tests {
             &structural_counts(&live.connection, StructuralSlot::B)?,
             &staged_counts,
             "staged and published structural counts",
+        )?;
+        require_eq(
+            &live.structural_state_signature()?,
+            &Some("full-next".to_owned()),
+            "full publication structural signature",
         )?;
         require_eq(
             &live.connection.query_row(
@@ -1087,6 +2100,7 @@ mod tests {
             "wrong-base",
             "corrupt-schema",
             "failed-quick-check",
+            "missing-signature",
         ] {
             let case_dir = root.join(case);
             fs::create_dir(&case_dir)?;
@@ -1101,6 +2115,9 @@ mod tests {
                 &["src/live.rs".to_owned()],
                 &[file_text("src/live.rs", "last valid generation")],
             )?;
+            if case == "missing-signature" {
+                upsert_structural_state_signature(&live.connection, "live-base")?;
+            }
             let base = live.publication_state()?;
             let staging = live.create_structural_staging(&live_path, &stage_path, &repo_root)?;
             let stage = AtlasStore::open(staging.path())?;
@@ -1148,6 +2165,7 @@ mod tests {
                         schema_version.saturating_add(1),
                     )?;
                 }
+                "missing-signature" => {}
                 other => return Err(format!("unknown staging rejection case: {other}").into()),
             }
             checkpoint(&stage.connection)?;
@@ -1164,6 +2182,9 @@ mod tests {
             };
             if case == "failed-quick-check" && !error.to_string().contains("quick_check") {
                 return Err(format!("quick-check rejection lost its cause: {error}").into());
+            }
+            if case == "missing-signature" && !error.to_string().contains("signature") {
+                return Err(format!("missing-signature rejection lost its cause: {error}").into());
             }
             require_eq(
                 &live.publication_state()?,
@@ -1212,6 +2233,7 @@ mod tests {
             &["src/candidate.rs".to_owned()],
             &[file_text("src/candidate.rs", "candidate generation")],
         )?;
+        stage.set_staged_structural_state_signature(&staging, "candidate-next")?;
         stage.seal_structural_staging(&staging)?;
         drop(stage);
 

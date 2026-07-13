@@ -2918,22 +2918,60 @@
           "test_ids": [
             "UT:ARRI-4.14"
           ],
-          "assertion": "Verify make an incremental update transactionally mutate only affected rows in the active slot and advance the epoch without creating a third slot or copying the whole graph.",
+          "assertion": "The store-owned incremental delta preserves the active slot, advances the epoch exactly once after affected-row mutation, invalidates affected typed and lexical rows, retains the inactive slot, and proves late-failure rollback of rows, signature, and publication metadata.",
           "command": {
             "executable": "cargo",
             "arguments": [
               "test",
               "--locked",
-              "--workspace",
+              "-p",
+              "projectatlas-db",
               "--all-features",
-              "task_arri_ut_arri_4_14"
+              "structural_publication::tests::task_arri_ut_arri_4_14",
+              "--",
+              "--exact"
             ]
           },
-          "timeout_seconds": 300,
+          "timeout_seconds": 600,
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "crates/projectatlas-db/src/lib.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/structural_publication.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/runtime.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/tests/e2e.rs"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/changes/advance-rust-repository-intelligence/design.md"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification-plan.json"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-4.14",
+              "path": "crates/projectatlas-db/src/structural_publication.rs",
+              "anchor": "task_arri_ut_arri_4_14"
             }
           ]
         },
@@ -4288,7 +4326,7 @@
           "test_ids": [
             "UT:ARRI-7.7"
           ],
-          "assertion": "Verify implement one-transaction incremental structural deltas against the active slot, advancing the epoch and updating only affected entity/relation/evidence/coverage/lexical rows while making any prior-tuple semantic generation stale; vector rebuild/activation remains a separate pack-owned task.",
+          "assertion": "Coupled database and real-process watch proofs show one-transaction visibility for affected lexical, symbol, summary, purpose, graph, evidence, and coverage state, one same-slot epoch advance, source/Git revalidation, inactive-slot retention, and complete rollback on late failure.",
           "command": {
             "executable": "cargo",
             "arguments": [
@@ -4299,11 +4337,50 @@
               "task_arri_ut_arri_7_7"
             ]
           },
-          "timeout_seconds": 300,
+          "timeout_seconds": 600,
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "crates/projectatlas-cli/src/runtime.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/runtime/full_scan.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/tests/e2e.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/lib.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/structural_publication.rs"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/changes/advance-rust-repository-intelligence/design.md"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification-plan.json"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-7.7",
+              "path": "crates/projectatlas-db/src/structural_publication.rs",
+              "anchor": "task_arri_ut_arri_7_7"
             }
           ]
         },
@@ -4552,7 +4629,7 @@
           "test_ids": [
             "UT:ARRI-7.18"
           ],
-          "assertion": "Verify add Git/content state signatures and cross-process per-project coalescing so unchanged dirty repositories do not repeatedly publish or amplify writes.",
+          "assertion": "Versioned content and Git revision, index, and worktree identity is persisted atomically; identical target signatures coalesce under the database write lock during a concurrent two-connection race and two concurrent CLI processes without row writes, busy failures, or epoch amplification, while notify mode schedules Git-only signature checks even without a relevant source event.",
           "command": {
             "executable": "cargo",
             "arguments": [
@@ -4563,11 +4640,50 @@
               "task_arri_ut_arri_7_18"
             ]
           },
-          "timeout_seconds": 300,
+          "timeout_seconds": 600,
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "crates/projectatlas-cli/src/runtime.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/runtime/full_scan.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/tests/e2e.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/schema.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/structural_publication.rs"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/changes/advance-rust-repository-intelligence/design.md"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification-plan.json"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-7.18",
+              "path": "crates/projectatlas-db/src/structural_publication.rs",
+              "anchor": "task_arri_ut_arri_7_18"
             }
           ]
         },
@@ -4576,22 +4692,53 @@
           "test_ids": [
             "UT:ARRI-7.19"
           ],
-          "assertion": "Verify measure and gate DB/WAL bytes so no-change work writes nothing and one-file updates scale with the affected dependency closure rather than whole graph size.",
+          "assertion": "Checkpointed small-versus-large file-backed evidence proves an identical target signature preserves exact main-DB and WAL byte identity, while the same one-file publication appends complete WAL frames below a whole-database page rewrite and within a fixed additive bound as unrelated graph and lexical state grows, preserves unrelated active rows, and writes no inactive-slot rows.",
           "command": {
             "executable": "cargo",
             "arguments": [
               "test",
               "--locked",
-              "--workspace",
+              "-p",
+              "projectatlas-db",
               "--all-features",
-              "task_arri_ut_arri_7_19"
+              "structural_publication::tests::task_arri_ut_arri_7_19",
+              "--",
+              "--exact",
+              "--nocapture"
             ]
           },
-          "timeout_seconds": 300,
+          "timeout_seconds": 600,
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "crates/projectatlas-cli/src/runtime.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/structural_publication.rs"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/changes/advance-rust-repository-intelligence/design.md"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification-plan.json"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-7.19",
+              "path": "crates/projectatlas-db/src/structural_publication.rs",
+              "anchor": "task_arri_ut_arri_7_19"
             }
           ]
         },

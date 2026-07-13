@@ -901,22 +901,11 @@ fn inspect_existing_database(path: &Path) -> DbResult<SchemaPreflightReport> {
         })
     })();
     drop(connection);
-    let journal_mode = inspection
-        .as_ref()
-        .map_or("unknown", |report| report.sidecars.journal_mode.as_str());
-    let after_sidecars = sidecar_state(path, journal_mode)?;
-    if before_sidecars.wal != after_sidecars.wal
-        || before_sidecars.shm != after_sidecars.shm
-        || before_sidecars.rollback_journal != after_sidecars.rollback_journal
-    {
-        return Err(preflight_error(
-            "read-only SQLite inspection changed WAL or journal sidecar state",
-        ));
-    }
-    inspection.map(|mut report| {
-        report.sidecars = after_sidecars;
-        report
-    })
+    // Keep the sidecar inventory captured immediately before inspection. Another
+    // process may append or checkpoint WAL frames while this read-only preflight
+    // runs, so an after-the-fact filesystem comparison cannot attribute a change
+    // to the inspector and would reject valid concurrent opens.
+    inspection
 }
 
 /// Build the authoritative current object contract in a throwaway database.

@@ -3,7 +3,10 @@
 mod schema;
 mod structural_publication;
 
-pub use structural_publication::StructuralStaging;
+pub use structural_publication::{
+    IncrementalBuiltInPurpose, IncrementalPublication, IncrementalSourceMutation,
+    IncrementalStructuralDelta, IncrementalSummaryMutation, StructuralStaging,
+};
 
 use projectatlas_core::graph::{GraphContractError, ProjectInstanceId};
 use projectatlas_core::health::{
@@ -32,7 +35,7 @@ use projectatlas_core::{
     normalize_repo_path_prefix,
 };
 use rusqlite::types::Value;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params, params_from_iter};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::TryFromIntError;
@@ -413,36 +416,7 @@ impl AtlasStore {
     /// Returns an error if persistence fails.
     pub fn mark_paths_absent(&mut self, paths: &[String]) -> DbResult<()> {
         let transaction = self.connection.transaction()?;
-        for path in paths {
-            if path == "." || path.is_empty() {
-                continue;
-            }
-            let descendant_pattern = sqlite_descendant_pattern(path);
-            transaction.execute(
-                "UPDATE nodes SET exists_now = 0 WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-                params![path, descendant_pattern],
-            )?;
-            transaction.execute(
-                "DELETE FROM symbol_relations WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-                params![path, descendant_pattern],
-            )?;
-            transaction.execute(
-                "DELETE FROM symbols WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-                params![path, descendant_pattern],
-            )?;
-            transaction.execute(
-                "DELETE FROM source_parse_metadata WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-                params![path, descendant_pattern],
-            )?;
-            transaction.execute(
-                "DELETE FROM file_texts
-                 WHERE structural_slot = (
-                     SELECT active_slot FROM graph_publication_state WHERE singleton = 1
-                 )
-                 AND (path = ?1 OR path LIKE ?2 ESCAPE '\\')",
-                params![path, descendant_pattern],
-            )?;
-        }
+        mark_paths_absent_in_connection(&transaction, paths)?;
         transaction.commit()?;
         Ok(())
     }
@@ -462,16 +436,7 @@ impl AtlasStore {
         texts: &[IndexedFileText],
     ) -> DbResult<()> {
         let transaction = self.connection.transaction()?;
-        for path in paths {
-            transaction.execute(
-                "DELETE FROM file_texts
-                 WHERE structural_slot = (
-                     SELECT active_slot FROM graph_publication_state WHERE singleton = 1
-                 )
-                 AND path = ?1",
-                [path],
-            )?;
-        }
+        delete_file_text_paths_from_active_slot(&transaction, paths)?;
         for text in texts {
             upsert_file_text(&transaction, text)?;
         }
@@ -684,113 +649,8 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn replace_symbol_graph(&mut self, graph: &SymbolGraph) -> DbResult<()> {
-        let metadata = SourceParseMetadata::from_graph(graph);
         let transaction = self.connection.transaction()?;
-        transaction.execute("DELETE FROM symbols WHERE path = ?1", [&graph.path])?;
-        transaction.execute(
-            "DELETE FROM symbol_relations WHERE path = ?1",
-            [&graph.path],
-        )?;
-        transaction.execute(
-            "
-            INSERT INTO source_parse_metadata(
-                path,
-                language,
-                parser,
-                symbol_count,
-                relation_count,
-                updated_at
-            )
-            VALUES(?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
-            ON CONFLICT(path) DO UPDATE SET
-                language = excluded.language,
-                parser = excluded.parser,
-                symbol_count = excluded.symbol_count,
-                relation_count = excluded.relation_count,
-                updated_at = CURRENT_TIMESTAMP
-            ",
-            params![
-                metadata.path,
-                metadata.language.as_deref(),
-                metadata.parser.to_string(),
-                usize_to_i64(metadata.symbol_count),
-                usize_to_i64(metadata.relation_count),
-            ],
-        )?;
-        let node_id = transaction
-            .query_row(
-                "SELECT id FROM nodes WHERE path = ?1 AND exists_now = 1",
-                [&graph.path],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        for symbol in &graph.symbols {
-            transaction.execute(
-                "
-                INSERT INTO symbols(
-                    path,
-                    language,
-                    name,
-                    kind,
-                    signature,
-                    exported,
-                    documentation,
-                    line_start,
-                    line_end,
-                    parent,
-                    parser,
-                    detail
-                )
-                VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                ",
-                params![
-                    symbol.path,
-                    symbol.language.as_deref(),
-                    symbol.name,
-                    symbol.kind.to_string(),
-                    symbol.signature,
-                    symbol.exported,
-                    symbol.documentation.as_deref(),
-                    usize_to_i64(symbol.line_start),
-                    usize_to_i64(symbol.line_end),
-                    symbol.parent.as_deref(),
-                    symbol.parser.to_string(),
-                    symbol.detail.as_deref(),
-                ],
-            )?;
-        }
-        for relation in &graph.relations {
-            transaction.execute(
-                "
-                INSERT INTO symbol_relations(
-                    path,
-                    source_name,
-                    target_name,
-                    kind,
-                    line,
-                    context,
-                    parser
-                )
-                VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                ",
-                params![
-                    relation.path,
-                    relation.source_name,
-                    relation.target_name,
-                    relation.kind.to_string(),
-                    usize_to_i64(relation.line),
-                    relation.context,
-                    relation.parser.to_string(),
-                ],
-            )?;
-        }
-        if let Some(node_id) = node_id {
-            replace_symbol_search_summary(
-                &transaction,
-                node_id,
-                symbol_search_summary(graph).as_deref(),
-            )?;
-        }
+        replace_symbol_graph_in_connection(&transaction, graph)?;
         transaction.commit()?;
         Ok(())
     }
@@ -804,25 +664,7 @@ impl AtlasStore {
     ///
     /// Returns an error if the path does not exist or persistence fails.
     pub fn clear_source_index_for_path(&self, path: &str) -> DbResult<()> {
-        let node_id = self.node_id_for_path(path)?;
-        self.connection
-            .execute("DELETE FROM symbols WHERE path = ?1", [path])?;
-        self.connection
-            .execute("DELETE FROM symbol_relations WHERE path = ?1", [path])?;
-        self.connection
-            .execute("DELETE FROM source_parse_metadata WHERE path = ?1", [path])?;
-        self.connection.execute(
-            "
-            DELETE FROM summaries
-            WHERE node_id = ?1
-              AND (
-                    (summary_level = 'node' AND subject = '')
-                    OR (summary_level = 'search' AND subject = 'symbols')
-                  )
-            ",
-            [node_id],
-        )?;
-        Ok(())
+        clear_source_index_in_connection(&self.connection, path, false)
     }
 
     /// Clear symbols and relations for one live file path while preserving node summaries.
@@ -831,23 +673,7 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn clear_symbol_graph_for_path(&self, path: &str) -> DbResult<()> {
-        let node_id = self.node_id_for_path(path)?;
-        self.connection
-            .execute("DELETE FROM symbols WHERE path = ?1", [path])?;
-        self.connection
-            .execute("DELETE FROM symbol_relations WHERE path = ?1", [path])?;
-        self.connection
-            .execute("DELETE FROM source_parse_metadata WHERE path = ?1", [path])?;
-        self.connection.execute(
-            "
-            DELETE FROM summaries
-            WHERE node_id = ?1
-              AND summary_level = 'search'
-              AND subject = 'symbols'
-            ",
-            [node_id],
-        )?;
-        Ok(())
+        clear_source_index_in_connection(&self.connection, path, true)
     }
 
     /// Persist an observed one-line summary for an indexed node.
@@ -856,20 +682,7 @@ impl AtlasStore {
     ///
     /// Returns an error if the path does not exist or persistence fails.
     pub fn set_node_summary(&self, path: &str, summary: &str) -> DbResult<()> {
-        let node_id = self.node_id_for_path(path)?;
-        self.connection.execute(
-            "
-            INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
-            VALUES(?1, 'node', '', ?2, CURRENT_TIMESTAMP)
-            ON CONFLICT(node_id, summary_level, subject) DO UPDATE SET
-                summary_level = 'node',
-                subject = '',
-                summary = excluded.summary,
-                updated_at = CURRENT_TIMESTAMP
-            ",
-            params![node_id, summary],
-        )?;
-        Ok(())
+        set_node_summary_in_connection(&self.connection, path, summary)
     }
 
     /// Remove the observed node-level summary for an indexed node.
@@ -878,17 +691,7 @@ impl AtlasStore {
     ///
     /// Returns an error if the path does not exist or persistence fails.
     pub fn clear_node_summary(&self, path: &str) -> DbResult<()> {
-        let node_id = self.node_id_for_path(path)?;
-        self.connection.execute(
-            "
-            DELETE FROM summaries
-            WHERE node_id = ?1
-              AND summary_level = 'node'
-              AND subject = ''
-            ",
-            [node_id],
-        )?;
-        Ok(())
+        clear_node_summary_in_connection(&self.connection, path)
     }
 
     /// Load symbols filtered by optional file path and query.
@@ -1655,20 +1458,7 @@ impl AtlasStore {
     ///
     /// Returns an error if the path does not exist or persistence fails.
     pub fn set_purpose(&self, path: &str, purpose: &str, source: PurposeSource) -> DbResult<()> {
-        let node_id = self.node_id_for_path(path)?;
-        self.connection.execute(
-            "
-            INSERT INTO purposes(node_id, purpose, source, status, updated_at)
-            VALUES(?1, ?2, ?3, 'approved', CURRENT_TIMESTAMP)
-            ON CONFLICT(node_id) DO UPDATE SET
-                purpose = excluded.purpose,
-                source = excluded.source,
-                status = 'approved',
-                updated_at = CURRENT_TIMESTAMP
-            ",
-            params![node_id, purpose, source.to_string()],
-        )?;
-        Ok(())
+        set_purpose_in_connection(&self.connection, path, purpose, source)
     }
 
     /// Persist a non-approved purpose suggestion for a path.
@@ -1677,34 +1467,7 @@ impl AtlasStore {
     ///
     /// Returns an error if the path does not exist or persistence fails.
     pub fn set_suggested_purpose(&self, path: &str, purpose: &str) -> DbResult<()> {
-        let node_id = self.node_id_for_path(path)?;
-        self.connection.execute(
-            "
-            INSERT INTO purposes(node_id, purpose, source, status, updated_at)
-            VALUES(?1, ?2, 'generated', 'suggested', CURRENT_TIMESTAMP)
-            ON CONFLICT(node_id) DO UPDATE SET
-                purpose = excluded.purpose,
-                source = 'generated',
-                status = 'suggested',
-                updated_at = CURRENT_TIMESTAMP
-            ",
-            params![node_id, purpose],
-        )?;
-        Ok(())
-    }
-
-    /// Load a node id for a repository path.
-    fn node_id_for_path(&self, path: &str) -> DbResult<i64> {
-        self.connection
-            .query_row(
-                "SELECT id FROM nodes WHERE path = ?1 AND exists_now = 1",
-                [path],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .ok_or_else(|| DbError::PathNotIndexed {
-                path: path.to_string(),
-            })
+        set_suggested_purpose_in_connection(&self.connection, path, purpose)
     }
 
     /// Load existing nodes with purpose state.
@@ -3608,9 +3371,264 @@ fn normalize_metadata_path(path: &Path) -> String {
     normalize_native_path_display(path)
 }
 
+/// Mark selected paths and descendants absent within an existing write boundary.
+fn mark_paths_absent_in_connection(connection: &Connection, paths: &[String]) -> DbResult<()> {
+    for path in paths {
+        if path == "." || path.is_empty() {
+            continue;
+        }
+        let descendant_pattern = sqlite_descendant_pattern(path);
+        connection.execute(
+            "UPDATE nodes SET exists_now = 0 WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+            params![path, descendant_pattern],
+        )?;
+        connection.execute(
+            "DELETE FROM symbol_relations WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+            params![path, descendant_pattern],
+        )?;
+        connection.execute(
+            "DELETE FROM symbols WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+            params![path, descendant_pattern],
+        )?;
+        connection.execute(
+            "DELETE FROM source_parse_metadata WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+            params![path, descendant_pattern],
+        )?;
+        connection.execute(
+            "DELETE FROM file_texts
+             WHERE structural_slot = (
+                 SELECT active_slot FROM graph_publication_state WHERE singleton = 1
+             )
+             AND (path = ?1 OR path LIKE ?2 ESCAPE '\\')",
+            params![path, descendant_pattern],
+        )?;
+    }
+    Ok(())
+}
+
+/// Clear active-slot lexical rows for exact affected paths.
+fn delete_file_text_paths_from_active_slot(
+    connection: &Connection,
+    paths: &[String],
+) -> DbResult<()> {
+    for path in paths {
+        connection.execute(
+            "DELETE FROM file_texts
+             WHERE structural_slot = (
+                 SELECT active_slot FROM graph_publication_state WHERE singleton = 1
+             )
+             AND path = ?1",
+            [path],
+        )?;
+    }
+    Ok(())
+}
+
+/// Load one live node id within a caller-owned connection or transaction.
+fn node_id_for_path_in_connection(connection: &Connection, path: &str) -> DbResult<i64> {
+    connection
+        .query_row(
+            "SELECT id FROM nodes WHERE path = ?1 AND exists_now = 1",
+            [path],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .ok_or_else(|| DbError::PathNotIndexed {
+            path: path.to_string(),
+        })
+}
+
+/// Persist one observed node summary within an existing write boundary.
+fn set_node_summary_in_connection(
+    connection: &Connection,
+    path: &str,
+    summary: &str,
+) -> DbResult<()> {
+    let node_id = node_id_for_path_in_connection(connection, path)?;
+    connection.execute(
+        "INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
+         VALUES(?1, 'node', '', ?2, CURRENT_TIMESTAMP)
+         ON CONFLICT(node_id, summary_level, subject) DO UPDATE SET
+             summary_level = 'node',
+             subject = '',
+             summary = excluded.summary,
+             updated_at = CURRENT_TIMESTAMP",
+        params![node_id, summary],
+    )?;
+    Ok(())
+}
+
+/// Remove one observed node summary within an existing write boundary.
+fn clear_node_summary_in_connection(connection: &Connection, path: &str) -> DbResult<()> {
+    let node_id = node_id_for_path_in_connection(connection, path)?;
+    connection.execute(
+        "DELETE FROM summaries
+         WHERE node_id = ?1 AND summary_level = 'node' AND subject = ''",
+        [node_id],
+    )?;
+    Ok(())
+}
+
+/// Persist one approved purpose within an existing write boundary.
+fn set_purpose_in_connection(
+    connection: &Connection,
+    path: &str,
+    purpose: &str,
+    source: PurposeSource,
+) -> DbResult<()> {
+    let node_id = node_id_for_path_in_connection(connection, path)?;
+    connection.execute(
+        "INSERT INTO purposes(node_id, purpose, source, status, updated_at)
+         VALUES(?1, ?2, ?3, 'approved', CURRENT_TIMESTAMP)
+         ON CONFLICT(node_id) DO UPDATE SET
+             purpose = excluded.purpose,
+             source = excluded.source,
+             status = 'approved',
+             updated_at = CURRENT_TIMESTAMP",
+        params![node_id, purpose, source.to_string()],
+    )?;
+    Ok(())
+}
+
+/// Persist a generated purpose only while no approved purpose owns the path.
+fn set_suggested_purpose_in_connection(
+    connection: &Connection,
+    path: &str,
+    purpose: &str,
+) -> DbResult<()> {
+    let node_id = node_id_for_path_in_connection(connection, path)?;
+    connection.execute(
+        "INSERT INTO purposes(node_id, purpose, source, status, updated_at)
+         VALUES(?1, ?2, 'generated', 'suggested', CURRENT_TIMESTAMP)
+         ON CONFLICT(node_id) DO UPDATE SET
+             purpose = excluded.purpose,
+             source = 'generated',
+             status = 'suggested',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE purposes.status IN ('missing', 'suggested')",
+        params![node_id, purpose],
+    )?;
+    Ok(())
+}
+
+/// Clear parser-owned compatibility rows within an existing write boundary.
+fn clear_source_index_in_connection(
+    connection: &Connection,
+    path: &str,
+    preserve_node_summary: bool,
+) -> DbResult<()> {
+    let node_id = node_id_for_path_in_connection(connection, path)?;
+    connection.execute("DELETE FROM symbols WHERE path = ?1", [path])?;
+    connection.execute("DELETE FROM symbol_relations WHERE path = ?1", [path])?;
+    connection.execute("DELETE FROM source_parse_metadata WHERE path = ?1", [path])?;
+    if preserve_node_summary {
+        connection.execute(
+            "DELETE FROM summaries
+             WHERE node_id = ?1 AND summary_level = 'search' AND subject = 'symbols'",
+            [node_id],
+        )?;
+    } else {
+        connection.execute(
+            "DELETE FROM summaries
+             WHERE node_id = ?1
+               AND ((summary_level = 'node' AND subject = '')
+                    OR (summary_level = 'search' AND subject = 'symbols'))",
+            [node_id],
+        )?;
+    }
+    Ok(())
+}
+
+/// Replace one parser-owned compatibility graph within an existing write boundary.
+fn replace_symbol_graph_in_connection(
+    connection: &Connection,
+    graph: &SymbolGraph,
+) -> DbResult<()> {
+    let metadata = SourceParseMetadata::from_graph(graph);
+    connection.execute("DELETE FROM symbols WHERE path = ?1", [&graph.path])?;
+    connection.execute(
+        "DELETE FROM symbol_relations WHERE path = ?1",
+        [&graph.path],
+    )?;
+    connection.execute(
+        "INSERT INTO source_parse_metadata(
+             path, language, parser, symbol_count, relation_count, updated_at
+         )
+         VALUES(?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
+         ON CONFLICT(path) DO UPDATE SET
+             language = excluded.language,
+             parser = excluded.parser,
+             symbol_count = excluded.symbol_count,
+             relation_count = excluded.relation_count,
+             updated_at = CURRENT_TIMESTAMP",
+        params![
+            metadata.path,
+            metadata.language.as_deref(),
+            metadata.parser.to_string(),
+            usize_to_i64(metadata.symbol_count),
+            usize_to_i64(metadata.relation_count),
+        ],
+    )?;
+    let node_id = connection
+        .query_row(
+            "SELECT id FROM nodes WHERE path = ?1 AND exists_now = 1",
+            [&graph.path],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    for symbol in &graph.symbols {
+        connection.execute(
+            "INSERT INTO symbols(
+                 path, language, name, kind, signature, exported, documentation,
+                 line_start, line_end, parent, parser, detail
+             )
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                symbol.path,
+                symbol.language.as_deref(),
+                symbol.name,
+                symbol.kind.to_string(),
+                symbol.signature,
+                symbol.exported,
+                symbol.documentation.as_deref(),
+                usize_to_i64(symbol.line_start),
+                usize_to_i64(symbol.line_end),
+                symbol.parent.as_deref(),
+                symbol.parser.to_string(),
+                symbol.detail.as_deref(),
+            ],
+        )?;
+    }
+    for relation in &graph.relations {
+        connection.execute(
+            "INSERT INTO symbol_relations(
+                 path, source_name, target_name, kind, line, context, parser
+             )
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                relation.path,
+                relation.source_name,
+                relation.target_name,
+                relation.kind.to_string(),
+                usize_to_i64(relation.line),
+                relation.context,
+                relation.parser.to_string(),
+            ],
+        )?;
+    }
+    if let Some(node_id) = node_id {
+        replace_symbol_search_summary(
+            connection,
+            node_id,
+            symbol_search_summary(graph).as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
 /// Upsert one scanned node into an existing transaction.
-fn upsert_node(transaction: &Transaction<'_>, node: &Node) -> DbResult<()> {
-    let existing = transaction
+fn upsert_node(connection: &Connection, node: &Node) -> DbResult<()> {
+    let existing = connection
         .query_row(
             "
             SELECT n.content_hash, p.status
@@ -3636,7 +3654,7 @@ fn upsert_node(transaction: &Transaction<'_>, node: &Node) -> DbResult<()> {
     let should_mark_stale = content_changed
         && existing.as_ref().and_then(|(_, status)| status.as_deref())
             == Some(PurposeStatus::Approved.as_str());
-    transaction.execute(
+    connection.execute(
         "
         INSERT INTO nodes(path, kind, parent_path, extension, language, size_bytes, mtime_ns, content_hash, exists_now)
         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
@@ -3663,12 +3681,12 @@ fn upsert_node(transaction: &Transaction<'_>, node: &Node) -> DbResult<()> {
             node.content_hash
         ],
     )?;
-    let node_id = transaction.query_row(
+    let node_id = connection.query_row(
         "SELECT id FROM nodes WHERE path = ?1",
         [&node.path],
         |row| row.get::<_, i64>(0),
     )?;
-    transaction.execute(
+    connection.execute(
         "
         INSERT INTO purposes(node_id, purpose, source, status)
         VALUES(?1, NULL, 'missing', 'missing')
@@ -3677,7 +3695,7 @@ fn upsert_node(transaction: &Transaction<'_>, node: &Node) -> DbResult<()> {
         [node_id],
     )?;
     let summary = generate_node_summary(node);
-    transaction.execute(
+    connection.execute(
         "
         INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
         VALUES(?1, 'node', '', ?2, CURRENT_TIMESTAMP)
@@ -3688,7 +3706,7 @@ fn upsert_node(transaction: &Transaction<'_>, node: &Node) -> DbResult<()> {
         params![node_id, summary, content_changed],
     )?;
     if should_mark_stale {
-        transaction.execute(
+        connection.execute(
             "
             UPDATE purposes
             SET status = 'stale',
@@ -3702,16 +3720,30 @@ fn upsert_node(transaction: &Transaction<'_>, node: &Node) -> DbResult<()> {
 }
 
 /// Upsert one persisted UTF-8 source-text row for indexed search.
-fn upsert_file_text(transaction: &Transaction<'_>, text: &IndexedFileText) -> DbResult<()> {
-    transaction.execute(
+fn upsert_file_text(connection: &Connection, text: &IndexedFileText) -> DbResult<()> {
+    let (active_slot, active_epoch) = connection.query_row(
+        "SELECT active_slot, active_epoch
+         FROM graph_publication_state WHERE singleton = 1",
+        [],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    upsert_file_text_for_publication(connection, text, &active_slot, active_epoch)
+}
+
+/// Upsert one lexical row with an explicit transactionally owned publication tuple.
+fn upsert_file_text_for_publication(
+    connection: &Connection,
+    text: &IndexedFileText,
+    structural_slot: &str,
+    last_changed_epoch: i64,
+) -> DbResult<()> {
+    connection.execute(
         "
         INSERT INTO file_texts(
             path, content_hash, byte_count, line_count, content, updated_at,
             structural_slot, last_changed_epoch
         )
-        SELECT ?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP, active_slot, active_epoch
-        FROM graph_publication_state
-        WHERE singleton = 1
+        VALUES(?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP, ?6, ?7)
         ON CONFLICT(structural_slot, path) DO UPDATE SET
             content_hash = excluded.content_hash,
             byte_count = excluded.byte_count,
@@ -3725,7 +3757,9 @@ fn upsert_file_text(transaction: &Transaction<'_>, text: &IndexedFileText) -> Db
             text.content_hash.as_deref(),
             usize_to_i64(text.byte_count),
             usize_to_i64(text.line_count),
-            text.content
+            text.content,
+            structural_slot,
+            last_changed_epoch,
         ],
     )?;
     Ok(())
@@ -3872,12 +3906,12 @@ fn sqlite_like_escape(value: &str) -> String {
 
 /// Replace the denormalized symbol-name search summary for one file node.
 fn replace_symbol_search_summary(
-    transaction: &Transaction<'_>,
+    connection: &Connection,
     node_id: i64,
     summary: Option<&str>,
 ) -> DbResult<()> {
     if let Some(summary) = summary {
-        transaction.execute(
+        connection.execute(
             "
             INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
             VALUES(?1, 'search', 'symbols', ?2, CURRENT_TIMESTAMP)
@@ -3888,7 +3922,7 @@ fn replace_symbol_search_summary(
             params![node_id, summary],
         )?;
     } else {
-        transaction.execute(
+        connection.execute(
             "
             DELETE FROM summaries
             WHERE node_id = ?1

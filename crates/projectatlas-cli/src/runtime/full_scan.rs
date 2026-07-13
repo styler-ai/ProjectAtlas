@@ -4,7 +4,7 @@ use super::{
     PurposeImportReport, ScanConfigurationInput, ScanReport, ScanRuntimePlan, SymbolBuildOptions,
     TextIndexOptions, build_symbols_for_index, imported_purpose_records,
     refresh_structural_summaries_for_nodes, refresh_text_index_for_nodes_with_rows,
-    seed_builtin_projectatlas_purposes,
+    repository_state_signature, seed_builtin_projectatlas_purposes,
 };
 use crate::CliError;
 use projectatlas_core::{Node, PurposeSource, PurposeStatus};
@@ -28,16 +28,17 @@ pub(crate) fn run_scan_pipeline(
     plan: &ScanRuntimePlan,
     symbol_options: &SymbolBuildOptions,
 ) -> Result<ScanReport, CliError> {
-    let inputs = StructuralInputManifest::capture(plan)?;
+    let inputs = StructuralInputManifest::capture(plan, symbol_options)?;
     let mut files = StagingDatabaseFiles::allocate(db_path)?;
     let staging = store.create_structural_staging(db_path, files.path(), &plan.root)?;
     let mut staging_store = AtlasStore::open(staging.path())?;
     staging_store.prepare_structural_full_scan()?;
     let mut report = rebuild_staging(&mut staging_store, plan, symbol_options, &inputs.nodes)?;
+    staging_store.set_staged_structural_state_signature(&staging, &inputs.state_signature)?;
     staging_store.seal_structural_staging(&staging)?;
     drop(staging_store);
 
-    publish_if_inputs_current(store, &staging, plan, &inputs)?;
+    publish_if_inputs_current(store, &staging, plan, symbol_options, &inputs)?;
     report.overview = store.overview()?;
     files.cleanup()?;
     Ok(report)
@@ -112,11 +113,16 @@ struct StructuralInputManifest {
     text_options: TextIndexOptions,
     /// Ordered source, ignore-file, root-folder, and content identities.
     nodes: Vec<Node>,
+    /// Versioned content, Git, policy, and structural-budget identity.
+    state_signature: String,
 }
 
 impl StructuralInputManifest {
     /// Capture current source and scan-policy inputs through the production scanner.
-    fn capture(plan: &ScanRuntimePlan) -> Result<Self, CliError> {
+    fn capture(
+        plan: &ScanRuntimePlan,
+        symbol_options: &SymbolBuildOptions,
+    ) -> Result<Self, CliError> {
         let current = ScanRuntimePlan::for_path(
             plan.requested_config_path.as_deref(),
             &plan.root,
@@ -133,18 +139,30 @@ impl StructuralInputManifest {
             });
         }
         let nodes = scan_repo(&current.root, &current.scan_options)?;
+        let state_signature = repository_state_signature(
+            &current.root,
+            &nodes,
+            &current.scan_options,
+            current.text_options,
+            symbol_options,
+        );
         Ok(Self {
             root: current.root,
             configuration: current.configuration_input,
             scan_options: current.scan_options,
             text_options: current.text_options,
             nodes,
+            state_signature,
         })
     }
 
     /// Recompute every mutable input and reject a stale staged generation.
-    fn ensure_current(&self, plan: &ScanRuntimePlan) -> Result<(), CliError> {
-        let current = Self::capture(plan)?;
+    fn ensure_current(
+        &self,
+        plan: &ScanRuntimePlan,
+        symbol_options: &SymbolBuildOptions,
+    ) -> Result<(), CliError> {
+        let current = Self::capture(plan, symbol_options)?;
         if *self == current {
             return Ok(());
         }
@@ -193,9 +211,10 @@ fn publish_if_inputs_current(
     store: &mut AtlasStore,
     staging: &StructuralStaging,
     plan: &ScanRuntimePlan,
+    symbol_options: &SymbolBuildOptions,
     inputs: &StructuralInputManifest,
 ) -> Result<(), CliError> {
-    inputs.ensure_current(plan)?;
+    inputs.ensure_current(plan, symbol_options)?;
     store.publish_structural_staging(staging)?;
     Ok(())
 }
@@ -396,12 +415,13 @@ mod tests {
         live.set_project_root(&root)?;
         let plan = ScanRuntimePlan::for_path(None, &root, None)?;
         let symbol_options = SymbolBuildOptions::new(1024 * 1024, Some(1), Some(30));
-        let inputs = StructuralInputManifest::capture(&plan)?;
+        let inputs = StructuralInputManifest::capture(&plan, &symbol_options)?;
         let mut files = StagingDatabaseFiles::allocate(&db_path)?;
         let staging = live.create_structural_staging(&db_path, files.path(), &root)?;
         let mut staging_store = AtlasStore::open(staging.path())?;
         staging_store.prepare_structural_full_scan()?;
         let _report = rebuild_staging(&mut staging_store, &plan, &symbol_options, &inputs.nodes)?;
+        staging_store.set_staged_structural_state_signature(&staging, &inputs.state_signature)?;
         staging_store.seal_structural_staging(&staging)?;
         drop(staging_store);
         let before = live.publication_state()?;
@@ -412,7 +432,7 @@ mod tests {
                 source,
             }
         })?;
-        match publish_if_inputs_current(&mut live, &staging, &plan, &inputs) {
+        match publish_if_inputs_current(&mut live, &staging, &plan, &symbol_options, &inputs) {
             Err(CliError::ScanInputsChanged { .. }) => {}
             Err(other) => return Err(other),
             Ok(()) => {
@@ -449,7 +469,8 @@ mod tests {
             }
         })?;
         let plan = ScanRuntimePlan::for_path(Some(&config_path), &root, None)?;
-        let inputs = StructuralInputManifest::capture(&plan)?;
+        let symbol_options = SymbolBuildOptions::new(1024 * 1024, Some(1), Some(30));
+        let inputs = StructuralInputManifest::capture(&plan, &symbol_options)?;
 
         fs::write(&config_path, b"# changed scan configuration\n").map_err(|source| {
             CliError::Io {
@@ -457,7 +478,7 @@ mod tests {
                 source,
             }
         })?;
-        match inputs.ensure_current(&plan) {
+        match inputs.ensure_current(&plan, &symbol_options) {
             Err(CliError::ScanInputsChanged { .. }) => Ok(()),
             Err(other) => Err(other),
             Ok(()) => Err(CliError::InvalidInput(

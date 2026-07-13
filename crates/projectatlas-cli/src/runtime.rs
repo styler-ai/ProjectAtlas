@@ -35,8 +35,12 @@ use projectatlas_core::{
     normalize_native_path_display_str, normalize_repo_path, purpose_review_signal,
     repo_path_to_native, validated_repo_file_key, validated_repo_node_key,
 };
-use projectatlas_db::{AtlasStore, HealthFindingsPage, HealthQuery, HealthScope, IndexedFileText};
-use projectatlas_fs::{ScanOptions, gitignore_excludes_path, scan_path, scan_repo};
+use projectatlas_db::{
+    AtlasStore, HealthFindingsPage, HealthQuery, HealthScope, IncrementalBuiltInPurpose,
+    IncrementalPublication, IncrementalSourceMutation, IncrementalStructuralDelta,
+    IncrementalSummaryMutation, IndexedFileText,
+};
+use projectatlas_fs::{ScanOptions, gitignore_excludes_path, scan_repo};
 use projectatlas_service::{
     FilePathMatcher, FileSummaryReport, NextStepReport, build_next_report,
     file_summary_baseline_text, load_ranked_file_nodes_with_reasons,
@@ -52,6 +56,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1414,11 +1419,6 @@ pub(crate) struct WatchChangeSet {
 }
 
 impl WatchChangeSet {
-    /// Return whether there is work to refresh.
-    fn has_changes(&self) -> bool {
-        self.requires_full_scan || !self.paths.is_empty()
-    }
-
     /// Merge another event batch into this set.
     fn merge(&mut self, other: Self) {
         self.requires_full_scan |= other.requires_full_scan;
@@ -1933,6 +1933,150 @@ impl SymbolBuildOptions {
     }
 }
 
+/// Compute the complete versioned content and Git identity used for publication coalescing.
+pub(crate) fn repository_state_signature(
+    root: &Path,
+    nodes: &[Node],
+    scan_options: &ScanOptions,
+    text_options: TextIndexOptions,
+    symbol_options: &SymbolBuildOptions,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    signature_field(
+        &mut hasher,
+        b"contract",
+        b"projectatlas-structural-state-v1",
+    );
+    signature_field(
+        &mut hasher,
+        b"root",
+        normalize_native_path_display(root).as_bytes(),
+    );
+
+    let mut option_values = [
+        (
+            &b"exclude-dir-name"[..],
+            scan_options.exclude_dir_names.clone(),
+        ),
+        (
+            &b"exclude-dir-suffix"[..],
+            scan_options.exclude_dir_suffixes.clone(),
+        ),
+        (
+            &b"exclude-path-prefix"[..],
+            scan_options.exclude_path_prefixes.clone(),
+        ),
+    ];
+    for (label, values) in &mut option_values {
+        values.sort();
+        for value in values {
+            signature_field(&mut hasher, label, value.as_bytes());
+        }
+    }
+    signature_field(
+        &mut hasher,
+        b"text-max-bytes",
+        &text_options.max_bytes.to_le_bytes(),
+    );
+    signature_field(
+        &mut hasher,
+        b"symbol-max-bytes",
+        &symbol_options.max_bytes.to_le_bytes(),
+    );
+    signature_field(
+        &mut hasher,
+        b"symbol-workers",
+        &symbol_options
+            .max_workers
+            .and_then(|workers| u64::try_from(workers).ok())
+            .unwrap_or(0)
+            .to_le_bytes(),
+    );
+    signature_field(
+        &mut hasher,
+        b"symbol-timeout-seconds",
+        &symbol_options.timeout_seconds.unwrap_or(0).to_le_bytes(),
+    );
+
+    let mut ordered_nodes = nodes.iter().collect::<Vec<_>>();
+    ordered_nodes.sort_by(|left, right| left.path.cmp(&right.path));
+    for node in ordered_nodes {
+        signature_field(&mut hasher, b"node-path", node.path.as_bytes());
+        signature_field(&mut hasher, b"node-kind", node.kind.to_string().as_bytes());
+        signature_optional_field(&mut hasher, b"node-parent", node.parent_path.as_deref());
+        signature_optional_field(&mut hasher, b"node-extension", node.extension.as_deref());
+        signature_optional_field(&mut hasher, b"node-language", node.language.as_deref());
+        signature_field(
+            &mut hasher,
+            b"node-size",
+            &node.size_bytes.unwrap_or(0).to_le_bytes(),
+        );
+        signature_optional_field(
+            &mut hasher,
+            b"node-content-hash",
+            node.content_hash.as_deref(),
+        );
+    }
+    signature_field(&mut hasher, b"git-state", &git_state_signature_bytes(root));
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Add one unambiguous length-delimited component to a structural state digest.
+fn signature_field(hasher: &mut blake3::Hasher, label: &[u8], value: &[u8]) {
+    hasher.update(&(label.len() as u64).to_le_bytes());
+    hasher.update(label);
+    hasher.update(&(value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+/// Add one optional UTF-8 component without collapsing absent and empty values.
+fn signature_optional_field(hasher: &mut blake3::Hasher, label: &[u8], value: Option<&str>) {
+    match value {
+        Some(value) => {
+            signature_field(hasher, b"present", label);
+            signature_field(hasher, label, value.as_bytes());
+        }
+        None => signature_field(hasher, b"absent", label),
+    }
+}
+
+/// Capture Git revision/index/worktree state through shell-free argument-vector calls.
+fn git_state_signature_bytes(root: &Path) -> Vec<u8> {
+    let mut state = Vec::new();
+    for arguments in [
+        &["rev-parse", "--verify", "HEAD"] as &[&str],
+        &[
+            "diff",
+            "--cached",
+            "--raw",
+            "-z",
+            "--no-ext-diff",
+            "--no-renames",
+        ],
+        &["diff", "--raw", "-z", "--no-ext-diff", "--no-renames"],
+    ] {
+        match ProcessCommand::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(arguments)
+            .output()
+        {
+            Ok(output) => {
+                state.extend_from_slice(&u8::from(output.status.success()).to_le_bytes());
+                state.extend_from_slice(&(output.stdout.len() as u64).to_le_bytes());
+                state.extend_from_slice(&output.stdout);
+                state.extend_from_slice(&(output.stderr.len() as u64).to_le_bytes());
+                state.extend_from_slice(&output.stderr);
+            }
+            Err(error) => {
+                state.extend_from_slice(b"git-unavailable\0");
+                state.extend_from_slice(error.kind().to_string().as_bytes());
+            }
+        }
+    }
+    state
+}
+
 /// Source file queued for symbol parsing.
 #[derive(Clone, Debug)]
 pub(crate) struct SymbolParseJob {
@@ -2158,24 +2302,6 @@ pub(crate) fn parse_symbol_job(
         summary,
         purpose_suggestion,
     })
-}
-
-/// Return an empty symbol build report.
-pub(crate) fn empty_symbol_build_report() -> SymbolBuildReport {
-    SymbolBuildReport {
-        candidates: 0,
-        parsed: 0,
-        unchanged: 0,
-        too_large: 0,
-        binary_or_non_utf8: 0,
-        timed_out: 0,
-        max_workers: 0,
-        timeout_seconds: None,
-        symbols: 0,
-        relations: 0,
-        summaries: 0,
-        purpose_suggestions: 0,
-    }
 }
 
 /// Create a deterministic one-line content summary from extracted symbols.
@@ -2772,17 +2898,15 @@ pub(crate) fn run_notify_watch_loop(
     cycles += 1;
     while max_cycles == 0 || cycles < max_cycles {
         let changes = wait_for_index_event(&receiver, &watch_root, debounce, scan_options)?;
-        if changes.has_changes() {
-            last_refresh = refresh_index_for_changes(
-                store,
-                &watch_root,
-                &changes,
-                symbol_options,
-                scan_options,
-                text_options,
-            )?;
-            cycles += 1;
-        }
+        last_refresh = refresh_index_for_changes(
+            store,
+            &watch_root,
+            &changes,
+            symbol_options,
+            scan_options,
+            text_options,
+        )?;
+        cycles += 1;
     }
     Ok(WatchReport {
         mode: WATCH_MODE_NOTIFY.to_string(),
@@ -2795,20 +2919,22 @@ pub(crate) fn run_notify_watch_loop(
     })
 }
 
-/// Wait for a debounced batch of relevant filesystem events.
+/// Wait for a debounced event batch or a scheduled Git/content signature check.
 pub(crate) fn wait_for_index_event(
     receiver: &mpsc::Receiver<notify::Result<Event>>,
     root: &Path,
     debounce: Duration,
     scan_options: &ScanOptions,
 ) -> Result<WatchChangeSet, CliError> {
-    let mut changes = notify_result_changes(
-        root,
-        scan_options,
-        receiver.recv().map_err(|source| {
-            CliError::Watcher(format!("watch event channel disconnected: {source}"))
-        })?,
-    )?;
+    let mut changes = match receiver.recv_timeout(debounce) {
+        Ok(result) => notify_result_changes(root, scan_options, result)?,
+        Err(RecvTimeoutError::Timeout) => return Ok(WatchChangeSet::default()),
+        Err(RecvTimeoutError::Disconnected) => {
+            return Err(CliError::Watcher(
+                "watch event channel disconnected".to_string(),
+            ));
+        }
+    };
     loop {
         match receiver.recv_timeout(debounce) {
             Ok(result) => {
@@ -2970,97 +3096,468 @@ pub(crate) fn refresh_index(
     text_options: TextIndexOptions,
 ) -> Result<IndexRefreshReport, CliError> {
     let root = canonical_project_root(root)?;
-    let previous_hashes = indexed_file_hashes(store)?;
     let nodes = scan_repo(&root, scan_options)?;
-    store.set_project_root(&root)?;
-    store.replace_scan(&nodes)?;
-    seed_builtin_projectatlas_purposes(store, &nodes)?;
-    let text_refresh = refresh_text_index_for_nodes_with_rows(store, &root, &nodes, text_options)?;
-    let text_index = text_refresh.report.clone();
-    let symbols = build_symbols_for_index(store, &root, symbol_options, Some(&previous_hashes))?;
-    let structural_summaries =
-        refresh_structural_summaries_for_nodes(store, &nodes, &text_refresh.rows)?;
-    Ok(IndexRefreshReport {
-        text_index,
-        structural_summaries,
-        symbols,
-    })
+    let target_state_signature =
+        repository_state_signature(&root, &nodes, scan_options, text_options, symbol_options);
+    let base_state_signature = store.structural_state_signature()?;
+    if base_state_signature.as_deref() == Some(target_state_signature.as_str()) {
+        return unchanged_index_refresh_report(store, &nodes, symbol_options, text_options);
+    }
+
+    let base_publication = store.publication_state()?;
+    let existing_nodes = store.load_nodes()?;
+    let existing_by_path = existing_nodes
+        .iter()
+        .map(|indexed| (indexed.node.path.clone(), indexed.clone()))
+        .collect::<HashMap<_, _>>();
+    let current_paths = nodes
+        .iter()
+        .map(|node| node.path.as_str())
+        .collect::<HashSet<_>>();
+    let changed_nodes = nodes
+        .iter()
+        .filter(|node| {
+            existing_by_path
+                .get(&node.path)
+                .is_none_or(|indexed| !same_structural_node(&indexed.node, node))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let absent_paths = minimal_absent_paths(
+        existing_nodes
+            .iter()
+            .filter(|indexed| !current_paths.contains(indexed.node.path.as_str()))
+            .map(|indexed| indexed.node.path.clone())
+            .collect(),
+    );
+    let mut affected_paths = changed_nodes
+        .iter()
+        .map(|node| node.path.clone())
+        .chain(absent_paths.iter().cloned())
+        .collect::<Vec<_>>();
+    affected_paths.sort();
+    affected_paths.dedup();
+
+    let text_rows = indexed_file_texts_for_nodes(&root, &changed_nodes, text_options)?;
+    let (symbols, source_mutations) = prepare_incremental_source_mutations(
+        store,
+        &root,
+        symbol_options,
+        &existing_by_path,
+        &changed_nodes,
+    )?;
+    let (structural_summaries, summary_mutations) = prepare_incremental_summary_mutations(
+        store,
+        &existing_by_path,
+        &changed_nodes,
+        &text_rows,
+        &source_mutations,
+    )?;
+    let built_in_purposes = changed_nodes
+        .iter()
+        .filter_map(|node| {
+            BUILTIN_PROJECTATLAS_PURPOSES
+                .iter()
+                .find(|(path, _)| *path == node.path)
+                .map(|(path, purpose)| IncrementalBuiltInPurpose {
+                    path: (*path).to_owned(),
+                    purpose: (*purpose).to_owned(),
+                    source: PurposeSource::Imported,
+                })
+        })
+        .collect();
+    let validated_nodes = scan_repo(&root, scan_options)?;
+    let validated_signature = repository_state_signature(
+        &root,
+        &validated_nodes,
+        scan_options,
+        text_options,
+        symbol_options,
+    );
+    if validated_signature != target_state_signature {
+        return Err(CliError::ScanInputsChanged {
+            detail:
+                "repository content or Git state changed while the incremental delta was prepared"
+                    .to_owned(),
+        });
+    }
+    let delta = IncrementalStructuralDelta {
+        project_root: root,
+        base_publication,
+        base_state_signature,
+        target_state_signature,
+        affected_paths,
+        nodes: changed_nodes,
+        absent_paths,
+        file_texts: text_rows
+            .iter()
+            .filter_map(|row| row.text.clone())
+            .collect(),
+        source_mutations,
+        summary_mutations,
+        built_in_purposes,
+    };
+    match store.publish_incremental_structural_delta(&delta)? {
+        IncrementalPublication::Published(_) => Ok(IndexRefreshReport {
+            text_index: persisted_text_index_report(store, &nodes, text_options)?,
+            structural_summaries,
+            symbols,
+        }),
+        IncrementalPublication::Unchanged(_) => {
+            unchanged_index_refresh_report(store, &nodes, symbol_options, text_options)
+        }
+    }
 }
 
 /// Refresh filesystem and symbol state for a debounced event batch.
 pub(crate) fn refresh_index_for_changes(
     store: &mut AtlasStore,
     root: &Path,
-    changes: &WatchChangeSet,
+    _changes: &WatchChangeSet,
     symbol_options: &SymbolBuildOptions,
     scan_options: &ScanOptions,
     text_options: TextIndexOptions,
 ) -> Result<IndexRefreshReport, CliError> {
-    if changes.requires_full_scan {
-        return refresh_index(store, root, symbol_options, scan_options, text_options);
-    }
-    let root = canonical_project_root(root)?;
-    let mut nodes = Vec::new();
-    let mut absent_paths = Vec::new();
-    for path in sorted_watch_paths(&changes.paths) {
-        if path.exists() {
-            if let Some(node) = scan_path(&root, &path, scan_options)? {
-                nodes.push(node);
-            }
-        } else if let Some(path_key) = normalized_deleted_path(&root, &path)? {
-            absent_paths.push(path_key);
+    refresh_index(store, root, symbol_options, scan_options, text_options)
+}
+
+/// Compare only structural node identity, excluding non-canonical filesystem timestamps.
+fn same_structural_node(left: &Node, right: &Node) -> bool {
+    left.path == right.path
+        && left.kind == right.kind
+        && left.parent_path == right.parent_path
+        && left.extension == right.extension
+        && left.language == right.language
+        && left.size_bytes == right.size_bytes
+        && left.content_hash == right.content_hash
+}
+
+/// Collapse absent descendants under the shallowest missing repository paths.
+fn minimal_absent_paths(mut paths: Vec<String>) -> Vec<String> {
+    paths.sort_by(|left, right| {
+        left.split('/')
+            .count()
+            .cmp(&right.split('/').count())
+            .then_with(|| left.cmp(right))
+    });
+    let mut minimal = Vec::<String>::new();
+    for path in paths {
+        if minimal.iter().any(|ancestor| {
+            path == *ancestor
+                || path
+                    .strip_prefix(ancestor)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        }) {
+            continue;
         }
+        minimal.push(path);
     }
-    let changed_paths = nodes
+    minimal.sort();
+    minimal
+}
+
+/// Report a coalesced watch cycle without reparsing or writing repository state.
+fn unchanged_index_refresh_report(
+    store: &AtlasStore,
+    nodes: &[Node],
+    symbol_options: &SymbolBuildOptions,
+    text_options: TextIndexOptions,
+) -> Result<IndexRefreshReport, CliError> {
+    let text_index = persisted_text_index_report(store, nodes, text_options)?;
+    let symbol_candidates = nodes
         .iter()
-        .map(|node| node.path.clone())
-        .chain(absent_paths.iter().cloned())
-        .collect::<HashSet<_>>();
-    let previous_hashes = indexed_file_hashes_for_paths(store, &changed_paths)?;
-    store.set_project_root(&root)?;
-    if !nodes.is_empty() {
-        store.upsert_scan_nodes(&nodes)?;
-        seed_builtin_projectatlas_purposes(store, &nodes)?;
-    }
-    if !absent_paths.is_empty() {
-        store.mark_paths_absent(&absent_paths)?;
-    }
-    let text_refresh = refresh_text_index_for_changed_paths_with_rows(
-        store,
-        &root,
-        &changed_paths,
-        &nodes,
-        text_options,
-    )?;
-    let text_index = text_refresh.report.clone();
-    let target_paths = nodes
+        .filter(|node| {
+            node.kind == NodeKind::File && is_symbol_candidate(&node.path, node.language.as_deref())
+        })
+        .count();
+    let symbol_too_large = nodes
         .iter()
-        .filter(|node| node.kind == NodeKind::File)
-        .map(|node| node.path.clone())
-        .collect::<HashSet<_>>();
-    if target_paths.is_empty() {
-        let structural_summaries =
-            refresh_structural_summaries_for_nodes(store, &nodes, &text_refresh.rows)?;
-        return Ok(IndexRefreshReport {
-            text_index,
-            structural_summaries,
-            symbols: empty_symbol_build_report(),
-        });
-    }
-    let symbols = build_symbols_for_paths(
-        store,
-        &root,
-        symbol_options,
-        Some(&previous_hashes),
-        Some(&target_paths),
-    )?;
-    let structural_summaries =
-        refresh_structural_summaries_for_nodes(store, &nodes, &text_refresh.rows)?;
+        .filter(|node| {
+            node.kind == NodeKind::File
+                && is_symbol_candidate(&node.path, node.language.as_deref())
+                && node
+                    .size_bytes
+                    .is_some_and(|size| size > symbol_options.max_bytes)
+        })
+        .count();
     Ok(IndexRefreshReport {
         text_index,
-        structural_summaries,
-        symbols,
+        structural_summaries: StructuralSummaryReport::default(),
+        symbols: SymbolBuildReport {
+            candidates: symbol_candidates,
+            parsed: 0,
+            unchanged: symbol_candidates.saturating_sub(symbol_too_large),
+            too_large: symbol_too_large,
+            binary_or_non_utf8: 0,
+            timed_out: 0,
+            max_workers: symbol_options.reported_workers(),
+            timeout_seconds: symbol_options.timeout_seconds,
+            symbols: 0,
+            relations: 0,
+            summaries: 0,
+            purpose_suggestions: 0,
+        },
     })
+}
+
+/// Report the complete persisted lexical index without rewriting unchanged rows.
+fn persisted_text_index_report(
+    store: &AtlasStore,
+    nodes: &[Node],
+    text_options: TextIndexOptions,
+) -> Result<TextIndexReport, CliError> {
+    let candidates = nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::File)
+        .count();
+    let indexed = store.file_text_count()?.min(candidates);
+    let too_large = nodes
+        .iter()
+        .filter(|node| {
+            node.kind == NodeKind::File
+                && node
+                    .size_bytes
+                    .is_some_and(|size| size > text_options.max_bytes)
+        })
+        .count();
+    Ok(TextIndexReport {
+        candidates,
+        indexed,
+        binary_or_non_utf8: candidates.saturating_sub(indexed).saturating_sub(too_large),
+        too_large,
+        skipped: candidates.saturating_sub(indexed),
+        max_bytes: text_options.max_bytes,
+        bytes: store.file_text_byte_count()?,
+    })
+}
+
+/// Parse affected source files without exposing any compatibility rows before commit.
+fn prepare_incremental_source_mutations(
+    store: &AtlasStore,
+    root: &Path,
+    options: &SymbolBuildOptions,
+    existing_by_path: &HashMap<String, projectatlas_core::IndexedNode>,
+    nodes: &[Node],
+) -> Result<(SymbolBuildReport, Vec<IncrementalSourceMutation>), CliError> {
+    let mut report = SymbolBuildReport {
+        candidates: 0,
+        parsed: 0,
+        unchanged: 0,
+        too_large: 0,
+        binary_or_non_utf8: 0,
+        timed_out: 0,
+        max_workers: options.reported_workers(),
+        timeout_seconds: options.timeout_seconds,
+        symbols: 0,
+        relations: 0,
+        summaries: 0,
+        purpose_suggestions: 0,
+    };
+    let mut mutations = Vec::new();
+    let mut jobs = Vec::new();
+    let mut language_by_path = HashMap::new();
+    for node in nodes.iter().filter(|node| node.kind == NodeKind::File) {
+        language_by_path.insert(node.path.clone(), node.language.clone());
+        if !is_symbol_candidate(&node.path, node.language.as_deref()) {
+            if existing_by_path.contains_key(&node.path)
+                && (store.symbol_count_for_path(&node.path)? > 0
+                    || store.load_source_parse_metadata(&node.path)?.is_some())
+            {
+                mutations.push(IncrementalSourceMutation::Clear {
+                    path: node.path.clone(),
+                    preserve_node_summary: is_structural_summary_candidate(
+                        &node.path,
+                        node.language.as_deref(),
+                    ),
+                });
+            }
+            continue;
+        }
+        report.candidates += 1;
+        if node.size_bytes.is_some_and(|size| size > options.max_bytes) {
+            mutations.push(IncrementalSourceMutation::Clear {
+                path: node.path.clone(),
+                preserve_node_summary: is_structural_summary_candidate(
+                    &node.path,
+                    node.language.as_deref(),
+                ),
+            });
+            report.too_large += 1;
+            continue;
+        }
+        let existing = existing_by_path.get(&node.path);
+        if let Some(indexed) = existing
+            && indexed.node.content_hash == node.content_hash
+        {
+            let has_source_index = store.symbol_count_for_path(&node.path)? > 0
+                || store.load_source_parse_metadata(&node.path)?.is_some();
+            if has_source_index {
+                report.unchanged += 1;
+                continue;
+            }
+        }
+        jobs.push(SymbolParseJob {
+            path: node.path.clone(),
+            native_path: root.join(repo_path_to_native(&node.path)),
+            language: node.language.clone(),
+            fallback_summary: existing.and_then(|indexed| indexed.summary.clone()),
+            purpose_needs_suggestion: existing.is_none_or(|indexed| {
+                matches!(
+                    indexed.purpose.status,
+                    PurposeStatus::Missing | PurposeStatus::Suggested
+                )
+            }),
+        });
+    }
+
+    let started_at = Instant::now();
+    for outcome in parse_symbol_jobs(&jobs, options, started_at)? {
+        match outcome {
+            SymbolParseOutcome::Parsed(parsed) => {
+                report.symbols += parsed.graph.symbols.len();
+                report.relations += parsed.graph.relations.len();
+                report.summaries += 1;
+                report.purpose_suggestions += usize::from(parsed.purpose_suggestion.is_some());
+                report.parsed += 1;
+                mutations.push(IncrementalSourceMutation::Replace {
+                    graph: parsed.graph,
+                    summary: parsed.summary,
+                    purpose_suggestion: parsed.purpose_suggestion,
+                });
+            }
+            SymbolParseOutcome::TimedOut { path } => {
+                let language = language_by_path.get(&path).and_then(Option::as_deref);
+                mutations.push(IncrementalSourceMutation::Clear {
+                    preserve_node_summary: is_structural_summary_candidate(&path, language),
+                    path,
+                });
+                report.timed_out += 1;
+            }
+            SymbolParseOutcome::BinaryOrNonUtf8 { path } => {
+                let language = language_by_path.get(&path).and_then(Option::as_deref);
+                mutations.push(IncrementalSourceMutation::Clear {
+                    preserve_node_summary: is_structural_summary_candidate(&path, language),
+                    path,
+                });
+                report.binary_or_non_utf8 += 1;
+            }
+            SymbolParseOutcome::Io { path, source } => {
+                return Err(CliError::Io { path, source });
+            }
+        }
+    }
+    Ok((report, mutations))
+}
+
+/// Prepare affected structural summaries after accounting for parser mutations.
+fn prepare_incremental_summary_mutations(
+    store: &AtlasStore,
+    existing_by_path: &HashMap<String, projectatlas_core::IndexedNode>,
+    nodes: &[Node],
+    text_rows: &[TextIndexRow],
+    source_mutations: &[IncrementalSourceMutation],
+) -> Result<(StructuralSummaryReport, Vec<IncrementalSummaryMutation>), CliError> {
+    let text_by_path = text_rows
+        .iter()
+        .filter_map(|row| row.text.as_ref().map(|text| (text.path.as_str(), text)))
+        .collect::<HashMap<_, _>>();
+    let reason_by_path = text_rows
+        .iter()
+        .map(|row| (row.path.as_str(), row.reason))
+        .collect::<HashMap<_, _>>();
+    let mut report = StructuralSummaryReport::default();
+    let mut mutations = Vec::new();
+    for node in nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::File)
+        .filter(|node| is_structural_summary_candidate(&node.path, node.language.as_deref()))
+    {
+        report.candidates += 1;
+        if reason_by_path.get(node.path.as_str()) == Some(&TextIndexSkipReason::TooLarge)
+            || node
+                .size_bytes
+                .is_some_and(|size_bytes| size_bytes > MAX_SYMBOL_FILE_BYTES)
+        {
+            mutations.push(IncrementalSummaryMutation::Clear {
+                path: node.path.clone(),
+            });
+            report.cleared += 1;
+            report.too_large += 1;
+            continue;
+        }
+        let Some(text) = text_by_path.get(node.path.as_str()) else {
+            mutations.push(IncrementalSummaryMutation::Clear {
+                path: node.path.clone(),
+            });
+            report.cleared += 1;
+            if reason_by_path.get(node.path.as_str()) == Some(&TextIndexSkipReason::BinaryOrNonUtf8)
+            {
+                report.binary_or_non_utf8 += 1;
+            }
+            continue;
+        };
+        let existing = existing_by_path.get(&node.path);
+        let mut symbol_count = if existing.is_some() {
+            store.symbol_count_for_path(&node.path)?
+        } else {
+            0
+        };
+        let mut current_summary = existing.and_then(|indexed| indexed.summary.clone());
+        for mutation in source_mutations {
+            match mutation {
+                IncrementalSourceMutation::Replace { graph, summary, .. }
+                    if graph.path == node.path =>
+                {
+                    symbol_count = graph.symbols.len();
+                    current_summary = Some(summary.clone());
+                    break;
+                }
+                IncrementalSourceMutation::Clear {
+                    path,
+                    preserve_node_summary,
+                } if path == &node.path => {
+                    symbol_count = 0;
+                    if !preserve_node_summary {
+                        current_summary = None;
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if symbol_count > 0
+            && current_summary.as_deref().is_some_and(|summary| {
+                !summary.trim().is_empty() && !is_scanner_fallback_summary(summary)
+            })
+        {
+            continue;
+        }
+        let Some(summary) =
+            structural_summary_for_path(&node.path, node.language.as_deref(), &text.content)
+        else {
+            mutations.push(IncrementalSummaryMutation::Clear {
+                path: node.path.clone(),
+            });
+            report.cleared += 1;
+            continue;
+        };
+        let purpose_suggestion = existing
+            .is_none_or(|indexed| {
+                matches!(
+                    indexed.purpose.status,
+                    PurposeStatus::Missing | PurposeStatus::Suggested
+                )
+            })
+            .then(|| suggest_file_purpose(&node.path, &summary));
+        report.summarized += 1;
+        report.purpose_suggestions += usize::from(purpose_suggestion.is_some());
+        mutations.push(IncrementalSummaryMutation::Set {
+            path: node.path.clone(),
+            summary,
+            purpose_suggestion,
+        });
+    }
+    Ok((report, mutations))
 }
 
 /// Seed built-in purposes for reserved `ProjectAtlas` metadata nodes when needed.
@@ -3294,50 +3791,6 @@ pub(crate) fn indexed_file_texts_for_nodes(
         });
     }
     Ok(rows)
-}
-
-/// Load indexed file hashes for incremental refresh comparison.
-pub(crate) fn indexed_file_hashes(store: &AtlasStore) -> Result<HashMap<String, String>, CliError> {
-    Ok(store
-        .load_nodes()?
-        .into_iter()
-        .filter(|node| node.node.kind == NodeKind::File)
-        .filter_map(|node| node.node.content_hash.map(|hash| (node.node.path, hash)))
-        .collect::<HashMap<_, _>>())
-}
-
-/// Load indexed file hashes for selected repository paths.
-pub(crate) fn indexed_file_hashes_for_paths(
-    store: &AtlasStore,
-    paths: &HashSet<String>,
-) -> Result<HashMap<String, String>, CliError> {
-    let mut sorted_paths = paths.iter().cloned().collect::<Vec<_>>();
-    sorted_paths.sort();
-    Ok(store
-        .load_nodes_by_paths(&sorted_paths)?
-        .into_iter()
-        .filter(|node| node.node.kind == NodeKind::File)
-        .filter_map(|node| node.node.content_hash.map(|hash| (node.node.path, hash)))
-        .collect::<HashMap<_, _>>())
-}
-
-/// Return event paths in deterministic order.
-pub(crate) fn sorted_watch_paths(paths: &HashSet<PathBuf>) -> Vec<PathBuf> {
-    let mut paths = paths.iter().cloned().collect::<Vec<_>>();
-    paths.sort();
-    paths
-}
-
-/// Normalize a deleted path if it belongs to the watched repository.
-pub(crate) fn normalized_deleted_path(
-    root: &Path,
-    path: &Path,
-) -> Result<Option<String>, CliError> {
-    match normalize_repo_path(root, path) {
-        Ok(path) => Ok(Some(path)),
-        Err(projectatlas_core::CoreError::PathOutsideRoot { .. }) => Ok(None),
-        Err(source) => Err(CliError::InvalidInput(source.to_string())),
-    }
 }
 
 /// Inspect and optionally remove legacy `.purpose` files.

@@ -7949,7 +7949,7 @@ fn notify_watch_refreshes_symbols_after_file_change() -> Result<(), Box<dyn Erro
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
-        .args(["watch", ".", "--poll-seconds", "1", "--max-cycles", "2"])
+        .args(["watch", ".", "--poll-seconds", "1", "--max-cycles", "3"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -8319,6 +8319,376 @@ fn watch_once_detects_new_files_folders_text_and_symbols() -> Result<(), Box<dyn
         .assert()
         .success()
         .stdout(predicate::str::contains("auto_detected_new_file"));
+    Ok(())
+}
+
+#[test]
+fn task_arri_ut_arri_7_7_runtime_publication() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    let source = repo.join(SRC_DIR_NAME).join("lib.rs");
+    fs::write(&source, "pub fn before() {}\n")?;
+    let db = temp.path().join("projectatlas.db");
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+    let before = AtlasStore::open(&db)?.publication_state()?;
+
+    fs::write(
+        &source,
+        "pub fn after() -> &'static str { \"atomic lexical marker\" }\n",
+    )?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["watch", ".", "--once"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("parsed: 1"))
+        .stdout(predicate::str::contains("indexed: 1"));
+
+    let store = AtlasStore::open(&db)?;
+    let after = store.publication_state()?;
+    if after.active_slot != before.active_slot
+        || after.active_epoch.get() != before.active_epoch.get().saturating_add(1)
+    {
+        return Err(io::Error::other(format!(
+            "incremental watch did not preserve the slot and advance exactly one epoch: before={before:?}, after={after:?}"
+        ))
+        .into());
+    }
+    let text = store
+        .load_file_text("src/lib.rs")?
+        .ok_or_else(|| io::Error::other("incremental lexical row missing"))?;
+    if !text.content.contains("atomic lexical marker") {
+        return Err(io::Error::other("incremental lexical row was stale").into());
+    }
+    drop(store);
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["symbols", "list", "--file", "src/lib.rs"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("after"));
+    let summary = json_summary_command(&repo, &db, "src/lib.rs")?;
+    if !json_at(&summary, &["content_summary"])?
+        .as_str()
+        .is_some_and(|value| value.contains("after"))
+    {
+        return Err(io::Error::other("incremental summary was stale").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn task_arri_ut_arri_7_18_git_and_content_coalescing() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    let source = repo.join(SRC_DIR_NAME).join("lib.rs");
+    fs::write(&source, "pub fn state() -> u8 { 1 }\n")?;
+    let git_init = StdCommand::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["init", "--quiet"])
+        .output()?;
+    if !git_init.status.success() {
+        return Err(io::Error::other(format!(
+            "git init failed: {}",
+            String::from_utf8_lossy(&git_init.stderr)
+        ))
+        .into());
+    }
+    let db = temp.path().join("projectatlas.db");
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+    let store = AtlasStore::open(&db)?;
+    let initial_state = store.publication_state()?;
+    let initial_signature = store
+        .structural_state_signature()?
+        .ok_or_else(|| io::Error::other("scan did not persist a structural signature"))?;
+    drop(store);
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["watch", ".", "--once"])
+        .assert()
+        .success();
+    if AtlasStore::open(&db)?.publication_state()? != initial_state {
+        return Err(io::Error::other("unchanged watch cycle advanced the epoch").into());
+    }
+
+    let git_add = StdCommand::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["add", "--", "src/lib.rs"])
+        .output()?;
+    if !git_add.status.success() {
+        return Err(io::Error::other(format!(
+            "git add failed: {}",
+            String::from_utf8_lossy(&git_add.stderr)
+        ))
+        .into());
+    }
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["watch", ".", "--once"])
+        .assert()
+        .success();
+    let staged_store = AtlasStore::open(&db)?;
+    let staged_state = staged_store.publication_state()?;
+    let staged_signature = staged_store
+        .structural_state_signature()?
+        .ok_or_else(|| io::Error::other("staged state signature missing"))?;
+    if staged_state.active_slot != initial_state.active_slot
+        || staged_state.active_epoch.get() != initial_state.active_epoch.get().saturating_add(1)
+        || staged_signature == initial_signature
+    {
+        return Err(io::Error::other("Git-only state change did not publish exactly once").into());
+    }
+    drop(staged_store);
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["watch", ".", "--once"])
+        .assert()
+        .success();
+    if AtlasStore::open(&db)?.publication_state()? != staged_state {
+        return Err(io::Error::other("unchanged staged state was published twice").into());
+    }
+
+    fs::write(&source, "pub fn state() -> u8 { 2 }\n")?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["watch", ".", "--once"])
+        .assert()
+        .success();
+    let dirty_store = AtlasStore::open(&db)?;
+    let dirty_state = dirty_store.publication_state()?;
+    let dirty_signature = dirty_store
+        .structural_state_signature()?
+        .ok_or_else(|| io::Error::other("dirty state signature missing"))?;
+    if dirty_state.active_slot != staged_state.active_slot
+        || dirty_state.active_epoch.get() != staged_state.active_epoch.get().saturating_add(1)
+        || dirty_signature == staged_signature
+    {
+        return Err(io::Error::other("content change did not publish exactly once").into());
+    }
+    drop(dirty_store);
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["watch", ".", "--once"])
+        .assert()
+        .success();
+    if AtlasStore::open(&db)?.publication_state()? != dirty_state {
+        return Err(io::Error::other("unchanged dirty state was published twice").into());
+    }
+
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let mut child = StdCommand::new(executable)
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["watch", ".", "--poll-seconds", "1", "--max-cycles", "4"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    fs::write(&source, "pub fn state() -> u8 { 20 }\n")?;
+    let readiness_started = Instant::now();
+    let (readiness_state, readiness_signature) = loop {
+        let readiness_store = AtlasStore::open(&db)?;
+        let state = readiness_store.publication_state()?;
+        let signature = readiness_store
+            .structural_state_signature()?
+            .ok_or_else(|| io::Error::other("notify readiness signature missing"))?;
+        if state.active_slot == dirty_state.active_slot
+            && state.active_epoch.get() == dirty_state.active_epoch.get().saturating_add(1)
+            && signature != dirty_signature
+        {
+            break (state, signature);
+        }
+        if state.active_epoch.get() > dirty_state.active_epoch.get().saturating_add(1) {
+            return Err(io::Error::other(
+                "notify readiness source change published more than once",
+            )
+            .into());
+        }
+        if child.try_wait()?.is_some() {
+            return Err(io::Error::other(
+                "notify watcher exited before the readiness source change was observed",
+            )
+            .into());
+        }
+        if readiness_started.elapsed() > Duration::from_secs(15) {
+            child.kill()?;
+            let _status = child.wait()?;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "notify watcher did not publish the readiness source change",
+            )
+            .into());
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    let git_add_dirty = StdCommand::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["add", "--", "src/lib.rs"])
+        .output()?;
+    if !git_add_dirty.status.success() {
+        return Err(io::Error::other(format!(
+            "git add during notify watch failed: {}",
+            String::from_utf8_lossy(&git_add_dirty.stderr)
+        ))
+        .into());
+    }
+    let started = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(15) {
+            if child.try_wait()?.is_none() {
+                child.kill()?;
+            }
+            let _status = child.wait()?;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "notify watch did not wake for a scheduled Git-only signature check",
+            )
+            .into());
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "notify watch failed during Git-only change: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let stdout = String::from_utf8(output.stdout)?;
+    if !stdout.contains("mode: notify") || !stdout.contains("cycles: 4") {
+        return Err(io::Error::other(format!(
+            "Git-only watcher did not complete four notify cycles: {stdout}"
+        ))
+        .into());
+    }
+    let scheduled_store = AtlasStore::open(&db)?;
+    let scheduled_state = scheduled_store.publication_state()?;
+    let scheduled_signature = scheduled_store
+        .structural_state_signature()?
+        .ok_or_else(|| io::Error::other("scheduled Git-only signature missing"))?;
+    if scheduled_state.active_slot != readiness_state.active_slot
+        || scheduled_state.active_epoch.get()
+            != readiness_state.active_epoch.get().saturating_add(1)
+        || scheduled_signature == readiness_signature
+    {
+        return Err(io::Error::other(
+            "continuous notify mode did not publish the Git-only state exactly once",
+        )
+        .into());
+    }
+
+    drop(scheduled_store);
+    fs::write(&source, "pub fn state() -> u8 { 3 }\n")?;
+    let process_base = scheduled_state;
+    let process_base_signature = scheduled_signature;
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let mut first = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["watch", ".", "--once"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut second = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["watch", ".", "--once"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let started = Instant::now();
+    loop {
+        let first_done = first.try_wait()?.is_some();
+        let second_done = second.try_wait()?.is_some();
+        if first_done && second_done {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(15) {
+            if !first_done {
+                first.kill()?;
+            }
+            if !second_done {
+                second.kill()?;
+            }
+            let _first_status = first.wait()?;
+            let _second_status = second.wait()?;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "concurrent watch processes did not coalesce within the deadline",
+            )
+            .into());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let first_output = first.wait_with_output()?;
+    let second_output = second.wait_with_output()?;
+    for (worker, output) in [("first", first_output), ("second", second_output)] {
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "{worker} concurrent watch process failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+    }
+    let process_store = AtlasStore::open(&db)?;
+    let process_state = process_store.publication_state()?;
+    let process_signature = process_store
+        .structural_state_signature()?
+        .ok_or_else(|| io::Error::other("cross-process target signature missing"))?;
+    if process_state.active_slot != process_base.active_slot
+        || process_state.active_epoch.get() != process_base.active_epoch.get().saturating_add(1)
+        || process_signature == process_base_signature
+    {
+        return Err(io::Error::other(
+            "concurrent watch processes did not coalesce to one publication",
+        )
+        .into());
+    }
     Ok(())
 }
 
