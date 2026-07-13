@@ -1,0 +1,1248 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "projectatlas_task_verification_run",
+  "change": "advance-rust-repository-intelligence",
+  "tested_commit": "4b751d705d42a1ff9a0ce2a74051994c7ef064f0",
+  "platform": {
+    "os": "windows",
+    "arch": "x64"
+  },
+  "started_at": "2026-07-13T22:39:51.228Z",
+  "completed_at": "2026-07-13T22:44:56.357Z",
+  "result_count": 52,
+  "passed_count": 52,
+  "results": [
+    {
+      "task_id": "1.1",
+      "test_id": "UT:ARRI-1.1",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "task_arri_ut_arri_1_1"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:40:21.308Z",
+      "completed_at": "2026-07-13T22:40:44.483Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:9a8a1a512b17eb1a4b2fa14628a33986c9ccb52bda01030d5e2a7293bc691313"
+    },
+    {
+      "task_id": "1.2",
+      "test_id": "UT:ARRI-1.2",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "task_arri_ut_arri_1_2"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:40:21.367Z",
+      "completed_at": "2026-07-13T22:40:44.514Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:3ef16a66da7f56429f85732e89ee01729fa190163eb77493c4864317c46c7560"
+    },
+    {
+      "task_id": "1.3",
+      "test_id": "UT:ARRI-1.3",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "task_arri_ut_arri_1_3"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:40:21.361Z",
+      "completed_at": "2026-07-13T22:40:44.502Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:3a1c10b43fe3edd0eda32245465bdd0aed1059fb0456ca0e337b7025127b4dea"
+    },
+    {
+      "task_id": "1.4",
+      "test_id": "UT:ARRI-1.4",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "task_arri_ut_arri_1_4"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:40:21.335Z",
+      "completed_at": "2026-07-13T22:40:44.504Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:10b11b4f8e66f4f16dbdfc181c3fc3df7f371a5dd7c0d10de199176ce9f3dbec"
+    },
+    {
+      "task_id": "1.5",
+      "test_id": "UT:ARRI-1.5",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "task_arri_ut_arri_1_5"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:40:21.403Z",
+      "completed_at": "2026-07-13T22:40:44.474Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:a236ed907f845a979662df58843e326e14c6642c88160ad686f857fa36ed7806"
+    },
+    {
+      "task_id": "1.6",
+      "test_id": "UT:ARRI-1.6",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "task_arri_ut_arri_1_6"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:40:21.427Z",
+      "completed_at": "2026-07-13T22:40:44.526Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:a5fdf86440abb71c350ed6329ca849aed73251e676f59141c6472872840890fc"
+    },
+    {
+      "task_id": "2.1",
+      "test_id": "UT:ARRI-2.1",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::capability_inventory_is_binding_and_owned",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:41:07.897Z",
+      "completed_at": "2026-07-13T22:41:09.593Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:9427b1867503365e3a9845f0273c5551e7b86b62415abce9502f98daa802b30f"
+    },
+    {
+      "task_id": "2.2",
+      "test_id": "UT:ARRI-2.2",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "language_capability_registry_tests::accepted_language_union_rejects_contract_mutations",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:41:07.906Z",
+      "completed_at": "2026-07-13T22:41:10.154Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:dcbbab3206d5605a0acc0d1f0d3e71d6bf54c7ec07679acdfb5174d580bd257b"
+    },
+    {
+      "task_id": "2.3",
+      "test_id": "UT:ARRI-2.3",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::capability_family_contract_has_measurable_completion",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:41:07.944Z",
+      "completed_at": "2026-07-13T22:41:09.816Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:ab6212e8205914dbb963ea9de3501d70c45be97670cd996422eebedce358b6a1"
+    },
+    {
+      "task_id": "2.4",
+      "test_id": "UT:ARRI-2.4",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::compatibility_contract_preserves_compiled_baseline",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:41:07.986Z",
+      "completed_at": "2026-07-13T22:41:10.072Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:bae713cb44f974bd3f1311cc23c2b816cf4d9d0c365f814da9b148dfc61947d4"
+    },
+    {
+      "task_id": "2.5",
+      "test_id": "UT:ARRI-2.5",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::evaluation_manifest_defines_reproduction_fields",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:41:08.018Z",
+      "completed_at": "2026-07-13T22:41:10.125Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:79d793cf364321b904da8b3dc157689dddbf8fdc558e128ed034cf1e052c5d95"
+    },
+    {
+      "task_id": "2.6",
+      "test_id": "UT:ARRI-2.6",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::baseline_contract_rejects_unmeasured_claims",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:41:07.954Z",
+      "completed_at": "2026-07-13T22:41:09.617Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:19402e5fbe678d2df4851664caed67a51066aa7ba8c84d8b3effd8cf02f94022"
+    },
+    {
+      "task_id": "2.7",
+      "test_id": "UT:ARRI-2.7",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::graph_snapshot_contract_is_mechanical",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:42:01.376Z",
+      "completed_at": "2026-07-13T22:42:05.658Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:a04c59614ce28745de22d3da14a08726dd1538267ecdea1738db87b0745150f3"
+    },
+    {
+      "task_id": "2.8",
+      "test_id": "UT:ARRI-2.8",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::default_core_budget_contract_matches_typed_limits",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:42:01.376Z",
+      "completed_at": "2026-07-13T22:42:05.229Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:df36af258a49447e73f8d2550ccc7803dc11126bb4bcb910e05ff130caa35b6a"
+    },
+    {
+      "task_id": "2.9",
+      "test_id": "UT:ARRI-2.9",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::optional_pack_budget_contract_is_separate_and_unmeasured",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:42:01.446Z",
+      "completed_at": "2026-07-13T22:42:05.472Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:20ab35597ff82cbbb9cca045bc9c8e1b8c02c8a59ebf963c97ee09f4436f668b"
+    },
+    {
+      "task_id": "2.10",
+      "test_id": "UT:ARRI-2.10",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::statistics_contract_preregisters_decisions",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:42:01.414Z",
+      "completed_at": "2026-07-13T22:42:05.260Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:d1ff25727a71418b80ac1acb0a75f891aa46fc540d2265131bb6d45c24d5aa41"
+    },
+    {
+      "task_id": "2.11",
+      "test_id": "UT:ARRI-2.11",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::latency_contract_has_absolute_boundary_goals",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:42:01.478Z",
+      "completed_at": "2026-07-13T22:42:05.279Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:62573a48a82fc6ff178ca91341e7374b7d5e0888f9894a4ae2211e96238d30bc"
+    },
+    {
+      "task_id": "2.12",
+      "test_id": "UT:ARRI-2.12",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "--example",
+          "repository-evaluation-runner",
+          "sqlite_architecture_evaluation::tests::fts_differential_is_complete_and_nonvacuous",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:42:01.463Z",
+      "completed_at": "2026-07-13T22:42:07.572Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:47f959b3af2142aa42f814b8bd25d6307c59d19d7a9b2933cf84ba492bc20897"
+    },
+    {
+      "task_id": "2.13",
+      "test_id": "UT:ARRI-2.13",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "--example",
+          "repository-evaluation-runner",
+          "sqlite_architecture_evaluation::tests::sqlite_strategy_matrix_preserves_slots_and_authored_data",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 600,
+      "started_at": "2026-07-13T22:42:30.141Z",
+      "completed_at": "2026-07-13T22:42:32.357Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:18c61c3bce9ea500b5341bdbfb703e74e766b4de3b8bd2a394067b03132d29ee"
+    },
+    {
+      "task_id": "2.14",
+      "test_id": "UT:ARRI-2.14",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "optional_pack_candidate_readiness_tests::arri_2_14_parser_host_candidates_fail_closed_until_ready",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:42:30.074Z",
+      "completed_at": "2026-07-13T22:42:32.252Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:4d328e08f9ca966aac6603a2f357bab9e5648e878f88905a5e23f548e957b40f"
+    },
+    {
+      "task_id": "2.15",
+      "test_id": "UT:ARRI-2.15",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "optional_pack_candidate_readiness_tests::arri_2_15_semantic_candidates_fail_closed_until_labeled",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:42:30.056Z",
+      "completed_at": "2026-07-13T22:42:31.943Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:9320b1e3fa0653e6039108120fcd1f48264c395b53d5eb22f87b5855cff95937"
+    },
+    {
+      "task_id": "2.16",
+      "test_id": "UT:ARRI-2.16",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::architecture_decision_contract_tracks_pending_decisions",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:42:30.062Z",
+      "completed_at": "2026-07-13T22:42:32.029Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:cdc43f0c13c7e553cf49168a1f92ca0bfaff317a16eb62ba1f72bb99b5ee1b0e"
+    },
+    {
+      "task_id": "2.19",
+      "test_id": "UT:ARRI-2.19",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::simplicity_contract_bounds_surface_growth",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:42:30.109Z",
+      "completed_at": "2026-07-13T22:42:32.002Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:cefc2d2d86516d88fb9512f21a31d3e2d37f1e1a94b336d243e20de1d3adf7fe"
+    },
+    {
+      "task_id": "2.20",
+      "test_id": "UT:ARRI-2.20",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::arri_2_20_phase_exit_ownership_review_is_binding",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:42:30.157Z",
+      "completed_at": "2026-07-13T22:42:32.363Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:c69740de925caaa3851e3daf06af6e295c3b502b1839f15aeb1d28bbad289148"
+    },
+    {
+      "task_id": "2.21",
+      "test_id": "UT:ARRI-2.21",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "task_evidence_plan_tests::every_v04_task_materializes_one_complete_initial_evidence_row",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:42:56.368Z",
+      "completed_at": "2026-07-13T22:42:58.279Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:88b6990db6ce451da8b0a8d6e8713b85d7cb40b5b0f9492b6b65f2083beb7816"
+    },
+    {
+      "task_id": "2.22",
+      "test_id": "UT:ARRI-2.22",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::arri_2_22_validator_contract_rejects_invalid_evidence",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:42:56.406Z",
+      "completed_at": "2026-07-13T22:42:58.690Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:8fd7e6789acfe2e8aed56d5512c3d413203d0ad6a1ebf93041c65e44fbd0b3d2"
+    },
+    {
+      "task_id": "2.23",
+      "test_id": "UT:ARRI-2.23",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::arri_2_23_behavior_tests_precede_saturation",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:42:56.376Z",
+      "completed_at": "2026-07-13T22:42:58.118Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:84f49bff4ad8293df261d99c65aee73076ead064e8d2b522c5265a43cc0d7fd6"
+    },
+    {
+      "task_id": "2.24",
+      "test_id": "UT:ARRI-2.24",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::arri_2_24_self_test_catalog_is_complete",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:42:56.463Z",
+      "completed_at": "2026-07-13T22:42:58.525Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:5990312d8fd1ecfebab95ab2ecf92ec8a067a837edeb27268c9a90b3cf12150b"
+    },
+    {
+      "task_id": "2.25",
+      "test_id": "UT:ARRI-2.25",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::arri_2_25_issueops_ownership_is_explicit",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:42:56.396Z",
+      "completed_at": "2026-07-13T22:42:58.186Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:2765f8e17752dc2363e21f2a57d0290d6071eb2c421a6515484288d850e4e4e2"
+    },
+    {
+      "task_id": "2.29",
+      "test_id": "UT:ARRI-2.29",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::arri_2_29_phase_review_and_evaluator_boundaries_are_closed",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 1800,
+      "started_at": "2026-07-13T22:42:56.438Z",
+      "completed_at": "2026-07-13T22:42:58.378Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:c2309f64c3be0ba1d2835dd3d7af3ab9911df8cb61fcebb2155593135aba9709"
+    },
+    {
+      "task_id": "2.30",
+      "test_id": "UT:ARRI-2.30",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::arri_2_30_quality_release_prerequisite_is_ordered",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:43:22.398Z",
+      "completed_at": "2026-07-13T22:43:24.274Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:fc3f84145a7079eb5f9c2a23575bf4500ed8ecef0e662a898d3cbd66d5ef086e"
+    },
+    {
+      "task_id": "2.31",
+      "test_id": "UT:ARRI-2.31",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_intelligence_contract_tests::arri_2_31_pre_mortem_mitigations_are_task_owned",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:43:22.354Z",
+      "completed_at": "2026-07-13T22:43:23.818Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:fb3731d607d1b97990c0e034158981a3255967c4e47430e04faba02e8034042c"
+    },
+    {
+      "task_id": "3.1",
+      "test_id": "UT:ARRI-3.1",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "repository_ownership_contract_tests::arri_3_1_ownership_map_is_need_driven",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:43:22.387Z",
+      "completed_at": "2026-07-13T22:43:24.063Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:4310f6503409e782ea3e13aa78519442745e6661aec9bd3060f5f44acc9fb8ce"
+    },
+    {
+      "task_id": "3.2",
+      "test_id": "UT:ARRI-3.2",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-core",
+          "graph::tests::graph_relations_preserve_legacy_compatibility",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:43:22.411Z",
+      "completed_at": "2026-07-13T22:43:24.658Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:e7dbb04a14efcd01de25b750bbe3421a76591c9f80512d5b58326aa8f150f186"
+    },
+    {
+      "task_id": "3.3",
+      "test_id": "UT:ARRI-3.3",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-db",
+          "schema::tests::store_facade_preserves_schema_and_legacy_repairs",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 600,
+      "started_at": "2026-07-13T22:43:22.481Z",
+      "completed_at": "2026-07-13T22:43:23.766Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:ea7073d6eaa9c05dfb900cf55bca490c95340c9e47cfacb943bd6c4e59b6a0b4"
+    },
+    {
+      "task_id": "3.4",
+      "test_id": "UT:ARRI-3.4",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-symbols",
+          "tests::task_arri_ut_arri_3_4",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:43:22.445Z",
+      "completed_at": "2026-07-13T22:43:25.186Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:9151700b8a8774e27d9ba6dd178f47c1e4797a0517bc486f0c37a35a6737da2e"
+    },
+    {
+      "task_id": "3.6",
+      "test_id": "UT:ARRI-3.6",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-cli",
+          "--all-features",
+          "runtime::full_scan::tests::task_arri_ut_arri_3_6",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:43:51.469Z",
+      "completed_at": "2026-07-13T22:43:52.781Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:9cbb463ce48dedd3ed2cb3303844f97fca4b523b038871f645d07eb981e45d82"
+    },
+    {
+      "task_id": "4.1",
+      "test_id": "UT:ARRI-4.1",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-core",
+          "graph::tests::resolved_graph_facts_are_generation_neutral_and_project_scoped",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:43:51.494Z",
+      "completed_at": "2026-07-13T22:43:52.262Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:621159e8e0def7f6c442026f49e2cdde86d9f3bdd21c02a8ff26f44bbdf027eb"
+    },
+    {
+      "task_id": "4.2",
+      "test_id": "UT:ARRI-4.2",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-db",
+          "schema::tests::task_arri_ut_arri_4_2",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 600,
+      "started_at": "2026-07-13T22:43:51.547Z",
+      "completed_at": "2026-07-13T22:43:53.261Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:eb9a4e628b7b75925e7ce6863f0688615a9aa93b5c588effd91881583aa3e96c"
+    },
+    {
+      "task_id": "4.3",
+      "test_id": "UT:ARRI-4.3",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-symbols",
+          "tests::task_arri_ut_arri_4_3",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:43:51.533Z",
+      "completed_at": "2026-07-13T22:43:52.568Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:e448a31e5cdd247ca5d86c39b22b62981f4d77b6a6732770c533aad3d5653fbf"
+    },
+    {
+      "task_id": "4.6",
+      "test_id": "UT:ARRI-4.6",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-db",
+          "schema::tests::task_arri_ut_arri_4_6",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:43:51.635Z",
+      "completed_at": "2026-07-13T22:43:53.186Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:9890ba36337d8471f97cbadba95dfe40f1f89ccdd731b918b9e92341769e993d"
+    },
+    {
+      "task_id": "4.7",
+      "test_id": "UT:ARRI-4.7",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "--workspace",
+          "--all-features",
+          "task_arri_ut_arri_4_7"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:43:51.642Z",
+      "completed_at": "2026-07-13T22:43:53.968Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:569d69a57c900a38bb6d5901db91cbe370c0c623517c1e8f9985562b166327da"
+    },
+    {
+      "task_id": "4.8",
+      "test_id": "UT:ARRI-4.8",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "--workspace",
+          "--all-features",
+          "task_arri_ut_arri_4_8"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:44:17.403Z",
+      "completed_at": "2026-07-13T22:44:19.475Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:d4f55f9b9f0e7fa966feac3d6e8b0fb125ac41a5c602dea989862ecd5ba90a92"
+    },
+    {
+      "task_id": "4.9",
+      "test_id": "UT:ARRI-4.9",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "--workspace",
+          "--all-features",
+          "task_arri_ut_arri_4_9"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:44:17.389Z",
+      "completed_at": "2026-07-13T22:44:19.478Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:08df865a8d2ff9cfcf7d8e0ad1c2b59cfc86b389ae99b47e1ab7858830620c6d"
+    },
+    {
+      "task_id": "4.10",
+      "test_id": "UT:ARRI-4.10",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "--workspace",
+          "--all-features",
+          "task_arri_ut_arri_4_10"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:44:17.424Z",
+      "completed_at": "2026-07-13T22:44:19.613Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:8de481346e4ffb08c3f0cc9de6cd30e005b4d0af6c374f90879ae8e1ab4761ff"
+    },
+    {
+      "task_id": "4.11",
+      "test_id": "UT:ARRI-4.11",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "--workspace",
+          "--all-features",
+          "task_arri_ut_arri_4_11"
+        ]
+      },
+      "timeout_seconds": 300,
+      "started_at": "2026-07-13T22:44:17.480Z",
+      "completed_at": "2026-07-13T22:44:19.546Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:d03832b2aaaa0c69e52ed3cd177928baa1d4ed418cd6302546469a0a829e31f2"
+    },
+    {
+      "task_id": "4.12",
+      "test_id": "UT:ARRI-4.12",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-db",
+          "--all-features",
+          "structural_publication::tests::task_arri_ut_arri_4_12",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 600,
+      "started_at": "2026-07-13T22:44:17.461Z",
+      "completed_at": "2026-07-13T22:44:20.181Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:7b79524a4a73857795d4ca2d7c53e0bdac948382e7879f7ed576b96342a75e07"
+    },
+    {
+      "task_id": "4.14",
+      "test_id": "UT:ARRI-4.14",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-db",
+          "--all-features",
+          "structural_publication::tests::task_arri_ut_arri_4_14",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 600,
+      "started_at": "2026-07-13T22:39:51.228Z",
+      "completed_at": "2026-07-13T22:39:51.627Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:c0f11126b1b905b5ba1b595740cdd4a980bfbb430431aa10e0592784451ccaa1"
+    },
+    {
+      "task_id": "7.6",
+      "test_id": "UT:ARRI-7.6",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-db",
+          "--all-features",
+          "structural_publication::tests::task_arri_ut_arri_7_6",
+          "--",
+          "--exact"
+        ]
+      },
+      "timeout_seconds": 600,
+      "started_at": "2026-07-13T22:44:17.502Z",
+      "completed_at": "2026-07-13T22:44:20.120Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:05b79b29ef6d28a15481df5ded7cf12c076669394c298c0357326fd997cc2aa0"
+    },
+    {
+      "task_id": "7.7",
+      "test_id": "UT:ARRI-7.7",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "--workspace",
+          "--all-features",
+          "task_arri_ut_arri_7_7"
+        ]
+      },
+      "timeout_seconds": 600,
+      "started_at": "2026-07-13T22:44:42.777Z",
+      "completed_at": "2026-07-13T22:44:44.990Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 2,
+      "output_digest": "sha256:0bc6b27a2312a268a1065f4813997761760b968c408fa64b4b70e6415d7b7a16"
+    },
+    {
+      "task_id": "7.18",
+      "test_id": "UT:ARRI-7.18",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "--workspace",
+          "--all-features",
+          "task_arri_ut_arri_7_18"
+        ]
+      },
+      "timeout_seconds": 600,
+      "started_at": "2026-07-13T22:44:46.330Z",
+      "completed_at": "2026-07-13T22:44:54.104Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 2,
+      "output_digest": "sha256:c8f68cf7f07df0dcc471be12e311efdb85cb81b6075bd6519601e662adfa173c"
+    },
+    {
+      "task_id": "7.19",
+      "test_id": "UT:ARRI-7.19",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--locked",
+          "-p",
+          "projectatlas-db",
+          "--all-features",
+          "structural_publication::tests::task_arri_ut_arri_7_19",
+          "--",
+          "--exact",
+          "--nocapture"
+        ]
+      },
+      "timeout_seconds": 600,
+      "started_at": "2026-07-13T22:44:55.514Z",
+      "completed_at": "2026-07-13T22:44:56.357Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 1,
+      "output_digest": "sha256:2b138bb981e54847e47d718f9558359088440d3684d42cb28bb79dbe4aa33774"
+    }
+  ]
+}
