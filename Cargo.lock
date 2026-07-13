@@ -1424,6 +1424,7 @@ dependencies = [
 name = "projectatlas-db"
 version = "0.3.26"
 dependencies = [
+ "blake3",
  "fs4",
  "projectatlas-core",
  "rusqlite",

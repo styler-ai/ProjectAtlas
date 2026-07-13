@@ -319,13 +319,12 @@ impl AtlasStore {
     ///
     /// Returns an error if `SQLite` setup or schema validation fails.
     pub fn open(path: &Path) -> DbResult<Self> {
-        schema::preflight(path)?;
-        let connection = Connection::open(path)?;
+        let migration_plan = schema::preflight(path)?;
+        let mut connection = Connection::open(path)?;
+        schema::apply_migration_plan(&mut connection, &migration_plan)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
-        let store = Self { connection };
-        store.initialize_schema()?;
-        Ok(store)
+        Ok(Self { connection })
     }
 
     /// Open an in-memory store for tests.
@@ -334,12 +333,10 @@ impl AtlasStore {
     ///
     /// Returns an error if schema setup fails.
     pub fn in_memory() -> DbResult<Self> {
-        schema::preflight_in_memory()?;
-        let store = Self {
-            connection: Connection::open_in_memory()?,
-        };
-        store.initialize_schema()?;
-        Ok(store)
+        let migration_plan = schema::preflight_in_memory()?;
+        let mut connection = Connection::open_in_memory()?;
+        schema::apply_migration_plan(&mut connection, &migration_plan)?;
+        Ok(Self { connection })
     }
 
     /// Initialize schema.
@@ -348,7 +345,7 @@ impl AtlasStore {
     ///
     /// Returns an error if schema creation or validation fails.
     pub fn initialize_schema(&self) -> DbResult<()> {
-        schema::initialize(&self.connection)
+        schema::verify_current_schema(&self.connection)
     }
 
     /// Upsert a full scan result and mark previously seen missing paths absent.

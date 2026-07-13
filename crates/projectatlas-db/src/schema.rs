@@ -3,18 +3,22 @@
 use crate::{DbError, DbResult, sqlite_read_uri};
 use projectatlas_core::graph::ProjectInstanceId;
 use projectatlas_core::normalize_native_path_display;
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Current `SQLite` schema version supported by this crate.
-const SCHEMA_VERSION: i64 = 9;
+/// Last schema version released before the runtime-owned migration ledger.
+const MIGRATION_BASE_SCHEMA_VERSION: i64 = 9;
+/// Current `SQLite` schema version allocated from the accepted migration inventory.
+const SCHEMA_VERSION: i64 = MIGRATION_BASE_SCHEMA_VERSION + MIGRATIONS.len() as i64;
 /// Metadata key for the schema contract version.
 const SCHEMA_VERSION_METADATA_KEY: &str = "schema_version";
 /// Metadata key for one independently initialized database identity.
 const PROJECT_INSTANCE_ID_METADATA_KEY: &str = "project_instance_id";
+/// Runtime-owned append-only migration history table.
+const MIGRATION_LEDGER_TABLE: &str = "schema_migrations";
 
 /// Earliest metadata schema version that the current repair path accepts.
 const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 1;
@@ -22,6 +26,144 @@ const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 1;
 const PROJECTATLAS_DIRECTORY_NAME: &str = ".projectatlas";
 /// Minimum headroom reserved when estimating backup feasibility.
 const BACKUP_HEADROOM_BYTES: u64 = 64 * 1024;
+
+/// One accepted migration before its schema version is allocated by inventory order.
+#[derive(Clone, Copy, Debug)]
+struct MigrationDefinition {
+    /// Immutable accepted migration identity.
+    id: &'static str,
+    /// Smallest runtime module responsible for the migration.
+    owner: &'static str,
+    /// State that must be proven before applying the migration.
+    prerequisites: &'static str,
+    /// Contract for ProjectAtlas-authored rows.
+    authored_effects: &'static str,
+    /// Contract for reproducible derived rows.
+    derived_effects: &'static str,
+    /// Atomicity boundary that owns every migration write.
+    transaction_boundary: &'static str,
+    /// Successful state transition performed by the migration.
+    forward_behavior: &'static str,
+    /// State retained when any migration step fails.
+    rollback_behavior: &'static str,
+    /// Focused executable proof for this migration.
+    evidence: &'static str,
+    /// Concrete schema operation for this closed migration inventory.
+    apply: fn(&Connection) -> DbResult<()>,
+    /// Concrete postcondition checked before the ledger row is written.
+    verify: fn(&Connection) -> DbResult<()>,
+}
+
+/// Accepted migrations in immutable application order.
+const MIGRATIONS: [MigrationDefinition; 1] = [MigrationDefinition {
+    id: "install-runtime-migration-ledger",
+    owner: "projectatlas-db::schema",
+    prerequisites: "read-only-preflight=write-ready;source-schema=1..=9-or-fresh",
+    authored_effects: "preserve=metadata,purposes,settings,telemetry",
+    derived_effects: "preserve=nodes,summaries,symbols,relations,file-texts",
+    transaction_boundary: "single-sqlite-transaction",
+    forward_behavior: "create-ledger;record-accepted-history;advance-schema-version",
+    rollback_behavior: "rollback-transaction;retain-source-schema-and-data",
+    evidence: "cargo test --locked --workspace --all-features task_arri_ut_arri_4_7",
+    apply: create_migration_ledger,
+    verify: verify_migration_ledger_schema,
+}];
+
+/// One migration with the schema version allocated from accepted inventory order.
+#[derive(Clone, Debug)]
+struct AllocatedMigration {
+    /// Runtime schema version allocated from inventory order.
+    schema_version: i64,
+    /// Accepted behavior and evidence contract.
+    definition: MigrationDefinition,
+    /// Integrity digest over the allocated version and accepted contract.
+    checksum: String,
+}
+
+impl AllocatedMigration {
+    /// Encode the immutable contract fields covered by the ledger digest.
+    fn canonical_payload(&self) -> String {
+        let definition = self.definition;
+        [
+            self.schema_version.to_string(),
+            definition.id.to_owned(),
+            definition.owner.to_owned(),
+            definition.prerequisites.to_owned(),
+            definition.authored_effects.to_owned(),
+            definition.derived_effects.to_owned(),
+            definition.transaction_boundary.to_owned(),
+            definition.forward_behavior.to_owned(),
+            definition.rollback_behavior.to_owned(),
+            definition.evidence.to_owned(),
+        ]
+        .join("\0")
+    }
+}
+
+/// Preflight-derived migration work passed across the write-capable open boundary.
+#[derive(Clone, Debug)]
+pub(crate) struct SchemaMigrationPlan {
+    /// Schema identifier observed by read-only preflight.
+    source_version: i64,
+    /// Current runtime schema identifier derived from accepted migrations.
+    target_version: i64,
+    /// Ordered migration work not represented by the source ledger.
+    pending: Vec<AllocatedMigration>,
+}
+
+impl SchemaMigrationPlan {
+    /// Plan all accepted migrations for an empty database.
+    fn fresh() -> Self {
+        Self {
+            source_version: 0,
+            target_version: SCHEMA_VERSION,
+            pending: allocated_migrations(),
+        }
+    }
+}
+
+/// One durable migration row read during preflight or post-migration reconciliation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MigrationLedgerRecord {
+    /// Schema version reached by the recorded migration.
+    schema_version: i64,
+    /// Immutable accepted migration identity.
+    migration_id: String,
+    /// Integrity digest from the runtime inventory.
+    checksum: String,
+}
+
+/// Read-only compatibility result for the runtime-owned migration ledger.
+#[derive(Debug, Eq, PartialEq)]
+enum MigrationLedgerState {
+    /// The source does not contain a migration ledger.
+    Absent,
+    /// Every persisted row agrees with the runtime inventory.
+    Compatible(Vec<MigrationLedgerRecord>),
+    /// Table shape or persisted history disagrees with the runtime inventory.
+    Rejected(String),
+}
+
+/// Allocate schema versions and integrity digests from immutable inventory order.
+fn allocated_migrations() -> Vec<AllocatedMigration> {
+    MIGRATIONS
+        .iter()
+        .copied()
+        .zip((MIGRATION_BASE_SCHEMA_VERSION + 1)..)
+        .map(|(definition, schema_version)| {
+            let mut migration = AllocatedMigration {
+                schema_version,
+                definition,
+                checksum: String::new(),
+            };
+            migration.checksum = format!(
+                "blake3:{}",
+                blake3::hash(migration.canonical_payload().as_bytes()).to_hex()
+            );
+            migration
+        })
+        .collect()
+}
 
 /// Schema state found before a write-capable database open.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -262,6 +404,8 @@ struct SchemaPreflightReport {
     free_space: FreeSpaceState,
     /// Backup and rollback feasibility.
     backup: BackupReadiness,
+    /// Runtime migration-ledger shape, order, metadata, and digest state.
+    migration_ledger: MigrationLedgerState,
     /// Conflicting or leftover partial-object diagnostics.
     conflicting_partial_objects: Vec<String>,
 }
@@ -447,8 +591,46 @@ impl SchemaPreflightReport {
                 self.backup.rollback_ready
             )));
         }
+        match &self.migration_ledger {
+            MigrationLedgerState::Absent if !self.source.migration_required() => {
+                if matches!(self.source, SchemaSourceState::Supported { .. }) {
+                    return Err(preflight_error(
+                        "current schema is missing the runtime migration ledger",
+                    ));
+                }
+            }
+            MigrationLedgerState::Absent | MigrationLedgerState::Compatible(_) => {}
+            MigrationLedgerState::Rejected(detail) => {
+                return Err(preflight_error(format!(
+                    "migration ledger is incompatible: {detail}"
+                )));
+            }
+        }
         Ok(())
     }
+}
+
+/// Convert a write-ready report into the exact pending migration sequence.
+fn migration_plan(report: &SchemaPreflightReport) -> DbResult<SchemaMigrationPlan> {
+    report.ensure_write_ready()?;
+    let source_version = match report.source {
+        SchemaSourceState::Fresh | SchemaSourceState::Empty => 0,
+        SchemaSourceState::Supported { version, .. } => version,
+        SchemaSourceState::Unsupported { version } => {
+            return Err(DbError::SchemaVersion {
+                found: version,
+                expected: SCHEMA_VERSION,
+            });
+        }
+    };
+    Ok(SchemaMigrationPlan {
+        source_version,
+        target_version: SCHEMA_VERSION,
+        pending: allocated_migrations()
+            .into_iter()
+            .filter(|migration| migration.schema_version > source_version)
+            .collect(),
+    })
 }
 
 /// Minimal `SQLite` schema-object identity used during preflight.
@@ -461,9 +643,9 @@ struct SqliteObjectState {
 }
 
 /// Run the file-backed read-only preflight before a write-capable open.
-pub(crate) fn preflight(path: &Path) -> DbResult<()> {
+pub(crate) fn preflight(path: &Path) -> DbResult<SchemaMigrationPlan> {
     let report = inspect_schema_preflight(path)?;
-    report.ensure_write_ready()
+    migration_plan(&report)
 }
 
 /// Inspect and retain the complete file-backed preflight report.
@@ -479,7 +661,7 @@ fn inspect_schema_preflight(path: &Path) -> DbResult<SchemaPreflightReport> {
 ///
 /// Filesystem capacity, sidecars, root binding, and backup readiness do not
 /// apply because the database has no persistent target and cannot migrate one.
-pub(crate) fn preflight_in_memory() -> DbResult<()> {
+pub(crate) fn preflight_in_memory() -> DbResult<SchemaMigrationPlan> {
     let connection = Connection::open_in_memory()?;
     let features = sqlite_feature_state(&connection)?;
     if features.version.is_empty() || features.compile_options.is_empty() {
@@ -488,7 +670,7 @@ pub(crate) fn preflight_in_memory() -> DbResult<()> {
         ));
     }
     match integrity_state(&connection)? {
-        IntegrityState::Passed => Ok(()),
+        IntegrityState::Passed => Ok(SchemaMigrationPlan::fresh()),
         IntegrityState::Failed(details) => Err(preflight_error(format!(
             "in-memory SQLite quick_check failed: {}",
             details.join("; ")
@@ -534,6 +716,7 @@ fn inspect_fresh_database(path: &Path) -> DbResult<SchemaPreflightReport> {
             backup_ready: parent_is_writable(parent)?,
             rollback_ready: true,
         },
+        migration_ledger: MigrationLedgerState::Absent,
         conflicting_partial_objects: Vec::new(),
     })
 }
@@ -574,6 +757,7 @@ fn inspect_existing_database(path: &Path) -> DbResult<SchemaPreflightReport> {
         conflicts.dedup();
 
         let root_binding = root_binding_state(&connection, path, &objects, source)?;
+        let migration_ledger = migration_ledger_state(&connection, &objects, source)?;
         let database_bytes = fs::metadata(path)
             .map_err(|error| filesystem_error(path, "read database metadata", &error))?
             .len();
@@ -608,6 +792,7 @@ fn inspect_existing_database(path: &Path) -> DbResult<SchemaPreflightReport> {
                 backup_ready,
                 rollback_ready: backup_ready,
             },
+            migration_ledger,
             conflicting_partial_objects: conflicts,
         })
     })();
@@ -632,8 +817,8 @@ fn inspect_existing_database(path: &Path) -> DbResult<SchemaPreflightReport> {
 
 /// Build the authoritative current object contract in a throwaway database.
 fn current_schema_reference() -> DbResult<(Connection, Vec<SchemaObjectContract>)> {
-    let connection = Connection::open_in_memory()?;
-    initialize(&connection)?;
+    let mut connection = Connection::open_in_memory()?;
+    apply_migration_plan(&mut connection, &SchemaMigrationPlan::fresh())?;
     let contracts = schema_object_contracts(&connection)?;
     Ok((connection, contracts))
 }
@@ -804,6 +989,75 @@ fn schema_source_state(
         version,
         migration_required: version < SCHEMA_VERSION,
     })
+}
+
+/// Validate the append-only migration history against the runtime inventory.
+fn migration_ledger_state(
+    connection: &Connection,
+    objects: &BTreeMap<String, SqliteObjectState>,
+    source: SchemaSourceState,
+) -> DbResult<MigrationLedgerState> {
+    let Some(object) = objects.get(MIGRATION_LEDGER_TABLE) else {
+        return Ok(MigrationLedgerState::Absent);
+    };
+    if object.object_type != "table" {
+        return Ok(MigrationLedgerState::Rejected(format!(
+            "{MIGRATION_LEDGER_TABLE} is a {}, not a table",
+            object.object_type
+        )));
+    }
+    if table_columns(connection, MIGRATION_LEDGER_TABLE)?
+        != ["schema_version", "migration_id", "checksum"]
+    {
+        return Ok(MigrationLedgerState::Rejected(format!(
+            "{MIGRATION_LEDGER_TABLE} has an unsupported column contract"
+        )));
+    }
+
+    let query = format!(
+        "SELECT schema_version, migration_id, checksum FROM {MIGRATION_LEDGER_TABLE} ORDER BY schema_version"
+    );
+    let mut statement = connection.prepare(&query)?;
+    let rows = statement.query_map([], |row| {
+        Ok(MigrationLedgerRecord {
+            schema_version: row.get(0)?,
+            migration_id: row.get(1)?,
+            checksum: row.get(2)?,
+        })
+    })?;
+    let records = rows.collect::<Result<Vec<_>, _>>()?;
+    let source_version = match source {
+        SchemaSourceState::Fresh | SchemaSourceState::Empty => 0,
+        SchemaSourceState::Supported { version, .. }
+        | SchemaSourceState::Unsupported { version } => version,
+    };
+    let expected = allocated_migrations()
+        .into_iter()
+        .filter(|migration| migration.schema_version <= source_version)
+        .collect::<Vec<_>>();
+    if source_version < SCHEMA_VERSION || records.len() != expected.len() {
+        return Ok(MigrationLedgerState::Rejected(format!(
+            "declared schema version {source_version} has {} ledger rows; expected {}",
+            records.len(),
+            expected.len()
+        )));
+    }
+    for (record, migration) in records.iter().zip(&expected) {
+        if record.schema_version != migration.schema_version
+            || record.migration_id != migration.definition.id
+            || record.checksum != migration.checksum
+        {
+            return Ok(MigrationLedgerState::Rejected(format!(
+                "schema version {} has migration {:?} digest {:?}; expected {:?} digest {:?}",
+                record.schema_version,
+                record.migration_id,
+                record.checksum,
+                migration.definition.id,
+                migration.checksum
+            )));
+        }
+    }
+    Ok(MigrationLedgerState::Compatible(records))
 }
 
 /// Compare one target database with the authoritative current object contract.
@@ -1067,8 +1321,45 @@ fn preflight_error(message: impl Into<String>) -> DbError {
     }
 }
 
-/// Initialize the current schema and repair supported legacy columns.
-pub(crate) fn initialize(connection: &Connection) -> DbResult<()> {
+/// Apply a preflight-derived migration plan through one `SQLite` transaction.
+pub(crate) fn apply_migration_plan(
+    connection: &mut Connection,
+    plan: &SchemaMigrationPlan,
+) -> DbResult<()> {
+    validate_migration_plan(plan)?;
+    if plan.pending.is_empty() {
+        return verify_current_schema(connection);
+    }
+
+    let transaction = connection.transaction()?;
+    let observed_source = observed_schema_version(&transaction)?;
+    if observed_source != plan.source_version {
+        return Err(preflight_error(format!(
+            "schema changed after preflight: planned source {} but writable transaction observed {observed_source}",
+            plan.source_version
+        )));
+    }
+
+    initialize_schema_objects(&transaction)?;
+    ensure_project_instance_id(&transaction, true)?;
+    for migration in &plan.pending {
+        (migration.definition.apply)(&transaction)?;
+        (migration.definition.verify)(&transaction)?;
+        record_applied_migration(&transaction, migration)?;
+        write_schema_version(&transaction, migration.schema_version)?;
+    }
+    verify_schema_history(&transaction, plan.target_version)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Revalidate an already initialized store without issuing schema writes.
+pub(crate) fn verify_current_schema(connection: &Connection) -> DbResult<()> {
+    verify_schema_history(connection, SCHEMA_VERSION)
+}
+
+/// Create or repair the pre-ledger schema objects inside the migration transaction.
+fn initialize_schema_objects(connection: &Connection) -> DbResult<()> {
     reset_legacy_summary_schema(connection)?;
     connection.execute_batch(
         "
@@ -1220,40 +1511,125 @@ pub(crate) fn initialize(connection: &Connection) -> DbResult<()> {
         CREATE INDEX IF NOT EXISTS idx_usage_session_created_at ON usage_events(session_id, created_at);
         ",
     )?;
-    reconcile_schema_version(connection)
+    Ok(())
 }
 
-/// Reconcile the supported metadata schema version without changing its contract.
-fn reconcile_schema_version(connection: &Connection) -> DbResult<()> {
-    let stored = connection
-        .query_row(
-            "SELECT value FROM metadata WHERE key = ?1",
-            [SCHEMA_VERSION_METADATA_KEY],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    if let Some(value) = stored {
-        let found = value.parse::<i64>().map_or(-1, |parsed| parsed);
-        if (1..SCHEMA_VERSION).contains(&found) {
-            ensure_project_instance_id(connection, true)?;
-            connection.execute(
-                "UPDATE metadata SET value = ?1 WHERE key = ?2",
-                (SCHEMA_VERSION.to_string(), SCHEMA_VERSION_METADATA_KEY),
-            )?;
-        } else if found == SCHEMA_VERSION {
-            ensure_project_instance_id(connection, false)?;
-        } else {
-            return Err(DbError::SchemaVersion {
-                found,
-                expected: SCHEMA_VERSION,
-            });
+/// Reject a plan that no longer matches the compiled migration inventory.
+fn validate_migration_plan(plan: &SchemaMigrationPlan) -> DbResult<()> {
+    if !(0..=SCHEMA_VERSION).contains(&plan.source_version) || plan.target_version != SCHEMA_VERSION
+    {
+        return Err(preflight_error(format!(
+            "migration plan range {}..={} is incompatible with runtime target {SCHEMA_VERSION}",
+            plan.source_version, plan.target_version
+        )));
+    }
+    let expected = allocated_migrations()
+        .into_iter()
+        .filter(|migration| migration.schema_version > plan.source_version)
+        .collect::<Vec<_>>();
+    if plan.pending.len() != expected.len()
+        || plan
+            .pending
+            .iter()
+            .zip(&expected)
+            .any(|(actual, expected)| {
+                actual.schema_version != expected.schema_version
+                    || actual.definition.id != expected.definition.id
+                    || actual.checksum != expected.checksum
+            })
+    {
+        return Err(preflight_error(
+            "migration plan does not match the compiled ordered inventory",
+        ));
+    }
+    Ok(())
+}
+
+/// Read the schema identifier again at the transaction boundary.
+fn observed_schema_version(connection: &Connection) -> DbResult<i64> {
+    let objects = sqlite_objects(connection)?;
+    match schema_source_state(connection, &objects)? {
+        SchemaSourceState::Fresh | SchemaSourceState::Empty => Ok(0),
+        SchemaSourceState::Supported { version, .. }
+        | SchemaSourceState::Unsupported { version } => Ok(version),
+    }
+}
+
+/// Create the runtime-owned append-only migration history table.
+fn create_migration_ledger(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(
+        "CREATE TABLE schema_migrations (
+            schema_version INTEGER PRIMARY KEY,
+            migration_id TEXT NOT NULL UNIQUE,
+            checksum TEXT NOT NULL
+        );",
+    )?;
+    Ok(())
+}
+
+/// Verify the table shape before recording the migration that created it.
+fn verify_migration_ledger_schema(connection: &Connection) -> DbResult<()> {
+    if table_columns(connection, MIGRATION_LEDGER_TABLE)?
+        != ["schema_version", "migration_id", "checksum"]
+    {
+        return Err(preflight_error(
+            "runtime migration ledger column contract did not reconcile",
+        ));
+    }
+    Ok(())
+}
+
+/// Record one accepted migration after its behavior reconciles successfully.
+fn record_applied_migration(
+    transaction: &Transaction<'_>,
+    migration: &AllocatedMigration,
+) -> DbResult<()> {
+    let statement = format!(
+        "INSERT INTO {MIGRATION_LEDGER_TABLE}(schema_version, migration_id, checksum) VALUES(?1, ?2, ?3)"
+    );
+    transaction.execute(
+        &statement,
+        params![
+            migration.schema_version,
+            migration.definition.id,
+            migration.checksum
+        ],
+    )?;
+    Ok(())
+}
+
+/// Advance metadata only after the migration behavior and ledger row succeed.
+fn write_schema_version(connection: &Connection, schema_version: i64) -> DbResult<()> {
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES(?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (SCHEMA_VERSION_METADATA_KEY, schema_version.to_string()),
+    )?;
+    Ok(())
+}
+
+/// Reconcile the declared version with the exact accepted ledger history.
+fn verify_schema_history(connection: &Connection, expected_version: i64) -> DbResult<()> {
+    let objects = sqlite_objects(connection)?;
+    let source = schema_source_state(connection, &objects)?;
+    if source
+        != (SchemaSourceState::Supported {
+            version: expected_version,
+            migration_required: false,
+        })
+    {
+        return Err(preflight_error(format!(
+            "schema history reconciled to {source:?}, expected version {expected_version}"
+        )));
+    }
+    match migration_ledger_state(connection, &objects, source)? {
+        MigrationLedgerState::Compatible(records)
+            if records.len() == allocated_migrations().len() => {}
+        state => {
+            return Err(preflight_error(format!(
+                "schema history did not reconcile with the runtime ledger: {state:?}"
+            )));
         }
-    } else {
-        ensure_project_instance_id(connection, true)?;
-        connection.execute(
-            "INSERT INTO metadata(key, value) VALUES(?1, ?2)",
-            (SCHEMA_VERSION_METADATA_KEY, SCHEMA_VERSION.to_string()),
-        )?;
     }
     Ok(())
 }
@@ -1457,6 +1833,7 @@ mod tests {
                 "metadata",
                 "nodes",
                 "purposes",
+                "schema_migrations",
                 "source_parse_metadata",
                 "summaries",
                 "symbol_relations",
@@ -1762,6 +2139,7 @@ mod tests {
             || fresh_report.backup.required
             || !fresh_report.backup.backup_ready
             || !fresh_report.backup.rollback_ready
+            || fresh_report.migration_ledger != MigrationLedgerState::Absent
             || !fresh_report.conflicting_partial_objects.is_empty()
         {
             return Err(io::Error::other(format!(
@@ -1820,6 +2198,11 @@ mod tests {
             || current_report.backup.required
             || !current_report.backup.backup_ready
             || !current_report.backup.rollback_ready
+            || !matches!(
+                current_report.migration_ledger,
+                MigrationLedgerState::Compatible(ref records)
+                    if records.len() == allocated_migrations().len()
+            )
             || !current_report.conflicting_partial_objects.is_empty()
         {
             return Err(io::Error::other(format!(
@@ -1875,7 +2258,7 @@ mod tests {
                 ))
                 .into());
             }
-            Ok(()) => {
+            Ok(_) => {
                 return Err(
                     io::Error::other("missing current object passed schema preflight").into(),
                 );
@@ -1913,6 +2296,7 @@ mod tests {
             || supported_report.free_space.required_bytes == 0
             || !supported_report.free_space.sufficient
             || supported_report.integrity != IntegrityState::Passed
+            || supported_report.migration_ledger != MigrationLedgerState::Absent
         {
             return Err(io::Error::other(format!(
                 "supported source preflight did not record migration readiness: {supported_report:?}"
@@ -1942,7 +2326,7 @@ mod tests {
                 ))
                 .into());
             }
-            Ok(()) => {
+            Ok(_) => {
                 return Err(
                     io::Error::other("leftover partial object passed schema preflight").into(),
                 );
@@ -1989,6 +2373,229 @@ mod tests {
             }
         }
         require_database_unchanged(&conflict_path, &conflict_bytes)?;
+        Ok(())
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_7() -> Result<(), Box<dyn Error>> {
+        fn reject_applied_migration(_: &Connection) -> DbResult<()> {
+            Err(preflight_error("injected migration verification failure"))
+        }
+
+        let migrations = allocated_migrations();
+        let [migration] = migrations.as_slice() else {
+            return Err(io::Error::other(
+                "ARRI 4.7 must materialize exactly one accepted ledger migration",
+            )
+            .into());
+        };
+        let migration_count = i64::try_from(migrations.len())?;
+        let definition = migration.definition;
+        if SCHEMA_VERSION != MIGRATION_BASE_SCHEMA_VERSION + migration_count
+            || migration.schema_version != MIGRATION_BASE_SCHEMA_VERSION + 1
+            || definition.id != "install-runtime-migration-ledger"
+            || definition.owner.is_empty()
+            || definition.prerequisites.is_empty()
+            || definition.authored_effects.is_empty()
+            || definition.derived_effects.is_empty()
+            || definition.transaction_boundary != "single-sqlite-transaction"
+            || definition.forward_behavior.is_empty()
+            || definition.rollback_behavior.is_empty()
+            || !definition.evidence.contains("task_arri_ut_arri_4_7")
+            || migration.checksum
+                != format!(
+                    "blake3:{}",
+                    blake3::hash(migration.canonical_payload().as_bytes()).to_hex()
+                )
+        {
+            return Err(io::Error::other(format!(
+                "accepted migration contract is incomplete or not inventory allocated: {migration:?}"
+            ))
+            .into());
+        }
+
+        let fresh = tempfile::tempdir()?;
+        let fresh_path = fresh.path().join("fresh.db");
+        let fresh_plan = preflight(&fresh_path)?;
+        if fresh_plan.source_version != 0
+            || fresh_plan.target_version != SCHEMA_VERSION
+            || fresh_plan.pending.len() != migrations.len()
+        {
+            return Err(io::Error::other(format!(
+                "fresh preflight did not allocate the accepted migration inventory: {fresh_plan:?}"
+            ))
+            .into());
+        }
+        let fresh_store = crate::AtlasStore::open(&fresh_path)?;
+        verify_current_schema(&fresh_store.connection)?;
+        if table_columns(&fresh_store.connection, MIGRATION_LEDGER_TABLE)?
+            != ["schema_version", "migration_id", "checksum"]
+        {
+            return Err(io::Error::other("fresh ledger persisted the wrong contract").into());
+        }
+        let fresh_record = fresh_store.connection.query_row(
+            "SELECT schema_version, migration_id, checksum FROM schema_migrations",
+            [],
+            |row| {
+                Ok(MigrationLedgerRecord {
+                    schema_version: row.get(0)?,
+                    migration_id: row.get(1)?,
+                    checksum: row.get(2)?,
+                })
+            },
+        )?;
+        if fresh_record
+            != (MigrationLedgerRecord {
+                schema_version: migration.schema_version,
+                migration_id: definition.id.to_owned(),
+                checksum: migration.checksum.clone(),
+            })
+        {
+            return Err(io::Error::other(format!(
+                "fresh ledger row does not bind accepted history: {fresh_record:?}"
+            ))
+            .into());
+        }
+        drop(fresh_store);
+        let reopened = crate::AtlasStore::open(&fresh_path)?;
+        let reopened_rows =
+            reopened
+                .connection
+                .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        if reopened_rows != migration_count || !preflight(&fresh_path)?.pending.is_empty() {
+            return Err(io::Error::other(
+                "reopening a current database reran or replanned accepted migrations",
+            )
+            .into());
+        }
+
+        let legacy = tempfile::tempdir()?;
+        let legacy_path = legacy.path().join("legacy.db");
+        seed_legacy_schema(&legacy_path, MIGRATION_BASE_SCHEMA_VERSION)?;
+        {
+            let connection = Connection::open(&legacy_path)?;
+            connection.execute(
+                "INSERT INTO metadata(key, value) VALUES('authored_note', 'preserve-me')",
+                [],
+            )?;
+            connection.execute(
+                "INSERT INTO symbols(path, language, name, kind, signature, line_start, line_end, parser)
+                 VALUES('src/lib.rs', 'rust', 'preserved_symbol', 'function', 'fn preserved_symbol()', 1, 1, 'tree_sitter')",
+                [],
+            )?;
+        }
+        let legacy_plan = preflight(&legacy_path)?;
+        if legacy_plan.source_version != MIGRATION_BASE_SCHEMA_VERSION
+            || legacy_plan.pending.len() != migrations.len()
+        {
+            return Err(io::Error::other(format!(
+                "legacy preflight did not allocate pending history: {legacy_plan:?}"
+            ))
+            .into());
+        }
+        let legacy_store = crate::AtlasStore::open(&legacy_path)?;
+        let preserved = legacy_store.connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'authored_note'),
+                (SELECT COUNT(*) FROM usage_events WHERE session_id = 'legacy-session'),
+                (SELECT COUNT(*) FROM symbols WHERE name = 'preserved_symbol')",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        if preserved != ("preserve-me".to_owned(), 1, 1) {
+            return Err(io::Error::other(format!(
+                "ledger migration changed authored or derived source rows: {preserved:?}"
+            ))
+            .into());
+        }
+        verify_current_schema(&legacy_store.connection)?;
+
+        let raced = tempfile::tempdir()?;
+        let raced_path = raced.path().join("raced.db");
+        seed_legacy_schema(&raced_path, MIGRATION_BASE_SCHEMA_VERSION)?;
+        let raced_plan = preflight(&raced_path)?;
+        Connection::open(&raced_path)?.execute(
+            "UPDATE metadata SET value = ?1 WHERE key = ?2",
+            (
+                (MIGRATION_BASE_SCHEMA_VERSION - 1).to_string(),
+                SCHEMA_VERSION_METADATA_KEY,
+            ),
+        )?;
+        let mut raced_connection = Connection::open(&raced_path)?;
+        match apply_migration_plan(&mut raced_connection, &raced_plan) {
+            Err(DbError::SchemaPreflight { message })
+                if message.contains("changed after preflight") => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "source-version race returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(()) => {
+                return Err(io::Error::other("source-version race applied a migration").into());
+            }
+        }
+        if sqlite_objects(&raced_connection)?.contains_key(MIGRATION_LEDGER_TABLE)
+            || observed_schema_version(&raced_connection)? != MIGRATION_BASE_SCHEMA_VERSION - 1
+        {
+            return Err(io::Error::other("source-version race wrote migration state").into());
+        }
+
+        let mut rollback_connection = Connection::open_in_memory()?;
+        let mut rollback_plan = SchemaMigrationPlan::fresh();
+        rollback_plan.pending[0].definition.verify = reject_applied_migration;
+        match apply_migration_plan(&mut rollback_connection, &rollback_plan) {
+            Err(DbError::SchemaPreflight { message })
+                if message.contains("injected migration verification failure") => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "failed migration returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(()) => return Err(io::Error::other("failed migration committed").into()),
+        }
+        if !sqlite_objects(&rollback_connection)?.is_empty() {
+            return Err(io::Error::other(
+                "failed migration did not roll back schema and ledger writes",
+            )
+            .into());
+        }
+
+        let tampered = tempfile::tempdir()?;
+        let tampered_path = tampered.path().join("tampered.db");
+        {
+            let store = crate::AtlasStore::open(&tampered_path)?;
+            store
+                .connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        }
+        remove_sqlite_sidecars(&tampered_path)?;
+        Connection::open(&tampered_path)?.execute(
+            "UPDATE schema_migrations SET checksum = 'blake3:tampered'",
+            [],
+        )?;
+        let tampered_bytes = fs::read(&tampered_path)?;
+        match crate::AtlasStore::open(&tampered_path) {
+            Err(DbError::SchemaPreflight { message })
+                if message.contains("migration ledger is incompatible") => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "tampered ledger returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(_) => return Err(io::Error::other("tampered ledger was accepted").into()),
+        }
+        require_database_unchanged(&tampered_path, &tampered_bytes)?;
         Ok(())
     }
 

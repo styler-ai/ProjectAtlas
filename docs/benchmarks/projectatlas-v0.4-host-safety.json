@@ -33,7 +33,7 @@
     "dirty_candidate_lockfile": {
       "path": "Cargo.lock",
       "git_blob_sha1": "fa1e9b28be307ca6a40d1aba433402ba05146ea5",
-      "sha256": "82b8c1df9595bcb8493c99a9a1f67ab6f7c84a911d24093fc65cc9e227b835a0",
+      "sha256": "d1ad3c174b6b9546f423356653d245322537d530b8d58766e19ff96ff4019811",
       "crossbeam_epoch_version": "0.9.20",
       "evidence_state": "proven_local",
       "gate_state": "release_blocker",
@@ -109,7 +109,7 @@
     "host_id": "windows-development-reference-2026-07-11",
     "head_commit": "c1220756e4949193482617e5fba579a7d2da9780",
     "head_tree": "9e6aede1882740852ce6f49a30545e097e8f478d",
-    "lockfile_sha256": "82b8c1df9595bcb8493c99a9a1f67ab6f7c84a911d24093fc65cc9e227b835a0",
+    "lockfile_sha256": "d1ad3c174b6b9546f423356653d245322537d530b8d58766e19ff96ff4019811",
     "worktree_claim_eligible": false,
     "claim_exclusion": "Dirty development-worktree observations are local evidence only and must be rerun on the reviewed candidate commit for release eligibility.",
     "manifest_ref": ".projectatlas/research/v04-results/host-safety/20260712T231656Z/command-observations.json",
@@ -121,7 +121,7 @@
       {
         "id": "dependency-inventory",
         "binding_id": "windows-dev-c122075-82b8c1df-20260712T231656Z",
-        "lockfile_sha256": "82b8c1df9595bcb8493c99a9a1f67ab6f7c84a911d24093fc65cc9e227b835a0",
+        "lockfile_sha256": "d1ad3c174b6b9546f423356653d245322537d530b8d58766e19ff96ff4019811",
         "manifest_observation_id": "dependency-inventory-current-lock",
         "argv": ["cargo", "metadata", "--locked", "--format-version", "1"],
         "observed_at_utc": "2026-07-12T23:16:56.5830691Z",
@@ -139,7 +139,7 @@
       {
         "id": "candidate-advisory-audit",
         "binding_id": "windows-dev-c122075-82b8c1df-20260712T231656Z",
-        "lockfile_sha256": "82b8c1df9595bcb8493c99a9a1f67ab6f7c84a911d24093fc65cc9e227b835a0",
+        "lockfile_sha256": "d1ad3c174b6b9546f423356653d245322537d530b8d58766e19ff96ff4019811",
         "manifest_observation_id": "candidate-advisory-audit-current-lock",
         "argv": ["cargo", "audit", "--file", "Cargo.lock", "--deny", "warnings"],
         "observed_at_utc": "2026-07-12T23:16:57.0313642Z",
@@ -157,7 +157,7 @@
       {
         "id": "candidate-policy-audit",
         "binding_id": "windows-dev-c122075-82b8c1df-20260712T231656Z",
-        "lockfile_sha256": "82b8c1df9595bcb8493c99a9a1f67ab6f7c84a911d24093fc65cc9e227b835a0",
+        "lockfile_sha256": "d1ad3c174b6b9546f423356653d245322537d530b8d58766e19ff96ff4019811",
         "manifest_observation_id": "candidate-policy-audit-current-lock",
         "argv": ["cargo", "deny", "check", "advisories"],
         "observed_at_utc": "2026-07-12T23:17:01.1514994Z",
@@ -758,7 +758,7 @@
         "audited_lockfile_sha256": "1e925a59e00fc8c0e82e925e64cf248e16fe08a37809b4923618342c382f073c",
         "audited_state": "affected",
         "candidate_version": "0.9.20",
-        "candidate_lockfile_sha256": "82b8c1df9595bcb8493c99a9a1f67ab6f7c84a911d24093fc65cc9e227b835a0",
+        "candidate_lockfile_sha256": "d1ad3c174b6b9546f423356653d245322537d530b8d58766e19ff96ff4019811",
         "candidate_audit": "pass-local-dirty",
         "candidate_deny": "pass-local-dirty",
         "evidence_state": "proven_local",

@@ -2578,7 +2578,46 @@
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "Cargo.lock"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/calibration_evidence_runner.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/Cargo.toml"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/lib.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/schema.rs"
+            },
+            {
+              "kind": "file",
+              "path": "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json"
+            },
+            {
+              "kind": "file",
+              "path": "docs/benchmarks/projectatlas-v0.4-host-safety.json"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-4.7",
+              "path": "crates/projectatlas-db/src/schema.rs",
+              "anchor": "task_arri_ut_arri_4_7"
             }
           ]
         },
