@@ -27,6 +27,35 @@ const FILE_TEXT_FTS_INSERT_TRIGGER: &str = "file_text_fts_insert";
 const FILE_TEXT_FTS_DELETE_TRIGGER: &str = "file_text_fts_delete";
 /// Trigger that mirrors source-text updates into the optional candidate index.
 const FILE_TEXT_FTS_UPDATE_TRIGGER: &str = "file_text_fts_update";
+/// Typed stable repository-graph entity rows.
+const GRAPH_ENTITIES_TABLE: &str = "graph_entities";
+/// Typed resolved logical repository-graph relations.
+const GRAPH_RELATIONS_TABLE: &str = "graph_relations";
+/// Evidence occurrences owned by resolved logical relations.
+const GRAPH_EVIDENCE_OCCURRENCES_TABLE: &str = "graph_evidence_occurrences";
+/// Non-traversable ambiguous and unresolved graph occurrences.
+const GRAPH_RESOLUTION_OCCURRENCES_TABLE: &str = "graph_resolution_occurrences";
+/// Normalized bounded candidates owned by ambiguous graph occurrences.
+const GRAPH_RESOLUTION_CANDIDATES_TABLE: &str = "graph_resolution_candidates";
+/// Typed structural graph coverage rows.
+const GRAPH_COVERAGE_TABLE: &str = "graph_coverage";
+/// Accepted relation-kind values owned by the typed graph schema.
+const GRAPH_RELATION_KIND_VALUES: &str = "'calls', 'channel', 'co-changes', 'configures', 'contains', 'cross-repository', 'declares', 'depends-on', 'deploys', 'exports', 'generates', 'implements', 'imports', 'inherits', 'overrides', 'reads', 'references', 'routes', 'rpc', 'similar', 'tests', 'writes'";
+/// Accepted parser-origin values owned by the typed graph schema.
+const GRAPH_PARSER_KIND_VALUES: &str =
+    "'tree-sitter', 'manifest', 'structural', 'fallback', 'parser-pack'";
+/// Finite graph confidence values.
+const GRAPH_CONFIDENCE_VALUES: &str = "'low', 'medium', 'high', 'exact'";
+/// Independent graph completeness values.
+const GRAPH_COMPLETENESS_VALUES: &str = "'complete', 'partial', 'truncated'";
+/// Direct or inferred graph evidence values.
+const GRAPH_EVIDENCE_CLASS_VALUES: &str = "'direct', 'inferred'";
+/// Typed evidence-origin values.
+const GRAPH_EVIDENCE_ORIGIN_VALUES: &str = "'entity', 'repository-path', 'external'";
+/// Resolved target-scope values.
+const GRAPH_TARGET_SCOPE_VALUES: &str = "'internal', 'external'";
+/// Structural slot values already required by the typed coverage contract.
+const GRAPH_STRUCTURAL_SLOT_VALUES: &str = "'a', 'b'";
 
 /// Earliest metadata schema version that the current repair path accepts.
 const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 1;
@@ -63,7 +92,7 @@ struct MigrationDefinition {
 }
 
 /// Accepted migrations in immutable application order.
-const MIGRATIONS: [MigrationDefinition; 2] = [
+const MIGRATIONS: [MigrationDefinition; 3] = [
     MigrationDefinition {
         id: "install-runtime-migration-ledger",
         owner: "projectatlas-db::schema",
@@ -89,6 +118,19 @@ const MIGRATIONS: [MigrationDefinition; 2] = [
         evidence: "cargo test --locked --workspace --all-features task_arri_ut_arri_4_8",
         apply: create_optional_file_text_fts,
         verify: verify_optional_file_text_fts,
+    },
+    MigrationDefinition {
+        id: "install-typed-repository-graph",
+        owner: "projectatlas-db::schema::repository-graph",
+        prerequisites: "read-only-preflight=write-ready;graph-contract=typed-stable-keys",
+        authored_effects: "preserve=metadata,purposes,settings,telemetry",
+        derived_effects: "preserve=nodes,summaries,symbols,relations,source-parse-metadata,file-texts;create=typed-entities,typed-relations,typed-evidence,typed-resolution,typed-coverage",
+        transaction_boundary: "single-sqlite-transaction",
+        forward_behavior: "create-normalized-typed-graph-tables;reconcile-column-contracts;advance-schema-version",
+        rollback_behavior: "rollback-typed-graph-tables-and-ledger;retain-authored-and-compatibility-data",
+        evidence: "cargo test --locked --workspace --all-features task_arri_ut_arri_4_9",
+        apply: create_typed_repository_graph_schema,
+        verify: verify_typed_repository_graph_schema,
     },
 ];
 
@@ -1742,6 +1784,471 @@ fn verify_optional_file_text_fts(connection: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Create normalized typed graph storage without rewriting legacy compatibility rows.
+fn create_typed_repository_graph_schema(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(&format!(
+        "
+        CREATE TABLE graph_entities (
+            stable_key_digest BLOB NOT NULL CHECK(length(stable_key_digest) = 32),
+            stable_key_version INTEGER NOT NULL CHECK(stable_key_version > 0),
+            stable_key_canonical BLOB NOT NULL,
+            project_instance_id BLOB NOT NULL CHECK(length(project_instance_id) = 16),
+            entity_kind TEXT NOT NULL CHECK(entity_kind IN (
+                'repository', 'folder', 'file', 'package', 'module', 'declaration',
+                'reference', 'endpoint', 'route', 'channel', 'configuration',
+                'environment', 'infrastructure', 'test', 'external'
+            )),
+            repository_path TEXT,
+            qualified_name TEXT,
+            signature TEXT,
+            discriminator TEXT,
+            external_namespace TEXT,
+            external_value TEXT,
+            language TEXT,
+            source_start_byte INTEGER,
+            source_end_byte INTEGER,
+            source_start_line INTEGER,
+            source_end_line INTEGER,
+            parser_kind TEXT NOT NULL CHECK(parser_kind IN ({GRAPH_PARSER_KIND_VALUES})),
+            parser_identity TEXT NOT NULL,
+            parser_version TEXT NOT NULL,
+            PRIMARY KEY(stable_key_digest),
+            UNIQUE(stable_key_canonical),
+            CHECK(
+                (source_start_byte IS NULL
+                    AND source_end_byte IS NULL
+                    AND source_start_line IS NULL
+                    AND source_end_line IS NULL)
+                OR
+                (source_start_byte >= 0
+                    AND source_end_byte >= source_start_byte
+                    AND source_start_line > 0
+                    AND source_end_line >= source_start_line)
+            )
+        );
+
+        CREATE TABLE graph_relations (
+            stable_key_digest BLOB NOT NULL CHECK(length(stable_key_digest) = 32),
+            stable_key_version INTEGER NOT NULL CHECK(stable_key_version > 0),
+            stable_key_canonical BLOB NOT NULL,
+            source_entity_digest BLOB NOT NULL CHECK(length(source_entity_digest) = 32),
+            relation_kind TEXT NOT NULL CHECK(relation_kind IN ({GRAPH_RELATION_KIND_VALUES})),
+            resolution_status TEXT NOT NULL DEFAULT 'resolved'
+                CHECK(resolution_status = 'resolved'),
+            target_scope TEXT NOT NULL CHECK(target_scope IN ({GRAPH_TARGET_SCOPE_VALUES})),
+            target_entity_digest BLOB,
+            external_target_namespace TEXT,
+            external_target_value TEXT,
+            confidence TEXT NOT NULL CHECK(confidence IN ({GRAPH_CONFIDENCE_VALUES})),
+            parser_kind TEXT NOT NULL CHECK(parser_kind IN ({GRAPH_PARSER_KIND_VALUES})),
+            parser_identity TEXT NOT NULL,
+            parser_version TEXT NOT NULL,
+            PRIMARY KEY(stable_key_digest),
+            UNIQUE(stable_key_canonical),
+            FOREIGN KEY(source_entity_digest)
+                REFERENCES graph_entities(stable_key_digest) ON DELETE CASCADE,
+            FOREIGN KEY(target_entity_digest)
+                REFERENCES graph_entities(stable_key_digest) ON DELETE CASCADE,
+            CHECK(
+                (target_scope = 'internal'
+                    AND length(target_entity_digest) = 32
+                    AND external_target_namespace IS NULL
+                    AND external_target_value IS NULL)
+                OR
+                (target_scope = 'external'
+                    AND target_entity_digest IS NULL
+                    AND external_target_namespace IS NOT NULL
+                    AND external_target_value IS NOT NULL)
+            )
+        );
+
+        CREATE TABLE graph_evidence_occurrences (
+            stable_key_digest BLOB NOT NULL CHECK(length(stable_key_digest) = 32),
+            stable_key_version INTEGER NOT NULL CHECK(stable_key_version > 0),
+            stable_key_canonical BLOB NOT NULL,
+            relation_digest BLOB NOT NULL CHECK(length(relation_digest) = 32),
+            origin_kind TEXT NOT NULL CHECK(origin_kind IN ({GRAPH_EVIDENCE_ORIGIN_VALUES})),
+            origin_entity_digest BLOB,
+            origin_project_instance_id BLOB,
+            origin_repository_path TEXT,
+            origin_external_namespace TEXT,
+            origin_external_value TEXT,
+            source_start_byte INTEGER,
+            source_end_byte INTEGER,
+            source_start_line INTEGER,
+            source_end_line INTEGER,
+            resolver_name TEXT NOT NULL,
+            resolver_version TEXT NOT NULL,
+            content_span_fingerprint BLOB NOT NULL CHECK(length(content_span_fingerprint) = 32),
+            occurrence_discriminator INTEGER NOT NULL CHECK(occurrence_discriminator >= 0),
+            evidence_class TEXT NOT NULL CHECK(evidence_class IN ({GRAPH_EVIDENCE_CLASS_VALUES})),
+            confidence TEXT NOT NULL CHECK(confidence IN ({GRAPH_CONFIDENCE_VALUES})),
+            completeness TEXT NOT NULL CHECK(completeness IN ({GRAPH_COMPLETENESS_VALUES})),
+            explanation TEXT,
+            PRIMARY KEY(stable_key_digest),
+            UNIQUE(stable_key_canonical),
+            FOREIGN KEY(relation_digest)
+                REFERENCES graph_relations(stable_key_digest) ON DELETE CASCADE,
+            FOREIGN KEY(origin_entity_digest)
+                REFERENCES graph_entities(stable_key_digest) ON DELETE CASCADE,
+            CHECK(
+                (origin_kind = 'entity'
+                    AND length(origin_entity_digest) = 32
+                    AND origin_project_instance_id IS NULL
+                    AND origin_repository_path IS NULL
+                    AND origin_external_namespace IS NULL
+                    AND origin_external_value IS NULL)
+                OR
+                (origin_kind = 'repository-path'
+                    AND origin_entity_digest IS NULL
+                    AND length(origin_project_instance_id) = 16
+                    AND origin_repository_path IS NOT NULL
+                    AND origin_external_namespace IS NULL
+                    AND origin_external_value IS NULL)
+                OR
+                (origin_kind = 'external'
+                    AND origin_entity_digest IS NULL
+                    AND origin_project_instance_id IS NULL
+                    AND origin_repository_path IS NULL
+                    AND origin_external_namespace IS NOT NULL
+                    AND origin_external_value IS NOT NULL)
+            ),
+            CHECK(
+                (source_start_byte IS NULL
+                    AND source_end_byte IS NULL
+                    AND source_start_line IS NULL
+                    AND source_end_line IS NULL)
+                OR
+                (source_start_byte >= 0
+                    AND source_end_byte >= source_start_byte
+                    AND source_start_line > 0
+                    AND source_end_line >= source_start_line)
+            )
+        );
+
+        CREATE TABLE graph_resolution_occurrences (
+            stable_key_digest BLOB NOT NULL CHECK(length(stable_key_digest) = 32),
+            stable_key_version INTEGER NOT NULL CHECK(stable_key_version > 0),
+            stable_key_canonical BLOB NOT NULL,
+            source_entity_digest BLOB NOT NULL CHECK(length(source_entity_digest) = 32),
+            relation_kind TEXT NOT NULL CHECK(relation_kind IN ({GRAPH_RELATION_KIND_VALUES})),
+            origin_kind TEXT NOT NULL CHECK(origin_kind IN ({GRAPH_EVIDENCE_ORIGIN_VALUES})),
+            origin_entity_digest BLOB,
+            origin_project_instance_id BLOB,
+            origin_repository_path TEXT,
+            origin_external_namespace TEXT,
+            origin_external_value TEXT,
+            source_start_byte INTEGER,
+            source_end_byte INTEGER,
+            source_start_line INTEGER,
+            source_end_line INTEGER,
+            resolver_name TEXT NOT NULL,
+            resolver_version TEXT NOT NULL,
+            content_span_fingerprint BLOB NOT NULL CHECK(length(content_span_fingerprint) = 32),
+            occurrence_discriminator INTEGER NOT NULL CHECK(occurrence_discriminator >= 0),
+            resolution_status TEXT NOT NULL
+                CHECK(resolution_status IN ('ambiguous', 'unresolved')),
+            candidate_total INTEGER,
+            candidate_completeness TEXT
+                CHECK(candidate_completeness IN ({GRAPH_COMPLETENESS_VALUES})),
+            unresolved_reason TEXT,
+            evidence_class TEXT NOT NULL CHECK(evidence_class IN ({GRAPH_EVIDENCE_CLASS_VALUES})),
+            confidence TEXT NOT NULL CHECK(confidence IN ({GRAPH_CONFIDENCE_VALUES})),
+            completeness TEXT NOT NULL CHECK(completeness IN ({GRAPH_COMPLETENESS_VALUES})),
+            parser_kind TEXT NOT NULL CHECK(parser_kind IN ({GRAPH_PARSER_KIND_VALUES})),
+            parser_identity TEXT NOT NULL,
+            parser_version TEXT NOT NULL,
+            PRIMARY KEY(stable_key_digest),
+            UNIQUE(stable_key_canonical),
+            FOREIGN KEY(source_entity_digest)
+                REFERENCES graph_entities(stable_key_digest) ON DELETE CASCADE,
+            FOREIGN KEY(origin_entity_digest)
+                REFERENCES graph_entities(stable_key_digest) ON DELETE CASCADE,
+            CHECK(
+                (origin_kind = 'entity'
+                    AND length(origin_entity_digest) = 32
+                    AND origin_project_instance_id IS NULL
+                    AND origin_repository_path IS NULL
+                    AND origin_external_namespace IS NULL
+                    AND origin_external_value IS NULL)
+                OR
+                (origin_kind = 'repository-path'
+                    AND origin_entity_digest IS NULL
+                    AND length(origin_project_instance_id) = 16
+                    AND origin_repository_path IS NOT NULL
+                    AND origin_external_namespace IS NULL
+                    AND origin_external_value IS NULL)
+                OR
+                (origin_kind = 'external'
+                    AND origin_entity_digest IS NULL
+                    AND origin_project_instance_id IS NULL
+                    AND origin_repository_path IS NULL
+                    AND origin_external_namespace IS NOT NULL
+                    AND origin_external_value IS NOT NULL)
+            ),
+            CHECK(
+                (source_start_byte IS NULL
+                    AND source_end_byte IS NULL
+                    AND source_start_line IS NULL
+                    AND source_end_line IS NULL)
+                OR
+                (source_start_byte >= 0
+                    AND source_end_byte >= source_start_byte
+                    AND source_start_line > 0
+                    AND source_end_line >= source_start_line)
+            ),
+            CHECK(
+                (resolution_status = 'ambiguous'
+                    AND candidate_total >= 2
+                    AND candidate_completeness IS NOT NULL
+                    AND unresolved_reason IS NULL)
+                OR
+                (resolution_status = 'unresolved'
+                    AND candidate_total IS NULL
+                    AND candidate_completeness IS NULL)
+            )
+        );
+
+        CREATE TABLE graph_resolution_candidates (
+            resolution_occurrence_digest BLOB NOT NULL
+                CHECK(length(resolution_occurrence_digest) = 32),
+            candidate_ordinal INTEGER NOT NULL CHECK(candidate_ordinal >= 0),
+            target_scope TEXT NOT NULL CHECK(target_scope IN ({GRAPH_TARGET_SCOPE_VALUES})),
+            target_entity_digest BLOB,
+            external_target_namespace TEXT,
+            external_target_value TEXT,
+            confidence TEXT NOT NULL CHECK(confidence IN ({GRAPH_CONFIDENCE_VALUES})),
+            explanation TEXT,
+            PRIMARY KEY(
+                resolution_occurrence_digest,
+                candidate_ordinal
+            ),
+            FOREIGN KEY(resolution_occurrence_digest)
+                REFERENCES graph_resolution_occurrences(stable_key_digest) ON DELETE CASCADE,
+            FOREIGN KEY(target_entity_digest)
+                REFERENCES graph_entities(stable_key_digest) ON DELETE CASCADE,
+            CHECK(
+                (target_scope = 'internal'
+                    AND length(target_entity_digest) = 32
+                    AND external_target_namespace IS NULL
+                    AND external_target_value IS NULL)
+                OR
+                (target_scope = 'external'
+                    AND target_entity_digest IS NULL
+                    AND external_target_namespace IS NOT NULL
+                    AND external_target_value IS NOT NULL)
+            )
+        );
+
+        CREATE TABLE graph_coverage (
+            scope_kind TEXT NOT NULL
+                CHECK(scope_kind IN ('repository', 'file', 'pass', 'relation')),
+            repository_path TEXT NOT NULL DEFAULT '',
+            pass_identity TEXT NOT NULL DEFAULT '',
+            relation_kind TEXT NOT NULL DEFAULT '' CHECK(
+                relation_kind = ''
+                OR relation_kind IN ({GRAPH_RELATION_KIND_VALUES})
+            ),
+            coverage_state TEXT NOT NULL CHECK(coverage_state IN (
+                'complete', 'partial', 'failed', 'ignored', 'oversized',
+                'quarantined', 'stale'
+            )),
+            produced_count INTEGER NOT NULL CHECK(produced_count >= 0),
+            omitted_count INTEGER CHECK(omitted_count >= 0),
+            reached_limit TEXT CHECK(
+                reached_limit IS NULL
+                OR reached_limit IN (
+                    'source_file_bytes', 'ast_depth', 'symbols_per_file',
+                    'relations_per_file', 'resolution_candidates', 'worker_count',
+                    'stage_time', 'working_memory', 'query_depth', 'visited_nodes',
+                    'expanded_edges', 'returned_rows', 'response_bytes',
+                    'cancellation_poll', 'cancellation_grace'
+                )
+            ),
+            reason TEXT,
+            structural_slot TEXT NOT NULL CHECK(structural_slot IN ({GRAPH_STRUCTURAL_SLOT_VALUES})),
+            last_changed_epoch INTEGER NOT NULL CHECK(last_changed_epoch >= 0),
+            PRIMARY KEY(
+                scope_kind,
+                repository_path,
+                pass_identity,
+                relation_kind,
+                structural_slot
+            ),
+            CHECK(
+                (scope_kind = 'repository'
+                    AND repository_path = ''
+                    AND pass_identity = ''
+                    AND relation_kind = '')
+                OR
+                (scope_kind = 'file'
+                    AND repository_path != ''
+                    AND pass_identity = ''
+                    AND relation_kind = '')
+                OR
+                (scope_kind = 'pass'
+                    AND repository_path != ''
+                    AND pass_identity != ''
+                    AND relation_kind = '')
+                OR
+                (scope_kind = 'relation'
+                    AND repository_path != ''
+                    AND pass_identity = ''
+                    AND relation_kind != '')
+            )
+        );
+        ",
+    ))?;
+    Ok(())
+}
+
+/// Reconcile every typed graph table before recording its migration.
+fn verify_typed_repository_graph_schema(connection: &Connection) -> DbResult<()> {
+    for (table, expected) in [
+        (
+            GRAPH_ENTITIES_TABLE,
+            &[
+                "stable_key_digest",
+                "stable_key_version",
+                "stable_key_canonical",
+                "project_instance_id",
+                "entity_kind",
+                "repository_path",
+                "qualified_name",
+                "signature",
+                "discriminator",
+                "external_namespace",
+                "external_value",
+                "language",
+                "source_start_byte",
+                "source_end_byte",
+                "source_start_line",
+                "source_end_line",
+                "parser_kind",
+                "parser_identity",
+                "parser_version",
+            ][..],
+        ),
+        (
+            GRAPH_RELATIONS_TABLE,
+            &[
+                "stable_key_digest",
+                "stable_key_version",
+                "stable_key_canonical",
+                "source_entity_digest",
+                "relation_kind",
+                "resolution_status",
+                "target_scope",
+                "target_entity_digest",
+                "external_target_namespace",
+                "external_target_value",
+                "confidence",
+                "parser_kind",
+                "parser_identity",
+                "parser_version",
+            ][..],
+        ),
+        (
+            GRAPH_EVIDENCE_OCCURRENCES_TABLE,
+            &[
+                "stable_key_digest",
+                "stable_key_version",
+                "stable_key_canonical",
+                "relation_digest",
+                "origin_kind",
+                "origin_entity_digest",
+                "origin_project_instance_id",
+                "origin_repository_path",
+                "origin_external_namespace",
+                "origin_external_value",
+                "source_start_byte",
+                "source_end_byte",
+                "source_start_line",
+                "source_end_line",
+                "resolver_name",
+                "resolver_version",
+                "content_span_fingerprint",
+                "occurrence_discriminator",
+                "evidence_class",
+                "confidence",
+                "completeness",
+                "explanation",
+            ][..],
+        ),
+        (
+            GRAPH_RESOLUTION_OCCURRENCES_TABLE,
+            &[
+                "stable_key_digest",
+                "stable_key_version",
+                "stable_key_canonical",
+                "source_entity_digest",
+                "relation_kind",
+                "origin_kind",
+                "origin_entity_digest",
+                "origin_project_instance_id",
+                "origin_repository_path",
+                "origin_external_namespace",
+                "origin_external_value",
+                "source_start_byte",
+                "source_end_byte",
+                "source_start_line",
+                "source_end_line",
+                "resolver_name",
+                "resolver_version",
+                "content_span_fingerprint",
+                "occurrence_discriminator",
+                "resolution_status",
+                "candidate_total",
+                "candidate_completeness",
+                "unresolved_reason",
+                "evidence_class",
+                "confidence",
+                "completeness",
+                "parser_kind",
+                "parser_identity",
+                "parser_version",
+            ][..],
+        ),
+        (
+            GRAPH_RESOLUTION_CANDIDATES_TABLE,
+            &[
+                "resolution_occurrence_digest",
+                "candidate_ordinal",
+                "target_scope",
+                "target_entity_digest",
+                "external_target_namespace",
+                "external_target_value",
+                "confidence",
+                "explanation",
+            ][..],
+        ),
+        (
+            GRAPH_COVERAGE_TABLE,
+            &[
+                "scope_kind",
+                "repository_path",
+                "pass_identity",
+                "relation_kind",
+                "coverage_state",
+                "produced_count",
+                "omitted_count",
+                "reached_limit",
+                "reason",
+                "structural_slot",
+                "last_changed_epoch",
+            ][..],
+        ),
+    ] {
+        let actual = table_columns(connection, table)?;
+        if actual != expected {
+            return Err(preflight_error(format!(
+                "typed repository graph table {table:?} did not reconcile: {actual:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Classify only the `SQLite` errors that mean the optional FTS capability is absent.
 fn is_optional_fts_unavailable(error: &rusqlite::Error) -> bool {
     matches!(
@@ -2002,6 +2509,12 @@ mod tests {
         if object_names(connection, "table")?
             != [
                 "file_texts",
+                "graph_coverage",
+                "graph_entities",
+                "graph_evidence_occurrences",
+                "graph_relations",
+                "graph_resolution_candidates",
+                "graph_resolution_occurrences",
                 "health_resolutions",
                 "metadata",
                 "nodes",
@@ -2880,7 +3393,7 @@ mod tests {
         }
         let prefix_plan = preflight(&prefix_path)?;
         if prefix_plan.source_version != ledger_migration.schema_version
-            || prefix_plan.pending.len() != 1
+            || prefix_plan.pending.len() != migrations.len() - 1
             || prefix_plan.pending[0].definition.id != fts_migration.definition.id
         {
             return Err(io::Error::other(format!(
@@ -2902,7 +3415,7 @@ mod tests {
         let plan = SchemaMigrationPlan {
             source_version: ledger_migration.schema_version,
             target_version: SCHEMA_VERSION,
-            pending: vec![fts_migration.clone()],
+            pending: migrations[1..].to_vec(),
         };
         apply_migration_plan(&mut connection, &plan)?;
         verify_optional_file_text_fts(&connection)?;
@@ -3017,17 +3530,350 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn task_arri_ut_arri_4_9() -> Result<(), Box<dyn Error>> {
+        type CompatibilitySnapshot = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        );
+
+        fn reject_typed_graph(_: &Connection) -> DbResult<()> {
+            Err(preflight_error(
+                "injected typed repository graph verification failure",
+            ))
+        }
+
+        fn seed_compatibility_rows(connection: &Connection) -> DbResult<()> {
+            connection.execute_batch(
+                "
+                INSERT INTO metadata(key, value)
+                VALUES('authored_note', 'preserve-metadata');
+
+                INSERT INTO nodes(
+                    id, path, kind, parent_path, extension, language, size_bytes,
+                    mtime_ns, content_hash, exists_now
+                ) VALUES(
+                    41, 'src/lib.rs', 'file', 'src', 'rs', 'rust', 17,
+                    99, 'node-hash', 1
+                );
+
+                INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+                VALUES(41, 'Preserve authored purpose', 'agent', 'approved', 'codex');
+
+                INSERT INTO summaries(id, node_id, summary_level, subject, summary)
+                VALUES(42, 41, 'file', 'src/lib.rs', 'Preserve summary');
+
+                INSERT INTO usage_events(
+                    id, session_id, command, path, query,
+                    estimated_tokens_without_projectatlas,
+                    estimated_tokens_with_projectatlas,
+                    estimated_tokens_saved
+                ) VALUES(
+                    43, 'preserve-session', 'summary', 'src/lib.rs', 'needle',
+                    100, 20, 80
+                );
+
+                INSERT INTO symbols(
+                    id, path, language, name, kind, signature, exported,
+                    documentation, line_start, line_end, parent, parser, detail
+                ) VALUES(
+                    44, 'src/lib.rs', 'rust', 'preserved_symbol', 'function',
+                    'fn preserved_symbol()', 1, 'Preserve docs', 1, 1,
+                    'crate', 'tree_sitter', 'Preserve detail'
+                );
+
+                INSERT INTO source_parse_metadata(
+                    path, language, parser, symbol_count, relation_count
+                ) VALUES('src/lib.rs', 'rust', 'tree_sitter', 1, 1);
+
+                INSERT INTO symbol_relations(
+                    id, path, source_name, target_name, kind, line, context, parser
+                ) VALUES(
+                    45, 'src/lib.rs', 'preserved_symbol', 'target_symbol',
+                    'calls', 1, 'preserve context', 'tree_sitter'
+                );
+
+                INSERT INTO health_resolutions(
+                    finding_id, category, path, related_path, rationale, resolved_by
+                ) VALUES(
+                    'preserve-finding', 'duplicate-purpose', 'src/lib.rs',
+                    'src/main.rs', 'Preserve resolution', 'agent'
+                );
+
+                INSERT INTO file_texts(
+                    path, content_hash, byte_count, line_count, content
+                ) VALUES(
+                    'src/lib.rs', 'text-hash', 17, 1, 'pub fn before() {}'
+                );
+                ",
+            )?;
+            Ok(())
+        }
+
+        fn compatibility_snapshot(connection: &Connection) -> DbResult<CompatibilitySnapshot> {
+            connection
+                .query_row(
+                    "
+                    SELECT
+                        (SELECT key || '=' || value
+                         FROM metadata WHERE key = 'authored_note'),
+                        (SELECT path || '|' || kind || '|' || content_hash
+                         FROM nodes WHERE id = 41),
+                        (SELECT purpose || '|' || source || '|' || status || '|' || updated_by
+                         FROM purposes WHERE node_id = 41),
+                        (SELECT summary_level || '|' || subject || '|' || summary
+                         FROM summaries WHERE id = 42),
+                        (SELECT session_id || '|' || command || '|' || path || '|' || query
+                         FROM usage_events WHERE id = 43),
+                        (SELECT path || '|' || name || '|' || signature || '|' || parser
+                         FROM symbols WHERE id = 44),
+                        (SELECT path || '|' || parser || '|' || symbol_count || '|' || relation_count
+                         FROM source_parse_metadata WHERE path = 'src/lib.rs'),
+                        (SELECT source_name || '|' || target_name || '|' || kind || '|' || context
+                         FROM symbol_relations WHERE id = 45),
+                        (SELECT finding_id || '|' || rationale || '|' || resolved_by
+                         FROM health_resolutions WHERE finding_id = 'preserve-finding'),
+                        (SELECT path || '|' || content_hash || '|' || content
+                         FROM file_texts WHERE path = 'src/lib.rs')
+                    ",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                            row.get(8)?,
+                            row.get(9)?,
+                        ))
+                    },
+                )
+                .map_err(DbError::from)
+        }
+
+        let migrations = allocated_migrations();
+        let [ledger_migration, fts_migration, typed_graph_migration] = migrations.as_slice() else {
+            return Err(io::Error::other(
+                "ARRI 4.9 requires the ledger, FTS, and typed graph migrations",
+            )
+            .into());
+        };
+        if typed_graph_migration.schema_version != fts_migration.schema_version + 1
+            || typed_graph_migration.definition.id != "install-typed-repository-graph"
+            || typed_graph_migration.definition.owner != "projectatlas-db::schema::repository-graph"
+            || typed_graph_migration.definition.transaction_boundary != "single-sqlite-transaction"
+            || !typed_graph_migration
+                .definition
+                .authored_effects
+                .contains("preserve")
+            || !typed_graph_migration
+                .definition
+                .derived_effects
+                .contains("source-parse-metadata")
+            || !typed_graph_migration
+                .definition
+                .rollback_behavior
+                .contains("retain-authored-and-compatibility-data")
+            || !typed_graph_migration
+                .definition
+                .evidence
+                .contains("task_arri_ut_arri_4_9")
+        {
+            return Err(io::Error::other(format!(
+                "typed repository graph migration contract is incomplete: {typed_graph_migration:?}"
+            ))
+            .into());
+        }
+
+        let prefix = tempfile::tempdir()?;
+        let prefix_root = prefix.path().join("repository");
+        let prefix_atlas = prefix_root.join(PROJECTATLAS_DIRECTORY_NAME);
+        fs::create_dir_all(&prefix_atlas)?;
+        let prefix_path = prefix_atlas.join("projectatlas.db");
+        let before = {
+            let mut connection = Connection::open(&prefix_path)?;
+            initialize_migration_prefix(&mut connection, &migrations[..2])?;
+            connection.execute(
+                "INSERT INTO metadata(key, value) VALUES('project_root', ?1)",
+                [normalize_native_path_display(&prefix_root)],
+            )?;
+            seed_compatibility_rows(&connection)?;
+            compatibility_snapshot(&connection)?
+        };
+
+        let prefix_plan = preflight(&prefix_path)?;
+        if prefix_plan.source_version != fts_migration.schema_version
+            || prefix_plan.pending.len() != 1
+            || prefix_plan.pending[0].definition.id != typed_graph_migration.definition.id
+        {
+            return Err(io::Error::other(format!(
+                "valid FTS migration prefix did not plan the typed graph migration: {prefix_plan:?}"
+            ))
+            .into());
+        }
+
+        let migrated = crate::AtlasStore::open(&prefix_path)?;
+        let connection = &migrated.connection;
+        verify_typed_repository_graph_schema(connection)?;
+        verify_current_schema(connection)?;
+        if compatibility_snapshot(connection)? != before {
+            return Err(io::Error::other(
+                "typed graph migration changed authored or compatibility rows",
+            )
+            .into());
+        }
+        let migrated_state = connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT COUNT(*) FROM schema_migrations),
+                (SELECT COUNT(*) FROM graph_entities)
+                    + (SELECT COUNT(*) FROM graph_relations)
+                    + (SELECT COUNT(*) FROM graph_evidence_occurrences)
+                    + (SELECT COUNT(*) FROM graph_resolution_occurrences)
+                    + (SELECT COUNT(*) FROM graph_resolution_candidates)
+                    + (SELECT COUNT(*) FROM graph_coverage)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        if migrated_state != (SCHEMA_VERSION.to_string(), 3, 0) {
+            return Err(io::Error::other(format!(
+                "typed graph migration fabricated rows or failed to advance history: {migrated_state:?}"
+            ))
+            .into());
+        }
+        require_column_contract(
+            connection,
+            GRAPH_ENTITIES_TABLE,
+            "stable_key_digest",
+            ("BLOB", true, None, true),
+        )?;
+        require_column_contract(
+            connection,
+            GRAPH_RELATIONS_TABLE,
+            "resolution_status",
+            ("TEXT", true, Some("'resolved'"), false),
+        )?;
+        require_column_contract(
+            connection,
+            GRAPH_EVIDENCE_OCCURRENCES_TABLE,
+            "content_span_fingerprint",
+            ("BLOB", true, None, false),
+        )?;
+        require_column_contract(
+            connection,
+            GRAPH_RESOLUTION_OCCURRENCES_TABLE,
+            "candidate_total",
+            ("INTEGER", false, None, false),
+        )?;
+        require_column_contract(
+            connection,
+            GRAPH_RESOLUTION_CANDIDATES_TABLE,
+            "candidate_ordinal",
+            ("INTEGER", true, None, true),
+        )?;
+        require_column_contract(
+            connection,
+            GRAPH_COVERAGE_TABLE,
+            "structural_slot",
+            ("TEXT", true, None, true),
+        )?;
+
+        let mut rollback_connection = Connection::open_in_memory()?;
+        initialize_migration_prefix(&mut rollback_connection, &migrations[..2])?;
+        seed_compatibility_rows(&rollback_connection)?;
+        let rollback_before = compatibility_snapshot(&rollback_connection)?;
+        let mut rollback_plan = SchemaMigrationPlan {
+            source_version: fts_migration.schema_version,
+            target_version: SCHEMA_VERSION,
+            pending: vec![typed_graph_migration.clone()],
+        };
+        rollback_plan.pending[0].definition.verify = reject_typed_graph;
+        match apply_migration_plan(&mut rollback_connection, &rollback_plan) {
+            Err(DbError::SchemaPreflight { message })
+                if message.contains("injected typed repository graph verification failure") => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "failed typed graph migration returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(()) => return Err(io::Error::other("failed typed graph migration committed").into()),
+        }
+        if compatibility_snapshot(&rollback_connection)? != rollback_before {
+            return Err(io::Error::other(
+                "failed typed graph migration changed authored or compatibility rows",
+            )
+            .into());
+        }
+        let rollback_state = rollback_connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT COUNT(*) FROM schema_migrations)",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        let rollback_objects = sqlite_objects(&rollback_connection)?;
+        if rollback_state != (fts_migration.schema_version.to_string(), 2)
+            || [
+                GRAPH_ENTITIES_TABLE,
+                GRAPH_RELATIONS_TABLE,
+                GRAPH_EVIDENCE_OCCURRENCES_TABLE,
+                GRAPH_RESOLUTION_OCCURRENCES_TABLE,
+                GRAPH_RESOLUTION_CANDIDATES_TABLE,
+                GRAPH_COVERAGE_TABLE,
+            ]
+            .iter()
+            .any(|table| rollback_objects.contains_key(*table))
+        {
+            return Err(io::Error::other(format!(
+                "failed typed graph migration changed the source schema: {rollback_state:?}"
+            ))
+            .into());
+        }
+        if ledger_migration.schema_version + 1 != fts_migration.schema_version {
+            return Err(io::Error::other("migration prefix order changed").into());
+        }
+        Ok(())
+    }
+
     fn initialize_ledger_schema(
         connection: &mut Connection,
         migration: &AllocatedMigration,
     ) -> DbResult<()> {
+        initialize_migration_prefix(connection, std::slice::from_ref(migration))
+    }
+
+    fn initialize_migration_prefix(
+        connection: &mut Connection,
+        migrations: &[AllocatedMigration],
+    ) -> DbResult<()> {
         let transaction = connection.transaction()?;
         initialize_schema_objects(&transaction)?;
         ensure_project_instance_id(&transaction, true)?;
-        (migration.definition.apply)(&transaction)?;
-        (migration.definition.verify)(&transaction)?;
-        record_applied_migration(&transaction, migration)?;
-        write_schema_version(&transaction, migration.schema_version)?;
+        for migration in migrations {
+            (migration.definition.apply)(&transaction)?;
+            (migration.definition.verify)(&transaction)?;
+            record_applied_migration(&transaction, migration)?;
+            write_schema_version(&transaction, migration.schema_version)?;
+        }
         transaction.commit()?;
         Ok(())
     }
