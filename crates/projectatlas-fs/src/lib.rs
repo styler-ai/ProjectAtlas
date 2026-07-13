@@ -47,7 +47,7 @@ pub enum FsError {
 pub type FsResult<T> = Result<T, FsError>;
 
 /// Repository scanner configuration.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScanOptions {
     /// Additional directory names to exclude.
     pub exclude_dir_names: Vec<String>,

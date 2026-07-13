@@ -3087,7 +3087,7 @@ impl ProjectAtlasMcpServer {
                 params.max_workers,
                 params.timeout_seconds,
             );
-            let report = run_scan_pipeline(&mut store, &plan, &symbol_options)?;
+            let report = run_scan_pipeline(&mut store, &state.db_path, &plan, &symbol_options)?;
             Self::encode_named_payload(MCP_PAYLOAD_SCAN, &report)
         })())
     }
@@ -4181,7 +4181,7 @@ mod tests {
         let mut store = open_atlas_store(&db_path)?;
         let plan = ScanRuntimePlan::for_path(None, &repo, None)?;
         let symbol_options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, Some(1), Some(30));
-        run_scan_pipeline(&mut store, &plan, &symbol_options)?;
+        run_scan_pipeline(&mut store, &db_path, &plan, &symbol_options)?;
         drop(store);
 
         let server = ProjectAtlasMcpServer::new(db_path, None, "mcp-test".to_string(), false);

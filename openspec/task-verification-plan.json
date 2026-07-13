@@ -1223,6 +1223,26 @@
     },
     {
       "change": "advance-rust-repository-intelligence",
+      "task_id": "3.6",
+      "requirement": "The first full-scan feature touch extracts only the focused CLI runtime owner while preserving CLI, MCP, and initialization dispatch.",
+      "scenario": "One responsibility-named full-scan module owns staging, rebuild, publication, and exact cleanup; runtime reexports that owner and the CLI scan, MCP scan, and initialization bootstrap paths continue to dispatch through it without a new trait, crate, or public surface.",
+      "owner": "rust-ownership-and-module-boundaries",
+      "changed_artifacts": ["crates/projectatlas-cli/src/main.rs", "crates/projectatlas-cli/src/mcp.rs", "crates/projectatlas-cli/src/runtime.rs", "crates/projectatlas-cli/src/runtime/full_scan.rs", "openspec/changes/advance-rust-repository-intelligence/tasks.md", "openspec/task-verification-plan.json", "openspec/task-verification.json"],
+      "risk": "L2-persistence-cross-crate",
+      "required_evidence_layers": ["unit", "integration"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-3.6",
+        "function": "runtime::full_scan::tests::task_arri_ut_arri_3_6",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "--all-features", "runtime::full_scan::tests::task_arri_ut_arri_3_6", "--", "--exact"] },
+        "assertion": "The full-scan feature touch is owned by one focused runtime module with the expected typed entrypoint, runtime reexport, and unchanged CLI scan, MCP scan, and initialization-bootstrap dispatch paths, without speculative abstractions or another crate.",
+        "covered_inputs": ["focused runtime full-scan module ownership", "typed run_scan_pipeline signature", "runtime compatibility reexport", "CLI scan dispatch", "MCP atlas_scan dispatch", "initialization bootstrap dispatch", "absence of a new trait, crate, or public command"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
       "task_id": "4.1",
       "requirement": "Centralized typed graph and hard-budget contracts live in the smallest core owners while service use-case contracts remain outside core and the service-to-database-to-core dependency direction is preserved.",
       "scenario": "A generation-neutral graph fact composes validated entity identity and selector, parser provenance, a project-scoped logical relation, evidence occurrences, finite confidence, and structural slot/epoch stamping; the focused graph suite separately exercises resolution candidates, coverage, typed budgets, serialization, and compatibility.",
@@ -1337,6 +1357,46 @@
         "command": { "executable": "cargo", "arguments": ["test", "--locked", "--workspace", "--all-features", "task_arri_ut_arri_4_11"] },
         "assertion": "Verify require every core graph, coverage, and lexical-index row to carry structural slot identity while treating `last_changed_epoch` only as freshness metadata; require pack-owned vector rows to bind a structural slot/epoch plus semantic generation and never participate in core slot visibility or publication.",
         "covered_inputs": ["composite structural-slot identity for every typed graph table", "same-slot graph foreign keys", "coverage-row preservation", "slot-aware authoritative lexical rows", "optional FTS slot and epoch synchronization", "active structural-tuple backfill", "same graph identity and lexical path in both slots", "last_changed_epoch excluded from identity and publication", "authored and compatibility-row preservation", "pack-owned semantic/vector boundary", "injected verification rollback"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "4.12",
+      "requirement": "Full-scan storage is built only in a parent-created separate staging database, validated read-only, imported into the inactive live slot, and published by one atomic parent transaction.",
+      "scenario": "A coherent VACUUM INTO stage is rebuilt and sealed away from the live write connection, reopened immutable and attached read-only, reconciled for identity, schema, integrity, authored-state compatibility, row counts, foreign keys, FTS, slot, and epoch, then imported into the inactive slot before the publication row flips last; any failure rolls back the entire live transaction.",
+      "owner": "graph-schema-and-storage",
+      "changed_artifacts": ["crates/projectatlas-db/src/lib.rs", "crates/projectatlas-db/src/structural_publication.rs", "crates/projectatlas-cli/src/runtime/full_scan.rs", "crates/projectatlas-cli/tests/full_scan_publication.rs", "openspec/changes/advance-rust-repository-intelligence/tasks.md", "openspec/task-verification-plan.json", "openspec/task-verification.json"],
+      "risk": "L4-platform-release-security",
+      "required_evidence_layers": ["unit", "integration", "e2e"],
+      "timeout_seconds": 600,
+      "unit_test": {
+        "test_id": "UT:ARRI-4.12",
+        "function": "structural_publication::tests::task_arri_ut_arri_4_12",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-db", "--all-features", "structural_publication::tests::task_arri_ut_arri_4_12", "--", "--exact"] },
+        "assertion": "The database owner proves parent-created separate staging, coherent snapshot creation, immutable read-only validation and attachment, inactive-slot replacement, authored-purpose preservation, exact reconciliation, publication-row-last atomicity, rollback on injected failure, and retention of the prior active slot.",
+        "covered_inputs": ["separate parent-owned staging path", "coherent VACUUM INTO snapshot", "immutable read-only staging validation and attachment", "live and staging root, instance, schema, ledger, slot, and epoch identity", "inactive-slot foreign-key-safe import", "concurrent authored-purpose reconciliation", "graph, coverage, lexical, FTS, and compatibility row counts", "publication-row-last atomic transaction", "injected import failure rollback", "previous active rollback slot retention", "real-process full-scan publication E2E"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "7.6",
+      "requirement": "The full runtime pipeline publishes only through parent-owned staging, reconciled inactive-slot import, and an atomic structural slot and epoch flip.",
+      "scenario": "Real CLI initialization and repeated scans expose only complete old or new lexical generations, alternate the active slot while advancing the epoch exactly once, preserve the previous active rows as rollback state, roll back an injected inactive-slot import failure, and remove only the exact staging database and SQLite sidecars.",
+      "owner": "incremental-index-and-worker-integrity",
+      "changed_artifacts": ["crates/projectatlas-cli/src/main.rs", "crates/projectatlas-cli/src/mcp.rs", "crates/projectatlas-cli/src/runtime.rs", "crates/projectatlas-cli/src/runtime/full_scan.rs", "crates/projectatlas-cli/tests/full_scan_publication.rs", "crates/projectatlas-db/src/lib.rs", "crates/projectatlas-db/src/structural_publication.rs", "crates/projectatlas-fs/src/lib.rs", "openspec/changes/advance-rust-repository-intelligence/tasks.md", "openspec/task-verification-plan.json", "openspec/task-verification.json"],
+      "risk": "L4-platform-release-security",
+      "required_evidence_layers": ["unit", "integration", "e2e"],
+      "timeout_seconds": 600,
+      "unit_test": {
+        "test_id": "UT:ARRI-7.6",
+        "function": "structural_publication::tests::task_arri_ut_arri_7_6",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-db", "--all-features", "structural_publication::tests::task_arri_ut_arri_7_6", "--", "--exact"] },
+        "assertion": "The coupled storage/runtime publication proof covers parent-owned staging, inactive-slot import and reconciliation, atomic slot and epoch publication, rollback-slot retention, failure rollback, active-reader visibility, and the real-process success, failure, and cleanup workflow.",
+        "covered_inputs": ["parent-owned full-scan staging workflow", "inactive-slot structural import", "authored and compatibility reconciliation", "atomic active-slot and active-epoch flip", "prior active rollback slot", "injected publication failure rollback", "active lexical reader filtering", "real CLI init and scan processes", "old-generation and new-generation lexical visibility", "exact staging DB, WAL, and SHM cleanup"],
         "state": "implemented_uncommitted"
       },
       "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }

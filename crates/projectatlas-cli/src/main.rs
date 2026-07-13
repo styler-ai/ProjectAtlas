@@ -154,6 +154,12 @@ enum CliError {
     /// Watcher runtime failed.
     #[error("watcher failed: {0}")]
     Watcher(String),
+    /// Repository inputs changed while a full scan was staging.
+    #[error("full-scan inputs changed before publication: {detail}")]
+    ScanInputsChanged {
+        /// First detected input difference.
+        detail: String,
+    },
     /// Atlas map operation failed.
     #[error("{0}")]
     AtlasMap(#[from] atlas_map::AtlasMapError),
@@ -889,7 +895,7 @@ fn run() -> Result<(), CliError> {
                 ScanRuntimePlan::for_path(cli.config.as_deref(), &path, *text_index_max_bytes)?;
             let symbol_options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None);
             let mut store = open_atlas_store(&cli.db)?;
-            let report = run_scan_pipeline(&mut store, &plan, &symbol_options)?;
+            let report = run_scan_pipeline(&mut store, &cli.db, &plan, &symbol_options)?;
             print_output(
                 cli.format,
                 &encode_agent_payload(&json!({ "scan": report })),

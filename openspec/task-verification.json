@@ -2125,22 +2125,56 @@
           "test_ids": [
             "UT:ARRI-3.6"
           ],
-          "assertion": "Verify on the first feature touch to CLI runtime or MCP dispatch, split only the affected index/watch or navigation/graph/index/admin/purpose/telemetry handler family while preserving registration and dispatch.",
+          "assertion": "The full-scan feature touch is owned by one focused runtime module with the expected typed entrypoint, runtime reexport, and unchanged CLI scan, MCP scan, and initialization-bootstrap dispatch paths, without speculative abstractions or another crate.",
           "command": {
             "executable": "cargo",
             "arguments": [
               "test",
               "--locked",
-              "--workspace",
+              "-p",
+              "projectatlas-cli",
               "--all-features",
-              "task_arri_ut_arri_3_6"
+              "runtime::full_scan::tests::task_arri_ut_arri_3_6",
+              "--",
+              "--exact"
             ]
           },
           "timeout_seconds": 300,
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "crates/projectatlas-cli/src/main.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/mcp.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/runtime.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/runtime/full_scan.rs"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification-plan.json"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-3.6",
+              "path": "crates/projectatlas-cli/src/runtime/full_scan.rs",
+              "anchor": "task_arri_ut_arri_3_6"
             }
           ]
         },
@@ -2802,22 +2836,56 @@
           "test_ids": [
             "UT:ARRI-4.12"
           ],
-          "assertion": "Verify make a full scan write only a parent-created separate staging database, validate it, import it into the inactive slot, and atomically flip `(active_slot, active_epoch)` in one parent transaction.",
+          "assertion": "The database owner proves parent-created separate staging, coherent snapshot creation, immutable read-only validation and attachment, inactive-slot replacement, authored-purpose preservation, exact reconciliation, publication-row-last atomicity, rollback on injected failure, and retention of the prior active slot.",
           "command": {
             "executable": "cargo",
             "arguments": [
               "test",
               "--locked",
-              "--workspace",
+              "-p",
+              "projectatlas-db",
               "--all-features",
-              "task_arri_ut_arri_4_12"
+              "structural_publication::tests::task_arri_ut_arri_4_12",
+              "--",
+              "--exact"
             ]
           },
-          "timeout_seconds": 300,
+          "timeout_seconds": 600,
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "crates/projectatlas-db/src/lib.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/structural_publication.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/runtime/full_scan.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/tests/full_scan_publication.rs"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification-plan.json"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-4.12",
+              "path": "crates/projectatlas-db/src/structural_publication.rs",
+              "anchor": "task_arri_ut_arri_4_12"
             }
           ]
         },
@@ -4146,22 +4214,72 @@
           "test_ids": [
             "UT:ARRI-7.6"
           ],
-          "assertion": "Verify implement full publication through the parent-owned staging database, inactive-slot import, reconciliation, and atomic `(active_slot, active_epoch)` flip defined in the storage contract.",
+          "assertion": "The coupled storage/runtime publication proof covers parent-owned staging, inactive-slot import and reconciliation, atomic slot and epoch publication, rollback-slot retention, failure rollback, active-reader visibility, and the real-process success, failure, and cleanup workflow.",
           "command": {
             "executable": "cargo",
             "arguments": [
               "test",
               "--locked",
-              "--workspace",
+              "-p",
+              "projectatlas-db",
               "--all-features",
-              "task_arri_ut_arri_7_6"
+              "structural_publication::tests::task_arri_ut_arri_7_6",
+              "--",
+              "--exact"
             ]
           },
-          "timeout_seconds": 300,
+          "timeout_seconds": 600,
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "crates/projectatlas-cli/src/main.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/mcp.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/runtime.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/runtime/full_scan.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/tests/full_scan_publication.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/lib.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/structural_publication.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-fs/src/lib.rs"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification-plan.json"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-7.6",
+              "path": "crates/projectatlas-db/src/structural_publication.rs",
+              "anchor": "task_arri_ut_arri_7_6"
             }
           ]
         },

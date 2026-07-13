@@ -1,6 +1,10 @@
 //! Purpose: Coordinate shared `ProjectAtlas` CLI and MCP runtime workflows.
 //! Shared runtime orchestration for the `ProjectAtlas` CLI and MCP adapters.
 
+mod full_scan;
+
+pub(crate) use full_scan::run_scan_pipeline;
+
 use crate::atlas_map::{
     self, imported_purpose_records, init_project_with_config, load_atlas_config,
     load_atlas_config_for_root,
@@ -89,6 +93,43 @@ pub(crate) struct ScanRuntimePlan {
     pub(crate) scan_options: ScanOptions,
     /// `SQLite` text-index options derived from config and command override.
     pub(crate) text_options: TextIndexOptions,
+    /// Explicit configuration path requested by the caller, when present.
+    requested_config_path: Option<PathBuf>,
+    /// Caller-provided text-index byte override, when present.
+    text_index_max_bytes: Option<u64>,
+    /// Exact configuration file identity consumed by this plan.
+    configuration_input: ScanConfigurationInput,
+}
+
+/// Exact configuration source consumed by one scan plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ScanConfigurationInput {
+    /// Selected configuration path, when one exists.
+    source: Option<PathBuf>,
+    /// BLAKE3 digest of the selected configuration bytes.
+    content_hash: Option<String>,
+}
+
+impl ScanConfigurationInput {
+    /// Capture the configuration path and bytes selected for a scan.
+    fn capture(config_path: Option<&Path>, root: &Path) -> Result<Self, CliError> {
+        let source = scan_import_config_path(config_path, root);
+        let content_hash = source
+            .as_deref()
+            .map(|path| {
+                fs::read(path)
+                    .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
+                    .map_err(|source| CliError::Io {
+                        path: path.to_path_buf(),
+                        source,
+                    })
+            })
+            .transpose()?;
+        Ok(Self {
+            source,
+            content_hash,
+        })
+    }
 }
 
 impl ScanRuntimePlan {
@@ -99,7 +140,18 @@ impl ScanRuntimePlan {
         text_index_max_bytes: Option<u64>,
     ) -> Result<Self, CliError> {
         let root = canonical_project_root(path)?;
-        let config = load_scan_import_config(config_path, &root)?;
+        let before = ScanConfigurationInput::capture(config_path, &root)?;
+        let config = before
+            .source
+            .as_deref()
+            .map(|path| load_atlas_config(Some(path)))
+            .transpose()?;
+        let configuration_input = ScanConfigurationInput::capture(config_path, &root)?;
+        if before != configuration_input {
+            return Err(CliError::ScanInputsChanged {
+                detail: "configuration changed while scan policy was loading".to_owned(),
+            });
+        }
         let scan_options = config.as_ref().map_or_else(
             ScanOptions::default,
             atlas_map::AtlasMapConfig::scan_options,
@@ -110,6 +162,9 @@ impl ScanRuntimePlan {
             config,
             scan_options,
             text_options,
+            requested_config_path: config_path.map(Path::to_path_buf),
+            text_index_max_bytes,
+            configuration_input,
         })
     }
 }
@@ -256,18 +311,26 @@ pub(crate) fn load_scan_import_config(
     config_path: Option<&Path>,
     scan_path: &Path,
 ) -> Result<Option<atlas_map::AtlasMapConfig>, CliError> {
+    scan_import_config_path(config_path, scan_path)
+        .as_deref()
+        .map(|path| load_atlas_config(Some(path)).map_err(CliError::from))
+        .transpose()
+}
+
+/// Return the exact configuration path selected for scan policy and imports.
+fn scan_import_config_path(config_path: Option<&Path>, scan_path: &Path) -> Option<PathBuf> {
     if let Some(config_path) = config_path {
-        return Ok(Some(load_atlas_config(Some(config_path))?));
+        return Some(config_path.to_path_buf());
     }
     let project_config = scan_path.join(".projectatlas").join("config.toml");
     if project_config.exists() {
-        return Ok(Some(load_atlas_config(Some(&project_config))?));
+        return Some(project_config);
     }
     let flat_config = scan_path.join("projectatlas.toml");
     if flat_config.exists() {
-        return Ok(Some(load_atlas_config(Some(&flat_config))?));
+        return Some(flat_config);
     }
-    Ok(None)
+    None
 }
 
 /// Open or create a durable index, creating the parent directory only on demand.
@@ -323,7 +386,7 @@ pub(crate) fn run_init_bootstrap(
         match ScanRuntimePlan::for_path(config_path, &root, options.text_index_max_bytes).and_then(
             |plan| {
                 let symbol_options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None);
-                run_scan_pipeline(&mut store, &plan, &symbol_options)
+                run_scan_pipeline(&mut store, db_path, &plan, &symbol_options)
             },
         ) {
             Ok(report) => (InitPhaseStatus::Verified, Some(report), None),
@@ -543,62 +606,6 @@ pub(crate) fn text_index_options(
         .or_else(|| config.map(atlas_map::AtlasMapConfig::text_index_max_bytes))
         .unwrap_or(atlas_map::DEFAULT_TEXT_INDEX_MAX_BYTES);
     TextIndexOptions::new(max_bytes)
-}
-
-/// Execute the full scan/index/symbol pipeline for a resolved project plan.
-pub(crate) fn run_scan_pipeline(
-    store: &mut AtlasStore,
-    plan: &ScanRuntimePlan,
-    symbol_options: &SymbolBuildOptions,
-) -> Result<ScanReport, CliError> {
-    let nodes = scan_repo(&plan.root, &plan.scan_options)?;
-    store.set_project_root(&plan.root)?;
-    store.replace_scan(&nodes)?;
-    seed_builtin_projectatlas_purposes(store, &nodes)?;
-    let text_refresh =
-        refresh_text_index_for_nodes_with_rows(store, &plan.root, &nodes, plan.text_options)?;
-    let text_index = text_refresh.report.clone();
-    let indexed_paths = nodes
-        .iter()
-        .map(|node| node.path.as_str())
-        .collect::<HashSet<_>>();
-    let existing_purpose_paths = store
-        .load_nodes()?
-        .into_iter()
-        .filter(|node| {
-            matches!(
-                node.purpose.status,
-                PurposeStatus::Approved | PurposeStatus::Stale
-            )
-        })
-        .map(|node| node.node.path)
-        .collect::<HashSet<_>>();
-    let mut purpose_import = PurposeImportReport::default();
-    if let Some(config) = plan.config.as_ref() {
-        for record in imported_purpose_records(config)? {
-            if !indexed_paths.contains(record.path.as_str()) {
-                purpose_import.skipped_stale += 1;
-                continue;
-            }
-            if existing_purpose_paths.contains(record.path.as_str()) {
-                purpose_import.skipped_existing += 1;
-                continue;
-            }
-            store.set_purpose(&record.path, &record.summary, PurposeSource::Imported)?;
-            purpose_import.imported += 1;
-        }
-    }
-    let symbols = build_symbols_for_index(store, &plan.root, symbol_options, None)?;
-    let structural_summaries =
-        refresh_structural_summaries_for_nodes(store, &nodes, &text_refresh.rows)?;
-    let overview = store.overview()?;
-    Ok(ScanReport {
-        overview,
-        purpose_import,
-        text_index,
-        structural_summaries,
-        symbols,
-    })
 }
 
 /// Record a usage event from a fast baseline estimate and actual atlas payload.
@@ -1305,7 +1312,7 @@ pub(crate) struct StructuralSummaryReport {
 }
 
 /// Options controlling full-text persistence for `SQLite` search.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TextIndexOptions {
     /// Maximum UTF-8 file size persisted into `SQLite` text search.
     pub(crate) max_bytes: u64,

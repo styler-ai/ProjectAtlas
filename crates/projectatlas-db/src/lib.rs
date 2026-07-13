@@ -1,6 +1,9 @@
 //! Purpose: Persist `ProjectAtlas` 3 indexes in `SQLite`.
 
 mod schema;
+mod structural_publication;
+
+pub use structural_publication::StructuralStaging;
 
 use projectatlas_core::graph::{GraphContractError, ProjectInstanceId};
 use projectatlas_core::health::{
@@ -88,6 +91,12 @@ pub enum DbError {
         value: i64,
         /// Source conversion error.
         source: TryFromIntError,
+    },
+    /// A full-scan staging database could not be validated or published safely.
+    #[error("structural publication failed: {message}")]
+    StructuralPublication {
+        /// Validation, reconciliation, or atomic-publication failure.
+        message: String,
     },
     /// A caller supplied a path that is not in the current index.
     #[error("path {path:?} is not indexed; run scan, fix the path, or choose an indexed path")]
@@ -372,7 +381,11 @@ impl AtlasStore {
             [],
         )?;
         transaction.execute(
-            "DELETE FROM file_texts WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
+            "DELETE FROM file_texts
+             WHERE structural_slot = (
+                 SELECT active_slot FROM graph_publication_state WHERE singleton = 1
+             )
+             AND path IN (SELECT path FROM nodes WHERE exists_now = 0)",
             [],
         )?;
         transaction.commit()?;
@@ -422,7 +435,11 @@ impl AtlasStore {
                 params![path, descendant_pattern],
             )?;
             transaction.execute(
-                "DELETE FROM file_texts WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+                "DELETE FROM file_texts
+                 WHERE structural_slot = (
+                     SELECT active_slot FROM graph_publication_state WHERE singleton = 1
+                 )
+                 AND (path = ?1 OR path LIKE ?2 ESCAPE '\\')",
                 params![path, descendant_pattern],
             )?;
         }
@@ -446,7 +463,14 @@ impl AtlasStore {
     ) -> DbResult<()> {
         let transaction = self.connection.transaction()?;
         for path in paths {
-            transaction.execute("DELETE FROM file_texts WHERE path = ?1", [path])?;
+            transaction.execute(
+                "DELETE FROM file_texts
+                 WHERE structural_slot = (
+                     SELECT active_slot FROM graph_publication_state WHERE singleton = 1
+                 )
+                 AND path = ?1",
+                [path],
+            )?;
         }
         for text in texts {
             upsert_file_text(&transaction, text)?;
@@ -465,7 +489,10 @@ impl AtlasStore {
             "
             SELECT path, content_hash, byte_count, line_count, content
             FROM file_texts
-            WHERE path = ?1
+            WHERE structural_slot = (
+                SELECT active_slot FROM graph_publication_state WHERE singleton = 1
+            )
+            AND path = ?1
             ",
         )?;
         let mut rows = statement.query([path])?;
@@ -520,7 +547,10 @@ impl AtlasStore {
                     "
                     SELECT path, content_hash, byte_count, line_count, content
                     FROM file_texts
-                    WHERE instr(content, ?1) > 0
+                    WHERE structural_slot = (
+                        SELECT active_slot FROM graph_publication_state WHERE singleton = 1
+                    )
+                    AND instr(content, ?1) > 0
                     ORDER BY path
                     ",
                 )?;
@@ -536,7 +566,10 @@ impl AtlasStore {
                     "
                     SELECT path, content_hash, byte_count, line_count, content
                     FROM file_texts
-                    WHERE instr(lower(content), ?1) > 0
+                    WHERE structural_slot = (
+                        SELECT active_slot FROM graph_publication_state WHERE singleton = 1
+                    )
+                    AND instr(lower(content), ?1) > 0
                     ORDER BY path
                     ",
                 )?;
@@ -552,6 +585,9 @@ impl AtlasStore {
                 "
                 SELECT path, content_hash, byte_count, line_count, content
                 FROM file_texts
+                WHERE structural_slot = (
+                    SELECT active_slot FROM graph_publication_state WHERE singleton = 1
+                )
                 ORDER BY path
                 ",
             )?;
@@ -571,11 +607,14 @@ impl AtlasStore {
     ///
     /// Returns an error if reading fails.
     pub fn file_text_count(&self) -> DbResult<usize> {
-        let count = self
-            .connection
-            .query_row("SELECT COUNT(*) FROM file_texts", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
+        let count = self.connection.query_row(
+            "SELECT COUNT(*) FROM file_texts
+                 WHERE structural_slot = (
+                     SELECT active_slot FROM graph_publication_state WHERE singleton = 1
+                 )",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
         count_to_usize("file_texts", count)
     }
 
@@ -586,7 +625,10 @@ impl AtlasStore {
     /// Returns an error if reading fails.
     pub fn file_text_byte_count(&self) -> DbResult<usize> {
         let count = self.connection.query_row(
-            "SELECT COALESCE(SUM(byte_count), 0) FROM file_texts",
+            "SELECT COALESCE(SUM(byte_count), 0) FROM file_texts
+             WHERE structural_slot = (
+                 SELECT active_slot FROM graph_publication_state WHERE singleton = 1
+             )",
             [],
             |row| row.get::<_, i64>(0),
         )?;
@@ -3663,14 +3705,20 @@ fn upsert_node(transaction: &Transaction<'_>, node: &Node) -> DbResult<()> {
 fn upsert_file_text(transaction: &Transaction<'_>, text: &IndexedFileText) -> DbResult<()> {
     transaction.execute(
         "
-        INSERT INTO file_texts(path, content_hash, byte_count, line_count, content, updated_at)
-        VALUES(?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
+        INSERT INTO file_texts(
+            path, content_hash, byte_count, line_count, content, updated_at,
+            structural_slot, last_changed_epoch
+        )
+        SELECT ?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP, active_slot, active_epoch
+        FROM graph_publication_state
+        WHERE singleton = 1
         ON CONFLICT(structural_slot, path) DO UPDATE SET
             content_hash = excluded.content_hash,
             byte_count = excluded.byte_count,
             line_count = excluded.line_count,
             content = excluded.content,
-            updated_at = CURRENT_TIMESTAMP
+            updated_at = CURRENT_TIMESTAMP,
+            last_changed_epoch = excluded.last_changed_epoch
         ",
         params![
             text.path,
