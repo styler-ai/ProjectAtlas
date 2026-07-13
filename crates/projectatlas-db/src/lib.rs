@@ -3665,7 +3665,7 @@ fn upsert_file_text(transaction: &Transaction<'_>, text: &IndexedFileText) -> Db
         "
         INSERT INTO file_texts(path, content_hash, byte_count, line_count, content, updated_at)
         VALUES(?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
-        ON CONFLICT(path) DO UPDATE SET
+        ON CONFLICT(structural_slot, path) DO UPDATE SET
             content_hash = excluded.content_hash,
             byte_count = excluded.byte_count,
             line_count = excluded.line_count,

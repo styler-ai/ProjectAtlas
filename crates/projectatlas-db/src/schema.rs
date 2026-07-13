@@ -21,6 +21,8 @@ const PROJECT_INSTANCE_ID_METADATA_KEY: &str = "project_instance_id";
 const MIGRATION_LEDGER_TABLE: &str = "schema_migrations";
 /// Optional trigram candidate index over authoritative file text.
 const FILE_TEXT_FTS_TABLE: &str = "file_text_fts";
+/// Authoritative UTF-8 source text used by deterministic lexical search.
+const FILE_TEXTS_TABLE: &str = "file_texts";
 /// Trigger that mirrors inserted source text into the optional candidate index.
 const FILE_TEXT_FTS_INSERT_TRIGGER: &str = "file_text_fts_insert";
 /// Trigger that removes deleted source text from the optional candidate index.
@@ -102,7 +104,7 @@ struct MigrationDefinition {
 }
 
 /// Accepted migrations in immutable application order.
-const MIGRATIONS: [MigrationDefinition; 4] = [
+const MIGRATIONS: [MigrationDefinition; 5] = [
     MigrationDefinition {
         id: "install-runtime-migration-ledger",
         owner: "projectatlas-db::schema",
@@ -127,7 +129,7 @@ const MIGRATIONS: [MigrationDefinition; 4] = [
         rollback_behavior: "rollback-index-backfill-triggers-and-ledger;retain-authoritative-file-texts",
         evidence: "cargo test --locked --workspace --all-features task_arri_ut_arri_4_8",
         apply: create_optional_file_text_fts,
-        verify: verify_optional_file_text_fts,
+        verify: verify_unbound_optional_file_text_fts,
     },
     MigrationDefinition {
         id: "install-typed-repository-graph",
@@ -140,7 +142,7 @@ const MIGRATIONS: [MigrationDefinition; 4] = [
         rollback_behavior: "rollback-typed-graph-tables-and-ledger;retain-authored-and-compatibility-data",
         evidence: "cargo test --locked --workspace --all-features task_arri_ut_arri_4_9",
         apply: create_typed_repository_graph_schema,
-        verify: verify_typed_repository_graph_schema,
+        verify: verify_unbound_typed_repository_graph_schema,
     },
     MigrationDefinition {
         id: "install-structural-publication-state",
@@ -154,6 +156,19 @@ const MIGRATIONS: [MigrationDefinition; 4] = [
         evidence: "cargo test --locked --workspace --all-features task_arri_ut_arri_4_10",
         apply: create_structural_publication_schema,
         verify: verify_structural_publication_schema,
+    },
+    MigrationDefinition {
+        id: "bind-structural-derived-rows",
+        owner: "projectatlas-db::schema::structural-storage",
+        prerequisites: "read-only-preflight=write-ready;structural-publication=installed",
+        authored_effects: "preserve=metadata,purposes,settings,telemetry,health-resolutions",
+        derived_effects: "slot-bind=typed-graph,coverage,file-texts,optional-file-text-fts;backfill=current-active-slot-and-epoch;exclude=compatibility-and-authored-tables,semantic-vector-storage;future-pack-vector-binding=structural-slot+structural-epoch+semantic-generation",
+        transaction_boundary: "single-sqlite-transaction",
+        forward_behavior: "rebuild-core-derived-keys-and-foreign-keys;permit-same-identity-in-both-slots;retain-last-changed-epoch-as-non-key-freshness;advance-schema-version",
+        rollback_behavior: "rollback-rebuilt-tables-indexes-triggers-and-ledger;retain-source-schema-and-all-rows",
+        evidence: "cargo test --locked --workspace --all-features task_arri_ut_arri_4_11",
+        apply: bind_structural_derived_rows,
+        verify: verify_structural_derived_row_schema,
     },
 ];
 
@@ -1481,7 +1496,8 @@ pub(crate) fn apply_migration_plan(
 /// Revalidate an already initialized store without issuing schema writes.
 pub(crate) fn verify_current_schema(connection: &Connection) -> DbResult<()> {
     verify_schema_history(connection, SCHEMA_VERSION)?;
-    verify_structural_publication_schema(connection)
+    verify_structural_publication_schema(connection)?;
+    verify_structural_derived_row_schema(connection)
 }
 
 /// Create or repair the pre-ledger schema objects inside the migration transaction.
@@ -1756,8 +1772,8 @@ fn create_optional_file_text_fts(connection: &Connection) -> DbResult<()> {
     Ok(())
 }
 
-/// Verify either a complete optional index or an unavailable exact-only runtime.
-fn verify_optional_file_text_fts(connection: &Connection) -> DbResult<()> {
+/// Verify the pre-slot optional index or an unavailable exact-only runtime.
+fn verify_unbound_optional_file_text_fts(connection: &Connection) -> DbResult<()> {
     let objects = sqlite_objects(connection)?;
     if !objects.contains_key(FILE_TEXT_FTS_TABLE) {
         return Ok(());
@@ -2126,8 +2142,16 @@ fn create_typed_repository_graph_schema(connection: &Connection) -> DbResult<()>
     Ok(())
 }
 
-/// Reconcile every typed graph table before recording its migration.
-fn verify_typed_repository_graph_schema(connection: &Connection) -> DbResult<()> {
+/// Reconcile the typed graph shape created before structural slots exist.
+fn verify_unbound_typed_repository_graph_schema(connection: &Connection) -> DbResult<()> {
+    verify_typed_repository_graph_columns(connection, false)
+}
+
+/// Reconcile typed graph columns for either the immutable pre-slot or current shape.
+fn verify_typed_repository_graph_columns(
+    connection: &Connection,
+    structural_binding: bool,
+) -> DbResult<()> {
     for (table, expected) in [
         (
             GRAPH_ENTITIES_TABLE,
@@ -2263,12 +2287,141 @@ fn verify_typed_repository_graph_schema(connection: &Connection) -> DbResult<()>
             ][..],
         ),
     ] {
+        let mut expected = expected.to_vec();
+        if structural_binding && table != GRAPH_COVERAGE_TABLE {
+            expected.extend(["structural_slot", "last_changed_epoch"]);
+        }
         let actual = table_columns(connection, table)?;
         if actual != expected {
             return Err(preflight_error(format!(
                 "typed repository graph table {table:?} did not reconcile: {actual:?}"
             )));
         }
+    }
+    Ok(())
+}
+
+/// Reconcile composite slot identities and same-slot graph references.
+fn verify_typed_repository_graph_schema(connection: &Connection) -> DbResult<()> {
+    verify_typed_repository_graph_columns(connection, true)?;
+
+    for (table, expected) in [
+        (
+            GRAPH_ENTITIES_TABLE,
+            &["structural_slot", "stable_key_digest"][..],
+        ),
+        (
+            GRAPH_RELATIONS_TABLE,
+            &["structural_slot", "stable_key_digest"][..],
+        ),
+        (
+            GRAPH_EVIDENCE_OCCURRENCES_TABLE,
+            &["structural_slot", "stable_key_digest"][..],
+        ),
+        (
+            GRAPH_RESOLUTION_OCCURRENCES_TABLE,
+            &["structural_slot", "stable_key_digest"][..],
+        ),
+        (
+            GRAPH_RESOLUTION_CANDIDATES_TABLE,
+            &[
+                "structural_slot",
+                "resolution_occurrence_digest",
+                "candidate_ordinal",
+            ][..],
+        ),
+        (
+            GRAPH_COVERAGE_TABLE,
+            &[
+                "scope_kind",
+                "repository_path",
+                "pass_identity",
+                "relation_kind",
+                "structural_slot",
+            ][..],
+        ),
+    ] {
+        let actual = table_primary_key_columns(connection, table)?;
+        if actual != expected {
+            return Err(preflight_error(format!(
+                "typed repository graph primary key for {table:?} did not reconcile: {actual:?}"
+            )));
+        }
+        require_foreign_key(
+            connection,
+            table,
+            GRAPH_STRUCTURAL_SLOTS_TABLE,
+            &[("structural_slot", "slot")],
+        )?;
+    }
+
+    for (table, target, columns) in [
+        (
+            GRAPH_RELATIONS_TABLE,
+            GRAPH_ENTITIES_TABLE,
+            &[
+                ("structural_slot", "structural_slot"),
+                ("source_entity_digest", "stable_key_digest"),
+            ][..],
+        ),
+        (
+            GRAPH_RELATIONS_TABLE,
+            GRAPH_ENTITIES_TABLE,
+            &[
+                ("structural_slot", "structural_slot"),
+                ("target_entity_digest", "stable_key_digest"),
+            ][..],
+        ),
+        (
+            GRAPH_EVIDENCE_OCCURRENCES_TABLE,
+            GRAPH_RELATIONS_TABLE,
+            &[
+                ("structural_slot", "structural_slot"),
+                ("relation_digest", "stable_key_digest"),
+            ][..],
+        ),
+        (
+            GRAPH_EVIDENCE_OCCURRENCES_TABLE,
+            GRAPH_ENTITIES_TABLE,
+            &[
+                ("structural_slot", "structural_slot"),
+                ("origin_entity_digest", "stable_key_digest"),
+            ][..],
+        ),
+        (
+            GRAPH_RESOLUTION_OCCURRENCES_TABLE,
+            GRAPH_ENTITIES_TABLE,
+            &[
+                ("structural_slot", "structural_slot"),
+                ("source_entity_digest", "stable_key_digest"),
+            ][..],
+        ),
+        (
+            GRAPH_RESOLUTION_OCCURRENCES_TABLE,
+            GRAPH_ENTITIES_TABLE,
+            &[
+                ("structural_slot", "structural_slot"),
+                ("origin_entity_digest", "stable_key_digest"),
+            ][..],
+        ),
+        (
+            GRAPH_RESOLUTION_CANDIDATES_TABLE,
+            GRAPH_RESOLUTION_OCCURRENCES_TABLE,
+            &[
+                ("structural_slot", "structural_slot"),
+                ("resolution_occurrence_digest", "stable_key_digest"),
+            ][..],
+        ),
+        (
+            GRAPH_RESOLUTION_CANDIDATES_TABLE,
+            GRAPH_ENTITIES_TABLE,
+            &[
+                ("structural_slot", "structural_slot"),
+                ("target_entity_digest", "stable_key_digest"),
+            ][..],
+        ),
+    ] {
+        require_foreign_key(connection, table, target, columns)?;
     }
     Ok(())
 }
@@ -2390,6 +2543,697 @@ fn verify_structural_publication_schema(connection: &Connection) -> DbResult<()>
                 "structural publication guard {trigger:?} did not reconcile"
             )));
         }
+    }
+    Ok(())
+}
+
+/// Rebuild core typed graph and lexical rows around structural slot identity.
+fn bind_structural_derived_rows(connection: &Connection) -> DbResult<()> {
+    let had_file_text_fts = sqlite_objects(connection)?.contains_key(FILE_TEXT_FTS_TABLE);
+    if had_file_text_fts {
+        connection.execute_batch(
+            "DROP TRIGGER file_text_fts_insert;
+             DROP TRIGGER file_text_fts_delete;
+             DROP TRIGGER file_text_fts_update;
+             DROP TABLE file_text_fts;",
+        )?;
+    }
+
+    connection.execute_batch(&format!(
+        "
+        CREATE TABLE graph_entities_with_slot (
+            stable_key_digest BLOB NOT NULL CHECK(length(stable_key_digest) = 32),
+            stable_key_version INTEGER NOT NULL CHECK(stable_key_version > 0),
+            stable_key_canonical BLOB NOT NULL,
+            project_instance_id BLOB NOT NULL CHECK(length(project_instance_id) = 16),
+            entity_kind TEXT NOT NULL CHECK(entity_kind IN (
+                'repository', 'folder', 'file', 'package', 'module', 'declaration',
+                'reference', 'endpoint', 'route', 'channel', 'configuration',
+                'environment', 'infrastructure', 'test', 'external'
+            )),
+            repository_path TEXT,
+            qualified_name TEXT,
+            signature TEXT,
+            discriminator TEXT,
+            external_namespace TEXT,
+            external_value TEXT,
+            language TEXT,
+            source_start_byte INTEGER,
+            source_end_byte INTEGER,
+            source_start_line INTEGER,
+            source_end_line INTEGER,
+            parser_kind TEXT NOT NULL CHECK(parser_kind IN ({GRAPH_PARSER_KIND_VALUES})),
+            parser_identity TEXT NOT NULL,
+            parser_version TEXT NOT NULL,
+            structural_slot TEXT NOT NULL DEFAULT 'a'
+                CHECK(structural_slot IN ({GRAPH_STRUCTURAL_SLOT_VALUES})),
+            last_changed_epoch INTEGER NOT NULL DEFAULT 0 CHECK(last_changed_epoch >= 0),
+            PRIMARY KEY(structural_slot, stable_key_digest),
+            UNIQUE(structural_slot, stable_key_canonical),
+            FOREIGN KEY(structural_slot)
+                REFERENCES graph_structural_slots(slot) ON UPDATE RESTRICT ON DELETE RESTRICT,
+            CHECK(
+                (source_start_byte IS NULL
+                    AND source_end_byte IS NULL
+                    AND source_start_line IS NULL
+                    AND source_end_line IS NULL)
+                OR
+                (source_start_byte >= 0
+                    AND source_end_byte >= source_start_byte
+                    AND source_start_line > 0
+                    AND source_end_line >= source_start_line)
+            )
+        );
+
+        CREATE TABLE graph_relations_with_slot (
+            stable_key_digest BLOB NOT NULL CHECK(length(stable_key_digest) = 32),
+            stable_key_version INTEGER NOT NULL CHECK(stable_key_version > 0),
+            stable_key_canonical BLOB NOT NULL,
+            source_entity_digest BLOB NOT NULL CHECK(length(source_entity_digest) = 32),
+            relation_kind TEXT NOT NULL CHECK(relation_kind IN ({GRAPH_RELATION_KIND_VALUES})),
+            resolution_status TEXT NOT NULL DEFAULT 'resolved'
+                CHECK(resolution_status = 'resolved'),
+            target_scope TEXT NOT NULL CHECK(target_scope IN ({GRAPH_TARGET_SCOPE_VALUES})),
+            target_entity_digest BLOB,
+            external_target_namespace TEXT,
+            external_target_value TEXT,
+            confidence TEXT NOT NULL CHECK(confidence IN ({GRAPH_CONFIDENCE_VALUES})),
+            parser_kind TEXT NOT NULL CHECK(parser_kind IN ({GRAPH_PARSER_KIND_VALUES})),
+            parser_identity TEXT NOT NULL,
+            parser_version TEXT NOT NULL,
+            structural_slot TEXT NOT NULL DEFAULT 'a'
+                CHECK(structural_slot IN ({GRAPH_STRUCTURAL_SLOT_VALUES})),
+            last_changed_epoch INTEGER NOT NULL DEFAULT 0 CHECK(last_changed_epoch >= 0),
+            PRIMARY KEY(structural_slot, stable_key_digest),
+            UNIQUE(structural_slot, stable_key_canonical),
+            FOREIGN KEY(structural_slot)
+                REFERENCES graph_structural_slots(slot) ON UPDATE RESTRICT ON DELETE RESTRICT,
+            FOREIGN KEY(structural_slot, source_entity_digest)
+                REFERENCES graph_entities_with_slot(structural_slot, stable_key_digest)
+                ON DELETE CASCADE,
+            FOREIGN KEY(structural_slot, target_entity_digest)
+                REFERENCES graph_entities_with_slot(structural_slot, stable_key_digest)
+                ON DELETE CASCADE,
+            CHECK(
+                (target_scope = 'internal'
+                    AND length(target_entity_digest) = 32
+                    AND external_target_namespace IS NULL
+                    AND external_target_value IS NULL)
+                OR
+                (target_scope = 'external'
+                    AND target_entity_digest IS NULL
+                    AND external_target_namespace IS NOT NULL
+                    AND external_target_value IS NOT NULL)
+            )
+        );
+
+        CREATE TABLE graph_evidence_occurrences_with_slot (
+            stable_key_digest BLOB NOT NULL CHECK(length(stable_key_digest) = 32),
+            stable_key_version INTEGER NOT NULL CHECK(stable_key_version > 0),
+            stable_key_canonical BLOB NOT NULL,
+            relation_digest BLOB NOT NULL CHECK(length(relation_digest) = 32),
+            origin_kind TEXT NOT NULL CHECK(origin_kind IN ({GRAPH_EVIDENCE_ORIGIN_VALUES})),
+            origin_entity_digest BLOB,
+            origin_project_instance_id BLOB,
+            origin_repository_path TEXT,
+            origin_external_namespace TEXT,
+            origin_external_value TEXT,
+            source_start_byte INTEGER,
+            source_end_byte INTEGER,
+            source_start_line INTEGER,
+            source_end_line INTEGER,
+            resolver_name TEXT NOT NULL,
+            resolver_version TEXT NOT NULL,
+            content_span_fingerprint BLOB NOT NULL CHECK(length(content_span_fingerprint) = 32),
+            occurrence_discriminator INTEGER NOT NULL CHECK(occurrence_discriminator >= 0),
+            evidence_class TEXT NOT NULL CHECK(evidence_class IN ({GRAPH_EVIDENCE_CLASS_VALUES})),
+            confidence TEXT NOT NULL CHECK(confidence IN ({GRAPH_CONFIDENCE_VALUES})),
+            completeness TEXT NOT NULL CHECK(completeness IN ({GRAPH_COMPLETENESS_VALUES})),
+            explanation TEXT,
+            structural_slot TEXT NOT NULL DEFAULT 'a'
+                CHECK(structural_slot IN ({GRAPH_STRUCTURAL_SLOT_VALUES})),
+            last_changed_epoch INTEGER NOT NULL DEFAULT 0 CHECK(last_changed_epoch >= 0),
+            PRIMARY KEY(structural_slot, stable_key_digest),
+            UNIQUE(structural_slot, stable_key_canonical),
+            FOREIGN KEY(structural_slot)
+                REFERENCES graph_structural_slots(slot) ON UPDATE RESTRICT ON DELETE RESTRICT,
+            FOREIGN KEY(structural_slot, relation_digest)
+                REFERENCES graph_relations_with_slot(structural_slot, stable_key_digest)
+                ON DELETE CASCADE,
+            FOREIGN KEY(structural_slot, origin_entity_digest)
+                REFERENCES graph_entities_with_slot(structural_slot, stable_key_digest)
+                ON DELETE CASCADE,
+            CHECK(
+                (origin_kind = 'entity'
+                    AND length(origin_entity_digest) = 32
+                    AND origin_project_instance_id IS NULL
+                    AND origin_repository_path IS NULL
+                    AND origin_external_namespace IS NULL
+                    AND origin_external_value IS NULL)
+                OR
+                (origin_kind = 'repository-path'
+                    AND origin_entity_digest IS NULL
+                    AND length(origin_project_instance_id) = 16
+                    AND origin_repository_path IS NOT NULL
+                    AND origin_external_namespace IS NULL
+                    AND origin_external_value IS NULL)
+                OR
+                (origin_kind = 'external'
+                    AND origin_entity_digest IS NULL
+                    AND origin_project_instance_id IS NULL
+                    AND origin_repository_path IS NULL
+                    AND origin_external_namespace IS NOT NULL
+                    AND origin_external_value IS NOT NULL)
+            ),
+            CHECK(
+                (source_start_byte IS NULL
+                    AND source_end_byte IS NULL
+                    AND source_start_line IS NULL
+                    AND source_end_line IS NULL)
+                OR
+                (source_start_byte >= 0
+                    AND source_end_byte >= source_start_byte
+                    AND source_start_line > 0
+                    AND source_end_line >= source_start_line)
+            )
+        );
+
+        CREATE TABLE graph_resolution_occurrences_with_slot (
+            stable_key_digest BLOB NOT NULL CHECK(length(stable_key_digest) = 32),
+            stable_key_version INTEGER NOT NULL CHECK(stable_key_version > 0),
+            stable_key_canonical BLOB NOT NULL,
+            source_entity_digest BLOB NOT NULL CHECK(length(source_entity_digest) = 32),
+            relation_kind TEXT NOT NULL CHECK(relation_kind IN ({GRAPH_RELATION_KIND_VALUES})),
+            origin_kind TEXT NOT NULL CHECK(origin_kind IN ({GRAPH_EVIDENCE_ORIGIN_VALUES})),
+            origin_entity_digest BLOB,
+            origin_project_instance_id BLOB,
+            origin_repository_path TEXT,
+            origin_external_namespace TEXT,
+            origin_external_value TEXT,
+            source_start_byte INTEGER,
+            source_end_byte INTEGER,
+            source_start_line INTEGER,
+            source_end_line INTEGER,
+            resolver_name TEXT NOT NULL,
+            resolver_version TEXT NOT NULL,
+            content_span_fingerprint BLOB NOT NULL CHECK(length(content_span_fingerprint) = 32),
+            occurrence_discriminator INTEGER NOT NULL CHECK(occurrence_discriminator >= 0),
+            resolution_status TEXT NOT NULL
+                CHECK(resolution_status IN ('ambiguous', 'unresolved')),
+            candidate_total INTEGER,
+            candidate_completeness TEXT
+                CHECK(candidate_completeness IN ({GRAPH_COMPLETENESS_VALUES})),
+            unresolved_reason TEXT,
+            evidence_class TEXT NOT NULL CHECK(evidence_class IN ({GRAPH_EVIDENCE_CLASS_VALUES})),
+            confidence TEXT NOT NULL CHECK(confidence IN ({GRAPH_CONFIDENCE_VALUES})),
+            completeness TEXT NOT NULL CHECK(completeness IN ({GRAPH_COMPLETENESS_VALUES})),
+            parser_kind TEXT NOT NULL CHECK(parser_kind IN ({GRAPH_PARSER_KIND_VALUES})),
+            parser_identity TEXT NOT NULL,
+            parser_version TEXT NOT NULL,
+            structural_slot TEXT NOT NULL DEFAULT 'a'
+                CHECK(structural_slot IN ({GRAPH_STRUCTURAL_SLOT_VALUES})),
+            last_changed_epoch INTEGER NOT NULL DEFAULT 0 CHECK(last_changed_epoch >= 0),
+            PRIMARY KEY(structural_slot, stable_key_digest),
+            UNIQUE(structural_slot, stable_key_canonical),
+            FOREIGN KEY(structural_slot)
+                REFERENCES graph_structural_slots(slot) ON UPDATE RESTRICT ON DELETE RESTRICT,
+            FOREIGN KEY(structural_slot, source_entity_digest)
+                REFERENCES graph_entities_with_slot(structural_slot, stable_key_digest)
+                ON DELETE CASCADE,
+            FOREIGN KEY(structural_slot, origin_entity_digest)
+                REFERENCES graph_entities_with_slot(structural_slot, stable_key_digest)
+                ON DELETE CASCADE,
+            CHECK(
+                (origin_kind = 'entity'
+                    AND length(origin_entity_digest) = 32
+                    AND origin_project_instance_id IS NULL
+                    AND origin_repository_path IS NULL
+                    AND origin_external_namespace IS NULL
+                    AND origin_external_value IS NULL)
+                OR
+                (origin_kind = 'repository-path'
+                    AND origin_entity_digest IS NULL
+                    AND length(origin_project_instance_id) = 16
+                    AND origin_repository_path IS NOT NULL
+                    AND origin_external_namespace IS NULL
+                    AND origin_external_value IS NULL)
+                OR
+                (origin_kind = 'external'
+                    AND origin_entity_digest IS NULL
+                    AND origin_project_instance_id IS NULL
+                    AND origin_repository_path IS NULL
+                    AND origin_external_namespace IS NOT NULL
+                    AND origin_external_value IS NOT NULL)
+            ),
+            CHECK(
+                (source_start_byte IS NULL
+                    AND source_end_byte IS NULL
+                    AND source_start_line IS NULL
+                    AND source_end_line IS NULL)
+                OR
+                (source_start_byte >= 0
+                    AND source_end_byte >= source_start_byte
+                    AND source_start_line > 0
+                    AND source_end_line >= source_start_line)
+            ),
+            CHECK(
+                (resolution_status = 'ambiguous'
+                    AND candidate_total >= 2
+                    AND candidate_completeness IS NOT NULL
+                    AND unresolved_reason IS NULL)
+                OR
+                (resolution_status = 'unresolved'
+                    AND candidate_total IS NULL
+                    AND candidate_completeness IS NULL)
+            )
+        );
+
+        CREATE TABLE graph_resolution_candidates_with_slot (
+            resolution_occurrence_digest BLOB NOT NULL
+                CHECK(length(resolution_occurrence_digest) = 32),
+            candidate_ordinal INTEGER NOT NULL CHECK(candidate_ordinal >= 0),
+            target_scope TEXT NOT NULL CHECK(target_scope IN ({GRAPH_TARGET_SCOPE_VALUES})),
+            target_entity_digest BLOB,
+            external_target_namespace TEXT,
+            external_target_value TEXT,
+            confidence TEXT NOT NULL CHECK(confidence IN ({GRAPH_CONFIDENCE_VALUES})),
+            explanation TEXT,
+            structural_slot TEXT NOT NULL DEFAULT 'a'
+                CHECK(structural_slot IN ({GRAPH_STRUCTURAL_SLOT_VALUES})),
+            last_changed_epoch INTEGER NOT NULL DEFAULT 0 CHECK(last_changed_epoch >= 0),
+            PRIMARY KEY(structural_slot, resolution_occurrence_digest, candidate_ordinal),
+            FOREIGN KEY(structural_slot)
+                REFERENCES graph_structural_slots(slot) ON UPDATE RESTRICT ON DELETE RESTRICT,
+            FOREIGN KEY(structural_slot, resolution_occurrence_digest)
+                REFERENCES graph_resolution_occurrences_with_slot(
+                    structural_slot, stable_key_digest
+                ) ON DELETE CASCADE,
+            FOREIGN KEY(structural_slot, target_entity_digest)
+                REFERENCES graph_entities_with_slot(structural_slot, stable_key_digest)
+                ON DELETE CASCADE,
+            CHECK(
+                (target_scope = 'internal'
+                    AND length(target_entity_digest) = 32
+                    AND external_target_namespace IS NULL
+                    AND external_target_value IS NULL)
+                OR
+                (target_scope = 'external'
+                    AND target_entity_digest IS NULL
+                    AND external_target_namespace IS NOT NULL
+                    AND external_target_value IS NOT NULL)
+            )
+        );
+
+        CREATE TABLE graph_coverage_with_slot (
+            scope_kind TEXT NOT NULL
+                CHECK(scope_kind IN ('repository', 'file', 'pass', 'relation')),
+            repository_path TEXT NOT NULL DEFAULT '',
+            pass_identity TEXT NOT NULL DEFAULT '',
+            relation_kind TEXT NOT NULL DEFAULT '' CHECK(
+                relation_kind = ''
+                OR relation_kind IN ({GRAPH_RELATION_KIND_VALUES})
+            ),
+            coverage_state TEXT NOT NULL CHECK(coverage_state IN (
+                'complete', 'partial', 'failed', 'ignored', 'oversized',
+                'quarantined', 'stale'
+            )),
+            produced_count INTEGER NOT NULL CHECK(produced_count >= 0),
+            omitted_count INTEGER CHECK(omitted_count >= 0),
+            reached_limit TEXT CHECK(
+                reached_limit IS NULL
+                OR reached_limit IN (
+                    'source_file_bytes', 'ast_depth', 'symbols_per_file',
+                    'relations_per_file', 'resolution_candidates', 'worker_count',
+                    'stage_time', 'working_memory', 'query_depth', 'visited_nodes',
+                    'expanded_edges', 'returned_rows', 'response_bytes',
+                    'cancellation_poll', 'cancellation_grace'
+                )
+            ),
+            reason TEXT,
+            structural_slot TEXT NOT NULL CHECK(structural_slot IN ({GRAPH_STRUCTURAL_SLOT_VALUES})),
+            last_changed_epoch INTEGER NOT NULL CHECK(last_changed_epoch >= 0),
+            PRIMARY KEY(
+                scope_kind,
+                repository_path,
+                pass_identity,
+                relation_kind,
+                structural_slot
+            ),
+            FOREIGN KEY(structural_slot)
+                REFERENCES graph_structural_slots(slot) ON UPDATE RESTRICT ON DELETE RESTRICT,
+            CHECK(
+                (scope_kind = 'repository'
+                    AND repository_path = ''
+                    AND pass_identity = ''
+                    AND relation_kind = '')
+                OR
+                (scope_kind = 'file'
+                    AND repository_path != ''
+                    AND pass_identity = ''
+                    AND relation_kind = '')
+                OR
+                (scope_kind = 'pass'
+                    AND repository_path != ''
+                    AND pass_identity != ''
+                    AND relation_kind = '')
+                OR
+                (scope_kind = 'relation'
+                    AND repository_path != ''
+                    AND pass_identity = ''
+                    AND relation_kind != '')
+            )
+        );
+
+        CREATE TABLE file_texts_with_slot (
+            path TEXT NOT NULL,
+            content_hash TEXT,
+            byte_count INTEGER NOT NULL,
+            line_count INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            structural_slot TEXT NOT NULL DEFAULT 'a'
+                CHECK(structural_slot IN ({GRAPH_STRUCTURAL_SLOT_VALUES})),
+            last_changed_epoch INTEGER NOT NULL DEFAULT 0 CHECK(last_changed_epoch >= 0),
+            PRIMARY KEY(structural_slot, path),
+            FOREIGN KEY(structural_slot)
+                REFERENCES graph_structural_slots(slot) ON UPDATE RESTRICT ON DELETE RESTRICT
+        );
+
+        INSERT INTO graph_entities_with_slot(
+            stable_key_digest, stable_key_version, stable_key_canonical,
+            project_instance_id, entity_kind, repository_path, qualified_name,
+            signature, discriminator, external_namespace, external_value, language,
+            source_start_byte, source_end_byte, source_start_line, source_end_line,
+            parser_kind, parser_identity, parser_version,
+            structural_slot, last_changed_epoch
+        )
+        SELECT
+            entity.stable_key_digest, entity.stable_key_version,
+            entity.stable_key_canonical, entity.project_instance_id,
+            entity.entity_kind, entity.repository_path, entity.qualified_name,
+            entity.signature, entity.discriminator, entity.external_namespace,
+            entity.external_value, entity.language, entity.source_start_byte,
+            entity.source_end_byte, entity.source_start_line, entity.source_end_line,
+            entity.parser_kind, entity.parser_identity, entity.parser_version,
+            publication.active_slot, publication.active_epoch
+        FROM graph_entities AS entity
+        CROSS JOIN graph_publication_state AS publication
+        WHERE publication.singleton = 1;
+
+        INSERT INTO graph_relations_with_slot(
+            stable_key_digest, stable_key_version, stable_key_canonical,
+            source_entity_digest, relation_kind, resolution_status, target_scope,
+            target_entity_digest, external_target_namespace, external_target_value,
+            confidence, parser_kind, parser_identity, parser_version,
+            structural_slot, last_changed_epoch
+        )
+        SELECT
+            relation.stable_key_digest, relation.stable_key_version,
+            relation.stable_key_canonical, relation.source_entity_digest,
+            relation.relation_kind, relation.resolution_status, relation.target_scope,
+            relation.target_entity_digest, relation.external_target_namespace,
+            relation.external_target_value, relation.confidence, relation.parser_kind,
+            relation.parser_identity, relation.parser_version,
+            publication.active_slot, publication.active_epoch
+        FROM graph_relations AS relation
+        CROSS JOIN graph_publication_state AS publication
+        WHERE publication.singleton = 1;
+
+        INSERT INTO graph_evidence_occurrences_with_slot(
+            stable_key_digest, stable_key_version, stable_key_canonical,
+            relation_digest, origin_kind, origin_entity_digest,
+            origin_project_instance_id, origin_repository_path,
+            origin_external_namespace, origin_external_value, source_start_byte,
+            source_end_byte, source_start_line, source_end_line, resolver_name,
+            resolver_version, content_span_fingerprint, occurrence_discriminator,
+            evidence_class, confidence, completeness, explanation,
+            structural_slot, last_changed_epoch
+        )
+        SELECT
+            evidence.stable_key_digest, evidence.stable_key_version,
+            evidence.stable_key_canonical, evidence.relation_digest,
+            evidence.origin_kind, evidence.origin_entity_digest,
+            evidence.origin_project_instance_id, evidence.origin_repository_path,
+            evidence.origin_external_namespace, evidence.origin_external_value,
+            evidence.source_start_byte, evidence.source_end_byte,
+            evidence.source_start_line, evidence.source_end_line,
+            evidence.resolver_name, evidence.resolver_version,
+            evidence.content_span_fingerprint, evidence.occurrence_discriminator,
+            evidence.evidence_class, evidence.confidence, evidence.completeness,
+            evidence.explanation, publication.active_slot, publication.active_epoch
+        FROM graph_evidence_occurrences AS evidence
+        CROSS JOIN graph_publication_state AS publication
+        WHERE publication.singleton = 1;
+
+        INSERT INTO graph_resolution_occurrences_with_slot(
+            stable_key_digest, stable_key_version, stable_key_canonical,
+            source_entity_digest, relation_kind, origin_kind, origin_entity_digest,
+            origin_project_instance_id, origin_repository_path,
+            origin_external_namespace, origin_external_value, source_start_byte,
+            source_end_byte, source_start_line, source_end_line, resolver_name,
+            resolver_version, content_span_fingerprint, occurrence_discriminator,
+            resolution_status, candidate_total, candidate_completeness,
+            unresolved_reason, evidence_class, confidence, completeness,
+            parser_kind, parser_identity, parser_version,
+            structural_slot, last_changed_epoch
+        )
+        SELECT
+            occurrence.stable_key_digest, occurrence.stable_key_version,
+            occurrence.stable_key_canonical, occurrence.source_entity_digest,
+            occurrence.relation_kind, occurrence.origin_kind,
+            occurrence.origin_entity_digest, occurrence.origin_project_instance_id,
+            occurrence.origin_repository_path, occurrence.origin_external_namespace,
+            occurrence.origin_external_value, occurrence.source_start_byte,
+            occurrence.source_end_byte, occurrence.source_start_line,
+            occurrence.source_end_line, occurrence.resolver_name,
+            occurrence.resolver_version, occurrence.content_span_fingerprint,
+            occurrence.occurrence_discriminator, occurrence.resolution_status,
+            occurrence.candidate_total, occurrence.candidate_completeness,
+            occurrence.unresolved_reason, occurrence.evidence_class,
+            occurrence.confidence, occurrence.completeness, occurrence.parser_kind,
+            occurrence.parser_identity, occurrence.parser_version,
+            publication.active_slot, publication.active_epoch
+        FROM graph_resolution_occurrences AS occurrence
+        CROSS JOIN graph_publication_state AS publication
+        WHERE publication.singleton = 1;
+
+        INSERT INTO graph_resolution_candidates_with_slot(
+            resolution_occurrence_digest, candidate_ordinal, target_scope,
+            target_entity_digest, external_target_namespace, external_target_value,
+            confidence, explanation, structural_slot, last_changed_epoch
+        )
+        SELECT
+            candidate.resolution_occurrence_digest, candidate.candidate_ordinal,
+            candidate.target_scope, candidate.target_entity_digest,
+            candidate.external_target_namespace, candidate.external_target_value,
+            candidate.confidence, candidate.explanation,
+            publication.active_slot, publication.active_epoch
+        FROM graph_resolution_candidates AS candidate
+        CROSS JOIN graph_publication_state AS publication
+        WHERE publication.singleton = 1;
+
+        INSERT INTO graph_coverage_with_slot(
+            scope_kind, repository_path, pass_identity, relation_kind,
+            coverage_state, produced_count, omitted_count, reached_limit,
+            reason, structural_slot, last_changed_epoch
+        )
+        SELECT
+            scope_kind, repository_path, pass_identity, relation_kind,
+            coverage_state, produced_count, omitted_count, reached_limit,
+            reason, structural_slot, last_changed_epoch
+        FROM graph_coverage;
+
+        INSERT INTO file_texts_with_slot(
+            path, content_hash, byte_count, line_count, content, updated_at,
+            structural_slot, last_changed_epoch
+        )
+        SELECT
+            text.path, text.content_hash, text.byte_count, text.line_count,
+            text.content, text.updated_at,
+            publication.active_slot, publication.active_epoch
+        FROM file_texts AS text
+        CROSS JOIN graph_publication_state AS publication
+        WHERE publication.singleton = 1;
+
+        DROP TABLE graph_resolution_candidates;
+        DROP TABLE graph_evidence_occurrences;
+        DROP TABLE graph_resolution_occurrences;
+        DROP TABLE graph_relations;
+        DROP TABLE graph_coverage;
+        DROP TABLE graph_entities;
+        DROP TABLE file_texts;
+
+        ALTER TABLE graph_entities_with_slot RENAME TO graph_entities;
+        ALTER TABLE graph_relations_with_slot RENAME TO graph_relations;
+        ALTER TABLE graph_evidence_occurrences_with_slot
+            RENAME TO graph_evidence_occurrences;
+        ALTER TABLE graph_resolution_occurrences_with_slot
+            RENAME TO graph_resolution_occurrences;
+        ALTER TABLE graph_resolution_candidates_with_slot
+            RENAME TO graph_resolution_candidates;
+        ALTER TABLE graph_coverage_with_slot RENAME TO graph_coverage;
+        ALTER TABLE file_texts_with_slot RENAME TO file_texts;
+
+        CREATE INDEX idx_file_texts_hash ON file_texts(content_hash);
+        "
+    ))?;
+
+    if had_file_text_fts {
+        create_slot_aware_file_text_fts(connection)?;
+    }
+    Ok(())
+}
+
+/// Recreate optional FTS candidate rows with the same structural identity as source text.
+fn create_slot_aware_file_text_fts(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(
+        "CREATE VIRTUAL TABLE file_text_fts
+         USING fts5(
+             structural_slot UNINDEXED,
+             last_changed_epoch UNINDEXED,
+             path UNINDEXED,
+             content,
+             tokenize='trigram'
+         );
+
+         INSERT INTO file_text_fts(structural_slot, last_changed_epoch, path, content)
+         SELECT structural_slot, last_changed_epoch, path, content
+         FROM file_texts
+         ORDER BY structural_slot, path;
+
+         CREATE TRIGGER file_text_fts_insert
+         AFTER INSERT ON file_texts
+         BEGIN
+             INSERT INTO file_text_fts(
+                 structural_slot, last_changed_epoch, path, content
+             ) VALUES(
+                 new.structural_slot, new.last_changed_epoch, new.path, new.content
+             );
+         END;
+
+         CREATE TRIGGER file_text_fts_delete
+         AFTER DELETE ON file_texts
+         BEGIN
+             DELETE FROM file_text_fts
+             WHERE structural_slot = old.structural_slot AND path = old.path;
+         END;
+
+         CREATE TRIGGER file_text_fts_update
+         AFTER UPDATE OF structural_slot, last_changed_epoch, path, content ON file_texts
+         BEGIN
+             DELETE FROM file_text_fts
+             WHERE structural_slot = old.structural_slot AND path = old.path;
+             INSERT INTO file_text_fts(
+                 structural_slot, last_changed_epoch, path, content
+             ) VALUES(
+                 new.structural_slot, new.last_changed_epoch, new.path, new.content
+             );
+         END;",
+    )?;
+    Ok(())
+}
+
+/// Verify structural identity for every current core graph and lexical row family.
+fn verify_structural_derived_row_schema(connection: &Connection) -> DbResult<()> {
+    verify_typed_repository_graph_schema(connection)?;
+    if table_columns(connection, FILE_TEXTS_TABLE)?
+        != [
+            "path",
+            "content_hash",
+            "byte_count",
+            "line_count",
+            "content",
+            "updated_at",
+            "structural_slot",
+            "last_changed_epoch",
+        ]
+    {
+        return Err(preflight_error(
+            "authoritative file-text structural columns did not reconcile",
+        ));
+    }
+    let file_text_key = table_primary_key_columns(connection, FILE_TEXTS_TABLE)?;
+    if file_text_key != ["structural_slot", "path"] {
+        return Err(preflight_error(format!(
+            "authoritative file-text primary key did not reconcile: {file_text_key:?}"
+        )));
+    }
+    require_foreign_key(
+        connection,
+        FILE_TEXTS_TABLE,
+        GRAPH_STRUCTURAL_SLOTS_TABLE,
+        &[("structural_slot", "slot")],
+    )?;
+    verify_optional_file_text_fts(connection)?;
+
+    let mut statement = connection.prepare("PRAGMA foreign_key_check")?;
+    if statement.query([])?.next()?.is_some() {
+        return Err(preflight_error(
+            "structural derived rows contain a cross-slot or missing-parent reference",
+        ));
+    }
+    Ok(())
+}
+
+/// Verify slot-aware FTS candidates or an unavailable exact-only runtime.
+fn verify_optional_file_text_fts(connection: &Connection) -> DbResult<()> {
+    let objects = sqlite_objects(connection)?;
+    if !objects.contains_key(FILE_TEXT_FTS_TABLE) {
+        return Ok(());
+    }
+    if table_columns(connection, FILE_TEXT_FTS_TABLE)?
+        != ["structural_slot", "last_changed_epoch", "path", "content"]
+    {
+        return Err(preflight_error(
+            "optional file-text FTS structural columns did not reconcile",
+        ));
+    }
+
+    for trigger in [
+        FILE_TEXT_FTS_INSERT_TRIGGER,
+        FILE_TEXT_FTS_DELETE_TRIGGER,
+        FILE_TEXT_FTS_UPDATE_TRIGGER,
+    ] {
+        if !matches!(
+            objects.get(trigger),
+            Some(object) if object.object_type == "trigger" && object.table_name == FILE_TEXTS_TABLE
+        ) {
+            return Err(preflight_error(format!(
+                "optional file-text FTS trigger {trigger:?} did not reconcile"
+            )));
+        }
+    }
+
+    let source_count = connection.query_row("SELECT COUNT(*) FROM file_texts", [], |row| {
+        row.get::<_, i64>(0)
+    })?;
+    let candidate_count =
+        connection.query_row("SELECT COUNT(*) FROM file_text_fts", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+    let content_mismatch = connection.query_row(
+        "SELECT
+             EXISTS(
+                 SELECT structural_slot, last_changed_epoch, path, content
+                 FROM file_texts
+                 EXCEPT
+                 SELECT structural_slot, last_changed_epoch, path, content
+                 FROM file_text_fts
+             )
+             OR EXISTS(
+                 SELECT structural_slot, last_changed_epoch, path, content
+                 FROM file_text_fts
+                 EXCEPT
+                 SELECT structural_slot, last_changed_epoch, path, content
+                 FROM file_texts
+             )",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? != 0;
+    if source_count != candidate_count || content_mismatch {
+        return Err(preflight_error(format!(
+            "optional slot-aware file-text FTS content did not reconcile: source={source_count}, candidate={candidate_count}"
+        )));
     }
     Ok(())
 }
@@ -2609,6 +3453,65 @@ fn table_columns(connection: &Connection, table: &str) -> DbResult<Vec<String>> 
     let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
     let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
     rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+}
+
+/// Return primary-key columns in their declared composite-key order.
+fn table_primary_key_columns(connection: &Connection, table: &str) -> DbResult<Vec<String>> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, i64>(5)?, row.get::<_, String>(1)?))
+    })?;
+    let mut columns = rows
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|(position, _)| *position > 0)
+        .collect::<Vec<_>>();
+    columns.sort_by_key(|(position, _)| *position);
+    Ok(columns.into_iter().map(|(_, name)| name).collect())
+}
+
+/// Require one complete same-parent foreign-key column group.
+fn require_foreign_key(
+    connection: &Connection,
+    table: &str,
+    target_table: &str,
+    expected_columns: &[(&str, &str)],
+) -> DbResult<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA foreign_key_list({table})"))?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    let mut groups = BTreeMap::<i64, (String, Vec<(i64, String, String)>)>::new();
+    for row in rows {
+        let (id, sequence, target, source_column, target_column) = row?;
+        let group = groups.entry(id).or_insert_with(|| (target, Vec::new()));
+        group.1.push((sequence, source_column, target_column));
+    }
+    let expected = expected_columns
+        .iter()
+        .map(|(source, target)| ((*source).to_owned(), (*target).to_owned()))
+        .collect::<Vec<_>>();
+    let found = groups.into_values().any(|(target, mut columns)| {
+        columns.sort_by_key(|(sequence, _, _)| *sequence);
+        target == target_table
+            && columns
+                .into_iter()
+                .map(|(_, source, target)| (source, target))
+                .collect::<Vec<_>>()
+                == expected
+    });
+    if !found {
+        return Err(preflight_error(format!(
+            "foreign key from {table:?} to {target_table:?} did not reconcile: {expected:?}"
+        )));
+    }
+    Ok(())
 }
 
 /// Drop an in-progress generated summary table that lacks multi-level keys.
@@ -3471,9 +4374,20 @@ mod tests {
         let tampered_path = tampered.path().join("tampered.db");
         {
             let store = crate::AtlasStore::open(&tampered_path)?;
-            store
-                .connection
-                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            if !store.connection.is_autocommit() {
+                return Err(io::Error::other(
+                    "current schema verification left an open transaction",
+                )
+                .into());
+            }
+        }
+        {
+            let checkpoint = Connection::open(&tampered_path)?;
+            checkpoint
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .map_err(|error| {
+                    io::Error::other(format!("tampered checkpoint failed: {error}"))
+                })?;
         }
         remove_sqlite_sidecars(&tampered_path)?;
         Connection::open(&tampered_path)?.execute(
@@ -4147,7 +5061,7 @@ mod tests {
 
         let prefix_plan = preflight(&prefix_path)?;
         if prefix_plan.source_version != typed_graph_migration.schema_version
-            || prefix_plan.pending.len() != 1
+            || prefix_plan.pending.len() != migrations.len() - 3
             || prefix_plan.pending[0].definition.id != publication_migration.definition.id
         {
             return Err(io::Error::other(format!(
@@ -4251,7 +5165,7 @@ mod tests {
         let mut rollback_plan = SchemaMigrationPlan {
             source_version: typed_graph_migration.schema_version,
             target_version: SCHEMA_VERSION,
-            pending: vec![publication_migration.clone()],
+            pending: migrations[3..].to_vec(),
         };
         rollback_plan.pending[0].definition.verify = reject_structural_publication;
         match apply_migration_plan(&mut rollback_connection, &rollback_plan) {
@@ -4286,7 +5200,7 @@ mod tests {
         if rollback_history
             != (
                 typed_graph_migration.schema_version.to_string(),
-                i64::try_from(migrations.len() - 1)?,
+                i64::try_from(migrations.len() - rollback_plan.pending.len())?,
             )
             || [
                 GRAPH_STRUCTURAL_SLOTS_TABLE,
@@ -4303,6 +5217,482 @@ mod tests {
             ))
             .into());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_11() -> Result<(), Box<dyn Error>> {
+        fn reject_structural_binding(_: &Connection) -> DbResult<()> {
+            Err(preflight_error(
+                "injected structural derived-row verification failure",
+            ))
+        }
+
+        fn seed_slotless_graph(connection: &Connection) -> DbResult<()> {
+            let project = vec![9_u8; 16];
+            let source = vec![1_u8; 32];
+            let target = vec![2_u8; 32];
+            let relation = vec![3_u8; 32];
+            let evidence = vec![4_u8; 32];
+            let resolution = vec![5_u8; 32];
+            let fingerprint = vec![6_u8; 32];
+
+            connection.execute(
+                "INSERT INTO graph_entities(
+                    stable_key_digest, stable_key_version, stable_key_canonical,
+                    project_instance_id, entity_kind, repository_path, qualified_name,
+                    parser_kind, parser_identity, parser_version
+                 ) VALUES(?1, 1, ?2, ?3, 'declaration', 'src/lib.rs', 'crate::source',
+                          'tree-sitter', 'rust', '1')",
+                params![&source, vec![11_u8], &project],
+            )?;
+            connection.execute(
+                "INSERT INTO graph_entities(
+                    stable_key_digest, stable_key_version, stable_key_canonical,
+                    project_instance_id, entity_kind, repository_path, qualified_name,
+                    parser_kind, parser_identity, parser_version
+                 ) VALUES(?1, 1, ?2, ?3, 'declaration', 'src/lib.rs', 'crate::target',
+                          'tree-sitter', 'rust', '1')",
+                params![&target, vec![12_u8], &project],
+            )?;
+            connection.execute(
+                "INSERT INTO graph_relations(
+                    stable_key_digest, stable_key_version, stable_key_canonical,
+                    source_entity_digest, relation_kind, target_scope,
+                    target_entity_digest, confidence, parser_kind,
+                    parser_identity, parser_version
+                 ) VALUES(?1, 1, ?2, ?3, 'calls', 'internal', ?4, 'exact',
+                          'tree-sitter', 'rust', '1')",
+                params![&relation, vec![13_u8], &source, &target],
+            )?;
+            connection.execute(
+                "INSERT INTO graph_evidence_occurrences(
+                    stable_key_digest, stable_key_version, stable_key_canonical,
+                    relation_digest, origin_kind, origin_entity_digest,
+                    resolver_name, resolver_version, content_span_fingerprint,
+                    occurrence_discriminator, evidence_class, confidence, completeness
+                 ) VALUES(?1, 1, ?2, ?3, 'entity', ?4, 'rust-resolver', '1', ?5,
+                          0, 'direct', 'exact', 'complete')",
+                params![&evidence, vec![14_u8], &relation, &source, &fingerprint],
+            )?;
+            connection.execute(
+                "INSERT INTO graph_resolution_occurrences(
+                    stable_key_digest, stable_key_version, stable_key_canonical,
+                    source_entity_digest, relation_kind, origin_kind,
+                    origin_entity_digest, resolver_name, resolver_version,
+                    content_span_fingerprint, occurrence_discriminator,
+                    resolution_status, candidate_total, candidate_completeness,
+                    evidence_class, confidence, completeness,
+                    parser_kind, parser_identity, parser_version
+                 ) VALUES(?1, 1, ?2, ?3, 'calls', 'entity', ?3, 'rust-resolver', '1',
+                          ?4, 1, 'ambiguous', 2, 'complete', 'direct', 'medium',
+                          'complete', 'tree-sitter', 'rust', '1')",
+                params![&resolution, vec![15_u8], &source, &fingerprint],
+            )?;
+            connection.execute(
+                "INSERT INTO graph_resolution_candidates(
+                    resolution_occurrence_digest, candidate_ordinal, target_scope,
+                    target_entity_digest, confidence, explanation
+                 ) VALUES(?1, 0, 'internal', ?2, 'high', 'visible target')",
+                params![&resolution, &target],
+            )?;
+            connection.execute(
+                "INSERT INTO graph_resolution_candidates(
+                    resolution_occurrence_digest, candidate_ordinal, target_scope,
+                    external_target_namespace, external_target_value,
+                    confidence, explanation
+                 ) VALUES(?1, 1, 'external', 'crate', 'outside', 'low',
+                          'external alternative')",
+                params![&resolution],
+            )?;
+            connection.execute_batch(
+                "INSERT INTO graph_coverage(
+                    scope_kind, coverage_state, produced_count, omitted_count,
+                    structural_slot, last_changed_epoch
+                 ) VALUES('repository', 'complete', 2, 0, 'b', 7);
+
+                 INSERT INTO file_texts(
+                    path, content_hash, byte_count, line_count, content
+                 ) VALUES(
+                    'src/lib.rs', 'slotless-text', 18, 1, 'pub fn source() {}'
+                 );",
+            )?;
+            Ok(())
+        }
+
+        let migrations = allocated_migrations();
+        let [
+            _,
+            _,
+            _,
+            publication_migration,
+            structural_binding_migration,
+            ..,
+        ] = migrations.as_slice()
+        else {
+            return Err(io::Error::other(
+                "ARRI 4.11 requires publication and structural row-binding migrations",
+            )
+            .into());
+        };
+        if structural_binding_migration.schema_version != publication_migration.schema_version + 1
+            || structural_binding_migration.definition.id != "bind-structural-derived-rows"
+            || structural_binding_migration.definition.owner
+                != "projectatlas-db::schema::structural-storage"
+            || !structural_binding_migration
+                .definition
+                .derived_effects
+                .contains("slot-bind=typed-graph,coverage,file-texts,optional-file-text-fts")
+            || !structural_binding_migration
+                .definition
+                .derived_effects
+                .contains("future-pack-vector-binding=structural-slot+structural-epoch+semantic-generation")
+            || !structural_binding_migration
+                .definition
+                .derived_effects
+                .contains("exclude=compatibility-and-authored-tables,semantic-vector-storage")
+            || !structural_binding_migration
+                .definition
+                .forward_behavior
+                .contains("retain-last-changed-epoch-as-non-key-freshness")
+            || !structural_binding_migration
+                .definition
+                .evidence
+                .contains("task_arri_ut_arri_4_11")
+        {
+            return Err(io::Error::other(format!(
+                "structural row-binding migration contract is incomplete: {structural_binding_migration:?}"
+            ))
+            .into());
+        }
+
+        let prefix = tempfile::tempdir()?;
+        let root = prefix.path().join("repository");
+        let atlas = root.join(PROJECTATLAS_DIRECTORY_NAME);
+        fs::create_dir_all(&atlas)?;
+        let path = atlas.join("projectatlas.db");
+        {
+            let mut connection = Connection::open(&path)?;
+            initialize_migration_prefix(&mut connection, &migrations[..4])?;
+            connection.execute(
+                "INSERT INTO metadata(key, value) VALUES('project_root', ?1)",
+                [normalize_native_path_display(&root)],
+            )?;
+            connection.execute_batch(
+                "INSERT INTO metadata(key, value)
+                 VALUES('authored_note', 'preserve-structural-binding');
+
+                 INSERT INTO nodes(
+                    id, path, kind, extension, language, size_bytes,
+                    mtime_ns, content_hash, exists_now
+                 ) VALUES(
+                    61, 'src/lib.rs', 'file', 'rs', 'rust', 18,
+                    201, 'compatibility-node', 1
+                 );
+
+                 UPDATE graph_publication_state
+                 SET active_slot = 'b', active_epoch = 7
+                 WHERE singleton = 1;",
+            )?;
+            seed_slotless_graph(&connection)?;
+        }
+
+        let plan = preflight(&path)?;
+        if plan.source_version != publication_migration.schema_version
+            || plan.pending.len() != 1
+            || plan.pending[0].definition.id != structural_binding_migration.definition.id
+        {
+            return Err(io::Error::other(format!(
+                "valid publication prefix did not plan structural row binding: {plan:?}"
+            ))
+            .into());
+        }
+
+        let migrated = crate::AtlasStore::open(&path)?;
+        let connection = &migrated.connection;
+        verify_current_schema(connection)?;
+        let preserved = connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'authored_note'),
+                (SELECT path || '|' || kind || '|' || content_hash FROM nodes WHERE id = 61),
+                (SELECT COUNT(*) FROM graph_entities),
+                (SELECT COUNT(*) FROM graph_relations),
+                (SELECT COUNT(*) FROM graph_evidence_occurrences),
+                (SELECT COUNT(*) FROM graph_resolution_occurrences),
+                (SELECT COUNT(*) FROM graph_resolution_candidates),
+                (SELECT COUNT(*) FROM graph_coverage),
+                (SELECT COUNT(*) FROM file_texts)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                ))
+            },
+        )?;
+        if preserved
+            != (
+                "preserve-structural-binding".to_owned(),
+                "src/lib.rs|file|compatibility-node".to_owned(),
+                2,
+                1,
+                1,
+                1,
+                2,
+                1,
+                1,
+            )
+        {
+            return Err(io::Error::other(format!(
+                "structural row binding did not preserve source rows: {preserved:?}"
+            ))
+            .into());
+        }
+
+        for table in [
+            GRAPH_ENTITIES_TABLE,
+            GRAPH_RELATIONS_TABLE,
+            GRAPH_EVIDENCE_OCCURRENCES_TABLE,
+            GRAPH_RESOLUTION_OCCURRENCES_TABLE,
+            GRAPH_RESOLUTION_CANDIDATES_TABLE,
+            GRAPH_COVERAGE_TABLE,
+            FILE_TEXTS_TABLE,
+        ] {
+            let binding = connection.query_row(
+                &format!("SELECT structural_slot, last_changed_epoch FROM {table} LIMIT 1"),
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )?;
+            if binding != ("b".to_owned(), 7) {
+                return Err(io::Error::other(format!(
+                    "{table} did not bind existing rows to the active structural tuple: {binding:?}"
+                ))
+                .into());
+            }
+        }
+        verify_optional_file_text_fts(connection)?;
+
+        connection.execute_batch(
+            "INSERT INTO graph_entities(
+                stable_key_digest, stable_key_version, stable_key_canonical,
+                project_instance_id, entity_kind, repository_path, qualified_name,
+                signature, discriminator, external_namespace, external_value, language,
+                source_start_byte, source_end_byte, source_start_line, source_end_line,
+                parser_kind, parser_identity, parser_version,
+                structural_slot, last_changed_epoch
+             )
+             SELECT
+                stable_key_digest, stable_key_version, stable_key_canonical,
+                project_instance_id, entity_kind, repository_path, qualified_name,
+                signature, discriminator, external_namespace, external_value, language,
+                source_start_byte, source_end_byte, source_start_line, source_end_line,
+                parser_kind, parser_identity, parser_version, 'a', 99
+             FROM graph_entities
+             WHERE structural_slot = 'b' AND qualified_name = 'crate::source';
+
+             INSERT INTO file_texts(
+                path, content_hash, byte_count, line_count, content, updated_at,
+                structural_slot, last_changed_epoch
+             )
+             SELECT
+                path, content_hash, byte_count, line_count, content, updated_at, 'a', 99
+             FROM file_texts
+             WHERE structural_slot = 'b' AND path = 'src/lib.rs';
+
+             INSERT INTO graph_coverage(
+                scope_kind, repository_path, pass_identity, relation_kind,
+                coverage_state, produced_count, omitted_count, reached_limit,
+                reason, structural_slot, last_changed_epoch
+             )
+             SELECT
+                scope_kind, repository_path, pass_identity, relation_kind,
+                coverage_state, produced_count, omitted_count, reached_limit,
+                reason, 'a', 99
+             FROM graph_coverage
+             WHERE structural_slot = 'b' AND scope_kind = 'repository';",
+        )?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        let cross_slot_relation = connection.execute(
+            "INSERT INTO graph_relations(
+                stable_key_digest, stable_key_version, stable_key_canonical,
+                source_entity_digest, relation_kind, resolution_status, target_scope,
+                target_entity_digest, external_target_namespace, external_target_value,
+                confidence, parser_kind, parser_identity, parser_version,
+                structural_slot, last_changed_epoch
+             )
+             SELECT
+                stable_key_digest, stable_key_version, stable_key_canonical,
+                source_entity_digest, relation_kind, resolution_status, target_scope,
+                target_entity_digest, external_target_namespace, external_target_value,
+                confidence, parser_kind, parser_identity, parser_version, 'a', 99
+             FROM graph_relations
+             WHERE structural_slot = 'b'",
+            [],
+        );
+        if cross_slot_relation.is_ok() {
+            return Err(io::Error::other(
+                "same-slot relation foreign keys accepted a target from another slot",
+            )
+            .into());
+        }
+        connection.execute_batch(
+            "INSERT INTO graph_entities(
+                stable_key_digest, stable_key_version, stable_key_canonical,
+                project_instance_id, entity_kind, repository_path, qualified_name,
+                signature, discriminator, external_namespace, external_value, language,
+                source_start_byte, source_end_byte, source_start_line, source_end_line,
+                parser_kind, parser_identity, parser_version,
+                structural_slot, last_changed_epoch
+             )
+             SELECT
+                stable_key_digest, stable_key_version, stable_key_canonical,
+                project_instance_id, entity_kind, repository_path, qualified_name,
+                signature, discriminator, external_namespace, external_value, language,
+                source_start_byte, source_end_byte, source_start_line, source_end_line,
+                parser_kind, parser_identity, parser_version, 'a', 99
+             FROM graph_entities
+             WHERE structural_slot = 'b' AND qualified_name = 'crate::target';
+
+             INSERT INTO graph_relations(
+                stable_key_digest, stable_key_version, stable_key_canonical,
+                source_entity_digest, relation_kind, resolution_status, target_scope,
+                target_entity_digest, external_target_namespace, external_target_value,
+                confidence, parser_kind, parser_identity, parser_version,
+                structural_slot, last_changed_epoch
+             )
+             SELECT
+                stable_key_digest, stable_key_version, stable_key_canonical,
+                source_entity_digest, relation_kind, resolution_status, target_scope,
+                target_entity_digest, external_target_namespace, external_target_value,
+                confidence, parser_kind, parser_identity, parser_version, 'a', 99
+             FROM graph_relations
+             WHERE structural_slot = 'b';
+
+             UPDATE graph_entities
+             SET last_changed_epoch = 100
+             WHERE structural_slot = 'a' AND qualified_name = 'crate::source';",
+        )?;
+        let visibility_identity = connection.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM graph_entities
+                 WHERE qualified_name = 'crate::source'),
+                (SELECT COUNT(DISTINCT structural_slot) FROM graph_entities
+                 WHERE qualified_name = 'crate::source'),
+                (SELECT COUNT(*) FROM file_texts WHERE path = 'src/lib.rs'),
+                (SELECT active_slot FROM graph_publication_state WHERE singleton = 1),
+                (SELECT active_epoch FROM graph_publication_state WHERE singleton = 1)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )?;
+        if visibility_identity != (2, 2, 2, "b".to_owned(), 7) {
+            return Err(io::Error::other(format!(
+                "slot identity or freshness-only epoch behavior drifted: {visibility_identity:?}"
+            ))
+            .into());
+        }
+        verify_structural_derived_row_schema(connection)?;
+
+        let table_names = object_names(connection, "table")?;
+        if table_names
+            .iter()
+            .any(|table| table.contains("vector") || table.contains("semantic"))
+            || table_columns(connection, GRAPH_PUBLICATION_STATE_TABLE)?
+                != ["singleton", "active_slot", "active_epoch"]
+        {
+            return Err(io::Error::other(
+                "core structural migration created or published pack-owned semantic storage",
+            )
+            .into());
+        }
+
+        let mut rollback_connection = Connection::open_in_memory()?;
+        initialize_migration_prefix(&mut rollback_connection, &migrations[..4])?;
+        rollback_connection.execute_batch(
+            "INSERT INTO metadata(key, value)
+             VALUES('authored_note', 'rollback-structural-binding');
+             INSERT INTO file_texts(
+                path, content_hash, byte_count, line_count, content
+             ) VALUES('src/rollback.rs', 'rollback-text', 19, 1, 'rollback survives');",
+        )?;
+        let rollback_before = rollback_connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'authored_note'),
+                (SELECT content FROM file_texts WHERE path = 'src/rollback.rs')",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        let mut rollback_plan = SchemaMigrationPlan {
+            source_version: publication_migration.schema_version,
+            target_version: SCHEMA_VERSION,
+            pending: vec![structural_binding_migration.clone()],
+        };
+        rollback_plan.pending[0].definition.verify = reject_structural_binding;
+        match apply_migration_plan(&mut rollback_connection, &rollback_plan) {
+            Err(DbError::SchemaPreflight { message })
+                if message.contains("injected structural derived-row verification failure") => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "failed structural row binding returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(()) => {
+                return Err(io::Error::other("failed structural row binding committed").into());
+            }
+        }
+        let rollback_after = rollback_connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'authored_note'),
+                (SELECT content FROM file_texts WHERE path = 'src/rollback.rs')",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        let rollback_history = rollback_connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT COUNT(*) FROM schema_migrations)",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        if rollback_after != rollback_before
+            || rollback_history
+                != (
+                    publication_migration.schema_version.to_string(),
+                    i64::try_from(migrations.len() - 1)?,
+                )
+            || table_columns(&rollback_connection, FILE_TEXTS_TABLE)?
+                != [
+                    "path",
+                    "content_hash",
+                    "byte_count",
+                    "line_count",
+                    "content",
+                    "updated_at",
+                ]
+        {
+            return Err(io::Error::other(format!(
+                "failed structural row binding changed the source schema or rows: {rollback_history:?}"
+            ))
+            .into());
+        }
+        verify_unbound_typed_repository_graph_schema(&rollback_connection)?;
+        verify_unbound_optional_file_text_fts(&rollback_connection)?;
+        verify_structural_publication_schema(&rollback_connection)?;
         Ok(())
     }
 
