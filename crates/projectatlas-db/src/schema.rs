@@ -19,6 +19,14 @@ const SCHEMA_VERSION_METADATA_KEY: &str = "schema_version";
 const PROJECT_INSTANCE_ID_METADATA_KEY: &str = "project_instance_id";
 /// Runtime-owned append-only migration history table.
 const MIGRATION_LEDGER_TABLE: &str = "schema_migrations";
+/// Optional trigram candidate index over authoritative file text.
+const FILE_TEXT_FTS_TABLE: &str = "file_text_fts";
+/// Trigger that mirrors inserted source text into the optional candidate index.
+const FILE_TEXT_FTS_INSERT_TRIGGER: &str = "file_text_fts_insert";
+/// Trigger that removes deleted source text from the optional candidate index.
+const FILE_TEXT_FTS_DELETE_TRIGGER: &str = "file_text_fts_delete";
+/// Trigger that mirrors source-text updates into the optional candidate index.
+const FILE_TEXT_FTS_UPDATE_TRIGGER: &str = "file_text_fts_update";
 
 /// Earliest metadata schema version that the current repair path accepts.
 const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 1;
@@ -55,19 +63,34 @@ struct MigrationDefinition {
 }
 
 /// Accepted migrations in immutable application order.
-const MIGRATIONS: [MigrationDefinition; 1] = [MigrationDefinition {
-    id: "install-runtime-migration-ledger",
-    owner: "projectatlas-db::schema",
-    prerequisites: "read-only-preflight=write-ready;source-schema=1..=9-or-fresh",
-    authored_effects: "preserve=metadata,purposes,settings,telemetry",
-    derived_effects: "preserve=nodes,summaries,symbols,relations,file-texts",
-    transaction_boundary: "single-sqlite-transaction",
-    forward_behavior: "create-ledger;record-accepted-history;advance-schema-version",
-    rollback_behavior: "rollback-transaction;retain-source-schema-and-data",
-    evidence: "cargo test --locked --workspace --all-features task_arri_ut_arri_4_7",
-    apply: create_migration_ledger,
-    verify: verify_migration_ledger_schema,
-}];
+const MIGRATIONS: [MigrationDefinition; 2] = [
+    MigrationDefinition {
+        id: "install-runtime-migration-ledger",
+        owner: "projectatlas-db::schema",
+        prerequisites: "read-only-preflight=write-ready;source-schema=1..=9-or-fresh",
+        authored_effects: "preserve=metadata,purposes,settings,telemetry",
+        derived_effects: "preserve=nodes,summaries,symbols,relations,file-texts",
+        transaction_boundary: "single-sqlite-transaction",
+        forward_behavior: "create-ledger;record-accepted-history;advance-schema-version",
+        rollback_behavior: "rollback-transaction;retain-source-schema-and-data",
+        evidence: "cargo test --locked --workspace --all-features task_arri_ut_arri_4_7",
+        apply: create_migration_ledger,
+        verify: verify_migration_ledger_schema,
+    },
+    MigrationDefinition {
+        id: "install-file-text-trigram-index",
+        owner: "projectatlas-db::schema::file-text-search",
+        prerequisites: "read-only-preflight=write-ready;sqlite-feature=fts5-trigram-or-exact-fallback",
+        authored_effects: "preserve=metadata,purposes,settings,telemetry",
+        derived_effects: "preserve=file-texts;when-supported=create-and-backfill-file-text-fts;otherwise=retain-exact-search",
+        transaction_boundary: "single-sqlite-transaction",
+        forward_behavior: "create-trigram-index;backfill;reconcile;install-sync-triggers;advance-schema-version",
+        rollback_behavior: "rollback-index-backfill-triggers-and-ledger;retain-authoritative-file-texts",
+        evidence: "cargo test --locked --workspace --all-features task_arri_ut_arri_4_8",
+        apply: create_optional_file_text_fts,
+        verify: verify_optional_file_text_fts,
+    },
+];
 
 /// One migration with the schema version allocated from accepted inventory order.
 #[derive(Clone, Debug)]
@@ -905,6 +928,9 @@ fn schema_object_contracts(connection: &Connection) -> DbResult<Vec<SchemaObject
     let mut contracts = Vec::new();
     for row in rows {
         let (object_type, name, table_name) = row?;
+        if is_optional_file_text_fts_object(&name, &table_name) {
+            continue;
+        }
         let kind = SchemaObjectKind::from_sql(&object_type)?;
         let columns = schema_object_columns(connection, kind, &name)?;
         if columns.is_empty() {
@@ -921,6 +947,18 @@ fn schema_object_contracts(connection: &Connection) -> DbResult<Vec<SchemaObject
         });
     }
     Ok(contracts)
+}
+
+/// Return whether one schema object belongs to the optional FTS capability.
+fn is_optional_file_text_fts_object(name: &str, table_name: &str) -> bool {
+    name == FILE_TEXT_FTS_TABLE
+        || table_name == FILE_TEXT_FTS_TABLE
+        || name
+            .strip_prefix(FILE_TEXT_FTS_TABLE)
+            .is_some_and(|suffix| suffix.starts_with('_'))
+        || table_name
+            .strip_prefix(FILE_TEXT_FTS_TABLE)
+            .is_some_and(|suffix| suffix.starts_with('_'))
 }
 
 /// Return ordered columns for one trusted schema-owned table or index name.
@@ -1036,7 +1074,7 @@ fn migration_ledger_state(
         .into_iter()
         .filter(|migration| migration.schema_version <= source_version)
         .collect::<Vec<_>>();
-    if source_version < SCHEMA_VERSION || records.len() != expected.len() {
+    if records.len() != expected.len() {
         return Ok(MigrationLedgerState::Rejected(format!(
             "declared schema version {source_version} has {} ledger rows; expected {}",
             records.len(),
@@ -1601,6 +1639,119 @@ fn verify_migration_ledger_schema(connection: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Create and synchronize the optional trigram candidate index when supported.
+fn create_optional_file_text_fts(connection: &Connection) -> DbResult<()> {
+    if !sqlite_feature_state(connection)?.fts5 {
+        return Ok(());
+    }
+
+    connection.execute_batch("SAVEPOINT projectatlas_file_text_fts_install;")?;
+    match connection.execute_batch(
+        "CREATE VIRTUAL TABLE file_text_fts
+         USING fts5(path UNINDEXED, content, tokenize='trigram');",
+    ) {
+        Ok(()) => {
+            connection.execute_batch("RELEASE SAVEPOINT projectatlas_file_text_fts_install;")?;
+        }
+        Err(error) if is_optional_fts_unavailable(&error) => {
+            connection.execute_batch(
+                "ROLLBACK TO SAVEPOINT projectatlas_file_text_fts_install;
+                 RELEASE SAVEPOINT projectatlas_file_text_fts_install;",
+            )?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    connection.execute_batch(
+        "
+         INSERT INTO file_text_fts(path, content)
+         SELECT path, content FROM file_texts ORDER BY path;
+
+         CREATE TRIGGER file_text_fts_insert
+         AFTER INSERT ON file_texts
+         BEGIN
+             INSERT INTO file_text_fts(path, content) VALUES(new.path, new.content);
+         END;
+
+         CREATE TRIGGER file_text_fts_delete
+         AFTER DELETE ON file_texts
+         BEGIN
+             DELETE FROM file_text_fts WHERE path = old.path;
+         END;
+
+         CREATE TRIGGER file_text_fts_update
+         AFTER UPDATE OF path, content ON file_texts
+         BEGIN
+             DELETE FROM file_text_fts WHERE path = old.path;
+             INSERT INTO file_text_fts(path, content) VALUES(new.path, new.content);
+         END;",
+    )?;
+    Ok(())
+}
+
+/// Verify either a complete optional index or an unavailable exact-only runtime.
+fn verify_optional_file_text_fts(connection: &Connection) -> DbResult<()> {
+    let objects = sqlite_objects(connection)?;
+    if !objects.contains_key(FILE_TEXT_FTS_TABLE) {
+        return Ok(());
+    }
+
+    for trigger in [
+        FILE_TEXT_FTS_INSERT_TRIGGER,
+        FILE_TEXT_FTS_DELETE_TRIGGER,
+        FILE_TEXT_FTS_UPDATE_TRIGGER,
+    ] {
+        if !matches!(
+            objects.get(trigger),
+            Some(object) if object.object_type == "trigger" && object.table_name == "file_texts"
+        ) {
+            return Err(preflight_error(format!(
+                "optional file-text FTS trigger {trigger:?} did not reconcile"
+            )));
+        }
+    }
+
+    let source_count = connection.query_row("SELECT COUNT(*) FROM file_texts", [], |row| {
+        row.get::<_, i64>(0)
+    })?;
+    let candidate_count =
+        connection.query_row("SELECT COUNT(*) FROM file_text_fts", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+    let content_mismatch = connection.query_row(
+        "SELECT
+             EXISTS(
+                 SELECT path, content FROM file_texts
+                 EXCEPT
+                 SELECT path, content FROM file_text_fts
+             )
+             OR EXISTS(
+                 SELECT path, content FROM file_text_fts
+                 EXCEPT
+                 SELECT path, content FROM file_texts
+             )",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? != 0;
+    if source_count != candidate_count || content_mismatch {
+        return Err(preflight_error(format!(
+            "optional file-text FTS content did not reconcile: source={source_count}, candidate={candidate_count}"
+        )));
+    }
+    Ok(())
+}
+
+/// Classify only the `SQLite` errors that mean the optional FTS capability is absent.
+fn is_optional_fts_unavailable(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(_, Some(message))
+            if message.contains("no such module: fts5")
+                || message.contains("no such tokenizer: trigram")
+    )
+}
+
 /// Record one accepted migration after its behavior reconciles successfully.
 fn record_applied_migration(
     transaction: &Transaction<'_>,
@@ -2017,7 +2168,7 @@ mod tests {
 
         let legacy = tempfile::tempdir()?;
         let legacy_path = legacy.path().join("legacy.db");
-        seed_legacy_schema(&legacy_path, SCHEMA_VERSION - 1)?;
+        seed_legacy_schema(&legacy_path, MIGRATION_BASE_SCHEMA_VERSION)?;
         {
             let connection = Connection::open(&legacy_path)?;
             connection.execute(
@@ -2049,7 +2200,7 @@ mod tests {
 
         let preserved = tempfile::tempdir()?;
         let preserved_path = preserved.path().join("preserved.db");
-        seed_legacy_schema(&preserved_path, SCHEMA_VERSION - 1)?;
+        seed_legacy_schema(&preserved_path, MIGRATION_BASE_SCHEMA_VERSION)?;
         let expected = ProjectInstanceId::try_from("00112233445566778899aabbccddeeff")?;
         Connection::open(&preserved_path)?.execute(
             "INSERT INTO metadata(key, value) VALUES(?1, ?2)",
@@ -2066,7 +2217,7 @@ mod tests {
         ] {
             let corrupt = tempfile::tempdir()?;
             let corrupt_path = corrupt.path().join(format!("{label}.db"));
-            seed_legacy_schema(&corrupt_path, SCHEMA_VERSION - 1)?;
+            seed_legacy_schema(&corrupt_path, MIGRATION_BASE_SCHEMA_VERSION)?;
             Connection::open(&corrupt_path)?.execute(
                 "INSERT INTO metadata(key, value) VALUES(?1, ?2)",
                 (PROJECT_INSTANCE_ID_METADATA_KEY, invalid),
@@ -2091,7 +2242,7 @@ mod tests {
                 [SCHEMA_VERSION_METADATA_KEY],
                 |row| row.get::<_, String>(0),
             )?;
-            if stored_version != (SCHEMA_VERSION - 1).to_string() {
+            if stored_version != MIGRATION_BASE_SCHEMA_VERSION.to_string() {
                 return Err(io::Error::other(format!(
                     "{label} identity advanced the schema version before failing"
                 ))
@@ -2101,7 +2252,13 @@ mod tests {
 
         let missing = tempfile::tempdir()?;
         let missing_path = missing.path().join("missing.db");
-        seed_legacy_schema(&missing_path, SCHEMA_VERSION)?;
+        {
+            let store = crate::AtlasStore::open(&missing_path)?;
+            store.connection.execute(
+                "DELETE FROM metadata WHERE key = ?1",
+                [PROJECT_INSTANCE_ID_METADATA_KEY],
+            )?;
+        }
         match crate::AtlasStore::open(&missing_path) {
             Err(DbError::ProjectInstanceIdMissing) => {}
             Err(error) => {
@@ -2454,9 +2611,9 @@ mod tests {
         }
 
         let migrations = allocated_migrations();
-        let [migration] = migrations.as_slice() else {
+        let Some(migration) = migrations.first() else {
             return Err(io::Error::other(
-                "ARRI 4.7 must materialize exactly one accepted ledger migration",
+                "ARRI 4.7 must remain the first accepted ledger migration",
             )
             .into());
         };
@@ -2670,6 +2827,211 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn task_arri_ut_arri_4_8() -> Result<(), Box<dyn Error>> {
+        fn reject_file_text_fts(_: &Connection) -> DbResult<()> {
+            Err(preflight_error(
+                "injected file-text FTS verification failure",
+            ))
+        }
+
+        let migrations = allocated_migrations();
+        let Some((ledger_migration, fts_migration)) = migrations.first().zip(migrations.get(1))
+        else {
+            return Err(io::Error::other(
+                "ARRI 4.8 requires the ledger and file-text FTS migrations",
+            )
+            .into());
+        };
+        if fts_migration.schema_version != ledger_migration.schema_version + 1
+            || fts_migration.definition.id != "install-file-text-trigram-index"
+            || fts_migration.definition.transaction_boundary != "single-sqlite-transaction"
+            || !fts_migration
+                .definition
+                .forward_behavior
+                .contains("backfill")
+            || !fts_migration
+                .definition
+                .rollback_behavior
+                .contains("retain-authoritative-file-texts")
+            || !fts_migration
+                .definition
+                .evidence
+                .contains("task_arri_ut_arri_4_8")
+        {
+            return Err(io::Error::other(format!(
+                "file-text FTS migration contract is incomplete: {fts_migration:?}"
+            ))
+            .into());
+        }
+
+        let prefix = tempfile::tempdir()?;
+        let prefix_root = prefix.path().join("repository");
+        let prefix_atlas = prefix_root.join(PROJECTATLAS_DIRECTORY_NAME);
+        fs::create_dir_all(&prefix_atlas)?;
+        let prefix_path = prefix_atlas.join("projectatlas.db");
+        {
+            let mut prefix_connection = Connection::open(&prefix_path)?;
+            initialize_ledger_schema(&mut prefix_connection, ledger_migration)?;
+            prefix_connection.execute(
+                "INSERT INTO metadata(key, value) VALUES('project_root', ?1)",
+                [normalize_native_path_display(&prefix_root)],
+            )?;
+        }
+        let prefix_plan = preflight(&prefix_path)?;
+        if prefix_plan.source_version != ledger_migration.schema_version
+            || prefix_plan.pending.len() != 1
+            || prefix_plan.pending[0].definition.id != fts_migration.definition.id
+        {
+            return Err(io::Error::other(format!(
+                "valid migration-ledger prefix did not plan the FTS migration: {prefix_plan:?}"
+            ))
+            .into());
+        }
+        let prefix_store = crate::AtlasStore::open(&prefix_path)?;
+        verify_current_schema(&prefix_store.connection)?;
+
+        let mut connection = Connection::open_in_memory()?;
+        initialize_ledger_schema(&mut connection, ledger_migration)?;
+        connection.execute(
+            "INSERT INTO file_texts(path, content_hash, byte_count, line_count, content)
+             VALUES('src/lib.rs', 'hash-before', 17, 1, 'pub fn before() {}')",
+            [],
+        )?;
+
+        let plan = SchemaMigrationPlan {
+            source_version: ledger_migration.schema_version,
+            target_version: SCHEMA_VERSION,
+            pending: vec![fts_migration.clone()],
+        };
+        apply_migration_plan(&mut connection, &plan)?;
+        verify_optional_file_text_fts(&connection)?;
+        let fts_active = sqlite_objects(&connection)?.contains_key(FILE_TEXT_FTS_TABLE);
+        if fts_active {
+            let backfilled = connection.query_row(
+                "SELECT content FROM file_text_fts WHERE path = 'src/lib.rs'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?;
+            if backfilled != "pub fn before() {}" {
+                return Err(
+                    io::Error::other("file-text FTS backfill changed source content").into(),
+                );
+            }
+
+            connection.execute(
+                "UPDATE file_texts
+                 SET path = 'src/main.rs', content_hash = 'hash-after', byte_count = 16,
+                     content = 'pub fn after() {}'
+                 WHERE path = 'src/lib.rs'",
+                [],
+            )?;
+            let synchronized =
+                connection.query_row("SELECT path, content FROM file_text_fts", [], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
+            if synchronized != ("src/main.rs".to_owned(), "pub fn after() {}".to_owned()) {
+                return Err(io::Error::other(format!(
+                    "file-text FTS update trigger drifted: {synchronized:?}"
+                ))
+                .into());
+            }
+            connection.execute("DELETE FROM file_texts WHERE path = 'src/main.rs'", [])?;
+            verify_optional_file_text_fts(&connection)?;
+        } else {
+            connection.execute("DELETE FROM file_texts WHERE path = 'src/lib.rs'", [])?;
+        }
+
+        connection.execute(
+            "INSERT INTO file_texts(path, content_hash, byte_count, line_count, content)
+             VALUES('src/fallback.rs', 'hash-fallback', 24, 1, 'punctuation::still_exact')",
+            [],
+        )?;
+        if fts_active {
+            let mirrored = connection.query_row(
+                "SELECT COUNT(*) FROM file_text_fts WHERE path = 'src/fallback.rs'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?;
+            if mirrored != 1 {
+                return Err(io::Error::other("file-text FTS insert trigger drifted").into());
+            }
+            connection.execute("DELETE FROM file_text_fts", [])?;
+        }
+        let fallback_store = crate::AtlasStore { connection };
+        let exact_fallback = fallback_store.load_file_texts_for_search(Some("::"), true)?;
+        if exact_fallback.len() != 1
+            || exact_fallback[0].path != "src/fallback.rs"
+            || exact_fallback[0].content != "punctuation::still_exact"
+        {
+            return Err(io::Error::other("exact search depended on FTS candidates").into());
+        }
+
+        let mut rollback_connection = Connection::open_in_memory()?;
+        initialize_ledger_schema(&mut rollback_connection, ledger_migration)?;
+        rollback_connection.execute(
+            "INSERT INTO file_texts(path, content_hash, byte_count, line_count, content)
+             VALUES('src/rollback.rs', 'hash-rollback', 18, 1, 'rollback survives')",
+            [],
+        )?;
+        let mut rollback_plan = plan;
+        rollback_plan.pending[0].definition.verify = reject_file_text_fts;
+        match apply_migration_plan(&mut rollback_connection, &rollback_plan) {
+            Err(DbError::SchemaPreflight { message })
+                if message.contains("injected file-text FTS verification failure") => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "failed FTS migration returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(()) => return Err(io::Error::other("failed FTS migration committed").into()),
+        }
+        let rollback_state = rollback_connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT COUNT(*) FROM schema_migrations),
+                (SELECT content FROM file_texts WHERE path = 'src/rollback.rs')",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        if rollback_state
+            != (
+                ledger_migration.schema_version.to_string(),
+                1,
+                "rollback survives".to_owned(),
+            )
+            || sqlite_objects(&rollback_connection)?.contains_key(FILE_TEXT_FTS_TABLE)
+        {
+            return Err(io::Error::other(format!(
+                "failed FTS migration changed the source schema or data: {rollback_state:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    fn initialize_ledger_schema(
+        connection: &mut Connection,
+        migration: &AllocatedMigration,
+    ) -> DbResult<()> {
+        let transaction = connection.transaction()?;
+        initialize_schema_objects(&transaction)?;
+        ensure_project_instance_id(&transaction, true)?;
+        (migration.definition.apply)(&transaction)?;
+        (migration.definition.verify)(&transaction)?;
+        record_applied_migration(&transaction, migration)?;
+        write_schema_version(&transaction, migration.schema_version)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Require a rejected database and its sidecar inventory to remain untouched.
     fn require_database_unchanged(path: &Path, expected: &[u8]) -> Result<(), Box<dyn Error>> {
         if fs::read(path)? != expected {
@@ -2810,9 +3172,21 @@ mod tests {
 
     fn object_names(connection: &Connection, kind: &str) -> DbResult<Vec<String>> {
         let mut statement = connection.prepare(
-            "SELECT name FROM sqlite_master WHERE type = ?1 AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            "SELECT name, tbl_name
+             FROM sqlite_master
+             WHERE type = ?1 AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
         )?;
-        let rows = statement.query_map([kind], |row| row.get::<_, String>(0))?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+        let rows = statement.query_map([kind], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut names = Vec::new();
+        for row in rows {
+            let (name, table_name) = row?;
+            if !is_optional_file_text_fts_object(&name, &table_name) {
+                names.push(name);
+            }
+        }
+        Ok(names)
     }
 }
