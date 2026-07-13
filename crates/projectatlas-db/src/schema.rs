@@ -39,6 +39,16 @@ const GRAPH_RESOLUTION_OCCURRENCES_TABLE: &str = "graph_resolution_occurrences";
 const GRAPH_RESOLUTION_CANDIDATES_TABLE: &str = "graph_resolution_candidates";
 /// Typed structural graph coverage rows.
 const GRAPH_COVERAGE_TABLE: &str = "graph_coverage";
+/// The two immutable physical structural derived-data slot identities.
+const GRAPH_STRUCTURAL_SLOTS_TABLE: &str = "graph_structural_slots";
+/// Singleton active structural slot and publication epoch metadata.
+const GRAPH_PUBLICATION_STATE_TABLE: &str = "graph_publication_state";
+/// Guard that prevents either structural slot identity from being removed.
+const GRAPH_STRUCTURAL_SLOTS_DELETE_GUARD: &str = "graph_structural_slots_delete_guard";
+/// Guard that prevents either structural slot identity from being rewritten.
+const GRAPH_STRUCTURAL_SLOTS_UPDATE_GUARD: &str = "graph_structural_slots_update_guard";
+/// Guard that preserves the singleton publication metadata row.
+const GRAPH_PUBLICATION_STATE_DELETE_GUARD: &str = "graph_publication_state_delete_guard";
 /// Accepted relation-kind values owned by the typed graph schema.
 const GRAPH_RELATION_KIND_VALUES: &str = "'calls', 'channel', 'co-changes', 'configures', 'contains', 'cross-repository', 'declares', 'depends-on', 'deploys', 'exports', 'generates', 'implements', 'imports', 'inherits', 'overrides', 'reads', 'references', 'routes', 'rpc', 'similar', 'tests', 'writes'";
 /// Accepted parser-origin values owned by the typed graph schema.
@@ -92,7 +102,7 @@ struct MigrationDefinition {
 }
 
 /// Accepted migrations in immutable application order.
-const MIGRATIONS: [MigrationDefinition; 3] = [
+const MIGRATIONS: [MigrationDefinition; 4] = [
     MigrationDefinition {
         id: "install-runtime-migration-ledger",
         owner: "projectatlas-db::schema",
@@ -131,6 +141,19 @@ const MIGRATIONS: [MigrationDefinition; 3] = [
         evidence: "cargo test --locked --workspace --all-features task_arri_ut_arri_4_9",
         apply: create_typed_repository_graph_schema,
         verify: verify_typed_repository_graph_schema,
+    },
+    MigrationDefinition {
+        id: "install-structural-publication-state",
+        owner: "projectatlas-db::schema::structural-publication",
+        prerequisites: "read-only-preflight=write-ready;typed-repository-graph=installed",
+        authored_effects: "preserve=metadata,purposes,settings,telemetry",
+        derived_effects: "preserve=legacy-and-typed-derived-data;create=exactly-two-structural-slots,singleton-publication-state",
+        transaction_boundary: "single-sqlite-transaction",
+        forward_behavior: "create-slot-identities-and-publication-state;initialize=active-slot-a,active-epoch-0;advance-schema-version",
+        rollback_behavior: "rollback-slot-identities-publication-state-and-ledger;retain-authored-and-derived-data",
+        evidence: "cargo test --locked --workspace --all-features task_arri_ut_arri_4_10",
+        apply: create_structural_publication_schema,
+        verify: verify_structural_publication_schema,
     },
 ];
 
@@ -1457,7 +1480,8 @@ pub(crate) fn apply_migration_plan(
 
 /// Revalidate an already initialized store without issuing schema writes.
 pub(crate) fn verify_current_schema(connection: &Connection) -> DbResult<()> {
-    verify_schema_history(connection, SCHEMA_VERSION)
+    verify_schema_history(connection, SCHEMA_VERSION)?;
+    verify_structural_publication_schema(connection)
 }
 
 /// Create or repair the pre-ledger schema objects inside the migration transaction.
@@ -2249,6 +2273,127 @@ fn verify_typed_repository_graph_schema(connection: &Connection) -> DbResult<()>
     Ok(())
 }
 
+/// Create the immutable pair of structural slots and singleton publication state.
+fn create_structural_publication_schema(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(&format!(
+        "
+        CREATE TABLE graph_structural_slots (
+            slot TEXT PRIMARY KEY CHECK(slot IN ({GRAPH_STRUCTURAL_SLOT_VALUES}))
+        ) WITHOUT ROWID;
+
+        INSERT INTO graph_structural_slots(slot) VALUES('a'), ('b');
+
+        CREATE TRIGGER graph_structural_slots_delete_guard
+        BEFORE DELETE ON graph_structural_slots
+        BEGIN
+            SELECT RAISE(ABORT, 'structural slot identities are immutable');
+        END;
+
+        CREATE TRIGGER graph_structural_slots_update_guard
+        BEFORE UPDATE OF slot ON graph_structural_slots
+        BEGIN
+            SELECT RAISE(ABORT, 'structural slot identities are immutable');
+        END;
+
+        CREATE TABLE graph_publication_state (
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            active_slot TEXT NOT NULL CHECK(active_slot IN ({GRAPH_STRUCTURAL_SLOT_VALUES})),
+            active_epoch INTEGER NOT NULL CHECK(active_epoch >= 0),
+            FOREIGN KEY(active_slot)
+                REFERENCES graph_structural_slots(slot) ON UPDATE RESTRICT ON DELETE RESTRICT
+        );
+
+        INSERT INTO graph_publication_state(singleton, active_slot, active_epoch)
+        VALUES(1, 'a', 0);
+
+        CREATE TRIGGER graph_publication_state_delete_guard
+        BEFORE DELETE ON graph_publication_state
+        BEGIN
+            SELECT RAISE(ABORT, 'publication state is a required singleton');
+        END;
+        "
+    ))?;
+    Ok(())
+}
+
+/// Reconcile the exact structural slot identities and singleton publication state.
+fn verify_structural_publication_schema(connection: &Connection) -> DbResult<()> {
+    if table_columns(connection, GRAPH_STRUCTURAL_SLOTS_TABLE)? != ["slot"] {
+        return Err(preflight_error(
+            "structural slot identity table did not reconcile",
+        ));
+    }
+    if table_columns(connection, GRAPH_PUBLICATION_STATE_TABLE)?
+        != ["singleton", "active_slot", "active_epoch"]
+    {
+        return Err(preflight_error(
+            "structural publication state table did not reconcile",
+        ));
+    }
+
+    let slots = connection
+        .prepare("SELECT slot FROM graph_structural_slots ORDER BY slot")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if slots != ["a", "b"] {
+        return Err(preflight_error(format!(
+            "structural slot identities did not reconcile: {slots:?}"
+        )));
+    }
+
+    let publication_rows =
+        connection.query_row("SELECT COUNT(*) FROM graph_publication_state", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+    if publication_rows != 1 {
+        return Err(preflight_error(format!(
+            "structural publication state must contain one row, found {publication_rows}"
+        )));
+    }
+    let publication = connection.query_row(
+        "SELECT singleton, active_slot, active_epoch FROM graph_publication_state",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        },
+    )?;
+    if publication.0 != 1 || !slots.iter().any(|slot| slot == &publication.1) || publication.2 < 0 {
+        return Err(preflight_error(format!(
+            "structural publication state did not reconcile: {publication:?}"
+        )));
+    }
+
+    let objects = sqlite_objects(connection)?;
+    for (trigger, table) in [
+        (
+            GRAPH_STRUCTURAL_SLOTS_DELETE_GUARD,
+            GRAPH_STRUCTURAL_SLOTS_TABLE,
+        ),
+        (
+            GRAPH_STRUCTURAL_SLOTS_UPDATE_GUARD,
+            GRAPH_STRUCTURAL_SLOTS_TABLE,
+        ),
+        (
+            GRAPH_PUBLICATION_STATE_DELETE_GUARD,
+            GRAPH_PUBLICATION_STATE_TABLE,
+        ),
+    ] {
+        if !matches!(
+            objects.get(trigger),
+            Some(object) if object.object_type == "trigger" && object.table_name == table
+        ) {
+            return Err(preflight_error(format!(
+                "structural publication guard {trigger:?} did not reconcile"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Classify only the `SQLite` errors that mean the optional FTS capability is absent.
 fn is_optional_fts_unavailable(error: &rusqlite::Error) -> bool {
     matches!(
@@ -2512,9 +2657,11 @@ mod tests {
                 "graph_coverage",
                 "graph_entities",
                 "graph_evidence_occurrences",
+                "graph_publication_state",
                 "graph_relations",
                 "graph_resolution_candidates",
                 "graph_resolution_occurrences",
+                "graph_structural_slots",
                 "health_resolutions",
                 "metadata",
                 "nodes",
@@ -2550,6 +2697,15 @@ mod tests {
             ]
         {
             return Err(io::Error::other("index inventory changed during extraction").into());
+        }
+        if object_names(connection, "trigger")?
+            != [
+                GRAPH_PUBLICATION_STATE_DELETE_GUARD,
+                GRAPH_STRUCTURAL_SLOTS_DELETE_GUARD,
+                GRAPH_STRUCTURAL_SLOTS_UPDATE_GUARD,
+            ]
+        {
+            return Err(io::Error::other("trigger inventory changed during extraction").into());
         }
         require_column_contract(
             connection,
@@ -3664,7 +3820,8 @@ mod tests {
         }
 
         let migrations = allocated_migrations();
-        let [ledger_migration, fts_migration, typed_graph_migration] = migrations.as_slice() else {
+        let [ledger_migration, fts_migration, typed_graph_migration, ..] = migrations.as_slice()
+        else {
             return Err(io::Error::other(
                 "ARRI 4.9 requires the ledger, FTS, and typed graph migrations",
             )
@@ -3715,7 +3872,7 @@ mod tests {
 
         let prefix_plan = preflight(&prefix_path)?;
         if prefix_plan.source_version != fts_migration.schema_version
-            || prefix_plan.pending.len() != 1
+            || prefix_plan.pending.len() != migrations.len() - 2
             || prefix_plan.pending[0].definition.id != typed_graph_migration.definition.id
         {
             return Err(io::Error::other(format!(
@@ -3753,7 +3910,13 @@ mod tests {
                 ))
             },
         )?;
-        if migrated_state != (SCHEMA_VERSION.to_string(), 3, 0) {
+        if migrated_state
+            != (
+                SCHEMA_VERSION.to_string(),
+                i64::try_from(migrations.len())?,
+                0,
+            )
+        {
             return Err(io::Error::other(format!(
                 "typed graph migration fabricated rows or failed to advance history: {migrated_state:?}"
             ))
@@ -3803,7 +3966,7 @@ mod tests {
         let mut rollback_plan = SchemaMigrationPlan {
             source_version: fts_migration.schema_version,
             target_version: SCHEMA_VERSION,
-            pending: vec![typed_graph_migration.clone()],
+            pending: migrations[2..].to_vec(),
         };
         rollback_plan.pending[0].definition.verify = reject_typed_graph;
         match apply_migration_plan(&mut rollback_connection, &rollback_plan) {
@@ -3850,6 +4013,295 @@ mod tests {
         }
         if ledger_migration.schema_version + 1 != fts_migration.schema_version {
             return Err(io::Error::other("migration prefix order changed").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_10() -> Result<(), Box<dyn Error>> {
+        type PreservationSnapshot = (String, String, String, String, String);
+
+        fn reject_structural_publication(_: &Connection) -> DbResult<()> {
+            Err(preflight_error(
+                "injected structural publication verification failure",
+            ))
+        }
+
+        fn seed_preserved_rows(connection: &Connection) -> DbResult<()> {
+            connection.execute_batch(
+                "
+                INSERT INTO metadata(key, value)
+                VALUES('authored_note', 'preserve-publication-migration');
+
+                INSERT INTO nodes(
+                    id, path, kind, extension, language, size_bytes,
+                    mtime_ns, content_hash, exists_now
+                ) VALUES(
+                    51, 'src/publication.rs', 'file', 'rs', 'rust', 19,
+                    101, 'publication-node-hash', 1
+                );
+
+                INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+                VALUES(
+                    51, 'Preserve publication migration purpose',
+                    'agent', 'approved', 'codex'
+                );
+
+                INSERT INTO file_texts(
+                    path, content_hash, byte_count, line_count, content
+                ) VALUES(
+                    'src/publication.rs', 'publication-text-hash', 19, 1,
+                    'pub fn retained() {}'
+                );
+
+                INSERT INTO graph_coverage(
+                    scope_kind, coverage_state, produced_count, omitted_count,
+                    structural_slot, last_changed_epoch
+                ) VALUES('repository', 'complete', 0, 0, 'b', 7);
+                ",
+            )?;
+            Ok(())
+        }
+
+        fn preservation_snapshot(connection: &Connection) -> DbResult<PreservationSnapshot> {
+            connection
+                .query_row(
+                    "
+                    SELECT
+                        (SELECT key || '=' || value
+                         FROM metadata WHERE key = 'authored_note'),
+                        (SELECT path || '|' || kind || '|' || content_hash
+                         FROM nodes WHERE id = 51),
+                        (SELECT purpose || '|' || source || '|' || status || '|' || updated_by
+                         FROM purposes WHERE node_id = 51),
+                        (SELECT path || '|' || content_hash || '|' || content
+                         FROM file_texts WHERE path = 'src/publication.rs'),
+                        (SELECT scope_kind || '|' || coverage_state || '|' || structural_slot
+                                || '|' || last_changed_epoch
+                         FROM graph_coverage WHERE scope_kind = 'repository')
+                    ",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .map_err(DbError::from)
+        }
+
+        let migrations = allocated_migrations();
+        let [_, _, typed_graph_migration, publication_migration, ..] = migrations.as_slice() else {
+            return Err(io::Error::other(
+                "ARRI 4.10 requires the typed graph and structural publication migrations",
+            )
+            .into());
+        };
+        if publication_migration.schema_version != typed_graph_migration.schema_version + 1
+            || publication_migration.definition.id != "install-structural-publication-state"
+            || publication_migration.definition.owner
+                != "projectatlas-db::schema::structural-publication"
+            || publication_migration.definition.transaction_boundary != "single-sqlite-transaction"
+            || !publication_migration
+                .definition
+                .derived_effects
+                .contains("exactly-two-structural-slots")
+            || !publication_migration
+                .definition
+                .forward_behavior
+                .contains("active-epoch-0")
+            || !publication_migration
+                .definition
+                .rollback_behavior
+                .contains("retain-authored-and-derived-data")
+            || !publication_migration
+                .definition
+                .evidence
+                .contains("task_arri_ut_arri_4_10")
+        {
+            return Err(io::Error::other(format!(
+                "structural publication migration contract is incomplete: {publication_migration:?}"
+            ))
+            .into());
+        }
+
+        let prefix = tempfile::tempdir()?;
+        let prefix_root = prefix.path().join("repository");
+        let prefix_atlas = prefix_root.join(PROJECTATLAS_DIRECTORY_NAME);
+        fs::create_dir_all(&prefix_atlas)?;
+        let prefix_path = prefix_atlas.join("projectatlas.db");
+        let before = {
+            let mut connection = Connection::open(&prefix_path)?;
+            initialize_migration_prefix(&mut connection, &migrations[..3])?;
+            connection.execute(
+                "INSERT INTO metadata(key, value) VALUES('project_root', ?1)",
+                [normalize_native_path_display(&prefix_root)],
+            )?;
+            seed_preserved_rows(&connection)?;
+            preservation_snapshot(&connection)?
+        };
+
+        let prefix_plan = preflight(&prefix_path)?;
+        if prefix_plan.source_version != typed_graph_migration.schema_version
+            || prefix_plan.pending.len() != 1
+            || prefix_plan.pending[0].definition.id != publication_migration.definition.id
+        {
+            return Err(io::Error::other(format!(
+                "valid typed graph prefix did not plan structural publication: {prefix_plan:?}"
+            ))
+            .into());
+        }
+
+        let migrated = crate::AtlasStore::open(&prefix_path)?;
+        let connection = &migrated.connection;
+        verify_structural_publication_schema(connection)?;
+        verify_current_schema(connection)?;
+        if preservation_snapshot(connection)? != before {
+            return Err(io::Error::other(
+                "structural publication migration changed authored or derived rows",
+            )
+            .into());
+        }
+        let slots = connection
+            .prepare("SELECT slot FROM graph_structural_slots ORDER BY slot")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let publication = connection.query_row(
+            "SELECT singleton, active_slot, active_epoch FROM graph_publication_state",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        let history = connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT COUNT(*) FROM schema_migrations)",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        if slots != ["a", "b"]
+            || publication != (1, "a".to_owned(), 0)
+            || history != (SCHEMA_VERSION.to_string(), i64::try_from(migrations.len())?)
+        {
+            return Err(io::Error::other(format!(
+                "structural publication initialization drifted: slots={slots:?}, publication={publication:?}, history={history:?}"
+            ))
+            .into());
+        }
+
+        for (statement, description) in [
+            (
+                "INSERT INTO graph_structural_slots(slot) VALUES('c')",
+                "a third structural slot",
+            ),
+            (
+                "UPDATE graph_structural_slots SET slot = 'c' WHERE slot = 'b'",
+                "a rewritten structural slot identity",
+            ),
+            (
+                "DELETE FROM graph_structural_slots WHERE slot = 'b'",
+                "a deleted structural slot identity",
+            ),
+            (
+                "INSERT INTO graph_publication_state(singleton, active_slot, active_epoch) VALUES(2, 'a', 0)",
+                "a second publication row",
+            ),
+            (
+                "DELETE FROM graph_publication_state WHERE singleton = 1",
+                "a deleted publication singleton",
+            ),
+            (
+                "UPDATE graph_publication_state SET active_slot = 'c' WHERE singleton = 1",
+                "an invalid active structural slot",
+            ),
+            (
+                "UPDATE graph_publication_state SET active_epoch = -1 WHERE singleton = 1",
+                "a negative publication epoch",
+            ),
+        ] {
+            if connection.execute(statement, []).is_ok() {
+                return Err(io::Error::other(format!(
+                    "structural publication schema accepted {description}"
+                ))
+                .into());
+            }
+        }
+        connection.execute(
+            "UPDATE graph_publication_state
+             SET active_slot = 'b', active_epoch = 1
+             WHERE singleton = 1",
+            [],
+        )?;
+        verify_structural_publication_schema(connection)?;
+        verify_current_schema(connection)?;
+
+        let mut rollback_connection = Connection::open_in_memory()?;
+        initialize_migration_prefix(&mut rollback_connection, &migrations[..3])?;
+        seed_preserved_rows(&rollback_connection)?;
+        let rollback_before = preservation_snapshot(&rollback_connection)?;
+        let mut rollback_plan = SchemaMigrationPlan {
+            source_version: typed_graph_migration.schema_version,
+            target_version: SCHEMA_VERSION,
+            pending: vec![publication_migration.clone()],
+        };
+        rollback_plan.pending[0].definition.verify = reject_structural_publication;
+        match apply_migration_plan(&mut rollback_connection, &rollback_plan) {
+            Err(DbError::SchemaPreflight { message })
+                if message.contains("injected structural publication verification failure") => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "failed structural publication migration returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(()) => {
+                return Err(
+                    io::Error::other("failed structural publication migration committed").into(),
+                );
+            }
+        }
+        if preservation_snapshot(&rollback_connection)? != rollback_before {
+            return Err(io::Error::other(
+                "failed structural publication migration changed authored or derived rows",
+            )
+            .into());
+        }
+        let rollback_history = rollback_connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT COUNT(*) FROM schema_migrations)",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        let rollback_objects = sqlite_objects(&rollback_connection)?;
+        if rollback_history
+            != (
+                typed_graph_migration.schema_version.to_string(),
+                i64::try_from(migrations.len() - 1)?,
+            )
+            || [
+                GRAPH_STRUCTURAL_SLOTS_TABLE,
+                GRAPH_PUBLICATION_STATE_TABLE,
+                GRAPH_STRUCTURAL_SLOTS_DELETE_GUARD,
+                GRAPH_STRUCTURAL_SLOTS_UPDATE_GUARD,
+                GRAPH_PUBLICATION_STATE_DELETE_GUARD,
+            ]
+            .iter()
+            .any(|object| rollback_objects.contains_key(*object))
+        {
+            return Err(io::Error::other(format!(
+                "failed structural publication migration changed the source schema: {rollback_history:?}"
+            ))
+            .into());
         }
         Ok(())
     }
