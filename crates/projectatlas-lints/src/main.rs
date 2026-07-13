@@ -68,9 +68,11 @@ const E2E_FIXTURE_PATH_LITERALS: &[&str] = &[
 /// Existing repeated e2e path joins reviewed as ordinary fixture structure.
 const E2E_ALLOWED_REPEATED_PATH_JOIN_LITERALS: &[&str] = &[
     ".cargo",
+    ".githooks",
     ".github",
     ".gitignore",
     ".purpose",
+    "03-auto-release.yml",
     "AppData",
     "Cargo.toml",
     "Local",
@@ -130,6 +132,7 @@ const E2E_ALLOWED_REPEATED_PATH_JOIN_LITERALS: &[&str] = &[
     "projectatlas.opencode.json",
     "projectatlas.toml",
     "projectatlas.toon",
+    "pre-push",
     "public",
     "py",
     "python",

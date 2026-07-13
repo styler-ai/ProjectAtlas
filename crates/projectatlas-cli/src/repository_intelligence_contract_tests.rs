@@ -92,6 +92,12 @@ const POSIX_INSTALLER: &[u8] =
     include_bytes!("../../../plugins/projectatlas/scripts/install-runtime.sh");
 /// Cross-platform source-artifact digest contract.
 const SOURCE_DIGEST_MODE_UTF8_LF: &str = "utf8-lf";
+/// GitHub issue that owns the repository-intelligence delivery program.
+const REPOSITORY_INTELLIGENCE_ISSUE: u64 = 308;
+/// GitHub issue that owns the repository-wide Rust quality program.
+const RUST_TEST_QUALITY_ISSUE: u64 = 309;
+/// GitHub issue that owns the first repository-intelligence implementation phase.
+const REPOSITORY_INTELLIGENCE_PHASE_ISSUE: u64 = 311;
 
 /// Minimal MCP client used to inspect the compiled tool schema.
 #[derive(Clone, Default)]
@@ -4123,15 +4129,22 @@ fn validate_quality_release_prerequisite(
     require(
         issue_map["schema_version"] == 2
             && intelligence["contract"] == "evidence-v2"
-            && intelligence["primary_issue"] == 308
+            && intelligence["primary_issue"] == REPOSITORY_INTELLIGENCE_ISSUE
             && issue_mapping_covers_tasks(
                 intelligence,
                 intelligence_tasks,
-                &BTreeSet::from([308, 311]),
+                &BTreeSet::from([
+                    REPOSITORY_INTELLIGENCE_ISSUE,
+                    REPOSITORY_INTELLIGENCE_PHASE_ISSUE,
+                ]),
             )?
             && quality["contract"] == "evidence-v2"
-            && quality["primary_issue"] == 309
-            && issue_mapping_covers_tasks(quality, quality_tasks, &BTreeSet::from([309]))?,
+            && quality["primary_issue"] == RUST_TEST_QUALITY_ISSUE
+            && issue_mapping_covers_tasks(
+                quality,
+                quality_tasks,
+                &BTreeSet::from([RUST_TEST_QUALITY_ISSUE]),
+            )?,
         "v0.4 feature and quality changes are not mapped to issues 308 and 309",
     )?;
 
@@ -4429,7 +4442,7 @@ fn arri_2_22_validator_contract_rejects_invalid_evidence() -> Result<(), Box<dyn
     let validator = &plan["validator_contract"];
     require(
         validator["implementation_change"] == "enforce-rust-test-quality-gates"
-            && validator["implementation_issue"] == 309,
+            && validator["implementation_issue"] == RUST_TEST_QUALITY_ISSUE,
         "final validator is not owned by the mapped quality change",
     )?;
     require(
@@ -4595,20 +4608,29 @@ fn arri_2_25_issueops_ownership_is_explicit() -> Result<(), Box<dyn Error>> {
     require(
         issue_map["schema_version"] == 2
             && intelligence["contract"] == "evidence-v2"
-            && intelligence["primary_issue"] == 308
+            && intelligence["primary_issue"] == REPOSITORY_INTELLIGENCE_ISSUE
             && issue_mapping_covers_tasks(
                 intelligence,
                 INTELLIGENCE_TASKS,
-                &BTreeSet::from([308, 311]),
+                &BTreeSet::from([
+                    REPOSITORY_INTELLIGENCE_ISSUE,
+                    REPOSITORY_INTELLIGENCE_PHASE_ISSUE,
+                ]),
             )?
             && quality["contract"] == "evidence-v2"
-            && quality["primary_issue"] == 309
-            && issue_mapping_covers_tasks(quality, QUALITY_TASKS, &BTreeSet::from([309]))?,
+            && quality["primary_issue"] == RUST_TEST_QUALITY_ISSUE
+            && issue_mapping_covers_tasks(
+                quality,
+                QUALITY_TASKS,
+                &BTreeSet::from([RUST_TEST_QUALITY_ISSUE]),
+            )?,
         "local issue map does not own both v0.4 changes",
     )?;
     require(
-        issueops["authoritative_issues"]["advance-rust-repository-intelligence"] == 308
-            && issueops["authoritative_issues"]["enforce-rust-test-quality-gates"] == 309,
+        issueops["authoritative_issues"]["advance-rust-repository-intelligence"]
+            == REPOSITORY_INTELLIGENCE_ISSUE
+            && issueops["authoritative_issues"]["enforce-rust-test-quality-gates"]
+                == RUST_TEST_QUALITY_ISSUE,
         "verification plan and issue map disagree",
     )?;
     require(
