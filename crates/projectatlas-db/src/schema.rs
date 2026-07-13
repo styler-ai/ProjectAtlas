@@ -501,7 +501,8 @@ impl SchemaPreflightReport {
             }
             RootBindingStatus::Bound => {
                 if self.root_binding.stored_root != self.root_binding.expected_root
-                    || self.root_binding.project_instance_id.is_none()
+                    || (self.root_binding.project_instance_id.is_none()
+                        && !self.source.migration_required())
                 {
                     return Err(preflight_error(
                         "bound database has inconsistent root or project-instance metadata",
@@ -1085,7 +1086,13 @@ fn required_schema_object_states(
             Some(actual) => {
                 let actual_columns =
                     schema_object_columns(connection, contract.kind, &contract.name)?;
-                if actual.table_name == contract.table_name && actual_columns == contract.columns {
+                if actual.table_name == contract.table_name
+                    && schema_object_columns_match(
+                        contract.kind,
+                        &actual_columns,
+                        &contract.columns,
+                    )
+                {
                     RequiredSchemaObjectStatus::Matches
                 } else if source.migration_required()
                     && contract.kind == SchemaObjectKind::Table
@@ -1136,6 +1143,21 @@ fn required_schema_object_states(
         });
     }
     Ok((states, conflicts))
+}
+
+/// Compare table columns by membership while preserving index-column order.
+fn schema_object_columns_match(
+    kind: SchemaObjectKind,
+    actual: &[String],
+    required: &[String],
+) -> bool {
+    actual.len() == required.len()
+        && match kind {
+            SchemaObjectKind::Table => actual
+                .iter()
+                .all(|column| required.iter().any(|candidate| candidate == column)),
+            SchemaObjectKind::Index => actual == required,
+        }
 }
 
 /// Find reserved migration leftovers such as `nodes_new` or `idx_name_tmp`.
@@ -2100,6 +2122,27 @@ mod tests {
 
     #[test]
     fn task_arri_ut_arri_4_6() -> Result<(), Box<dyn Error>> {
+        let historical_table_columns = ["id", "created_at", "session_id"]
+            .map(str::to_owned)
+            .to_vec();
+        let current_table_columns = ["id", "session_id", "created_at"]
+            .map(str::to_owned)
+            .to_vec();
+        if !schema_object_columns_match(
+            SchemaObjectKind::Table,
+            &historical_table_columns,
+            &current_table_columns,
+        ) || schema_object_columns_match(
+            SchemaObjectKind::Index,
+            &historical_table_columns,
+            &current_table_columns,
+        ) {
+            return Err(io::Error::other(
+                "schema preflight did not distinguish table membership from index order",
+            )
+            .into());
+        }
+
         let expected_relative_root = normalize_native_path_display(std::env::current_dir()?);
         let inferred_relative_root =
             inferred_project_root(Path::new(".projectatlas/projectatlas.db"));
@@ -2303,6 +2346,34 @@ mod tests {
             ))
             .into());
         }
+
+        let bound_legacy = tempfile::tempdir()?;
+        let bound_legacy_root = bound_legacy.path().join("repository");
+        let bound_legacy_atlas = bound_legacy_root.join(PROJECTATLAS_DIRECTORY_NAME);
+        fs::create_dir_all(&bound_legacy_atlas)?;
+        let bound_legacy_path = bound_legacy_atlas.join("projectatlas.db");
+        seed_legacy_schema(&bound_legacy_path, MIGRATION_BASE_SCHEMA_VERSION - 1)?;
+        Connection::open(&bound_legacy_path)?.execute(
+            "INSERT INTO metadata(key, value) VALUES('project_root', ?1)",
+            [normalize_native_path_display(&bound_legacy_root)],
+        )?;
+        remove_sqlite_sidecars(&bound_legacy_path)?;
+        let bound_legacy_bytes = fs::read(&bound_legacy_path)?;
+        let bound_legacy_report = inspect_schema_preflight(&bound_legacy_path)?;
+        bound_legacy_report.ensure_write_ready()?;
+        if bound_legacy_report.root_binding.status != RootBindingStatus::Bound
+            || bound_legacy_report
+                .root_binding
+                .project_instance_id
+                .is_some()
+            || !bound_legacy_report.source.migration_required()
+        {
+            return Err(io::Error::other(format!(
+                "bound legacy database preflight did not preserve migration eligibility: {bound_legacy_report:?}"
+            ))
+            .into());
+        }
+        require_database_unchanged(&bound_legacy_path, &bound_legacy_bytes)?;
 
         Connection::open(&supported_path)?
             .execute_batch("CREATE TABLE summaries_new(id INTEGER PRIMARY KEY);")?;
