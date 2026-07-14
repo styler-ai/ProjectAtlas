@@ -1775,6 +1775,10 @@
     {
       "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v15.db",
       "purpose": "Pinned schema-v15 SQLite fixture for migration preservation and rollback verification."
+    },
+    {
+      "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-3a04be5.json",
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 3a04be5."
     }
   ]
 }
