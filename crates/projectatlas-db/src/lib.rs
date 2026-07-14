@@ -8,7 +8,7 @@ pub use structural_publication::{
     IncrementalStructuralDelta, IncrementalSummaryMutation, StructuralStaging,
 };
 
-use projectatlas_core::graph::{GraphContractError, ProjectInstanceId};
+use projectatlas_core::graph::{GraphContractError, ProjectInstanceId, PublicationState};
 use projectatlas_core::health::{
     CATEGORY_DUPLICATE_PURPOSE, CATEGORY_MISSING_PURPOSE, CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
     CATEGORY_REPEATED_TEMPORARY_FOLDER, CATEGORY_STALE_PURPOSE, CATEGORY_SUGGESTED_PURPOSE_REVIEW,
@@ -35,7 +35,7 @@ use projectatlas_core::{
     normalize_repo_path_prefix,
 };
 use rusqlite::types::Value;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
+use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::TryFromIntError;
@@ -51,6 +51,15 @@ pub enum DbError {
     /// `SQLite` operation failed.
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// `SQLite` reported corruption while materializing a result page.
+    #[error(
+        "database corruption stopped row iteration: {source}; preserve the database, stop writers, and run `projectatlas reset-index --dry-run` before any rebuild"
+    )]
+    DatabaseCorruption {
+        /// Original `SQLite` corruption diagnostic.
+        #[source]
+        source: rusqlite::Error,
+    },
     /// Schema version is not supported.
     #[error("unsupported schema version {found}, expected {expected}")]
     SchemaVersion {
@@ -360,6 +369,22 @@ impl AtlasStore {
         schema::verify_current_schema(&self.connection)
     }
 
+    /// Run one structural read against a transactionally captured publication.
+    fn with_structural_read_snapshot<T>(
+        &self,
+        read: impl FnOnce(&Connection, PublicationState) -> DbResult<T>,
+    ) -> DbResult<T> {
+        if !self.connection.is_autocommit() {
+            let publication = structural_publication::load_publication_state(&self.connection)?;
+            return read(&self.connection, publication);
+        }
+        let transaction = self.connection.unchecked_transaction()?;
+        let publication = structural_publication::load_publication_state(&transaction)?;
+        let result = read(&transaction, publication)?;
+        transaction.commit()?;
+        Ok(result)
+    }
+
     /// Upsert a full scan result and mark previously seen missing paths absent.
     ///
     /// # Errors
@@ -450,18 +475,36 @@ impl AtlasStore {
     ///
     /// Returns an error if reading fails or stored counts are invalid.
     pub fn load_file_text(&self, path: &str) -> DbResult<Option<IndexedFileText>> {
-        let mut statement = self.connection.prepare(
-            "
-            SELECT path, content_hash, byte_count, line_count, content
-            FROM file_texts
-            WHERE structural_slot = (
-                SELECT active_slot FROM graph_publication_state WHERE singleton = 1
-            )
-            AND path = ?1
-            ",
-        )?;
-        let mut rows = statement.query([path])?;
-        rows.next()?.map(file_text_from_row).transpose()
+        self.with_structural_read_snapshot(|connection, publication| {
+            let mut statement = connection.prepare(
+                "
+                SELECT path, content_hash, byte_count, line_count, content
+                FROM file_texts
+                WHERE structural_slot = ?1 AND path = ?2
+                ",
+            )?;
+            let mut rows = statement.query_and_then(
+                params![
+                    structural_publication::slot_text(publication.active_slot),
+                    path
+                ],
+                file_text_from_row,
+            )?;
+            let first = rows.next().transpose().map_err(database_row_error)?;
+            if rows
+                .next()
+                .transpose()
+                .map_err(database_row_error)?
+                .is_some()
+            {
+                return Err(DbError::StructuralPublication {
+                    message: format!(
+                        "active structural slot returned duplicate file text for {path:?}"
+                    ),
+                });
+            }
+            Ok(first)
+        })
     }
 
     /// Load indexed text rows for search.
@@ -506,64 +549,49 @@ impl AtlasStore {
     where
         F: FnMut(IndexedFileText) -> DbResult<bool>,
     {
-        if let Some(pattern) = literal_pattern.filter(|pattern| !pattern.is_empty()) {
-            if case_sensitive {
-                let mut statement = self.connection.prepare(
-                    "
-                    SELECT path, content_hash, byte_count, line_count, content
-                    FROM file_texts
-                    WHERE structural_slot = (
-                        SELECT active_slot FROM graph_publication_state WHERE singleton = 1
-                    )
-                    AND instr(content, ?1) > 0
-                    ORDER BY path
-                    ",
-                )?;
-                let mut rows = statement.query([pattern])?;
-                while let Some(row) = rows.next()? {
-                    if !visitor(file_text_from_row(row)?)? {
-                        return Ok(());
-                    }
+        self.with_structural_read_snapshot(|connection, publication| {
+            let active_slot = structural_publication::slot_text(publication.active_slot);
+            if let Some(pattern) = literal_pattern.filter(|pattern| !pattern.is_empty()) {
+                if case_sensitive {
+                    let mut statement = connection.prepare(
+                        "
+                        SELECT path, content_hash, byte_count, line_count, content
+                        FROM file_texts
+                        WHERE structural_slot = ?1 AND instr(content, ?2) > 0
+                        ORDER BY path
+                        ",
+                    )?;
+                    let rows = statement
+                        .query_and_then(params![active_slot, pattern], file_text_from_row)?;
+                    visit_rows_to_terminal(rows, &mut visitor)?;
+                } else {
+                    let pattern = pattern.to_ascii_lowercase();
+                    let mut statement = connection.prepare(
+                        "
+                        SELECT path, content_hash, byte_count, line_count, content
+                        FROM file_texts
+                        WHERE structural_slot = ?1 AND instr(lower(content), ?2) > 0
+                        ORDER BY path
+                        ",
+                    )?;
+                    let rows = statement
+                        .query_and_then(params![active_slot, pattern], file_text_from_row)?;
+                    visit_rows_to_terminal(rows, &mut visitor)?;
                 }
             } else {
-                let pattern = pattern.to_ascii_lowercase();
-                let mut statement = self.connection.prepare(
+                let mut statement = connection.prepare(
                     "
                     SELECT path, content_hash, byte_count, line_count, content
                     FROM file_texts
-                    WHERE structural_slot = (
-                        SELECT active_slot FROM graph_publication_state WHERE singleton = 1
-                    )
-                    AND instr(lower(content), ?1) > 0
+                    WHERE structural_slot = ?1
                     ORDER BY path
                     ",
                 )?;
-                let mut rows = statement.query([pattern])?;
-                while let Some(row) = rows.next()? {
-                    if !visitor(file_text_from_row(row)?)? {
-                        return Ok(());
-                    }
-                }
+                let rows = statement.query_and_then([active_slot], file_text_from_row)?;
+                visit_rows_to_terminal(rows, &mut visitor)?;
             }
-        } else {
-            let mut statement = self.connection.prepare(
-                "
-                SELECT path, content_hash, byte_count, line_count, content
-                FROM file_texts
-                WHERE structural_slot = (
-                    SELECT active_slot FROM graph_publication_state WHERE singleton = 1
-                )
-                ORDER BY path
-                ",
-            )?;
-            let mut rows = statement.query([])?;
-            while let Some(row) = rows.next()? {
-                if !visitor(file_text_from_row(row)?)? {
-                    return Ok(());
-                }
-            }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Count files with persisted UTF-8 text for indexed search.
@@ -572,15 +600,14 @@ impl AtlasStore {
     ///
     /// Returns an error if reading fails.
     pub fn file_text_count(&self) -> DbResult<usize> {
-        let count = self.connection.query_row(
-            "SELECT COUNT(*) FROM file_texts
-                 WHERE structural_slot = (
-                     SELECT active_slot FROM graph_publication_state WHERE singleton = 1
-                 )",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?;
-        count_to_usize("file_texts", count)
+        self.with_structural_read_snapshot(|connection, publication| {
+            let count = connection.query_row(
+                "SELECT COUNT(*) FROM file_texts WHERE structural_slot = ?1",
+                [structural_publication::slot_text(publication.active_slot)],
+                |row| row.get::<_, i64>(0),
+            )?;
+            count_to_usize("file_texts", count)
+        })
     }
 
     /// Sum persisted UTF-8 source bytes used by indexed search.
@@ -589,15 +616,15 @@ impl AtlasStore {
     ///
     /// Returns an error if reading fails.
     pub fn file_text_byte_count(&self) -> DbResult<usize> {
-        let count = self.connection.query_row(
-            "SELECT COALESCE(SUM(byte_count), 0) FROM file_texts
-             WHERE structural_slot = (
-                 SELECT active_slot FROM graph_publication_state WHERE singleton = 1
-             )",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?;
-        count_to_usize("file_text_bytes", count)
+        self.with_structural_read_snapshot(|connection, publication| {
+            let count = connection.query_row(
+                "SELECT COALESCE(SUM(byte_count), 0) FROM file_texts
+                 WHERE structural_slot = ?1",
+                [structural_publication::slot_text(publication.active_slot)],
+                |row| row.get::<_, i64>(0),
+            )?;
+            count_to_usize("file_text_bytes", count)
+        })
     }
 
     /// Persist the canonical filesystem root for indexed repository files.
@@ -1711,13 +1738,10 @@ impl AtlasStore {
         }
         sql.push_str(" ORDER BY path");
         let mut statement = self.connection.prepare(&sql)?;
-        let mut rows = statement.query(params_from_iter(values))?;
-        while let Some(row) = rows.next()? {
-            if !visitor(row.get::<_, String>(0)?, row.get::<_, Option<u64>>(1)?)? {
-                return Ok(());
-            }
-        }
-        Ok(())
+        let rows = statement.query_and_then(params_from_iter(values), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<u64>>(1)?))
+        })?;
+        visit_rows_to_terminal(rows, &mut |(path, size_bytes)| visitor(path, size_bytes))
     }
 
     /// Build unresolved health findings without loading the full node table.
@@ -3373,35 +3397,34 @@ fn normalize_metadata_path(path: &Path) -> String {
 
 /// Mark selected paths and descendants absent within an existing write boundary.
 fn mark_paths_absent_in_connection(connection: &Connection, paths: &[String]) -> DbResult<()> {
+    let mut update_nodes = connection.prepare_cached(
+        "UPDATE nodes SET exists_now = 0 WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+    )?;
+    let mut delete_relations = connection.prepare_cached(
+        "DELETE FROM symbol_relations WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+    )?;
+    let mut delete_symbols = connection
+        .prepare_cached("DELETE FROM symbols WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'")?;
+    let mut delete_parse_metadata = connection.prepare_cached(
+        "DELETE FROM source_parse_metadata WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+    )?;
+    let mut delete_texts = connection.prepare_cached(
+        "DELETE FROM file_texts
+         WHERE structural_slot = (
+             SELECT active_slot FROM graph_publication_state WHERE singleton = 1
+         )
+         AND (path = ?1 OR path LIKE ?2 ESCAPE '\\')",
+    )?;
     for path in paths {
         if path == "." || path.is_empty() {
             continue;
         }
         let descendant_pattern = sqlite_descendant_pattern(path);
-        connection.execute(
-            "UPDATE nodes SET exists_now = 0 WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-            params![path, descendant_pattern],
-        )?;
-        connection.execute(
-            "DELETE FROM symbol_relations WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-            params![path, descendant_pattern],
-        )?;
-        connection.execute(
-            "DELETE FROM symbols WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-            params![path, descendant_pattern],
-        )?;
-        connection.execute(
-            "DELETE FROM source_parse_metadata WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-            params![path, descendant_pattern],
-        )?;
-        connection.execute(
-            "DELETE FROM file_texts
-             WHERE structural_slot = (
-                 SELECT active_slot FROM graph_publication_state WHERE singleton = 1
-             )
-             AND (path = ?1 OR path LIKE ?2 ESCAPE '\\')",
-            params![path, descendant_pattern],
-        )?;
+        update_nodes.execute(params![path, descendant_pattern])?;
+        delete_relations.execute(params![path, descendant_pattern])?;
+        delete_symbols.execute(params![path, descendant_pattern])?;
+        delete_parse_metadata.execute(params![path, descendant_pattern])?;
+        delete_texts.execute(params![path, descendant_pattern])?;
     }
     Ok(())
 }
@@ -3411,15 +3434,15 @@ fn delete_file_text_paths_from_active_slot(
     connection: &Connection,
     paths: &[String],
 ) -> DbResult<()> {
+    let mut delete = connection.prepare_cached(
+        "DELETE FROM file_texts
+         WHERE structural_slot = (
+             SELECT active_slot FROM graph_publication_state WHERE singleton = 1
+         )
+         AND path = ?1",
+    )?;
     for path in paths {
-        connection.execute(
-            "DELETE FROM file_texts
-             WHERE structural_slot = (
-                 SELECT active_slot FROM graph_publication_state WHERE singleton = 1
-             )
-             AND path = ?1",
-            [path],
-        )?;
+        delete.execute([path])?;
     }
     Ok(())
 }
@@ -3445,27 +3468,29 @@ fn set_node_summary_in_connection(
     summary: &str,
 ) -> DbResult<()> {
     let node_id = node_id_for_path_in_connection(connection, path)?;
-    connection.execute(
-        "INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
+    connection
+        .prepare_cached(
+            "INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
          VALUES(?1, 'node', '', ?2, CURRENT_TIMESTAMP)
          ON CONFLICT(node_id, summary_level, subject) DO UPDATE SET
              summary_level = 'node',
              subject = '',
              summary = excluded.summary,
              updated_at = CURRENT_TIMESTAMP",
-        params![node_id, summary],
-    )?;
+        )?
+        .execute(params![node_id, summary])?;
     Ok(())
 }
 
 /// Remove one observed node summary within an existing write boundary.
 fn clear_node_summary_in_connection(connection: &Connection, path: &str) -> DbResult<()> {
     let node_id = node_id_for_path_in_connection(connection, path)?;
-    connection.execute(
-        "DELETE FROM summaries
+    connection
+        .prepare_cached(
+            "DELETE FROM summaries
          WHERE node_id = ?1 AND summary_level = 'node' AND subject = ''",
-        [node_id],
-    )?;
+        )?
+        .execute([node_id])?;
     Ok(())
 }
 
@@ -3477,16 +3502,17 @@ fn set_purpose_in_connection(
     source: PurposeSource,
 ) -> DbResult<()> {
     let node_id = node_id_for_path_in_connection(connection, path)?;
-    connection.execute(
-        "INSERT INTO purposes(node_id, purpose, source, status, updated_at)
+    connection
+        .prepare_cached(
+            "INSERT INTO purposes(node_id, purpose, source, status, updated_at)
          VALUES(?1, ?2, ?3, 'approved', CURRENT_TIMESTAMP)
          ON CONFLICT(node_id) DO UPDATE SET
              purpose = excluded.purpose,
              source = excluded.source,
              status = 'approved',
              updated_at = CURRENT_TIMESTAMP",
-        params![node_id, purpose, source.to_string()],
-    )?;
+        )?
+        .execute(params![node_id, purpose, source.to_string()])?;
     Ok(())
 }
 
@@ -3497,8 +3523,9 @@ fn set_suggested_purpose_in_connection(
     purpose: &str,
 ) -> DbResult<()> {
     let node_id = node_id_for_path_in_connection(connection, path)?;
-    connection.execute(
-        "INSERT INTO purposes(node_id, purpose, source, status, updated_at)
+    connection
+        .prepare_cached(
+            "INSERT INTO purposes(node_id, purpose, source, status, updated_at)
          VALUES(?1, ?2, 'generated', 'suggested', CURRENT_TIMESTAMP)
          ON CONFLICT(node_id) DO UPDATE SET
              purpose = excluded.purpose,
@@ -3506,8 +3533,8 @@ fn set_suggested_purpose_in_connection(
              status = 'suggested',
              updated_at = CURRENT_TIMESTAMP
          WHERE purposes.status IN ('missing', 'suggested')",
-        params![node_id, purpose],
-    )?;
+        )?
+        .execute(params![node_id, purpose])?;
     Ok(())
 }
 
@@ -3518,23 +3545,31 @@ fn clear_source_index_in_connection(
     preserve_node_summary: bool,
 ) -> DbResult<()> {
     let node_id = node_id_for_path_in_connection(connection, path)?;
-    connection.execute("DELETE FROM symbols WHERE path = ?1", [path])?;
-    connection.execute("DELETE FROM symbol_relations WHERE path = ?1", [path])?;
-    connection.execute("DELETE FROM source_parse_metadata WHERE path = ?1", [path])?;
+    connection
+        .prepare_cached("DELETE FROM symbols WHERE path = ?1")?
+        .execute([path])?;
+    connection
+        .prepare_cached("DELETE FROM symbol_relations WHERE path = ?1")?
+        .execute([path])?;
+    connection
+        .prepare_cached("DELETE FROM source_parse_metadata WHERE path = ?1")?
+        .execute([path])?;
     if preserve_node_summary {
-        connection.execute(
-            "DELETE FROM summaries
+        connection
+            .prepare_cached(
+                "DELETE FROM summaries
              WHERE node_id = ?1 AND summary_level = 'search' AND subject = 'symbols'",
-            [node_id],
-        )?;
+            )?
+            .execute([node_id])?;
     } else {
-        connection.execute(
-            "DELETE FROM summaries
+        connection
+            .prepare_cached(
+                "DELETE FROM summaries
              WHERE node_id = ?1
                AND ((summary_level = 'node' AND subject = '')
                     OR (summary_level = 'search' AND subject = 'symbols'))",
-            [node_id],
-        )?;
+            )?
+            .execute([node_id])?;
     }
     Ok(())
 }
@@ -3545,13 +3580,15 @@ fn replace_symbol_graph_in_connection(
     graph: &SymbolGraph,
 ) -> DbResult<()> {
     let metadata = SourceParseMetadata::from_graph(graph);
-    connection.execute("DELETE FROM symbols WHERE path = ?1", [&graph.path])?;
-    connection.execute(
-        "DELETE FROM symbol_relations WHERE path = ?1",
-        [&graph.path],
-    )?;
-    connection.execute(
-        "INSERT INTO source_parse_metadata(
+    connection
+        .prepare_cached("DELETE FROM symbols WHERE path = ?1")?
+        .execute([&graph.path])?;
+    connection
+        .prepare_cached("DELETE FROM symbol_relations WHERE path = ?1")?
+        .execute([&graph.path])?;
+    connection
+        .prepare_cached(
+            "INSERT INTO source_parse_metadata(
              path, language, parser, symbol_count, relation_count, updated_at
          )
          VALUES(?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
@@ -3561,14 +3598,14 @@ fn replace_symbol_graph_in_connection(
              symbol_count = excluded.symbol_count,
              relation_count = excluded.relation_count,
              updated_at = CURRENT_TIMESTAMP",
-        params![
+        )?
+        .execute(params![
             metadata.path,
             metadata.language.as_deref(),
             metadata.parser.to_string(),
             usize_to_i64(metadata.symbol_count),
             usize_to_i64(metadata.relation_count),
-        ],
-    )?;
+        ])?;
     let node_id = connection
         .query_row(
             "SELECT id FROM nodes WHERE path = ?1 AND exists_now = 1",
@@ -3576,45 +3613,45 @@ fn replace_symbol_graph_in_connection(
             |row| row.get::<_, i64>(0),
         )
         .optional()?;
+    let mut insert_symbol = connection.prepare_cached(
+        "INSERT INTO symbols(
+             path, language, name, kind, signature, exported, documentation,
+             line_start, line_end, parent, parser, detail
+         )
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+    )?;
     for symbol in &graph.symbols {
-        connection.execute(
-            "INSERT INTO symbols(
-                 path, language, name, kind, signature, exported, documentation,
-                 line_start, line_end, parent, parser, detail
-             )
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                symbol.path,
-                symbol.language.as_deref(),
-                symbol.name,
-                symbol.kind.to_string(),
-                symbol.signature,
-                symbol.exported,
-                symbol.documentation.as_deref(),
-                usize_to_i64(symbol.line_start),
-                usize_to_i64(symbol.line_end),
-                symbol.parent.as_deref(),
-                symbol.parser.to_string(),
-                symbol.detail.as_deref(),
-            ],
-        )?;
+        insert_symbol.execute(params![
+            symbol.path,
+            symbol.language.as_deref(),
+            symbol.name,
+            symbol.kind.to_string(),
+            symbol.signature,
+            symbol.exported,
+            symbol.documentation.as_deref(),
+            usize_to_i64(symbol.line_start),
+            usize_to_i64(symbol.line_end),
+            symbol.parent.as_deref(),
+            symbol.parser.to_string(),
+            symbol.detail.as_deref(),
+        ])?;
     }
+    let mut insert_relation = connection.prepare_cached(
+        "INSERT INTO symbol_relations(
+             path, source_name, target_name, kind, line, context, parser
+         )
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )?;
     for relation in &graph.relations {
-        connection.execute(
-            "INSERT INTO symbol_relations(
-                 path, source_name, target_name, kind, line, context, parser
-             )
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                relation.path,
-                relation.source_name,
-                relation.target_name,
-                relation.kind.to_string(),
-                usize_to_i64(relation.line),
-                relation.context,
-                relation.parser.to_string(),
-            ],
-        )?;
+        insert_relation.execute(params![
+            relation.path,
+            relation.source_name,
+            relation.target_name,
+            relation.kind.to_string(),
+            usize_to_i64(relation.line),
+            relation.context,
+            relation.parser.to_string(),
+        ])?;
     }
     if let Some(node_id) = node_id {
         replace_symbol_search_summary(
@@ -3629,21 +3666,20 @@ fn replace_symbol_graph_in_connection(
 /// Upsert one scanned node into an existing transaction.
 fn upsert_node(connection: &Connection, node: &Node) -> DbResult<()> {
     let existing = connection
-        .query_row(
+        .prepare_cached(
             "
             SELECT n.content_hash, p.status
             FROM nodes n
             LEFT JOIN purposes p ON p.node_id = n.id
             WHERE n.path = ?1
             ",
-            [&node.path],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                ))
-            },
-        )
+        )?
+        .query_row([&node.path], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })
         .optional()?;
     let content_changed = existing.as_ref().is_some_and(|(old_hash, _)| {
         node.kind == NodeKind::File
@@ -3654,8 +3690,9 @@ fn upsert_node(connection: &Connection, node: &Node) -> DbResult<()> {
     let should_mark_stale = content_changed
         && existing.as_ref().and_then(|(_, status)| status.as_deref())
             == Some(PurposeStatus::Approved.as_str());
-    connection.execute(
-        "
+    connection
+        .prepare_cached(
+            "
         INSERT INTO nodes(path, kind, parent_path, extension, language, size_bytes, mtime_ns, content_hash, exists_now)
         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
         ON CONFLICT(path) DO UPDATE SET
@@ -3670,51 +3707,52 @@ fn upsert_node(connection: &Connection, node: &Node) -> DbResult<()> {
             last_seen_at = CURRENT_TIMESTAMP,
             last_indexed_at = CURRENT_TIMESTAMP
         ",
-        params![
-            node.path,
-            node.kind.to_string(),
-            node.parent_path,
-            node.extension,
-            node.language,
-            node.size_bytes,
-            node.mtime_ns,
-            node.content_hash
-        ],
-    )?;
-    let node_id = connection.query_row(
-        "SELECT id FROM nodes WHERE path = ?1",
-        [&node.path],
-        |row| row.get::<_, i64>(0),
-    )?;
-    connection.execute(
-        "
+        )?
+        .execute(params![
+                node.path,
+                node.kind.to_string(),
+                node.parent_path,
+                node.extension,
+                node.language,
+                node.size_bytes,
+                node.mtime_ns,
+                node.content_hash
+            ])?;
+    let node_id = connection
+        .prepare_cached("SELECT id FROM nodes WHERE path = ?1")?
+        .query_row([&node.path], |row| row.get::<_, i64>(0))?;
+    connection
+        .prepare_cached(
+            "
         INSERT INTO purposes(node_id, purpose, source, status)
         VALUES(?1, NULL, 'missing', 'missing')
         ON CONFLICT(node_id) DO NOTHING
         ",
-        [node_id],
-    )?;
+        )?
+        .execute([node_id])?;
     let summary = generate_node_summary(node);
-    connection.execute(
-        "
+    connection
+        .prepare_cached(
+            "
         INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
         VALUES(?1, 'node', '', ?2, CURRENT_TIMESTAMP)
         ON CONFLICT(node_id, summary_level, subject) DO UPDATE SET
             summary = CASE WHEN ?3 THEN excluded.summary ELSE summaries.summary END,
             updated_at = CURRENT_TIMESTAMP
         ",
-        params![node_id, summary, content_changed],
-    )?;
+        )?
+        .execute(params![node_id, summary, content_changed])?;
     if should_mark_stale {
-        connection.execute(
-            "
+        connection
+            .prepare_cached(
+                "
             UPDATE purposes
             SET status = 'stale',
                 updated_at = CURRENT_TIMESTAMP
             WHERE node_id = ?1
             ",
-            [node_id],
-        )?;
+            )?
+            .execute([node_id])?;
     }
     Ok(())
 }
@@ -3737,8 +3775,9 @@ fn upsert_file_text_for_publication(
     structural_slot: &str,
     last_changed_epoch: i64,
 ) -> DbResult<()> {
-    connection.execute(
-        "
+    connection
+        .prepare_cached(
+            "
         INSERT INTO file_texts(
             path, content_hash, byte_count, line_count, content, updated_at,
             structural_slot, last_changed_epoch
@@ -3752,7 +3791,8 @@ fn upsert_file_text_for_publication(
             updated_at = CURRENT_TIMESTAMP,
             last_changed_epoch = excluded.last_changed_epoch
         ",
-        params![
+        )?
+        .execute(params![
             text.path,
             text.content_hash.as_deref(),
             usize_to_i64(text.byte_count),
@@ -3760,8 +3800,7 @@ fn upsert_file_text_for_publication(
             text.content,
             structural_slot,
             last_changed_epoch,
-        ],
-    )?;
+        ])?;
     Ok(())
 }
 
@@ -3776,6 +3815,36 @@ fn file_text_from_row(row: &rusqlite::Row<'_>) -> DbResult<IndexedFileText> {
         line_count,
         content: row.get(4)?,
     })
+}
+
+/// Consume a started result page through its terminal `SQLite` status.
+fn visit_rows_to_terminal<T>(
+    rows: impl Iterator<Item = DbResult<T>>,
+    visitor: &mut impl FnMut(T) -> DbResult<bool>,
+) -> DbResult<()> {
+    let mut visit = true;
+    for row in rows {
+        let value = row.map_err(database_row_error)?;
+        if visit {
+            visit = visitor(value)?;
+        }
+    }
+    Ok(())
+}
+
+/// Attach recovery guidance without erasing the original `SQLite` code.
+fn database_row_error(error: DbError) -> DbError {
+    match error {
+        DbError::Sqlite(source)
+            if matches!(
+                source.sqlite_error_code(),
+                Some(ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase)
+            ) =>
+        {
+            DbError::DatabaseCorruption { source }
+        }
+        other => other,
+    }
 }
 
 /// Build an indexed node from the standard node select column order.
@@ -3894,6 +3963,11 @@ fn sqlite_like_pattern(term: &str) -> String {
 /// Build a `SQLite` LIKE descendant pattern for a repository path prefix.
 fn sqlite_descendant_pattern(path: &str) -> String {
     format!("{}/%", sqlite_like_escape(path))
+}
+
+/// Build binary-collation bounds for normalized descendants of one repository path.
+fn sqlite_descendant_bounds(path: &str) -> (String, String) {
+    (format!("{path}/"), format!("{path}0"))
 }
 
 /// Escape user or path text for `SQLite` LIKE patterns with backslash escaping.
@@ -6155,7 +6229,7 @@ mod tests {
     }
 
     #[test]
-    fn indexed_file_text_search_can_stop_without_collecting_all_rows() -> Result<(), Box<dyn Error>>
+    fn indexed_file_text_search_stops_visiting_but_finishes_the_page() -> Result<(), Box<dyn Error>>
     {
         let mut store = AtlasStore::in_memory()?;
         store.replace_scan(&[
@@ -6188,6 +6262,85 @@ mod tests {
             Ok(false)
         })?;
         require_eq(&visited, &vec!["src/a.rs".to_string()], "early stop rows")?;
+        Ok(())
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_17() -> Result<(), Box<dyn Error>> {
+        let corrupt = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            Some("injected corruption after one row".to_owned()),
+        );
+        let rows = vec![Ok::<_, DbError>("first"), Err(DbError::Sqlite(corrupt))];
+        let mut visited = Vec::new();
+        let Err(error) = visit_rows_to_terminal(rows.into_iter(), &mut |value| {
+            visited.push(value);
+            Ok(false)
+        }) else {
+            return Err(
+                io::Error::other("corruption after a returned row unexpectedly succeeded").into(),
+            );
+        };
+        require_eq(&visited, &vec!["first"], "rows exposed before corruption")?;
+        if !matches!(error, DbError::DatabaseCorruption { .. })
+            || !error.to_string().contains("reset-index --dry-run")
+        {
+            return Err(io::Error::other(format!(
+                "corruption lost its typed recovery guidance: {error}"
+            ))
+            .into());
+        }
+
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("src/b.rs", "hash-b"),
+        ])?;
+        store.replace_file_texts_for_paths(
+            &["src/a.rs".to_owned(), "src/b.rs".to_owned()],
+            &[
+                IndexedFileText {
+                    path: "src/a.rs".to_owned(),
+                    content_hash: Some("hash-a".to_owned()),
+                    byte_count: 5,
+                    line_count: 1,
+                    content: "first".to_owned(),
+                },
+                IndexedFileText {
+                    path: "src/b.rs".to_owned(),
+                    content_hash: Some("hash-b".to_owned()),
+                    byte_count: 6,
+                    line_count: 1,
+                    content: "second".to_owned(),
+                },
+            ],
+        )?;
+        let interrupt = store.connection.get_interrupt_handle();
+        let mut interrupted_rows = Vec::new();
+        let Err(error) = store.visit_file_texts_for_search(None, false, |text| {
+            interrupted_rows.push(text.path);
+            interrupt.interrupt();
+            Ok(false)
+        }) else {
+            return Err(
+                io::Error::other("an interrupted terminal step unexpectedly succeeded").into(),
+            );
+        };
+        require_eq(
+            &interrupted_rows,
+            &vec!["src/a.rs".to_owned()],
+            "rows exposed before interruption",
+        )?;
+        if !matches!(
+            error,
+            DbError::Sqlite(ref source)
+                if source.sqlite_error_code() == Some(ErrorCode::OperationInterrupted)
+        ) {
+            return Err(io::Error::other(format!(
+                "interrupted row iteration returned the wrong failure: {error}"
+            ))
+            .into());
+        }
         Ok(())
     }
 

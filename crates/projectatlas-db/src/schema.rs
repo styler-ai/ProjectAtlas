@@ -1,13 +1,18 @@
 //! `SQLite` schema initialization and legacy repair behind the store facade.
 
 use crate::{DbError, DbResult, sqlite_read_uri};
-use projectatlas_core::graph::ProjectInstanceId;
+use projectatlas_core::budget::DefaultCoreBudgetKind;
+use projectatlas_core::graph::{
+    CoverageRecord, CoverageScope, CoverageState, GraphRelationKind, IdentityText, IndexEpoch,
+    OmittedFactCount, ProjectInstanceId, PublicationState, RepositoryFilePath, StructuralSlot,
+};
 use projectatlas_core::normalize_native_path_display;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params, types::ValueRef};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// Last schema version released before the runtime-owned migration ledger.
 const MIGRATION_BASE_SCHEMA_VERSION: i64 = 9;
@@ -29,6 +34,45 @@ const FILE_TEXT_FTS_INSERT_TRIGGER: &str = "file_text_fts_insert";
 const FILE_TEXT_FTS_DELETE_TRIGGER: &str = "file_text_fts_delete";
 /// Trigger that mirrors source-text updates into the optional candidate index.
 const FILE_TEXT_FTS_UPDATE_TRIGGER: &str = "file_text_fts_update";
+/// Fixed trigram-safe prefix for indexed repository-path lookup.
+const FILE_TEXT_FTS_PATH_LOOKUP_PREFIX: &str = "pa";
+/// Canonical current-schema trigger that mirrors inserted source text.
+fn file_text_fts_insert_trigger_sql() -> String {
+    format!(
+        r"CREATE TRIGGER file_text_fts_insert
+AFTER INSERT ON file_texts
+BEGIN
+    INSERT INTO file_text_fts(
+        structural_slot, last_changed_epoch, path, path_lookup, content
+    ) VALUES(
+        new.structural_slot, new.last_changed_epoch, new.path, '{FILE_TEXT_FTS_PATH_LOOKUP_PREFIX}' || new.path, new.content
+    );
+END;"
+    )
+}
+/// Canonical current-schema trigger that removes deleted source text.
+const FILE_TEXT_FTS_DELETE_TRIGGER_SQL: &str = r"CREATE TRIGGER file_text_fts_delete
+AFTER DELETE ON file_texts
+BEGIN
+    DELETE FROM file_text_fts
+    WHERE structural_slot = old.structural_slot AND path = old.path;
+END;";
+/// Canonical current-schema trigger that mirrors source-text updates.
+fn file_text_fts_update_trigger_sql() -> String {
+    format!(
+        r"CREATE TRIGGER file_text_fts_update
+AFTER UPDATE OF structural_slot, last_changed_epoch, path, content ON file_texts
+BEGIN
+    DELETE FROM file_text_fts
+    WHERE structural_slot = old.structural_slot AND path = old.path;
+    INSERT INTO file_text_fts(
+        structural_slot, last_changed_epoch, path, path_lookup, content
+    ) VALUES(
+        new.structural_slot, new.last_changed_epoch, new.path, '{FILE_TEXT_FTS_PATH_LOOKUP_PREFIX}' || new.path, new.content
+    );
+END;"
+    )
+}
 /// Typed stable repository-graph entity rows.
 const GRAPH_ENTITIES_TABLE: &str = "graph_entities";
 /// Typed resolved logical repository-graph relations.
@@ -51,6 +95,41 @@ const GRAPH_STRUCTURAL_SLOTS_DELETE_GUARD: &str = "graph_structural_slots_delete
 const GRAPH_STRUCTURAL_SLOTS_UPDATE_GUARD: &str = "graph_structural_slots_update_guard";
 /// Guard that preserves the singleton publication metadata row.
 const GRAPH_PUBLICATION_STATE_DELETE_GUARD: &str = "graph_publication_state_delete_guard";
+/// Affected-row lookup index for graph entities.
+const GRAPH_ENTITIES_SLOT_PATH_INDEX: &str = "idx_graph_entities_slot_repository_path";
+/// Affected-row lookup index for graph evidence.
+const GRAPH_EVIDENCE_SLOT_PATH_INDEX: &str = "idx_graph_evidence_slot_origin_repository_path";
+/// Affected-row lookup index for unresolved graph occurrences.
+const GRAPH_RESOLUTION_SLOT_PATH_INDEX: &str = "idx_graph_resolution_slot_origin_repository_path";
+/// Affected-row lookup index for structural coverage.
+const GRAPH_COVERAGE_SLOT_PATH_INDEX: &str = "idx_graph_coverage_slot_repository_path";
+/// Schema-owned indexes that keep non-root reconciliation proportional to its path closure.
+const AFFECTED_RECONCILIATION_INDEX_SQL: &str = r"CREATE INDEX IF NOT EXISTS idx_graph_entities_slot_repository_path
+          ON graph_entities(structural_slot, repository_path);
+      CREATE INDEX IF NOT EXISTS idx_graph_evidence_slot_origin_repository_path
+          ON graph_evidence_occurrences(structural_slot, origin_repository_path);
+      CREATE INDEX IF NOT EXISTS idx_graph_resolution_slot_origin_repository_path
+          ON graph_resolution_occurrences(structural_slot, origin_repository_path);
+      CREATE INDEX IF NOT EXISTS idx_graph_coverage_slot_repository_path
+          ON graph_coverage(structural_slot, repository_path);";
+/// Canonical current-schema guard for the immutable slot inventory.
+const GRAPH_STRUCTURAL_SLOTS_DELETE_GUARD_SQL: &str = r"CREATE TRIGGER graph_structural_slots_delete_guard
+BEFORE DELETE ON graph_structural_slots
+BEGIN
+    SELECT RAISE(ABORT, 'structural slot identities are immutable');
+END;";
+/// Canonical current-schema guard for immutable slot spellings.
+const GRAPH_STRUCTURAL_SLOTS_UPDATE_GUARD_SQL: &str = r"CREATE TRIGGER graph_structural_slots_update_guard
+BEFORE UPDATE OF slot ON graph_structural_slots
+BEGIN
+    SELECT RAISE(ABORT, 'structural slot identities are immutable');
+END;";
+/// Canonical current-schema guard for the required publication singleton.
+const GRAPH_PUBLICATION_STATE_DELETE_GUARD_SQL: &str = r"CREATE TRIGGER graph_publication_state_delete_guard
+BEFORE DELETE ON graph_publication_state
+BEGIN
+    SELECT RAISE(ABORT, 'publication state is a required singleton');
+END;";
 /// Accepted relation-kind values owned by the typed graph schema.
 const GRAPH_RELATION_KIND_VALUES: &str = "'calls', 'channel', 'co-changes', 'configures', 'contains', 'cross-repository', 'declares', 'depends-on', 'deploys', 'exports', 'generates', 'implements', 'imports', 'inherits', 'overrides', 'reads', 'references', 'routes', 'rpc', 'similar', 'tests', 'writes'";
 /// Accepted parser-origin values owned by the typed graph schema.
@@ -68,6 +147,46 @@ const GRAPH_EVIDENCE_ORIGIN_VALUES: &str = "'entity', 'repository-path', 'extern
 const GRAPH_TARGET_SCOPE_VALUES: &str = "'internal', 'external'";
 /// Structural slot values already required by the typed coverage contract.
 const GRAPH_STRUCTURAL_SLOT_VALUES: &str = "'a', 'b'";
+
+/// Complete core structural table inventory owned by the current schema.
+pub(crate) const STRUCTURAL_DERIVED_TABLES: [&str; 7] = [
+    GRAPH_ENTITIES_TABLE,
+    GRAPH_RELATIONS_TABLE,
+    GRAPH_EVIDENCE_OCCURRENCES_TABLE,
+    GRAPH_RESOLUTION_OCCURRENCES_TABLE,
+    GRAPH_RESOLUTION_CANDIDATES_TABLE,
+    GRAPH_COVERAGE_TABLE,
+    FILE_TEXTS_TABLE,
+];
+/// Required structural objects whose normalized DDL is a publication invariant.
+const STRUCTURAL_SCHEMA_SQL_OBJECTS: [&str; 16] = [
+    GRAPH_STRUCTURAL_SLOTS_TABLE,
+    GRAPH_PUBLICATION_STATE_TABLE,
+    GRAPH_ENTITIES_TABLE,
+    GRAPH_RELATIONS_TABLE,
+    GRAPH_EVIDENCE_OCCURRENCES_TABLE,
+    GRAPH_RESOLUTION_OCCURRENCES_TABLE,
+    GRAPH_RESOLUTION_CANDIDATES_TABLE,
+    GRAPH_COVERAGE_TABLE,
+    FILE_TEXTS_TABLE,
+    GRAPH_ENTITIES_SLOT_PATH_INDEX,
+    GRAPH_EVIDENCE_SLOT_PATH_INDEX,
+    GRAPH_RESOLUTION_SLOT_PATH_INDEX,
+    GRAPH_COVERAGE_SLOT_PATH_INDEX,
+    GRAPH_STRUCTURAL_SLOTS_DELETE_GUARD,
+    GRAPH_STRUCTURAL_SLOTS_UPDATE_GUARD,
+    GRAPH_PUBLICATION_STATE_DELETE_GUARD,
+];
+/// Optional FTS objects that join the exact contract only when FTS is available.
+const OPTIONAL_STRUCTURAL_SCHEMA_SQL_OBJECTS: [&str; 4] = [
+    FILE_TEXT_FTS_TABLE,
+    FILE_TEXT_FTS_INSERT_TRIGGER,
+    FILE_TEXT_FTS_DELETE_TRIGGER,
+    FILE_TEXT_FTS_UPDATE_TRIGGER,
+];
+/// Process-local immutable DDL reference built from the authoritative initializer.
+static STRUCTURAL_SCHEMA_SQL_REFERENCE: OnceLock<Result<BTreeMap<String, String>, String>> =
+    OnceLock::new();
 
 /// Earliest metadata schema version that the current repair path accepts.
 const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 1;
@@ -104,7 +223,7 @@ struct MigrationDefinition {
 }
 
 /// Accepted migrations in immutable application order.
-const MIGRATIONS: [MigrationDefinition; 5] = [
+const MIGRATIONS: [MigrationDefinition; 6] = [
     MigrationDefinition {
         id: "install-runtime-migration-ledger",
         owner: "projectatlas-db::schema",
@@ -168,7 +287,20 @@ const MIGRATIONS: [MigrationDefinition; 5] = [
         rollback_behavior: "rollback-rebuilt-tables-indexes-triggers-and-ledger;retain-source-schema-and-all-rows",
         evidence: "cargo test --locked --workspace --all-features task_arri_ut_arri_4_11",
         apply: bind_structural_derived_rows,
-        verify: verify_structural_derived_row_schema,
+        verify: verify_bound_structural_derived_rows,
+    },
+    MigrationDefinition {
+        id: "install-affected-reconciliation-contracts",
+        owner: "projectatlas-db::schema::structural-reconciliation",
+        prerequisites: "read-only-preflight=write-ready;structural-derived-rows=slot-bound",
+        authored_effects: "preserve=metadata,purposes,settings,telemetry,health-resolutions",
+        derived_effects: "preserve=all-authoritative-and-structural-rows;index=affected-graph-paths,affected-fts-paths;canonicalize=slot-aware-fts-triggers",
+        transaction_boundary: "single-sqlite-transaction",
+        forward_behavior: "install-path-range-indexes;rebuild-legacy-slot-aware-fts-lookup-when-needed;reconcile-current-schema-and-fts-content;advance-schema-version",
+        rollback_behavior: "rollback-indexes-fts-rebuild-and-ledger;retain-prior-schema-and-all-rows",
+        evidence: "cargo test --locked --workspace --all-features task_arri_ut_arri_4_16",
+        apply: install_affected_reconciliation_contracts,
+        verify: verify_affected_reconciliation_contracts,
     },
 ];
 
@@ -916,6 +1048,73 @@ fn current_schema_reference() -> DbResult<(Connection, Vec<SchemaObjectContract>
     Ok((connection, contracts))
 }
 
+/// Require every structural table/index/trigger DDL contract to match the initializer.
+fn verify_exact_structural_schema_sql(connection: &Connection) -> DbResult<()> {
+    let expected = STRUCTURAL_SCHEMA_SQL_REFERENCE.get_or_init(|| {
+        current_schema_reference()
+            .and_then(|(connection, _)| structural_schema_sql(&connection))
+            .map_err(|error| error.to_string())
+    });
+    let expected = expected.as_ref().map_err(|message| {
+        preflight_error(format!(
+            "failed to build the authoritative structural schema SQL reference: {message}"
+        ))
+    })?;
+    let observed = structural_schema_sql(connection)?;
+    if &observed == expected {
+        return Ok(());
+    }
+    let names = expected
+        .keys()
+        .chain(observed.keys())
+        .collect::<std::collections::BTreeSet<_>>();
+    let differences = names
+        .into_iter()
+        .filter_map(|name| {
+            let expected_sql = expected.get(name);
+            let observed_sql = observed.get(name);
+            (expected_sql != observed_sql)
+                .then(|| format!("{name:?}: expected={expected_sql:?}, observed={observed_sql:?}"))
+        })
+        .collect::<Vec<_>>();
+    Err(preflight_error(format!(
+        "structural schema object canonical SQL did not reconcile: {}",
+        differences.join("; ")
+    )))
+}
+
+/// Load normalized SQL for required structural objects and optional FTS objects.
+fn structural_schema_sql(connection: &Connection) -> DbResult<BTreeMap<String, String>> {
+    let mut contracts = BTreeMap::new();
+    for name in STRUCTURAL_SCHEMA_SQL_OBJECTS {
+        let sql = schema_sql(connection, name)?.ok_or_else(|| {
+            preflight_error(format!(
+                "required structural schema object {name:?} has no canonical SQL"
+            ))
+        })?;
+        contracts.insert(name.to_owned(), normalize_schema_sql(&sql));
+    }
+    for name in OPTIONAL_STRUCTURAL_SCHEMA_SQL_OBJECTS {
+        if let Some(sql) = schema_sql(connection, name)? {
+            contracts.insert(name.to_owned(), normalize_schema_sql(&sql));
+        }
+    }
+    Ok(contracts)
+}
+
+/// Read one named object's stored SQL, distinguishing absence from a null definition.
+fn schema_sql(connection: &Connection, name: &str) -> DbResult<Option<String>> {
+    connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name = ?1",
+            [name],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(Option::flatten)
+        .map_err(DbError::from)
+}
+
 /// Read the independent `SQLite` application user-version integer.
 fn read_user_version(connection: &Connection) -> DbResult<i64> {
     connection
@@ -1484,9 +1683,750 @@ pub(crate) fn apply_migration_plan(
 
 /// Revalidate an already initialized store without issuing schema writes.
 pub(crate) fn verify_current_schema(connection: &Connection) -> DbResult<()> {
+    verify_current_schema_objects(connection)?;
+    reconcile_full_file_text_fts(connection)?;
+    reconcile_foreign_key_integrity(connection)
+}
+
+/// Reconcile schema-owned objects before inspecting publication content.
+fn verify_current_schema_objects(connection: &Connection) -> DbResult<()> {
     verify_schema_history(connection, SCHEMA_VERSION)?;
     verify_structural_publication_schema(connection)?;
-    verify_structural_derived_row_schema(connection)
+    verify_structural_derived_row_schema(connection)?;
+    verify_exact_structural_schema_sql(connection)
+}
+
+/// Reconcile one complete structural publication inside its owning transaction.
+pub(crate) fn reconcile_full_structural_publication(
+    connection: &Connection,
+    expected_root: &str,
+    expected_publication: PublicationState,
+) -> DbResult<()> {
+    reconcile_quick_check(connection)?;
+    verify_current_schema_objects(connection)?;
+    reconcile_project_root(connection, expected_root)?;
+    reconcile_publication_state(connection, expected_publication)?;
+    reconcile_structural_slots_and_epochs(connection, expected_publication.active_epoch)?;
+    reconcile_structural_text(connection)?;
+    reconcile_resolution_candidate_uniqueness(connection)?;
+    reconcile_relation_families(connection)?;
+    reconcile_foreign_key_integrity(connection)?;
+    reconcile_resolution_candidate_counts(connection)?;
+    reconcile_coverage(connection)?;
+    reconcile_full_file_text_fts(connection)
+}
+
+/// Reconcile only the active-slot closure changed by one incremental publication.
+pub(crate) fn reconcile_incremental_structural_publication(
+    connection: &Connection,
+    expected_root: &str,
+    expected_publication: PublicationState,
+    affected_paths: &[String],
+) -> DbResult<()> {
+    verify_current_schema_objects(connection)?;
+    reconcile_project_root(connection, expected_root)?;
+    reconcile_publication_state(connection, expected_publication)?;
+    require_foreign_keys_enabled(connection)?;
+    let active_slot = structural_slot_text(expected_publication.active_slot);
+    let active_epoch = sqlite_epoch(expected_publication.active_epoch)?;
+    reconcile_affected_structural_invalidation(connection, active_slot, affected_paths)?;
+    reconcile_affected_file_texts(connection, active_slot, active_epoch, affected_paths)?;
+    reconcile_affected_file_text_fts(connection, active_slot, affected_paths)
+}
+
+/// Require native foreign-key enforcement for the affected-row proof.
+fn require_foreign_keys_enabled(connection: &Connection) -> DbResult<()> {
+    let enabled = connection.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))?;
+    if enabled == 1 {
+        Ok(())
+    } else {
+        Err(preflight_error(
+            "incremental structural reconciliation requires SQLite foreign_keys=ON",
+        ))
+    }
+}
+
+/// Require the complete `SQLite` quick-check result to be exactly successful.
+fn reconcile_quick_check(connection: &Connection) -> DbResult<()> {
+    match integrity_state(connection)? {
+        IntegrityState::Passed => Ok(()),
+        IntegrityState::Failed(details) => Err(preflight_error(format!(
+            "SQLite quick_check failed before structural publication: {}",
+            details.join("; ")
+        ))),
+    }
+}
+
+/// Require the complete foreign-key diagnostic page to be empty.
+fn reconcile_foreign_key_integrity(connection: &Connection) -> DbResult<()> {
+    let mut statement = connection.prepare("PRAGMA foreign_key_check")?;
+    let rows = statement.query_map([], |row| {
+        Ok(format!(
+            "table={:?}, row={:?}, parent={:?}, foreign-key={}",
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<i64>>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?
+        ))
+    })?;
+    let violations = rows.collect::<Result<Vec<_>, _>>()?;
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(preflight_error(format!(
+            "structural endpoint foreign-key reconciliation failed: {}",
+            violations.join("; ")
+        )))
+    }
+}
+
+/// Require exact canonical root metadata at the publication boundary.
+fn reconcile_project_root(connection: &Connection, expected_root: &str) -> DbResult<()> {
+    let observed = metadata_value(connection, "project_root")?;
+    if observed.as_deref() == Some(expected_root) {
+        Ok(())
+    } else {
+        Err(preflight_error(format!(
+            "structural publication project root did not reconcile: expected {expected_root:?}, found {observed:?}"
+        )))
+    }
+}
+
+/// Require the singleton to equal the state that the transaction will publish.
+fn reconcile_publication_state(
+    connection: &Connection,
+    expected: PublicationState,
+) -> DbResult<()> {
+    let mut statement = connection.prepare(
+        "SELECT singleton, active_slot, active_epoch
+         FROM graph_publication_state ORDER BY singleton",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    let observed = rows.collect::<Result<Vec<_>, _>>()?;
+    let expected_row = (
+        1,
+        structural_slot_text(expected.active_slot).to_owned(),
+        sqlite_epoch(expected.active_epoch)?,
+    );
+    if observed == [expected_row] {
+        Ok(())
+    } else {
+        Err(preflight_error(format!(
+            "structural publication state did not reconcile: expected {expected:?}, found {observed:?}"
+        )))
+    }
+}
+
+/// Reject invalid physical slots and rows newer than the published epoch.
+fn reconcile_structural_slots_and_epochs(
+    connection: &Connection,
+    expected_epoch: IndexEpoch,
+) -> DbResult<()> {
+    let expected_epoch = sqlite_epoch(expected_epoch)?;
+    for table in STRUCTURAL_DERIVED_TABLES {
+        let mut statement = connection.prepare(&format!(
+            "SELECT structural_slot, last_changed_epoch
+             FROM {table}
+             WHERE structural_slot NOT IN ('a', 'b')
+                OR last_changed_epoch < 0
+                OR last_changed_epoch > ?1"
+        ))?;
+        let rows = statement.query_map([expected_epoch], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let invalid = rows.collect::<Result<Vec<_>, _>>()?;
+        if !invalid.is_empty() {
+            return Err(preflight_error(format!(
+                "structural slot or epoch did not reconcile for {table:?} at published epoch {expected_epoch}: {invalid:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Require every invalidated active-slot path row to be absent after mutation.
+fn reconcile_affected_structural_invalidation(
+    connection: &Connection,
+    active_slot: &str,
+    affected_paths: &[String],
+) -> DbResult<()> {
+    for (table, path_column) in [
+        (GRAPH_ENTITIES_TABLE, "repository_path"),
+        (GRAPH_EVIDENCE_OCCURRENCES_TABLE, "origin_repository_path"),
+        (GRAPH_RESOLUTION_OCCURRENCES_TABLE, "origin_repository_path"),
+        (GRAPH_COVERAGE_TABLE, "repository_path"),
+    ] {
+        for path in affected_paths {
+            if path == "." {
+                let survives = connection.query_row(
+                    &format!(
+                        "SELECT EXISTS(
+                             SELECT 1 FROM {table} WHERE structural_slot = ?1
+                         )"
+                    ),
+                    [active_slot],
+                    |row| row.get::<_, i64>(0),
+                )? != 0;
+                if survives {
+                    return Err(preflight_error(format!(
+                        "incremental root invalidation left an active-slot row in {table:?}; dependent relations and candidates are protected by enforced foreign keys"
+                    )));
+                }
+                continue;
+            }
+            let (descendant_start, descendant_end) = crate::sqlite_descendant_bounds(path);
+            let survives = connection.query_row(
+                &format!(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM {table}
+                         WHERE structural_slot = ?1
+                           AND ({path_column} = ?2
+                                OR ({path_column} >= ?3 AND {path_column} < ?4))
+                     )"
+                ),
+                params![active_slot, path, descendant_start, descendant_end],
+                |row| row.get::<_, i64>(0),
+            )? != 0;
+            if survives {
+                return Err(preflight_error(format!(
+                    "incremental structural invalidation left an active-slot row in {table:?} for affected path {path:?}; dependent relations and candidates are protected by enforced foreign keys"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Require affected authoritative text rows to belong to the new active epoch.
+fn reconcile_affected_file_texts(
+    connection: &Connection,
+    active_slot: &str,
+    active_epoch: i64,
+    affected_paths: &[String],
+) -> DbResult<()> {
+    let root_scope = affected_paths.iter().any(|path| path == ".");
+    let sql = if root_scope {
+        "SELECT path, content_hash, content, updated_at, last_changed_epoch
+         FROM file_texts WHERE structural_slot = ?1 ORDER BY path"
+    } else {
+        "SELECT path, content_hash, content, updated_at, last_changed_epoch
+         FROM file_texts
+         WHERE structural_slot = ?1
+           AND (path = ?2 OR (path >= ?3 AND path < ?4))
+         ORDER BY path"
+    };
+    let mut statement = connection.prepare(sql)?;
+    for affected_path in affected_paths {
+        let mut rows = if root_scope {
+            statement.query([active_slot])?
+        } else {
+            let (descendant_start, descendant_end) = crate::sqlite_descendant_bounds(affected_path);
+            statement.query(params![
+                active_slot,
+                affected_path,
+                descendant_start,
+                descendant_end
+            ])?
+        };
+        while let Some(row) = rows.next()? {
+            let path = row.get::<_, String>(0)?;
+            let _content_hash = row.get::<_, Option<String>>(1)?;
+            let _content = row.get::<_, String>(2)?;
+            let _updated_at = row.get::<_, String>(3)?;
+            let row_epoch = row.get::<_, i64>(4)?;
+            if row_epoch != active_epoch {
+                return Err(preflight_error(format!(
+                    "incremental file-text slot or epoch did not reconcile for {path:?}: expected slot={active_slot:?}, epoch={active_epoch}, found epoch={row_epoch}"
+                )));
+            }
+        }
+        if root_scope {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Reconcile only affected FTS candidates against authoritative file text.
+fn reconcile_affected_file_text_fts(
+    connection: &Connection,
+    active_slot: &str,
+    affected_paths: &[String],
+) -> DbResult<()> {
+    verify_optional_file_text_fts_schema(connection)?;
+    if !sqlite_objects(connection)?.contains_key(FILE_TEXT_FTS_TABLE) {
+        return Ok(());
+    }
+    if affected_paths.iter().any(|path| path == ".") {
+        return reconcile_full_file_text_fts(connection);
+    }
+    let mut statement = connection.prepare(
+        "SELECT
+             (SELECT COUNT(*) FROM file_texts
+              WHERE structural_slot = ?1
+                AND (path = ?2 OR (path >= ?3 AND path < ?4))),
+             (SELECT COUNT(*) FROM file_text_fts
+              WHERE file_text_fts MATCH ?5
+                AND structural_slot = ?1
+                AND (path = ?2 OR (path >= ?3 AND path < ?4))),
+             EXISTS(
+                 SELECT structural_slot, last_changed_epoch, path, content
+                 FROM file_texts
+                 WHERE structural_slot = ?1
+                   AND (path = ?2 OR (path >= ?3 AND path < ?4))
+                 EXCEPT
+                 SELECT structural_slot, last_changed_epoch, path, content
+                 FROM file_text_fts
+                 WHERE file_text_fts MATCH ?5
+                   AND structural_slot = ?1
+                   AND (path = ?2 OR (path >= ?3 AND path < ?4))
+             ) OR EXISTS(
+                 SELECT structural_slot, last_changed_epoch, path, content
+                 FROM file_text_fts
+                 WHERE file_text_fts MATCH ?5
+                   AND structural_slot = ?1
+                   AND (path = ?2 OR (path >= ?3 AND path < ?4))
+                 EXCEPT
+                 SELECT structural_slot, last_changed_epoch, path, content
+                 FROM file_texts
+                 WHERE structural_slot = ?1
+                   AND (path = ?2 OR (path >= ?3 AND path < ?4))
+             )",
+    )?;
+    for affected_path in affected_paths {
+        let (descendant_start, descendant_end) = crate::sqlite_descendant_bounds(affected_path);
+        let lookup = format!("{FILE_TEXT_FTS_PATH_LOOKUP_PREFIX}{affected_path}");
+        let match_query = format!("path_lookup : \"{}\"", lookup.replace('"', "\"\""));
+        let (source_count, candidate_count, mismatch) = statement.query_row(
+            params![
+                active_slot,
+                affected_path,
+                descendant_start,
+                descendant_end,
+                match_query
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        if source_count != candidate_count || mismatch != 0 {
+            return Err(preflight_error(format!(
+                "affected slot-aware file-text FTS content did not reconcile for {affected_path:?}: source={source_count}, candidate={candidate_count}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Reject ambiguous candidate targets that violate the typed set contract.
+fn reconcile_resolution_candidate_uniqueness(connection: &Connection) -> DbResult<()> {
+    let mut statement = connection.prepare(
+        "SELECT structural_slot, hex(resolution_occurrence_digest), target_scope,
+                coalesce(hex(target_entity_digest), ''),
+                coalesce(external_target_namespace, ''),
+                coalesce(external_target_value, ''), COUNT(*)
+         FROM graph_resolution_candidates
+         GROUP BY structural_slot, resolution_occurrence_digest, target_scope,
+                  target_entity_digest, external_target_namespace, external_target_value
+         HAVING COUNT(*) > 1",
+    )?;
+    let duplicates = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if duplicates.is_empty() {
+        Ok(())
+    } else {
+        Err(preflight_error(format!(
+            "resolution candidate target uniqueness failed: {duplicates:?}"
+        )))
+    }
+}
+
+/// Require every persisted relation spelling to belong to the typed inventory.
+fn reconcile_relation_families(connection: &Connection) -> DbResult<()> {
+    for table in [GRAPH_RELATIONS_TABLE, GRAPH_RESOLUTION_OCCURRENCES_TABLE] {
+        let mut statement =
+            connection.prepare(&format!("SELECT DISTINCT relation_kind FROM {table}"))?;
+        let values = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for value in values {
+            if parse_graph_relation_kind(&value).is_err() {
+                return Err(preflight_error(format!(
+                    "relation family {value:?} in {table:?} is outside the typed inventory"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reconcile ambiguous candidate totals with the retained bounded rows.
+fn reconcile_resolution_candidate_counts(connection: &Connection) -> DbResult<()> {
+    let retained_limit = i64::try_from(
+        DefaultCoreBudgetKind::ResolutionCandidates
+            .default_budget()
+            .value(),
+    )
+    .map_err(|error| {
+        preflight_error(format!(
+            "resolution-candidate hard budget exceeds SQLite INTEGER: {error}"
+        ))
+    })?;
+    let mut statement = connection.prepare(
+        "SELECT occurrence.structural_slot,
+                hex(occurrence.stable_key_digest),
+                occurrence.resolution_status,
+                occurrence.candidate_total,
+                occurrence.candidate_completeness,
+                COUNT(candidate.candidate_ordinal),
+                MIN(candidate.candidate_ordinal),
+                MAX(candidate.candidate_ordinal)
+         FROM graph_resolution_occurrences AS occurrence
+         LEFT JOIN graph_resolution_candidates AS candidate
+           ON candidate.structural_slot = occurrence.structural_slot
+          AND candidate.resolution_occurrence_digest = occurrence.stable_key_digest
+         GROUP BY occurrence.structural_slot, occurrence.stable_key_digest
+         HAVING
+            (occurrence.resolution_status = 'ambiguous' AND (
+                occurrence.candidate_total IS NULL
+                OR occurrence.candidate_total < 2
+                OR occurrence.candidate_total > ?1
+                OR COUNT(candidate.candidate_ordinal) = 0
+                OR COUNT(candidate.candidate_ordinal) > ?2
+                OR COUNT(candidate.candidate_ordinal) > occurrence.candidate_total
+                OR MIN(candidate.candidate_ordinal) != 0
+                OR MAX(candidate.candidate_ordinal) != COUNT(candidate.candidate_ordinal) - 1
+                OR occurrence.candidate_completeness NOT IN ('complete', 'partial', 'truncated')
+                OR (occurrence.candidate_completeness = 'complete'
+                    AND COUNT(candidate.candidate_ordinal) != occurrence.candidate_total)
+                OR (occurrence.candidate_completeness = 'truncated'
+                    AND COUNT(candidate.candidate_ordinal) >= occurrence.candidate_total)
+            ))
+            OR (occurrence.resolution_status = 'unresolved' AND (
+                occurrence.candidate_total IS NOT NULL
+                OR occurrence.candidate_completeness IS NOT NULL
+                OR COUNT(candidate.candidate_ordinal) != 0
+            ))
+            OR occurrence.resolution_status NOT IN ('ambiguous', 'unresolved')",
+    )?;
+    let mismatches = statement
+        .query_map(params![i64::from(u32::MAX), retained_limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+                row.get::<_, Option<i64>>(7)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        Err(preflight_error(format!(
+            "resolution candidate counts did not reconcile: {mismatches:?}"
+        )))
+    }
+}
+
+/// One raw coverage row awaiting core-domain validation.
+struct PersistedCoverageRow {
+    /// Persisted coverage-scope discriminator.
+    scope_kind: String,
+    /// Repository-relative file key or the repository sentinel.
+    repository_path: String,
+    /// Optional structural-pass identity.
+    pass_identity: String,
+    /// Optional typed relation-family spelling.
+    relation_kind: String,
+    /// Persisted coverage-state spelling.
+    coverage_state: String,
+    /// Number of retained structural facts.
+    produced_count: i64,
+    /// Exact omitted count or unknown when absent.
+    omitted_count: Option<i64>,
+    /// Optional hard-budget contract identifier.
+    reached_limit: Option<String>,
+    /// Optional bounded non-complete explanation.
+    reason: Option<String>,
+    /// Physical structural slot containing the row.
+    structural_slot: String,
+    /// Structural epoch that last changed the row.
+    last_changed_epoch: i64,
+}
+
+/// Reuse the typed coverage contract and reconcile relation-scope counts.
+fn reconcile_coverage(connection: &Connection) -> DbResult<()> {
+    let mut statement = connection.prepare(
+        "SELECT scope_kind, repository_path, pass_identity, relation_kind,
+                coverage_state, produced_count, omitted_count, reached_limit,
+                reason, structural_slot, last_changed_epoch
+         FROM graph_coverage
+         ORDER BY structural_slot, scope_kind, repository_path, pass_identity, relation_kind",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        validate_persisted_coverage(PersistedCoverageRow {
+            scope_kind: row.get(0)?,
+            repository_path: row.get(1)?,
+            pass_identity: row.get(2)?,
+            relation_kind: row.get(3)?,
+            coverage_state: row.get(4)?,
+            produced_count: row.get(5)?,
+            omitted_count: row.get(6)?,
+            reached_limit: row.get(7)?,
+            reason: row.get(8)?,
+            structural_slot: row.get(9)?,
+            last_changed_epoch: row.get(10)?,
+        })?;
+    }
+    drop(rows);
+    drop(statement);
+
+    let mut statement = connection.prepare(
+        "SELECT coverage.structural_slot, coverage.repository_path,
+                coverage.relation_kind, coverage.produced_count,
+                COUNT(relation.stable_key_digest)
+         FROM graph_coverage AS coverage
+         LEFT JOIN graph_entities AS source
+           ON source.structural_slot = coverage.structural_slot
+          AND source.repository_path = coverage.repository_path
+         LEFT JOIN graph_relations AS relation
+           ON relation.structural_slot = source.structural_slot
+          AND relation.source_entity_digest = source.stable_key_digest
+          AND relation.relation_kind = coverage.relation_kind
+         WHERE coverage.scope_kind = 'relation'
+         GROUP BY coverage.structural_slot, coverage.repository_path,
+                  coverage.relation_kind, coverage.produced_count
+         HAVING coverage.produced_count != COUNT(relation.stable_key_digest)",
+    )?;
+    let mismatches = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        Err(preflight_error(format!(
+            "relation coverage counts did not reconcile: {mismatches:?}"
+        )))
+    }
+}
+
+/// Convert a persisted coverage row back through the core invariant owner.
+fn validate_persisted_coverage(row: PersistedCoverageRow) -> DbResult<()> {
+    let scope = match row.scope_kind.as_str() {
+        "repository"
+            if row.repository_path.is_empty()
+                && row.pass_identity.is_empty()
+                && row.relation_kind.is_empty() =>
+        {
+            CoverageScope::Repository
+        }
+        "file" if row.pass_identity.is_empty() && row.relation_kind.is_empty() => {
+            CoverageScope::File {
+                path: parse_repository_file_path(row.repository_path)?,
+            }
+        }
+        "pass" if row.relation_kind.is_empty() => CoverageScope::Pass {
+            path: parse_repository_file_path(row.repository_path)?,
+            pass: parse_identity_text(row.pass_identity, "coverage pass identity")?,
+        },
+        "relation" if row.pass_identity.is_empty() => CoverageScope::Relation {
+            path: parse_repository_file_path(row.repository_path)?,
+            relation: parse_graph_relation_kind(&row.relation_kind)?,
+        },
+        _ => {
+            return Err(preflight_error(format!(
+                "coverage scope fields did not reconcile for {:?}",
+                row.scope_kind
+            )));
+        }
+    };
+    let state = CoverageState::ALL
+        .into_iter()
+        .find(|state| state.as_str() == row.coverage_state)
+        .ok_or_else(|| {
+            preflight_error(format!(
+                "coverage state {:?} is outside the typed inventory",
+                row.coverage_state
+            ))
+        })?;
+    let produced = nonnegative_u64(row.produced_count, "coverage produced count")?;
+    let omitted = match row.omitted_count {
+        Some(value) => OmittedFactCount::Known(nonnegative_u64(value, "coverage omitted count")?),
+        None => OmittedFactCount::Unknown,
+    };
+    let reached_limit = row
+        .reached_limit
+        .map(|value| {
+            DefaultCoreBudgetKind::ALL
+                .into_iter()
+                .find(|kind| kind.contract_id() == value)
+                .ok_or_else(|| {
+                    preflight_error(format!(
+                        "coverage reached-limit {value:?} is outside the typed inventory"
+                    ))
+                })
+        })
+        .transpose()?;
+    let reason = row
+        .reason
+        .map(|value| parse_identity_text(value, "coverage reason"))
+        .transpose()?;
+    let slot = parse_structural_slot(&row.structural_slot)?;
+    let last_changed_epoch = IndexEpoch::new(nonnegative_u64(
+        row.last_changed_epoch,
+        "coverage last-changed epoch",
+    )?);
+    CoverageRecord::new(
+        scope,
+        state,
+        produced,
+        omitted,
+        reached_limit,
+        reason,
+        slot,
+        last_changed_epoch,
+    )
+    .map(|_| ())
+    .map_err(|error| preflight_error(format!("coverage row did not reconcile: {error}")))
+}
+
+/// Require every value in every declared structural TEXT column to be UTF-8.
+fn reconcile_structural_text(connection: &Connection) -> DbResult<()> {
+    for table in STRUCTURAL_DERIVED_TABLES {
+        for column in table_text_columns(connection, table)? {
+            let identifier = quote_identifier(&column);
+            let mut statement = connection.prepare(&format!("SELECT {identifier} FROM {table}"))?;
+            let mut rows = statement.query([])?;
+            let mut row_number = 0_u64;
+            while let Some(row) = rows.next()? {
+                row_number += 1;
+                match row.get_ref(0)? {
+                    ValueRef::Null => {}
+                    ValueRef::Text(bytes) if std::str::from_utf8(bytes).is_ok() => {}
+                    ValueRef::Text(_) => {
+                        return Err(preflight_error(format!(
+                            "invalid UTF-8 in structural TEXT column {table}.{column} at row {row_number}"
+                        )));
+                    }
+                    value => {
+                        return Err(preflight_error(format!(
+                            "non-TEXT value {} in structural TEXT column {table}.{column} at row {row_number}",
+                            sqlite_value_kind(value)
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parse one relation family through the closed core inventory.
+fn parse_graph_relation_kind(value: &str) -> DbResult<GraphRelationKind> {
+    GraphRelationKind::ALL
+        .into_iter()
+        .find(|kind| kind.as_str() == value)
+        .ok_or_else(|| {
+            preflight_error(format!(
+                "relation family {value:?} is outside the typed inventory"
+            ))
+        })
+}
+
+/// Parse one persisted structural-slot spelling.
+fn parse_structural_slot(value: &str) -> DbResult<StructuralSlot> {
+    match value {
+        "a" => Ok(StructuralSlot::A),
+        "b" => Ok(StructuralSlot::B),
+        _ => Err(preflight_error(format!(
+            "structural slot {value:?} is invalid"
+        ))),
+    }
+}
+
+/// Return the persistent spelling for a typed structural slot.
+const fn structural_slot_text(slot: StructuralSlot) -> &'static str {
+    match slot {
+        StructuralSlot::A => "a",
+        StructuralSlot::B => "b",
+    }
+}
+
+/// Convert a typed epoch into `SQLite`'s signed integer domain.
+fn sqlite_epoch(epoch: IndexEpoch) -> DbResult<i64> {
+    i64::try_from(epoch.get()).map_err(|error| {
+        preflight_error(format!(
+            "structural publication epoch exceeds SQLite INTEGER: {error}"
+        ))
+    })
+}
+
+/// Parse and retain a canonical repository file path.
+fn parse_repository_file_path(value: String) -> DbResult<RepositoryFilePath> {
+    RepositoryFilePath::try_from(value)
+        .map_err(|error| preflight_error(format!("coverage repository path is invalid: {error}")))
+}
+
+/// Parse one bounded identity scalar with storage context.
+fn parse_identity_text(value: String, field: &str) -> DbResult<IdentityText> {
+    IdentityText::try_from(value)
+        .map_err(|error| preflight_error(format!("{field} is invalid: {error}")))
+}
+
+/// Convert a nonnegative `SQLite` count into the core unsigned domain.
+fn nonnegative_u64(value: i64, field: &str) -> DbResult<u64> {
+    u64::try_from(value)
+        .map_err(|error| preflight_error(format!("{field} is invalid ({value}): {error}")))
+}
+
+/// Quote one schema-derived `SQLite` identifier.
+fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+/// Return a diagnostic name for one dynamically typed `SQLite` value.
+const fn sqlite_value_kind(value: ValueRef<'_>) -> &'static str {
+    match value {
+        ValueRef::Null => "NULL",
+        ValueRef::Integer(_) => "INTEGER",
+        ValueRef::Real(_) => "REAL",
+        ValueRef::Text(_) => "TEXT",
+        ValueRef::Blob(_) => "BLOB",
+    }
 }
 
 /// Create or repair the pre-ledger schema objects inside the migration transaction.
@@ -2344,6 +3284,44 @@ fn verify_typed_repository_graph_schema(connection: &Connection) -> DbResult<()>
         )?;
     }
 
+    for table in [
+        GRAPH_ENTITIES_TABLE,
+        GRAPH_RELATIONS_TABLE,
+        GRAPH_EVIDENCE_OCCURRENCES_TABLE,
+        GRAPH_RESOLUTION_OCCURRENCES_TABLE,
+    ] {
+        require_unique_constraint(
+            connection,
+            table,
+            &["structural_slot", "stable_key_canonical"],
+        )?;
+    }
+
+    for (index, table, columns) in [
+        (
+            GRAPH_ENTITIES_SLOT_PATH_INDEX,
+            GRAPH_ENTITIES_TABLE,
+            &["structural_slot", "repository_path"][..],
+        ),
+        (
+            GRAPH_EVIDENCE_SLOT_PATH_INDEX,
+            GRAPH_EVIDENCE_OCCURRENCES_TABLE,
+            &["structural_slot", "origin_repository_path"][..],
+        ),
+        (
+            GRAPH_RESOLUTION_SLOT_PATH_INDEX,
+            GRAPH_RESOLUTION_OCCURRENCES_TABLE,
+            &["structural_slot", "origin_repository_path"][..],
+        ),
+        (
+            GRAPH_COVERAGE_SLOT_PATH_INDEX,
+            GRAPH_COVERAGE_TABLE,
+            &["structural_slot", "repository_path"][..],
+        ),
+    ] {
+        require_index_contract(connection, index, table, columns)?;
+    }
+
     for (table, target, columns) in [
         (
             GRAPH_RELATIONS_TABLE,
@@ -2425,18 +3403,6 @@ fn create_structural_publication_schema(connection: &Connection) -> DbResult<()>
 
         INSERT INTO graph_structural_slots(slot) VALUES('a'), ('b');
 
-        CREATE TRIGGER graph_structural_slots_delete_guard
-        BEFORE DELETE ON graph_structural_slots
-        BEGIN
-            SELECT RAISE(ABORT, 'structural slot identities are immutable');
-        END;
-
-        CREATE TRIGGER graph_structural_slots_update_guard
-        BEFORE UPDATE OF slot ON graph_structural_slots
-        BEGIN
-            SELECT RAISE(ABORT, 'structural slot identities are immutable');
-        END;
-
         CREATE TABLE graph_publication_state (
             singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
             active_slot TEXT NOT NULL CHECK(active_slot IN ({GRAPH_STRUCTURAL_SLOT_VALUES})),
@@ -2447,14 +3413,11 @@ fn create_structural_publication_schema(connection: &Connection) -> DbResult<()>
 
         INSERT INTO graph_publication_state(singleton, active_slot, active_epoch)
         VALUES(1, 'a', 0);
-
-        CREATE TRIGGER graph_publication_state_delete_guard
-        BEFORE DELETE ON graph_publication_state
-        BEGIN
-            SELECT RAISE(ABORT, 'publication state is a required singleton');
-        END;
         "
     ))?;
+    connection.execute_batch(GRAPH_STRUCTURAL_SLOTS_DELETE_GUARD_SQL)?;
+    connection.execute_batch(GRAPH_STRUCTURAL_SLOTS_UPDATE_GUARD_SQL)?;
+    connection.execute_batch(GRAPH_PUBLICATION_STATE_DELETE_GUARD_SQL)?;
     Ok(())
 }
 
@@ -2509,31 +3472,142 @@ fn verify_structural_publication_schema(connection: &Connection) -> DbResult<()>
         )));
     }
 
-    let objects = sqlite_objects(connection)?;
-    for (trigger, table) in [
+    for (trigger, table, expected_sql) in [
         (
             GRAPH_STRUCTURAL_SLOTS_DELETE_GUARD,
             GRAPH_STRUCTURAL_SLOTS_TABLE,
+            GRAPH_STRUCTURAL_SLOTS_DELETE_GUARD_SQL,
         ),
         (
             GRAPH_STRUCTURAL_SLOTS_UPDATE_GUARD,
             GRAPH_STRUCTURAL_SLOTS_TABLE,
+            GRAPH_STRUCTURAL_SLOTS_UPDATE_GUARD_SQL,
         ),
         (
             GRAPH_PUBLICATION_STATE_DELETE_GUARD,
             GRAPH_PUBLICATION_STATE_TABLE,
+            GRAPH_PUBLICATION_STATE_DELETE_GUARD_SQL,
         ),
     ] {
-        if !matches!(
-            objects.get(trigger),
-            Some(object) if object.object_type == "trigger" && object.table_name == table
-        ) {
-            return Err(preflight_error(format!(
-                "structural publication guard {trigger:?} did not reconcile"
-            )));
-        }
+        require_trigger_contract(
+            connection,
+            trigger,
+            table,
+            expected_sql,
+            "publication guard",
+        )?;
     }
     Ok(())
+}
+
+/// Require one schema-owned trigger to retain its canonical owner and body.
+fn require_trigger_contract(
+    connection: &Connection,
+    trigger: &str,
+    table: &str,
+    expected_sql: &str,
+    role: &str,
+) -> DbResult<()> {
+    let observed = connection
+        .query_row(
+            "SELECT type, tbl_name, sql FROM sqlite_schema WHERE name = ?1",
+            [trigger],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let expected = normalize_schema_sql(expected_sql);
+    if matches!(
+        observed.as_ref(),
+        Some((object_type, table_name, Some(sql)))
+            if object_type == "trigger"
+                && table_name == table
+                && normalize_schema_sql(sql) == expected
+    ) {
+        Ok(())
+    } else {
+        Err(preflight_error(format!(
+            "structural {role} {trigger:?} did not reconcile with its canonical SQL: {observed:?}"
+        )))
+    }
+}
+
+/// Return whether one installed trigger exactly matches its schema-owned contract.
+fn trigger_contract_matches(
+    connection: &Connection,
+    trigger: &str,
+    table: &str,
+    expected_sql: &str,
+) -> DbResult<bool> {
+    let observed = connection
+        .query_row(
+            "SELECT type, tbl_name, sql FROM sqlite_schema WHERE name = ?1",
+            [trigger],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let expected = normalize_schema_sql(expected_sql);
+    Ok(matches!(
+        observed.as_ref(),
+        Some((object_type, table_name, Some(sql)))
+            if object_type == "trigger"
+                && table_name == table
+                && normalize_schema_sql(sql) == expected
+    ))
+}
+
+/// Normalize only SQL whitespace outside quoted literals and a trailing delimiter.
+fn normalize_schema_sql(sql: &str) -> String {
+    let mut normalized = String::with_capacity(sql.len());
+    let mut characters = sql
+        .trim()
+        .trim_end_matches(';')
+        .trim_end()
+        .chars()
+        .peekable();
+    let mut quote = None;
+    let mut pending_space = false;
+    while let Some(character) = characters.next() {
+        if let Some(delimiter) = quote {
+            normalized.push(character);
+            if character == delimiter {
+                if characters.next_if_eq(&delimiter).is_some() {
+                    normalized.push(delimiter);
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+        if matches!(character, '\'' | '"' | '`') {
+            if pending_space && !normalized.is_empty() {
+                normalized.push(' ');
+            }
+            pending_space = false;
+            quote = Some(character);
+            normalized.push(character);
+        } else if character.is_whitespace() {
+            pending_space = true;
+        } else {
+            if pending_space && !normalized.is_empty() {
+                normalized.push(' ');
+            }
+            pending_space = false;
+            normalized.push(character);
+        }
+    }
+    normalized
 }
 
 /// Rebuild core typed graph and lexical rows around structural slot identity.
@@ -3067,6 +4141,7 @@ fn bind_structural_derived_rows(connection: &Connection) -> DbResult<()> {
         "
     ))?;
 
+    install_affected_reconciliation_indexes(connection)?;
     if had_file_text_fts {
         create_slot_aware_file_text_fts(connection)?;
     }
@@ -3075,51 +4150,84 @@ fn bind_structural_derived_rows(connection: &Connection) -> DbResult<()> {
 
 /// Recreate optional FTS candidate rows with the same structural identity as source text.
 fn create_slot_aware_file_text_fts(connection: &Connection) -> DbResult<()> {
-    connection.execute_batch(
+    connection.execute_batch(&format!(
         "CREATE VIRTUAL TABLE file_text_fts
          USING fts5(
              structural_slot UNINDEXED,
              last_changed_epoch UNINDEXED,
              path UNINDEXED,
+             path_lookup,
              content,
              tokenize='trigram'
          );
 
-         INSERT INTO file_text_fts(structural_slot, last_changed_epoch, path, content)
-         SELECT structural_slot, last_changed_epoch, path, content
+         INSERT INTO file_text_fts(
+             structural_slot, last_changed_epoch, path, path_lookup, content
+         )
+         SELECT structural_slot, last_changed_epoch, path,
+                '{FILE_TEXT_FTS_PATH_LOOKUP_PREFIX}' || path, content
          FROM file_texts
-         ORDER BY structural_slot, path;
-
-         CREATE TRIGGER file_text_fts_insert
-         AFTER INSERT ON file_texts
-         BEGIN
-             INSERT INTO file_text_fts(
-                 structural_slot, last_changed_epoch, path, content
-             ) VALUES(
-                 new.structural_slot, new.last_changed_epoch, new.path, new.content
-             );
-         END;
-
-         CREATE TRIGGER file_text_fts_delete
-         AFTER DELETE ON file_texts
-         BEGIN
-             DELETE FROM file_text_fts
-             WHERE structural_slot = old.structural_slot AND path = old.path;
-         END;
-
-         CREATE TRIGGER file_text_fts_update
-         AFTER UPDATE OF structural_slot, last_changed_epoch, path, content ON file_texts
-         BEGIN
-             DELETE FROM file_text_fts
-             WHERE structural_slot = old.structural_slot AND path = old.path;
-             INSERT INTO file_text_fts(
-                 structural_slot, last_changed_epoch, path, content
-             ) VALUES(
-                 new.structural_slot, new.last_changed_epoch, new.path, new.content
-             );
-         END;",
-    )?;
+         ORDER BY structural_slot, path;",
+    ))?;
+    connection.execute_batch(&file_text_fts_insert_trigger_sql())?;
+    connection.execute_batch(FILE_TEXT_FTS_DELETE_TRIGGER_SQL)?;
+    connection.execute_batch(&file_text_fts_update_trigger_sql())?;
     Ok(())
+}
+
+/// Install the bounded path-range indexes shared by mutation and reconciliation.
+fn install_affected_reconciliation_indexes(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(AFFECTED_RECONCILIATION_INDEX_SQL)?;
+    Ok(())
+}
+
+/// Upgrade an existing slot-bound schema to indexed affected-row reconciliation.
+fn install_affected_reconciliation_contracts(connection: &Connection) -> DbResult<()> {
+    install_affected_reconciliation_indexes(connection)?;
+    let objects = sqlite_objects(connection)?;
+    if !objects.contains_key(FILE_TEXT_FTS_TABLE) {
+        return Ok(());
+    }
+    let current_columns = table_columns(connection, FILE_TEXT_FTS_TABLE)?
+        == [
+            "structural_slot",
+            "last_changed_epoch",
+            "path",
+            "path_lookup",
+            "content",
+        ];
+    let current_triggers = trigger_contract_matches(
+        connection,
+        FILE_TEXT_FTS_INSERT_TRIGGER,
+        FILE_TEXTS_TABLE,
+        &file_text_fts_insert_trigger_sql(),
+    )? && trigger_contract_matches(
+        connection,
+        FILE_TEXT_FTS_DELETE_TRIGGER,
+        FILE_TEXTS_TABLE,
+        FILE_TEXT_FTS_DELETE_TRIGGER_SQL,
+    )? && trigger_contract_matches(
+        connection,
+        FILE_TEXT_FTS_UPDATE_TRIGGER,
+        FILE_TEXTS_TABLE,
+        &file_text_fts_update_trigger_sql(),
+    )?;
+    if !current_columns || !current_triggers {
+        connection.execute_batch(
+            "DROP TRIGGER IF EXISTS file_text_fts_insert;
+             DROP TRIGGER IF EXISTS file_text_fts_delete;
+             DROP TRIGGER IF EXISTS file_text_fts_update;
+             DROP TABLE file_text_fts;",
+        )?;
+        create_slot_aware_file_text_fts(connection)?;
+    }
+    Ok(())
+}
+
+/// Verify the post-upgrade schema and complete FTS preservation before sealing migration.
+fn verify_affected_reconciliation_contracts(connection: &Connection) -> DbResult<()> {
+    verify_structural_derived_row_schema(connection)?;
+    reconcile_full_file_text_fts(connection)
 }
 
 /// Verify structural identity for every current core graph and lexical row family.
@@ -3153,44 +4261,67 @@ fn verify_structural_derived_row_schema(connection: &Connection) -> DbResult<()>
         GRAPH_STRUCTURAL_SLOTS_TABLE,
         &[("structural_slot", "slot")],
     )?;
-    verify_optional_file_text_fts(connection)?;
-
-    let mut statement = connection.prepare("PRAGMA foreign_key_check")?;
-    if statement.query([])?.next()?.is_some() {
-        return Err(preflight_error(
-            "structural derived rows contain a cross-slot or missing-parent reference",
-        ));
-    }
+    verify_optional_file_text_fts_schema(connection)?;
     Ok(())
 }
 
-/// Verify slot-aware FTS candidates or an unavailable exact-only runtime.
-fn verify_optional_file_text_fts(connection: &Connection) -> DbResult<()> {
+/// Verify the bound schema and its complete optional FTS backfill before sealing migration.
+fn verify_bound_structural_derived_rows(connection: &Connection) -> DbResult<()> {
+    verify_structural_derived_row_schema(connection)?;
+    reconcile_full_file_text_fts(connection)
+}
+
+/// Verify slot-aware FTS schema or an unavailable exact-only runtime.
+fn verify_optional_file_text_fts_schema(connection: &Connection) -> DbResult<()> {
     let objects = sqlite_objects(connection)?;
     if !objects.contains_key(FILE_TEXT_FTS_TABLE) {
         return Ok(());
     }
     if table_columns(connection, FILE_TEXT_FTS_TABLE)?
-        != ["structural_slot", "last_changed_epoch", "path", "content"]
+        != [
+            "structural_slot",
+            "last_changed_epoch",
+            "path",
+            "path_lookup",
+            "content",
+        ]
     {
         return Err(preflight_error(
             "optional file-text FTS structural columns did not reconcile",
         ));
     }
 
-    for trigger in [
-        FILE_TEXT_FTS_INSERT_TRIGGER,
-        FILE_TEXT_FTS_DELETE_TRIGGER,
-        FILE_TEXT_FTS_UPDATE_TRIGGER,
+    for (trigger, expected_sql) in [
+        (
+            FILE_TEXT_FTS_INSERT_TRIGGER,
+            file_text_fts_insert_trigger_sql(),
+        ),
+        (
+            FILE_TEXT_FTS_DELETE_TRIGGER,
+            FILE_TEXT_FTS_DELETE_TRIGGER_SQL.to_owned(),
+        ),
+        (
+            FILE_TEXT_FTS_UPDATE_TRIGGER,
+            file_text_fts_update_trigger_sql(),
+        ),
     ] {
-        if !matches!(
-            objects.get(trigger),
-            Some(object) if object.object_type == "trigger" && object.table_name == FILE_TEXTS_TABLE
-        ) {
-            return Err(preflight_error(format!(
-                "optional file-text FTS trigger {trigger:?} did not reconcile"
-            )));
-        }
+        require_trigger_contract(
+            connection,
+            trigger,
+            FILE_TEXTS_TABLE,
+            &expected_sql,
+            "file-text FTS trigger",
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Verify all slot-aware FTS candidates against authoritative file text.
+fn reconcile_full_file_text_fts(connection: &Connection) -> DbResult<()> {
+    verify_optional_file_text_fts_schema(connection)?;
+    if !sqlite_objects(connection)?.contains_key(FILE_TEXT_FTS_TABLE) {
+        return Ok(());
     }
 
     let source_count = connection.query_row("SELECT COUNT(*) FROM file_texts", [], |row| {
@@ -3203,20 +4334,24 @@ fn verify_optional_file_text_fts(connection: &Connection) -> DbResult<()> {
     let content_mismatch = connection.query_row(
         "SELECT
              EXISTS(
-                 SELECT structural_slot, last_changed_epoch, path, content
+                 SELECT structural_slot, last_changed_epoch, path,
+                        ?1 || path, content
                  FROM file_texts
                  EXCEPT
-                 SELECT structural_slot, last_changed_epoch, path, content
+                 SELECT structural_slot, last_changed_epoch, path,
+                        path_lookup, content
                  FROM file_text_fts
              )
              OR EXISTS(
-                 SELECT structural_slot, last_changed_epoch, path, content
+                 SELECT structural_slot, last_changed_epoch, path,
+                        path_lookup, content
                  FROM file_text_fts
                  EXCEPT
-                 SELECT structural_slot, last_changed_epoch, path, content
+                 SELECT structural_slot, last_changed_epoch, path,
+                        ?1 || path, content
                  FROM file_texts
              )",
-        [],
+        [FILE_TEXT_FTS_PATH_LOOKUP_PREFIX],
         |row| row.get::<_, i64>(0),
     )? != 0;
     if source_count != candidate_count || content_mismatch {
@@ -3225,6 +4360,12 @@ fn verify_optional_file_text_fts(connection: &Connection) -> DbResult<()> {
         )));
     }
     Ok(())
+}
+
+/// Preserve the migration/test proof that schema and complete content agree.
+#[cfg(test)]
+fn verify_optional_file_text_fts(connection: &Connection) -> DbResult<()> {
+    reconcile_full_file_text_fts(connection)
 }
 
 /// Classify only the `SQLite` errors that mean the optional FTS capability is absent.
@@ -3444,6 +4585,21 @@ fn table_columns(connection: &Connection, table: &str) -> DbResult<Vec<String>> 
     rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
 }
 
+/// Return declared TEXT columns for one trusted static table name.
+fn table_text_columns(connection: &Connection, table: &str) -> DbResult<Vec<String>> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+    })?;
+    rows.filter_map(|row| match row {
+        Ok((name, declared_type)) if declared_type.eq_ignore_ascii_case("TEXT") => Some(Ok(name)),
+        Ok(_) => None,
+        Err(error) => Some(Err(error)),
+    })
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(DbError::from)
+}
+
 /// Return primary-key columns in their declared composite-key order.
 fn table_primary_key_columns(connection: &Connection, table: &str) -> DbResult<Vec<String>> {
     let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
@@ -3457,6 +4613,76 @@ fn table_primary_key_columns(connection: &Connection, table: &str) -> DbResult<V
         .collect::<Vec<_>>();
     columns.sort_by_key(|(position, _)| *position);
     Ok(columns.into_iter().map(|(_, name)| name).collect())
+}
+
+/// Require one exact table-level `UNIQUE` contract by ordered columns.
+fn require_unique_constraint(
+    connection: &Connection,
+    table: &str,
+    expected_columns: &[&str],
+) -> DbResult<()> {
+    let mut statement =
+        connection.prepare(&format!("PRAGMA index_list({})", quote_identifier(table)))?;
+    let indexes = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (index, unique, origin, partial) in indexes {
+        if unique != 1 || origin != "u" || partial != 0 {
+            continue;
+        }
+        let mut index_statement =
+            connection.prepare(&format!("PRAGMA index_info({})", quote_identifier(&index)))?;
+        let columns = index_statement
+            .query_map([], |row| row.get::<_, String>(2))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if columns
+            .iter()
+            .map(String::as_str)
+            .eq(expected_columns.iter().copied())
+        {
+            return Ok(());
+        }
+    }
+    Err(preflight_error(format!(
+        "typed repository graph UNIQUE constraint for {table:?} did not reconcile: expected {expected_columns:?}"
+    )))
+}
+
+/// Require one exact schema-owned index used by affected-row reconciliation.
+fn require_index_contract(
+    connection: &Connection,
+    index: &str,
+    table: &str,
+    expected_columns: &[&str],
+) -> DbResult<()> {
+    let objects = sqlite_objects(connection)?;
+    if !matches!(
+        objects.get(index),
+        Some(object) if object.object_type == "index" && object.table_name == table
+    ) {
+        return Err(preflight_error(format!(
+            "affected-row index {index:?} for {table:?} did not reconcile"
+        )));
+    }
+    let columns = schema_object_columns(connection, SchemaObjectKind::Index, index)?;
+    if columns
+        .iter()
+        .map(String::as_str)
+        .eq(expected_columns.iter().copied())
+    {
+        Ok(())
+    } else {
+        Err(preflight_error(format!(
+            "affected-row index {index:?} columns did not reconcile: expected {expected_columns:?}, found {columns:?}"
+        )))
+    }
 }
 
 /// Require one complete same-parent foreign-key column group.
@@ -3571,6 +4797,10 @@ mod tests {
         if object_names(connection, "index")?
             != [
                 "idx_file_texts_hash",
+                "idx_graph_coverage_slot_repository_path",
+                "idx_graph_entities_slot_repository_path",
+                "idx_graph_evidence_slot_origin_repository_path",
+                "idx_graph_resolution_slot_origin_repository_path",
                 "idx_health_resolutions_category",
                 "idx_nodes_kind",
                 "idx_nodes_parent",
@@ -5316,7 +6546,7 @@ mod tests {
             _,
             publication_migration,
             structural_binding_migration,
-            ..,
+            affected_reconciliation_migration,
         ] = migrations.as_slice()
         else {
             return Err(io::Error::other(
@@ -5388,8 +6618,9 @@ mod tests {
 
         let plan = preflight(&path)?;
         if plan.source_version != publication_migration.schema_version
-            || plan.pending.len() != 1
+            || plan.pending.len() != 2
             || plan.pending[0].definition.id != structural_binding_migration.definition.id
+            || plan.pending[1].definition.id != affected_reconciliation_migration.definition.id
         {
             return Err(io::Error::other(format!(
                 "valid publication prefix did not plan structural row binding: {plan:?}"
@@ -5628,7 +6859,10 @@ mod tests {
         let mut rollback_plan = SchemaMigrationPlan {
             source_version: publication_migration.schema_version,
             target_version: SCHEMA_VERSION,
-            pending: vec![structural_binding_migration.clone()],
+            pending: vec![
+                structural_binding_migration.clone(),
+                affected_reconciliation_migration.clone(),
+            ],
         };
         rollback_plan.pending[0].definition.verify = reject_structural_binding;
         match apply_migration_plan(&mut rollback_connection, &rollback_plan) {
@@ -5662,7 +6896,7 @@ mod tests {
             || rollback_history
                 != (
                     publication_migration.schema_version.to_string(),
-                    i64::try_from(migrations.len() - 1)?,
+                    i64::try_from(migrations.len() - 2)?,
                 )
             || table_columns(&rollback_connection, FILE_TEXTS_TABLE)?
                 != [

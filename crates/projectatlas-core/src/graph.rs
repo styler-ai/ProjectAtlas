@@ -2126,6 +2126,33 @@ pub enum CoverageState {
     Stale,
 }
 
+impl CoverageState {
+    /// Complete accepted coverage-state inventory in stable serialized order.
+    pub const ALL: [Self; 7] = [
+        Self::Complete,
+        Self::Partial,
+        Self::Failed,
+        Self::Ignored,
+        Self::Oversized,
+        Self::Quarantined,
+        Self::Stale,
+    ];
+
+    /// Return the stable canonical and serialized spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+            Self::Failed => "failed",
+            Self::Ignored => "ignored",
+            Self::Oversized => "oversized",
+            Self::Quarantined => "quarantined",
+            Self::Stale => "stale",
+        }
+    }
+}
+
 /// Closed structural scope at which graph coverage is reconciled.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CoverageScope {

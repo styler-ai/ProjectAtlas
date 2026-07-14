@@ -197,8 +197,7 @@ fn install_inactive_import_failure(db: &Path) -> Result<(), Box<dyn Error>> {
         .into());
     }
     connection.execute_batch(
-        "DROP TRIGGER file_text_fts_insert;
-         CREATE TRIGGER file_text_fts_insert
+        "CREATE TRIGGER inject_inactive_slot_import_failure
          AFTER INSERT ON file_texts
          BEGIN
              SELECT CASE
@@ -207,11 +206,6 @@ fn install_inactive_import_failure(db: &Path) -> Result<(), Box<dyn Error>> {
                  )
                  THEN RAISE(ABORT, 'injected inactive-slot import failure')
              END;
-             INSERT INTO file_text_fts(
-                 structural_slot, last_changed_epoch, path, content
-             ) VALUES(
-                 new.structural_slot, new.last_changed_epoch, new.path, new.content
-             );
          END;",
     )?;
     Ok(())

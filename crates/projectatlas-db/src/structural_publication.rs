@@ -36,17 +36,6 @@ const FILE_TEXTS_TABLE: &str = "file_texts";
 /// Versioned content and VCS identity of the last published structural generation.
 const STRUCTURAL_STATE_SIGNATURE_KEY: &str = "structural_state_signature_v1";
 
-/// Every core structural table whose source and target counts must reconcile.
-const STRUCTURAL_TABLES: [&str; 7] = [
-    GRAPH_ENTITIES_TABLE,
-    GRAPH_RELATIONS_TABLE,
-    GRAPH_EVIDENCE_OCCURRENCES_TABLE,
-    GRAPH_RESOLUTION_OCCURRENCES_TABLE,
-    GRAPH_RESOLUTION_CANDIDATES_TABLE,
-    GRAPH_COVERAGE_TABLE,
-    FILE_TEXTS_TABLE,
-];
-
 /// Reverse dependency order for clearing one inactive or staging slot.
 const STRUCTURAL_DELETE_ORDER: [&str; 7] = [
     GRAPH_RESOLUTION_CANDIDATES_TABLE,
@@ -392,7 +381,7 @@ impl AtlasStore {
                 delta.base_state_signature, live_signature
             )));
         }
-        bind_incremental_project_root(&transaction, &delta.project_root)?;
+        let project_root = bind_incremental_project_root(&transaction, &delta.project_root)?;
 
         let next_publication = live_publication
             .next_incremental()
@@ -404,23 +393,7 @@ impl AtlasStore {
             ))
         })?;
 
-        invalidate_structural_paths(&transaction, active_slot, &delta.affected_paths)?;
-        for node in &delta.nodes {
-            upsert_node(&transaction, node)?;
-        }
-        for purpose in &delta.built_in_purposes {
-            set_built_in_purpose(&transaction, purpose)?;
-        }
-        mark_paths_absent_in_connection(&transaction, &delta.absent_paths)?;
-        for text in &delta.file_texts {
-            upsert_file_text_for_publication(&transaction, text, active_slot, next_epoch)?;
-        }
-        for mutation in &delta.source_mutations {
-            apply_incremental_source_mutation(&transaction, mutation)?;
-        }
-        for mutation in &delta.summary_mutations {
-            apply_incremental_summary_mutation(&transaction, mutation)?;
-        }
+        apply_incremental_mutations(&transaction, delta, active_slot, next_epoch)?;
 
         upsert_structural_state_signature(&transaction, &delta.target_state_signature)?;
         let changed = transaction.execute(
@@ -445,7 +418,12 @@ impl AtlasStore {
                 "publication singleton did not reconcile after the incremental epoch advance",
             ));
         }
-        schema::verify_current_schema(&transaction)?;
+        schema::reconcile_incremental_structural_publication(
+            &transaction,
+            &project_root,
+            next_publication,
+            &delta.affected_paths,
+        )?;
         transaction.commit()?;
         Ok(IncrementalPublication::Published(next_publication))
     }
@@ -594,21 +572,48 @@ fn path_is_within_affected_path(path: &str, affected: &str) -> bool {
 fn bind_incremental_project_root(
     transaction: &Transaction<'_>,
     project_root: &Path,
-) -> DbResult<()> {
+) -> DbResult<String> {
     let requested = normalize_metadata_path(project_root);
     match load_project_root(transaction, None)? {
         Some(live) if live != requested => Err(publication_error(format!(
             "live project root does not match the incremental delta root: live={live:?}, requested={requested:?}"
         ))),
-        Some(_) => Ok(()),
+        Some(_) => Ok(requested),
         None => {
             transaction.execute(
                 "INSERT INTO metadata(key, value) VALUES('project_root', ?1)",
                 [&requested],
             )?;
-            Ok(())
+            Ok(requested)
         }
     }
+}
+
+/// Apply one prepared mutation batch without weakening the parent transaction.
+fn apply_incremental_mutations(
+    transaction: &Transaction<'_>,
+    delta: &IncrementalStructuralDelta,
+    active_slot: &str,
+    next_epoch: i64,
+) -> DbResult<()> {
+    invalidate_structural_paths(transaction, active_slot, &delta.affected_paths)?;
+    for node in &delta.nodes {
+        upsert_node(transaction, node)?;
+    }
+    for purpose in &delta.built_in_purposes {
+        set_built_in_purpose(transaction, purpose)?;
+    }
+    mark_paths_absent_in_connection(transaction, &delta.absent_paths)?;
+    for text in &delta.file_texts {
+        upsert_file_text_for_publication(transaction, text, active_slot, next_epoch)?;
+    }
+    for mutation in &delta.source_mutations {
+        apply_incremental_source_mutation(transaction, mutation)?;
+    }
+    for mutation in &delta.summary_mutations {
+        apply_incremental_summary_mutation(transaction, mutation)?;
+    }
+    Ok(())
 }
 
 /// Invalidate only affected active-slot typed graph, coverage, evidence, and lexical rows.
@@ -617,6 +622,35 @@ fn invalidate_structural_paths(
     active_slot: &str,
     paths: &[String],
 ) -> DbResult<()> {
+    let mut delete_evidence = transaction.prepare_cached(
+        "DELETE FROM graph_evidence_occurrences
+         WHERE structural_slot = ?1
+           AND (origin_repository_path = ?2
+                OR (origin_repository_path >= ?3 AND origin_repository_path < ?4))",
+    )?;
+    let mut delete_resolution = transaction.prepare_cached(
+        "DELETE FROM graph_resolution_occurrences
+         WHERE structural_slot = ?1
+           AND (origin_repository_path = ?2
+                OR (origin_repository_path >= ?3 AND origin_repository_path < ?4))",
+    )?;
+    let mut delete_coverage = transaction.prepare_cached(
+        "DELETE FROM graph_coverage
+         WHERE structural_slot = ?1
+           AND (repository_path = ?2
+                OR (repository_path >= ?3 AND repository_path < ?4))",
+    )?;
+    let mut delete_entities = transaction.prepare_cached(
+        "DELETE FROM graph_entities
+         WHERE structural_slot = ?1
+           AND (repository_path = ?2
+                OR (repository_path >= ?3 AND repository_path < ?4))",
+    )?;
+    let mut delete_texts = transaction.prepare_cached(
+        "DELETE FROM file_texts
+         WHERE structural_slot = ?1
+           AND (path = ?2 OR (path >= ?3 AND path < ?4))",
+    )?;
     for path in paths {
         if path.is_empty() {
             continue;
@@ -630,37 +664,12 @@ fn invalidate_structural_paths(
             }
             continue;
         }
-        let descendants = crate::sqlite_descendant_pattern(path);
-        transaction.execute(
-            "DELETE FROM graph_evidence_occurrences
-             WHERE structural_slot = ?1
-               AND (origin_repository_path = ?2 OR origin_repository_path LIKE ?3 ESCAPE '\\')",
-            params![active_slot, path, descendants],
-        )?;
-        transaction.execute(
-            "DELETE FROM graph_resolution_occurrences
-             WHERE structural_slot = ?1
-               AND (origin_repository_path = ?2 OR origin_repository_path LIKE ?3 ESCAPE '\\')",
-            params![active_slot, path, descendants],
-        )?;
-        transaction.execute(
-            "DELETE FROM graph_coverage
-             WHERE structural_slot = ?1
-               AND (repository_path = ?2 OR repository_path LIKE ?3 ESCAPE '\\')",
-            params![active_slot, path, descendants],
-        )?;
-        transaction.execute(
-            "DELETE FROM graph_entities
-             WHERE structural_slot = ?1
-               AND (repository_path = ?2 OR repository_path LIKE ?3 ESCAPE '\\')",
-            params![active_slot, path, descendants],
-        )?;
-        transaction.execute(
-            "DELETE FROM file_texts
-             WHERE structural_slot = ?1
-               AND (path = ?2 OR path LIKE ?3 ESCAPE '\\')",
-            params![active_slot, path, descendants],
-        )?;
+        let (descendant_start, descendant_end) = crate::sqlite_descendant_bounds(path);
+        delete_evidence.execute(params![active_slot, path, descendant_start, descendant_end])?;
+        delete_resolution.execute(params![active_slot, path, descendant_start, descendant_end])?;
+        delete_coverage.execute(params![active_slot, path, descendant_start, descendant_end])?;
+        delete_entities.execute(params![active_slot, path, descendant_start, descendant_end])?;
+        delete_texts.execute(params![active_slot, path, descendant_start, descendant_end])?;
     }
     Ok(())
 }
@@ -687,10 +696,11 @@ fn set_built_in_purpose(
             OR (purposes.status = '{stale}'
                 AND purposes.source NOT IN ({reviewed_sources}))"
     );
-    connection.execute(
-        &sql,
-        params![node_id, purpose.purpose, purpose.source.to_string()],
-    )?;
+    connection.prepare_cached(&sql)?.execute(params![
+        node_id,
+        purpose.purpose,
+        purpose.source.to_string()
+    ])?;
     Ok(())
 }
 
@@ -779,7 +789,6 @@ fn publish_attached(
     reconcile_compatibility_rows(&transaction, staging)?;
     replace_structural_rows(&transaction, source_slot, target_slot, next_epoch)?;
     reconcile_structural_counts(&transaction, source_slot, target_slot)?;
-    schema::verify_current_schema(&transaction)?;
 
     let changed = transaction.execute(
         "UPDATE graph_publication_state
@@ -804,6 +813,11 @@ fn publish_attached(
             "publication singleton did not reconcile after the atomic flip",
         ));
     }
+    schema::reconcile_full_structural_publication(
+        &transaction,
+        &staging.project_root,
+        next_publication,
+    )?;
     transaction.commit()?;
     Ok(next_publication)
 }
@@ -1076,7 +1090,7 @@ fn reconcile_structural_counts(
     source_slot: &str,
     target_slot: &str,
 ) -> DbResult<()> {
-    for table in STRUCTURAL_TABLES {
+    for table in schema::STRUCTURAL_DERIVED_TABLES {
         let source_count = transaction.query_row(
             &format!("SELECT COUNT(*) FROM {STAGING_SCHEMA}.{table} WHERE structural_slot = ?1"),
             [source_slot],
@@ -1217,7 +1231,7 @@ fn verify_quick_check(connection: &Connection) -> DbResult<()> {
 }
 
 /// Load the typed singleton publication state from the main database.
-fn load_publication_state(connection: &Connection) -> DbResult<PublicationState> {
+pub(crate) fn load_publication_state(connection: &Connection) -> DbResult<PublicationState> {
     let (slot, epoch) = connection.query_row(
         "SELECT active_slot, active_epoch
          FROM graph_publication_state
@@ -1263,7 +1277,7 @@ fn publication_state_from_sql(slot: &str, epoch: i64) -> DbResult<PublicationSta
 }
 
 /// Return the `SQLite` encoding for one closed structural slot.
-fn slot_text(slot: StructuralSlot) -> &'static str {
+pub(crate) fn slot_text(slot: StructuralSlot) -> &'static str {
     match slot {
         StructuralSlot::A => "a",
         StructuralSlot::B => "b",
@@ -1447,9 +1461,102 @@ mod tests {
     // larger fixture; it must not grow with the unrelated-row multiplier.
     const MAX_UNRELATED_SCALE_FRAME_DELTA: usize = 12;
 
+    #[derive(Clone, Copy, Debug)]
+    enum ReconciliationFault {
+        CandidateUniqueness,
+        MissingEndpoint,
+        UnknownRelationFamily,
+        CandidateCount,
+        CandidateTotalBoundary,
+        CandidateRetentionBudget,
+        CandidateOrdinalGap,
+        CoverageContract,
+        CoverageCount,
+        InvalidUtf8,
+        WrongRoot,
+        InvalidRowSlot,
+        FutureRowEpoch,
+        WrongPublication,
+        MissingSchemaGuard,
+        NoOpSchemaGuard,
+        MissingUniqueConstraint,
+        AlteredPathCollation,
+        PartialPathIndex,
+        AlteredForeignKeyAction,
+    }
+
+    impl ReconciliationFault {
+        const ALL: [Self; 20] = [
+            Self::CandidateUniqueness,
+            Self::MissingEndpoint,
+            Self::UnknownRelationFamily,
+            Self::CandidateCount,
+            Self::CandidateTotalBoundary,
+            Self::CandidateRetentionBudget,
+            Self::CandidateOrdinalGap,
+            Self::CoverageContract,
+            Self::CoverageCount,
+            Self::InvalidUtf8,
+            Self::WrongRoot,
+            Self::InvalidRowSlot,
+            Self::FutureRowEpoch,
+            Self::WrongPublication,
+            Self::MissingSchemaGuard,
+            Self::NoOpSchemaGuard,
+            Self::MissingUniqueConstraint,
+            Self::AlteredPathCollation,
+            Self::PartialPathIndex,
+            Self::AlteredForeignKeyAction,
+        ];
+
+        const fn expected_diagnostic(self) -> &'static str {
+            match self {
+                Self::CandidateUniqueness => "candidate target uniqueness",
+                Self::MissingEndpoint => "endpoint foreign-key",
+                Self::UnknownRelationFamily => "relation family",
+                Self::CandidateCount
+                | Self::CandidateTotalBoundary
+                | Self::CandidateRetentionBudget
+                | Self::CandidateOrdinalGap => "candidate counts",
+                Self::CoverageContract => "coverage row",
+                Self::CoverageCount => "coverage counts",
+                Self::InvalidUtf8 => "invalid UTF-8",
+                Self::WrongRoot => "project root",
+                Self::InvalidRowSlot | Self::FutureRowEpoch => "slot or epoch",
+                Self::WrongPublication => "publication state",
+                Self::MissingSchemaGuard => "guard",
+                Self::NoOpSchemaGuard
+                | Self::AlteredPathCollation
+                | Self::PartialPathIndex
+                | Self::AlteredForeignKeyAction => "canonical SQL",
+                Self::MissingUniqueConstraint => "UNIQUE constraint",
+            }
+        }
+
+        const fn disables_foreign_keys(self) -> bool {
+            matches!(
+                self,
+                Self::MissingEndpoint
+                    | Self::InvalidRowSlot
+                    | Self::MissingUniqueConstraint
+                    | Self::AlteredPathCollation
+                    | Self::AlteredForeignKeyAction
+            )
+        }
+
+        const fn ignores_check_constraints(self) -> bool {
+            matches!(self, Self::UnknownRelationFamily | Self::InvalidRowSlot)
+        }
+    }
+
     #[test]
     fn task_arri_ut_arri_4_12() -> Result<(), Box<dyn Error>> {
         prove_parent_owned_full_scan_publication()
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_13() -> Result<(), Box<dyn Error>> {
+        prove_transactional_reader_and_rollback_retention()
     }
 
     #[test]
@@ -1460,6 +1567,16 @@ mod tests {
     #[test]
     fn task_arri_ut_arri_4_14() -> Result<(), Box<dyn Error>> {
         prove_incremental_publication_atomicity()
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_15() -> Result<(), Box<dyn Error>> {
+        prove_prepared_mutation_batch_fails_closed()
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_16() -> Result<(), Box<dyn Error>> {
+        prove_structural_publication_reconciliation()
     }
 
     #[test]
@@ -1946,12 +2063,1162 @@ mod tests {
         }
     }
 
+    fn prove_structural_publication_reconciliation() -> Result<(), Box<dyn Error>> {
+        prove_affected_reconciliation_query_plans()?;
+        prove_affected_path_edge_cases()?;
+        prove_sqlite_enforces_graph_identity_uniqueness()?;
+        prove_reconciliation_fault_matrix()?;
+        prove_incremental_reconciliation_rolls_back()?;
+        prove_full_reconciliation_rolls_back()
+    }
+
+    fn prove_affected_reconciliation_query_plans() -> Result<(), Box<dyn Error>> {
+        let store = AtlasStore::in_memory()?;
+        let (descendant_start, descendant_end) = crate::sqlite_descendant_bounds("src");
+        for (table, path_column, index) in [
+            (
+                "graph_entities",
+                "repository_path",
+                "idx_graph_entities_slot_repository_path",
+            ),
+            (
+                "graph_evidence_occurrences",
+                "origin_repository_path",
+                "idx_graph_evidence_slot_origin_repository_path",
+            ),
+            (
+                "graph_resolution_occurrences",
+                "origin_repository_path",
+                "idx_graph_resolution_slot_origin_repository_path",
+            ),
+            (
+                "graph_coverage",
+                "repository_path",
+                "idx_graph_coverage_slot_repository_path",
+            ),
+        ] {
+            let mut statement = store.connection.prepare(&format!(
+                "EXPLAIN QUERY PLAN
+                 SELECT EXISTS(
+                     SELECT 1 FROM {table}
+                     WHERE structural_slot = ?1
+                       AND ({path_column} = ?2
+                            OR ({path_column} >= ?3 AND {path_column} < ?4))
+                 )"
+            ))?;
+            let details = statement
+                .query_map(
+                    params!["a", "src", descendant_start, descendant_end],
+                    |row| row.get::<_, String>(3),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            require(
+                details.iter().any(|detail| detail.contains(index)),
+                &format!("affected-row reconciliation stopped using {index}: {details:?}"),
+            )?;
+        }
+
+        let mut statement = store.connection.prepare(
+            "EXPLAIN QUERY PLAN
+             SELECT path, content FROM file_texts
+             WHERE structural_slot = ?1
+               AND (path = ?2 OR (path >= ?3 AND path < ?4))",
+        )?;
+        let details = statement
+            .query_map(
+                params!["a", "src", descendant_start, descendant_end],
+                |row| row.get::<_, String>(3),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        require(
+            details.iter().any(|detail| {
+                detail.contains("SEARCH file_texts USING INDEX")
+                    || detail.contains("SEARCH file_texts USING COVERING INDEX")
+            }),
+            &format!("affected file-text reconciliation lost its slot/path index: {details:?}"),
+        )?;
+
+        let fts_available = store.connection.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_schema
+                 WHERE type = 'table' AND name = 'file_text_fts'
+             )",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        if fts_available {
+            let mut statement = store.connection.prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT COUNT(*) FROM file_text_fts
+                 WHERE file_text_fts MATCH ?1
+                   AND structural_slot = ?2
+                   AND (path = ?3 OR (path >= ?4 AND path < ?5))",
+            )?;
+            let details = statement
+                .query_map(
+                    params![
+                        "path_lookup : \"pasrc\"",
+                        "a",
+                        "src",
+                        descendant_start,
+                        descendant_end
+                    ],
+                    |row| row.get::<_, String>(3),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            require(
+                details
+                    .iter()
+                    .any(|detail| detail.contains("VIRTUAL TABLE INDEX") && detail.contains('M')),
+                &format!("affected FTS reconciliation lost its MATCH index: {details:?}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn prove_affected_path_edge_cases() -> Result<(), Box<dyn Error>> {
+        for (affected_path, replacement_path, sentinel_path) in [
+            ("a", "a", "b"),
+            ("src/quo\"te.rs", "src/quo\"te.rs", "src/quote.rs"),
+            (
+                "src/space name.rs",
+                "src/space name.rs",
+                "src/space-name.rs",
+            ),
+            ("src/über.rs", "src/über.rs", "src/unicode.rs"),
+            ("src/Case.rs", "src/Case.rs", "Src/Case.rs"),
+            ("src/foo", "src/foo/file.rs", "src/foobar.rs"),
+        ] {
+            prove_affected_path_case(affected_path, replacement_path, sentinel_path)?;
+        }
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("root-affected-path");
+        fs::create_dir(&root)?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(&root)?;
+        store.replace_scan(&[
+            file_node("src/lib.rs", "root-base"),
+            file_node("src/old.rs", "root-old"),
+        ])?;
+        store.replace_file_texts_for_paths(
+            &["src/lib.rs".to_owned(), "src/old.rs".to_owned()],
+            &[
+                file_text("src/lib.rs", "root base content"),
+                file_text("src/old.rs", "root old content"),
+            ],
+        )?;
+        upsert_structural_state_signature(&store.connection, "root-base")?;
+        let base = store.publication_state()?;
+        let delta = IncrementalStructuralDelta {
+            project_root: root,
+            base_publication: base,
+            base_state_signature: store.structural_state_signature()?,
+            target_state_signature: "root-next".to_owned(),
+            affected_paths: vec![".".to_owned()],
+            nodes: vec![file_node("src/lib.rs", "root-next")],
+            absent_paths: vec!["src/old.rs".to_owned()],
+            file_texts: vec![file_text("src/lib.rs", "root next content")],
+            source_mutations: Vec::new(),
+            summary_mutations: Vec::new(),
+            built_in_purposes: Vec::new(),
+        };
+        require_eq(
+            &store.publish_incremental_structural_delta(&delta)?,
+            &IncrementalPublication::Published(base.next_incremental()?),
+            "root affected-path publication",
+        )?;
+        require(
+            store.load_file_text("src/old.rs")?.is_none(),
+            "root affected-path publication retained obsolete text",
+        )?;
+        require_eq(
+            &require_some(
+                store.load_file_text("src/lib.rs")?,
+                "root affected-path replacement text",
+            )?
+            .content,
+            &"root next content".to_owned(),
+            "root affected-path replacement content",
+        )?;
+        Ok(())
+    }
+
+    fn prove_affected_path_case(
+        affected_path: &str,
+        replacement_path: &str,
+        sentinel_path: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("affected-path-case");
+        fs::create_dir(&root)?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(&root)?;
+        store.replace_scan(&[
+            file_node(replacement_path, "edge-base"),
+            file_node(sentinel_path, "sentinel-base"),
+        ])?;
+        store.replace_file_texts_for_paths(
+            &[replacement_path.to_owned(), sentinel_path.to_owned()],
+            &[
+                file_text(replacement_path, "edge base content"),
+                file_text(sentinel_path, "sentinel content"),
+            ],
+        )?;
+        upsert_structural_state_signature(&store.connection, "edge-base")?;
+        let base = store.publication_state()?;
+        let delta = IncrementalStructuralDelta {
+            project_root: root,
+            base_publication: base,
+            base_state_signature: store.structural_state_signature()?,
+            target_state_signature: format!("edge-next-{affected_path}"),
+            affected_paths: vec![affected_path.to_owned()],
+            nodes: vec![file_node(replacement_path, "edge-next")],
+            absent_paths: Vec::new(),
+            file_texts: vec![file_text(replacement_path, "edge next content")],
+            source_mutations: Vec::new(),
+            summary_mutations: Vec::new(),
+            built_in_purposes: Vec::new(),
+        };
+        require_eq(
+            &store.publish_incremental_structural_delta(&delta)?,
+            &IncrementalPublication::Published(base.next_incremental()?),
+            &format!("affected-path publication for {affected_path:?}"),
+        )?;
+        require_eq(
+            &require_some(
+                store.load_file_text(replacement_path)?,
+                "affected-path replacement text",
+            )?
+            .content,
+            &"edge next content".to_owned(),
+            &format!("affected-path replacement content for {affected_path:?}"),
+        )?;
+        require_eq(
+            &require_some(
+                store.load_file_text(sentinel_path)?,
+                "affected-path sentinel text",
+            )?
+            .content,
+            &"sentinel content".to_owned(),
+            &format!("affected-path sibling/case sentinel for {affected_path:?}"),
+        )?;
+        Ok(())
+    }
+
+    fn prove_sqlite_enforces_graph_identity_uniqueness() -> Result<(), Box<dyn Error>> {
+        let store = AtlasStore::in_memory()?;
+        insert_reconciliation_graph_fixture(&store.connection)?;
+        let duplicate = store.connection.execute(
+            "UPDATE graph_entities
+             SET stable_key_canonical = (
+                 SELECT stable_key_canonical FROM graph_entities
+                 WHERE repository_path = 'src/lib.rs'
+             )
+             WHERE repository_path = 'src/target.rs'",
+            [],
+        );
+        let error = match duplicate {
+            Ok(_) => {
+                return Err(io::Error::other(
+                    "SQLite accepted a duplicate canonical graph identity",
+                )
+                .into());
+            }
+            Err(error) => error.to_string(),
+        };
+        require(
+            error.contains("UNIQUE constraint failed"),
+            &format!("duplicate graph identity returned the wrong SQLite diagnostic: {error}"),
+        )?;
+        Ok(())
+    }
+
+    fn prove_reconciliation_fault_matrix() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        for fault in ReconciliationFault::ALL {
+            let root = temp.path().join(format!("fault-{fault:?}"));
+            fs::create_dir(&root)?;
+            let mut store = AtlasStore::in_memory()?;
+            store.set_project_root(&root)?;
+            store.replace_scan(&[
+                file_node("src/lib.rs", "base-hash"),
+                file_node("src/target.rs", "target-hash"),
+            ])?;
+            store.replace_file_texts_for_paths(
+                &["src/lib.rs".to_owned()],
+                &[file_text("src/lib.rs", "valid utf8")],
+            )?;
+            insert_reconciliation_graph_fixture(&store.connection)?;
+            upsert_structural_state_signature(&store.connection, "reconciled-base")?;
+
+            let base = store.publication_state()?;
+            let root_text = normalize_metadata_path(&root);
+            schema::reconcile_full_structural_publication(&store.connection, &root_text, base)?;
+            let base_signature = store.structural_state_signature()?;
+            let base_counts = [
+                structural_counts(&store.connection, StructuralSlot::A)?,
+                structural_counts(&store.connection, StructuralSlot::B)?,
+            ];
+
+            if fault.disables_foreign_keys() {
+                store
+                    .connection
+                    .pragma_update(None, "foreign_keys", "OFF")?;
+            }
+            if fault.ignores_check_constraints() {
+                store
+                    .connection
+                    .pragma_update(None, "ignore_check_constraints", "ON")?;
+            }
+            let transaction = store
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            inject_reconciliation_fault(&transaction, fault)?;
+            let Err(error) =
+                schema::reconcile_full_structural_publication(&transaction, &root_text, base)
+            else {
+                return Err(
+                    format!("reconciliation fault {fault:?} was accepted unexpectedly").into(),
+                );
+            };
+            require(
+                error.to_string().contains(fault.expected_diagnostic()),
+                &format!("reconciliation fault {fault:?} lost its diagnostic: {error}"),
+            )?;
+            transaction.rollback()?;
+            store
+                .connection
+                .pragma_update(None, "ignore_check_constraints", "OFF")?;
+            store.connection.pragma_update(None, "foreign_keys", "ON")?;
+
+            schema::reconcile_full_structural_publication(&store.connection, &root_text, base)?;
+            require_eq(
+                &store.publication_state()?,
+                &base,
+                &format!("publication after {fault:?} rollback"),
+            )?;
+            require_eq(
+                &store.structural_state_signature()?,
+                &base_signature,
+                &format!("signature after {fault:?} rollback"),
+            )?;
+            require_eq(
+                &[
+                    structural_counts(&store.connection, StructuralSlot::A)?,
+                    structural_counts(&store.connection, StructuralSlot::B)?,
+                ],
+                &base_counts,
+                &format!("slot rows after {fault:?} rollback"),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn inject_reconciliation_fault(
+        transaction: &Transaction<'_>,
+        fault: ReconciliationFault,
+    ) -> DbResult<()> {
+        match fault {
+            ReconciliationFault::CandidateUniqueness => {
+                let occurrence = blake3::hash(b"reconciliation-resolution");
+                let target = blake3::hash(b"reconciliation-target");
+                transaction.execute(
+                    "INSERT INTO graph_resolution_candidates(
+                         resolution_occurrence_digest, candidate_ordinal, target_scope,
+                         target_entity_digest, confidence, structural_slot,
+                         last_changed_epoch
+                     )
+                     SELECT ?1, 2, 'internal', ?2, 'exact', active_slot, active_epoch
+                     FROM graph_publication_state WHERE singleton = 1",
+                    params![
+                        occurrence.as_bytes().as_slice(),
+                        target.as_bytes().as_slice()
+                    ],
+                )?;
+                transaction.execute(
+                    "UPDATE graph_resolution_occurrences SET candidate_total = 3",
+                    [],
+                )?;
+            }
+            ReconciliationFault::MissingEndpoint => {
+                transaction.execute(
+                    "UPDATE graph_relations SET source_entity_digest = zeroblob(32)",
+                    [],
+                )?;
+            }
+            ReconciliationFault::UnknownRelationFamily => {
+                transaction.execute(
+                    "UPDATE graph_relations SET relation_kind = 'untyped-relation'",
+                    [],
+                )?;
+            }
+            ReconciliationFault::CandidateCount => {
+                transaction.execute(
+                    "UPDATE graph_resolution_occurrences SET candidate_total = 3",
+                    [],
+                )?;
+            }
+            ReconciliationFault::CandidateTotalBoundary => {
+                transaction.execute(
+                    "UPDATE graph_resolution_occurrences
+                     SET candidate_total = 4294967296,
+                         candidate_completeness = 'partial'",
+                    [],
+                )?;
+            }
+            ReconciliationFault::CandidateRetentionBudget => {
+                transaction.execute_batch(
+                    "WITH RECURSIVE candidate(candidate_ordinal) AS (
+                         SELECT 2
+                         UNION ALL
+                         SELECT candidate_ordinal + 1 FROM candidate
+                         WHERE candidate_ordinal < 64
+                     )
+                     INSERT INTO graph_resolution_candidates(
+                         resolution_occurrence_digest, candidate_ordinal,
+                         target_scope, external_target_namespace,
+                         external_target_value, confidence, structural_slot,
+                         last_changed_epoch
+                     )
+                     SELECT occurrence.stable_key_digest, candidate.candidate_ordinal,
+                            'external', 'publication-test',
+                            printf('candidate-%d', candidate.candidate_ordinal),
+                            'exact', occurrence.structural_slot,
+                            occurrence.last_changed_epoch
+                     FROM graph_resolution_occurrences AS occurrence
+                     CROSS JOIN candidate;
+                     UPDATE graph_resolution_occurrences
+                     SET candidate_total = 65,
+                         candidate_completeness = 'complete';",
+                )?;
+            }
+            ReconciliationFault::CandidateOrdinalGap => {
+                transaction.execute(
+                    "UPDATE graph_resolution_candidates
+                     SET candidate_ordinal = 2 WHERE candidate_ordinal = 1",
+                    [],
+                )?;
+            }
+            ReconciliationFault::CoverageContract => {
+                transaction.execute(
+                    "UPDATE graph_coverage SET omitted_count = 1
+                     WHERE scope_kind = 'relation'",
+                    [],
+                )?;
+            }
+            ReconciliationFault::CoverageCount => {
+                transaction.execute(
+                    "UPDATE graph_coverage SET produced_count = 2
+                     WHERE scope_kind = 'relation'",
+                    [],
+                )?;
+            }
+            ReconciliationFault::InvalidUtf8 => {
+                transaction.execute("UPDATE file_texts SET content = CAST(x'80' AS TEXT)", [])?;
+            }
+            ReconciliationFault::WrongRoot => {
+                transaction.execute(
+                    "UPDATE metadata SET value = 'C:/wrong-root' WHERE key = 'project_root'",
+                    [],
+                )?;
+            }
+            ReconciliationFault::InvalidRowSlot => {
+                transaction.execute("UPDATE file_texts SET structural_slot = 'c'", [])?;
+            }
+            ReconciliationFault::FutureRowEpoch => {
+                transaction.execute("UPDATE file_texts SET last_changed_epoch = 1", [])?;
+            }
+            ReconciliationFault::WrongPublication => {
+                transaction.execute(
+                    "UPDATE graph_publication_state SET active_epoch = 1 WHERE singleton = 1",
+                    [],
+                )?;
+            }
+            ReconciliationFault::MissingSchemaGuard => {
+                transaction.execute("DROP TRIGGER graph_publication_state_delete_guard", [])?;
+            }
+            ReconciliationFault::NoOpSchemaGuard => {
+                transaction.execute_batch(
+                    "DROP TRIGGER graph_publication_state_delete_guard;
+                     CREATE TRIGGER graph_publication_state_delete_guard
+                     BEFORE DELETE ON graph_publication_state
+                     BEGIN
+                         SELECT 1;
+                     END;",
+                )?;
+            }
+            ReconciliationFault::MissingUniqueConstraint => {
+                rebuild_graph_entities_without_unique_constraint(transaction)?;
+            }
+            ReconciliationFault::AlteredPathCollation => {
+                rebuild_graph_coverage_with_nocase_path(transaction)?;
+            }
+            ReconciliationFault::PartialPathIndex => {
+                transaction.execute_batch(
+                    "DROP INDEX idx_graph_coverage_slot_repository_path;
+                     CREATE INDEX idx_graph_coverage_slot_repository_path
+                     ON graph_coverage(structural_slot, repository_path)
+                     WHERE repository_path IS NOT NULL;",
+                )?;
+            }
+            ReconciliationFault::AlteredForeignKeyAction => {
+                rebuild_resolution_candidates_without_cascade(transaction)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn rebuild_graph_entities_without_unique_constraint(
+        transaction: &Transaction<'_>,
+    ) -> DbResult<()> {
+        let canonical_sql = transaction.query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'table' AND name = 'graph_entities'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        let rebuilt_sql = canonical_sql
+            .replacen(
+                "graph_entities",
+                "graph_entities_without_unique_constraint",
+                1,
+            )
+            .replacen("UNIQUE(structural_slot, stable_key_canonical),", "", 1);
+        if rebuilt_sql == canonical_sql
+            || rebuilt_sql.contains("UNIQUE(structural_slot, stable_key_canonical)")
+        {
+            return Err(publication_error(
+                "failed to construct the missing-UNIQUE fault table",
+            ));
+        }
+        transaction.execute_batch(&rebuilt_sql)?;
+        transaction.execute(
+            "INSERT INTO graph_entities_without_unique_constraint
+             SELECT * FROM graph_entities",
+            [],
+        )?;
+        transaction.execute("DROP TABLE graph_entities", [])?;
+        transaction.execute(
+            "ALTER TABLE graph_entities_without_unique_constraint
+             RENAME TO graph_entities",
+            [],
+        )?;
+        Ok(())
+    }
+
+    fn rebuild_graph_coverage_with_nocase_path(transaction: &Transaction<'_>) -> DbResult<()> {
+        let canonical_sql = transaction.query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'table' AND name = 'graph_coverage'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        let rebuilt_sql = canonical_sql
+            .replacen("graph_coverage", "graph_coverage_with_nocase_path", 1)
+            .replacen(
+                "repository_path TEXT NOT NULL DEFAULT '',",
+                "repository_path TEXT NOT NULL COLLATE NOCASE DEFAULT '',",
+                1,
+            );
+        if rebuilt_sql == canonical_sql || !rebuilt_sql.contains("COLLATE NOCASE") {
+            return Err(publication_error(
+                "failed to construct the altered-collation fault table",
+            ));
+        }
+        transaction.execute_batch(&rebuilt_sql)?;
+        transaction.execute(
+            "INSERT INTO graph_coverage_with_nocase_path SELECT * FROM graph_coverage",
+            [],
+        )?;
+        transaction.execute("DROP TABLE graph_coverage", [])?;
+        transaction.execute(
+            "ALTER TABLE graph_coverage_with_nocase_path RENAME TO graph_coverage",
+            [],
+        )?;
+        transaction.execute(
+            "CREATE INDEX idx_graph_coverage_slot_repository_path
+             ON graph_coverage(structural_slot, repository_path)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    fn rebuild_resolution_candidates_without_cascade(
+        transaction: &Transaction<'_>,
+    ) -> DbResult<()> {
+        let canonical_sql = transaction.query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'table' AND name = 'graph_resolution_candidates'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        let rebuilt_sql = canonical_sql
+            .replacen(
+                "graph_resolution_candidates",
+                "graph_resolution_candidates_without_cascade",
+                1,
+            )
+            .replacen("ON DELETE CASCADE", "ON DELETE RESTRICT", 1);
+        if rebuilt_sql == canonical_sql || !rebuilt_sql.contains("ON DELETE RESTRICT") {
+            return Err(publication_error(
+                "failed to construct the altered-foreign-key fault table",
+            ));
+        }
+        transaction.execute_batch(&rebuilt_sql)?;
+        transaction.execute(
+            "INSERT INTO graph_resolution_candidates_without_cascade
+             SELECT * FROM graph_resolution_candidates",
+            [],
+        )?;
+        transaction.execute("DROP TABLE graph_resolution_candidates", [])?;
+        transaction.execute(
+            "ALTER TABLE graph_resolution_candidates_without_cascade
+             RENAME TO graph_resolution_candidates",
+            [],
+        )?;
+        Ok(())
+    }
+
+    fn prove_incremental_reconciliation_rolls_back() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("incremental-reconciliation");
+        fs::create_dir(&root)?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(&root)?;
+        store.replace_scan(&[file_node("src/lib.rs", "base-hash")])?;
+        store.replace_file_texts_for_paths(
+            &["src/lib.rs".to_owned()],
+            &[file_text("src/lib.rs", "base content")],
+        )?;
+        upsert_structural_state_signature(&store.connection, "incremental-base")?;
+        let base = store.publication_state()?;
+        let base_signature = store.structural_state_signature()?;
+        let base_counts = structural_counts(&store.connection, base.active_slot)?;
+        store.connection.execute_batch(
+            "CREATE TRIGGER inject_incremental_root_drift
+             AFTER INSERT ON file_texts
+             BEGIN
+                 UPDATE metadata SET value = 'C:/injected-root-drift'
+                 WHERE key = 'project_root';
+             END;",
+        )?;
+
+        let delta = test_incremental_delta(
+            &root,
+            base,
+            base_signature.clone(),
+            "incremental-next",
+            "next-hash",
+            "next content",
+        );
+        let error = match store.publish_incremental_structural_delta(&delta) {
+            Err(error) => error,
+            Ok(publication) => {
+                return Err(format!(
+                    "incremental root-drift fault published unexpectedly: {publication:?}"
+                )
+                .into());
+            }
+        };
+        require(
+            error.to_string().contains("project root"),
+            &format!("incremental reconciliation lost its root diagnostic: {error}"),
+        )?;
+        require_eq(
+            &store.publication_state()?,
+            &base,
+            "incremental reconciliation publication rollback",
+        )?;
+        require_eq(
+            &store.structural_state_signature()?,
+            &base_signature,
+            "incremental reconciliation signature rollback",
+        )?;
+        require_eq(
+            &structural_counts(&store.connection, base.active_slot)?,
+            &base_counts,
+            "incremental reconciliation active-slot rollback",
+        )?;
+        let text = require_some(
+            store.load_file_text("src/lib.rs")?,
+            "incremental reconciliation rollback text",
+        )?;
+        require_eq(
+            &text.content,
+            &"base content".to_owned(),
+            "incremental reconciliation rollback content",
+        )?;
+        require_eq(
+            &store.project_root()?,
+            &Some(normalize_metadata_path(&root)),
+            "incremental reconciliation root rollback",
+        )?;
+        Ok(())
+    }
+
+    fn prove_full_reconciliation_rolls_back() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("full-reconciliation");
+        let live_path = temp.path().join("full-live.db");
+        let stage_path = temp.path().join("full-stage.db");
+        fs::create_dir(&root)?;
+        let mut live = AtlasStore::open(&live_path)?;
+        live.set_project_root(&root)?;
+        live.replace_scan(&[file_node("src/lib.rs", "base-hash")])?;
+        live.replace_file_texts_for_paths(
+            &["src/lib.rs".to_owned()],
+            &[file_text("src/lib.rs", "base content")],
+        )?;
+        upsert_structural_state_signature(&live.connection, "full-base")?;
+        let base = live.publication_state()?;
+        let base_signature = live.structural_state_signature()?;
+        let inactive_counts = structural_counts(&live.connection, base.active_slot.other())?;
+
+        let staging = live.create_structural_staging(&live_path, &stage_path, &root)?;
+        let mut stage = AtlasStore::open(staging.path())?;
+        stage.prepare_structural_full_scan()?;
+        stage.replace_scan(&[
+            file_node("src/lib.rs", "next-hash"),
+            file_node("src/target.rs", "target-hash"),
+        ])?;
+        stage.replace_file_texts_for_paths(
+            &["src/lib.rs".to_owned()],
+            &[file_text("src/lib.rs", "next content")],
+        )?;
+        insert_reconciliation_graph_fixture(&stage.connection)?;
+        stage.connection.execute(
+            "UPDATE graph_coverage SET produced_count = 2
+             WHERE scope_kind = 'relation'",
+            [],
+        )?;
+        stage.set_staged_structural_state_signature(&staging, "full-next")?;
+        stage.seal_structural_staging(&staging)?;
+        drop(stage);
+
+        let error = match live.publish_structural_staging(&staging) {
+            Err(error) => error,
+            Ok(publication) => {
+                return Err(format!(
+                    "full coverage-count fault published unexpectedly: {publication:?}"
+                )
+                .into());
+            }
+        };
+        require(
+            error.to_string().contains("coverage counts"),
+            &format!("full reconciliation lost its count diagnostic: {error}"),
+        )?;
+        require_eq(
+            &live.publication_state()?,
+            &base,
+            "full reconciliation publication rollback",
+        )?;
+        require_eq(
+            &live.structural_state_signature()?,
+            &base_signature,
+            "full reconciliation signature rollback",
+        )?;
+        require_eq(
+            &structural_counts(&live.connection, base.active_slot.other())?,
+            &inactive_counts,
+            "full reconciliation inactive-slot rollback",
+        )?;
+        let text = require_some(
+            live.load_file_text("src/lib.rs")?,
+            "full reconciliation rollback text",
+        )?;
+        require_eq(
+            &text.content,
+            &"base content".to_owned(),
+            "full reconciliation rollback content",
+        )?;
+        Ok(())
+    }
+
+    fn insert_reconciliation_graph_fixture(connection: &Connection) -> DbResult<()> {
+        insert_graph_entity(connection, "reconciliation-source", "src/lib.rs")?;
+        insert_graph_entity(connection, "reconciliation-target", "src/target.rs")?;
+        let source = blake3::hash(b"reconciliation-source");
+        let target = blake3::hash(b"reconciliation-target");
+        let relation = blake3::hash(b"reconciliation-relation");
+        let occurrence = blake3::hash(b"reconciliation-resolution");
+        let fingerprint = blake3::hash(b"reconciliation-fingerprint");
+        connection.execute(
+            "INSERT INTO graph_relations(
+                 stable_key_digest, stable_key_version, stable_key_canonical,
+                 source_entity_digest, relation_kind, resolution_status,
+                 target_scope, target_entity_digest, confidence, parser_kind,
+                 parser_identity, parser_version, structural_slot,
+                 last_changed_epoch
+             )
+             SELECT ?1, 1, ?2, ?3, 'calls', 'resolved', 'internal', ?4,
+                    'exact', 'structural', 'publication-test', '1',
+                    active_slot, active_epoch
+             FROM graph_publication_state WHERE singleton = 1",
+            params![
+                relation.as_bytes().as_slice(),
+                b"reconciliation-relation".as_slice(),
+                source.as_bytes().as_slice(),
+                target.as_bytes().as_slice()
+            ],
+        )?;
+        connection.execute(
+            "INSERT INTO graph_resolution_occurrences(
+                 stable_key_digest, stable_key_version, stable_key_canonical,
+                 source_entity_digest, relation_kind, origin_kind,
+                 origin_entity_digest, resolver_name, resolver_version,
+                 content_span_fingerprint, occurrence_discriminator,
+                 resolution_status, candidate_total, candidate_completeness,
+                 evidence_class, confidence, completeness, parser_kind,
+                 parser_identity, parser_version, structural_slot,
+                 last_changed_epoch
+             )
+             SELECT ?1, 1, ?2, ?3, 'calls', 'entity', ?3,
+                    'publication-resolver', '1', ?4, 0, 'ambiguous', 2,
+                    'complete', 'direct', 'exact', 'complete', 'structural',
+                    'publication-test', '1', active_slot, active_epoch
+             FROM graph_publication_state WHERE singleton = 1",
+            params![
+                occurrence.as_bytes().as_slice(),
+                b"reconciliation-resolution".as_slice(),
+                source.as_bytes().as_slice(),
+                fingerprint.as_bytes().as_slice()
+            ],
+        )?;
+        for (ordinal, candidate) in [(0_i64, source), (1_i64, target)] {
+            connection.execute(
+                "INSERT INTO graph_resolution_candidates(
+                     resolution_occurrence_digest, candidate_ordinal,
+                     target_scope, target_entity_digest, confidence,
+                     structural_slot, last_changed_epoch
+                 )
+                 SELECT ?1, ?2, 'internal', ?3, 'exact', active_slot, active_epoch
+                 FROM graph_publication_state WHERE singleton = 1",
+                params![
+                    occurrence.as_bytes().as_slice(),
+                    ordinal,
+                    candidate.as_bytes().as_slice()
+                ],
+            )?;
+        }
+        connection.execute(
+            "INSERT INTO graph_coverage(
+                 scope_kind, repository_path, relation_kind, coverage_state,
+                 produced_count, omitted_count, structural_slot,
+                 last_changed_epoch
+             )
+             SELECT 'relation', 'src/lib.rs', 'calls', 'complete', 1, 0,
+                    active_slot, active_epoch
+             FROM graph_publication_state WHERE singleton = 1",
+            [],
+        )?;
+        Ok(())
+    }
+
+    fn prove_prepared_mutation_batch_fails_closed() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(&root)?;
+        store.replace_scan(&[file_node("src/existing.rs", "base-hash")])?;
+        store.replace_file_texts_for_paths(
+            &["src/existing.rs".to_owned()],
+            &[file_text("src/existing.rs", "base content")],
+        )?;
+        insert_graph_entity(&store.connection, "existing", "src/existing.rs")?;
+        upsert_structural_state_signature(&store.connection, "batch-base")?;
+        let base = store.publication_state()?;
+        let base_signature = store.structural_state_signature()?;
+
+        store.connection.execute_batch(
+            "CREATE TRIGGER reject_second_batch_insert
+             BEFORE INSERT ON nodes WHEN new.path = 'src/b.rs'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected prepared insert failure');
+             END;",
+        )?;
+        let insert_delta = IncrementalStructuralDelta {
+            project_root: root.clone(),
+            base_publication: base,
+            base_state_signature: base_signature.clone(),
+            target_state_signature: "batch-insert".to_owned(),
+            affected_paths: vec!["src".to_owned()],
+            nodes: vec![
+                file_node("src/a.rs", "a-hash"),
+                file_node("src/b.rs", "b-hash"),
+            ],
+            absent_paths: Vec::new(),
+            file_texts: Vec::new(),
+            source_mutations: Vec::new(),
+            summary_mutations: Vec::new(),
+            built_in_purposes: Vec::new(),
+        };
+        let insert_error = require_incremental_error(
+            store.publish_incremental_structural_delta(&insert_delta),
+            "prepared insert failure must abort the batch",
+        )?;
+        require(
+            insert_error
+                .to_string()
+                .contains("injected prepared insert failure"),
+            "prepared insert failure lost its terminal status",
+        )?;
+        store
+            .connection
+            .execute("DROP TRIGGER reject_second_batch_insert", [])?;
+        require_unpublished_batch(&store, base, "base-hash")?;
+        require(
+            store.load_node_by_path("src/a.rs")?.is_none(),
+            "the successful prefix of a failed insert batch leaked",
+        )?;
+
+        store.connection.execute_batch(
+            "CREATE TRIGGER reject_batch_update
+             BEFORE UPDATE ON nodes WHEN new.path = 'src/existing.rs'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected prepared update failure');
+             END;",
+        )?;
+        let update_delta = IncrementalStructuralDelta {
+            project_root: root.clone(),
+            base_publication: base,
+            base_state_signature: base_signature.clone(),
+            target_state_signature: "batch-update".to_owned(),
+            affected_paths: vec!["src/existing.rs".to_owned()],
+            nodes: vec![file_node("src/existing.rs", "updated-hash")],
+            absent_paths: Vec::new(),
+            file_texts: Vec::new(),
+            source_mutations: Vec::new(),
+            summary_mutations: Vec::new(),
+            built_in_purposes: Vec::new(),
+        };
+        let update_error = require_incremental_error(
+            store.publish_incremental_structural_delta(&update_delta),
+            "prepared update failure must abort the batch",
+        )?;
+        require(
+            update_error
+                .to_string()
+                .contains("injected prepared update failure"),
+            "prepared update failure lost its terminal status",
+        )?;
+        store
+            .connection
+            .execute("DROP TRIGGER reject_batch_update", [])?;
+        require_unpublished_batch(&store, base, "base-hash")?;
+
+        store.connection.execute_batch(
+            "CREATE TRIGGER reject_batch_delete
+             BEFORE DELETE ON graph_entities
+             WHEN old.repository_path = 'src/existing.rs'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected prepared delete failure');
+             END;",
+        )?;
+        let delete_delta = IncrementalStructuralDelta {
+            project_root: root,
+            base_publication: base,
+            base_state_signature: base_signature,
+            target_state_signature: "batch-delete".to_owned(),
+            affected_paths: vec!["src/existing.rs".to_owned()],
+            nodes: Vec::new(),
+            absent_paths: vec!["src/existing.rs".to_owned()],
+            file_texts: Vec::new(),
+            source_mutations: Vec::new(),
+            summary_mutations: Vec::new(),
+            built_in_purposes: Vec::new(),
+        };
+        let delete_error = require_incremental_error(
+            store.publish_incremental_structural_delta(&delete_delta),
+            "prepared delete failure must abort the batch",
+        )?;
+        require(
+            delete_error
+                .to_string()
+                .contains("injected prepared delete failure"),
+            "prepared delete failure lost its terminal status",
+        )?;
+        require_unpublished_batch(&store, base, "base-hash")?;
+        Ok(())
+    }
+
+    fn require_unpublished_batch(
+        store: &AtlasStore,
+        base: PublicationState,
+        expected_hash: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        require_eq(
+            &store.publication_state()?,
+            &base,
+            "publication state after failed prepared batch",
+        )?;
+        require_eq(
+            &store.structural_state_signature()?,
+            &Some("batch-base".to_owned()),
+            "signature after failed prepared batch",
+        )?;
+        require_eq(
+            &require_some(
+                store.load_node_by_path("src/existing.rs")?,
+                "existing node after failed prepared batch",
+            )?
+            .node
+            .content_hash,
+            &Some(expected_hash.to_owned()),
+            "existing node hash after failed prepared batch",
+        )?;
+        require_eq(
+            &store.connection.query_row(
+                "SELECT COUNT(*) FROM graph_entities
+                 WHERE structural_slot = 'a' AND repository_path = 'src/existing.rs'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            &1,
+            "graph row after failed prepared batch",
+        )?;
+        Ok(())
+    }
+
     fn read_optional_file(path: &Path) -> io::Result<Vec<u8>> {
         match fs::read(path) {
             Ok(bytes) => Ok(bytes),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(error) => Err(error),
         }
+    }
+
+    fn prove_transactional_reader_and_rollback_retention() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let live_path = temp.path().join("reader-live.db");
+        let staging_path = temp.path().join("reader-stage.db");
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+
+        let mut writer = AtlasStore::open(&live_path)?;
+        writer.set_project_root(&root)?;
+        writer.replace_scan(&[
+            file_node("src/first.rs", "old-first-hash"),
+            file_node("src/second.rs", "old-second-hash"),
+        ])?;
+        writer.replace_file_texts_for_paths(
+            &["src/first.rs".to_owned(), "src/second.rs".to_owned()],
+            &[
+                file_text("src/first.rs", "old first generation"),
+                file_text("src/second.rs", "old second generation"),
+            ],
+        )?;
+        insert_graph_entity(&writer.connection, "old-first", "src/first.rs")?;
+        let rollback_counts = structural_counts(&writer.connection, StructuralSlot::A)?;
+
+        let staging = writer.create_structural_staging(&live_path, &staging_path, &root)?;
+        let mut stage = AtlasStore::open(staging.path())?;
+        stage.prepare_structural_full_scan()?;
+        stage.replace_scan(&[
+            file_node("src/first.rs", "new-first-hash"),
+            file_node("src/second.rs", "new-second-hash"),
+        ])?;
+        stage.replace_file_texts_for_paths(
+            &["src/first.rs".to_owned(), "src/second.rs".to_owned()],
+            &[
+                file_text("src/first.rs", "new first generation"),
+                file_text("src/second.rs", "new second generation"),
+            ],
+        )?;
+        insert_graph_entity(&stage.connection, "new-first", "src/first.rs")?;
+        stage.set_staged_structural_state_signature(&staging, "reader-next")?;
+        stage.seal_structural_staging(&staging)?;
+        drop(stage);
+
+        writer.connection.execute_batch(
+            "CREATE TRIGGER reject_active_structural_delete
+             BEFORE DELETE ON file_texts
+             WHEN old.structural_slot = (
+                 SELECT active_slot FROM graph_publication_state WHERE singleton = 1
+             )
+             BEGIN
+                 SELECT RAISE(ABORT, 'active structural slot delete attempted');
+             END;",
+        )?;
+
+        let reader = AtlasStore::open(&live_path)?;
+        let publication_barrier = Arc::new(Barrier::new(2));
+        let writer_barrier = Arc::clone(&publication_barrier);
+        let publication_thread = thread::spawn(move || -> Result<PublicationState, String> {
+            writer_barrier.wait();
+            let result = writer
+                .publish_structural_staging(&staging)
+                .map_err(|error| error.to_string());
+            writer_barrier.wait();
+            result
+        });
+
+        let mut observed = Vec::new();
+        let mut publication_started = false;
+        reader.visit_file_texts_for_search(None, false, |text| {
+            if !publication_started {
+                publication_started = true;
+                publication_barrier.wait();
+                publication_barrier.wait();
+            }
+            observed.push((text.path, text.content));
+            Ok(true)
+        })?;
+        let publication = publication_thread
+            .join()
+            .map_err(|_panic| io::Error::other("overlapping full publication panicked"))?
+            .map_err(io::Error::other)?;
+
+        require_eq(
+            &publication,
+            &PublicationState {
+                active_slot: StructuralSlot::B,
+                active_epoch: IndexEpoch::new(1),
+            },
+            "overlapping full publication",
+        )?;
+        require_eq(
+            &observed,
+            &vec![
+                ("src/first.rs".to_owned(), "old first generation".to_owned()),
+                (
+                    "src/second.rs".to_owned(),
+                    "old second generation".to_owned(),
+                ),
+            ],
+            "transactional reader generation",
+        )?;
+
+        let current = reader.load_file_texts_for_search(None, false)?;
+        let current = current
+            .into_iter()
+            .map(|text| (text.path, text.content))
+            .collect::<Vec<_>>();
+        require_eq(
+            &current,
+            &vec![
+                ("src/first.rs".to_owned(), "new first generation".to_owned()),
+                (
+                    "src/second.rs".to_owned(),
+                    "new second generation".to_owned(),
+                ),
+            ],
+            "post-publication reader generation",
+        )?;
+        require_eq(
+            &structural_counts(&reader.connection, StructuralSlot::A)?,
+            &rollback_counts,
+            "retained rollback slot",
+        )?;
+        require(
+            structural_counts(&reader.connection, StructuralSlot::B)?
+                .into_iter()
+                .any(|count| count > 0),
+            "active slot is empty after publication",
+        )?;
+        Ok(())
     }
 
     fn prove_parent_owned_full_scan_publication() -> Result<(), Box<dyn Error>> {
@@ -2340,6 +3607,19 @@ mod tests {
         value.ok_or_else(|| io::Error::other(format!("{field} is missing")).into())
     }
 
+    fn require_incremental_error(
+        result: DbResult<IncrementalPublication>,
+        context: &str,
+    ) -> Result<DbError, Box<dyn Error>> {
+        match result {
+            Err(error) => Ok(error),
+            Ok(publication) => Err(io::Error::other(format!(
+                "{context}: published unexpectedly as {publication:?}"
+            ))
+            .into()),
+        }
+    }
+
     fn checkpoint(connection: &Connection) -> DbResult<()> {
         let busy = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
             row.get::<_, i64>(0)
@@ -2404,7 +3684,7 @@ mod tests {
     }
 
     fn structural_counts(connection: &Connection, slot: StructuralSlot) -> DbResult<Vec<i64>> {
-        STRUCTURAL_TABLES
+        schema::STRUCTURAL_DERIVED_TABLES
             .iter()
             .map(|table| {
                 connection

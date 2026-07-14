@@ -2894,22 +2894,48 @@
           "test_ids": [
             "UT:ARRI-4.13"
           ],
-          "assertion": "Verify keep normal readers filtered to one transactionally observed active slot, retain the previous full slot for rollback until the next successful full publication or explicit bounded cleanup, and never delete the active slot.",
+          "assertion": "A normal multi-row structural read captures one active slot inside one SQLite read transaction, remains on that generation across an overlapping full publication, observes the next generation only in a later read, retains the previous full slot, and rejects active-slot deletion.",
           "command": {
             "executable": "cargo",
             "arguments": [
               "test",
               "--locked",
-              "--workspace",
+              "-p",
+              "projectatlas-db",
               "--all-features",
-              "task_arri_ut_arri_4_13"
+              "structural_publication::tests::task_arri_ut_arri_4_13",
+              "--",
+              "--exact"
             ]
           },
-          "timeout_seconds": 300,
+          "timeout_seconds": 600,
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "crates/projectatlas-db/src/lib.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/structural_publication.rs"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification-plan.json"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-4.13",
+              "path": "crates/projectatlas-db/src/structural_publication.rs",
+              "anchor": "task_arri_ut_arri_4_13"
             }
           ]
         },
@@ -2980,22 +3006,48 @@
           "test_ids": [
             "UT:ARRI-4.15"
           ],
-          "assertion": "Verify add prepared batch insert/update/delete APIs that propagate every SQLite terminal status and prohibit duplicated schema knowledge or manual SQLite page writers.",
+          "assertion": "One immediate parent transaction applies prepared insert, update, and delete batches, propagates each injected SQLite failure, rolls back every successful prefix plus graph invalidation, preserves slot/epoch/signature, and uses the schema-owned structural table inventory without a page writer or fallback retry.",
           "command": {
             "executable": "cargo",
             "arguments": [
               "test",
               "--locked",
-              "--workspace",
+              "-p",
+              "projectatlas-db",
               "--all-features",
-              "task_arri_ut_arri_4_15"
+              "structural_publication::tests::task_arri_ut_arri_4_15",
+              "--",
+              "--exact"
             ]
           },
-          "timeout_seconds": 300,
+          "timeout_seconds": 600,
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "crates/projectatlas-db/src/lib.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/structural_publication.rs"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification-plan.json"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-4.15",
+              "path": "crates/projectatlas-db/src/structural_publication.rs",
+              "anchor": "task_arri_ut_arri_4_15"
             }
           ]
         },
@@ -3004,22 +3056,56 @@
           "test_ids": [
             "UT:ARRI-4.16"
           ],
-          "assertion": "Verify add graph uniqueness, endpoint, relation-family, count, coverage, UTF-8, root-binding, slot, epoch, and schema reconciliation before publication.",
+          "assertion": "The schema-owned pre-commit reconciler keeps exhaustive quick-check, foreign-key, graph, coverage, TEXT, and FTS validation for full publication while incremental publication revalidates the authoritative normalized DDL for every structural table/index/trigger, exact PK/FK/UNIQUE/index/root/publication contracts, and live foreign-key enforcement before checking only the indexed active-slot affected closure and trigram-indexed FTS path candidates. A forward migration upgrades existing slot-bound databases to the new path indexes and one-owner FTS lookup contract. Typed candidate reconciliation enforces the u32 total boundary, the 64-row retention budget, contiguous ordinals, counts, completeness, and target uniqueness. Query-plan assertions, root/short/quoted/spaced/Unicode/case-distinct path publications, native duplicate rejection, twenty injected integrity/schema faults including collation/partial-index/FK-action drift, and full/incremental late failures prove fail-closed rollback without changing either slot, the signature, or publication metadata.",
           "command": {
             "executable": "cargo",
             "arguments": [
               "test",
               "--locked",
-              "--workspace",
+              "-p",
+              "projectatlas-db",
               "--all-features",
-              "task_arri_ut_arri_4_16"
+              "structural_publication::tests::task_arri_ut_arri_4_16",
+              "--",
+              "--exact"
             ]
           },
-          "timeout_seconds": 300,
+          "timeout_seconds": 600,
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "crates/projectatlas-core/src/graph.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/schema.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/structural_publication.rs"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/changes/advance-rust-repository-intelligence/design.md"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification-plan.json"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-4.16",
+              "path": "crates/projectatlas-db/src/structural_publication.rs",
+              "anchor": "task_arri_ut_arri_4_16"
             }
           ]
         },
@@ -3028,22 +3114,44 @@
           "test_ids": [
             "UT:ARRI-4.17"
           ],
-          "assertion": "Verify add corruption and interrupted-row-iteration tests proving partial SQLite rows never return as successful empty or truncated query pages.",
+          "assertion": "Every started SQLite result page is stepped to terminal status after visitor stop; a synthetic SQLITE_CORRUPT result and a real interrupted file-text statement both fail the whole page after one decoded row, preserve the raw terminal cause, expose no successful prefix, and include corruption recovery guidance when applicable.",
           "command": {
             "executable": "cargo",
             "arguments": [
               "test",
               "--locked",
-              "--workspace",
+              "-p",
+              "projectatlas-db",
               "--all-features",
-              "task_arri_ut_arri_4_17"
+              "tests::task_arri_ut_arri_4_17",
+              "--",
+              "--exact"
             ]
           },
-          "timeout_seconds": 300,
+          "timeout_seconds": 600,
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "crates/projectatlas-db/src/lib.rs"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification-plan.json"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-4.17",
+              "path": "crates/projectatlas-db/src/lib.rs",
+              "anchor": "task_arri_ut_arri_4_17"
             }
           ]
         },
