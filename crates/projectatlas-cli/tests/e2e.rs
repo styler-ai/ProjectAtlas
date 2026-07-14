@@ -8002,6 +8002,14 @@ fn notify_watch_refreshes_symbols_after_file_change() -> Result<(), Box<dyn Erro
     )?;
     let db = temp.path().join("projectatlas.db");
 
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let mut child = StdCommand::new(executable)
         .current_dir(&repo)
