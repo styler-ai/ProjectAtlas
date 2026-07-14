@@ -3160,22 +3160,100 @@
           "test_ids": [
             "UT:ARRI-4.18"
           ],
-          "assertion": "Verify add migration tests from every supported prior schema with before/after purpose, review state, telemetry, settings, file, symbol, search, graph, slot, and epoch reconciliation.",
+          "assertion": "Every supported prior schema version migrates transactionally to the accepted ledger and exact current schema while preserving project identity, reviewed purpose state, settings, telemetry, file metadata, symbols, lexical text/search behavior, and any existing graph entity; graph rows reconcile to active slot A at epoch 0 without fabricating rows for schemas that had none.",
           "command": {
             "executable": "cargo",
             "arguments": [
               "test",
               "--locked",
-              "--workspace",
+              "-p",
+              "projectatlas-db",
               "--all-features",
-              "task_arri_ut_arri_4_18"
+              "schema::tests::task_arri_ut_arri_4_18",
+              "--",
+              "--exact"
             ]
           },
-          "timeout_seconds": 300,
+          "timeout_seconds": 600,
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "crates/projectatlas-db/src/schema.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v01.db"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v02.db"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v03.db"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v04.db"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v05.db"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v06.db"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v07.db"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v08.db"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v09.db"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v10.db"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v11.db"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v12.db"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v13.db"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v14.db"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification-plan.json"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-4.18",
+              "path": "crates/projectatlas-db/src/schema.rs",
+              "anchor": "task_arri_ut_arri_4_18"
             }
           ]
         },
@@ -3184,22 +3262,51 @@
           "test_ids": [
             "UT:ARRI-4.19"
           ],
-          "assertion": "Verify add unknown-future-schema, failed-preflight, insufficient-space, partial-object, failed-migration, and interrupted-publication tests that refuse activation and preserve the original database.",
+          "assertion": "Unknown-future schemas, root-binding preflight failures, insufficient backup space, partial migration objects, injected migration verification failures, and interrupted inactive-slot imports all refuse activation; rejected preflight and migration cases preserve the exact main database and sidecar inventory, while interrupted publication preserves authored rows, the active tuple, active content, and the retained inactive slot.",
           "command": {
             "executable": "cargo",
             "arguments": [
               "test",
               "--locked",
-              "--workspace",
+              "-p",
+              "projectatlas-db",
               "--all-features",
               "task_arri_ut_arri_4_19"
             ]
           },
-          "timeout_seconds": 300,
+          "timeout_seconds": 600,
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "crates/projectatlas-db/src/schema.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/structural_publication.rs"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification-plan.json"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-4.19",
+              "path": "crates/projectatlas-db/src/schema.rs",
+              "anchor": "task_arri_ut_arri_4_19_schema_failures"
+            },
+            {
+              "test_id": "UT:ARRI-4.19",
+              "path": "crates/projectatlas-db/src/structural_publication.rs",
+              "anchor": "task_arri_ut_arri_4_19_interrupted_publication"
             }
           ]
         },

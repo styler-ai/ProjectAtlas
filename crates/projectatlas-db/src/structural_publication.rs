@@ -1580,6 +1580,12 @@ mod tests {
     }
 
     #[test]
+    fn task_arri_ut_arri_4_19_interrupted_publication() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        prove_import_rollback(temp.path())
+    }
+
+    #[test]
     fn task_arri_ut_arri_7_7() -> Result<(), Box<dyn Error>> {
         prove_incremental_publication_atomicity()
     }
@@ -3516,9 +3522,14 @@ mod tests {
             has_fts,
             "bundled SQLite must expose the tested FTS import boundary",
         )?;
+        let canonical_insert_trigger_sql = live.connection.query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'file_text_fts_insert'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
         live.connection.execute_batch(
-            "DROP TRIGGER file_text_fts_insert;
-             CREATE TRIGGER file_text_fts_insert
+            "CREATE TRIGGER inject_inactive_slot_import_failure
              AFTER INSERT ON file_texts
              BEGIN
                  SELECT CASE
@@ -3527,11 +3538,6 @@ mod tests {
                      )
                      THEN RAISE(ABORT, 'injected inactive-slot import failure')
                  END;
-                 INSERT INTO file_text_fts(
-                     structural_slot, last_changed_epoch, path, content
-                 ) VALUES(
-                     new.structural_slot, new.last_changed_epoch, new.path, new.content
-                 );
              END;",
         )?;
 
@@ -3549,6 +3555,17 @@ mod tests {
                 .to_string()
                 .contains("injected inactive-slot import failure"),
             "inactive-slot import failure lost its root cause",
+        )?;
+        let canonical_insert_trigger_sql_after = live.connection.query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'file_text_fts_insert'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &canonical_insert_trigger_sql_after,
+            &canonical_insert_trigger_sql,
+            "canonical FTS insert trigger after import rollback",
         )?;
         require_eq(
             &live.publication_state()?,

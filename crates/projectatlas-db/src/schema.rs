@@ -6919,6 +6919,522 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn task_arri_ut_arri_4_18() -> Result<(), Box<dyn Error>> {
+        const FROZEN_MIGRATION_FIXTURES: &[(i64, &[u8], &str)] = &[
+            (
+                1,
+                include_bytes!("../tests/fixtures/schema-migrations/schema-v01.db"),
+                "blake3:ebb2d78f9390fff83a5f9d0186a034ac88ddda6d841ded4e82970ddd3bf11ae5",
+            ),
+            (
+                2,
+                include_bytes!("../tests/fixtures/schema-migrations/schema-v02.db"),
+                "blake3:41c10eaff912258aba14e1304ff8797de1ef53c2c28ee2e5bb669ac74585574b",
+            ),
+            (
+                3,
+                include_bytes!("../tests/fixtures/schema-migrations/schema-v03.db"),
+                "blake3:5c6f2dddef5aef9586562d36099e7572cb35436641771dfe7f21e20a332a699f",
+            ),
+            (
+                4,
+                include_bytes!("../tests/fixtures/schema-migrations/schema-v04.db"),
+                "blake3:61977387bc3a49ed59615d704746fd152bb52b5250968d4ffafcc13a6d1d3a54",
+            ),
+            (
+                5,
+                include_bytes!("../tests/fixtures/schema-migrations/schema-v05.db"),
+                "blake3:004db47283e38db0a816debf59fc4ce8f776b8f79fa7a8a92053c63baa36c734",
+            ),
+            (
+                6,
+                include_bytes!("../tests/fixtures/schema-migrations/schema-v06.db"),
+                "blake3:07551f5ce753ac864cb1613cf00272bb0ad83bc10adf57e9be6c3429969d3044",
+            ),
+            (
+                7,
+                include_bytes!("../tests/fixtures/schema-migrations/schema-v07.db"),
+                "blake3:b1a485e97456736c28d6f7d44676f5a327dcb2390d51b6b8425d50486163f602",
+            ),
+            (
+                8,
+                include_bytes!("../tests/fixtures/schema-migrations/schema-v08.db"),
+                "blake3:27a5da4f01e5d002f27ea8e5e2afa89bffc6230b44b4f102beeeb12a27d623b2",
+            ),
+            (
+                9,
+                include_bytes!("../tests/fixtures/schema-migrations/schema-v09.db"),
+                "blake3:ed81c7cf43c2106d878574be6554b72a95d7263a755ab5707dee31d018ee4bcf",
+            ),
+            (
+                10,
+                include_bytes!("../tests/fixtures/schema-migrations/schema-v10.db"),
+                "blake3:83bddf21c9334a2c8effaee4009b6b26ed59e423a7e683010ddfc9825db87f3d",
+            ),
+            (
+                11,
+                include_bytes!("../tests/fixtures/schema-migrations/schema-v11.db"),
+                "blake3:96f3a01498ffea84abd15370fd36e9ea4d1dbec34f871daea8523e13ab1e223d",
+            ),
+            (
+                12,
+                include_bytes!("../tests/fixtures/schema-migrations/schema-v12.db"),
+                "blake3:f8bd76bc7ada759f91e66bc2be4fbc41c3c5de8f02ffc1cecdcd53bd909fc9ef",
+            ),
+            (
+                13,
+                include_bytes!("../tests/fixtures/schema-migrations/schema-v13.db"),
+                "blake3:368ad5d85f59f4f1128a67d2956cc6eda09d0917e8af6467c9a8a9b0dde233ae",
+            ),
+            (
+                14,
+                include_bytes!("../tests/fixtures/schema-migrations/schema-v14.db"),
+                "blake3:b8fe0588f4a33ef8776522065600137ad9977710aa143f3807a893c8f21acb3b",
+            ),
+        ];
+
+        let supported_version_count =
+            usize::try_from(SCHEMA_VERSION - MIN_SUPPORTED_SCHEMA_VERSION)?;
+        if FROZEN_MIGRATION_FIXTURES.len() != supported_version_count {
+            return Err(io::Error::other(format!(
+                "frozen migration fixture coverage is incomplete: expected {supported_version_count}, found {}",
+                FROZEN_MIGRATION_FIXTURES.len()
+            ))
+            .into());
+        }
+
+        for (expected_source_version, fixture) in
+            (MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION).zip(FROZEN_MIGRATION_FIXTURES)
+        {
+            let &(source_version, fixture_bytes, expected_digest) = fixture;
+            if source_version != expected_source_version {
+                return Err(io::Error::other(format!(
+                    "frozen migration fixtures are out of order: expected schema {expected_source_version}, found schema {source_version}"
+                ))
+                .into());
+            }
+            let actual_digest = format!("blake3:{}", blake3::hash(fixture_bytes).to_hex());
+            if actual_digest != expected_digest {
+                return Err(io::Error::other(format!(
+                    "schema {source_version} frozen fixture digest changed: expected {expected_digest}, found {actual_digest}"
+                ))
+                .into());
+            }
+
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join(format!("schema-{source_version}.db"));
+            fs::write(&path, fixture_bytes)?;
+
+            let before = {
+                let connection = Connection::open(&path)?;
+                let embedded_source_version = connection.query_row(
+                    "SELECT value FROM metadata WHERE key = 'schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )?;
+                if embedded_source_version != source_version.to_string() {
+                    return Err(io::Error::other(format!(
+                        "schema {source_version} frozen fixture declares schema {embedded_source_version}"
+                    ))
+                    .into());
+                }
+                migration_preserved_rows(&connection)?
+            };
+            let store = crate::AtlasStore::open(&path)?;
+            verify_current_schema(&store.connection)?;
+            let after = migration_preserved_rows(&store.connection)?;
+            if after != before {
+                return Err(io::Error::other(format!(
+                    "schema {source_version} migration changed preserved rows: before={before:?}, after={after:?}"
+                ))
+                .into());
+            }
+
+            let publication = store.publication_state()?;
+            if publication.active_slot != StructuralSlot::A
+                || publication.active_epoch != IndexEpoch::INITIAL
+            {
+                return Err(io::Error::other(format!(
+                    "schema {source_version} migration published the wrong structural state: {publication:?}"
+                ))
+                .into());
+            }
+            let graph_binding = store
+                .connection
+                .query_row(
+                    "SELECT structural_slot, last_changed_epoch
+                     FROM graph_entities
+                     WHERE repository_path = 'src/migration.rs'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()?;
+            if source_version >= MIGRATION_BASE_SCHEMA_VERSION + 3 {
+                if graph_binding != Some(("a".to_owned(), 0)) {
+                    return Err(io::Error::other(format!(
+                        "schema {source_version} graph row did not reconcile to the active tuple: {graph_binding:?}"
+                    ))
+                    .into());
+                }
+            } else if graph_binding.is_some() {
+                return Err(io::Error::other(format!(
+                    "schema {source_version} introduced an unseeded graph row: {graph_binding:?}"
+                ))
+                .into());
+            }
+
+            let search_rows = store.load_file_texts_for_search(Some("migration marker"), false)?;
+            if search_rows.len() != 1
+                || search_rows[0].path != "src/migration.rs"
+                || search_rows[0].content != "migration marker preserved"
+            {
+                return Err(io::Error::other(format!(
+                    "schema {source_version} migration changed lexical search results: {search_rows:?}"
+                ))
+                .into());
+            }
+            let ledger_rows = store.connection.query_row(
+                "SELECT COUNT(*) FROM schema_migrations",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?;
+            if ledger_rows != i64::try_from(allocated_migrations().len())? {
+                return Err(io::Error::other(format!(
+                    "schema {source_version} migration ledger is incomplete: {ledger_rows}"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_19_schema_failures() -> Result<(), Box<dyn Error>> {
+        fn reject_migration(_: &Connection) -> DbResult<()> {
+            Err(preflight_error("injected migration failure"))
+        }
+
+        let future = tempfile::tempdir()?;
+        let future_path = future.path().join("future.db");
+        seed_legacy_schema(&future_path, SCHEMA_VERSION + 1)?;
+        remove_sqlite_sidecars(&future_path)?;
+        let future_bytes = fs::read(&future_path)?;
+        match crate::AtlasStore::open(&future_path) {
+            Err(DbError::SchemaVersion { found, expected })
+                if found == SCHEMA_VERSION + 1 && expected == SCHEMA_VERSION => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "unknown future schema returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(_) => return Err(io::Error::other("unknown future schema was activated").into()),
+        }
+        require_database_unchanged(&future_path, &future_bytes)?;
+
+        let bound = tempfile::tempdir()?;
+        let original_root = bound.path().join("original");
+        let original_atlas = original_root.join(PROJECTATLAS_DIRECTORY_NAME);
+        fs::create_dir_all(&original_atlas)?;
+        let original_path = original_atlas.join("projectatlas.db");
+        {
+            let store = crate::AtlasStore::open(&original_path)?;
+            store.set_project_root(&original_root)?;
+            store
+                .connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        }
+        remove_sqlite_sidecars(&original_path)?;
+        let moved_root = bound.path().join("moved");
+        let moved_atlas = moved_root.join(PROJECTATLAS_DIRECTORY_NAME);
+        fs::create_dir_all(&moved_atlas)?;
+        let moved_path = moved_atlas.join("projectatlas.db");
+        fs::copy(&original_path, &moved_path)?;
+        let moved_bytes = fs::read(&moved_path)?;
+        match crate::AtlasStore::open(&moved_path) {
+            Err(DbError::SchemaPreflight { message }) if message.contains("root binding") => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "failed root preflight returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(_) => return Err(io::Error::other("failed root preflight activated a copy").into()),
+        }
+        require_database_unchanged(&moved_path, &moved_bytes)?;
+
+        let insufficient = tempfile::tempdir()?;
+        let insufficient_path = insufficient.path().join("insufficient.db");
+        seed_supported_migration_fixture(&insufficient_path, MIGRATION_BASE_SCHEMA_VERSION)?;
+        remove_sqlite_sidecars(&insufficient_path)?;
+        let insufficient_bytes = fs::read(&insufficient_path)?;
+        let mut insufficient_report = inspect_schema_preflight(&insufficient_path)?;
+        insufficient_report.free_space.available_bytes = insufficient_report
+            .free_space
+            .required_bytes
+            .saturating_sub(1);
+        insufficient_report.free_space.sufficient = false;
+        insufficient_report.backup.backup_ready = false;
+        insufficient_report.backup.rollback_ready = false;
+        match migration_plan(&insufficient_report) {
+            Err(DbError::SchemaPreflight { message })
+                if message.contains("migration backup is not ready") => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "insufficient-space preflight returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(_) => {
+                return Err(io::Error::other("insufficient-space migration was planned").into());
+            }
+        }
+        require_database_unchanged(&insufficient_path, &insufficient_bytes)?;
+
+        let partial = tempfile::tempdir()?;
+        let partial_path = partial.path().join("partial.db");
+        seed_supported_migration_fixture(&partial_path, MIGRATION_BASE_SCHEMA_VERSION)?;
+        Connection::open(&partial_path)?
+            .execute_batch("CREATE TABLE summaries_new(id INTEGER PRIMARY KEY);")?;
+        remove_sqlite_sidecars(&partial_path)?;
+        let partial_bytes = fs::read(&partial_path)?;
+        match crate::AtlasStore::open(&partial_path) {
+            Err(DbError::SchemaPreflight { message }) if message.contains("summaries_new") => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "partial migration object returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(_) => return Err(io::Error::other("partial migration object was activated").into()),
+        }
+        require_database_unchanged(&partial_path, &partial_bytes)?;
+
+        let failed = tempfile::tempdir()?;
+        let failed_path = failed.path().join("failed.db");
+        seed_supported_migration_fixture(&failed_path, MIGRATION_BASE_SCHEMA_VERSION)?;
+        remove_sqlite_sidecars(&failed_path)?;
+        let failed_bytes = fs::read(&failed_path)?;
+        let mut failed_plan = preflight(&failed_path)?;
+        let Some(first_pending) = failed_plan.pending.first_mut() else {
+            return Err(io::Error::other("supported schema did not plan a migration").into());
+        };
+        first_pending.definition.verify = reject_migration;
+        {
+            let mut connection = Connection::open(&failed_path)?;
+            match apply_migration_plan(&mut connection, &failed_plan) {
+                Err(DbError::SchemaPreflight { message })
+                    if message.contains("injected migration failure") => {}
+                Err(error) => {
+                    return Err(io::Error::other(format!(
+                        "failed migration returned the wrong error: {error}"
+                    ))
+                    .into());
+                }
+                Ok(()) => return Err(io::Error::other("failed migration committed").into()),
+            }
+        }
+        require_database_unchanged(&failed_path, &failed_bytes)?;
+        Ok(())
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct MigrationPreservedRows {
+        project_instance_id: ProjectInstanceId,
+        purpose: (String, String, String, Option<String>),
+        setting: String,
+        telemetry: (String, i64, i64, i64),
+        file: (String, String, i64),
+        symbol: (String, String, i64, i64),
+        file_text: (String, String, i64, i64, String),
+        graph_entity: Option<(Vec<u8>, String, String)>,
+    }
+
+    fn seed_supported_migration_fixture(path: &Path, version: i64) -> DbResult<()> {
+        if !(MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION).contains(&version) {
+            return Err(preflight_error(format!(
+                "unsupported migration fixture version: {version}"
+            )));
+        }
+        seed_legacy_schema(path, version.min(MIGRATION_BASE_SCHEMA_VERSION))?;
+        let mut connection = Connection::open(path)?;
+        if version > MIGRATION_BASE_SCHEMA_VERSION {
+            let migrations = allocated_migrations();
+            let prefix_length = usize::try_from(version - MIGRATION_BASE_SCHEMA_VERSION)
+                .map_err(|error| preflight_error(error.to_string()))?;
+            initialize_migration_prefix(&mut connection, &migrations[..prefix_length])?;
+        } else {
+            initialize_schema_objects(&connection)?;
+            ensure_project_instance_id(&connection, true)?;
+        }
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        connection.execute(
+            "INSERT INTO metadata(key, value) VALUES('migration_fixture_setting', 'preserve-setting')",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO nodes(path, kind, size_bytes, content_hash)
+             VALUES('src/migration.rs', 'file', 27, 'migration-hash')",
+            [],
+        )?;
+        let node_id = connection.last_insert_rowid();
+        connection.execute(
+            "INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+             VALUES(?1, 'Preserve reviewed purpose.', 'agent', 'approved', 'migration-reviewer')",
+            [node_id],
+        )?;
+        connection.execute(
+            "INSERT INTO usage_events(
+                session_id, command, estimated_tokens_without_projectatlas,
+                estimated_tokens_with_projectatlas, estimated_tokens_saved
+             ) VALUES('migration-preservation', 'summary', 100, 25, 75)",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO symbols(
+                path, language, name, kind, signature, exported,
+                line_start, line_end, parser
+             ) VALUES(
+                'src/migration.rs', 'rust', 'preserved_symbol', 'function',
+                'fn preserved_symbol()', 1, 2, 4, 'tree-sitter'
+             )",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO file_texts(path, content_hash, byte_count, line_count, content)
+             VALUES(
+                'src/migration.rs', 'migration-text-hash', 26, 1,
+                'migration marker preserved'
+             )",
+            [],
+        )?;
+
+        if version >= MIGRATION_BASE_SCHEMA_VERSION + 3 {
+            let digest = vec![42_u8; 32];
+            let project = project_instance_id(&connection)?.as_bytes().to_vec();
+            connection.execute(
+                "INSERT INTO graph_entities(
+                    stable_key_digest, stable_key_version, stable_key_canonical,
+                    project_instance_id, entity_kind, repository_path, qualified_name,
+                    parser_kind, parser_identity, parser_version
+                 ) VALUES(
+                    ?1, 1, ?2, ?3, 'file', 'src/migration.rs', 'crate::migration',
+                    'tree-sitter', 'rust', '1'
+                 )",
+                params![digest, b"migration-entity".as_slice(), project],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn migration_preserved_rows(connection: &Connection) -> DbResult<MigrationPreservedRows> {
+        let purpose = connection.query_row(
+            "SELECT purposes.purpose, purposes.source, purposes.status, purposes.updated_by
+             FROM purposes
+             JOIN nodes ON nodes.id = purposes.node_id
+             WHERE nodes.path = 'src/migration.rs'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )?;
+        let setting = connection.query_row(
+            "SELECT value FROM metadata WHERE key = 'migration_fixture_setting'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        let telemetry = connection.query_row(
+            "SELECT command, estimated_tokens_without_projectatlas,
+                    estimated_tokens_with_projectatlas, estimated_tokens_saved
+             FROM usage_events
+             WHERE session_id = 'migration-preservation'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        let file = connection.query_row(
+            "SELECT path, content_hash, size_bytes
+             FROM nodes WHERE path = 'src/migration.rs'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        let symbol = connection.query_row(
+            "SELECT name, signature, line_start, line_end
+             FROM symbols
+             WHERE path = 'src/migration.rs' AND name = 'preserved_symbol'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        let file_text = connection.query_row(
+            "SELECT path, content_hash, byte_count, line_count, content
+             FROM file_texts WHERE path = 'src/migration.rs'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )?;
+        let graph_entity = if sqlite_objects(connection)?.contains_key(GRAPH_ENTITIES_TABLE) {
+            connection
+                .query_row(
+                    "SELECT stable_key_canonical, repository_path, qualified_name
+                     FROM graph_entities
+                     WHERE repository_path = 'src/migration.rs'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()?
+        } else {
+            None
+        };
+        Ok(MigrationPreservedRows {
+            project_instance_id: project_instance_id(connection)?,
+            purpose,
+            setting,
+            telemetry,
+            file,
+            symbol,
+            file_text,
+            graph_entity,
+        })
+    }
+
     fn initialize_ledger_schema(
         connection: &mut Connection,
         migration: &AllocatedMigration,
