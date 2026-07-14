@@ -3318,6 +3318,30 @@
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "Cargo.toml"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/lib.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/schema.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/structural_publication.rs"
+            },
+            {
+              "kind": "file",
+              "path": "docs/benchmarks/projectatlas-v0.4-host-safety.json"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/changes/advance-rust-repository-intelligence/design.md"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
             }
           ]

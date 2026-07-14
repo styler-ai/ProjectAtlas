@@ -341,6 +341,7 @@ impl AtlasStore {
     /// Returns an error if `SQLite` setup or schema validation fails.
     pub fn open(path: &Path) -> DbResult<Self> {
         let migration_plan = schema::preflight(path)?;
+        let _migration_backup = schema::create_verified_migration_backup(path, &migration_plan)?;
         let mut connection = Connection::open(path)?;
         schema::apply_migration_plan(&mut connection, &migration_plan)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;

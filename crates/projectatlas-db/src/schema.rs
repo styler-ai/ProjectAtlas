@@ -1,18 +1,23 @@
 //! `SQLite` schema initialization and legacy repair behind the store facade.
 
 use crate::{DbError, DbResult, sqlite_read_uri};
+use fs4::{FileExt, TryLockError};
 use projectatlas_core::budget::DefaultCoreBudgetKind;
 use projectatlas_core::graph::{
     CoverageRecord, CoverageScope, CoverageState, GraphRelationKind, IdentityText, IndexEpoch,
     OmittedFactCount, ProjectInstanceId, PublicationState, RepositoryFilePath, StructuralSlot,
 };
 use projectatlas_core::normalize_native_path_display;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params, types::ValueRef};
+use rusqlite::{
+    Connection, DatabaseName, OpenFlags, OptionalExtension, Transaction, params, types::ValueRef,
+};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Last schema version released before the runtime-owned migration ledger.
 const MIGRATION_BASE_SCHEMA_VERSION: i64 = 9;
@@ -194,6 +199,10 @@ const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 1;
 const PROJECTATLAS_DIRECTORY_NAME: &str = ".projectatlas";
 /// Minimum headroom reserved when estimating backup feasibility.
 const BACKUP_HEADROOM_BYTES: u64 = 64 * 1024;
+/// Database-name suffix prefix reserved for bounded migration backup artifacts.
+const MIGRATION_BACKUP_SUFFIX_PREFIX: &str = ".migration-backup-";
+/// Advisory lease file that serializes backup retention with migration writes.
+const MIGRATION_BACKUP_LOCK_SUFFIX: &str = ".migration-backup.lock";
 
 /// One accepted migration before its schema version is allocated by inventory order.
 #[derive(Clone, Copy, Debug)]
@@ -355,6 +364,24 @@ impl SchemaMigrationPlan {
             pending: allocated_migrations(),
         }
     }
+
+    /// Whether an existing supported database must be backed up before writes.
+    fn requires_backup(&self) -> bool {
+        self.source_version > 0 && !self.pending.is_empty()
+    }
+}
+
+/// One verified, project-local database image retained for migration rollback.
+#[derive(Debug)]
+pub(crate) struct VerifiedMigrationBackup {
+    /// Immutable backup path whose name includes its content digest.
+    path: PathBuf,
+    /// Cryptographic digest over the complete `SQLite` backup bytes.
+    digest: String,
+    /// Schema identifier captured before migration.
+    source_version: i64,
+    /// Exclusive lease retained through the caller's migration write.
+    _retention_lock: fs::File,
 }
 
 /// One durable migration row read during preflight or post-migration reconciliation.
@@ -1646,6 +1673,323 @@ fn filesystem_error(path: &Path, operation: &str, error: &std::io::Error) -> DbE
 fn preflight_error(message: impl Into<String>) -> DbError {
     DbError::SchemaPreflight {
         message: message.into(),
+    }
+}
+
+/// Create and verify the one retained pre-migration database image.
+///
+/// The online backup API captures committed WAL frames without copying a live
+/// main file directly. A newly verified image is retained before older backup
+/// artifacts are removed, so a cleanup failure is recoverable and prevents the
+/// migration from starting.
+pub(crate) fn create_verified_migration_backup(
+    database_path: &Path,
+    plan: &SchemaMigrationPlan,
+) -> DbResult<Option<VerifiedMigrationBackup>> {
+    validate_migration_plan(plan)?;
+    if !plan.requires_backup() {
+        return Ok(None);
+    }
+
+    let retention_lock = acquire_migration_backup_lock(database_path)?;
+
+    let sidecars = sidecar_state(database_path, "unknown")?;
+    if sidecars.rollback_journal.exists && sidecars.rollback_journal.bytes > 0 {
+        return Err(preflight_error(format!(
+            "cannot create a migration backup while an unresolved rollback journal exists at {}",
+            sidecars.rollback_journal.path.display()
+        )));
+    }
+    if sidecars.wal.exists && !sidecars.shm.exists {
+        return Err(preflight_error(format!(
+            "cannot create a migration backup because WAL sidecar {} has no shared-memory peer",
+            sidecars.wal.path.display()
+        )));
+    }
+
+    let source_uri = sqlite_read_uri(database_path, !sidecars.wal.exists);
+    let source = Connection::open_with_flags(
+        source_uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    let pending_path = pending_migration_backup_path(database_path);
+    if pending_path.exists() {
+        return Err(preflight_error(format!(
+            "migration backup pending path already exists: {}",
+            pending_path.display()
+        )));
+    }
+    if let Err(error) = source.backup(DatabaseName::Main, &pending_path, None) {
+        let cleanup = remove_pending_backup(&pending_path);
+        return Err(preflight_error(format!(
+            "SQLite online migration backup failed for {}: {error}{cleanup}",
+            database_path.display()
+        )));
+    }
+    drop(source);
+
+    let digest = file_blake3_digest(&pending_path)?;
+    let final_path = migration_backup_path(database_path, plan.source_version, &digest)?;
+    let mut backup = VerifiedMigrationBackup {
+        path: pending_path.clone(),
+        digest,
+        source_version: plan.source_version,
+        _retention_lock: retention_lock,
+    };
+    verify_migration_backup(&backup)?;
+
+    if final_path.exists() {
+        verify_migration_backup_path(&final_path, &backup.digest, backup.source_version).map_err(
+            |error| {
+            preflight_error(format!(
+                "existing digest-named migration backup is invalid at {}; the newly verified image remains at {}: {error}",
+                final_path.display(),
+                pending_path.display()
+            ))
+        })?;
+        fs::remove_file(&pending_path).map_err(|error| {
+            filesystem_error(
+                &pending_path,
+                "remove duplicate pending migration backup",
+                &error,
+            )
+        })?;
+        backup.path = final_path;
+    } else {
+        fs::rename(&pending_path, &final_path).map_err(|error| {
+            filesystem_error(
+                &pending_path,
+                &format!(
+                    "retain verified migration backup as {}",
+                    final_path.display()
+                ),
+                &error,
+            )
+        })?;
+        backup.path = final_path;
+        verify_migration_backup(&backup)?;
+    }
+
+    cleanup_obsolete_migration_backups(database_path, &backup.path)?;
+    Ok(Some(backup))
+}
+
+/// Restore a retained migration image through `SQLite` and revalidate the result.
+#[cfg(test)]
+fn restore_verified_migration_backup(
+    database_path: &Path,
+    backup: &VerifiedMigrationBackup,
+) -> DbResult<()> {
+    verify_migration_backup(backup)?;
+    let digest_before = file_blake3_digest(&backup.path)?;
+    let mut destination = Connection::open(database_path)?;
+    destination.restore(
+        DatabaseName::Main,
+        &backup.path,
+        None::<fn(rusqlite::backup::Progress)>,
+    )?;
+    drop(destination);
+    let digest_after = file_blake3_digest(&backup.path)?;
+    if digest_after != digest_before {
+        return Err(preflight_error(format!(
+            "migration backup changed while restoring {}: before={digest_before}, after={digest_after}",
+            backup.path.display()
+        )));
+    }
+
+    let sidecars = sidecar_state(database_path, "unknown")?;
+    let restored_uri = sqlite_read_uri(database_path, !sidecars.wal.exists);
+    let restored = Connection::open_with_flags(
+        restored_uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    match integrity_state(&restored)? {
+        IntegrityState::Passed => {}
+        IntegrityState::Failed(details) => {
+            return Err(preflight_error(format!(
+                "restored migration backup failed SQLite quick_check: {}",
+                details.join("; ")
+            )));
+        }
+    }
+    let restored_version = observed_schema_version(&restored)?;
+    if restored_version != backup.source_version {
+        return Err(preflight_error(format!(
+            "restored migration backup has schema {restored_version}, expected {}",
+            backup.source_version
+        )));
+    }
+    Ok(())
+}
+
+/// Verify backup bytes, integrity, and source schema before retention or restore.
+fn verify_migration_backup(backup: &VerifiedMigrationBackup) -> DbResult<()> {
+    verify_migration_backup_path(&backup.path, &backup.digest, backup.source_version)
+}
+
+/// Verify one backup path against its immutable digest and source schema.
+fn verify_migration_backup_path(path: &Path, digest: &str, source_version: i64) -> DbResult<()> {
+    let actual_digest = file_blake3_digest(path)?;
+    if actual_digest != digest {
+        return Err(preflight_error(format!(
+            "migration backup digest mismatch at {}: expected {}, found {actual_digest}",
+            path.display(),
+            digest
+        )));
+    }
+    let uri = sqlite_read_uri(path, true);
+    let connection = Connection::open_with_flags(
+        uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    match integrity_state(&connection)? {
+        IntegrityState::Passed => {}
+        IntegrityState::Failed(details) => {
+            return Err(preflight_error(format!(
+                "migration backup failed SQLite quick_check at {}: {}",
+                path.display(),
+                details.join("; ")
+            )));
+        }
+    }
+    let observed_version = observed_schema_version(&connection)?;
+    if observed_version != source_version {
+        return Err(preflight_error(format!(
+            "migration backup at {} contains schema {observed_version}, expected {source_version}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Acquire the non-blocking lease that protects one retained backup lifecycle.
+fn acquire_migration_backup_lock(database_path: &Path) -> DbResult<fs::File> {
+    let lock_path = sqlite_sidecar_path(database_path, MIGRATION_BACKUP_LOCK_SUFFIX);
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| filesystem_error(&lock_path, "open migration backup lease", &error))?;
+    match FileExt::try_lock(&lock) {
+        Ok(()) => Ok(lock),
+        Err(TryLockError::WouldBlock) => Err(preflight_error(format!(
+            "another migration backup is already active for {}; retry after that open completes",
+            database_path.display()
+        ))),
+        Err(TryLockError::Error(error)) => Err(filesystem_error(
+            &lock_path,
+            "acquire migration backup lease",
+            &error,
+        )),
+    }
+}
+
+/// Return a collision-resistant temporary path adjacent to the source database.
+fn pending_migration_backup_path(database_path: &Path) -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    sqlite_sidecar_path(
+        database_path,
+        &format!(
+            "{MIGRATION_BACKUP_SUFFIX_PREFIX}pending-{}-{timestamp}.db",
+            std::process::id()
+        ),
+    )
+}
+
+/// Build the retained path whose identity binds source schema and backup bytes.
+fn migration_backup_path(
+    database_path: &Path,
+    source_version: i64,
+    digest: &str,
+) -> DbResult<PathBuf> {
+    let digest = digest.strip_prefix("blake3:").ok_or_else(|| {
+        preflight_error(format!(
+            "unsupported migration backup digest format: {digest}"
+        ))
+    })?;
+    Ok(sqlite_sidecar_path(
+        database_path,
+        &format!("{MIGRATION_BACKUP_SUFFIX_PREFIX}v{source_version}-{digest}.db"),
+    ))
+}
+
+/// Remove every older backup artifact only after the retained image is verified.
+fn cleanup_obsolete_migration_backups(database_path: &Path, retained_path: &Path) -> DbResult<()> {
+    for candidate in migration_backup_candidates(database_path)? {
+        if candidate == retained_path {
+            continue;
+        }
+        if let Err(error) = fs::remove_file(&candidate) {
+            return Err(preflight_error(format!(
+                "recoverable migration backup cleanup failure: retained verified backup {}; failed to remove obsolete artifact {}: {error}; migration was not started and can be retried after removing that obsolete artifact",
+                retained_path.display(),
+                candidate.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Discover only backup artifacts owned by the selected database filename.
+fn migration_backup_candidates(database_path: &Path) -> DbResult<Vec<PathBuf>> {
+    let parent = database_parent(database_path)?;
+    let file_name = database_path.file_name().ok_or_else(|| {
+        preflight_error(format!(
+            "database path has no filename for backup retention: {}",
+            database_path.display()
+        ))
+    })?;
+    let mut prefix = OsString::from(file_name);
+    prefix.push(MIGRATION_BACKUP_SUFFIX_PREFIX);
+    let prefix = prefix.as_encoded_bytes();
+    let mut candidates = Vec::new();
+    let entries = fs::read_dir(parent)
+        .map_err(|error| filesystem_error(parent, "list migration backup artifacts", &error))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            filesystem_error(parent, "read migration backup directory entry", &error)
+        })?;
+        let name = entry.file_name();
+        let encoded = name.as_encoded_bytes();
+        if encoded.starts_with(prefix) && encoded.ends_with(b".db") {
+            candidates.push(entry.path());
+        }
+    }
+    candidates.sort();
+    Ok(candidates)
+}
+
+/// Stream one file through BLAKE3 without scaling memory to database size.
+fn file_blake3_digest(path: &Path) -> DbResult<String> {
+    let mut file = fs::File::open(path)
+        .map_err(|error| filesystem_error(path, "open migration backup for digest", &error))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| filesystem_error(path, "read migration backup for digest", &error))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("blake3:{}", hasher.finalize().to_hex()))
+}
+
+/// Best-effort cleanup detail appended when online backup creation fails.
+fn remove_pending_backup(path: &Path) -> String {
+    match fs::remove_file(path) {
+        Ok(()) => String::new(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => format!(
+            "; pending artifact cleanup also failed for {}: {error}",
+            path.display()
+        ),
     }
 }
 
@@ -7105,6 +7449,167 @@ mod tests {
                 ))
                 .into());
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_20_migration_backup_restore() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("migration-restore.db");
+        let source_version = SCHEMA_VERSION - 1;
+        seed_supported_migration_fixture(&path, source_version)?;
+
+        let writer = Connection::open(&path)?;
+        writer.pragma_update(None, "journal_mode", "WAL")?;
+        writer.pragma_update(None, "wal_autocheckpoint", 0)?;
+        writer.execute(
+            "INSERT INTO metadata(key, value) VALUES('wal_backup_marker', 'captured')",
+            [],
+        )?;
+        let sidecars = sidecar_state(&path, "unknown")?;
+        if !sidecars.wal.exists || sidecars.wal.bytes == 0 || !sidecars.shm.exists {
+            return Err(io::Error::other(format!(
+                "migration backup fixture did not retain committed WAL frames: {sidecars:?}"
+            ))
+            .into());
+        }
+        let preserved_before = migration_preserved_rows(&writer)?;
+
+        let plan = preflight(&path)?;
+        let backup = create_verified_migration_backup(&path, &plan)?
+            .ok_or_else(|| io::Error::other("supported migration did not retain a backup"))?;
+        if backup.source_version != source_version
+            || backup.path.parent() != path.parent()
+            || file_blake3_digest(&backup.path)? != backup.digest
+        {
+            return Err(io::Error::other(format!(
+                "migration backup identity did not reconcile: {backup:?}"
+            ))
+            .into());
+        }
+        match create_verified_migration_backup(&path, &plan) {
+            Err(DbError::SchemaPreflight { message })
+                if message.contains("another migration backup is already active") => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "concurrent migration backup returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(_) => {
+                return Err(io::Error::other(
+                    "concurrent migration backup bypassed the retention lease",
+                )
+                .into());
+            }
+        }
+        let backup_connection = Connection::open_with_flags(
+            sqlite_read_uri(&backup.path, true),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )?;
+        let wal_marker = backup_connection.query_row(
+            "SELECT value FROM metadata WHERE key = 'wal_backup_marker'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        if wal_marker != "captured" {
+            return Err(io::Error::other(format!(
+                "online backup omitted committed WAL content: {wal_marker:?}"
+            ))
+            .into());
+        }
+        drop(backup_connection);
+        drop(writer);
+
+        {
+            let mut connection = Connection::open(&path)?;
+            apply_migration_plan(&mut connection, &plan)?;
+            connection.execute(
+                "UPDATE metadata SET value = 'post-migration' WHERE key = 'wal_backup_marker'",
+                [],
+            )?;
+        }
+        let migrated = Connection::open(&path)?;
+        if observed_schema_version(&migrated)? != SCHEMA_VERSION {
+            return Err(io::Error::other("migration did not reach the current schema").into());
+        }
+        drop(migrated);
+
+        let original_backup_bytes = fs::read(&backup.path)?;
+        let mut corrupt_backup_bytes = original_backup_bytes.clone();
+        let Some(first) = corrupt_backup_bytes.first_mut() else {
+            return Err(io::Error::other("migration backup was empty").into());
+        };
+        *first ^= 0xff;
+        fs::write(&backup.path, corrupt_backup_bytes)?;
+        match restore_verified_migration_backup(&path, &backup) {
+            Err(DbError::SchemaPreflight { message }) if message.contains("digest mismatch") => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "corrupt backup returned the wrong restore error: {error}"
+                ))
+                .into());
+            }
+            Ok(()) => return Err(io::Error::other("corrupt backup restored unexpectedly").into()),
+        }
+        if observed_schema_version(&Connection::open(&path)?)? != SCHEMA_VERSION {
+            return Err(io::Error::other("rejected restore changed the migrated database").into());
+        }
+
+        fs::write(&backup.path, original_backup_bytes)?;
+        restore_verified_migration_backup(&path, &backup)?;
+        let restored = Connection::open(&path)?;
+        if observed_schema_version(&restored)? != source_version
+            || migration_preserved_rows(&restored)? != preserved_before
+            || restored.query_row(
+                "SELECT value FROM metadata WHERE key = 'wal_backup_marker'",
+                [],
+                |row| row.get::<_, String>(0),
+            )? != "captured"
+        {
+            return Err(io::Error::other(
+                "verified migration restore did not reproduce the pre-migration database",
+            )
+            .into());
+        }
+        drop(restored);
+        drop(backup);
+
+        let obsolete = sqlite_sidecar_path(
+            &path,
+            &format!("{MIGRATION_BACKUP_SUFFIX_PREFIX}obsolete.db"),
+        );
+        fs::create_dir(&obsolete)?;
+        let retry_plan = preflight(&path)?;
+        match create_verified_migration_backup(&path, &retry_plan) {
+            Err(DbError::SchemaPreflight { message })
+                if message.contains("recoverable migration backup cleanup failure")
+                    && message.contains("migration was not started") => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "obsolete-backup cleanup returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(_) => {
+                return Err(
+                    io::Error::other("obsolete-backup cleanup failure was not reported").into(),
+                );
+            }
+        }
+        if observed_schema_version(&Connection::open(&path)?)? != source_version {
+            return Err(io::Error::other("cleanup failure started the migration").into());
+        }
+        fs::remove_dir(&obsolete)?;
+        let retained = create_verified_migration_backup(&path, &retry_plan)?
+            .ok_or_else(|| io::Error::other("retry did not retain a migration backup"))?;
+        let candidates = migration_backup_candidates(&path)?;
+        if candidates != [retained.path] {
+            return Err(io::Error::other(format!(
+                "migration backup retention is not bounded: {candidates:?}"
+            ))
+            .into());
         }
         Ok(())
     }

@@ -935,11 +935,22 @@ fn replace_structural_rows(
     target_slot: &str,
     next_epoch: i64,
 ) -> DbResult<()> {
+    if source_slot == target_slot {
+        return Err(publication_error(
+            "full publication refused to clean the active structural slot",
+        ));
+    }
     for table in STRUCTURAL_DELETE_ORDER {
-        transaction.execute(
-            &format!("DELETE FROM {table} WHERE structural_slot = ?1"),
-            [target_slot],
-        )?;
+        transaction
+            .execute(
+                &format!("DELETE FROM {table} WHERE structural_slot = ?1"),
+                [target_slot],
+            )
+            .map_err(|error| {
+                publication_error(format!(
+                    "recoverable inactive-slot cleanup failure for slot {target_slot:?} in table {table}: {error}; the publication transaction will restore the retained rollback slot and leave the active slot unchanged"
+                ))
+            })?;
     }
 
     transaction.execute(
@@ -1583,6 +1594,11 @@ mod tests {
     fn task_arri_ut_arri_4_19_interrupted_publication() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         prove_import_rollback(temp.path())
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_20_retained_slot_cleanup() -> Result<(), Box<dyn Error>> {
+        prove_bounded_retained_slot_cleanup()
     }
 
     #[test]
@@ -3223,6 +3239,177 @@ mod tests {
                 .into_iter()
                 .any(|count| count > 0),
             "active slot is empty after publication",
+        )?;
+        Ok(())
+    }
+
+    fn prove_bounded_retained_slot_cleanup() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let live_path = temp.path().join("cleanup-live.db");
+        let first_stage_path = temp.path().join("cleanup-first-stage.db");
+        let second_stage_path = temp.path().join("cleanup-second-stage.db");
+        fs::create_dir(&root)?;
+
+        let mut live = AtlasStore::open(&live_path)?;
+        live.set_project_root(&root)?;
+        live.replace_scan(&[file_node("src/retained.rs", "retained-hash")])?;
+        live.replace_file_texts_for_paths(
+            &["src/retained.rs".to_owned()],
+            &[file_text("src/retained.rs", "retained generation")],
+        )?;
+        insert_graph_entity(&live.connection, "retained-entity", "src/retained.rs")?;
+        live.connection.execute(
+            "INSERT INTO metadata(key, value) VALUES('cleanup_authored_note', 'preserved')",
+            [],
+        )?;
+
+        let first_staging = live.create_structural_staging(&live_path, &first_stage_path, &root)?;
+        let mut first_stage = AtlasStore::open(first_staging.path())?;
+        first_stage.prepare_structural_full_scan()?;
+        first_stage.replace_scan(&[file_node("src/current.rs", "current-hash")])?;
+        first_stage.replace_file_texts_for_paths(
+            &["src/current.rs".to_owned()],
+            &[file_text("src/current.rs", "current generation")],
+        )?;
+        insert_graph_entity(&first_stage.connection, "current-entity", "src/current.rs")?;
+        first_stage.set_staged_structural_state_signature(&first_staging, "cleanup-current")?;
+        first_stage.seal_structural_staging(&first_staging)?;
+        drop(first_stage);
+        let current_publication = live.publish_structural_staging(&first_staging)?;
+        require_eq(
+            &current_publication,
+            &PublicationState {
+                active_slot: StructuralSlot::B,
+                active_epoch: IndexEpoch::new(1),
+            },
+            "first cleanup publication",
+        )?;
+        let retained_before = structural_counts(&live.connection, StructuralSlot::A)?;
+        let active_before = structural_counts(&live.connection, StructuralSlot::B)?;
+
+        let second_staging =
+            live.create_structural_staging(&live_path, &second_stage_path, &root)?;
+        let mut second_stage = AtlasStore::open(second_staging.path())?;
+        second_stage.prepare_structural_full_scan()?;
+        second_stage.replace_scan(&[file_node("src/next.rs", "next-hash")])?;
+        second_stage.replace_file_texts_for_paths(
+            &["src/next.rs".to_owned()],
+            &[file_text("src/next.rs", "next generation")],
+        )?;
+        second_stage.set_staged_structural_state_signature(&second_staging, "cleanup-next")?;
+        second_stage.seal_structural_staging(&second_staging)?;
+        drop(second_stage);
+
+        live.connection.execute_batch(
+            "CREATE TRIGGER reject_active_slot_cleanup
+             BEFORE DELETE ON file_texts
+             WHEN old.structural_slot = (
+                 SELECT active_slot FROM graph_publication_state WHERE singleton = 1
+             )
+             BEGIN
+                 SELECT RAISE(ABORT, 'active slot cleanup attempted');
+             END;
+
+             CREATE TRIGGER inject_retained_slot_cleanup_failure
+             BEFORE DELETE ON file_texts
+             WHEN old.structural_slot != (
+                 SELECT active_slot FROM graph_publication_state WHERE singleton = 1
+             )
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected retained-slot cleanup failure');
+             END;",
+        )?;
+        let error = match live.publish_structural_staging(&second_staging) {
+            Err(error) => error,
+            Ok(publication) => {
+                return Err(format!(
+                    "retained-slot cleanup failure published unexpectedly: {publication:?}"
+                )
+                .into());
+            }
+        };
+        require(
+            error
+                .to_string()
+                .contains("recoverable inactive-slot cleanup failure")
+                && error
+                    .to_string()
+                    .contains("injected retained-slot cleanup failure"),
+            &format!("retained-slot cleanup lost its recoverable diagnostic: {error}"),
+        )?;
+        require_eq(
+            &live.publication_state()?,
+            &current_publication,
+            "publication after retained-slot cleanup rollback",
+        )?;
+        require_eq(
+            &structural_counts(&live.connection, StructuralSlot::A)?,
+            &retained_before,
+            "restored retained slot after cleanup rollback",
+        )?;
+        require_eq(
+            &structural_counts(&live.connection, StructuralSlot::B)?,
+            &active_before,
+            "active slot after cleanup rollback",
+        )?;
+        require_eq(
+            &live.connection.query_row(
+                "SELECT content FROM file_texts
+                 WHERE structural_slot = 'a' AND path = 'src/retained.rs'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?,
+            &"retained generation".to_owned(),
+            "retained lexical row after cleanup rollback",
+        )?;
+        require_eq(
+            &live.connection.query_row(
+                "SELECT value FROM metadata WHERE key = 'cleanup_authored_note'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?,
+            &"preserved".to_owned(),
+            "authored metadata after cleanup rollback",
+        )?;
+
+        live.connection
+            .execute("DROP TRIGGER inject_retained_slot_cleanup_failure", [])?;
+        let next_publication = live.publish_structural_staging(&second_staging)?;
+        require_eq(
+            &next_publication,
+            &PublicationState {
+                active_slot: StructuralSlot::A,
+                active_epoch: IndexEpoch::new(2),
+            },
+            "validated retained-slot reuse",
+        )?;
+        let next = require_some(live.load_file_text("src/next.rs")?, "next active text")?;
+        require_eq(
+            &next.content,
+            &"next generation".to_owned(),
+            "next active generation",
+        )?;
+        require_eq(
+            &live.connection.query_row(
+                "SELECT content FROM file_texts
+                 WHERE structural_slot = 'b' AND path = 'src/current.rs'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?,
+            &"current generation".to_owned(),
+            "new retained rollback slot",
+        )?;
+        require(
+            live.connection.query_row(
+                "SELECT EXISTS(
+                         SELECT 1 FROM file_texts
+                         WHERE structural_slot = 'a' AND path = 'src/retained.rs'
+                     )",
+                [],
+                |row| row.get::<_, i64>(0),
+            )? == 0,
+            "obsolete retained slot was not replaced by the validated publication",
         )?;
         Ok(())
     }

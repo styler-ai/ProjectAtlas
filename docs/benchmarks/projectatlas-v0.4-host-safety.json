@@ -189,7 +189,7 @@
       "id": "workspace-lint-policy",
       "path": "Cargo.toml",
       "digest_mode": "utf8-lf",
-      "sha256": "1197ff4c365f14cb27fe57a50d55d3712be605838de45d5475bef69b38590ed6",
+      "sha256": "6629875497eb8cbd71a6b826ef1d43285dfcabf673bfeee54934d41904bbf0fc",
       "evidence_state": "proven_local",
       "gate_state": "pass"
     },
