@@ -16,6 +16,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+projectatlas-symbols.workspace = true
 tempfile.workspace = true
 
 [lints]

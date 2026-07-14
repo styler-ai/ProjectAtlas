@@ -8,7 +8,14 @@ pub use structural_publication::{
     IncrementalStructuralDelta, IncrementalSummaryMutation, StructuralStaging,
 };
 
-use projectatlas_core::graph::{GraphContractError, ProjectInstanceId, PublicationState};
+use projectatlas_core::budget::DefaultCoreBudgetKind;
+use projectatlas_core::graph::{
+    Completeness, ConfidenceClass, ContentSpanFingerprint, EvidenceClass, GraphContractError,
+    GraphEntityKeyHandle, GraphEntityKeyInput, GraphEntityKind, GraphEvidenceKeyHandle,
+    GraphEvidenceOriginInput, GraphKeyArena, GraphLogicalEdgeKeyHandle, GraphRelationKind,
+    GraphRelationTargetInput, GraphResolutionKeyHandle, GraphResolverInput, IdentityText,
+    IndexEpoch, ProjectInstanceId, PublicationState, RepositoryFilePath, RepositoryPath,
+};
 use projectatlas_core::health::{
     CATEGORY_DUPLICATE_PURPOSE, CATEGORY_MISSING_PURPOSE, CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
     CATEGORY_REPEATED_TEMPORARY_FOLDER, CATEGORY_STALE_PURPOSE, CATEGORY_SUGGESTED_PURPOSE_REVIEW,
@@ -34,8 +41,10 @@ use projectatlas_core::{
     Purpose, PurposeSource, PurposeStatus, normalize_native_path_display,
     normalize_repo_path_prefix,
 };
-use rusqlite::types::Value;
-use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, params, params_from_iter};
+use rusqlite::types::{Value, ValueRef};
+use rusqlite::{
+    Connection, ErrorCode, OpenFlags, OptionalExtension, Params, params, params_from_iter,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::num::TryFromIntError;
@@ -44,6 +53,126 @@ use thiserror::Error;
 
 /// Maximum persisted text for denormalized symbol-name search summaries.
 const MAX_SYMBOL_SEARCH_SUMMARY_CHARS: usize = 16_000;
+/// Normal parser producer recorded on typed compatibility-graph rows.
+const GRAPH_PARSER_IDENTITY: &str = "projectatlas-symbols";
+/// Workspace runtime version recorded on typed compatibility-graph rows.
+const GRAPH_PARSER_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Compatibility source name used for file-owned relations.
+const GRAPH_FILE_SOURCE_NAME: &str = "<module>";
+/// Synthetic source emitted only by the Cargo manifest dependency producer.
+const GRAPH_CARGO_MANIFEST_SOURCE_NAME: &str = "cargo";
+/// Language identity required for exact Cargo manifest dependency ownership.
+const GRAPH_CARGO_MANIFEST_LANGUAGE: &str = "cargo-manifest";
+/// Canonical Cargo manifest basename required for file-owned dependencies.
+const GRAPH_CARGO_MANIFEST_FILE_NAME: &str = "Cargo.toml";
+/// External namespace used by compatibility dependency targets.
+const GRAPH_EXTERNAL_PACKAGE_NAMESPACE: &str = "package";
+/// Typed entity table used in stable-key collision diagnostics.
+const GRAPH_ENTITIES_TABLE: &str = "graph_entities";
+/// Typed logical-relation table used in stable-key collision diagnostics.
+const GRAPH_RELATIONS_TABLE: &str = "graph_relations";
+/// Typed occurrence-evidence table used in stable-key collision diagnostics.
+const GRAPH_EVIDENCE_OCCURRENCES_TABLE: &str = "graph_evidence_occurrences";
+/// Typed non-traversable occurrence table used in stable-key collision diagnostics.
+const GRAPH_RESOLUTION_OCCURRENCES_TABLE: &str = "graph_resolution_occurrences";
+/// Stable entity digest/canonical mismatch probe run before path invalidation.
+const GRAPH_ENTITY_IDENTITY_CONFLICT_SQL: &str = "
+    SELECT EXISTS(
+        SELECT 1 FROM graph_entities
+        WHERE structural_slot = ?1 AND stable_key_digest = ?2
+          AND (stable_key_version <> ?3 OR stable_key_canonical <> ?4)
+    )
+";
+/// Stable relation digest/canonical mismatch probe run before path invalidation.
+const GRAPH_RELATION_IDENTITY_CONFLICT_SQL: &str = "
+    SELECT EXISTS(
+        SELECT 1 FROM graph_relations
+        WHERE structural_slot = ?1 AND stable_key_digest = ?2
+          AND (stable_key_version <> ?3 OR stable_key_canonical <> ?4)
+    )
+";
+/// Stable evidence digest/canonical mismatch probe run before path invalidation.
+const GRAPH_EVIDENCE_IDENTITY_CONFLICT_SQL: &str = "
+    SELECT EXISTS(
+        SELECT 1 FROM graph_evidence_occurrences
+        WHERE structural_slot = ?1 AND stable_key_digest = ?2
+          AND (stable_key_version <> ?3 OR stable_key_canonical <> ?4)
+    )
+";
+/// Stable non-traversable occurrence digest/canonical mismatch probe run before path invalidation.
+const GRAPH_RESOLUTION_IDENTITY_CONFLICT_SQL: &str = "
+    SELECT EXISTS(
+        SELECT 1 FROM graph_resolution_occurrences
+        WHERE structural_slot = ?1 AND stable_key_digest = ?2
+          AND (stable_key_version <> ?3 OR stable_key_canonical <> ?4)
+    )
+";
+/// Active-slot entity lookup by stable digest.
+const GRAPH_ENTITY_BY_STABLE_KEY_SQL: &str = "
+    SELECT stable_key_digest, entity_kind, repository_path, qualified_name,
+           signature, discriminator, last_changed_epoch
+    FROM graph_entities
+    WHERE structural_slot = ?1 AND stable_key_digest = ?2
+";
+/// Active-slot entity lookup by typed kind and qualified identity.
+const GRAPH_ENTITIES_BY_QUALIFIED_NAME_SQL: &str = "
+    SELECT stable_key_digest, entity_kind, repository_path, qualified_name,
+           signature, discriminator, last_changed_epoch
+    FROM graph_entities
+    WHERE structural_slot = ?1 AND entity_kind = ?2 AND qualified_name = ?3
+    ORDER BY stable_key_digest
+    LIMIT ?4
+";
+/// Active-slot outbound adjacency with an exact relation-family filter.
+const GRAPH_OUTBOUND_RELATIONS_BY_KIND_SQL: &str = "
+    SELECT stable_key_digest, source_entity_digest, relation_kind, target_scope,
+           target_entity_digest, external_target_namespace, external_target_value,
+           last_changed_epoch
+    FROM graph_relations
+    WHERE structural_slot = ?1 AND source_entity_digest = ?2 AND relation_kind = ?3
+    ORDER BY stable_key_digest
+    LIMIT ?4
+";
+/// Active-slot outbound adjacency across relation families.
+const GRAPH_OUTBOUND_RELATIONS_SQL: &str = "
+    SELECT stable_key_digest, source_entity_digest, relation_kind, target_scope,
+           target_entity_digest, external_target_namespace, external_target_value,
+           last_changed_epoch
+    FROM graph_relations
+    WHERE structural_slot = ?1 AND source_entity_digest = ?2
+    ORDER BY relation_kind, stable_key_digest
+    LIMIT ?3
+";
+/// Active-slot inbound adjacency with an exact relation-family filter.
+const GRAPH_INBOUND_RELATIONS_BY_KIND_SQL: &str = "
+    SELECT stable_key_digest, source_entity_digest, relation_kind, target_scope,
+           target_entity_digest, external_target_namespace, external_target_value,
+           last_changed_epoch
+    FROM graph_relations
+    WHERE structural_slot = ?1 AND target_entity_digest = ?2 AND relation_kind = ?3
+    ORDER BY stable_key_digest
+    LIMIT ?4
+";
+/// Active-slot inbound adjacency across relation families.
+const GRAPH_INBOUND_RELATIONS_SQL: &str = "
+    SELECT stable_key_digest, source_entity_digest, relation_kind, target_scope,
+           target_entity_digest, external_target_namespace, external_target_value,
+           last_changed_epoch
+    FROM graph_relations
+    WHERE structural_slot = ?1 AND target_entity_digest = ?2
+    ORDER BY relation_kind, stable_key_digest
+    LIMIT ?3
+";
+/// Active-slot bounded relation-family lookup.
+const GRAPH_RELATIONS_BY_KIND_SQL: &str = "
+    SELECT stable_key_digest, source_entity_digest, relation_kind, target_scope,
+           target_entity_digest, external_target_namespace, external_target_value,
+           last_changed_epoch
+    FROM graph_relations
+    WHERE structural_slot = ?1 AND relation_kind = ?2
+    ORDER BY stable_key_digest
+    LIMIT ?3
+";
 
 /// Database-layer error type.
 #[derive(Debug, Error)]
@@ -89,6 +218,9 @@ pub enum DbError {
     /// An expanded compatibility graph could not enter the compact persistence path.
     #[error("invalid compact symbol graph: {0}")]
     InvalidCompactSymbolGraph(#[from] CompactSymbolGraphError),
+    /// A parser-produced compatibility fact could not enter the typed graph contract.
+    #[error("invalid typed graph fact: {0}")]
+    InvalidGraphFact(#[from] GraphContractError),
     /// Invalid enum value read from the database.
     #[error("invalid {field} value in database: {value}")]
     InvalidEnum {
@@ -106,6 +238,32 @@ pub enum DbError {
         value: i64,
         /// Source conversion error.
         source: TryFromIntError,
+    },
+    /// A fixed-width graph identity read from `SQLite` has an invalid byte length.
+    #[error("invalid byte length for {field}: expected {expected}, found {found}")]
+    InvalidByteLength {
+        /// Stored graph field.
+        field: &'static str,
+        /// Required byte length.
+        expected: usize,
+        /// Observed byte length.
+        found: usize,
+    },
+    /// A persisted relation violates its typed target contract.
+    #[error("invalid persisted graph relation: {message}")]
+    InvalidGraphRelation {
+        /// Broken storage invariant.
+        message: String,
+    },
+    /// A stable digest matched different canonical identity material.
+    #[error(
+        "stable graph identity collision in {table} for structural slot {structural_slot:?}: digest matched different encoding version or canonical bytes"
+    )]
+    StableGraphIdentityCollision {
+        /// Typed graph table whose digest identity conflicted.
+        table: &'static str,
+        /// Structural slot containing the retained identity.
+        structural_slot: String,
     },
     /// A full-scan staging database could not be validated or published safely.
     #[error("structural publication failed: {message}")]
@@ -155,6 +313,63 @@ pub struct IndexedFileText {
     pub line_count: usize,
     /// Full UTF-8 source text used by indexed search.
     pub content: String,
+}
+
+/// Direction of one bounded active-slot graph adjacency read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphRelationDirection {
+    /// Relations whose source is the selected entity.
+    Outbound,
+    /// Relations whose internal target is the selected entity.
+    Inbound,
+}
+
+/// Typed persisted target of a resolved graph relation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PersistedGraphTarget {
+    /// Active-project entity digest.
+    Internal([u8; 32]),
+    /// Canonical external target identity.
+    External {
+        /// Ecosystem, protocol, or provider namespace.
+        namespace: String,
+        /// Canonical identity inside the namespace.
+        value: String,
+    },
+}
+
+/// Bounded typed relation row read from the active structural slot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PersistedGraphRelation {
+    /// Stable logical-relation digest.
+    pub stable_key_digest: [u8; 32],
+    /// Stable source-entity digest.
+    pub source_entity_digest: [u8; 32],
+    /// Typed relation family.
+    pub kind: GraphRelationKind,
+    /// Typed internal or external target.
+    pub target: PersistedGraphTarget,
+    /// Epoch when this row last changed.
+    pub last_changed_epoch: IndexEpoch,
+}
+
+/// Bounded typed entity row read from the active structural slot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PersistedGraphEntity {
+    /// Stable entity digest.
+    pub stable_key_digest: [u8; 32],
+    /// Typed entity category.
+    pub kind: GraphEntityKind,
+    /// Repository-relative source path when the entity is source-backed.
+    pub repository_path: Option<String>,
+    /// Qualified package, module, or declaration identity when available.
+    pub qualified_name: Option<String>,
+    /// Optional signature that distinguishes overload-shaped declarations.
+    pub signature: Option<String>,
+    /// Optional producer-owned stable discriminator.
+    pub discriminator: Option<String>,
+    /// Epoch when this row last changed.
+    pub last_changed_epoch: IndexEpoch,
 }
 
 /// Agent-approved resolution for a deterministic health finding.
@@ -371,6 +586,141 @@ impl AtlasStore {
     /// Returns an error if schema creation or validation fails.
     pub fn initialize_schema(&self) -> DbResult<()> {
         schema::verify_current_schema(&self.connection)
+    }
+
+    /// Load one active-slot graph entity by stable digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` fails or persisted typed fields are invalid.
+    pub fn load_graph_entity(
+        &self,
+        stable_key_digest: &[u8; 32],
+    ) -> DbResult<Option<PersistedGraphEntity>> {
+        self.with_structural_read_snapshot(|connection, publication| {
+            let mut statement = connection.prepare_cached(GRAPH_ENTITY_BY_STABLE_KEY_SQL)?;
+            let rows = statement.query_and_then(
+                params![
+                    structural_publication::slot_text(publication.active_slot),
+                    &stable_key_digest[..]
+                ],
+                persisted_graph_entity_from_row,
+            )?;
+            let mut entities = Vec::new();
+            visit_rows_to_terminal(rows, &mut |entity| {
+                entities.push(entity);
+                Ok(true)
+            })?;
+            if entities.len() > 1 {
+                return Err(DbError::StructuralPublication {
+                    message: "active structural slot returned duplicate graph stable keys"
+                        .to_owned(),
+                });
+            }
+            Ok(entities.pop())
+        })
+    }
+
+    /// Load active-slot entities by typed kind and exact qualified identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` fails or persisted typed fields are invalid.
+    pub fn load_graph_entities_by_qualified_name(
+        &self,
+        kind: GraphEntityKind,
+        qualified_name: &str,
+        limit: u32,
+    ) -> DbResult<Vec<PersistedGraphEntity>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.with_structural_read_snapshot(|connection, publication| {
+            let mut statement = connection.prepare_cached(GRAPH_ENTITIES_BY_QUALIFIED_NAME_SQL)?;
+            let rows = statement.query_and_then(
+                params![
+                    structural_publication::slot_text(publication.active_slot),
+                    kind.as_str(),
+                    qualified_name,
+                    i64::from(limit)
+                ],
+                persisted_graph_entity_from_row,
+            )?;
+            let mut entities = Vec::new();
+            visit_rows_to_terminal(rows, &mut |entity| {
+                entities.push(entity);
+                Ok(true)
+            })?;
+            Ok(entities)
+        })
+    }
+
+    /// Load bounded inbound or outbound active-slot adjacency for one entity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` fails or persisted typed fields are invalid.
+    pub fn load_graph_adjacency(
+        &self,
+        entity_digest: &[u8; 32],
+        direction: GraphRelationDirection,
+        kind: Option<GraphRelationKind>,
+        limit: u32,
+    ) -> DbResult<Vec<PersistedGraphRelation>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.with_structural_read_snapshot(|connection, publication| {
+            let slot = structural_publication::slot_text(publication.active_slot);
+            match (direction, kind) {
+                (GraphRelationDirection::Outbound, Some(kind)) => load_graph_relations(
+                    connection,
+                    GRAPH_OUTBOUND_RELATIONS_BY_KIND_SQL,
+                    params![slot, &entity_digest[..], kind.as_str(), i64::from(limit)],
+                ),
+                (GraphRelationDirection::Outbound, None) => load_graph_relations(
+                    connection,
+                    GRAPH_OUTBOUND_RELATIONS_SQL,
+                    params![slot, &entity_digest[..], i64::from(limit)],
+                ),
+                (GraphRelationDirection::Inbound, Some(kind)) => load_graph_relations(
+                    connection,
+                    GRAPH_INBOUND_RELATIONS_BY_KIND_SQL,
+                    params![slot, &entity_digest[..], kind.as_str(), i64::from(limit)],
+                ),
+                (GraphRelationDirection::Inbound, None) => load_graph_relations(
+                    connection,
+                    GRAPH_INBOUND_RELATIONS_SQL,
+                    params![slot, &entity_digest[..], i64::from(limit)],
+                ),
+            }
+        })
+    }
+
+    /// Load a bounded active-slot relation family without scanning unrelated kinds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` fails or persisted typed fields are invalid.
+    pub fn load_graph_relations_by_kind(
+        &self,
+        kind: GraphRelationKind,
+        limit: u32,
+    ) -> DbResult<Vec<PersistedGraphRelation>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.with_structural_read_snapshot(|connection, publication| {
+            load_graph_relations(
+                connection,
+                GRAPH_RELATIONS_BY_KIND_SQL,
+                params![
+                    structural_publication::slot_text(publication.active_slot),
+                    kind.as_str(),
+                    i64::from(limit)
+                ],
+            )
+        })
     }
 
     /// Run one structural read against a transactionally captured publication.
@@ -690,6 +1040,29 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn replace_compact_symbol_graph(&mut self, graph: &CompactSymbolGraph) -> DbResult<()> {
+        structural_publication::publish_active_graph_mutation(
+            &self.connection,
+            |connection, structural_slot, last_changed_epoch| {
+                replace_compact_symbol_graph_at_publication(
+                    connection,
+                    graph,
+                    structural_slot,
+                    last_changed_epoch,
+                )
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Replace one parser graph inside a separate full-scan staging database.
+    ///
+    /// The parent publication owner assigns the final slot and epoch when it
+    /// imports and activates the validated staging database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if staging persistence fails.
+    pub fn stage_compact_symbol_graph(&mut self, graph: &CompactSymbolGraph) -> DbResult<()> {
         let transaction = self.connection.transaction()?;
         replace_compact_symbol_graph_in_connection(&transaction, graph)?;
         transaction.commit()?;
@@ -705,7 +1078,13 @@ impl AtlasStore {
     ///
     /// Returns an error if the path does not exist or persistence fails.
     pub fn clear_source_index_for_path(&self, path: &str) -> DbResult<()> {
-        clear_source_index_in_connection(&self.connection, path, false)
+        structural_publication::publish_active_graph_mutation(
+            &self.connection,
+            |connection, _structural_slot, _last_changed_epoch| {
+                clear_source_index_in_connection(connection, path, false)
+            },
+        )?;
+        Ok(())
     }
 
     /// Clear symbols and relations for one live file path while preserving node summaries.
@@ -714,7 +1093,37 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn clear_symbol_graph_for_path(&self, path: &str) -> DbResult<()> {
-        clear_source_index_in_connection(&self.connection, path, true)
+        structural_publication::publish_active_graph_mutation(
+            &self.connection,
+            |connection, _structural_slot, _last_changed_epoch| {
+                clear_source_index_in_connection(connection, path, true)
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Clear source-derived rows inside a separate full-scan staging database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path does not exist or staging persistence fails.
+    pub fn clear_staged_source_index_for_path(&self, path: &str) -> DbResult<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        clear_source_index_in_connection(&transaction, path, false)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Clear parser graph rows inside a separate staging database while preserving summaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if staging persistence fails.
+    pub fn clear_staged_symbol_graph_for_path(&self, path: &str) -> DbResult<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        clear_source_index_in_connection(&transaction, path, true)?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Persist an observed one-line summary for an indexed node.
@@ -3559,6 +3968,7 @@ fn clear_source_index_in_connection(
     preserve_node_summary: bool,
 ) -> DbResult<()> {
     let node_id = node_id_for_path_in_connection(connection, path)?;
+    clear_typed_graph_for_path(connection, path)?;
     connection
         .prepare_cached("DELETE FROM symbols WHERE path = ?1")?
         .execute([path])?;
@@ -3588,12 +3998,1126 @@ fn clear_source_index_in_connection(
     Ok(())
 }
 
+/// Borrowed or shared-arena text retained without one allocation per entity.
+#[derive(Clone, Copy, Debug)]
+enum CompactTypedGraphText<'a> {
+    /// Text already interned by the compact parser graph.
+    Borrowed(&'a str),
+    /// One contiguous range in the batch-owned qualified-name arena.
+    Shared {
+        /// Inclusive byte offset in the shared qualified-name text.
+        start: usize,
+        /// Byte length of this UTF-8 name in the shared text.
+        length: usize,
+    },
+}
+
+impl CompactTypedGraphText<'_> {
+    /// Borrow this text from its original graph or the shared batch arena.
+    fn as_str<'a>(&'a self, shared: &'a str) -> &'a str {
+        match self {
+            Self::Borrowed(value) => value,
+            Self::Shared { start, length } => &shared[*start..*start + *length],
+        }
+    }
+}
+
+/// Parser-produced entity retained long enough to persist relations without expanding the graph.
+struct CompactTypedGraphEntity<'a> {
+    /// Compatibility name used to resolve same-file source and target references.
+    lookup_name: &'a str,
+    /// Stable project-scoped entity identity.
+    key: GraphEntityKeyHandle,
+    /// Typed entity category.
+    kind: GraphEntityKind,
+    /// Repository path that owns invalidation for this fact.
+    repository_path: &'a str,
+    /// Qualified package, module, or declaration identity.
+    qualified_name: CompactTypedGraphText<'a>,
+    /// Optional overload/signature discriminator retained for inspection.
+    signature: Option<&'a str>,
+    /// External namespace for package-shaped selectors.
+    external_namespace: Option<&'static str>,
+    /// External value for package-shaped selectors.
+    external_value: Option<&'a str>,
+    /// Detected language or file family.
+    language: Option<&'a str>,
+    /// Parser family that produced the fact.
+    parser: ParserKind,
+}
+
+/// Borrowed internal or external target retained by one compact relation row.
+#[derive(Clone, Copy, Debug)]
+enum CompactTypedGraphTarget<'a> {
+    /// Exact same-project entity key stored in the shared key arena.
+    Internal(GraphEntityKeyHandle),
+    /// Exact namespaced identity borrowed from the compact parser graph.
+    External {
+        /// Ecosystem namespace for the external target.
+        namespace: &'static str,
+        /// Canonical target value inside the namespace.
+        value: &'a str,
+    },
+}
+
+impl<'a> CompactTypedGraphTarget<'a> {
+    /// Return the borrowed selector accepted by the core key arena.
+    const fn key_input(self) -> GraphRelationTargetInput<'a> {
+        match self {
+            Self::Internal(target) => GraphRelationTargetInput::Internal(target),
+            Self::External { namespace, value } => {
+                GraphRelationTargetInput::External { namespace, value }
+            }
+        }
+    }
+}
+
+/// One resolved parser relation and its exact source occurrence ready for typed persistence.
+struct CompactTypedGraphRelation<'a> {
+    /// Stable logical-edge identity.
+    key: GraphLogicalEdgeKeyHandle,
+    /// Index of the source in the owning compact entity batch.
+    source_index: usize,
+    /// Accepted typed relation family.
+    kind: GraphRelationKind,
+    /// Exact internal or external target.
+    target: CompactTypedGraphTarget<'a>,
+    /// Parser family that produced the relation.
+    parser: ParserKind,
+    /// Truthful confidence for the bounded resolver rule that established the target.
+    confidence: ConfidenceClass,
+    /// Stable evidence-occurrence identity stored in the shared key arena.
+    evidence_key: GraphEvidenceKeyHandle,
+    /// Content-anchored source occurrence fingerprint.
+    span_fingerprint: ContentSpanFingerprint,
+    /// Stable discriminator for repeated occurrences at the same content span.
+    occurrence_discriminator: u32,
+    /// Optional validated source context borrowed from the compact graph.
+    explanation: Option<&'a str>,
+}
+
+/// Non-traversable resolution state retained without fabricating a logical edge.
+#[derive(Clone, Copy, Debug)]
+enum CompactTypedGraphResolutionState {
+    /// More than one same-file target has the exact compatibility name.
+    Ambiguous {
+        /// First retained candidate in the sorted entity-name index.
+        candidate_start: usize,
+        /// Exclusive end of the retained candidate page.
+        candidate_end: usize,
+        /// Complete viable-candidate count before the hard retention bound.
+        candidate_total: usize,
+        /// Whether the retained candidate page is complete or truncated.
+        candidate_completeness: Completeness,
+    },
+    /// No traversable target was established under the current bounded resolver.
+    Unresolved {
+        /// Bounded diagnostic retained with the source occurrence.
+        reason: &'static str,
+    },
+}
+
+/// Shared source and provenance inputs for one parser relation observation.
+#[derive(Clone, Copy, Debug)]
+struct CompactTypedGraphOccurrence<'a> {
+    /// Index of the resolved source or containing file in the entity batch.
+    source_index: usize,
+    /// Stable source identity stored in the shared key arena.
+    source_key: GraphEntityKeyHandle,
+    /// Accepted typed relation family.
+    kind: GraphRelationKind,
+    /// Parser family that observed the relation.
+    parser: ParserKind,
+    /// Project-owned repository origin for the parser observation.
+    origin: GraphEvidenceOriginInput<'a>,
+    /// Versioned resolver identity for stable occurrence keys.
+    resolver: GraphResolverInput<'static>,
+    /// Content-anchored source occurrence fingerprint.
+    span_fingerprint: ContentSpanFingerprint,
+}
+
+impl CompactTypedGraphOccurrence<'_> {
+    /// Materialize one non-traversable occurrence in the shared key arena.
+    fn resolution(
+        self,
+        key_arena: &mut GraphKeyArena,
+        occurrence_discriminator: u32,
+        state: CompactTypedGraphResolutionState,
+        confidence: ConfidenceClass,
+    ) -> DbResult<CompactTypedGraphResolution> {
+        Ok(CompactTypedGraphResolution {
+            key: key_arena.resolution_key(
+                self.source_key,
+                self.kind,
+                self.origin,
+                self.resolver,
+                self.span_fingerprint,
+                occurrence_discriminator,
+            )?,
+            source_index: self.source_index,
+            kind: self.kind,
+            parser: self.parser,
+            span_fingerprint: self.span_fingerprint,
+            occurrence_discriminator,
+            state,
+            confidence,
+        })
+    }
+}
+
+/// One ambiguous or unresolved parser observation ready for typed persistence.
+struct CompactTypedGraphResolution {
+    /// Stable target-free occurrence identity stored in the shared key arena.
+    key: GraphResolutionKeyHandle,
+    /// Resolved containing source, or the owning file for an unresolved source name.
+    source_index: usize,
+    /// Accepted typed relation family.
+    kind: GraphRelationKind,
+    /// Parser family that observed the relation.
+    parser: ParserKind,
+    /// Content-anchored source occurrence fingerprint.
+    span_fingerprint: ContentSpanFingerprint,
+    /// Stable discriminator for equal unresolved observations.
+    occurrence_discriminator: u32,
+    /// Ambiguous candidate page or unresolved reason.
+    state: CompactTypedGraphResolutionState,
+    /// Finite confidence in the non-traversable observation.
+    confidence: ConfidenceClass,
+}
+
+/// Resolved edges, non-traversable observations, and their allocation-bounded name index.
+struct CompactTypedGraphRelationPlan<'a> {
+    /// Traversable relations and direct evidence.
+    relations: Vec<CompactTypedGraphRelation<'a>>,
+    /// Ambiguous and unresolved observations excluded from adjacency.
+    resolutions: Vec<CompactTypedGraphResolution>,
+    /// One contiguous deterministic index over compatibility names.
+    entity_indices: Vec<(&'a str, usize)>,
+}
+
+/// Delete typed facts owned by one active-slot source path.
+fn clear_typed_graph_for_path(connection: &Connection, path: &str) -> DbResult<()> {
+    let active_slot = connection.query_row(
+        "SELECT active_slot FROM graph_publication_state WHERE singleton = 1",
+        [],
+        |row| row.get::<_, String>(0),
+    )?;
+    clear_typed_graph_for_path_in_slot(connection, path, &active_slot)
+}
+
+/// Delete typed facts owned by one source path in the selected structural slot.
+fn clear_typed_graph_for_path_in_slot(
+    connection: &Connection,
+    path: &str,
+    structural_slot: &str,
+) -> DbResult<()> {
+    connection
+        .prepare_cached(
+            "DELETE FROM graph_entities
+             WHERE structural_slot = ?1 AND repository_path = ?2",
+        )?
+        .execute(params![structural_slot, path])?;
+    Ok(())
+}
+
+/// Require one guarded stable-key insert or update to preserve canonical identity.
+fn require_stable_graph_identity_upsert(
+    affected_rows: usize,
+    table: &'static str,
+    structural_slot: &str,
+) -> DbResult<()> {
+    if affected_rows == 1 {
+        Ok(())
+    } else {
+        Err(DbError::StableGraphIdentityCollision {
+            table,
+            structural_slot: structural_slot.to_owned(),
+        })
+    }
+}
+
+/// Reject an existing digest whose version or canonical identity does not match.
+fn require_stable_graph_identity_available(
+    connection: &Connection,
+    sql: &str,
+    table: &'static str,
+    structural_slot: &str,
+    digest: &[u8; 32],
+    encoding_version: u16,
+    canonical_identity: &[u8],
+) -> DbResult<()> {
+    let conflicts = connection.query_row(
+        sql,
+        params![
+            structural_slot,
+            &digest[..],
+            i64::from(encoding_version),
+            canonical_identity
+        ],
+        |row| row.get::<_, i64>(0),
+    )?;
+    if conflicts == 0 {
+        Ok(())
+    } else {
+        Err(DbError::StableGraphIdentityCollision {
+            table,
+            structural_slot: structural_slot.to_owned(),
+        })
+    }
+}
+
+/// Replace one compact parser graph in normalized active-slot typed storage.
+fn replace_typed_graph_for_compact_symbol_graph(
+    connection: &Connection,
+    graph: &CompactSymbolGraph,
+    structural_slot: &str,
+    last_changed_epoch: i64,
+) -> DbResult<()> {
+    let project = schema::project_instance_id(connection)?;
+    let project_bytes = project.as_bytes();
+    let graph_path = RepositoryFilePath::try_from(graph.path())?;
+    let evidence_origin_path = RepositoryPath::try_from(graph.path())?;
+    let mut key_arena = GraphKeyArena::default();
+    let mut qualified_name_arena = String::new();
+    let entities = compact_typed_graph_entities(
+        project,
+        graph,
+        &graph_path,
+        &mut key_arena,
+        &mut qualified_name_arena,
+    )?;
+    let CompactTypedGraphRelationPlan {
+        relations,
+        resolutions,
+        entity_indices,
+    } = compact_typed_graph_relations(
+        project,
+        graph,
+        &entities,
+        &evidence_origin_path,
+        &mut key_arena,
+    )?;
+    let mut checked_entities = HashSet::with_capacity(entities.len());
+    for entity in &entities {
+        if checked_entities.insert(entity.key.digest()) {
+            let digest = entity.key.digest();
+            require_stable_graph_identity_available(
+                connection,
+                GRAPH_ENTITY_IDENTITY_CONFLICT_SQL,
+                GRAPH_ENTITIES_TABLE,
+                structural_slot,
+                &digest,
+                entity.key.encoding_version(),
+                key_arena.entity_canonical_identity(entity.key),
+            )?;
+        }
+    }
+    let mut checked_relations = HashSet::with_capacity(relations.len());
+    let mut checked_evidence = HashSet::with_capacity(relations.len());
+    for relation in &relations {
+        if checked_relations.insert(relation.key.digest()) {
+            let digest = relation.key.digest();
+            require_stable_graph_identity_available(
+                connection,
+                GRAPH_RELATION_IDENTITY_CONFLICT_SQL,
+                GRAPH_RELATIONS_TABLE,
+                structural_slot,
+                &digest,
+                relation.key.encoding_version(),
+                key_arena.logical_edge_canonical_identity(relation.key),
+            )?;
+        }
+        if checked_evidence.insert(relation.evidence_key.digest()) {
+            let digest = relation.evidence_key.digest();
+            require_stable_graph_identity_available(
+                connection,
+                GRAPH_EVIDENCE_IDENTITY_CONFLICT_SQL,
+                GRAPH_EVIDENCE_OCCURRENCES_TABLE,
+                structural_slot,
+                &digest,
+                relation.evidence_key.encoding_version(),
+                key_arena.evidence_canonical_identity(relation.evidence_key),
+            )?;
+        }
+    }
+    let mut checked_resolutions = HashSet::with_capacity(resolutions.len());
+    for resolution in &resolutions {
+        if checked_resolutions.insert(resolution.key.digest()) {
+            let digest = resolution.key.digest();
+            require_stable_graph_identity_available(
+                connection,
+                GRAPH_RESOLUTION_IDENTITY_CONFLICT_SQL,
+                GRAPH_RESOLUTION_OCCURRENCES_TABLE,
+                structural_slot,
+                &digest,
+                resolution.key.encoding_version(),
+                key_arena.resolution_canonical_identity(resolution.key),
+            )?;
+        }
+    }
+    clear_typed_graph_for_path_in_slot(connection, graph.path(), structural_slot)?;
+    let mut insert_entity = connection.prepare_cached(
+        "INSERT INTO graph_entities(
+             stable_key_digest, stable_key_version, stable_key_canonical,
+             project_instance_id, entity_kind, repository_path, qualified_name,
+             signature, discriminator, external_namespace, external_value, language,
+             source_start_byte, source_end_byte, source_start_line, source_end_line,
+             parser_kind, parser_identity, parser_version,
+             structural_slot, last_changed_epoch
+         ) VALUES(
+             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10, ?11,
+             NULL, NULL, NULL, NULL, ?12, ?13, ?14, ?15, ?16
+         )
+         ON CONFLICT(structural_slot, stable_key_digest) DO UPDATE SET
+             stable_key_version = excluded.stable_key_version,
+             stable_key_canonical = excluded.stable_key_canonical,
+             project_instance_id = excluded.project_instance_id,
+             entity_kind = excluded.entity_kind,
+             repository_path = excluded.repository_path,
+             qualified_name = excluded.qualified_name,
+             signature = excluded.signature,
+             discriminator = excluded.discriminator,
+             external_namespace = excluded.external_namespace,
+             external_value = excluded.external_value,
+             language = excluded.language,
+             source_start_byte = excluded.source_start_byte,
+             source_end_byte = excluded.source_end_byte,
+             source_start_line = excluded.source_start_line,
+             source_end_line = excluded.source_end_line,
+             parser_kind = excluded.parser_kind,
+             parser_identity = excluded.parser_identity,
+             parser_version = excluded.parser_version,
+             last_changed_epoch = excluded.last_changed_epoch
+         WHERE graph_entities.stable_key_version = excluded.stable_key_version
+           AND graph_entities.stable_key_canonical = excluded.stable_key_canonical",
+    )?;
+    for entity in &entities {
+        let digest = entity.key.digest();
+        let affected_rows = insert_entity.execute(params![
+            &digest[..],
+            i64::from(entity.key.encoding_version()),
+            key_arena.entity_canonical_identity(entity.key),
+            &project_bytes[..],
+            entity.kind.as_str(),
+            entity.repository_path,
+            entity.qualified_name.as_str(&qualified_name_arena),
+            entity.signature,
+            entity.external_namespace,
+            entity.external_value,
+            entity.language,
+            entity.parser.as_str(),
+            GRAPH_PARSER_IDENTITY,
+            GRAPH_PARSER_VERSION,
+            structural_slot,
+            last_changed_epoch,
+        ])?;
+        require_stable_graph_identity_upsert(affected_rows, GRAPH_ENTITIES_TABLE, structural_slot)?;
+    }
+
+    let mut insert_relation = connection.prepare_cached(
+        "INSERT INTO graph_relations(
+             stable_key_digest, stable_key_version, stable_key_canonical,
+             source_entity_digest, relation_kind, resolution_status, target_scope,
+             target_entity_digest, external_target_namespace, external_target_value,
+             confidence, parser_kind, parser_identity, parser_version,
+             structural_slot, last_changed_epoch
+         ) VALUES(
+             ?1, ?2, ?3, ?4, ?5, 'resolved', ?6, ?7, ?8, ?9,
+             ?10, ?11, ?12, ?13, ?14, ?15
+         )
+         ON CONFLICT(structural_slot, stable_key_digest) DO UPDATE SET
+             stable_key_version = excluded.stable_key_version,
+             stable_key_canonical = excluded.stable_key_canonical,
+             source_entity_digest = excluded.source_entity_digest,
+             relation_kind = excluded.relation_kind,
+             resolution_status = excluded.resolution_status,
+             target_scope = excluded.target_scope,
+             target_entity_digest = excluded.target_entity_digest,
+             external_target_namespace = excluded.external_target_namespace,
+             external_target_value = excluded.external_target_value,
+             confidence = excluded.confidence,
+             parser_kind = excluded.parser_kind,
+             parser_identity = excluded.parser_identity,
+             parser_version = excluded.parser_version,
+             last_changed_epoch = excluded.last_changed_epoch
+         WHERE graph_relations.stable_key_version = excluded.stable_key_version
+           AND graph_relations.stable_key_canonical = excluded.stable_key_canonical",
+    )?;
+    let mut insert_evidence = connection.prepare_cached(
+        "INSERT INTO graph_evidence_occurrences(
+             stable_key_digest, stable_key_version, stable_key_canonical,
+             relation_digest, origin_kind, origin_entity_digest,
+             origin_project_instance_id, origin_repository_path,
+             origin_external_namespace, origin_external_value,
+             source_start_byte, source_end_byte, source_start_line, source_end_line,
+             resolver_name, resolver_version, content_span_fingerprint,
+             occurrence_discriminator, evidence_class, confidence, completeness,
+             explanation, structural_slot, last_changed_epoch
+         ) VALUES(
+             ?1, ?2, ?3, ?4, 'repository-path', NULL, ?5, ?6, NULL, NULL,
+             NULL, NULL, NULL, NULL, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+         )
+         ON CONFLICT(structural_slot, stable_key_digest) DO UPDATE SET
+             stable_key_version = excluded.stable_key_version,
+             stable_key_canonical = excluded.stable_key_canonical,
+             relation_digest = excluded.relation_digest,
+             origin_kind = excluded.origin_kind,
+             origin_entity_digest = excluded.origin_entity_digest,
+             origin_project_instance_id = excluded.origin_project_instance_id,
+             origin_repository_path = excluded.origin_repository_path,
+             origin_external_namespace = excluded.origin_external_namespace,
+             origin_external_value = excluded.origin_external_value,
+             source_start_byte = excluded.source_start_byte,
+             source_end_byte = excluded.source_end_byte,
+             source_start_line = excluded.source_start_line,
+             source_end_line = excluded.source_end_line,
+             resolver_name = excluded.resolver_name,
+             resolver_version = excluded.resolver_version,
+             content_span_fingerprint = excluded.content_span_fingerprint,
+             occurrence_discriminator = excluded.occurrence_discriminator,
+             evidence_class = excluded.evidence_class,
+             confidence = excluded.confidence,
+             completeness = excluded.completeness,
+             explanation = excluded.explanation,
+             last_changed_epoch = excluded.last_changed_epoch
+         WHERE graph_evidence_occurrences.stable_key_version = excluded.stable_key_version
+           AND graph_evidence_occurrences.stable_key_canonical = excluded.stable_key_canonical",
+    )?;
+    let mut insert_resolution = connection.prepare_cached(
+        "INSERT INTO graph_resolution_occurrences(
+             stable_key_digest, stable_key_version, stable_key_canonical,
+             source_entity_digest, relation_kind, origin_kind, origin_entity_digest,
+             origin_project_instance_id, origin_repository_path,
+             origin_external_namespace, origin_external_value,
+             source_start_byte, source_end_byte, source_start_line, source_end_line,
+             resolver_name, resolver_version, content_span_fingerprint,
+             occurrence_discriminator, resolution_status, candidate_total,
+             candidate_completeness, unresolved_reason, evidence_class, confidence,
+             completeness, parser_kind, parser_identity, parser_version,
+             structural_slot, last_changed_epoch
+         ) VALUES(
+             ?1, ?2, ?3, ?4, ?5, 'repository-path', NULL, ?6, ?7, NULL, NULL,
+             NULL, NULL, NULL, NULL, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+             ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23
+         )
+         ON CONFLICT(structural_slot, stable_key_digest) DO UPDATE SET
+             stable_key_version = excluded.stable_key_version,
+             stable_key_canonical = excluded.stable_key_canonical,
+             source_entity_digest = excluded.source_entity_digest,
+             relation_kind = excluded.relation_kind,
+             origin_kind = excluded.origin_kind,
+             origin_entity_digest = excluded.origin_entity_digest,
+             origin_project_instance_id = excluded.origin_project_instance_id,
+             origin_repository_path = excluded.origin_repository_path,
+             origin_external_namespace = excluded.origin_external_namespace,
+             origin_external_value = excluded.origin_external_value,
+             source_start_byte = excluded.source_start_byte,
+             source_end_byte = excluded.source_end_byte,
+             source_start_line = excluded.source_start_line,
+             source_end_line = excluded.source_end_line,
+             resolver_name = excluded.resolver_name,
+             resolver_version = excluded.resolver_version,
+             content_span_fingerprint = excluded.content_span_fingerprint,
+             occurrence_discriminator = excluded.occurrence_discriminator,
+             resolution_status = excluded.resolution_status,
+             candidate_total = excluded.candidate_total,
+             candidate_completeness = excluded.candidate_completeness,
+             unresolved_reason = excluded.unresolved_reason,
+             evidence_class = excluded.evidence_class,
+             confidence = excluded.confidence,
+             completeness = excluded.completeness,
+             parser_kind = excluded.parser_kind,
+             parser_identity = excluded.parser_identity,
+             parser_version = excluded.parser_version,
+             last_changed_epoch = excluded.last_changed_epoch
+         WHERE graph_resolution_occurrences.stable_key_version = excluded.stable_key_version
+           AND graph_resolution_occurrences.stable_key_canonical = excluded.stable_key_canonical",
+    )?;
+    let mut insert_resolution_candidate = connection.prepare_cached(
+        "INSERT INTO graph_resolution_candidates(
+             resolution_occurrence_digest, candidate_ordinal, target_scope,
+             target_entity_digest, external_target_namespace, external_target_value,
+             confidence, explanation, structural_slot, last_changed_epoch
+         ) VALUES(?1, ?2, 'internal', ?3, NULL, NULL, ?4, ?5, ?6, ?7)
+         ON CONFLICT(structural_slot, resolution_occurrence_digest, candidate_ordinal)
+         DO UPDATE SET
+             target_scope = excluded.target_scope,
+             target_entity_digest = excluded.target_entity_digest,
+             external_target_namespace = excluded.external_target_namespace,
+             external_target_value = excluded.external_target_value,
+             confidence = excluded.confidence,
+             explanation = excluded.explanation,
+             last_changed_epoch = excluded.last_changed_epoch",
+    )?;
+    for relation in &relations {
+        let source =
+            entities
+                .get(relation.source_index)
+                .ok_or_else(|| DbError::InvalidGraphRelation {
+                    message: "compact relation source index exceeded the entity batch".to_owned(),
+                })?;
+        let target_digest = match relation.target {
+            CompactTypedGraphTarget::Internal(target) => Some(target.digest()),
+            CompactTypedGraphTarget::External { .. } => None,
+        };
+        let (target_scope, external_namespace, external_value) = match relation.target {
+            CompactTypedGraphTarget::Internal(_) => ("internal", None, None),
+            CompactTypedGraphTarget::External { namespace, value } => {
+                ("external", Some(namespace), Some(value))
+            }
+        };
+        let relation_digest = relation.key.digest();
+        let source_digest = source.key.digest();
+        let affected_rows = insert_relation.execute(params![
+            &relation_digest[..],
+            i64::from(relation.key.encoding_version()),
+            key_arena.logical_edge_canonical_identity(relation.key),
+            &source_digest[..],
+            relation.kind.as_str(),
+            target_scope,
+            target_digest.as_ref().map(|digest| &digest[..]),
+            external_namespace,
+            external_value,
+            relation.confidence.as_str(),
+            relation.parser.as_str(),
+            GRAPH_PARSER_IDENTITY,
+            GRAPH_PARSER_VERSION,
+            structural_slot,
+            last_changed_epoch,
+        ])?;
+        require_stable_graph_identity_upsert(
+            affected_rows,
+            GRAPH_RELATIONS_TABLE,
+            structural_slot,
+        )?;
+
+        let evidence_digest = relation.evidence_key.digest();
+        let fingerprint = relation.span_fingerprint.as_bytes();
+        let affected_rows = insert_evidence.execute(params![
+            &evidence_digest[..],
+            i64::from(relation.evidence_key.encoding_version()),
+            key_arena.evidence_canonical_identity(relation.evidence_key),
+            &relation_digest[..],
+            &project_bytes[..],
+            graph.path(),
+            GRAPH_PARSER_IDENTITY,
+            GRAPH_PARSER_VERSION,
+            &fingerprint[..],
+            i64::from(relation.occurrence_discriminator),
+            EvidenceClass::Direct.as_str(),
+            relation.confidence.as_str(),
+            Completeness::Complete.as_str(),
+            relation.explanation,
+            structural_slot,
+            last_changed_epoch,
+        ])?;
+        require_stable_graph_identity_upsert(
+            affected_rows,
+            GRAPH_EVIDENCE_OCCURRENCES_TABLE,
+            structural_slot,
+        )?;
+    }
+    for resolution in &resolutions {
+        let source =
+            entities
+                .get(resolution.source_index)
+                .ok_or_else(|| DbError::InvalidGraphRelation {
+                    message: "compact resolution source index exceeded the entity batch".to_owned(),
+                })?;
+        let (status, candidate_total, candidate_completeness, unresolved_reason) =
+            match resolution.state {
+                CompactTypedGraphResolutionState::Ambiguous {
+                    candidate_total,
+                    candidate_completeness,
+                    ..
+                } => (
+                    "ambiguous",
+                    Some(usize_to_i64(candidate_total)),
+                    Some(candidate_completeness.as_str()),
+                    None,
+                ),
+                CompactTypedGraphResolutionState::Unresolved { reason } => {
+                    ("unresolved", None, None, Some(reason))
+                }
+            };
+        let resolution_digest = resolution.key.digest();
+        let source_digest = source.key.digest();
+        let fingerprint = resolution.span_fingerprint.as_bytes();
+        let affected_rows = insert_resolution.execute(params![
+            &resolution_digest[..],
+            i64::from(resolution.key.encoding_version()),
+            key_arena.resolution_canonical_identity(resolution.key),
+            &source_digest[..],
+            resolution.kind.as_str(),
+            &project_bytes[..],
+            graph.path(),
+            GRAPH_PARSER_IDENTITY,
+            GRAPH_PARSER_VERSION,
+            &fingerprint[..],
+            i64::from(resolution.occurrence_discriminator),
+            status,
+            candidate_total,
+            candidate_completeness,
+            unresolved_reason,
+            EvidenceClass::Direct.as_str(),
+            resolution.confidence.as_str(),
+            Completeness::Complete.as_str(),
+            resolution.parser.as_str(),
+            GRAPH_PARSER_IDENTITY,
+            GRAPH_PARSER_VERSION,
+            structural_slot,
+            last_changed_epoch,
+        ])?;
+        require_stable_graph_identity_upsert(
+            affected_rows,
+            GRAPH_RESOLUTION_OCCURRENCES_TABLE,
+            structural_slot,
+        )?;
+
+        if let CompactTypedGraphResolutionState::Ambiguous {
+            candidate_start,
+            candidate_end,
+            ..
+        } = resolution.state
+        {
+            for (ordinal, (_, entity_index)) in entity_indices[candidate_start..candidate_end]
+                .iter()
+                .enumerate()
+            {
+                let candidate =
+                    entities
+                        .get(*entity_index)
+                        .ok_or_else(|| DbError::InvalidGraphRelation {
+                            message: "compact resolution candidate index exceeded the entity batch"
+                                .to_owned(),
+                        })?;
+                let candidate_digest = candidate.key.digest();
+                insert_resolution_candidate.execute(params![
+                    &resolution_digest[..],
+                    usize_to_i64(ordinal),
+                    &candidate_digest[..],
+                    ConfidenceClass::High.as_str(),
+                    "same-file exact-name candidate",
+                    structural_slot,
+                    last_changed_epoch,
+                ])?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Derive typed stable entities directly from one compact parser graph.
+fn compact_typed_graph_entities<'graph>(
+    project: ProjectInstanceId,
+    graph: &'graph CompactSymbolGraph,
+    graph_path: &RepositoryFilePath,
+    key_arena: &mut GraphKeyArena,
+    qualified_name_arena: &mut String,
+) -> DbResult<Vec<CompactTypedGraphEntity<'graph>>> {
+    let mut entities = Vec::with_capacity(graph.symbol_count().saturating_add(1));
+    entities.push(CompactTypedGraphEntity {
+        lookup_name: GRAPH_FILE_SOURCE_NAME,
+        key: key_arena.entity_key(project, GraphEntityKeyInput::File { path: graph_path })?,
+        kind: GraphEntityKind::File,
+        repository_path: graph.path(),
+        qualified_name: CompactTypedGraphText::Borrowed(graph.path()),
+        signature: None,
+        external_namespace: None,
+        external_value: None,
+        language: graph.language(),
+        parser: graph.parser(),
+    });
+    for symbol in graph.symbols().filter(|symbol| {
+        !matches!(
+            symbol.kind(),
+            SymbolKind::Dependency | SymbolKind::Import | SymbolKind::Unknown
+        )
+    }) {
+        let qualified_name = compact_typed_graph_qualified_name(
+            symbol.parent(),
+            symbol.name(),
+            qualified_name_arena,
+        );
+        let qualified_name_value = qualified_name.as_str(qualified_name_arena);
+        let signature = (!symbol.signature().is_empty()).then(|| symbol.signature());
+        let (key_input, external_namespace, external_value) = match symbol.kind() {
+            SymbolKind::Package | SymbolKind::Workspace => {
+                let namespace = package_entity_namespace(symbol.kind(), symbol.language());
+                (
+                    GraphEntityKeyInput::Package {
+                        namespace,
+                        value: symbol.name(),
+                    },
+                    Some(namespace),
+                    Some(symbol.name()),
+                )
+            }
+            SymbolKind::Module => (
+                GraphEntityKeyInput::Module {
+                    path: graph_path,
+                    qualified_name: qualified_name_value,
+                },
+                None,
+                None,
+            ),
+            _ => (
+                GraphEntityKeyInput::Declaration {
+                    path: graph_path,
+                    qualified_name: qualified_name_value,
+                    signature,
+                },
+                None,
+                None,
+            ),
+        };
+        entities.push(CompactTypedGraphEntity {
+            lookup_name: symbol.name(),
+            key: key_arena.entity_key(project, key_input)?,
+            kind: key_input.entity_kind(),
+            repository_path: symbol.path(),
+            qualified_name,
+            signature,
+            external_namespace,
+            external_value,
+            language: symbol.language(),
+            parser: symbol.parser(),
+        });
+    }
+    Ok(entities)
+}
+
+/// Retain one qualified name in borrowed form or the shared batch text arena.
+fn compact_typed_graph_qualified_name<'graph>(
+    parent: Option<&'graph str>,
+    name: &'graph str,
+    shared: &mut String,
+) -> CompactTypedGraphText<'graph> {
+    let Some(parent) = parent else {
+        return CompactTypedGraphText::Borrowed(name);
+    };
+    let start = shared.len();
+    shared.push_str(parent);
+    shared.push_str("::");
+    shared.push_str(name);
+    CompactTypedGraphText::Shared {
+        start,
+        length: shared.len() - start,
+    }
+}
+
+/// Derive traversable edges plus typed abstentions without expanding compact parser facts.
+fn compact_typed_graph_relations<'graph>(
+    project: ProjectInstanceId,
+    graph: &'graph CompactSymbolGraph,
+    entities: &[CompactTypedGraphEntity<'graph>],
+    evidence_origin_path: &RepositoryPath,
+    key_arena: &mut GraphKeyArena,
+) -> DbResult<CompactTypedGraphRelationPlan<'graph>> {
+    let entity_indices = compact_typed_graph_entity_indices(entities);
+    let evidence_origin = GraphEvidenceOriginInput::RepositoryPath {
+        project,
+        path: evidence_origin_path,
+    };
+    let evidence_resolver = GraphResolverInput {
+        name: GRAPH_PARSER_IDENTITY,
+        version: GRAPH_PARSER_VERSION,
+    };
+    let mut evidence_discriminators = HashMap::<([u8; 32], [u8; 32]), u32>::new();
+    let mut resolution_discriminators =
+        HashMap::<([u8; 32], GraphRelationKind, [u8; 32]), u32>::new();
+    let mut relations = Vec::with_capacity(graph.relation_count());
+    let mut resolutions = Vec::new();
+    let candidate_limit = usize::try_from(
+        DefaultCoreBudgetKind::ResolutionCandidates
+            .default_budget()
+            .value(),
+    )
+    .map_err(|_source| DbError::InvalidGraphRelation {
+        message: "resolution-candidate budget exceeded this platform's index width".to_owned(),
+    })?;
+    for relation in graph.relations() {
+        let kind = GraphRelationKind::from(relation.kind());
+        let span_fingerprint = ContentSpanFingerprint::from_content(relation.context().as_bytes());
+        let (source_start, source_end) =
+            compact_typed_graph_entity_match_range(&entity_indices, relation.source_name());
+        let source_count = source_end - source_start;
+        let source_index = match source_count {
+            1 => entity_indices[source_start].1,
+            0 if compact_relation_has_file_owned_manifest_source(
+                graph,
+                relation.source_name(),
+                relation.kind(),
+                relation.parser(),
+            ) =>
+            {
+                0
+            }
+            _ => {
+                let source = entities
+                    .first()
+                    .ok_or_else(|| DbError::InvalidGraphRelation {
+                        message: "compact entity batch omitted its containing file".to_owned(),
+                    })?;
+                let occurrence = CompactTypedGraphOccurrence {
+                    source_index: 0,
+                    source_key: source.key,
+                    kind,
+                    parser: relation.parser(),
+                    origin: evidence_origin,
+                    resolver: evidence_resolver,
+                    span_fingerprint,
+                };
+                let occurrence_discriminator = next_compact_typed_graph_occurrence_discriminator(
+                    &mut resolution_discriminators,
+                    (source.key.digest(), kind, span_fingerprint.as_bytes()),
+                )?;
+                let (reason, confidence) = if source_count == 0 {
+                    (
+                        "relation source was not resolved in the containing file",
+                        ConfidenceClass::Low,
+                    )
+                } else {
+                    (
+                        "relation source name matched multiple entities in the containing file",
+                        ConfidenceClass::Medium,
+                    )
+                };
+                resolutions.push(occurrence.resolution(
+                    key_arena,
+                    occurrence_discriminator,
+                    CompactTypedGraphResolutionState::Unresolved { reason },
+                    confidence,
+                )?);
+                continue;
+            }
+        };
+        let source = entities
+            .get(source_index)
+            .ok_or_else(|| DbError::InvalidGraphRelation {
+                message: "compact relation source index exceeded the entity batch".to_owned(),
+            })?;
+        let occurrence = CompactTypedGraphOccurrence {
+            source_index,
+            source_key: source.key,
+            kind,
+            parser: relation.parser(),
+            origin: evidence_origin,
+            resolver: evidence_resolver,
+            span_fingerprint,
+        };
+        let target = match relation.kind() {
+            RelationKind::DependsOn => CompactTypedGraphTarget::External {
+                namespace: GRAPH_EXTERNAL_PACKAGE_NAMESPACE,
+                value: relation.target_name(),
+            },
+            RelationKind::Imports => {
+                let occurrence_discriminator = next_compact_typed_graph_occurrence_discriminator(
+                    &mut resolution_discriminators,
+                    (source.key.digest(), kind, span_fingerprint.as_bytes()),
+                )?;
+                resolutions.push(occurrence.resolution(
+                    key_arena,
+                    occurrence_discriminator,
+                    CompactTypedGraphResolutionState::Unresolved {
+                        reason:
+                            "import target is not resolved by the same-file compatibility resolver",
+                    },
+                    ConfidenceClass::Low,
+                )?);
+                continue;
+            }
+            RelationKind::Contains | RelationKind::Calls => {
+                let (target_start, target_end) =
+                    compact_typed_graph_entity_match_range(&entity_indices, relation.target_name());
+                let target_count = target_end - target_start;
+                if target_count == 1 {
+                    let target = entities
+                        .get(entity_indices[target_start].1)
+                        .ok_or_else(|| DbError::InvalidGraphRelation {
+                            message: "compact relation target index exceeded the entity batch"
+                                .to_owned(),
+                        })?;
+                    CompactTypedGraphTarget::Internal(target.key)
+                } else {
+                    let occurrence_discriminator =
+                        next_compact_typed_graph_occurrence_discriminator(
+                            &mut resolution_discriminators,
+                            (source.key.digest(), kind, span_fingerprint.as_bytes()),
+                        )?;
+                    let (state, confidence) = if target_count == 0 {
+                        let reason = match relation.kind() {
+                            RelationKind::Contains => {
+                                "contained target was not resolved in the containing file"
+                            }
+                            RelationKind::Calls => {
+                                "call target was not resolved in the containing file"
+                            }
+                            RelationKind::Imports | RelationKind::DependsOn => unreachable!(
+                                "target absence is handled only for containment and calls"
+                            ),
+                        };
+                        (
+                            CompactTypedGraphResolutionState::Unresolved { reason },
+                            ConfidenceClass::Low,
+                        )
+                    } else {
+                        let candidate_end = target_start + target_count.min(candidate_limit);
+                        let candidate_completeness = if candidate_end == target_end {
+                            Completeness::Complete
+                        } else {
+                            Completeness::Truncated
+                        };
+                        (
+                            CompactTypedGraphResolutionState::Ambiguous {
+                                candidate_start: target_start,
+                                candidate_end,
+                                candidate_total: target_count,
+                                candidate_completeness,
+                            },
+                            ConfidenceClass::Medium,
+                        )
+                    };
+                    resolutions.push(occurrence.resolution(
+                        key_arena,
+                        occurrence_discriminator,
+                        state,
+                        confidence,
+                    )?);
+                    continue;
+                }
+            }
+        };
+        let confidence = match relation.kind() {
+            RelationKind::Calls => ConfidenceClass::High,
+            RelationKind::Contains | RelationKind::DependsOn => ConfidenceClass::Exact,
+            RelationKind::Imports => unreachable!("imports remain non-traversable"),
+        };
+        let key = key_arena.logical_edge_key(source.key, target.key_input(), kind)?;
+        let occurrence_discriminator = next_compact_typed_graph_occurrence_discriminator(
+            &mut evidence_discriminators,
+            (key.digest(), span_fingerprint.as_bytes()),
+        )?;
+        let evidence_key = key_arena.evidence_key(
+            key,
+            evidence_origin,
+            evidence_resolver,
+            span_fingerprint,
+            occurrence_discriminator,
+        )?;
+        relations.push(CompactTypedGraphRelation {
+            key,
+            source_index,
+            kind,
+            target,
+            parser: relation.parser(),
+            confidence,
+            evidence_key,
+            span_fingerprint,
+            occurrence_discriminator,
+            explanation: IdentityText::validate(relation.context())
+                .is_ok()
+                .then_some(relation.context()),
+        });
+    }
+    Ok(CompactTypedGraphRelationPlan {
+        relations,
+        resolutions,
+        entity_indices,
+    })
+}
+
+/// Accept file ownership only for the exact Cargo manifest producer contract.
+fn compact_relation_has_file_owned_manifest_source(
+    graph: &CompactSymbolGraph,
+    source_name: &str,
+    relation_kind: RelationKind,
+    relation_parser: ParserKind,
+) -> bool {
+    relation_kind == RelationKind::DependsOn
+        && source_name == GRAPH_CARGO_MANIFEST_SOURCE_NAME
+        && graph.parser() == ParserKind::Manifest
+        && relation_parser == ParserKind::Manifest
+        && graph.language() == Some(GRAPH_CARGO_MANIFEST_LANGUAGE)
+        && graph.path().rsplit('/').next() == Some(GRAPH_CARGO_MANIFEST_FILE_NAME)
+}
+
+/// Index same-file compatibility names once in deterministic contiguous storage.
+fn compact_typed_graph_entity_indices<'graph>(
+    entities: &[CompactTypedGraphEntity<'graph>],
+) -> Vec<(&'graph str, usize)> {
+    let mut indices = entities
+        .iter()
+        .enumerate()
+        .map(|(index, entity)| (entity.lookup_name, index))
+        .collect::<Vec<_>>();
+    indices.sort_unstable_by(|left, right| left.0.cmp(right.0).then(left.1.cmp(&right.1)));
+    indices
+}
+
+/// Return the half-open range for one compatibility name in the sorted entity index.
+fn compact_typed_graph_entity_match_range(indices: &[(&str, usize)], name: &str) -> (usize, usize) {
+    let start = indices.partition_point(|(candidate, _)| *candidate < name);
+    let end = indices.partition_point(|(candidate, _)| *candidate <= name);
+    (start, end)
+}
+
+/// Increment one occurrence discriminator without losing its current value.
+fn next_compact_typed_graph_occurrence_discriminator<K>(
+    discriminators: &mut HashMap<K, u32>,
+    identity: K,
+) -> DbResult<u32>
+where
+    K: Eq + std::hash::Hash,
+{
+    let discriminator = discriminators.entry(identity).or_default();
+    let current = *discriminator;
+    *discriminator = discriminator
+        .checked_add(1)
+        .ok_or_else(|| DbError::InvalidGraphRelation {
+            message: "one graph fact exceeded the occurrence discriminator bound".to_owned(),
+        })?;
+    Ok(current)
+}
+
+/// Return a stable ecosystem namespace for package and workspace entities.
+fn package_entity_namespace(kind: SymbolKind, language: Option<&str>) -> &'static str {
+    match (kind, language) {
+        (SymbolKind::Workspace, Some("cargo-manifest" | "cargo-lock")) => "cargo-workspace",
+        (SymbolKind::Package, Some("cargo-manifest" | "cargo-lock")) => "cargo",
+        (SymbolKind::Workspace, _) => "workspace",
+        _ => "package",
+    }
+}
+
 /// Replace one parser-owned compatibility graph within an existing write boundary.
 fn replace_compact_symbol_graph_in_connection(
     connection: &Connection,
     graph: &CompactSymbolGraph,
 ) -> DbResult<()> {
+    let (active_slot, active_epoch) = connection.query_row(
+        "SELECT active_slot, active_epoch
+         FROM graph_publication_state WHERE singleton = 1",
+        [],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    replace_compact_symbol_graph_at_publication(connection, graph, &active_slot, active_epoch)
+}
+
+/// Replace one parser graph at an already selected slot and publication epoch.
+pub(crate) fn replace_compact_symbol_graph_at_publication(
+    connection: &Connection,
+    graph: &CompactSymbolGraph,
+    structural_slot: &str,
+    last_changed_epoch: i64,
+) -> DbResult<()> {
     let path = graph.path();
+    replace_typed_graph_for_compact_symbol_graph(
+        connection,
+        graph,
+        structural_slot,
+        last_changed_epoch,
+    )?;
     connection
         .prepare_cached("DELETE FROM symbols WHERE path = ?1")?
         .execute([path])?;
@@ -3616,7 +5140,7 @@ fn replace_compact_symbol_graph_in_connection(
         .execute(params![
             path,
             graph.language(),
-            graph.parser().to_string(),
+            graph.parser().as_str(),
             usize_to_i64(graph.symbol_count()),
             usize_to_i64(graph.relation_count()),
         ])?;
@@ -3639,14 +5163,14 @@ fn replace_compact_symbol_graph_in_connection(
             symbol.path(),
             symbol.language(),
             symbol.name(),
-            symbol.kind().to_string(),
+            symbol.kind().as_str(),
             symbol.signature(),
             symbol.exported(),
             symbol.documentation(),
             i64::from(symbol.line_start()),
             i64::from(symbol.line_end()),
             symbol.parent(),
-            symbol.parser().to_string(),
+            symbol.parser().as_str(),
             symbol.detail(),
         ])?;
     }
@@ -3661,10 +5185,10 @@ fn replace_compact_symbol_graph_in_connection(
             relation.path(),
             relation.source_name(),
             relation.target_name(),
-            relation.kind().to_string(),
+            relation.kind().as_str(),
             i64::from(relation.line()),
             relation.context(),
-            relation.parser().to_string(),
+            relation.parser().as_str(),
         ])?;
     }
     if let Some(node_id) = node_id {
@@ -3829,6 +5353,164 @@ fn file_text_from_row(row: &rusqlite::Row<'_>) -> DbResult<IndexedFileText> {
         line_count,
         content: row.get(4)?,
     })
+}
+
+/// Read one typed persisted graph entity from the selected column order.
+fn persisted_graph_entity_from_row(row: &rusqlite::Row<'_>) -> DbResult<PersistedGraphEntity> {
+    let kind_value = graph_text(row, 1, "graph entity kind")?;
+    let kind = GraphEntityKind::ALL
+        .into_iter()
+        .find(|kind| kind.as_str() == kind_value)
+        .ok_or_else(|| DbError::InvalidEnum {
+            field: "graph entity kind",
+            value: kind_value.to_owned(),
+        })?;
+    Ok(PersistedGraphEntity {
+        stable_key_digest: graph_digest_from_row(row, 0, "graph entity stable key")?,
+        kind,
+        repository_path: row.get(2)?,
+        qualified_name: row.get(3)?,
+        signature: row.get(4)?,
+        discriminator: row.get(5)?,
+        last_changed_epoch: graph_epoch(row.get(6)?, "graph entity last changed epoch")?,
+    })
+}
+
+/// Read one typed persisted graph relation from the selected column order.
+fn persisted_graph_relation_from_row(row: &rusqlite::Row<'_>) -> DbResult<PersistedGraphRelation> {
+    let kind_value = graph_text(row, 2, "graph relation kind")?;
+    let kind = GraphRelationKind::ALL
+        .into_iter()
+        .find(|kind| kind.as_str() == kind_value)
+        .ok_or_else(|| DbError::InvalidEnum {
+            field: "graph relation kind",
+            value: kind_value.to_owned(),
+        })?;
+    let target_scope = graph_text(row, 3, "graph relation target scope")?;
+    let target_digest = graph_optional_digest_from_row(row, 4, "graph relation target entity")?;
+    let external_namespace = row.get::<_, Option<String>>(5)?;
+    let external_value = row.get::<_, Option<String>>(6)?;
+    let target = match (
+        target_scope,
+        target_digest,
+        external_namespace,
+        external_value,
+    ) {
+        ("internal", Some(digest), None, None) => PersistedGraphTarget::Internal(digest),
+        ("external", None, Some(namespace), Some(value)) => {
+            PersistedGraphTarget::External { namespace, value }
+        }
+        (scope, _, _, _) => {
+            return Err(DbError::InvalidGraphRelation {
+                message: format!("target fields do not match scope {scope:?}"),
+            });
+        }
+    };
+    Ok(PersistedGraphRelation {
+        stable_key_digest: graph_digest_from_row(row, 0, "graph relation stable key")?,
+        source_entity_digest: graph_digest_from_row(row, 1, "graph relation source entity")?,
+        kind,
+        target,
+        last_changed_epoch: graph_epoch(row.get(7)?, "graph relation last changed epoch")?,
+    })
+}
+
+/// Run one prepared bounded relation query and preserve terminal row status.
+fn load_graph_relations(
+    connection: &Connection,
+    sql: &str,
+    parameters: impl Params,
+) -> DbResult<Vec<PersistedGraphRelation>> {
+    let mut statement = connection.prepare_cached(sql)?;
+    let rows = statement.query_and_then(parameters, persisted_graph_relation_from_row)?;
+    let mut relations = Vec::new();
+    visit_rows_to_terminal(rows, &mut |relation| {
+        relations.push(relation);
+        Ok(true)
+    })?;
+    Ok(relations)
+}
+
+/// Borrow one `SQLite` text value without allocating an owned scalar.
+fn graph_text<'row>(
+    row: &'row rusqlite::Row<'_>,
+    index: usize,
+    field: &'static str,
+) -> DbResult<&'row str> {
+    match row.get_ref(index)? {
+        ValueRef::Text(value) => {
+            std::str::from_utf8(value).map_err(|source| DbError::InvalidGraphRelation {
+                message: format!("{field} is not valid UTF-8: {source}"),
+            })
+        }
+        value => Err(DbError::InvalidGraphRelation {
+            message: format!(
+                "{field} has SQLite type {:?}, expected text",
+                value.data_type()
+            ),
+        }),
+    }
+}
+
+/// Copy one borrowed fixed-width `SQLite` graph digest.
+fn graph_digest_from_row(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+    field: &'static str,
+) -> DbResult<[u8; 32]> {
+    match row.get_ref(index)? {
+        ValueRef::Blob(value) => graph_digest(value, field),
+        value => Err(DbError::InvalidGraphRelation {
+            message: format!(
+                "{field} has SQLite type {:?}, expected blob",
+                value.data_type()
+            ),
+        }),
+    }
+}
+
+/// Copy one optional borrowed fixed-width `SQLite` graph digest.
+fn graph_optional_digest_from_row(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+    field: &'static str,
+) -> DbResult<Option<[u8; 32]>> {
+    match row.get_ref(index)? {
+        ValueRef::Null => Ok(None),
+        ValueRef::Blob(value) => graph_digest(value, field).map(Some),
+        value => Err(DbError::InvalidGraphRelation {
+            message: format!(
+                "{field} has SQLite type {:?}, expected blob",
+                value.data_type()
+            ),
+        }),
+    }
+}
+
+/// Convert a checked `SQLite` graph digest into its fixed-width representation.
+fn graph_digest(value: &[u8], field: &'static str) -> DbResult<[u8; 32]> {
+    let found = value.len();
+    if found != 32 {
+        return Err(DbError::InvalidByteLength {
+            field,
+            expected: 32,
+            found,
+        });
+    }
+    let mut digest = [0_u8; 32];
+    digest.copy_from_slice(value);
+    Ok(digest)
+}
+
+/// Convert a non-negative `SQLite` epoch into the typed graph contract.
+fn graph_epoch(value: i64, field: &'static str) -> DbResult<IndexEpoch> {
+    u64::try_from(value)
+        .map(IndexEpoch::new)
+        .map_err(|source| DbError::InvalidCount {
+            field,
+            value,
+            source,
+        })
 }
 
 /// Consume a started result page through its terminal `SQLite` status.
@@ -6591,6 +8273,927 @@ mod tests {
     }
 
     #[test]
+    fn task_arri_ut_arri_4_22_uses_indexed_graph_adjacency() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let source_graph = projectatlas_symbols::extract_symbol_graph(
+            "src/lib.rs",
+            Some("rust"),
+            "pub mod nested {}\n\
+             pub fn source() { middle(); middle(); external_api(); }\n\
+             fn middle() { target(); }\n\
+             fn target() {}\n",
+        );
+        let source_graph = CompactSymbolGraph::try_from(source_graph)?;
+        store.replace_compact_symbol_graph(&source_graph)?;
+        let manifest_graph = projectatlas_symbols::extract_symbol_graph(
+            "Cargo.toml",
+            Some("cargo-manifest"),
+            "[package]\nname = \"projectatlas-db\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nrusqlite = \"0.32\"\n",
+        );
+        let manifest_graph = CompactSymbolGraph::try_from(manifest_graph)?;
+        store.replace_compact_symbol_graph(&manifest_graph)?;
+        let unbound_manifest_path = "fixtures/Cargo.toml";
+        let unbound_manifest_graph = CompactSymbolGraph::try_from(SymbolGraph {
+            path: unbound_manifest_path.to_owned(),
+            language: Some(GRAPH_CARGO_MANIFEST_LANGUAGE.to_owned()),
+            parser: ParserKind::Manifest,
+            symbols: Vec::new(),
+            relations: vec![SymbolRelation {
+                path: unbound_manifest_path.to_owned(),
+                source_name: "unknown-manifest-owner".to_owned(),
+                target_name: "fabricated-target".to_owned(),
+                kind: RelationKind::DependsOn,
+                line: 1,
+                context: "fabricated-target = \"1\"".to_owned(),
+                parser: ParserKind::Manifest,
+            }],
+        })?;
+        store.replace_compact_symbol_graph(&unbound_manifest_graph)?;
+        let overloaded_graph = CompactSymbolGraph::try_from(SymbolGraph {
+            path: "src/overloaded.rs".to_owned(),
+            language: Some("rust".to_owned()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![
+                CodeSymbol {
+                    path: "src/overloaded.rs".to_owned(),
+                    language: Some("rust".to_owned()),
+                    name: "render".to_owned(),
+                    kind: SymbolKind::Method,
+                    signature: "fn render(&self)".to_owned(),
+                    exported: false,
+                    documentation: None,
+                    line_start: 2,
+                    line_end: 2,
+                    parent: Some("Renderer".to_owned()),
+                    parser: ParserKind::TreeSitter,
+                    detail: Some("function_item".to_owned()),
+                },
+                CodeSymbol {
+                    path: "src/overloaded.rs".to_owned(),
+                    language: Some("rust".to_owned()),
+                    name: "render".to_owned(),
+                    kind: SymbolKind::Method,
+                    signature: "fn render(&self, value: usize)".to_owned(),
+                    exported: false,
+                    documentation: None,
+                    line_start: 3,
+                    line_end: 3,
+                    parent: Some("Renderer".to_owned()),
+                    parser: ParserKind::TreeSitter,
+                    detail: Some("function_item".to_owned()),
+                },
+            ],
+            relations: Vec::new(),
+        })?;
+        store.replace_compact_symbol_graph(&overloaded_graph)?;
+        let ambiguous_symbol = |name: &str, parent: Option<&str>, line: usize| CodeSymbol {
+            path: "src/ambiguous.rs".to_owned(),
+            language: Some("rust".to_owned()),
+            name: name.to_owned(),
+            kind: SymbolKind::Function,
+            signature: format!("fn {name}()"),
+            exported: false,
+            documentation: None,
+            line_start: line,
+            line_end: line,
+            parent: parent.map(ToOwned::to_owned),
+            parser: ParserKind::TreeSitter,
+            detail: Some("function_item".to_owned()),
+        };
+        let ambiguous_graph = CompactSymbolGraph::try_from(SymbolGraph {
+            path: "src/ambiguous.rs".to_owned(),
+            language: Some("rust".to_owned()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![
+                ambiguous_symbol("ambiguous_source", None, 1),
+                ambiguous_symbol("duplicate", Some("Left"), 2),
+                ambiguous_symbol("duplicate", Some("Right"), 3),
+            ],
+            relations: vec![SymbolRelation {
+                path: "src/ambiguous.rs".to_owned(),
+                source_name: "ambiguous_source".to_owned(),
+                target_name: "duplicate".to_owned(),
+                kind: RelationKind::Calls,
+                line: 1,
+                context: "duplicate();".to_owned(),
+                parser: ParserKind::TreeSitter,
+            }],
+        })?;
+        store.replace_compact_symbol_graph(&ambiguous_graph)?;
+
+        insert_graph_entity(
+            &store,
+            "b",
+            250,
+            GraphEntityKind::Declaration,
+            Some("src/retained.rs"),
+            "retained::only",
+        )?;
+
+        let source_entities = store.load_graph_entities_by_qualified_name(
+            GraphEntityKind::Declaration,
+            "source",
+            4,
+        )?;
+        let middle_entities = store.load_graph_entities_by_qualified_name(
+            GraphEntityKind::Declaration,
+            "middle",
+            4,
+        )?;
+        let target_entities = store.load_graph_entities_by_qualified_name(
+            GraphEntityKind::Declaration,
+            "target",
+            4,
+        )?;
+        require_eq(
+            &source_entities.len(),
+            &1,
+            "normal extraction source entity",
+        )?;
+        require_eq(
+            &middle_entities.len(),
+            &1,
+            "normal extraction middle entity",
+        )?;
+        require_eq(
+            &target_entities.len(),
+            &1,
+            "normal extraction target entity",
+        )?;
+        let source = source_entities[0].stable_key_digest;
+        let middle = middle_entities[0].stable_key_digest;
+        let target = target_entities[0].stable_key_digest;
+        let active_source = store
+            .load_graph_entity(&source)?
+            .ok_or_else(|| io::Error::other("active source graph entity was not found"))?;
+        require_eq(
+            &active_source.qualified_name,
+            &Some("source".to_owned()),
+            "normal persistence stable-key lookup",
+        )?;
+
+        let packages = store.load_graph_entities_by_qualified_name(
+            GraphEntityKind::Package,
+            "projectatlas-db",
+            4,
+        )?;
+        let modules =
+            store.load_graph_entities_by_qualified_name(GraphEntityKind::Module, "nested", 4)?;
+        require_eq(&packages.len(), &1, "normal package extraction and lookup")?;
+        require_eq(&modules.len(), &1, "normal module extraction and lookup")?;
+        store.connection.execute(
+            "UPDATE graph_entities
+             SET discriminator = 'receiver-only'
+             WHERE structural_slot = (
+                 SELECT active_slot FROM graph_publication_state WHERE singleton = 1
+             )
+               AND repository_path = 'src/overloaded.rs'
+               AND signature = 'fn render(&self)'",
+            [],
+        )?;
+        let overloads = store.load_graph_entities_by_qualified_name(
+            GraphEntityKind::Declaration,
+            "Renderer::render",
+            4,
+        )?;
+        require_eq(&overloads.len(), &2, "duplicate qualified-name overloads")?;
+        require_eq(
+            &overloads
+                .iter()
+                .map(|entity| entity.stable_key_digest)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            &2,
+            "overload stable-key distinction",
+        )?;
+        require_eq(
+            &overloads
+                .iter()
+                .filter_map(|entity| entity.signature.as_deref())
+                .collect::<BTreeSet<_>>(),
+            &BTreeSet::from(["fn render(&self)", "fn render(&self, value: usize)"]),
+            "overload semantic distinction",
+        )?;
+        require_eq(
+            &overloads
+                .iter()
+                .map(|entity| entity.discriminator.as_deref())
+                .collect::<BTreeSet<_>>(),
+            &BTreeSet::from([None, Some("receiver-only")]),
+            "overload discriminator decoding",
+        )?;
+        let ambiguous_source = store.load_graph_entities_by_qualified_name(
+            GraphEntityKind::Declaration,
+            "ambiguous_source",
+            4,
+        )?;
+        require_eq(
+            &ambiguous_source.len(),
+            &1,
+            "ambiguous-target fixture source entity",
+        )?;
+        require_eq(
+            &store
+                .load_graph_adjacency(
+                    &ambiguous_source[0].stable_key_digest,
+                    GraphRelationDirection::Outbound,
+                    Some(GraphRelationKind::Calls),
+                    8,
+                )?
+                .is_empty(),
+            &true,
+            "ambiguous compatibility target does not become an exact edge",
+        )?;
+        let ambiguous_resolution = store.connection.query_row(
+            "SELECT stable_key_digest, source_entity_digest, resolution_status,
+                    candidate_total, candidate_completeness, unresolved_reason, confidence
+             FROM graph_resolution_occurrences
+             WHERE structural_slot = 'a'
+               AND origin_repository_path = 'src/ambiguous.rs'
+               AND relation_kind = 'calls'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )?;
+        require_eq(
+            &ambiguous_resolution.1,
+            &ambiguous_source[0].stable_key_digest.to_vec(),
+            "ambiguous occurrence source identity",
+        )?;
+        require_eq(
+            &(
+                ambiguous_resolution.2.as_str(),
+                ambiguous_resolution.3,
+                ambiguous_resolution.4.as_str(),
+                ambiguous_resolution.5.as_deref(),
+                ambiguous_resolution.6.as_str(),
+            ),
+            &("ambiguous", 2, "complete", None, "medium"),
+            "typed ambiguous occurrence state",
+        )?;
+        let ambiguous_candidates = store
+            .connection
+            .prepare(
+                "SELECT entity.qualified_name
+                 FROM graph_resolution_candidates AS candidate
+                 JOIN graph_entities AS entity
+                   ON entity.structural_slot = candidate.structural_slot
+                  AND entity.stable_key_digest = candidate.target_entity_digest
+                 WHERE candidate.structural_slot = 'a'
+                   AND candidate.resolution_occurrence_digest = ?1
+                 ORDER BY candidate.candidate_ordinal",
+            )?
+            .query_map([ambiguous_resolution.0.as_slice()], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        require_eq(
+            &ambiguous_candidates,
+            &vec!["Left::duplicate".to_owned(), "Right::duplicate".to_owned()],
+            "bounded deterministic ambiguous candidates",
+        )?;
+        require_eq(
+            &store.load_graph_entity(&graph_test_digest(250))?.is_none(),
+            &true,
+            "retained slot entity stays invisible",
+        )?;
+
+        let outbound_calls = store.load_graph_adjacency(
+            &source,
+            GraphRelationDirection::Outbound,
+            Some(GraphRelationKind::Calls),
+            8,
+        )?;
+        require_eq(&outbound_calls.len(), &1, "typed outbound adjacency")?;
+        require_eq(
+            &outbound_calls
+                .iter()
+                .any(|relation| relation.target == PersistedGraphTarget::Internal(middle)),
+            &true,
+            "outbound internal target",
+        )?;
+        let middle_edges = outbound_calls
+            .iter()
+            .filter(|relation| relation.target == PersistedGraphTarget::Internal(middle))
+            .collect::<Vec<_>>();
+        require_eq(
+            &middle_edges.len(),
+            &1,
+            "repeated calls share one logical relation",
+        )?;
+        let call_confidence = store.connection.query_row(
+            "SELECT confidence FROM graph_relations
+             WHERE structural_slot = 'a' AND stable_key_digest = ?1",
+            [&middle_edges[0].stable_key_digest[..]],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &call_confidence.as_str(),
+            &"high",
+            "name-only call relation confidence",
+        )?;
+        let evidence_rows = store
+            .connection
+            .prepare(
+                "SELECT origin_kind, origin_repository_path, resolver_name, resolver_version,
+                        content_span_fingerprint, occurrence_discriminator, evidence_class,
+                        confidence, completeness, structural_slot, last_changed_epoch, explanation
+                 FROM graph_evidence_occurrences
+                 WHERE structural_slot = 'a' AND relation_digest = ?1
+                 ORDER BY occurrence_discriminator",
+            )?
+            .query_map([&middle_edges[0].stable_key_digest[..]], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        require_eq(
+            &evidence_rows.len(),
+            &2,
+            "repeated call evidence occurrence count",
+        )?;
+        let expected_epoch = i64::try_from(middle_edges[0].last_changed_epoch.get())?;
+        for (index, evidence) in evidence_rows.iter().enumerate() {
+            require_eq(
+                &evidence.0.as_str(),
+                &"repository-path",
+                "evidence origin kind",
+            )?;
+            require_eq(&evidence.1.as_str(), &"src/lib.rs", "evidence origin path")?;
+            require_eq(
+                &evidence.2.as_str(),
+                &GRAPH_PARSER_IDENTITY,
+                "evidence resolver",
+            )?;
+            require_eq(
+                &evidence.3.as_str(),
+                &GRAPH_PARSER_VERSION,
+                "evidence resolver version",
+            )?;
+            require_eq(&evidence.4.len(), &32, "evidence fingerprint width")?;
+            require_eq(
+                &evidence.5,
+                &i64::try_from(index)?,
+                "evidence occurrence discriminator",
+            )?;
+            require_eq(&evidence.6.as_str(), &"direct", "evidence class")?;
+            require_eq(&evidence.7.as_str(), &"high", "evidence confidence")?;
+            require_eq(&evidence.8.as_str(), &"complete", "evidence completeness")?;
+            require_eq(&evidence.9.as_str(), &"a", "evidence structural slot")?;
+            require_eq(&evidence.10, &expected_epoch, "evidence structural epoch")?;
+            require_eq(&evidence.11.is_some(), &true, "evidence source context")?;
+        }
+        let outbound =
+            store.load_graph_adjacency(&source, GraphRelationDirection::Outbound, None, 8)?;
+        require_eq(&outbound.len(), &1, "unfiltered outbound adjacency")?;
+        require_eq(
+            &store
+                .load_symbol_relations(Some("src/lib.rs"), Some("external_api"), 8)?
+                .len(),
+            &1,
+            "unresolved call remains in the compatibility projection",
+        )?;
+        let unresolved_call = store.connection.query_row(
+            "SELECT source_entity_digest, resolution_status, candidate_total,
+                    candidate_completeness, unresolved_reason, confidence,
+                    occurrence_discriminator
+             FROM graph_resolution_occurrences
+             WHERE structural_slot = 'a'
+               AND origin_repository_path = 'src/lib.rs'
+               AND relation_kind = 'calls'
+               AND unresolved_reason =
+                   'call target was not resolved in the containing file'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            },
+        )?;
+        require_eq(
+            &unresolved_call.0,
+            &source.to_vec(),
+            "unresolved call containing source identity",
+        )?;
+        require_eq(
+            &(
+                unresolved_call.1.as_str(),
+                unresolved_call.2,
+                unresolved_call.3.as_deref(),
+                unresolved_call.4.as_deref(),
+                unresolved_call.5.as_str(),
+                unresolved_call.6,
+            ),
+            &(
+                "unresolved",
+                None,
+                None,
+                Some("call target was not resolved in the containing file"),
+                "low",
+                0,
+            ),
+            "typed unresolved call occurrence",
+        )?;
+
+        let inbound_calls = store.load_graph_adjacency(
+            &target,
+            GraphRelationDirection::Inbound,
+            Some(GraphRelationKind::Calls),
+            8,
+        )?;
+        require_eq(&inbound_calls.len(), &1, "typed inbound adjacency")?;
+        require_eq(
+            &inbound_calls[0].source_entity_digest,
+            &middle,
+            "inbound source digest",
+        )?;
+        let inbound =
+            store.load_graph_adjacency(&target, GraphRelationDirection::Inbound, None, 8)?;
+        require_eq(&inbound, &inbound_calls, "unfiltered inbound adjacency")?;
+        let calls = store.load_graph_relations_by_kind(GraphRelationKind::Calls, 1)?;
+        require_eq(&calls.len(), &1, "relation-family row bound")?;
+        let dependencies = store.load_graph_relations_by_kind(GraphRelationKind::DependsOn, 8)?;
+        if !dependencies.iter().any(|relation| {
+            relation.target
+                == PersistedGraphTarget::External {
+                    namespace: "package".to_owned(),
+                    value: "rusqlite".to_owned(),
+                }
+        }) {
+            let manifest_symbols = manifest_graph
+                .symbols()
+                .map(|symbol| (symbol.name(), symbol.kind(), symbol.parent()))
+                .collect::<Vec<_>>();
+            let manifest_relations = manifest_graph
+                .relations()
+                .map(|relation| {
+                    (
+                        relation.source_name(),
+                        relation.target_name(),
+                        relation.kind(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            return Err(io::Error::other(format!(
+                "normal manifest extraction lost the typed external dependency: persisted={dependencies:?}, symbols={manifest_symbols:?}, relations={manifest_relations:?}"
+            ))
+            .into());
+        }
+        require_eq(
+            &dependencies.iter().any(|relation| {
+                relation.target
+                    == PersistedGraphTarget::External {
+                        namespace: GRAPH_EXTERNAL_PACKAGE_NAMESPACE.to_owned(),
+                        value: "fabricated-target".to_owned(),
+                    }
+            }),
+            &false,
+            "unbound manifest source abstains from exact dependency ownership",
+        )?;
+        require_eq(
+            &store
+                .load_symbol_relations(Some(unbound_manifest_path), Some("fabricated-target"), 8)?
+                .len(),
+            &1,
+            "unbound manifest dependency remains in the compatibility projection",
+        )?;
+        let manifest_confidence = store.connection.query_row(
+            "SELECT relation.confidence, evidence.confidence
+             FROM graph_relations AS relation
+             JOIN graph_evidence_occurrences AS evidence
+               ON evidence.structural_slot = relation.structural_slot
+              AND evidence.relation_digest = relation.stable_key_digest
+             WHERE relation.structural_slot = 'a'
+               AND relation.relation_kind = 'depends-on'
+               AND relation.external_target_namespace = 'package'
+               AND relation.external_target_value = 'rusqlite'",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        require_eq(
+            &(
+                manifest_confidence.0.as_str(),
+                manifest_confidence.1.as_str(),
+            ),
+            &("exact", "exact"),
+            "explicit manifest dependency confidence",
+        )?;
+        let unbound_manifest_resolution = store.connection.query_row(
+            "SELECT resolution_status, candidate_total, candidate_completeness,
+                    unresolved_reason, confidence,
+                    (SELECT COUNT(*) FROM graph_resolution_candidates AS candidate
+                     WHERE candidate.structural_slot = occurrence.structural_slot
+                       AND candidate.resolution_occurrence_digest =
+                           occurrence.stable_key_digest)
+             FROM graph_resolution_occurrences AS occurrence
+             WHERE structural_slot = 'a'
+               AND origin_repository_path = ?1
+               AND relation_kind = 'depends-on'",
+            [unbound_manifest_path],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )?;
+        require_eq(
+            &(
+                unbound_manifest_resolution.0.as_str(),
+                unbound_manifest_resolution.1,
+                unbound_manifest_resolution.2.as_deref(),
+                unbound_manifest_resolution.3.as_deref(),
+                unbound_manifest_resolution.4.as_str(),
+                unbound_manifest_resolution.5,
+            ),
+            &(
+                "unresolved",
+                None,
+                None,
+                Some("relation source was not resolved in the containing file"),
+                "low",
+                0,
+            ),
+            "unknown dependency source abstention",
+        )?;
+        require_eq(
+            &store
+                .load_graph_adjacency(&source, GraphRelationDirection::Outbound, None, 0)?
+                .is_empty(),
+            &true,
+            "zero row bound",
+        )?;
+
+        let publication = store.publication_state()?;
+        let mut visited = BTreeSet::from([source]);
+        let mut frontier = vec![source];
+        for _ in 0..2 {
+            let mut next = Vec::new();
+            for entity in frontier {
+                for relation in store.load_graph_adjacency(
+                    &entity,
+                    GraphRelationDirection::Outbound,
+                    Some(GraphRelationKind::Calls),
+                    8,
+                )? {
+                    if let PersistedGraphTarget::Internal(target) = relation.target
+                        && visited.insert(target)
+                    {
+                        next.push(target);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        require_eq(
+            &visited,
+            &BTreeSet::from([source, middle, target]),
+            "bounded adjacency composition under an unchanged publication",
+        )?;
+        require_eq(
+            &store.publication_state()?,
+            &publication,
+            "adjacency composition publication remained unchanged",
+        )?;
+
+        require_query_plan_search(
+            &store.connection,
+            GRAPH_ENTITY_BY_STABLE_KEY_SQL,
+            &[Value::Text("a".to_owned()), Value::Blob(source.to_vec())],
+            GRAPH_ENTITIES_TABLE,
+        )?;
+        require_primary_key_columns(
+            &store.connection,
+            GRAPH_ENTITIES_TABLE,
+            &["structural_slot", "stable_key_digest"],
+        )?;
+        require_query_plan_index(
+            &store.connection,
+            GRAPH_ENTITIES_BY_QUALIFIED_NAME_SQL,
+            &[
+                Value::Text("a".to_owned()),
+                Value::Text(GraphEntityKind::Package.as_str().to_owned()),
+                Value::Text("projectatlas-db".to_owned()),
+                Value::Integer(4),
+            ],
+            "idx_graph_entities_slot_kind_qualified_name_stable_key",
+        )?;
+        require_query_plan_index(
+            &store.connection,
+            GRAPH_OUTBOUND_RELATIONS_BY_KIND_SQL,
+            &[
+                Value::Text("a".to_owned()),
+                Value::Blob(source.to_vec()),
+                Value::Text(GraphRelationKind::Calls.as_str().to_owned()),
+                Value::Integer(8),
+            ],
+            "idx_graph_relations_slot_source_kind_stable_key",
+        )?;
+        require_query_plan_index(
+            &store.connection,
+            GRAPH_OUTBOUND_RELATIONS_SQL,
+            &[
+                Value::Text("a".to_owned()),
+                Value::Blob(source.to_vec()),
+                Value::Integer(8),
+            ],
+            "idx_graph_relations_slot_source_kind_stable_key",
+        )?;
+        require_query_plan_index(
+            &store.connection,
+            GRAPH_INBOUND_RELATIONS_BY_KIND_SQL,
+            &[
+                Value::Text("a".to_owned()),
+                Value::Blob(target.to_vec()),
+                Value::Text(GraphRelationKind::Calls.as_str().to_owned()),
+                Value::Integer(8),
+            ],
+            "idx_graph_relations_slot_target_kind_stable_key",
+        )?;
+        require_query_plan_index(
+            &store.connection,
+            GRAPH_INBOUND_RELATIONS_SQL,
+            &[
+                Value::Text("a".to_owned()),
+                Value::Blob(target.to_vec()),
+                Value::Integer(8),
+            ],
+            "idx_graph_relations_slot_target_kind_stable_key",
+        )?;
+        require_query_plan_index(
+            &store.connection,
+            GRAPH_RELATIONS_BY_KIND_SQL,
+            &[
+                Value::Text("a".to_owned()),
+                Value::Text(GraphRelationKind::Calls.as_str().to_owned()),
+                Value::Integer(8),
+            ],
+            "idx_graph_relations_slot_kind_stable_key",
+        )?;
+        for sql in [
+            GRAPH_ENTITY_BY_STABLE_KEY_SQL,
+            GRAPH_ENTITIES_BY_QUALIFIED_NAME_SQL,
+            GRAPH_OUTBOUND_RELATIONS_BY_KIND_SQL,
+            GRAPH_OUTBOUND_RELATIONS_SQL,
+            GRAPH_INBOUND_RELATIONS_BY_KIND_SQL,
+            GRAPH_INBOUND_RELATIONS_SQL,
+            GRAPH_RELATIONS_BY_KIND_SQL,
+        ] {
+            if sql.to_ascii_lowercase().contains("json") {
+                return Err(io::Error::other(format!(
+                    "typed graph query unexpectedly invokes JSON: {sql}"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_22_evidence_failure_rolls_back_graph_and_compatibility_rows()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let baseline = compact_call_graph("src/evidence-rollback.rs", false)?;
+        store.replace_compact_symbol_graph(&baseline)?;
+        let before = graph_write_snapshot(&store.connection)?;
+        let publication = store.publication_state()?;
+        store.connection.execute_batch(
+            "CREATE TEMP TRIGGER reject_graph_evidence
+             BEFORE INSERT ON graph_evidence_occurrences
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected graph evidence failure');
+             END;",
+        )?;
+
+        let replacement = compact_call_graph("src/evidence-rollback.rs", true)?;
+        let Err(error) = store.replace_compact_symbol_graph(&replacement) else {
+            return Err(io::Error::other(
+                "injected evidence failure did not abort graph replacement",
+            )
+            .into());
+        };
+        require_eq(
+            &matches!(error, DbError::Sqlite(ref source) if source.to_string().contains("injected graph evidence failure")),
+            &true,
+            "typed evidence failure",
+        )?;
+        require_eq(
+            &graph_write_snapshot(&store.connection)?,
+            &before,
+            "evidence failure transaction rollback",
+        )?;
+        require_eq(
+            &store.publication_state()?,
+            &publication,
+            "evidence failure publication state",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_22_rejects_stable_digest_identity_collisions()
+    -> Result<(), Box<dyn Error>> {
+        let graph = compact_call_graph("src/identity-collision.rs", false)?;
+
+        let mut entity_store = AtlasStore::in_memory()?;
+        entity_store.replace_compact_symbol_graph(&graph)?;
+        entity_store.connection.execute(
+            "UPDATE graph_entities
+             SET stable_key_canonical = ?1
+             WHERE structural_slot = 'a' AND entity_kind = 'file'
+               AND repository_path = 'src/identity-collision.rs'",
+            [b"forged-entity-canonical".as_slice()],
+        )?;
+        let entity_before = graph_write_snapshot(&entity_store.connection)?;
+        let entity_publication = entity_store.publication_state()?;
+        let Err(entity_error) = entity_store.replace_compact_symbol_graph(&graph) else {
+            return Err(io::Error::other(
+                "entity digest collision did not abort graph replacement",
+            )
+            .into());
+        };
+        require_eq(
+            &matches!(
+                entity_error,
+                DbError::StableGraphIdentityCollision {
+                    table: GRAPH_ENTITIES_TABLE,
+                    ..
+                }
+            ),
+            &true,
+            "typed entity identity collision",
+        )?;
+        require_eq(
+            &graph_write_snapshot(&entity_store.connection)?,
+            &entity_before,
+            "entity collision byte-for-byte rollback",
+        )?;
+        require_eq(
+            &entity_store.publication_state()?,
+            &entity_publication,
+            "entity collision publication state",
+        )?;
+
+        let mut relation_store = AtlasStore::in_memory()?;
+        relation_store.replace_compact_symbol_graph(&graph)?;
+        relation_store.connection.execute(
+            "UPDATE graph_relations
+             SET stable_key_canonical = ?1
+             WHERE structural_slot = 'a'",
+            [b"forged-relation-canonical".as_slice()],
+        )?;
+        let relation_before = graph_write_snapshot(&relation_store.connection)?;
+        let relation_publication = relation_store.publication_state()?;
+        let Err(relation_error) = relation_store.replace_compact_symbol_graph(&graph) else {
+            return Err(io::Error::other(
+                "relation digest collision did not abort graph replacement",
+            )
+            .into());
+        };
+        require_eq(
+            &matches!(
+                relation_error,
+                DbError::StableGraphIdentityCollision {
+                    table: GRAPH_RELATIONS_TABLE,
+                    ..
+                }
+            ),
+            &true,
+            "typed relation identity collision",
+        )?;
+        require_eq(
+            &graph_write_snapshot(&relation_store.connection)?,
+            &relation_before,
+            "relation collision byte-for-byte rollback",
+        )?;
+        require_eq(
+            &relation_store.publication_state()?,
+            &relation_publication,
+            "relation collision publication state",
+        )?;
+
+        let mut evidence_store = AtlasStore::in_memory()?;
+        evidence_store.replace_compact_symbol_graph(&graph)?;
+        evidence_store.connection.execute(
+            "UPDATE graph_evidence_occurrences
+             SET stable_key_version = stable_key_version + 1,
+                 stable_key_canonical = ?1
+             WHERE structural_slot = 'a'",
+            [b"forged-evidence-canonical".as_slice()],
+        )?;
+        let evidence_before = graph_write_snapshot(&evidence_store.connection)?;
+        let evidence_publication = evidence_store.publication_state()?;
+        let Err(evidence_error) = evidence_store.replace_compact_symbol_graph(&graph) else {
+            return Err(io::Error::other(
+                "evidence digest collision did not abort graph replacement",
+            )
+            .into());
+        };
+        require_eq(
+            &matches!(
+                evidence_error,
+                DbError::StableGraphIdentityCollision {
+                    table: GRAPH_EVIDENCE_OCCURRENCES_TABLE,
+                    ..
+                }
+            ),
+            &true,
+            "typed evidence identity collision",
+        )?;
+        require_eq(
+            &graph_write_snapshot(&evidence_store.connection)?,
+            &evidence_before,
+            "evidence collision byte-for-byte rollback",
+        )?;
+        require_eq(
+            &evidence_store.publication_state()?,
+            &evidence_publication,
+            "evidence collision publication state",
+        )?;
+
+        let resolution_graph =
+            CompactSymbolGraph::try_from(projectatlas_symbols::extract_symbol_graph(
+                "src/resolution-identity-collision.rs",
+                Some("rust"),
+                "fn source() { unresolved_target(); }\n",
+            ))?;
+        let mut resolution_store = AtlasStore::in_memory()?;
+        resolution_store.replace_compact_symbol_graph(&resolution_graph)?;
+        resolution_store.connection.execute(
+            "UPDATE graph_resolution_occurrences
+             SET stable_key_version = stable_key_version + 1,
+                 stable_key_canonical = ?1
+             WHERE structural_slot = 'a'
+               AND origin_repository_path = 'src/resolution-identity-collision.rs'",
+            [b"forged-resolution-canonical".as_slice()],
+        )?;
+        let resolution_before = graph_write_snapshot(&resolution_store.connection)?;
+        let resolution_publication = resolution_store.publication_state()?;
+        let Err(resolution_error) =
+            resolution_store.replace_compact_symbol_graph(&resolution_graph)
+        else {
+            return Err(io::Error::other(
+                "resolution digest collision did not abort graph replacement",
+            )
+            .into());
+        };
+        require_eq(
+            &matches!(
+                resolution_error,
+                DbError::StableGraphIdentityCollision {
+                    table: GRAPH_RESOLUTION_OCCURRENCES_TABLE,
+                    ..
+                }
+            ),
+            &true,
+            "typed resolution identity collision",
+        )?;
+        require_eq(
+            &graph_write_snapshot(&resolution_store.connection)?,
+            &resolution_before,
+            "resolution collision byte-for-byte rollback",
+        )?;
+        require_eq(
+            &resolution_store.publication_state()?,
+            &resolution_publication,
+            "resolution collision publication state",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn full_scan_removal_clears_source_parse_metadata() -> Result<(), Box<dyn Error>> {
         let mut store = AtlasStore::in_memory()?;
         store.replace_scan(&[test_file_node("src/a.rs", "hash-a")])?;
@@ -6819,6 +9422,239 @@ mod tests {
             mtime_ns: Some(10),
             content_hash: Some(hash.to_string()),
         }
+    }
+
+    fn compact_call_graph(
+        path: &str,
+        include_second_target: bool,
+    ) -> Result<CompactSymbolGraph, CompactSymbolGraphError> {
+        let symbol = |name: &str, line: usize| CodeSymbol {
+            path: path.to_owned(),
+            language: Some("rust".to_owned()),
+            name: name.to_owned(),
+            kind: SymbolKind::Function,
+            signature: format!("fn {name}()"),
+            exported: false,
+            documentation: None,
+            line_start: line,
+            line_end: line,
+            parent: None,
+            parser: ParserKind::TreeSitter,
+            detail: Some("function_item".to_owned()),
+        };
+        let mut symbols = vec![symbol("source", 1), symbol("target", 2)];
+        let mut relations = vec![SymbolRelation {
+            path: path.to_owned(),
+            source_name: "source".to_owned(),
+            target_name: "target".to_owned(),
+            kind: RelationKind::Calls,
+            line: 1,
+            context: "target();".to_owned(),
+            parser: ParserKind::TreeSitter,
+        }];
+        if include_second_target {
+            symbols.push(symbol("replacement", 3));
+            relations.push(SymbolRelation {
+                path: path.to_owned(),
+                source_name: "source".to_owned(),
+                target_name: "replacement".to_owned(),
+                kind: RelationKind::Calls,
+                line: 1,
+                context: "replacement();".to_owned(),
+                parser: ParserKind::TreeSitter,
+            });
+        }
+        CompactSymbolGraph::try_from(SymbolGraph {
+            path: path.to_owned(),
+            language: Some("rust".to_owned()),
+            parser: ParserKind::TreeSitter,
+            symbols,
+            relations,
+        })
+    }
+
+    fn graph_write_snapshot(
+        connection: &Connection,
+    ) -> Result<Vec<(&'static str, Vec<Vec<Value>>)>, rusqlite::Error> {
+        [
+            GRAPH_ENTITIES_TABLE,
+            GRAPH_RELATIONS_TABLE,
+            GRAPH_EVIDENCE_OCCURRENCES_TABLE,
+            GRAPH_RESOLUTION_OCCURRENCES_TABLE,
+            "graph_resolution_candidates",
+            "symbols",
+            "symbol_relations",
+            "source_parse_metadata",
+        ]
+        .into_iter()
+        .map(|table| {
+            let sql = match table {
+                GRAPH_ENTITIES_TABLE => "SELECT * FROM graph_entities ORDER BY rowid",
+                GRAPH_RELATIONS_TABLE => "SELECT * FROM graph_relations ORDER BY rowid",
+                GRAPH_EVIDENCE_OCCURRENCES_TABLE => {
+                    "SELECT * FROM graph_evidence_occurrences ORDER BY rowid"
+                }
+                GRAPH_RESOLUTION_OCCURRENCES_TABLE => {
+                    "SELECT * FROM graph_resolution_occurrences ORDER BY rowid"
+                }
+                "graph_resolution_candidates" => {
+                    "SELECT * FROM graph_resolution_candidates ORDER BY rowid"
+                }
+                "symbols" => "SELECT * FROM symbols ORDER BY rowid",
+                "symbol_relations" => "SELECT * FROM symbol_relations ORDER BY rowid",
+                "source_parse_metadata" => "SELECT * FROM source_parse_metadata ORDER BY rowid",
+                _ => unreachable!("graph snapshot table inventory is closed"),
+            };
+            let mut statement = connection.prepare(sql)?;
+            let column_count = statement.column_count();
+            let rows = statement
+                .query_map([], |row| {
+                    (0..column_count)
+                        .map(|index| row.get::<_, Value>(index))
+                        .collect::<Result<Vec<_>, _>>()
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((table, rows))
+        })
+        .collect()
+    }
+
+    fn graph_test_digest(value: u8) -> [u8; 32] {
+        [value; 32]
+    }
+
+    fn insert_graph_entity(
+        store: &AtlasStore,
+        slot: &str,
+        key: u8,
+        kind: GraphEntityKind,
+        repository_path: Option<&str>,
+        qualified_name: &str,
+    ) -> DbResult<()> {
+        let digest = graph_test_digest(key);
+        let canonical = [b'e', key];
+        let project = store.project_instance_id()?.as_bytes();
+        store.connection.execute(
+            "INSERT INTO graph_entities(
+                 stable_key_digest, stable_key_version, stable_key_canonical,
+                 project_instance_id, entity_kind, repository_path, qualified_name,
+                 parser_kind, parser_identity, parser_version,
+                 structural_slot, last_changed_epoch
+             ) VALUES(?1, 1, ?2, ?3, ?4, ?5, ?6, 'structural', 'task-arri-4.22', '1', ?7, 1)",
+            params![
+                &digest[..],
+                &canonical[..],
+                &project[..],
+                kind.as_str(),
+                repository_path,
+                qualified_name,
+                slot,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn require_query_plan_search(
+        connection: &Connection,
+        sql: &str,
+        values: &[Value],
+        expected_table: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+        let details = statement
+            .query_map(params_from_iter(values.iter()), |row| {
+                row.get::<_, String>(3)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !details
+            .iter()
+            .any(|detail| detail.contains(&format!("SEARCH {expected_table}")))
+        {
+            return Err(io::Error::other(format!(
+                "query did not use an indexed search of {expected_table}: {details:?}"
+            ))
+            .into());
+        }
+        if details
+            .iter()
+            .any(|detail| detail.contains(&format!("SCAN {expected_table}")))
+        {
+            return Err(io::Error::other(format!(
+                "query plan scanned {expected_table}: {details:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    fn require_primary_key_columns(
+        connection: &Connection,
+        table: &str,
+        expected_columns: &[&str],
+    ) -> Result<(), Box<dyn Error>> {
+        let pragma = match table {
+            GRAPH_ENTITIES_TABLE => "PRAGMA table_info(graph_entities)",
+            GRAPH_RELATIONS_TABLE => "PRAGMA table_info(graph_relations)",
+            _ => {
+                return Err(io::Error::other(format!(
+                    "primary-key helper does not accept table {table:?}"
+                ))
+                .into());
+            }
+        };
+        let mut columns = connection
+            .prepare(pragma)?
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(5)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(|row| match row {
+                Ok((ordinal, column)) if ordinal > 0 => Some(Ok((ordinal, column))),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        columns.sort_by_key(|(ordinal, _)| *ordinal);
+        let columns = columns
+            .iter()
+            .map(|(_, column)| column.as_str())
+            .collect::<Vec<_>>();
+        require_eq(
+            &columns.as_slice(),
+            &expected_columns,
+            "primary-key columns",
+        )
+    }
+
+    fn require_query_plan_index(
+        connection: &Connection,
+        sql: &str,
+        values: &[Value],
+        expected_index: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+        let details = statement
+            .query_map(params_from_iter(values.iter()), |row| {
+                row.get::<_, String>(3)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !details
+            .iter()
+            .any(|detail| detail.contains(&format!("USING INDEX {expected_index}")))
+        {
+            return Err(io::Error::other(format!(
+                "query did not use {expected_index}: {details:?}"
+            ))
+            .into());
+        }
+        if details.iter().any(|detail| {
+            detail.contains("SCAN graph_relations") || detail.contains("SCAN graph_entities")
+        }) {
+            return Err(io::Error::other(format!(
+                "query plan scanned an unrelated graph table: {details:?}"
+            ))
+            .into());
+        }
+        Ok(())
     }
 
     /// Build a representative folder node for store tests.

@@ -229,6 +229,16 @@ impl IdentityText {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Validate a borrowed scalar without allocating an owned identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the value is empty, non-canonical, contains a
+    /// control character, or exceeds the identity-text byte bound.
+    pub fn validate(value: &str) -> Result<(), GraphContractError> {
+        validate_identity_text("identity text", value)
+    }
 }
 
 impl TryFrom<&str> for IdentityText {
@@ -243,7 +253,7 @@ impl TryFrom<String> for IdentityText {
     type Error = GraphContractError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        validate_identity_text("identity text", &value)?;
+        Self::validate(&value)?;
         Ok(Self(value))
     }
 }
@@ -433,6 +443,25 @@ pub enum GraphEntityKind {
 }
 
 impl GraphEntityKind {
+    /// Complete accepted entity-kind inventory in stable serialized order.
+    pub const ALL: [Self; 15] = [
+        Self::Repository,
+        Self::Folder,
+        Self::File,
+        Self::Package,
+        Self::Module,
+        Self::Declaration,
+        Self::Reference,
+        Self::Endpoint,
+        Self::Route,
+        Self::Channel,
+        Self::Configuration,
+        Self::Environment,
+        Self::Infrastructure,
+        Self::Test,
+        Self::External,
+    ];
+
     /// Return the stable canonical and serialized spelling.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -661,22 +690,33 @@ struct CanonicalEncoder {
 impl CanonicalEncoder {
     /// Start a canonical identity with its fixed-width encoding version.
     fn new() -> Self {
-        Self {
-            bytes: GRAPH_KEY_ENCODING_VERSION.to_be_bytes().to_vec(),
-        }
+        let mut bytes = Vec::new();
+        begin_canonical_key(&mut bytes);
+        Self { bytes }
     }
 
     /// Append one length-prefixed canonical field.
     fn field(&mut self, value: &[u8]) {
-        let length = value.len() as u64;
-        self.bytes.extend_from_slice(&length.to_be_bytes());
-        self.bytes.extend_from_slice(value);
+        push_canonical_field(&mut self.bytes, value);
     }
 
     /// Finish the canonical identity byte sequence.
     fn finish(self) -> Vec<u8> {
         self.bytes
     }
+}
+
+/// Reset one reusable buffer to the current graph-key encoding prefix.
+fn begin_canonical_key(bytes: &mut Vec<u8>) {
+    bytes.clear();
+    bytes.extend_from_slice(&GRAPH_KEY_ENCODING_VERSION.to_be_bytes());
+}
+
+/// Append one bounded length-prefixed field to canonical graph-key bytes.
+fn push_canonical_field(bytes: &mut Vec<u8>, value: &[u8]) {
+    let length = value.len() as u64;
+    bytes.extend_from_slice(&length.to_be_bytes());
+    bytes.extend_from_slice(value);
 }
 
 /// Shared internal material for one typed stable key.
@@ -754,6 +794,209 @@ impl EntityKey {
     pub fn canonical_identity(&self) -> &[u8] {
         &self.material.canonical_identity
     }
+}
+
+/// Borrowed entity identity accepted by the allocation-bounded graph-key encoder.
+///
+/// The variants cover the entity families emitted by the current compact parser
+/// path. Other graph producers continue to use [`EntitySelector`] until their
+/// measured hot path needs the same borrowed encoding boundary.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub enum GraphEntityKeyInput<'a> {
+    /// A file selected by one already validated repository-relative path.
+    File {
+        /// Owning repository-relative file path.
+        path: &'a RepositoryFilePath,
+    },
+    /// A package selected by one borrowed namespaced identity.
+    Package {
+        /// Ecosystem or package namespace.
+        namespace: &'a str,
+        /// Canonical package identity inside the namespace.
+        value: &'a str,
+    },
+    /// A module selected by path and qualified identity.
+    Module {
+        /// Owning repository-relative file path.
+        path: &'a RepositoryFilePath,
+        /// Fully qualified module identity.
+        qualified_name: &'a str,
+    },
+    /// A declaration selected without mutable source coordinates.
+    Declaration {
+        /// Owning repository-relative file path.
+        path: &'a RepositoryFilePath,
+        /// Fully qualified declaration identity.
+        qualified_name: &'a str,
+        /// Optional signature or overload discriminator.
+        signature: Option<&'a str>,
+    },
+}
+
+impl GraphEntityKeyInput<'_> {
+    /// Return the typed entity kind encoded by this borrowed input.
+    #[must_use]
+    pub const fn entity_kind(self) -> GraphEntityKind {
+        match self {
+            Self::File { .. } => GraphEntityKind::File,
+            Self::Package { .. } => GraphEntityKind::Package,
+            Self::Module { .. } => GraphEntityKind::Module,
+            Self::Declaration { .. } => GraphEntityKind::Declaration,
+        }
+    }
+}
+
+/// Offset-backed stable entity key stored inside one [`GraphKeyArena`].
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct GraphEntityKeyHandle {
+    /// Project instance owning this entity.
+    project: ProjectInstanceId,
+    /// Digest plus canonical-byte range inside the owning arena.
+    material: GraphKeyMaterialHandle,
+}
+
+impl GraphEntityKeyHandle {
+    /// Return the independently initialized project that owns this entity.
+    #[must_use]
+    pub const fn project(self) -> ProjectInstanceId {
+        self.project
+    }
+
+    /// Return the stable encoding version.
+    #[must_use]
+    pub const fn encoding_version(self) -> u16 {
+        self.material.encoding_version
+    }
+
+    /// Return the domain-separated stable digest.
+    #[must_use]
+    pub const fn digest(self) -> [u8; 32] {
+        self.material.digest
+    }
+}
+
+/// Reusable canonical-byte owner for allocation-bounded graph persistence.
+///
+/// Every encoded key contributes one byte range to `canonical_bytes`; the
+/// scratch allocation is reused for all entity, relation, evidence, and
+/// non-traversable occurrence keys.
+#[derive(Debug, Default)]
+pub struct GraphKeyArena {
+    /// Contiguous canonical identities retained for collision detection.
+    canonical_bytes: Vec<u8>,
+    /// Reused encoder storage for the next key.
+    scratch: Vec<u8>,
+}
+
+impl GraphKeyArena {
+    /// Construct an arena with one predicted canonical-byte capacity.
+    #[must_use]
+    pub fn with_capacity(canonical_capacity: usize) -> Self {
+        Self {
+            canonical_bytes: Vec::with_capacity(canonical_capacity),
+            scratch: Vec::new(),
+        }
+    }
+
+    /// Encode one borrowed entity identity into the contiguous arena.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a borrowed identity scalar violates the typed
+    /// graph contract.
+    pub fn entity_key(
+        &mut self,
+        project: ProjectInstanceId,
+        input: GraphEntityKeyInput<'_>,
+    ) -> Result<GraphEntityKeyHandle, GraphContractError> {
+        begin_canonical_key(&mut self.scratch);
+        push_canonical_field(&mut self.scratch, &project.as_bytes());
+        push_canonical_field(&mut self.scratch, input.entity_kind().as_str().as_bytes());
+        match input {
+            GraphEntityKeyInput::File { path } => {
+                push_canonical_field(&mut self.scratch, path.as_str().as_bytes());
+            }
+            GraphEntityKeyInput::Package { namespace, value } => {
+                validate_identity_text("external identity namespace", namespace)?;
+                validate_identity_text("external identity value", value)?;
+                push_canonical_field(&mut self.scratch, namespace.as_bytes());
+                push_canonical_field(&mut self.scratch, value.as_bytes());
+            }
+            GraphEntityKeyInput::Module {
+                path,
+                qualified_name,
+            } => {
+                validate_identity_text("qualified name", qualified_name)?;
+                push_canonical_field(&mut self.scratch, path.as_str().as_bytes());
+                push_canonical_field(&mut self.scratch, qualified_name.as_bytes());
+            }
+            GraphEntityKeyInput::Declaration {
+                path,
+                qualified_name,
+                signature,
+            } => {
+                validate_identity_text("qualified name", qualified_name)?;
+                if let Some(signature) = signature {
+                    validate_identity_text("signature", signature)?;
+                }
+                push_canonical_field(&mut self.scratch, path.as_str().as_bytes());
+                push_canonical_field(&mut self.scratch, qualified_name.as_bytes());
+                match signature {
+                    Some(signature) => {
+                        push_canonical_field(&mut self.scratch, &[1]);
+                        push_canonical_field(&mut self.scratch, signature.as_bytes());
+                    }
+                    None => push_canonical_field(&mut self.scratch, &[0]),
+                }
+            }
+        }
+        let material = self.finish_key(ENTITY_KEY_CONTEXT);
+        Ok(GraphEntityKeyHandle { project, material })
+    }
+
+    /// Borrow canonical collision material for one entity key.
+    #[must_use]
+    pub fn entity_canonical_identity(&self, key: GraphEntityKeyHandle) -> &[u8] {
+        self.canonical_identity(key.material)
+    }
+
+    /// Return the total retained canonical-key bytes.
+    #[must_use]
+    pub const fn canonical_bytes_len(&self) -> usize {
+        self.canonical_bytes.len()
+    }
+
+    /// Finish the scratch key and retain it in the contiguous byte arena.
+    fn finish_key(&mut self, context: &'static str) -> GraphKeyMaterialHandle {
+        let digest = derive_digest(context, &self.scratch);
+        let start = self.canonical_bytes.len();
+        self.canonical_bytes.extend_from_slice(&self.scratch);
+        GraphKeyMaterialHandle {
+            encoding_version: GRAPH_KEY_ENCODING_VERSION,
+            digest,
+            start,
+            length: self.scratch.len(),
+        }
+    }
+
+    /// Borrow one previously encoded canonical identity.
+    fn canonical_identity(&self, material: GraphKeyMaterialHandle) -> &[u8] {
+        &self.canonical_bytes[material.start..material.start + material.length]
+    }
+}
+
+/// Fixed-width key metadata whose canonical bytes live in one owning arena.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct GraphKeyMaterialHandle {
+    /// Stable graph-key encoding version.
+    encoding_version: u16,
+    /// Domain-separated digest.
+    digest: [u8; 32],
+    /// Canonical-byte start offset inside the owning arena.
+    start: usize,
+    /// Canonical-byte length inside the owning arena.
+    length: usize,
 }
 
 /// Accepted versioned repository-graph relation families.
@@ -966,6 +1209,108 @@ impl ResolutionTarget {
     }
 }
 
+/// Borrowed internal or external target accepted by [`GraphKeyArena`].
+#[derive(Clone, Copy, Debug)]
+pub enum GraphRelationTargetInput<'a> {
+    /// An entity whose canonical bytes already live in the same arena.
+    Internal(GraphEntityKeyHandle),
+    /// A borrowed namespaced target outside the indexed project.
+    External {
+        /// Ecosystem, protocol, or provider namespace.
+        namespace: &'a str,
+        /// Canonical target identity inside the namespace.
+        value: &'a str,
+    },
+}
+
+/// Offset-backed stable logical-edge key stored inside one [`GraphKeyArena`].
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct GraphLogicalEdgeKeyHandle {
+    /// Project instance owning the relation source.
+    source_project: ProjectInstanceId,
+    /// Digest plus canonical-byte range inside the owning arena.
+    material: GraphKeyMaterialHandle,
+}
+
+impl GraphLogicalEdgeKeyHandle {
+    /// Return the stable encoding version.
+    #[must_use]
+    pub const fn encoding_version(self) -> u16 {
+        self.material.encoding_version
+    }
+
+    /// Return the domain-separated stable digest.
+    #[must_use]
+    pub const fn digest(self) -> [u8; 32] {
+        self.material.digest
+    }
+}
+
+impl GraphKeyArena {
+    /// Encode one resolved logical-edge identity into the contiguous arena.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an internal target belongs to another project or
+    /// an external identity scalar violates the graph contract.
+    pub fn logical_edge_key(
+        &mut self,
+        source: GraphEntityKeyHandle,
+        target: GraphRelationTargetInput<'_>,
+        kind: GraphRelationKind,
+    ) -> Result<GraphLogicalEdgeKeyHandle, GraphContractError> {
+        if let GraphRelationTargetInput::Internal(target) = target
+            && source.project != target.project
+        {
+            return Err(GraphContractError::CrossProjectInternalTarget {
+                source_project: source.project,
+                target_project: target.project,
+            });
+        }
+        if let GraphRelationTargetInput::External { namespace, value } = target {
+            validate_identity_text("external identity namespace", namespace)?;
+            validate_identity_text("external identity value", value)?;
+        }
+
+        let source_material = source.material;
+        let source_start = source_material.start;
+        let source_end = source_start + source_material.length;
+        begin_canonical_key(&mut self.scratch);
+        push_canonical_field(
+            &mut self.scratch,
+            &self.canonical_bytes[source_start..source_end],
+        );
+        match target {
+            GraphRelationTargetInput::Internal(target) => {
+                push_canonical_field(&mut self.scratch, b"internal");
+                let material = target.material;
+                let start = material.start;
+                push_canonical_field(
+                    &mut self.scratch,
+                    &self.canonical_bytes[start..start + material.length],
+                );
+            }
+            GraphRelationTargetInput::External { namespace, value } => {
+                push_canonical_field(&mut self.scratch, b"external");
+                push_canonical_field(&mut self.scratch, namespace.as_bytes());
+                push_canonical_field(&mut self.scratch, value.as_bytes());
+            }
+        }
+        push_canonical_field(&mut self.scratch, kind.as_str().as_bytes());
+        let material = self.finish_key(LOGICAL_EDGE_KEY_CONTEXT);
+        Ok(GraphLogicalEdgeKeyHandle {
+            source_project: source.project,
+            material,
+        })
+    }
+
+    /// Borrow canonical collision material for one logical-edge key.
+    #[must_use]
+    pub fn logical_edge_canonical_identity(&self, key: GraphLogicalEdgeKeyHandle) -> &[u8] {
+        self.canonical_identity(key.material)
+    }
+}
+
 /// Stable versioned identity for one traversable logical relation.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct LogicalEdgeKey(KeyMaterial);
@@ -1097,6 +1442,148 @@ pub struct ResolverIdentity {
     pub name: IdentityText,
     /// Stable resolver implementation or rule-set version.
     pub version: IdentityText,
+}
+
+/// Borrowed evidence origin accepted by [`GraphKeyArena`].
+#[derive(Clone, Copy, Debug)]
+pub enum GraphEvidenceOriginInput<'a> {
+    /// Evidence originates from an indexed entity in the same project.
+    Entity(GraphEntityKeyHandle),
+    /// Evidence originates from one project-owned repository path.
+    RepositoryPath {
+        /// Project instance owning the path.
+        project: ProjectInstanceId,
+        /// Validated normalized repository path.
+        path: &'a RepositoryPath,
+    },
+    /// Evidence originates outside the indexed project.
+    External {
+        /// Ecosystem, protocol, or provider namespace.
+        namespace: &'a str,
+        /// Canonical external identity inside the namespace.
+        value: &'a str,
+    },
+}
+
+/// Borrowed resolver identity accepted by [`GraphKeyArena`].
+#[derive(Clone, Copy, Debug)]
+pub struct GraphResolverInput<'a> {
+    /// Stable resolver or provider name.
+    pub name: &'a str,
+    /// Stable resolver implementation or rule-set version.
+    pub version: &'a str,
+}
+
+/// Offset-backed evidence-occurrence key stored inside one [`GraphKeyArena`].
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct GraphEvidenceKeyHandle {
+    /// Digest plus canonical-byte range inside the owning arena.
+    material: GraphKeyMaterialHandle,
+}
+
+impl GraphEvidenceKeyHandle {
+    /// Return the stable encoding version.
+    #[must_use]
+    pub const fn encoding_version(self) -> u16 {
+        self.material.encoding_version
+    }
+
+    /// Return the domain-separated stable digest.
+    #[must_use]
+    pub const fn digest(self) -> [u8; 32] {
+        self.material.digest
+    }
+}
+
+impl GraphKeyArena {
+    /// Encode one logical edge's evidence-occurrence identity into the arena.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when evidence belongs to another project or a borrowed
+    /// resolver/external scalar violates the graph contract.
+    pub fn evidence_key(
+        &mut self,
+        edge: GraphLogicalEdgeKeyHandle,
+        origin: GraphEvidenceOriginInput<'_>,
+        resolver: GraphResolverInput<'_>,
+        span_fingerprint: ContentSpanFingerprint,
+        occurrence_discriminator: u32,
+    ) -> Result<GraphEvidenceKeyHandle, GraphContractError> {
+        Self::validate_evidence_input(edge.source_project, origin, resolver)?;
+        let edge_start = edge.material.start;
+        let edge_end = edge_start + edge.material.length;
+        begin_canonical_key(&mut self.scratch);
+        push_canonical_field(
+            &mut self.scratch,
+            &self.canonical_bytes[edge_start..edge_end],
+        );
+        self.encode_evidence_origin(origin);
+        push_canonical_field(&mut self.scratch, resolver.name.as_bytes());
+        push_canonical_field(&mut self.scratch, resolver.version.as_bytes());
+        push_canonical_field(&mut self.scratch, &span_fingerprint.as_bytes());
+        push_canonical_field(&mut self.scratch, &occurrence_discriminator.to_be_bytes());
+        let material = self.finish_key(EVIDENCE_KEY_CONTEXT);
+        Ok(GraphEvidenceKeyHandle { material })
+    }
+
+    /// Borrow canonical collision material for one evidence-occurrence key.
+    #[must_use]
+    pub fn evidence_canonical_identity(&self, key: GraphEvidenceKeyHandle) -> &[u8] {
+        self.canonical_identity(key.material)
+    }
+
+    /// Validate borrowed evidence provenance against the owning project.
+    fn validate_evidence_input(
+        source_project: ProjectInstanceId,
+        origin: GraphEvidenceOriginInput<'_>,
+        resolver: GraphResolverInput<'_>,
+    ) -> Result<(), GraphContractError> {
+        let origin_project = match origin {
+            GraphEvidenceOriginInput::Entity(entity) => Some(entity.project),
+            GraphEvidenceOriginInput::RepositoryPath { project, .. } => Some(project),
+            GraphEvidenceOriginInput::External { namespace, value } => {
+                validate_identity_text("external identity namespace", namespace)?;
+                validate_identity_text("external identity value", value)?;
+                None
+            }
+        };
+        if let Some(origin_project) = origin_project
+            && origin_project != source_project
+        {
+            return Err(GraphContractError::CrossProjectEvidenceOrigin {
+                source_project,
+                origin_project,
+            });
+        }
+        validate_identity_text("resolver name", resolver.name)?;
+        validate_identity_text("resolver version", resolver.version)?;
+        Ok(())
+    }
+
+    /// Append one borrowed evidence origin in canonical order.
+    fn encode_evidence_origin(&mut self, origin: GraphEvidenceOriginInput<'_>) {
+        match origin {
+            GraphEvidenceOriginInput::Entity(entity) => {
+                push_canonical_field(&mut self.scratch, b"entity");
+                let start = entity.material.start;
+                push_canonical_field(
+                    &mut self.scratch,
+                    &self.canonical_bytes[start..start + entity.material.length],
+                );
+            }
+            GraphEvidenceOriginInput::RepositoryPath { project, path } => {
+                push_canonical_field(&mut self.scratch, b"repository-path");
+                push_canonical_field(&mut self.scratch, &project.as_bytes());
+                push_canonical_field(&mut self.scratch, path.as_str().as_bytes());
+            }
+            GraphEvidenceOriginInput::External { namespace, value } => {
+                push_canonical_field(&mut self.scratch, b"external");
+                push_canonical_field(&mut self.scratch, namespace.as_bytes());
+                push_canonical_field(&mut self.scratch, value.as_bytes());
+            }
+        }
+    }
 }
 
 /// Stable versioned identity for one logical edge's source occurrence.
@@ -1248,6 +1735,17 @@ pub enum EvidenceClass {
     Inferred,
 }
 
+impl EvidenceClass {
+    /// Return the stable canonical and serialized spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Inferred => "inferred",
+        }
+    }
+}
+
 /// Independent completeness state for bounded facts or result sets.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1258,6 +1756,18 @@ pub enum Completeness {
     Partial,
     /// A bounded result omitted known facts after reaching a limit.
     Truncated,
+}
+
+impl Completeness {
+    /// Return the stable canonical and serialized spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+            Self::Truncated => "truncated",
+        }
+    }
 }
 
 /// Finite confidence class for graph resolution and inference.
@@ -1272,6 +1782,19 @@ pub enum ConfidenceClass {
     High,
     /// Deterministic identity evidence under the declared resolver contract.
     Exact,
+}
+
+impl ConfidenceClass {
+    /// Return the stable canonical and serialized spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Exact => "exact",
+        }
+    }
 }
 
 /// One bounded viable target retained for ambiguous resolution.
@@ -1542,6 +2065,68 @@ impl ResolutionOccurrenceKey {
     }
 }
 
+/// Offset-backed non-traversable occurrence key stored inside one [`GraphKeyArena`].
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct GraphResolutionKeyHandle {
+    /// Digest plus canonical-byte range inside the owning arena.
+    material: GraphKeyMaterialHandle,
+}
+
+impl GraphResolutionKeyHandle {
+    /// Return the stable encoding version.
+    #[must_use]
+    pub const fn encoding_version(self) -> u16 {
+        self.material.encoding_version
+    }
+
+    /// Return the domain-separated stable digest.
+    #[must_use]
+    pub const fn digest(self) -> [u8; 32] {
+        self.material.digest
+    }
+}
+
+impl GraphKeyArena {
+    /// Encode one ambiguous or unresolved occurrence identity into the arena.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when evidence belongs to another project or a borrowed
+    /// resolver/external scalar violates the graph contract.
+    pub fn resolution_key(
+        &mut self,
+        source: GraphEntityKeyHandle,
+        kind: GraphRelationKind,
+        origin: GraphEvidenceOriginInput<'_>,
+        resolver: GraphResolverInput<'_>,
+        span_fingerprint: ContentSpanFingerprint,
+        occurrence_discriminator: u32,
+    ) -> Result<GraphResolutionKeyHandle, GraphContractError> {
+        Self::validate_evidence_input(source.project, origin, resolver)?;
+        let source_start = source.material.start;
+        let source_end = source_start + source.material.length;
+        begin_canonical_key(&mut self.scratch);
+        push_canonical_field(
+            &mut self.scratch,
+            &self.canonical_bytes[source_start..source_end],
+        );
+        push_canonical_field(&mut self.scratch, kind.as_str().as_bytes());
+        self.encode_evidence_origin(origin);
+        push_canonical_field(&mut self.scratch, resolver.name.as_bytes());
+        push_canonical_field(&mut self.scratch, resolver.version.as_bytes());
+        push_canonical_field(&mut self.scratch, &span_fingerprint.as_bytes());
+        push_canonical_field(&mut self.scratch, &occurrence_discriminator.to_be_bytes());
+        let material = self.finish_key(RESOLUTION_OCCURRENCE_KEY_CONTEXT);
+        Ok(GraphResolutionKeyHandle { material })
+    }
+
+    /// Borrow canonical collision material for one non-traversable occurrence key.
+    #[must_use]
+    pub fn resolution_canonical_identity(&self, key: GraphResolutionKeyHandle) -> &[u8] {
+        self.canonical_identity(key.material)
+    }
+}
+
 /// First-class ambiguous or unresolved occurrence that is never traversable.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolutionOccurrenceRecord {
@@ -1717,6 +2302,10 @@ pub struct RelationEvidence {
     span: Option<SourceSpan>,
     /// Resolver that produced the evidence.
     resolver: ResolverIdentity,
+    /// Content-anchored fingerprint retained for persistence and inspection.
+    span_fingerprint: ContentSpanFingerprint,
+    /// Stable discriminator for repeated occurrences with the same fingerprint.
+    occurrence_discriminator: u32,
     /// Direct or inferred evidence class.
     evidence_class: EvidenceClass,
     /// Finite confidence class.
@@ -1755,6 +2344,8 @@ impl RelationEvidence {
             origin,
             span,
             resolver,
+            span_fingerprint,
+            occurrence_discriminator,
             evidence_class,
             confidence,
             completeness,
@@ -1790,6 +2381,18 @@ impl RelationEvidence {
     #[must_use]
     pub const fn resolver(&self) -> &ResolverIdentity {
         &self.resolver
+    }
+
+    /// Return the content-anchored source fingerprint.
+    #[must_use]
+    pub const fn span_fingerprint(&self) -> ContentSpanFingerprint {
+        self.span_fingerprint
+    }
+
+    /// Return the stable same-fingerprint occurrence discriminator.
+    #[must_use]
+    pub const fn occurrence_discriminator(&self) -> u32 {
+        self.occurrence_discriminator
     }
 
     /// Return whether this evidence is direct or inferred.
@@ -2703,6 +3306,135 @@ mod tests {
                 483,
             ),
             "logical-edge and evidence key golden contract drifted",
+        )?;
+        Ok(())
+    }
+
+    /// Borrowed hot-path encoding preserves every owning stable-key contract.
+    #[test]
+    fn task_arri_ut_arri_4_22_graph_key_arena_matches_owned_keys()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let project = project()?;
+        let path = RepositoryFilePath::try_from("src/lib.rs")?;
+        let origin_path = RepositoryPath::try_from(path.as_str())?;
+        let source_selector = declaration("crate::source", "fn()")?;
+        let target_selector = declaration("crate::target", "fn()")?;
+        let source = EntityKey::new(project, &source_selector);
+        let target = EntityKey::new(project, &target_selector);
+        let owned_target = ResolutionTarget::Internal(target.clone());
+        let edge = LogicalEdgeKey::new(&source, &owned_target, GraphRelationKind::Calls)?;
+        let resolver = ResolverIdentity {
+            name: text("rust-name-resolution")?,
+            version: text("1")?,
+        };
+        let origin = EvidenceOrigin::RepositoryPath {
+            project,
+            path: origin_path.clone(),
+        };
+        let fingerprint = ContentSpanFingerprint::from_content(b"target()");
+        let evidence = RelationEvidence::new(
+            &edge,
+            origin.clone(),
+            None,
+            resolver.clone(),
+            fingerprint,
+            0,
+            EvidenceClass::Direct,
+            ConfidenceClass::High,
+            Completeness::Complete,
+            None,
+        );
+        let resolution = ResolutionOccurrenceRecord::new(
+            source.clone(),
+            GraphRelationKind::Calls,
+            origin,
+            None,
+            resolver,
+            fingerprint,
+            1,
+            ResolutionOccurrenceState::Unresolved { reason: None },
+            EvidenceClass::Direct,
+            ConfidenceClass::Low,
+            Completeness::Complete,
+            parser_origin()?,
+        )?;
+
+        let mut arena = GraphKeyArena::with_capacity(1_024);
+        let source_handle = arena.entity_key(
+            project,
+            GraphEntityKeyInput::Declaration {
+                path: &path,
+                qualified_name: "crate::source",
+                signature: Some("fn()"),
+            },
+        )?;
+        let target_handle = arena.entity_key(
+            project,
+            GraphEntityKeyInput::Declaration {
+                path: &path,
+                qualified_name: "crate::target",
+                signature: Some("fn()"),
+            },
+        )?;
+        let edge_handle = arena.logical_edge_key(
+            source_handle,
+            GraphRelationTargetInput::Internal(target_handle),
+            GraphRelationKind::Calls,
+        )?;
+        let origin_input = GraphEvidenceOriginInput::RepositoryPath {
+            project,
+            path: &origin_path,
+        };
+        let resolver_input = GraphResolverInput {
+            name: "rust-name-resolution",
+            version: "1",
+        };
+        let evidence_handle =
+            arena.evidence_key(edge_handle, origin_input, resolver_input, fingerprint, 0)?;
+        let resolution_handle = arena.resolution_key(
+            source_handle,
+            GraphRelationKind::Calls,
+            origin_input,
+            resolver_input,
+            fingerprint,
+            1,
+        )?;
+
+        require(
+            source_handle.digest() == *source.digest()
+                && arena.entity_canonical_identity(source_handle) == source.canonical_identity(),
+            "arena source entity key drifted from the owning contract",
+        )?;
+        require(
+            target_handle.digest() == *target.digest()
+                && arena.entity_canonical_identity(target_handle) == target.canonical_identity(),
+            "arena target entity key drifted from the owning contract",
+        )?;
+        require(
+            edge_handle.digest() == *edge.digest()
+                && arena.logical_edge_canonical_identity(edge_handle) == edge.canonical_identity(),
+            "arena logical-edge key drifted from the owning contract",
+        )?;
+        require(
+            evidence_handle.digest() == *evidence.key().digest()
+                && arena.evidence_canonical_identity(evidence_handle)
+                    == evidence.key().canonical_identity(),
+            "arena evidence key drifted from the owning contract",
+        )?;
+        require(
+            resolution_handle.digest() == *resolution.key().digest()
+                && arena.resolution_canonical_identity(resolution_handle)
+                    == resolution.key().canonical_identity(),
+            "arena resolution key drifted from the owning contract",
+        )?;
+        let expected_bytes = source.canonical_identity().len()
+            + target.canonical_identity().len()
+            + edge.canonical_identity().len()
+            + evidence.key().canonical_identity().len()
+            + resolution.key().canonical_identity().len();
+        require(
+            arena.canonical_bytes_len() == expected_bytes,
+            "arena did not retain one contiguous copy of each canonical key",
         )?;
         Ok(())
     }

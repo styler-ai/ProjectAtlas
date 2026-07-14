@@ -44,7 +44,15 @@ pub enum SymbolKind {
 
 impl fmt::Display for SymbolKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl SymbolKind {
+    /// Return the stable persisted spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
             Self::Function => "function",
             Self::Method => "method",
             Self::Class => "class",
@@ -60,11 +68,9 @@ impl fmt::Display for SymbolKind {
             Self::Workspace => "workspace",
             Self::Dependency => "dependency",
             Self::Unknown => "unknown",
-        })
+        }
     }
-}
 
-impl SymbolKind {
     /// Parse a persisted symbol kind.
     #[must_use]
     pub fn from_db(value: &str) -> Self {
@@ -104,16 +110,22 @@ pub enum RelationKind {
 
 impl fmt::Display for RelationKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Contains => "contains",
-            Self::Imports => "imports",
-            Self::Calls => "calls",
-            Self::DependsOn => "depends-on",
-        })
+        formatter.write_str(self.as_str())
     }
 }
 
 impl RelationKind {
+    /// Return the stable persisted spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Contains => "contains",
+            Self::Imports => "imports",
+            Self::Calls => "calls",
+            Self::DependsOn => "depends-on",
+        }
+    }
+
     /// Parse a persisted relation kind.
     #[must_use]
     pub fn from_db(value: &str) -> Option<Self> {
@@ -143,16 +155,22 @@ pub enum ParserKind {
 
 impl fmt::Display for ParserKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::TreeSitter => "tree-sitter",
-            Self::Manifest => "manifest",
-            Self::Structural => "structural",
-            Self::Fallback => "fallback",
-        })
+        formatter.write_str(self.as_str())
     }
 }
 
 impl ParserKind {
+    /// Return the stable persisted spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TreeSitter => "tree-sitter",
+            Self::Manifest => "manifest",
+            Self::Structural => "structural",
+            Self::Fallback => "fallback",
+        }
+    }
+
     /// Parse a persisted parser kind.
     #[must_use]
     pub fn from_db(value: &str) -> Self {

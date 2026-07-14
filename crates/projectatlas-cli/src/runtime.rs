@@ -2143,16 +2143,49 @@ pub(crate) fn build_symbols_for_index(
     options: &SymbolBuildOptions,
     previous_hashes: Option<&HashMap<String, String>>,
 ) -> Result<SymbolBuildReport, CliError> {
-    build_symbols_for_paths(store, root, options, previous_hashes, None)
+    build_symbols_for_paths_with_destination(
+        store,
+        root,
+        options,
+        previous_hashes,
+        None,
+        SymbolGraphDestination::Published,
+    )
 }
 
-/// Build symbol graphs for selected indexed files.
-pub(crate) fn build_symbols_for_paths(
+/// Build symbol graphs inside a parent-owned full-scan staging database.
+pub(crate) fn build_symbols_for_staging(
+    store: &mut AtlasStore,
+    root: &Path,
+    options: &SymbolBuildOptions,
+) -> Result<SymbolBuildReport, CliError> {
+    build_symbols_for_paths_with_destination(
+        store,
+        root,
+        options,
+        None,
+        None,
+        SymbolGraphDestination::Staging,
+    )
+}
+
+/// Whether parser output is published immediately or retained for a later full-slot flip.
+#[derive(Clone, Copy)]
+enum SymbolGraphDestination {
+    /// Publish each parser graph through the incremental slot/epoch transaction.
+    Published,
+    /// Write parser graphs into the parent-owned full-scan staging slot.
+    Staging,
+}
+
+/// Build symbol graphs with one explicit structural publication destination.
+fn build_symbols_for_paths_with_destination(
     store: &mut AtlasStore,
     root: &Path,
     options: &SymbolBuildOptions,
     previous_hashes: Option<&HashMap<String, String>>,
     target_paths: Option<&HashSet<String>>,
+    destination: SymbolGraphDestination,
 ) -> Result<SymbolBuildReport, CliError> {
     let root = root.canonicalize().map_err(|source| CliError::Io {
         path: root.to_path_buf(),
@@ -2191,7 +2224,12 @@ pub(crate) fn build_symbols_for_paths(
             .size_bytes
             .is_some_and(|size| size > options.max_bytes)
         {
-            clear_skipped_symbol_index(store, &node.node.path, node.node.language.as_deref())?;
+            clear_skipped_symbol_index(
+                store,
+                &node.node.path,
+                node.node.language.as_deref(),
+                destination,
+            )?;
             report.too_large += 1;
             continue;
         }
@@ -2232,15 +2270,22 @@ pub(crate) fn build_symbols_for_paths(
                         store.set_suggested_purpose(parsed.graph.path(), &suggestion)?;
                         report.purpose_suggestions += 1;
                     }
-                    store.replace_compact_symbol_graph(&parsed.graph)?;
+                    match destination {
+                        SymbolGraphDestination::Published => {
+                            store.replace_compact_symbol_graph(&parsed.graph)?;
+                        }
+                        SymbolGraphDestination::Staging => {
+                            store.stage_compact_symbol_graph(&parsed.graph)?;
+                        }
+                    }
                     report.parsed += 1;
                 }
                 SymbolParseOutcome::TimedOut { path } => {
-                    clear_skipped_symbol_index_for_path(store, &path)?;
+                    clear_skipped_symbol_index_for_path(store, &path, destination)?;
                     report.timed_out += 1;
                 }
                 SymbolParseOutcome::BinaryOrNonUtf8 { path } => {
-                    clear_skipped_symbol_index_for_path(store, &path)?;
+                    clear_skipped_symbol_index_for_path(store, &path, destination)?;
                     report.binary_or_non_utf8 += 1;
                 }
                 SymbolParseOutcome::Io { path, source } => {
@@ -2754,21 +2799,31 @@ fn clear_skipped_symbol_index(
     store: &AtlasStore,
     path: &str,
     language: Option<&str>,
+    destination: SymbolGraphDestination,
 ) -> Result<(), CliError> {
-    if is_structural_summary_candidate(path, language) {
-        store.clear_symbol_graph_for_path(path)?;
-    } else {
-        store.clear_source_index_for_path(path)?;
+    match (destination, is_structural_summary_candidate(path, language)) {
+        (SymbolGraphDestination::Published, true) => store.clear_symbol_graph_for_path(path)?,
+        (SymbolGraphDestination::Published, false) => store.clear_source_index_for_path(path)?,
+        (SymbolGraphDestination::Staging, true) => {
+            store.clear_staged_symbol_graph_for_path(path)?;
+        }
+        (SymbolGraphDestination::Staging, false) => {
+            store.clear_staged_source_index_for_path(path)?;
+        }
     }
     Ok(())
 }
 
 /// Clear stale symbol output for a skipped path loaded from the index.
-fn clear_skipped_symbol_index_for_path(store: &AtlasStore, path: &str) -> Result<(), CliError> {
+fn clear_skipped_symbol_index_for_path(
+    store: &AtlasStore,
+    path: &str,
+    destination: SymbolGraphDestination,
+) -> Result<(), CliError> {
     let language = store
         .load_node_by_path(path)?
         .and_then(|indexed| indexed.node.language);
-    clear_skipped_symbol_index(store, path, language.as_deref())
+    clear_skipped_symbol_index(store, path, language.as_deref(), destination)
 }
 
 /// Normalize and validate a user-supplied path as a repository-relative file key.

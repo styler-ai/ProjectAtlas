@@ -2,7 +2,7 @@
 
 use super::{
     PurposeImportReport, ScanConfigurationInput, ScanReport, ScanRuntimePlan, SymbolBuildOptions,
-    TextIndexOptions, build_symbols_for_index, imported_purpose_records,
+    TextIndexOptions, build_symbols_for_staging, imported_purpose_records,
     refresh_structural_summaries_for_nodes, refresh_text_index_for_nodes_with_rows,
     repository_state_signature, seed_builtin_projectatlas_purposes,
 };
@@ -87,7 +87,7 @@ fn rebuild_staging(
             purpose_import.imported += 1;
         }
     }
-    let symbols = build_symbols_for_index(store, &plan.root, symbol_options, None)?;
+    let symbols = build_symbols_for_staging(store, &plan.root, symbol_options)?;
     let structural_summaries =
         refresh_structural_summaries_for_nodes(store, nodes, &text_refresh.rows)?;
     let overview = store.overview()?;

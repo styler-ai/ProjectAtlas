@@ -1427,6 +1427,7 @@ dependencies = [
  "blake3",
  "fs4",
  "projectatlas-core",
+ "projectatlas-symbols",
  "rusqlite",
  "serde",
  "serde_json",

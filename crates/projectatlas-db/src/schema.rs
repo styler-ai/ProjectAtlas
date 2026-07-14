@@ -108,6 +108,17 @@ const GRAPH_EVIDENCE_SLOT_PATH_INDEX: &str = "idx_graph_evidence_slot_origin_rep
 const GRAPH_RESOLUTION_SLOT_PATH_INDEX: &str = "idx_graph_resolution_slot_origin_repository_path";
 /// Affected-row lookup index for structural coverage.
 const GRAPH_COVERAGE_SLOT_PATH_INDEX: &str = "idx_graph_coverage_slot_repository_path";
+/// Ordered source adjacency index for bounded typed relation lookup.
+const GRAPH_RELATIONS_SLOT_SOURCE_KIND_KEY_INDEX: &str =
+    "idx_graph_relations_slot_source_kind_stable_key";
+/// Ordered target adjacency index for bounded typed relation lookup.
+const GRAPH_RELATIONS_SLOT_TARGET_KIND_KEY_INDEX: &str =
+    "idx_graph_relations_slot_target_kind_stable_key";
+/// Ordered relation-family index for bounded typed graph filtering.
+const GRAPH_RELATIONS_SLOT_KIND_KEY_INDEX: &str = "idx_graph_relations_slot_kind_stable_key";
+/// Ordered entity-kind/name index for package and module lookup.
+const GRAPH_ENTITIES_SLOT_KIND_NAME_KEY_INDEX: &str =
+    "idx_graph_entities_slot_kind_qualified_name_stable_key";
 /// Schema-owned indexes that keep non-root reconciliation proportional to its path closure.
 const AFFECTED_RECONCILIATION_INDEX_SQL: &str = r"CREATE INDEX IF NOT EXISTS idx_graph_entities_slot_repository_path
           ON graph_entities(structural_slot, repository_path);
@@ -117,6 +128,21 @@ const AFFECTED_RECONCILIATION_INDEX_SQL: &str = r"CREATE INDEX IF NOT EXISTS idx
           ON graph_resolution_occurrences(structural_slot, origin_repository_path);
       CREATE INDEX IF NOT EXISTS idx_graph_coverage_slot_repository_path
           ON graph_coverage(structural_slot, repository_path);";
+/// Canonical indexes for active-slot graph identity, adjacency, and package/module reads.
+const GRAPH_QUERY_INDEX_SQL: &str = r"CREATE INDEX IF NOT EXISTS idx_graph_relations_slot_source_kind_stable_key
+          ON graph_relations(
+              structural_slot, source_entity_digest, relation_kind, stable_key_digest
+          );
+      CREATE INDEX IF NOT EXISTS idx_graph_relations_slot_target_kind_stable_key
+          ON graph_relations(
+              structural_slot, target_entity_digest, relation_kind, stable_key_digest
+          );
+      CREATE INDEX IF NOT EXISTS idx_graph_relations_slot_kind_stable_key
+          ON graph_relations(structural_slot, relation_kind, stable_key_digest);
+      CREATE INDEX IF NOT EXISTS idx_graph_entities_slot_kind_qualified_name_stable_key
+          ON graph_entities(
+              structural_slot, entity_kind, qualified_name, stable_key_digest
+          );";
 /// Canonical current-schema guard for the immutable slot inventory.
 const GRAPH_STRUCTURAL_SLOTS_DELETE_GUARD_SQL: &str = r"CREATE TRIGGER graph_structural_slots_delete_guard
 BEFORE DELETE ON graph_structural_slots
@@ -164,7 +190,7 @@ pub(crate) const STRUCTURAL_DERIVED_TABLES: [&str; 7] = [
     FILE_TEXTS_TABLE,
 ];
 /// Required structural objects whose normalized DDL is a publication invariant.
-const STRUCTURAL_SCHEMA_SQL_OBJECTS: [&str; 16] = [
+const STRUCTURAL_SCHEMA_SQL_OBJECTS: [&str; 20] = [
     GRAPH_STRUCTURAL_SLOTS_TABLE,
     GRAPH_PUBLICATION_STATE_TABLE,
     GRAPH_ENTITIES_TABLE,
@@ -178,6 +204,10 @@ const STRUCTURAL_SCHEMA_SQL_OBJECTS: [&str; 16] = [
     GRAPH_EVIDENCE_SLOT_PATH_INDEX,
     GRAPH_RESOLUTION_SLOT_PATH_INDEX,
     GRAPH_COVERAGE_SLOT_PATH_INDEX,
+    GRAPH_RELATIONS_SLOT_SOURCE_KIND_KEY_INDEX,
+    GRAPH_RELATIONS_SLOT_TARGET_KIND_KEY_INDEX,
+    GRAPH_RELATIONS_SLOT_KIND_KEY_INDEX,
+    GRAPH_ENTITIES_SLOT_KIND_NAME_KEY_INDEX,
     GRAPH_STRUCTURAL_SLOTS_DELETE_GUARD,
     GRAPH_STRUCTURAL_SLOTS_UPDATE_GUARD,
     GRAPH_PUBLICATION_STATE_DELETE_GUARD,
@@ -232,7 +262,7 @@ struct MigrationDefinition {
 }
 
 /// Accepted migrations in immutable application order.
-const MIGRATIONS: [MigrationDefinition; 6] = [
+const MIGRATIONS: [MigrationDefinition; 7] = [
     MigrationDefinition {
         id: "install-runtime-migration-ledger",
         owner: "projectatlas-db::schema",
@@ -310,6 +340,19 @@ const MIGRATIONS: [MigrationDefinition; 6] = [
         evidence: "cargo test --locked --workspace --all-features task_arri_ut_arri_4_16",
         apply: install_affected_reconciliation_contracts,
         verify: verify_affected_reconciliation_contracts,
+    },
+    MigrationDefinition {
+        id: "install-graph-query-indexes",
+        owner: "projectatlas-db::schema::repository-graph-query",
+        prerequisites: "read-only-preflight=write-ready;structural-derived-rows=slot-bound",
+        authored_effects: "preserve=metadata,purposes,settings,telemetry,health-resolutions",
+        derived_effects: "preserve=all-rows;index=source-adjacency,target-adjacency,relation-kind,entity-kind-qualified-name;reuse=slot-stable-key-primary-keys",
+        transaction_boundary: "single-sqlite-transaction",
+        forward_behavior: "install-ordered-graph-query-indexes;reconcile-exact-column-order;advance-schema-version",
+        rollback_behavior: "rollback-query-indexes-and-ledger;retain-prior-schema-and-all-rows",
+        evidence: "cargo test --locked --workspace --all-features task_arri_ut_arri_4_22",
+        apply: install_graph_query_indexes,
+        verify: verify_graph_query_indexes,
     },
 ];
 
@@ -2073,7 +2116,7 @@ pub(crate) fn reconcile_incremental_structural_publication(
     require_foreign_keys_enabled(connection)?;
     let active_slot = structural_slot_text(expected_publication.active_slot);
     let active_epoch = sqlite_epoch(expected_publication.active_epoch)?;
-    reconcile_affected_structural_invalidation(connection, active_slot, affected_paths)?;
+    reconcile_affected_structural_rows(connection, active_slot, active_epoch, affected_paths)?;
     reconcile_affected_file_texts(connection, active_slot, active_epoch, affected_paths)?;
     reconcile_affected_file_text_fts(connection, active_slot, affected_paths)
 }
@@ -2194,10 +2237,11 @@ fn reconcile_structural_slots_and_epochs(
     Ok(())
 }
 
-/// Require every invalidated active-slot path row to be absent after mutation.
-fn reconcile_affected_structural_invalidation(
+/// Require every retained replacement row in the affected closure to use the new epoch.
+fn reconcile_affected_structural_rows(
     connection: &Connection,
     active_slot: &str,
+    active_epoch: i64,
     affected_paths: &[String],
 ) -> DbResult<()> {
     for (table, path_column) in [
@@ -2208,38 +2252,46 @@ fn reconcile_affected_structural_invalidation(
     ] {
         for path in affected_paths {
             if path == "." {
-                let survives = connection.query_row(
+                let stale = connection.query_row(
                     &format!(
                         "SELECT EXISTS(
-                             SELECT 1 FROM {table} WHERE structural_slot = ?1
+                             SELECT 1 FROM {table}
+                             WHERE structural_slot = ?1 AND last_changed_epoch <> ?2
                          )"
                     ),
-                    [active_slot],
+                    params![active_slot, active_epoch],
                     |row| row.get::<_, i64>(0),
                 )? != 0;
-                if survives {
+                if stale {
                     return Err(preflight_error(format!(
-                        "incremental root invalidation left an active-slot row in {table:?}; dependent relations and candidates are protected by enforced foreign keys"
+                        "incremental root replacement retained a stale active-slot row in {table:?}; dependent relations and candidates are protected by enforced foreign keys"
                     )));
                 }
                 continue;
             }
             let (descendant_start, descendant_end) = crate::sqlite_descendant_bounds(path);
-            let survives = connection.query_row(
+            let stale = connection.query_row(
                 &format!(
                     "SELECT EXISTS(
                          SELECT 1 FROM {table}
                          WHERE structural_slot = ?1
-                           AND ({path_column} = ?2
-                                OR ({path_column} >= ?3 AND {path_column} < ?4))
+                           AND last_changed_epoch <> ?2
+                           AND ({path_column} = ?3
+                                OR ({path_column} >= ?4 AND {path_column} < ?5))
                      )"
                 ),
-                params![active_slot, path, descendant_start, descendant_end],
+                params![
+                    active_slot,
+                    active_epoch,
+                    path,
+                    descendant_start,
+                    descendant_end
+                ],
                 |row| row.get::<_, i64>(0),
             )? != 0;
-            if survives {
+            if stale {
                 return Err(preflight_error(format!(
-                    "incremental structural invalidation left an active-slot row in {table:?} for affected path {path:?}; dependent relations and candidates are protected by enforced foreign keys"
+                    "incremental structural replacement retained a stale active-slot row in {table:?} for affected path {path:?}; dependent relations and candidates are protected by enforced foreign keys"
                 )));
             }
         }
@@ -4574,6 +4626,56 @@ fn verify_affected_reconciliation_contracts(connection: &Connection) -> DbResult
     reconcile_full_file_text_fts(connection)
 }
 
+/// Install ordered indexes for bounded active-slot graph queries.
+fn install_graph_query_indexes(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(GRAPH_QUERY_INDEX_SQL)?;
+    Ok(())
+}
+
+/// Require every graph query index to retain its selected column order.
+fn verify_graph_query_indexes(connection: &Connection) -> DbResult<()> {
+    for (index, table, columns) in [
+        (
+            GRAPH_RELATIONS_SLOT_SOURCE_KIND_KEY_INDEX,
+            GRAPH_RELATIONS_TABLE,
+            &[
+                "structural_slot",
+                "source_entity_digest",
+                "relation_kind",
+                "stable_key_digest",
+            ][..],
+        ),
+        (
+            GRAPH_RELATIONS_SLOT_TARGET_KIND_KEY_INDEX,
+            GRAPH_RELATIONS_TABLE,
+            &[
+                "structural_slot",
+                "target_entity_digest",
+                "relation_kind",
+                "stable_key_digest",
+            ][..],
+        ),
+        (
+            GRAPH_RELATIONS_SLOT_KIND_KEY_INDEX,
+            GRAPH_RELATIONS_TABLE,
+            &["structural_slot", "relation_kind", "stable_key_digest"][..],
+        ),
+        (
+            GRAPH_ENTITIES_SLOT_KIND_NAME_KEY_INDEX,
+            GRAPH_ENTITIES_TABLE,
+            &[
+                "structural_slot",
+                "entity_kind",
+                "qualified_name",
+                "stable_key_digest",
+            ][..],
+        ),
+    ] {
+        require_index_contract(connection, index, table, columns)?;
+    }
+    Ok(())
+}
+
 /// Verify structural identity for every current core graph and lexical row family.
 fn verify_structural_derived_row_schema(connection: &Connection) -> DbResult<()> {
     verify_typed_repository_graph_schema(connection)?;
@@ -4999,7 +5101,7 @@ fn require_unique_constraint(
     )))
 }
 
-/// Require one exact schema-owned index used by affected-row reconciliation.
+/// Require one exact schema-owned index and its ordered columns.
 fn require_index_contract(
     connection: &Connection,
     index: &str,
@@ -5012,7 +5114,7 @@ fn require_index_contract(
         Some(object) if object.object_type == "index" && object.table_name == table
     ) {
         return Err(preflight_error(format!(
-            "affected-row index {index:?} for {table:?} did not reconcile"
+            "schema-owned index {index:?} for {table:?} did not reconcile"
         )));
     }
     let columns = schema_object_columns(connection, SchemaObjectKind::Index, index)?;
@@ -5024,7 +5126,7 @@ fn require_index_contract(
         Ok(())
     } else {
         Err(preflight_error(format!(
-            "affected-row index {index:?} columns did not reconcile: expected {expected_columns:?}, found {columns:?}"
+            "schema-owned index {index:?} columns did not reconcile: expected {expected_columns:?}, found {columns:?}"
         )))
     }
 }
@@ -5097,6 +5199,7 @@ fn reset_legacy_summary_schema(connection: &Connection) -> DbResult<()> {
 mod tests {
     use super::*;
     use std::error::Error;
+    use std::fmt::Debug;
     use std::io;
 
     #[test]
@@ -5142,8 +5245,12 @@ mod tests {
             != [
                 "idx_file_texts_hash",
                 "idx_graph_coverage_slot_repository_path",
+                "idx_graph_entities_slot_kind_qualified_name_stable_key",
                 "idx_graph_entities_slot_repository_path",
                 "idx_graph_evidence_slot_origin_repository_path",
+                "idx_graph_relations_slot_kind_stable_key",
+                "idx_graph_relations_slot_source_kind_stable_key",
+                "idx_graph_relations_slot_target_kind_stable_key",
                 "idx_graph_resolution_slot_origin_repository_path",
                 "idx_health_resolutions_category",
                 "idx_nodes_kind",
@@ -6884,20 +6991,16 @@ mod tests {
         }
 
         let migrations = allocated_migrations();
-        let [
-            _,
-            _,
-            _,
-            publication_migration,
-            structural_binding_migration,
-            affected_reconciliation_migration,
-        ] = migrations.as_slice()
-        else {
-            return Err(io::Error::other(
-                "ARRI 4.11 requires publication and structural row-binding migrations",
-            )
-            .into());
+        let migration = |id| {
+            migrations
+                .iter()
+                .find(|migration| migration.definition.id == id)
+                .ok_or_else(|| io::Error::other(format!("ARRI 4.11 requires migration {id:?}")))
         };
+        let publication_migration = migration("install-structural-publication-state")?;
+        let structural_binding_migration = migration("bind-structural-derived-rows")?;
+        let affected_reconciliation_migration =
+            migration("install-affected-reconciliation-contracts")?;
         if structural_binding_migration.schema_version != publication_migration.schema_version + 1
             || structural_binding_migration.definition.id != "bind-structural-derived-rows"
             || structural_binding_migration.definition.owner
@@ -6962,9 +7065,13 @@ mod tests {
 
         let plan = preflight(&path)?;
         if plan.source_version != publication_migration.schema_version
-            || plan.pending.len() != 2
-            || plan.pending[0].definition.id != structural_binding_migration.definition.id
-            || plan.pending[1].definition.id != affected_reconciliation_migration.definition.id
+            || plan
+                .pending
+                .first()
+                .map(|migration| migration.definition.id)
+                != Some(structural_binding_migration.definition.id)
+            || plan.pending.get(1).map(|migration| migration.definition.id)
+                != Some(affected_reconciliation_migration.definition.id)
         {
             return Err(io::Error::other(format!(
                 "valid publication prefix did not plan structural row binding: {plan:?}"
@@ -7203,10 +7310,11 @@ mod tests {
         let mut rollback_plan = SchemaMigrationPlan {
             source_version: publication_migration.schema_version,
             target_version: SCHEMA_VERSION,
-            pending: vec![
-                structural_binding_migration.clone(),
-                affected_reconciliation_migration.clone(),
-            ],
+            pending: migrations
+                .iter()
+                .filter(|migration| migration.schema_version > publication_migration.schema_version)
+                .cloned()
+                .collect(),
         };
         rollback_plan.pending[0].definition.verify = reject_structural_binding;
         match apply_migration_plan(&mut rollback_connection, &rollback_plan) {
@@ -7240,7 +7348,7 @@ mod tests {
             || rollback_history
                 != (
                     publication_migration.schema_version.to_string(),
-                    i64::try_from(migrations.len() - 2)?,
+                    publication_migration.schema_version - MIGRATION_BASE_SCHEMA_VERSION,
                 )
             || table_columns(&rollback_connection, FILE_TEXTS_TABLE)?
                 != [
@@ -7335,6 +7443,11 @@ mod tests {
                 14,
                 include_bytes!("../tests/fixtures/schema-migrations/schema-v14.db"),
                 "blake3:b8fe0588f4a33ef8776522065600137ad9977710aa143f3807a893c8f21acb3b",
+            ),
+            (
+                15,
+                include_bytes!("../tests/fixtures/schema-migrations/schema-v15.db"),
+                "blake3:40afc4bd8c40b66dd9eac0f54c331f126577be7fb4826ce769afac1446e3d487",
             ),
         ];
 
@@ -7446,6 +7559,124 @@ mod tests {
             if ledger_rows != i64::try_from(allocated_migrations().len())? {
                 return Err(io::Error::other(format!(
                     "schema {source_version} migration ledger is incomplete: {ledger_rows}"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_22_migrates_graph_query_indexes() -> Result<(), Box<dyn Error>> {
+        fn reject_graph_query_indexes(_: &Connection) -> DbResult<()> {
+            Err(preflight_error(
+                "injected graph query index verification failure",
+            ))
+        }
+
+        let fixture = include_bytes!("../tests/fixtures/schema-migrations/schema-v15.db");
+        let success = tempfile::tempdir()?;
+        let success_path = success.path().join("schema-v15-query-indexes.db");
+        fs::write(&success_path, fixture)?;
+        let success_before = {
+            let connection = Connection::open(&success_path)?;
+            if observed_schema_version(&connection)? != SCHEMA_VERSION - 1 {
+                return Err(io::Error::other(
+                    "ARRI 4.22 migration fixture is not the immediate schema predecessor",
+                )
+                .into());
+            }
+            migration_preserved_rows(&connection)?
+        };
+        let store = crate::AtlasStore::open(&success_path)?;
+        require_eq(
+            &observed_schema_version(&store.connection)?,
+            &SCHEMA_VERSION,
+            "graph query index target schema",
+        )?;
+        require_eq(
+            &migration_preserved_rows(&store.connection)?,
+            &success_before,
+            "graph query index migration row preservation",
+        )?;
+        verify_graph_query_indexes(&store.connection)?;
+        let ledger_rows =
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        require_eq(
+            &ledger_rows,
+            &i64::try_from(allocated_migrations().len())?,
+            "graph query index migration ledger",
+        )?;
+
+        let rollback = tempfile::tempdir()?;
+        let rollback_path = rollback.path().join("schema-v15-query-indexes-rollback.db");
+        fs::write(&rollback_path, fixture)?;
+        let mut rollback_connection = Connection::open(&rollback_path)?;
+        let rollback_before = migration_preserved_rows(&rollback_connection)?;
+        let rollback_ledger_rows =
+            rollback_connection.query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
+        let mut rollback_plan = preflight(&rollback_path)?;
+        if rollback_plan.pending.len() != 1
+            || rollback_plan.pending[0].definition.id != "install-graph-query-indexes"
+        {
+            return Err(io::Error::other(format!(
+                "schema v15 did not plan only the graph query index migration: {:?}",
+                rollback_plan.pending
+            ))
+            .into());
+        }
+        rollback_plan.pending[0].definition.verify = reject_graph_query_indexes;
+        match apply_migration_plan(&mut rollback_connection, &rollback_plan) {
+            Err(DbError::SchemaPreflight { message })
+                if message.contains("injected graph query index verification failure") => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "graph query index rollback returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(()) => {
+                return Err(io::Error::other(
+                    "injected graph query index verification failure committed",
+                )
+                .into());
+            }
+        }
+        require_eq(
+            &observed_schema_version(&rollback_connection)?,
+            &(SCHEMA_VERSION - 1),
+            "graph query index rollback schema",
+        )?;
+        require_eq(
+            &migration_preserved_rows(&rollback_connection)?,
+            &rollback_before,
+            "graph query index rollback rows",
+        )?;
+        require_eq(
+            &rollback_connection.query_row(
+                "SELECT COUNT(*) FROM schema_migrations",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            &rollback_ledger_rows,
+            "graph query index rollback ledger",
+        )?;
+        let rollback_objects = sqlite_objects(&rollback_connection)?;
+        for index in [
+            GRAPH_RELATIONS_SLOT_SOURCE_KIND_KEY_INDEX,
+            GRAPH_RELATIONS_SLOT_TARGET_KIND_KEY_INDEX,
+            GRAPH_RELATIONS_SLOT_KIND_KEY_INDEX,
+            GRAPH_ENTITIES_SLOT_KIND_NAME_KEY_INDEX,
+        ] {
+            if rollback_objects.contains_key(index) {
+                return Err(io::Error::other(format!(
+                    "failed graph query index migration retained {index:?}"
                 ))
                 .into());
             }
@@ -8094,6 +8325,20 @@ mod tests {
             .into());
         }
         Ok(())
+    }
+
+    fn require_eq<T>(actual: &T, expected: &T, label: &str) -> Result<(), Box<dyn Error>>
+    where
+        T: Debug + PartialEq,
+    {
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "{label} mismatch: expected {expected:?}, got {actual:?}"
+            ))
+            .into())
+        }
     }
 
     fn index_columns(connection: &Connection, index: &str) -> DbResult<Vec<String>> {

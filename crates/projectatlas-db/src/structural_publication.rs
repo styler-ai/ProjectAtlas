@@ -4,7 +4,7 @@ use crate::{
     AtlasStore, DbError, DbResult, IndexedFileText, clear_node_summary_in_connection,
     clear_source_index_in_connection, mark_paths_absent_in_connection,
     node_id_for_path_in_connection, normalize_metadata_path,
-    replace_compact_symbol_graph_in_connection, schema, set_node_summary_in_connection,
+    replace_compact_symbol_graph_at_publication, schema, set_node_summary_in_connection,
     set_suggested_purpose_in_connection, sql_string_literals, sqlite_read_uri,
     upsert_file_text_for_publication, upsert_node,
 };
@@ -609,7 +609,7 @@ fn apply_incremental_mutations(
         upsert_file_text_for_publication(transaction, text, active_slot, next_epoch)?;
     }
     for mutation in &delta.source_mutations {
-        apply_incremental_source_mutation(transaction, mutation)?;
+        apply_incremental_source_mutation(transaction, mutation, active_slot, next_epoch)?;
     }
     for mutation in &delta.summary_mutations {
         apply_incremental_summary_mutation(transaction, mutation)?;
@@ -709,6 +709,8 @@ fn set_built_in_purpose(
 fn apply_incremental_source_mutation(
     connection: &Connection,
     mutation: &IncrementalSourceMutation,
+    structural_slot: &str,
+    last_changed_epoch: i64,
 ) -> DbResult<()> {
     match mutation {
         IncrementalSourceMutation::Replace {
@@ -720,7 +722,12 @@ fn apply_incremental_source_mutation(
             if let Some(suggestion) = purpose_suggestion {
                 set_suggested_purpose_in_connection(connection, graph.path(), suggestion)?;
             }
-            replace_compact_symbol_graph_in_connection(connection, graph)
+            replace_compact_symbol_graph_at_publication(
+                connection,
+                graph,
+                structural_slot,
+                last_changed_epoch,
+            )
         }
         IncrementalSourceMutation::Clear {
             path,
@@ -1254,6 +1261,41 @@ pub(crate) fn load_publication_state(connection: &Connection) -> DbResult<Public
     publication_state_from_sql(&slot, epoch)
 }
 
+/// Apply one direct graph mutation and publish its new active-slot epoch atomically.
+pub(crate) fn publish_active_graph_mutation(
+    connection: &Connection,
+    mutate: impl FnOnce(&Connection, &str, i64) -> DbResult<()>,
+) -> DbResult<PublicationState> {
+    let transaction = connection.unchecked_transaction()?;
+    let current = load_publication_state(&transaction)?;
+    let next = current
+        .next_incremental()
+        .map_err(|error| publication_error(error.to_string()))?;
+    let active_slot = slot_text(current.active_slot);
+    let current_epoch = i64::try_from(current.active_epoch.get()).map_err(|source| {
+        publication_error(format!(
+            "current graph epoch exceeds SQLite INTEGER: {source}"
+        ))
+    })?;
+    let next_epoch = i64::try_from(next.active_epoch.get()).map_err(|source| {
+        publication_error(format!("next graph epoch exceeds SQLite INTEGER: {source}"))
+    })?;
+    mutate(&transaction, active_slot, next_epoch)?;
+    let changed = transaction.execute(
+        "UPDATE graph_publication_state
+         SET active_epoch = ?1
+         WHERE singleton = 1 AND active_slot = ?2 AND active_epoch = ?3",
+        params![next_epoch, active_slot, current_epoch],
+    )?;
+    if changed != 1 || load_publication_state(&transaction)? != next {
+        return Err(publication_error(
+            "direct graph mutation did not publish its active-slot epoch",
+        ));
+    }
+    transaction.commit()?;
+    Ok(next)
+}
+
 /// Load the typed singleton publication state from the attached stage.
 fn load_attached_publication_state(transaction: &Transaction<'_>) -> DbResult<PublicationState> {
     let (slot, epoch) = transaction.query_row(
@@ -1579,6 +1621,133 @@ mod tests {
     #[test]
     fn task_arri_ut_arri_4_14() -> Result<(), Box<dyn Error>> {
         prove_incremental_publication_atomicity()
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_22_incremental_graph_uses_published_epoch() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(&root)?;
+        store.replace_scan(&[file_node("src/lib.rs", "epoch-base")])?;
+        upsert_structural_state_signature(&store.connection, "epoch-base")?;
+        let base = store.publication_state()?;
+        let source = "pub fn source() { target(); }\nfn target() {}\n";
+        let graph = CompactSymbolGraph::try_from(projectatlas_symbols::extract_symbol_graph(
+            "src/lib.rs",
+            Some("rust"),
+            source,
+        ))?;
+        let mut delta = test_incremental_delta(
+            &root,
+            base,
+            Some("epoch-base".to_owned()),
+            "epoch-next",
+            "epoch-next",
+            source,
+        );
+        delta.source_mutations = vec![IncrementalSourceMutation::Replace {
+            graph,
+            summary: "Rust source declaring source.".to_owned(),
+            purpose_suggestion: None,
+        }];
+
+        let publication = match store.publish_incremental_structural_delta(&delta)? {
+            IncrementalPublication::Published(publication) => publication,
+            IncrementalPublication::Unchanged(publication) => {
+                return Err(format!(
+                    "incremental graph publication coalesced unexpectedly: {publication:?}"
+                )
+                .into());
+            }
+        };
+        let entities = store.load_graph_entities_by_qualified_name(
+            projectatlas_core::graph::GraphEntityKind::Declaration,
+            "source",
+            1,
+        )?;
+        require_eq(&entities.len(), &1, "published declaration count")?;
+        require_eq(
+            &entities[0].last_changed_epoch,
+            &publication.active_epoch,
+            "incremental graph row freshness epoch",
+        )?;
+
+        let before_direct = store.publication_state()?;
+        let expected_direct = before_direct.next_incremental()?;
+        let direct_graph = CompactSymbolGraph::try_from(
+            projectatlas_symbols::extract_symbol_graph("src/lib.rs", Some("rust"), source),
+        )?;
+        store.replace_compact_symbol_graph(&direct_graph)?;
+        require_eq(
+            &store.publication_state()?,
+            &expected_direct,
+            "direct replacement publishes exactly one epoch",
+        )?;
+        let direct_entities = store.load_graph_entities_by_qualified_name(
+            projectatlas_core::graph::GraphEntityKind::Declaration,
+            "source",
+            1,
+        )?;
+        require_eq(&direct_entities.len(), &1, "direct declaration count")?;
+        require_eq(
+            &direct_entities[0].last_changed_epoch,
+            &expected_direct.active_epoch,
+            "direct entity freshness epoch",
+        )?;
+        let direct_relations = store.load_graph_adjacency(
+            &direct_entities[0].stable_key_digest,
+            crate::GraphRelationDirection::Outbound,
+            Some(projectatlas_core::graph::GraphRelationKind::Calls),
+            1,
+        )?;
+        require_eq(&direct_relations.len(), &1, "direct relation count")?;
+        require_eq(
+            &direct_relations[0].last_changed_epoch,
+            &expected_direct.active_epoch,
+            "direct relation freshness epoch",
+        )?;
+        let direct_evidence_epoch = store.connection.query_row(
+            "SELECT last_changed_epoch
+             FROM graph_evidence_occurrences
+             WHERE structural_slot = ?1 AND relation_digest = ?2",
+            params![
+                slot_text(expected_direct.active_slot),
+                &direct_relations[0].stable_key_digest[..]
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &u64::try_from(direct_evidence_epoch)?,
+            &expected_direct.active_epoch.get(),
+            "direct evidence freshness epoch",
+        )?;
+
+        let mut staging_store = AtlasStore::in_memory()?;
+        let staging_base = staging_store.publication_state()?;
+        let staging_graph = CompactSymbolGraph::try_from(
+            projectatlas_symbols::extract_symbol_graph("src/lib.rs", Some("rust"), source),
+        )?;
+        staging_store.stage_compact_symbol_graph(&staging_graph)?;
+        require_eq(
+            &staging_store.publication_state()?,
+            &staging_base,
+            "staging replacement leaves publication state unchanged",
+        )?;
+        let staged_entities = staging_store.load_graph_entities_by_qualified_name(
+            projectatlas_core::graph::GraphEntityKind::Declaration,
+            "source",
+            1,
+        )?;
+        require_eq(&staged_entities.len(), &1, "staged declaration count")?;
+        require_eq(
+            &staged_entities[0].last_changed_epoch,
+            &staging_base.active_epoch,
+            "staged row retains the captured base epoch",
+        )?;
+        Ok(())
     }
 
     #[test]

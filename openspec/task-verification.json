@@ -3395,7 +3395,7 @@
           "test_ids": [
             "UT:ARRI-4.22"
           ],
-          "assertion": "Verify add source/target/kind/package/stable-key/slot adjacency indexes and prove normal extraction, persistence, relation lookup, and traversal avoid unrelated JSON decoding and whole-graph scans.",
+          "assertion": "Verify schema-v15 preservation and transactional schema-16 installation of the exact ordered slot/source, slot/target, slot/kind, and slot/entity-kind/qualified-name indexes; indexed primary-key, package/module, inbound/outbound adjacency, and relation-family plans with bounded typed decoding and no JSON calls or whole-table scans; one canonical-key arena with fixed entity/relation/evidence/resolution handles plus shared qualified-name text and a contiguous deterministic name index; normal compact extraction into active-slot entities, High-confidence calls, Exact containment, and Exact file-owned Cargo dependencies only under the complete producer/parser/language/basename contract; typed non-traversable unresolved and ambiguous resolution occurrences with bounded deterministic candidates; overload signature/discriminator distinction and unchanged-publication two-hop composition; one logical edge with distinct repository-origin evidence occurrences; pre-invalidation fail-closed canonical digest collisions for entity, relation, evidence, and resolution identities; injected evidence, collision, and migration-verification rollback across typed rows, resolution candidates, compatibility rows, ledger, and publication state; and incremental versus full-scan staging ownership of slot/epoch publication.",
           "command": {
             "executable": "cargo",
             "arguments": [
@@ -3408,6 +3408,50 @@
           },
           "timeout_seconds": 300,
           "covered_inputs": [
+            {
+              "kind": "file",
+              "path": "Cargo.lock"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/runtime.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/runtime/full_scan.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-core/src/graph.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-core/src/symbols.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/Cargo.toml"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/lib.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/schema.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/structural_publication.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v15.db"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/changes/advance-rust-repository-intelligence/design.md"
+            },
             {
               "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
