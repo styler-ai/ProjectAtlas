@@ -3296,18 +3296,6 @@
               "kind": "file",
               "path": "openspec/task-verification.json"
             }
-          ],
-          "test_sources": [
-            {
-              "test_id": "UT:ARRI-4.19",
-              "path": "crates/projectatlas-db/src/schema.rs",
-              "anchor": "task_arri_ut_arri_4_19_schema_failures"
-            },
-            {
-              "test_id": "UT:ARRI-4.19",
-              "path": "crates/projectatlas-db/src/structural_publication.rs",
-              "anchor": "task_arri_ut_arri_4_19_interrupted_publication"
-            }
           ]
         },
         {
