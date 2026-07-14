@@ -1147,7 +1147,7 @@
       "requirement": "The intended product-crate, test, and independent workspace-tool ownership boundaries are recorded without performing a speculative repository refactor.",
       "scenario": "A typed contract reconciles the exact six existing product owners and acyclic dependency direction against normalized local path dependencies parsed from the live root and member Cargo manifests, then validates the filesystem boundary, independent lint-tool role, test placement, first-touch split policy, real-consumer crate gate, and rejected speculative scaffolding.",
       "owner": "rust-ownership-and-module-boundaries",
-      "changed_artifacts": ["docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json", "crates/projectatlas-cli/src/repository_ownership_contract_tests.rs", "crates/projectatlas-cli/src/main.rs", "openspec/task-verification-plan.json", ".projectatlas/projectatlas-purpose-review.json"],
+      "changed_artifacts": ["docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json", "crates/projectatlas-cli/src/repository_ownership_contract_tests.rs", "crates/projectatlas-cli/src/main.rs", "openspec/task-verification-plan.json"],
       "risk": "L1-pure-domain",
       "required_evidence_layers": ["unit"],
       "timeout_seconds": 300,

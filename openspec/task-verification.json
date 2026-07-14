@@ -1906,10 +1906,6 @@
           "covered_inputs": [
             {
               "kind": "file",
-              "path": ".projectatlas/projectatlas-purpose-review.json"
-            },
-            {
-              "kind": "file",
               "path": "crates/projectatlas-cli/src/main.rs"
             },
             {
