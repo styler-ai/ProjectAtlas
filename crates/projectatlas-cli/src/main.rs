@@ -2815,7 +2815,7 @@ mod tests {
         context: &str,
     ) -> Result<(), Box<dyn Error>> {
         let root_display = normalize_native_path_display(root.canonicalize()?);
-        let db_display = normalize_native_path_display(db);
+        let db_display = normalize_native_path_display(db.canonicalize()?);
         if text.contains("selected_project:")
             && text.contains(&root_display)
             && text.contains(&db_display)

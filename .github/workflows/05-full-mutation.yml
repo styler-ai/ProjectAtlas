@@ -25,6 +25,7 @@ permissions:
 
 env:
   MUTATION_SHA: ${{ inputs.expected_sha || github.sha }}
+  DECLARED_LINUX_RUNNER_IMAGE: ubuntu-latest
 
 jobs:
   inventory:
@@ -370,7 +371,7 @@ jobs:
           set -o pipefail
           evidence=target/projectatlas-quality/full-mutation
           aggregate="$evidence/aggregate"
-          : "${ImageOS:?hosted runner image is unavailable}"
+          : "${DECLARED_LINUX_RUNNER_IMAGE:?declared runner image is unavailable}"
           : "${ImageVersion:?hosted runner image version is unavailable}"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
             > "$aggregate/jobs.json"
@@ -417,7 +418,7 @@ jobs:
             --arg repository "$GITHUB_REPOSITORY" \
             --arg commit_sha "$MUTATION_SHA" \
             --arg target "$(rustc -Vv | sed -n 's/^host: //p')" \
-            --arg runner_image "$ImageOS" \
+            --arg runner_image "$DECLARED_LINUX_RUNNER_IMAGE" \
             --arg runner_image_version "$ImageVersion" \
             --arg rustc_version "$(rustc --version)" \
             --arg llvm_version "$(rustc -Vv | sed -n 's/^LLVM version: //p')" \

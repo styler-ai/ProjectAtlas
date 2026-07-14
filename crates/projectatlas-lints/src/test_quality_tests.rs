@@ -97,6 +97,12 @@ fn policy_failure(
     }
 }
 
+fn required_text_position(haystack: &str, needle: &str) -> Result<usize, std::io::Error> {
+    haystack.find(needle).ok_or_else(|| {
+        std::io::Error::other(format!("required workflow text is missing: {needle}"))
+    })
+}
+
 fn coverage_exception(
     root: &RepositoryRoot,
     id: &str,
@@ -118,6 +124,52 @@ fn coverage_exception(
         source_sha256: digest_file(&source)?,
         expires_on: Some("2999-01-01".to_string()),
         expires_release: None,
+    })
+}
+
+fn under_target_coverage_export(
+    root: &RepositoryRoot,
+) -> Result<LlvmCoverageExport, Box<dyn std::error::Error>> {
+    let source = root.input("crates/projectatlas-lints/src/test_quality_tests.rs")?;
+    let manifest = root.input("Cargo.toml")?;
+    let summary = || LlvmCoverageSummary {
+        lines: LlvmMetric {
+            count: 10,
+            covered: 8,
+            notcovered: Some(2),
+        },
+        regions: LlvmMetric {
+            count: 10,
+            covered: 8,
+            notcovered: Some(2),
+        },
+        functions: LlvmMetric {
+            count: 10,
+            covered: 8,
+            notcovered: Some(2),
+        },
+    };
+    Ok(LlvmCoverageExport {
+        data: vec![LlvmCoverageData {
+            files: vec![LlvmCoverageFile {
+                filename: source.to_string_lossy().into_owned(),
+                segments: vec![(1, 1, 1, true, true, false)],
+                summary: summary(),
+            }],
+            functions: vec![LlvmCoverageFunction {
+                count: 1,
+                filenames: vec![source.to_string_lossy().into_owned()],
+                name: "under_target_fixture".to_string(),
+                regions: vec![(1, 1, 1, 2, 1, 0, 0, 0)],
+            }],
+            totals: summary(),
+        }],
+        export_type: "llvm.coverage.json.export".to_string(),
+        version: "2.0.1".to_string(),
+        cargo_llvm_cov: LlvmCovTool {
+            version: EXPECTED_LLVM_COV_VERSION.to_string(),
+            manifest_path: manifest.to_string_lossy().into_owned(),
+        },
     })
 }
 
@@ -547,6 +599,171 @@ fn task_tqg_ut_3_8() {
     assert!(failures[2].source().is_some());
     assert_eq!(failures[0].exit_code(), EXIT_USAGE);
     assert_eq!(failures[5].exit_code(), QualityStatus::NoTests.exit_code());
+}
+
+#[test]
+fn implementation_checkpoint_coverage_preserves_structure_without_claiming_release_targets() {
+    let root = assert_ok!(workspace_root());
+    let policy = assert_ok!(policy(&root));
+    let export = assert_ok!(under_target_coverage_export(&root));
+    let checkpoint = validate_coverage(
+        &root,
+        &policy,
+        "linux-x86_64-gnu",
+        &export,
+        CoverageEnforcement::ImplementationCheckpoint,
+    );
+    assert!(
+        checkpoint.is_ok(),
+        "checkpoint coverage failed: {checkpoint:?}"
+    );
+    let release = validate_coverage(
+        &root,
+        &policy,
+        "linux-x86_64-gnu",
+        &export,
+        CoverageEnforcement::ReleaseQuality,
+    );
+    assert!(matches!(
+        release,
+        Err(QualityError::Status {
+            status: QualityStatus::PolicyFailure,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn release_aggregate_rejects_checkpoint_coverage() {
+    let root = assert_ok!(workspace_root());
+    let policy = assert_ok!(policy(&root));
+    let counts = CoverageCounts {
+        lines: MetricCounts::new(8, 10),
+        regions: MetricCounts::new(8, 10),
+        functions: MetricCounts::new(8, 10),
+    };
+    let checkpoint = GateResult::Coverage {
+        enforcement: CoverageEnforcement::ImplementationCheckpoint,
+        raw: counts,
+        adjusted: counts,
+        exceptions_used: 0,
+    };
+    assert_ok!(validate_gate_result(&policy, &checkpoint, false));
+    assert!(validate_gate_result(&policy, &checkpoint, true).is_err());
+
+    let strict = GateResult::Coverage {
+        enforcement: CoverageEnforcement::ReleaseQuality,
+        raw: counts,
+        adjusted: counts,
+        exceptions_used: 0,
+    };
+    assert!(validate_gate_result(&policy, &strict, false).is_err());
+}
+
+#[test]
+fn omitted_coverage_enforcement_remains_release_quality() {
+    assert_eq!(
+        assert_ok!(CoverageEnforcement::from_cli(None)),
+        CoverageEnforcement::ReleaseQuality
+    );
+    assert_eq!(
+        assert_ok!(CoverageEnforcement::from_cli(Some(
+            "implementation-checkpoint"
+        ))),
+        CoverageEnforcement::ImplementationCheckpoint
+    );
+    assert!(CoverageEnforcement::from_cli(Some("future-mode")).is_err());
+
+    let decoded: GateResult = assert_ok!(serde_json::from_value(json!({
+        "kind": "coverage",
+        "raw": {
+            "lines": {"covered": 1, "total": 1},
+            "regions": {"covered": 1, "total": 1},
+            "functions": {"covered": 1, "total": 1}
+        },
+        "adjusted": {
+            "lines": {"covered": 1, "total": 1},
+            "regions": {"covered": 1, "total": 1},
+            "functions": {"covered": 1, "total": 1}
+        },
+        "exceptions_used": 0
+    })));
+    assert!(matches!(
+        decoded,
+        GateResult::Coverage {
+            enforcement: CoverageEnforcement::ReleaseQuality,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn quality_workflows_bind_declared_runner_and_phase_contracts() {
+    let root = assert_ok!(workspace_root());
+    let ci = assert_ok!(read_text(&assert_ok!(
+        root.input(".github/workflows/ci.yml")
+    )));
+    let mutation = assert_ok!(read_text(&assert_ok!(
+        root.input(".github/workflows/05-full-mutation.yml")
+    )));
+    let release = assert_ok!(read_text(&assert_ok!(
+        root.input(".github/workflows/release.yml")
+    )));
+
+    assert!(ci.contains("runs-on: ${{ matrix.runner_image }}"));
+    for selector in [
+        "runner_image: ubuntu-latest",
+        "runner_image: windows-latest",
+        "runner_image: macos-15-intel",
+        "runner_image: macos-14",
+    ] {
+        assert!(ci.contains(selector), "missing runner selector {selector}");
+    }
+    assert!(!ci.contains("--arg runner_image \"$ImageOS\""));
+    assert!(!mutation.contains("--arg runner_image \"$ImageOS\""));
+    assert!(ci.contains("--arg runner_image \"$DECLARED_RUNNER_IMAGE\""));
+    assert!(ci.contains("--arg runner_image \"$DECLARED_LINUX_RUNNER_IMAGE\""));
+    assert!(mutation.contains("--arg runner_image \"$DECLARED_LINUX_RUNNER_IMAGE\""));
+
+    assert!(ci.contains("trusted_git=/usr/bin/git"));
+    assert!(ci.contains("trusted_git=\"$(command -v git.exe)\""));
+    assert!(ci.contains("trusted_git_sha256"));
+    assert!(ci.contains("filtered_path+=(\"$directory\")"));
+
+    assert!(ci.contains("required: true\n        type: string\n\npermissions:"));
+    assert!(ci.contains("'implementation-checkpoint'"));
+    assert!(ci.contains("--enforcement \"$COVERAGE_ENFORCEMENT\""));
+    assert!(ci.contains("enforcement:$enforcement"));
+    assert!(release.contains("coverage_enforcement: release-quality"));
+    assert!(ci.contains("profile:\"doc\""));
+    assert!(ci.contains("configs:[{role:\"nextest\""));
+}
+
+#[test]
+fn changed_mutation_normalizes_only_successful_empty_source_runs() {
+    let root = assert_ok!(workspace_root());
+    let ci = assert_ok!(read_text(&assert_ok!(
+        root.input(".github/workflows/ci.yml")
+    )));
+    let command = assert_ok!(required_text_position(&ci, "if ! cargo mutants"));
+    let execution_failure = assert_ok!(required_text_position(
+        &ci,
+        "changed-source mutation execution failed"
+    ));
+    let source_guard = assert_ok!(required_text_position(
+        &ci,
+        "cargo-mutants omitted native output for an applicable Rust source change"
+    ));
+    let empty_inventory = assert_ok!(required_text_position(
+        &ci,
+        "printf '[]\\n' > \"$inventory\""
+    ));
+    assert!(command < execution_failure);
+    assert!(execution_failure < source_guard);
+    assert!(source_guard < empty_inventory);
+    assert!(ci.contains("^crates/[^/]+/src/(.*/)?[^/]+\\.rs$"));
+    assert!(ci.contains("cargo_mutants_version:\"27.1.0\""));
+    assert!(!ci.contains("cargo mutants || true"));
 }
 
 /// Ensure every completed Rust task command runs one real test rather than succeeding with zero tests.

@@ -135,12 +135,23 @@ fn execute(
                 .insert("tasks".to_string(), usize_to_u64(tasks.len())?);
         }
         "coverage" => {
-            args.require_only(&["--root", "--policy", "--platform", "--llvm-json"])?;
+            args.require_only(&[
+                "--root",
+                "--policy",
+                "--platform",
+                "--llvm-json",
+                "--enforcement",
+            ])?;
             let platform = args.required_one("--platform")?;
+            let enforcement = CoverageEnforcement::from_cli(args.optional_one("--enforcement")?)?;
             let export: LlvmCoverageExport =
                 read_json(&root.input(args.required_one("--llvm-json")?)?)?;
-            let counts = validate_coverage(&root, &policy, platform, &export)?;
+            let counts = validate_coverage(&root, &policy, platform, &export, enforcement)?;
             counts.insert_summary(&mut summary.counts);
+            summary.identities.insert(
+                "coverage_enforcement".to_string(),
+                enforcement.manifest_name().to_string(),
+            );
         }
         "mutation-inventory" => {
             args.require_only(&["--root", "--policy", "--inventory"])?;
@@ -241,7 +252,7 @@ fn write_help() -> Result<(), QualityError> {
     let mut stdout = io::stdout().lock();
     writeln!(
         stdout,
-        "Usage: cargo projectatlas-lints test-quality <COMMAND> [OPTIONS]\n\nCommands:\n  policy             Validate policy and optional merge-base ratchet.\n  configs            Validate pinned nextest and cargo-mutants configuration.\n  nextest            Reconcile native nextest inventory with JUnit evidence.\n  doctest            Normalize stable cargo test --doc evidence.\n  tasks              Validate OpenSpec task, verification-plan, and evidence binding.\n  coverage           Validate one platform LLVM coverage export.\n  mutation-inventory Validate one raw cargo-mutants inventory.\n  mutation-changed   Validate changed-source mutation outcomes.\n  mutation-aggregate Reconcile exactly 16 full-mutation shards.\n  evidence           Validate normalized gate or release evidence.\n\nEvery command requires --root and --policy. Add --json for JSON output."
+        "Usage: cargo projectatlas-lints test-quality <COMMAND> [OPTIONS]\n\nCommands:\n  policy             Validate policy and optional merge-base ratchet.\n  configs            Validate pinned nextest and cargo-mutants configuration.\n  nextest            Reconcile native nextest inventory with JUnit evidence.\n  doctest            Normalize stable cargo test --doc evidence.\n  tasks              Validate OpenSpec task, verification-plan, and evidence binding.\n  coverage           Validate one platform LLVM coverage export; --enforcement defaults to release-quality.\n  mutation-inventory Validate one raw cargo-mutants inventory.\n  mutation-changed   Validate changed-source mutation outcomes.\n  mutation-aggregate Reconcile exactly 16 full-mutation shards.\n  evidence           Validate normalized gate or release evidence.\n\nEvery command requires --root and --policy. Add --json for JSON output."
     )
     .map_err(QualityError::Output)
 }
@@ -4191,6 +4202,7 @@ fn validate_coverage(
     policy: &QualityPolicy,
     platform_id: &str,
     export: &LlvmCoverageExport,
+    enforcement: CoverageEnforcement,
 ) -> Result<CoverageCounts, QualityError> {
     if export.export_type != "llvm.coverage.json.export"
         || export.version.trim().is_empty()
@@ -4299,26 +4311,32 @@ fn validate_coverage(
             message: format!("coverage regressed below the {platform_id} floor"),
         });
     }
-    let targets = &policy.targets.coverage;
-    if !applicable.lines.meets(targets.lines.raw_basis_points)
-        || !applicable.regions.meets(targets.regions.raw_basis_points)
-        || !applicable
-            .functions
-            .meets(targets.functions.raw_basis_points)
-        || !applicable.lines.meets(targets.lines.adjusted_basis_points)
-        || !applicable
-            .regions
-            .meets(targets.regions.adjusted_basis_points)
-        || !applicable
-            .functions
-            .meets(targets.functions.adjusted_basis_points)
-    {
+    if enforcement.enforces_targets() && !coverage_meets_targets(policy, &applicable, &applicable) {
         return Err(QualityError::Status {
             status: QualityStatus::PolicyFailure,
             message: format!("coverage misses an agreed v0.4 target on {platform_id}"),
         });
     }
     Ok(applicable)
+}
+
+/// Return whether raw and adjusted coverage counts meet every agreed target.
+fn coverage_meets_targets(
+    policy: &QualityPolicy,
+    raw: &CoverageCounts,
+    adjusted: &CoverageCounts,
+) -> bool {
+    let targets = &policy.targets.coverage;
+    raw.lines.meets(targets.lines.raw_basis_points)
+        && raw.regions.meets(targets.regions.raw_basis_points)
+        && raw.functions.meets(targets.functions.raw_basis_points)
+        && adjusted.lines.meets(targets.lines.adjusted_basis_points)
+        && adjusted
+            .regions
+            .meets(targets.regions.adjusted_basis_points)
+        && adjusted
+            .functions
+            .meets(targets.functions.adjusted_basis_points)
 }
 
 /// Extract validated line, region, and function counts from an LLVM summary.
@@ -5400,6 +5418,43 @@ enum GateKind {
     FullMutation,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+/// Closed coverage-enforcement modes carried by validation and retained evidence.
+enum CoverageEnforcement {
+    /// Validate complete coverage structure and platform floors for an implementation checkpoint.
+    ImplementationCheckpoint,
+    /// Enforce every structural, floor, and final v0.4 coverage target requirement.
+    #[default]
+    ReleaseQuality,
+}
+
+impl CoverageEnforcement {
+    /// Parse the CLI spelling while preserving strict release-quality behavior when omitted.
+    fn from_cli(value: Option<&str>) -> Result<Self, QualityError> {
+        match value {
+            None | Some("release-quality") => Ok(Self::ReleaseQuality),
+            Some("implementation-checkpoint") => Ok(Self::ImplementationCheckpoint),
+            Some(other) => Err(QualityError::Usage(format!(
+                "unsupported coverage enforcement {other:?}"
+            ))),
+        }
+    }
+
+    /// Return the stable retained-manifest spelling.
+    const fn manifest_name(self) -> &'static str {
+        match self {
+            Self::ImplementationCheckpoint => "implementation_checkpoint",
+            Self::ReleaseQuality => "release_quality",
+        }
+    }
+
+    /// Return whether the final v0.4 target percentages are enforced.
+    const fn enforces_targets(self) -> bool {
+        matches!(self, Self::ReleaseQuality)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 /// Operating system, architecture, target, and runner identity for a gate.
@@ -5606,6 +5661,9 @@ enum GateResult {
     },
     /// Coverage case accepted by the gate result contract.
     Coverage {
+        #[serde(default)]
+        /// Enforcement contract used to validate this coverage record.
+        enforcement: CoverageEnforcement,
         /// Unadjusted coverage counts from the source tool.
         raw: CoverageCounts,
         /// Coverage counts after approved exceptions are applied.
@@ -5901,7 +5959,17 @@ fn validate_gate_manifest(
             "typed result does not reconcile with its validator summary".to_string(),
         ));
     }
-    validate_gate_result(policy, &manifest.result)
+    if let GateResult::Coverage { enforcement, .. } = &manifest.result
+        && summary
+            .identities
+            .get("coverage_enforcement")
+            .is_none_or(|value| value != enforcement.manifest_name())
+    {
+        return Err(QualityError::Evidence(
+            "coverage enforcement does not reconcile with its validator summary".to_string(),
+        ));
+    }
+    validate_gate_result(policy, &manifest.result, release)
 }
 
 /// Validate gate platform against its repository contract.
@@ -5979,8 +6047,8 @@ fn validate_gate_inputs(
         });
     }
     let required = match gate {
-        GateKind::Nextest => BTreeSet::from([ConfigRole::Nextest]),
-        GateKind::Doctest | GateKind::Coverage => BTreeSet::new(),
+        GateKind::Nextest | GateKind::Coverage => BTreeSet::from([ConfigRole::Nextest]),
+        GateKind::Doctest => BTreeSet::new(),
         GateKind::ChangedMutation | GateKind::FullMutation => {
             BTreeSet::from([ConfigRole::Nextest, ConfigRole::Mutants])
         }
@@ -6013,9 +6081,8 @@ fn validate_gate_inputs(
 /// Validate gate command against its repository contract.
 fn validate_gate_command(gate: GateKind, command: &GateCommand) -> Result<(), QualityError> {
     let profile = match gate {
-        GateKind::Nextest => "ci",
+        GateKind::Nextest | GateKind::Coverage => "ci",
         GateKind::Doctest => "doc",
-        GateKind::Coverage => "llvm-cov",
         GateKind::ChangedMutation | GateKind::FullMutation => "mutants",
     };
     if command.executable != "cargo"
@@ -6198,7 +6265,11 @@ fn gate_command_name(gate: GateKind) -> &'static str {
 }
 
 /// Validate gate result against its repository contract.
-fn validate_gate_result(policy: &QualityPolicy, result: &GateResult) -> Result<(), QualityError> {
+fn validate_gate_result(
+    policy: &QualityPolicy,
+    result: &GateResult,
+    release: bool,
+) -> Result<(), QualityError> {
     let valid = match result {
         GateResult::Nextest {
             tests,
@@ -6215,30 +6286,16 @@ fn validate_gate_result(policy: &QualityPolicy, result: &GateResult) -> Result<(
             ..
         } => *passed > 0 && *failed == 0 && *summaries > 0,
         GateResult::Coverage {
+            enforcement,
             raw,
             adjusted,
             exceptions_used,
         } => {
             raw.validate().is_ok()
                 && adjusted.validate().is_ok()
-                && raw
-                    .lines
-                    .meets(policy.targets.coverage.lines.raw_basis_points)
-                && raw
-                    .regions
-                    .meets(policy.targets.coverage.regions.raw_basis_points)
-                && raw
-                    .functions
-                    .meets(policy.targets.coverage.functions.raw_basis_points)
-                && adjusted
-                    .lines
-                    .meets(policy.targets.coverage.lines.adjusted_basis_points)
-                && adjusted
-                    .regions
-                    .meets(policy.targets.coverage.regions.adjusted_basis_points)
-                && adjusted
-                    .functions
-                    .meets(policy.targets.coverage.functions.adjusted_basis_points)
+                && (!enforcement.enforces_targets()
+                    || coverage_meets_targets(policy, raw, adjusted))
+                && (!release || *enforcement == CoverageEnforcement::ReleaseQuality)
                 && *exceptions_used
                     == usize_to_u64(
                         policy

@@ -5065,7 +5065,7 @@ fn compact_relation_has_file_owned_manifest_source(
         && graph.path().rsplit('/').next() == Some(GRAPH_CARGO_MANIFEST_FILE_NAME)
 }
 
-/// Index same-file compatibility names once in deterministic contiguous storage.
+/// Index unique same-file logical entities by compatibility name and stable key.
 fn compact_typed_graph_entity_indices<'graph>(
     entities: &[CompactTypedGraphEntity<'graph>],
 ) -> Vec<(&'graph str, usize)> {
@@ -5074,7 +5074,20 @@ fn compact_typed_graph_entity_indices<'graph>(
         .enumerate()
         .map(|(index, entity)| (entity.lookup_name, index))
         .collect::<Vec<_>>();
-    indices.sort_unstable_by(|left, right| left.0.cmp(right.0).then(left.1.cmp(&right.1)));
+    indices.sort_unstable_by(|left, right| {
+        left.0
+            .cmp(right.0)
+            .then_with(|| {
+                entities[left.1]
+                    .key
+                    .digest()
+                    .cmp(&entities[right.1].key.digest())
+            })
+            .then(left.1.cmp(&right.1))
+    });
+    indices.dedup_by(|left, right| {
+        left.0 == right.0 && entities[left.1].key.digest() == entities[right.1].key.digest()
+    });
     indices
 }
 
@@ -8608,7 +8621,7 @@ mod tests {
         let ambiguous_candidates = store
             .connection
             .prepare(
-                "SELECT entity.qualified_name
+                "SELECT entity.qualified_name, candidate.target_entity_digest
                  FROM graph_resolution_candidates AS candidate
                  JOIN graph_entities AS entity
                    ON entity.structural_slot = candidate.structural_slot
@@ -8618,13 +8631,23 @@ mod tests {
                  ORDER BY candidate.candidate_ordinal",
             )?
             .query_map([ambiguous_resolution.0.as_slice()], |row| {
-                row.get::<_, String>(0)
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         require_eq(
-            &ambiguous_candidates,
-            &vec!["Left::duplicate".to_owned(), "Right::duplicate".to_owned()],
-            "bounded deterministic ambiguous candidates",
+            &ambiguous_candidates
+                .iter()
+                .map(|candidate| candidate.0.as_str())
+                .collect::<BTreeSet<_>>(),
+            &BTreeSet::from(["Left::duplicate", "Right::duplicate"]),
+            "bounded ambiguous candidate identities",
+        )?;
+        require_eq(
+            &ambiguous_candidates
+                .windows(2)
+                .all(|pair| pair[0].1 < pair[1].1),
+            &true,
+            "deterministic stable-key candidate order",
         )?;
         require_eq(
             &store.load_graph_entity(&graph_test_digest(250))?.is_none(),
@@ -9042,6 +9065,111 @@ mod tests {
                 .into());
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_22_deduplicates_logical_resolution_candidates()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(&root)?;
+        let symbol = |name: &str, signature: &str, line: usize| CodeSymbol {
+            path: "src/candidate-set.rs".to_owned(),
+            language: Some("rust".to_owned()),
+            name: name.to_owned(),
+            kind: SymbolKind::Function,
+            signature: signature.to_owned(),
+            exported: false,
+            documentation: None,
+            line_start: line,
+            line_end: line,
+            parent: None,
+            parser: ParserKind::TreeSitter,
+            detail: Some("function_item".to_owned()),
+        };
+        let graph = CompactSymbolGraph::try_from(SymbolGraph {
+            path: "src/candidate-set.rs".to_owned(),
+            language: Some("rust".to_owned()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![
+                symbol("source", "fn source()", 1),
+                symbol("target", "fn target()", 2),
+                symbol("target", "fn target()", 3),
+                symbol("target", "fn target(value: usize)", 4),
+            ],
+            relations: vec![SymbolRelation {
+                path: "src/candidate-set.rs".to_owned(),
+                source_name: "source".to_owned(),
+                target_name: "target".to_owned(),
+                kind: RelationKind::Calls,
+                line: 1,
+                context: "target();".to_owned(),
+                parser: ParserKind::TreeSitter,
+            }],
+        })?;
+        store.replace_compact_symbol_graph(&graph)?;
+
+        let targets = store.load_graph_entities_by_qualified_name(
+            GraphEntityKind::Declaration,
+            "target",
+            8,
+        )?;
+        require_eq(
+            &targets.len(),
+            &2,
+            "equivalent parser entities collapse while overloads remain distinct",
+        )?;
+        let (occurrence_digest, candidate_total) = store.connection.query_row(
+            "SELECT stable_key_digest, candidate_total
+             FROM graph_resolution_occurrences
+             WHERE structural_slot = 'a'
+               AND origin_repository_path = 'src/candidate-set.rs'
+               AND relation_kind = 'calls'",
+            [],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        let candidates = store
+            .connection
+            .prepare(
+                "SELECT candidate_ordinal, target_entity_digest
+                 FROM graph_resolution_candidates
+                 WHERE structural_slot = 'a'
+                   AND resolution_occurrence_digest = ?1
+                 ORDER BY candidate_ordinal",
+            )?
+            .query_map([occurrence_digest.as_slice()], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        require_eq(&candidate_total, &2, "logical candidate total")?;
+        require_eq(
+            &candidates
+                .iter()
+                .map(|candidate| candidate.0)
+                .collect::<Vec<_>>(),
+            &vec![0, 1],
+            "logical candidate ordinals",
+        )?;
+        require_eq(
+            &candidates
+                .iter()
+                .map(|candidate| candidate.1.as_slice())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            &2,
+            "logical candidate targets are unique",
+        )?;
+        let root_text = store
+            .project_root()?
+            .ok_or_else(|| io::Error::other("candidate fixture root was not persisted"))?;
+        schema::reconcile_full_structural_publication(
+            &store.connection,
+            &root_text,
+            store.publication_state()?,
+        )?;
         Ok(())
     }
 

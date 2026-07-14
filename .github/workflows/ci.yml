@@ -28,6 +28,10 @@ on:
         required: false
         type: string
         default: ""
+      coverage_enforcement:
+        description: Explicit coverage enforcement required from the release caller.
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -37,6 +41,8 @@ permissions:
 
 env:
   QUALITY_SHA: ${{ inputs.expected_sha || github.event.pull_request.head.sha || github.sha }}
+  COVERAGE_ENFORCEMENT: ${{ inputs.coverage_enforcement || 'implementation-checkpoint' }}
+  DECLARED_LINUX_RUNNER_IMAGE: ubuntu-latest
 
 jobs:
   verify:
@@ -304,7 +310,7 @@ jobs:
           set -o pipefail
           evidence=target/projectatlas-quality/nextest
           cp target/nextest/ci/junit.xml "$evidence/junit.xml"
-          : "${ImageOS:?hosted runner image is unavailable}"
+          : "${DECLARED_LINUX_RUNNER_IMAGE:?declared runner image is unavailable}"
           : "${ImageVersion:?hosted runner image version is unavailable}"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
             > "$evidence/jobs.json"
@@ -319,7 +325,7 @@ jobs:
             --arg repository "$GITHUB_REPOSITORY" \
             --arg commit_sha "$QUALITY_SHA" \
             --arg target "$(rustc -Vv | sed -n 's/^host: //p')" \
-            --arg runner_image "$ImageOS" \
+            --arg runner_image "$DECLARED_LINUX_RUNNER_IMAGE" \
             --arg runner_image_version "$ImageVersion" \
             --arg rustc_version "$(rustc --version)" \
             --arg llvm_version "$(rustc -Vv | sed -n 's/^LLVM version: //p')" \
@@ -441,7 +447,7 @@ jobs:
         run: |
           set -o pipefail
           evidence=target/projectatlas-quality/doctest
-          : "${ImageOS:?hosted runner image is unavailable}"
+          : "${DECLARED_LINUX_RUNNER_IMAGE:?declared runner image is unavailable}"
           : "${ImageVersion:?hosted runner image version is unavailable}"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
             > "$evidence/jobs.json"
@@ -455,7 +461,7 @@ jobs:
             --arg repository "$GITHUB_REPOSITORY" \
             --arg commit_sha "$QUALITY_SHA" \
             --arg target "$(rustc -Vv | sed -n 's/^host: //p')" \
-            --arg runner_image "$ImageOS" \
+            --arg runner_image "$DECLARED_LINUX_RUNNER_IMAGE" \
             --arg runner_image_version "$ImageVersion" \
             --arg rustc_version "$(rustc --version)" \
             --arg llvm_version "$(rustc -Vv | sed -n 's/^LLVM version: //p')" \
@@ -479,7 +485,7 @@ jobs:
             --argjson measured "$(jq -er '.counts.measured' "$evidence/validation.json")" \
             --argjson filtered "$(jq -er '.counts.filtered' "$evidence/validation.json")" \
             --argjson summaries "$(jq -er '.counts.summaries' "$evidence/validation.json")" \
-            '{schema_version:1,repository:$repository,gate:"doctest",status:"passed",commit_sha:$commit_sha,platform:{id:"linux-x86_64-gnu",os:"linux",arch:"x86_64",target:$target,runner_image:$runner_image,runner_image_version:$runner_image_version},toolchain:{rustc_version:$rustc_version,llvm_version:$llvm_version},tool:{name:"cargo",version:$cargo_version},inputs:{cargo_lock_sha256:$cargo_lock_sha256,policy_sha256:$policy_sha256,source_scope_sha256:$source_scope_sha256,configs:[]},command:{executable:"cargo",arguments:["test","--doc","--workspace","--all-features","--locked"],profile:"test"},timeouts:{command_seconds:900,job_seconds:1200,test_seconds:null,build_seconds:null},started_at_utc:$started_at_utc,completed_at_utc:$completed_at_utc,run:{kind:"github_actions",run_id:$run_id,run_attempt:$run_attempt,job_id:$job_id,job_name:$job_name,workflow_ref:$workflow_ref},artifacts:[{role:"doctest_log",path:"run.log",sha256:$log_sha256},{role:"validation_summary",path:"validation.json",sha256:$validation_sha256},{role:"diagnostics",path:"native-exit-code.txt",sha256:$diagnostics_sha256}],result:{kind:"doctest",passed:$passed,failed:$failed,ignored:$ignored,measured:$measured,filtered:$filtered,summaries:$summaries}}' \
+            '{schema_version:1,repository:$repository,gate:"doctest",status:"passed",commit_sha:$commit_sha,platform:{id:"linux-x86_64-gnu",os:"linux",arch:"x86_64",target:$target,runner_image:$runner_image,runner_image_version:$runner_image_version},toolchain:{rustc_version:$rustc_version,llvm_version:$llvm_version},tool:{name:"cargo",version:$cargo_version},inputs:{cargo_lock_sha256:$cargo_lock_sha256,policy_sha256:$policy_sha256,source_scope_sha256:$source_scope_sha256,configs:[]},command:{executable:"cargo",arguments:["test","--doc","--workspace","--all-features","--locked"],profile:"doc"},timeouts:{command_seconds:900,job_seconds:1200,test_seconds:null,build_seconds:null},started_at_utc:$started_at_utc,completed_at_utc:$completed_at_utc,run:{kind:"github_actions",run_id:$run_id,run_attempt:$run_attempt,job_id:$job_id,job_name:$job_name,workflow_ref:$workflow_ref},artifacts:[{role:"doctest_log",path:"run.log",sha256:$log_sha256},{role:"validation_summary",path:"validation.json",sha256:$validation_sha256},{role:"diagnostics",path:"native-exit-code.txt",sha256:$diagnostics_sha256}],result:{kind:"doctest",passed:$passed,failed:$failed,ignored:$ignored,measured:$measured,filtered:$filtered,summaries:$summaries}}' \
             > "$evidence/manifest.json"
           cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
             test-quality evidence --root . --policy test-quality.toml \
@@ -513,20 +519,20 @@ jobs:
       github.event_name == 'pull_request' ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'workflow_call'
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner_image }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
           - label: linux-x86_64-gnu
-            os: ubuntu-latest
+            runner_image: ubuntu-latest
           - label: windows-x86_64-msvc
-            os: windows-latest
+            runner_image: windows-latest
           - label: macos-x86_64
-            os: macos-15-intel
+            runner_image: macos-15-intel
           - label: macos-aarch64
-            os: macos-14
+            runner_image: macos-14
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -580,6 +586,41 @@ jobs:
           PLATFORM_ID: ${{ matrix.label }}
         run: |
           evidence="target/projectatlas-quality/coverage/$PLATFORM_ID"
+          case "$RUNNER_OS" in
+            Linux|macOS)
+              trusted_git=/usr/bin/git
+              git_suffix=""
+              ;;
+            Windows)
+              trusted_git="$(command -v git.exe)"
+              git_suffix=.exe
+              ;;
+            *)
+              echo "unsupported runner OS $RUNNER_OS" >&2
+              exit 1
+              ;;
+          esac
+          if [[ ! -f "$trusted_git" ]]; then
+            echo "trusted Git executable is unavailable: $trusted_git" >&2
+            exit 1
+          fi
+          trusted_git_directory="$(dirname "$trusted_git")"
+          trusted_git_sha256="$(sha256sum "$trusted_git" | cut -d ' ' -f1)"
+          filtered_path=("$trusted_git_directory")
+          IFS=: read -r -a path_entries <<<"$PATH"
+          for directory in "${path_entries[@]}"; do
+            if [[ -z "$directory" || "$directory" == "$trusted_git_directory" ]]; then
+              continue
+            fi
+            candidate="$directory/git$git_suffix"
+            if [[ -f "$candidate" ]] \
+              && [[ "$(sha256sum "$candidate" | cut -d ' ' -f1)" != "$trusted_git_sha256" ]]; then
+              continue
+            fi
+            filtered_path+=("$directory")
+          done
+          export PATH="$(IFS=:; printf '%s' "${filtered_path[*]}")"
+          git --version
           cargo llvm-cov clean --workspace
           cargo llvm-cov nextest --workspace --all-features --locked \
             --json --output-path "$evidence/coverage.json"
@@ -602,6 +643,7 @@ jobs:
             --policy test-quality.toml \
             --platform "$PLATFORM_ID" \
             --llvm-json "$evidence/coverage.json" \
+            --enforcement "$COVERAGE_ENFORCEMENT" \
             --json | tee "$evidence/validation.json"
 
       - name: Build and validate coverage manifest
@@ -612,10 +654,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PLATFORM_ID: ${{ matrix.label }}
+          DECLARED_RUNNER_IMAGE: ${{ matrix.runner_image }}
         run: |
           set -o pipefail
           evidence="target/projectatlas-quality/coverage/$PLATFORM_ID"
-          : "${ImageOS:?hosted runner image is unavailable}"
+          : "${DECLARED_RUNNER_IMAGE:?declared runner image is unavailable}"
           : "${ImageVersion:?hosted runner image version is unavailable}"
           case "$RUNNER_OS" in
             Linux) platform_os=linux ;;
@@ -642,6 +685,7 @@ jobs:
           regions_total="$(jq -er '.counts.regions_total' "$evidence/validation.json")"
           functions_covered="$(jq -er '.counts.functions_covered' "$evidence/validation.json")"
           functions_total="$(jq -er '.counts.functions_total' "$evidence/validation.json")"
+          enforcement="$(jq -er '.identities.coverage_enforcement' "$evidence/validation.json")"
           coverage_path="$evidence/coverage.json"
           jq -n \
             --arg repository "$GITHUB_REPOSITORY" \
@@ -650,7 +694,7 @@ jobs:
             --arg platform_os "$platform_os" \
             --arg platform_arch "$platform_arch" \
             --arg target "$(rustc -Vv | sed -n 's/^host: //p')" \
-            --arg runner_image "$ImageOS" \
+            --arg runner_image "$DECLARED_RUNNER_IMAGE" \
             --arg runner_image_version "$ImageVersion" \
             --arg rustc_version "$(rustc --version)" \
             --arg llvm_version "$(rustc -Vv | sed -n 's/^LLVM version: //p')" \
@@ -666,6 +710,7 @@ jobs:
             --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
             --arg job_name "$job_name" \
             --arg coverage_path "$coverage_path" \
+            --arg enforcement "$enforcement" \
             --argjson run_id "$GITHUB_RUN_ID" \
             --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
             --argjson job_id "$job_id" \
@@ -675,7 +720,7 @@ jobs:
             --argjson regions_total "$regions_total" \
             --argjson functions_covered "$functions_covered" \
             --argjson functions_total "$functions_total" \
-            '{schema_version:1,repository:$repository,gate:"coverage",status:"passed",commit_sha:$commit_sha,platform:{id:$platform_id,os:$platform_os,arch:$platform_arch,target:$target,runner_image:$runner_image,runner_image_version:$runner_image_version},toolchain:{rustc_version:$rustc_version,llvm_version:$llvm_version},tool:{name:"cargo-llvm-cov",version:"0.8.7"},inputs:{cargo_lock_sha256:$cargo_lock_sha256,policy_sha256:$policy_sha256,source_scope_sha256:$source_scope_sha256,configs:[{role:"nextest",path:".config/nextest.toml",sha256:$nextest_config_sha256}]},command:{executable:"cargo",arguments:["llvm-cov","nextest","--workspace","--all-features","--locked","--json","--output-path",$coverage_path],profile:"ci"},timeouts:{command_seconds:2400,job_seconds:2700,test_seconds:120,build_seconds:null},started_at_utc:$started_at_utc,completed_at_utc:$completed_at_utc,run:{kind:"github_actions",run_id:$run_id,run_attempt:$run_attempt,job_id:$job_id,job_name:$job_name,workflow_ref:$workflow_ref},artifacts:[{role:"llvm_json",path:"coverage.json",sha256:$llvm_json_sha256},{role:"coverage_report",path:"coverage.txt",sha256:$coverage_report_sha256},{role:"validation_summary",path:"validation.json",sha256:$validation_sha256}],result:{kind:"coverage",raw:{lines:{covered:$lines_covered,total:$lines_total},regions:{covered:$regions_covered,total:$regions_total},functions:{covered:$functions_covered,total:$functions_total}},adjusted:{lines:{covered:$lines_covered,total:$lines_total},regions:{covered:$regions_covered,total:$regions_total},functions:{covered:$functions_covered,total:$functions_total}},exceptions_used:0}}' \
+            '{schema_version:1,repository:$repository,gate:"coverage",status:"passed",commit_sha:$commit_sha,platform:{id:$platform_id,os:$platform_os,arch:$platform_arch,target:$target,runner_image:$runner_image,runner_image_version:$runner_image_version},toolchain:{rustc_version:$rustc_version,llvm_version:$llvm_version},tool:{name:"cargo-llvm-cov",version:"0.8.7"},inputs:{cargo_lock_sha256:$cargo_lock_sha256,policy_sha256:$policy_sha256,source_scope_sha256:$source_scope_sha256,configs:[{role:"nextest",path:".config/nextest.toml",sha256:$nextest_config_sha256}]},command:{executable:"cargo",arguments:["llvm-cov","nextest","--workspace","--all-features","--locked","--json","--output-path",$coverage_path],profile:"ci"},timeouts:{command_seconds:2400,job_seconds:2700,test_seconds:120,build_seconds:null},started_at_utc:$started_at_utc,completed_at_utc:$completed_at_utc,run:{kind:"github_actions",run_id:$run_id,run_attempt:$run_attempt,job_id:$job_id,job_name:$job_name,workflow_ref:$workflow_ref},artifacts:[{role:"llvm_json",path:"coverage.json",sha256:$llvm_json_sha256},{role:"coverage_report",path:"coverage.txt",sha256:$coverage_report_sha256},{role:"validation_summary",path:"validation.json",sha256:$validation_sha256}],result:{kind:"coverage",enforcement:$enforcement,raw:{lines:{covered:$lines_covered,total:$lines_total},regions:{covered:$regions_covered,total:$regions_total},functions:{covered:$functions_covered,total:$functions_total}},adjusted:{lines:{covered:$lines_covered,total:$lines_total},regions:{covered:$regions_covered,total:$regions_total},functions:{covered:$functions_covered,total:$functions_total}},exceptions_used:0}}' \
             > "$evidence/manifest.json"
           cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
             test-quality evidence --root . --policy test-quality.toml \
@@ -784,15 +829,41 @@ jobs:
         env:
           BASE_SHA: ${{ steps.mutation_base.outputs.base }}
         run: |
-          cargo mutants \
-            --config .cargo/mutants.toml \
-            --workspace \
-            --in-diff target/projectatlas-quality/changed-mutation/source.diff \
-            --baseline run \
-            --timeout 180 \
-            --build-timeout 900 \
-            --output target/projectatlas-quality/changed-mutation/native \
-            --annotations github
+          evidence=target/projectatlas-quality/changed-mutation
+          native="$evidence/native/mutants.out"
+          if ! cargo mutants \
+              --config .cargo/mutants.toml \
+              --workspace \
+              --in-diff target/projectatlas-quality/changed-mutation/source.diff \
+              --baseline run \
+              --timeout 180 \
+              --build-timeout 900 \
+              --output target/projectatlas-quality/changed-mutation/native \
+              --annotations github; then
+            echo "changed-source mutation execution failed" >&2
+            exit 1
+          fi
+          inventory="$native/mutants.json"
+          outcomes="$native/outcomes.json"
+          changed_paths="$(git diff --name-only --diff-filter=ACDMRTUXB \
+            "$BASE_SHA..$QUALITY_SHA" --)"
+          if [[ -f "$inventory" || -f "$outcomes" ]]; then
+            if [[ ! -f "$inventory" || ! -f "$outcomes" ]]; then
+              echo "cargo-mutants produced an incomplete native result" >&2
+              exit 1
+            fi
+          elif grep -Eq '^crates/[^/]+/src/(.*/)?[^/]+\.rs$' <<<"$changed_paths"; then
+            echo "cargo-mutants omitted native output for an applicable Rust source change" >&2
+            exit 1
+          else
+            mkdir -p "$native"
+            printf '[]\n' > "$inventory"
+            jq -n \
+              --arg start_time "$(cat "$evidence/started-at.txt")" \
+              --arg end_time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '{outcomes:[],total_mutants:0,missed:0,caught:0,timeout:0,unviable:0,success:0,start_time:$start_time,end_time:$end_time,cargo_mutants_version:"27.1.0"}' \
+              > "$outcomes"
+          fi
 
       - name: Validate changed-source mutation policy
         if: always()
@@ -824,7 +895,7 @@ jobs:
           mutants_path="$evidence/native/mutants.out/mutants.json"
           outcomes_path="$evidence/native/mutants.out/outcomes.json"
           diff_path="$evidence/source.diff"
-          : "${ImageOS:?hosted runner image is unavailable}"
+          : "${DECLARED_LINUX_RUNNER_IMAGE:?declared runner image is unavailable}"
           : "${ImageVersion:?hosted runner image version is unavailable}"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
             > "$evidence/jobs.json"
@@ -838,7 +909,7 @@ jobs:
             --arg repository "$GITHUB_REPOSITORY" \
             --arg commit_sha "$QUALITY_SHA" \
             --arg target "$(rustc -Vv | sed -n 's/^host: //p')" \
-            --arg runner_image "$ImageOS" \
+            --arg runner_image "$DECLARED_LINUX_RUNNER_IMAGE" \
             --arg runner_image_version "$ImageVersion" \
             --arg rustc_version "$(rustc --version)" \
             --arg llvm_version "$(rustc -Vv | sed -n 's/^LLVM version: //p')" \

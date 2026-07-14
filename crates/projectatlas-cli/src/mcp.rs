@@ -2458,15 +2458,12 @@ impl ProjectAtlasMcpServer {
 
     /// Return an indexed lexical root without treating symlinked descendants as the lexical owner.
     fn indexed_root_from_lexical_candidate(candidate: &Path) -> Option<McpIndexedRoot> {
-        if Self::path_has_symlink_component(candidate) {
+        if Self::path_has_symlink_below_indexed_root(candidate) {
             return None;
         }
         let Ok(root) = canonical_project_root(candidate) else {
             return None;
         };
-        if normalize_native_path_display(candidate) != normalize_native_path_display(&root) {
-            return None;
-        }
         let db_path = Self::projectatlas_db_path(&root);
         if !db_path.is_file() || !Self::indexed_db_matches_root(&db_path, &root) {
             return None;
@@ -2491,9 +2488,10 @@ impl ProjectAtlasMcpServer {
         normalized
     }
 
-    /// Return whether a path contains a symlink component in its lexical ancestry.
-    fn path_has_symlink_component(path: &Path) -> bool {
+    /// Return whether a path crosses a symlink after entering an indexed root.
+    fn path_has_symlink_below_indexed_root(path: &Path) -> bool {
         let mut current = PathBuf::new();
+        let mut entered_indexed_root = false;
         for component in path.components() {
             match component {
                 Component::Prefix(prefix) => current.push(prefix.as_os_str()),
@@ -2506,9 +2504,12 @@ impl ProjectAtlasMcpServer {
                     current.push(segment);
                     if fs::symlink_metadata(&current)
                         .is_ok_and(|metadata| Self::metadata_is_symlink_or_reparse_point(&metadata))
+                        && entered_indexed_root
                     {
                         return true;
                     }
+                    entered_indexed_root = entered_indexed_root
+                        || Self::indexed_root_from_candidate(&current).is_some();
                 }
             }
         }
@@ -2550,7 +2551,7 @@ impl ProjectAtlasMcpServer {
             return Ok(());
         }
         let lexical_path = Self::lexically_normalized_absolute_path(path);
-        if Self::path_has_symlink_component(&lexical_path)
+        if Self::path_has_symlink_below_indexed_root(&lexical_path)
             || lexical_state.is_some_and(|state| !canonical_path.as_path().starts_with(&state.root))
         {
             return Err(Self::ambiguous_nearest_project_path_error(
@@ -4405,6 +4406,70 @@ mod tests {
             "outside selected root produced a repo key",
         )?;
 
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nearest_project_accepts_alias_before_root_and_rejects_project_local_alias()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir()?;
+        let repo_a = temp.path().join("repo-a");
+        let physical_parent = temp.path().join("physical-parent");
+        let repo_b = physical_parent.join("repo-b");
+        for repo in [&repo_a, &repo_b] {
+            fs::create_dir_all(repo.join(".projectatlas"))?;
+            fs::create_dir_all(repo.join("src"))?;
+            fs::write(repo.join("src").join("lib.rs"), "pub fn marker() {}\n")?;
+            let store = open_atlas_store(
+                &repo
+                    .join(".projectatlas")
+                    .join(PROJECTATLAS_DATABASE_FILE_NAME),
+            )?;
+            store.set_project_root(repo)?;
+        }
+        let active_state = ProjectAtlasMcpServer::project_state_from_root(&repo_a)?;
+        let alias_parent = temp.path().join("alias-parent");
+        symlink(&physical_parent, &alias_parent)?;
+        let alias_file = alias_parent.join("repo-b").join("src").join("lib.rs");
+        let routed = ProjectAtlasMcpServer::nearest_state_and_repo_key(
+            &active_state,
+            &alias_file.to_string_lossy(),
+        )?
+        .ok_or_else(|| io::Error::other("alias above indexed root did not route"))?;
+        require(
+            routed.state.root == canonical_project_root(&repo_b)?,
+            "alias above indexed root selected the wrong project",
+        )?;
+        require(
+            routed.key == "src/lib.rs",
+            "alias above indexed root produced the wrong repository key",
+        )?;
+        require(
+            routed.routed_project,
+            "alias above indexed root did not report cross-project routing",
+        )?;
+
+        let project_local_alias = repo_a.join("linked-repo-b");
+        symlink(&repo_b, &project_local_alias)?;
+        let project_local_file = project_local_alias.join("src").join("lib.rs");
+        let Err(error) = ProjectAtlasMcpServer::nearest_state_and_repo_key(
+            &active_state,
+            &project_local_file.to_string_lossy(),
+        ) else {
+            return Err(io::Error::other(
+                "project-local alias routed despite conflicting indexed roots",
+            )
+            .into());
+        };
+        require(
+            error
+                .to_string()
+                .contains(AMBIGUOUS_NEAREST_PROJECT_PATH_ERROR),
+            "project-local alias did not return the ambiguity diagnostic",
+        )?;
         Ok(())
     }
 

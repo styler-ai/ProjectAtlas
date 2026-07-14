@@ -121,6 +121,7 @@ jobs:
     with:
       expected_sha: ${{ inputs.commit_sha }}
       mutation_base_sha: ${{ needs.release-policy.outputs.mutation_base_sha }}
+      coverage_enforcement: release-quality
 
   full-mutation:
     name: release full mutation

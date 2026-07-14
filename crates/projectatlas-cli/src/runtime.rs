@@ -1577,7 +1577,7 @@ pub(crate) fn build_settings_report(
     } else {
         None
     };
-    let repo_root = normalize_display_path(&config.root);
+    let repo_root = normalize_display_path(&canonical_project_root(&config.root)?);
     let db_project_root = index
         .as_ref()
         .and_then(|stats| stats.project_root.as_ref())
