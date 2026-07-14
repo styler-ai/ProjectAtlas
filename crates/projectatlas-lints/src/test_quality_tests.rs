@@ -845,13 +845,19 @@ fn coverage_enforcement_manifest_identity_is_exact() {
     );
     assert!(
         CoverageEnforcement::ImplementationCheckpoint
-            .matches_manifest_name(Some("implementation_checkpoint"))
+            .validate_manifest_name(Some("implementation_checkpoint"))
+            .is_ok()
     );
     assert!(
-        !CoverageEnforcement::ImplementationCheckpoint
-            .matches_manifest_name(Some("release_quality"))
+        CoverageEnforcement::ImplementationCheckpoint
+            .validate_manifest_name(Some("release_quality"))
+            .is_err()
     );
-    assert!(!CoverageEnforcement::ReleaseQuality.matches_manifest_name(None));
+    assert!(
+        CoverageEnforcement::ReleaseQuality
+            .validate_manifest_name(None)
+            .is_err()
+    );
 }
 
 #[test]

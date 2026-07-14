@@ -5451,9 +5451,15 @@ impl CoverageEnforcement {
         }
     }
 
-    /// Return whether a retained summary carries this exact enforcement identity.
-    fn matches_manifest_name(self, value: Option<&str>) -> bool {
-        value.is_some_and(|value| value == self.manifest_name())
+    /// Require a retained summary to carry this exact enforcement identity.
+    fn validate_manifest_name(self, value: Option<&str>) -> Result<(), QualityError> {
+        if value.is_some_and(|value| value == self.manifest_name()) {
+            Ok(())
+        } else {
+            Err(QualityError::Evidence(
+                "coverage enforcement does not reconcile with its validator summary".to_string(),
+            ))
+        }
     }
 
     /// Return whether the final v0.4 target percentages are enforced.
@@ -5966,17 +5972,13 @@ fn validate_gate_manifest(
             "typed result does not reconcile with its validator summary".to_string(),
         ));
     }
-    if let GateResult::Coverage { enforcement, .. } = &manifest.result
-        && !enforcement.matches_manifest_name(
+    if let GateResult::Coverage { enforcement, .. } = &manifest.result {
+        enforcement.validate_manifest_name(
             summary
                 .identities
                 .get(COVERAGE_ENFORCEMENT_IDENTITY)
                 .map(String::as_str),
-        )
-    {
-        return Err(QualityError::Evidence(
-            "coverage enforcement does not reconcile with its validator summary".to_string(),
-        ));
+        )?;
     }
     validate_gate_result(policy, &manifest.platform.id, &manifest.result, release)
 }
