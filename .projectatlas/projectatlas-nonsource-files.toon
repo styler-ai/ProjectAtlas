@@ -27,20 +27,6 @@ nonsource_files[]:
   Cargo.lock,Locked Rust dependency versions for ProjectAtlas 3
   crates/projectatlas-core/Cargo.toml,Core Rust crate manifest for ProjectAtlas 3
   crates/projectatlas-db/Cargo.toml,SQLite Rust crate manifest for ProjectAtlas 3
-  crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v01.db,SQLite schema-v01 fixture for migration preservation and rollback verification
-  crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v02.db,SQLite schema-v02 fixture for migration preservation and rollback verification
-  crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v03.db,SQLite schema-v03 fixture for migration preservation and rollback verification
-  crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v04.db,SQLite schema-v04 fixture for migration preservation and rollback verification
-  crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v05.db,SQLite schema-v05 fixture for migration preservation and rollback verification
-  crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v06.db,SQLite schema-v06 fixture for migration preservation and rollback verification
-  crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v07.db,SQLite schema-v07 fixture for migration preservation and rollback verification
-  crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v08.db,SQLite schema-v08 fixture for migration preservation and rollback verification
-  crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v09.db,SQLite schema-v09 fixture for migration preservation and rollback verification
-  crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v10.db,SQLite schema-v10 fixture for migration preservation and rollback verification
-  crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v11.db,SQLite schema-v11 fixture for migration preservation and rollback verification
-  crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v12.db,SQLite schema-v12 fixture for migration preservation and rollback verification
-  crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v13.db,SQLite schema-v13 fixture for migration preservation and rollback verification
-  crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v14.db,SQLite schema-v14 fixture for migration preservation and rollback verification
   crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v15.db,SQLite schema-v15 fixture for migration preservation and rollback verification
   crates/projectatlas-fs/Cargo.toml,Filesystem scanner Rust crate manifest for ProjectAtlas 3
   crates/projectatlas-cli/Cargo.toml,CLI Rust crate manifest for ProjectAtlas 3

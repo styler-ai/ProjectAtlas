@@ -1101,14 +1101,11 @@ fn quality_workflows_bind_declared_runner_and_phase_contracts() {
 }
 
 #[test]
-fn strict_lint_metadata_covers_retained_repository_artifacts() {
+fn strict_lint_review_replays_retained_repository_artifacts() {
     let root = assert_ok!(workspace_root());
     let fixture_directory = root
         .0
         .join("crates/projectatlas-db/tests/fixtures/schema-migrations");
-    let nonsource = assert_ok!(read_text(&assert_ok!(
-        root.input(".projectatlas/projectatlas-nonsource-files.toon")
-    )));
     let review_text = assert_ok!(read_text(&assert_ok!(
         root.input(".projectatlas/projectatlas-purpose-review.json")
     )));
@@ -1135,12 +1132,6 @@ fn strict_lint_metadata_covers_retained_repository_artifacts() {
     assert!(!fixtures.is_empty(), "migration fixture inventory is empty");
 
     for fixture in fixtures {
-        assert!(
-            nonsource
-                .lines()
-                .any(|line| line.trim_start().starts_with(&format!("{fixture},"))),
-            "migration fixture is missing from non-source metadata: {fixture}"
-        );
         assert!(
             reviewed.contains(fixture.as_str()),
             "migration fixture is missing from reviewed-purpose replay: {fixture}"

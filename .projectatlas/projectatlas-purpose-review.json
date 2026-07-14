@@ -1526,91 +1526,91 @@
     },
     {
       "path": ".config",
-      "purpose": "Repository-local configuration for deterministic ProjectAtlas test execution."
+      "purpose": "Repository-level tool configuration for deterministic ProjectAtlas test execution."
     },
     {
       "path": ".github/fixtures",
-      "purpose": "Deterministic fixtures for validating ProjectAtlas GitHub workflow and IssueOps behavior."
+      "purpose": "Deterministic fixtures for GitHub automation and IssueOps contract tests."
     },
     {
       "path": ".github/fixtures/issueops",
-      "purpose": "Acceptance, rejection, escaping, pagination, and idempotency fixtures for ProjectAtlas IssueOps validation."
+      "purpose": "IssueOps acceptance, rejection, escaping, pagination, and idempotency contract fixtures."
     },
     {
       "path": "crates/projectatlas-cli/src/runtime",
-      "purpose": "Runtime modules for staging, rebuilding, validating, atomically publishing, and cleaning ProjectAtlas scan generations."
+      "purpose": "Full-scan runtime pipeline that stages, validates, and atomically publishes ProjectAtlas index rebuilds."
     },
     {
       "path": "crates/projectatlas-db/tests",
-      "purpose": "Database integration tests and fixtures for schema migration, preservation, rollback, and publication behavior."
+      "purpose": "Database migration regression fixtures used by ProjectAtlas persistence tests."
     },
     {
       "path": "crates/projectatlas-db/tests/fixtures",
-      "purpose": "Versioned SQLite fixtures used by ProjectAtlas database migration and compatibility tests."
+      "purpose": "Versioned SQLite fixture assets for ProjectAtlas database compatibility tests."
     },
     {
       "path": "crates/projectatlas-db/tests/fixtures/schema-migrations",
-      "purpose": "SQLite snapshots for schema versions v01 through v15 used to verify migration preservation and rollback."
+      "purpose": "Pinned historical SQLite schema images used to verify migration preservation and rollback."
     },
     {
       "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v01.db",
-      "purpose": "Provide the SQLite schema-v01 fixture for migration preservation and rollback verification."
+      "purpose": "Pinned schema-v01 SQLite fixture for migration preservation and rollback verification."
     },
     {
       "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v02.db",
-      "purpose": "Provide the SQLite schema-v02 fixture for migration preservation and rollback verification."
+      "purpose": "Pinned schema-v02 SQLite fixture for migration preservation and rollback verification."
     },
     {
       "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v03.db",
-      "purpose": "Provide the SQLite schema-v03 fixture for migration preservation and rollback verification."
+      "purpose": "Pinned schema-v03 SQLite fixture for migration preservation and rollback verification."
     },
     {
       "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v04.db",
-      "purpose": "Provide the SQLite schema-v04 fixture for migration preservation and rollback verification."
+      "purpose": "Pinned schema-v04 SQLite fixture for migration preservation and rollback verification."
     },
     {
       "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v05.db",
-      "purpose": "Provide the SQLite schema-v05 fixture for migration preservation and rollback verification."
+      "purpose": "Pinned schema-v05 SQLite fixture for migration preservation and rollback verification."
     },
     {
       "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v06.db",
-      "purpose": "Provide the SQLite schema-v06 fixture for migration preservation and rollback verification."
+      "purpose": "Pinned schema-v06 SQLite fixture for migration preservation and rollback verification."
     },
     {
       "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v07.db",
-      "purpose": "Provide the SQLite schema-v07 fixture for migration preservation and rollback verification."
+      "purpose": "Pinned schema-v07 SQLite fixture for migration preservation and rollback verification."
     },
     {
       "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v08.db",
-      "purpose": "Provide the SQLite schema-v08 fixture for migration preservation and rollback verification."
+      "purpose": "Pinned schema-v08 SQLite fixture for migration preservation and rollback verification."
     },
     {
       "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v09.db",
-      "purpose": "Provide the SQLite schema-v09 fixture for migration preservation and rollback verification."
+      "purpose": "Pinned schema-v09 SQLite fixture for migration preservation and rollback verification."
     },
     {
       "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v10.db",
-      "purpose": "Provide the SQLite schema-v10 fixture for migration preservation and rollback verification."
+      "purpose": "Pinned schema-v10 SQLite fixture for migration preservation and rollback verification."
     },
     {
       "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v11.db",
-      "purpose": "Provide the SQLite schema-v11 fixture for migration preservation and rollback verification."
+      "purpose": "Pinned schema-v11 SQLite fixture for migration preservation and rollback verification."
     },
     {
       "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v12.db",
-      "purpose": "Provide the SQLite schema-v12 fixture for migration preservation and rollback verification."
+      "purpose": "Pinned schema-v12 SQLite fixture for migration preservation and rollback verification."
     },
     {
       "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v13.db",
-      "purpose": "Provide the SQLite schema-v13 fixture for migration preservation and rollback verification."
+      "purpose": "Pinned schema-v13 SQLite fixture for migration preservation and rollback verification."
     },
     {
       "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v14.db",
-      "purpose": "Provide the SQLite schema-v14 fixture for migration preservation and rollback verification."
+      "purpose": "Pinned schema-v14 SQLite fixture for migration preservation and rollback verification."
     },
     {
       "path": "crates/projectatlas-lints/tests",
-      "purpose": "Process-level integration tests for public cargo-projectatlas-lints CLI contracts."
+      "purpose": "Public-process contract tests for the ProjectAtlas repository-lint binary."
     },
     {
       "path": ".cargo/mutants.toml",
@@ -1622,139 +1622,139 @@
     },
     {
       "path": ".github/fixtures/issueops/cases.json",
-      "purpose": "Define deterministic IssueOps acceptance, rejection, Markdown escaping, pagination, and duplicate-comment fixtures."
+      "purpose": "Define IssueOps acceptance, rejection, escaping, pagination, and idempotency fixture cases."
     },
     {
       "path": "crates/projectatlas-cli/src/relation_traceability_contract_tests.rs",
-      "purpose": "Validate the accepted relation-family inventory against the typed graph contract."
+      "purpose": "Validate accepted relation-family traceability against the typed graph and capability-registry contracts."
     },
     {
       "path": "crates/projectatlas-cli/src/runtime/full_scan.rs",
-      "purpose": "Own full-scan staging, rebuild, atomic publication, input-drift detection, and exact SQLite sidecar cleanup."
+      "purpose": "Stage, rebuild, validate, and atomically publish full-scan ProjectAtlas databases."
     },
     {
       "path": "crates/projectatlas-cli/tests/full_scan_publication.rs",
-      "purpose": "Prove parent-owned full-scan staging and atomic publication behavior through real ProjectAtlas processes."
+      "purpose": "Prove parent-owned full-scan staging and atomic publication through real CLI processes."
     },
     {
       "path": "crates/projectatlas-db/src/schema.rs",
-      "purpose": "Own SQLite schema initialization, compatibility preflight, migrations, backup and rollback safeguards, and legacy repair behind the store facade."
+      "purpose": "Initialize, preflight, migrate, verify, and repair the ProjectAtlas SQLite schema."
     },
     {
       "path": "crates/projectatlas-db/src/structural_publication.rs",
-      "purpose": "Own parent-controlled atomic publication for full scans and incremental structural deltas."
+      "purpose": "Atomically publish full-scan stages and incremental structural deltas into active SQLite slots."
     },
     {
       "path": "crates/projectatlas-lints/src/test_quality.rs",
-      "purpose": "Validate repository-owned Rust test-quality policy, native-tool results, retained evidence, exceptions, and release gates."
+      "purpose": "Validate repository-owned Rust test-quality policy and retained evidence."
     },
     {
       "path": "crates/projectatlas-lints/src/test_quality_tests.rs",
-      "purpose": "Provide unit and regression tests for Rust quality-gate policy, evidence integrity, path containment, native-tool schemas, metric ratchets, status mapping, and OpenSpec verification bindings."
+      "purpose": "Exercise task-specific unit contracts for Rust quality policy, workflows, and retained evidence."
     },
     {
       "path": "crates/projectatlas-lints/tests/cli_contract.rs",
-      "purpose": "Verify the public cargo projectatlas-lints test-quality help contract, including usage, the coverage command, and release-quality enforcement-default guidance."
+      "purpose": "Exercise the public test-quality help contract through the built lint binary."
     },
     {
       "path": "crates/projectatlas-symbols/src/parser_registry.rs",
-      "purpose": "Provide the closed registry mapping ProjectAtlas language identifiers to built-in tree-sitter parsers."
+      "purpose": "Map ProjectAtlas language identifiers to the closed set of built-in tree-sitter parsers."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-2081aa7.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit 2081aa7e1c058d6aafe7303a0bb0d554c4a55c7d, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 2081aa7."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-20d4020.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit 20d40200fa9137ae5295924eca80b2dd99ee056b, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 20d4020."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-2ac4406.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit 2ac440646b9495af8b5f704c456bb77be4790339, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 2ac4406."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-38934ba.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit 38934ba8c70bb6d4f8e10626d2078f2808929867, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 38934ba."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-3ace994.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit 3ace994f63db911b5f72a59bd63381eb8ce09631, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 3ace994."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-4b751d7.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit 4b751d705d42a1ff9a0ce2a74051994c7ef064f0, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 4b751d7."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-50cac53.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit 50cac53a2b871a8da7f015b7d573f7a938e86cf6, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 50cac53."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-7b2d4ff.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit 7b2d4ff7c14973683ea93867e59672f137f67b97, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 7b2d4ff."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-80d7bc8.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit 80d7bc8134afdba974090d8dc11f42f110b91765, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 80d7bc8."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit 8395af817e20e4f321ce9f4925b057f24c3da5c8, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 8395af8."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-a3f20bf.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit a3f20bf69d35c7211d85005b308b45aaaa3f9f24, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint a3f20bf."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-ad82e5d.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit ad82e5db85db763362bc8ddeef927f9119bdc2e7, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint ad82e5d."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-baacdb8.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit baacdb8f0c839817a0740d0685547d90a24426b1, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint baacdb8."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-c7dcf47.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit c7dcf47d3f17151a20022ff8f722c6b95ad29080, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint c7dcf47."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-c8aa6e7.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit c8aa6e7ddb6aac4b5f928d01da6b1d23d75b7f26, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint c8aa6e7."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-cfc1e78.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit cfc1e78a1d785b91ce4713315fbfe04b9f52be95, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint cfc1e78."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d40c5c4.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit d40c5c48bd3a0ce17658aa0a7de9e2b40aac8cea, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint d40c5c4."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d6d0d97.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit d6d0d975a432c9cf5553291ba793d3456d2db479, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint d6d0d97."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint d7bc3b9."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-daec36f.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit daec36fd4764fdb04341927a5035b098aac03b2b, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint daec36f."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-e0f32cc.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit e0f32cce4cfffc3309af42882e7db1f732254eab, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint e0f32cc."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-e2b179d.json",
-      "purpose": "Retain the all-passing Windows x64 task-verification run for exact commit e2b179d861bed3859e8e0c4cdcf00e88ed4be179, including aggregate counts and each repository-intelligence task's command, timing, outcome, execution count, and output digest."
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint e2b179d."
     },
     {
       "path": "openspec/task-evidence.json",
-      "purpose": "Record commit-bound verification outcomes, covered-input digests, platforms, timestamps, and retained-result pointers for every OpenSpec task."
+      "purpose": "Record exact-commit outcomes and retained-result pointers for verified OpenSpec tasks."
     },
     {
       "path": "openspec/task-verification.json",
-      "purpose": "Bind every OpenSpec task to its test IDs, assertion, executable command, timeout, covered inputs, and source anchors."
+      "purpose": "Define bounded verification commands, assertions, timeouts, and covered inputs for every mapped OpenSpec task."
     },
     {
       "path": "test-quality.toml",
@@ -1774,7 +1774,7 @@
     },
     {
       "path": "crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v15.db",
-      "purpose": "Provide the SQLite schema-v15 fixture for migration preservation and rollback verification."
+      "purpose": "Pinned schema-v15 SQLite fixture for migration preservation and rollback verification."
     }
   ]
 }
