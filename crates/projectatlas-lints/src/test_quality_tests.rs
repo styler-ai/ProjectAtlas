@@ -648,8 +648,13 @@ fn release_aggregate_rejects_checkpoint_coverage() {
         adjusted: counts,
         exceptions_used: 0,
     };
-    assert_ok!(validate_gate_result(&policy, &checkpoint, false));
-    assert!(validate_gate_result(&policy, &checkpoint, true).is_err());
+    assert_ok!(validate_gate_result(
+        &policy,
+        "linux-x86_64-gnu",
+        &checkpoint,
+        false
+    ));
+    assert!(validate_gate_result(&policy, "linux-x86_64-gnu", &checkpoint, true).is_err());
 
     let strict = GateResult::Coverage {
         enforcement: CoverageEnforcement::ReleaseQuality,
@@ -657,7 +662,294 @@ fn release_aggregate_rejects_checkpoint_coverage() {
         adjusted: counts,
         exceptions_used: 0,
     };
-    assert!(validate_gate_result(&policy, &strict, false).is_err());
+    assert!(validate_gate_result(&policy, "linux-x86_64-gnu", &strict, false).is_err());
+}
+
+#[test]
+fn coverage_targets_require_each_raw_and_adjusted_metric() {
+    let root = assert_ok!(workspace_root());
+    let policy = assert_ok!(policy(&root));
+    let passing_metric = MetricCounts::new(100, 100);
+    let passing = CoverageCounts {
+        lines: passing_metric,
+        regions: passing_metric,
+        functions: passing_metric,
+    };
+    assert!(coverage_meets_targets(&policy, &passing, &passing));
+
+    let failing_metric = MetricCounts::new(0, 100);
+    let cases = [
+        (
+            "raw lines",
+            CoverageCounts {
+                lines: failing_metric,
+                ..passing
+            },
+            passing,
+        ),
+        (
+            "raw regions",
+            CoverageCounts {
+                regions: failing_metric,
+                ..passing
+            },
+            passing,
+        ),
+        (
+            "raw functions",
+            CoverageCounts {
+                functions: failing_metric,
+                ..passing
+            },
+            passing,
+        ),
+        (
+            "adjusted lines",
+            passing,
+            CoverageCounts {
+                lines: failing_metric,
+                ..passing
+            },
+        ),
+        (
+            "adjusted regions",
+            passing,
+            CoverageCounts {
+                regions: failing_metric,
+                ..passing
+            },
+        ),
+        (
+            "adjusted functions",
+            passing,
+            CoverageCounts {
+                functions: failing_metric,
+                ..passing
+            },
+        ),
+    ];
+    for (label, raw, adjusted) in cases {
+        assert!(
+            !coverage_meets_targets(&policy, &raw, &adjusted),
+            "coverage accepted a failing {label} metric"
+        );
+    }
+
+    let passing_result = GateResult::Coverage {
+        enforcement: CoverageEnforcement::ReleaseQuality,
+        raw: passing,
+        adjusted: passing,
+        exceptions_used: 0,
+    };
+    assert_ok!(validate_gate_result(
+        &policy,
+        "linux-x86_64-gnu",
+        &passing_result,
+        false
+    ));
+
+    let invalid_raw = GateResult::Coverage {
+        enforcement: CoverageEnforcement::ReleaseQuality,
+        raw: CoverageCounts {
+            lines: MetricCounts::new(101, 100),
+            ..passing
+        },
+        adjusted: passing,
+        exceptions_used: 0,
+    };
+    assert!(validate_gate_result(&policy, "linux-x86_64-gnu", &invalid_raw, false).is_err());
+    let invalid_adjusted = GateResult::Coverage {
+        enforcement: CoverageEnforcement::ReleaseQuality,
+        raw: passing,
+        adjusted: CoverageCounts {
+            functions: MetricCounts::new(101, 100),
+            ..passing
+        },
+        exceptions_used: 0,
+    };
+    assert!(validate_gate_result(&policy, "linux-x86_64-gnu", &invalid_adjusted, false).is_err());
+    let wrong_exception_count = GateResult::Coverage {
+        enforcement: CoverageEnforcement::ReleaseQuality,
+        raw: passing,
+        adjusted: passing,
+        exceptions_used: 1,
+    };
+    assert!(
+        validate_gate_result(&policy, "linux-x86_64-gnu", &wrong_exception_count, false).is_err()
+    );
+}
+
+#[test]
+fn checkpoint_aggregate_enforces_established_platform_floor() {
+    let root = assert_ok!(workspace_root());
+    let mut policy = assert_ok!(policy(&root));
+    let platform_id = "linux-x86_64-gnu";
+    let platform = policy
+        .platforms
+        .iter_mut()
+        .find(|platform| platform.id == platform_id);
+    assert!(
+        platform.is_some(),
+        "quality policy lacks the Linux reference platform"
+    );
+    let Some(platform) = platform else { return };
+    platform.coverage_floor_established = true;
+    platform.lines_covered_floor = Some(9);
+    platform.lines_total = Some(10);
+    platform.regions_covered_floor = Some(9);
+    platform.regions_total = Some(10);
+    platform.functions_covered_floor = Some(9);
+    platform.functions_total = Some(10);
+
+    let below_floor = CoverageCounts {
+        lines: MetricCounts::new(8, 10),
+        regions: MetricCounts::new(8, 10),
+        functions: MetricCounts::new(8, 10),
+    };
+    let below_floor_result = GateResult::Coverage {
+        enforcement: CoverageEnforcement::ImplementationCheckpoint,
+        raw: below_floor,
+        adjusted: below_floor,
+        exceptions_used: 0,
+    };
+    assert!(validate_gate_result(&policy, platform_id, &below_floor_result, false).is_err());
+
+    let at_floor = CoverageCounts {
+        lines: MetricCounts::new(9, 10),
+        regions: MetricCounts::new(9, 10),
+        functions: MetricCounts::new(9, 10),
+    };
+    let at_floor_result = GateResult::Coverage {
+        enforcement: CoverageEnforcement::ImplementationCheckpoint,
+        raw: at_floor,
+        adjusted: at_floor,
+        exceptions_used: 0,
+    };
+    assert_ok!(validate_gate_result(
+        &policy,
+        platform_id,
+        &at_floor_result,
+        false
+    ));
+}
+
+#[test]
+fn coverage_enforcement_manifest_identity_is_exact() {
+    assert_eq!(
+        CoverageEnforcement::ImplementationCheckpoint.manifest_name(),
+        "implementation_checkpoint"
+    );
+    assert_eq!(
+        CoverageEnforcement::ReleaseQuality.manifest_name(),
+        "release_quality"
+    );
+    assert!(
+        CoverageEnforcement::ImplementationCheckpoint
+            .matches_manifest_name(Some("implementation_checkpoint"))
+    );
+    assert!(
+        !CoverageEnforcement::ImplementationCheckpoint
+            .matches_manifest_name(Some("release_quality"))
+    );
+    assert!(!CoverageEnforcement::ReleaseQuality.matches_manifest_name(None));
+}
+
+#[test]
+fn gate_manifest_rejects_ineligible_identity_before_artifact_reads() {
+    let root = assert_ok!(workspace_root());
+    let policy = assert_ok!(policy(&root));
+    let commit = "0".repeat(40);
+    let manifest: EvidenceManifest = assert_ok!(serde_json::from_value(json!({
+        "schema_version": EVIDENCE_SCHEMA_VERSION + 1,
+        "repository": policy.repository,
+        "gate": "nextest",
+        "status": "passed",
+        "commit_sha": commit,
+        "platform": {
+            "id": "linux-x86_64-gnu",
+            "os": "linux",
+            "arch": "x86_64",
+            "target": "x86_64-unknown-linux-gnu",
+            "runner_image": "ubuntu-latest",
+            "runner_image_version": "test"
+        },
+        "toolchain": {"rustc_version": "test", "llvm_version": "test"},
+        "tool": {"name": "test", "version": "test"},
+        "inputs": {
+            "cargo_lock_sha256": "test",
+            "policy_sha256": "test",
+            "source_scope_sha256": "test",
+            "configs": []
+        },
+        "command": {"executable": "cargo", "arguments": ["nextest"], "profile": "ci"},
+        "timeouts": {
+            "command_seconds": 1,
+            "job_seconds": 1,
+            "test_seconds": null,
+            "build_seconds": null
+        },
+        "started_at_utc": "2026-01-01T00:00:00Z",
+        "completed_at_utc": "2026-01-01T00:00:01Z",
+        "run": {"kind": "repository_retained_local", "run_id": "test", "host": "test"},
+        "artifacts": [],
+        "result": {
+            "kind": "nextest",
+            "tests": 1,
+            "suites": 1,
+            "ignored": 0,
+            "failed": 0,
+            "errors": 0,
+            "timed_out": 0
+        }
+    })));
+    let result = validate_gate_manifest(
+        &root,
+        &policy,
+        "unused-policy-digest",
+        Path::new("unused-manifest.json"),
+        &manifest,
+        &commit,
+        false,
+    );
+    assert!(matches!(
+        result,
+        Err(QualityError::Status {
+            status: QualityStatus::StaleEvidence,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn gate_inputs_reject_stale_digests() {
+    let root = assert_ok!(workspace_root());
+    let policy = assert_ok!(policy(&root));
+    let inputs = GateInputs {
+        cargo_lock_sha256: "stale".to_string(),
+        policy_sha256: "stale".to_string(),
+        source_scope_sha256: "stale".to_string(),
+        configs: Vec::new(),
+    };
+    assert!(
+        validate_gate_inputs(
+            &root,
+            &policy,
+            "current-policy-digest",
+            GateKind::Doctest,
+            &inputs,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn gate_commands_require_bounded_cargo_arguments() {
+    let command = GateCommand {
+        executable: "shell".to_string(),
+        arguments: Vec::new(),
+        profile: "ci".to_string(),
+    };
+    assert!(validate_gate_command(GateKind::Nextest, &command).is_err());
 }
 
 #[test]
@@ -709,6 +1001,7 @@ fn quality_workflows_bind_declared_runner_and_phase_contracts() {
     let release = assert_ok!(read_text(&assert_ok!(
         root.input(".github/workflows/release.yml")
     )));
+    let workflow_docs = assert_ok!(read_text(&assert_ok!(root.input("docs/workflow.md"))));
 
     assert!(ci.contains("runs-on: ${{ matrix.runner_image }}"));
     for selector in [
@@ -737,6 +1030,12 @@ fn quality_workflows_bind_declared_runner_and_phase_contracts() {
     assert!(release.contains("coverage_enforcement: release-quality"));
     assert!(ci.contains("profile:\"doc\""));
     assert!(ci.contains("configs:[{role:\"nextest\""));
+    assert!(workflow_docs.contains(
+        "git diff --binary --no-ext-diff \"$base..HEAD\" -- > \"$mutation_root/source.diff\""
+    ));
+    assert!(workflow_docs.contains("--in-diff \"$mutation_root/source.diff\""));
+    assert!(workflow_docs.contains("--output \"$mutation_root/native\""));
+    assert!(!workflow_docs.contains("--in-diff \"$base..HEAD\""));
 }
 
 #[test]

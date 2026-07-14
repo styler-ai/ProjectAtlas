@@ -83,8 +83,14 @@ Run changed-source mutation against a trusted merge base explicitly:
 
 ```bash
 base="$(git merge-base HEAD origin/main)"
-cargo mutants --config .cargo/mutants.toml --workspace --in-diff "$base..HEAD" --baseline run --timeout 180 --build-timeout 900 --output target/projectatlas-quality/local-changed-mutation
+mutation_root=target/projectatlas-quality/local-changed-mutation
+mkdir -p "$mutation_root"
+git diff --binary --no-ext-diff "$base..HEAD" -- > "$mutation_root/source.diff"
+cargo mutants --config .cargo/mutants.toml --workspace --in-diff "$mutation_root/source.diff" --baseline run --timeout 180 --build-timeout 900 --output "$mutation_root/native"
 ```
+
+`--in-diff` accepts a unified-diff file, not a Git revision expression. Keep the native output in a
+child directory so cargo-mutants cannot remove the source patch while preparing its output tree.
 
 The expensive complete mutation run is not part of the pre-push hook. Dispatch the checked-in workflow,
 which generates one unfiltered master inventory and executes exactly 16 native shards:

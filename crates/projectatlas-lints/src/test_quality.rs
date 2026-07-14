@@ -25,6 +25,8 @@ const EXPECTED_MUTANTS_VERSION: &str = "27.1.0";
 const REQUIRED_MUTATION_SHARDS: u8 = 16;
 /// Process exit code for invalid validator usage.
 const EXIT_USAGE: u8 = 2;
+/// Validation-summary identity for the retained coverage enforcement contract.
+const COVERAGE_ENFORCEMENT_IDENTITY: &str = "coverage_enforcement";
 /// Pinned historical mutant count used to verify observed drift.
 const HISTORICAL_MUTATION_BASELINE: u64 = 4_911;
 
@@ -149,7 +151,7 @@ fn execute(
             let counts = validate_coverage(&root, &policy, platform, &export, enforcement)?;
             counts.insert_summary(&mut summary.counts);
             summary.identities.insert(
-                "coverage_enforcement".to_string(),
+                COVERAGE_ENFORCEMENT_IDENTITY.to_string(),
                 enforcement.manifest_name().to_string(),
             );
         }
@@ -5449,6 +5451,11 @@ impl CoverageEnforcement {
         }
     }
 
+    /// Return whether a retained summary carries this exact enforcement identity.
+    fn matches_manifest_name(self, value: Option<&str>) -> bool {
+        value.is_some_and(|value| value == self.manifest_name())
+    }
+
     /// Return whether the final v0.4 target percentages are enforced.
     const fn enforces_targets(self) -> bool {
         matches!(self, Self::ReleaseQuality)
@@ -5960,16 +5967,18 @@ fn validate_gate_manifest(
         ));
     }
     if let GateResult::Coverage { enforcement, .. } = &manifest.result
-        && summary
-            .identities
-            .get("coverage_enforcement")
-            .is_none_or(|value| value != enforcement.manifest_name())
+        && !enforcement.matches_manifest_name(
+            summary
+                .identities
+                .get(COVERAGE_ENFORCEMENT_IDENTITY)
+                .map(String::as_str),
+        )
     {
         return Err(QualityError::Evidence(
             "coverage enforcement does not reconcile with its validator summary".to_string(),
         ));
     }
-    validate_gate_result(policy, &manifest.result, release)
+    validate_gate_result(policy, &manifest.platform.id, &manifest.result, release)
 }
 
 /// Validate gate platform against its repository contract.
@@ -6267,6 +6276,7 @@ fn gate_command_name(gate: GateKind) -> &'static str {
 /// Validate gate result against its repository contract.
 fn validate_gate_result(
     policy: &QualityPolicy,
+    platform_id: &str,
     result: &GateResult,
     release: bool,
 ) -> Result<(), QualityError> {
@@ -6291,10 +6301,17 @@ fn validate_gate_result(
             adjusted,
             exceptions_used,
         } => {
+            let meets_floor = policy
+                .platforms
+                .iter()
+                .find(|platform| platform.id == platform_id)
+                .and_then(PlatformPolicy::coverage_floor)
+                .is_none_or(|floor| raw.at_least(&floor));
             raw.validate().is_ok()
                 && adjusted.validate().is_ok()
                 && (!enforcement.enforces_targets()
                     || coverage_meets_targets(policy, raw, adjusted))
+                && meets_floor
                 && (!release || *enforcement == CoverageEnforcement::ReleaseQuality)
                 && *exceptions_used
                     == usize_to_u64(

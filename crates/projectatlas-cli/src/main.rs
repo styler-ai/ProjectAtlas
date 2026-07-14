@@ -4347,6 +4347,33 @@ mod tests {
             return Err("nearest DB routing did not reject config root mismatch".into());
         }
 
+        let linked_source = repo_a.join("linked-src");
+        match create_directory_symlink(&repo_a.join("src"), &linked_source) {
+            Ok(()) => {
+                let mut linked_source_args = Map::new();
+                linked_source_args.insert(
+                    "file".to_string(),
+                    json!(linked_source.join("lib.rs").to_string_lossy().to_string()),
+                );
+                linked_source_args.insert("nearest_project".to_string(), json!(true));
+                let linked_source_summary = call_text!("atlas_file_summary", linked_source_args);
+                if !linked_source_summary.contains("alpha_project_a_marker")
+                    || !linked_source_summary.contains("file_path: src/lib.rs")
+                {
+                    return Err(format!(
+                        "nearest routing rejected a same-project symlink/junction alias: {linked_source_summary}"
+                    )
+                    .into());
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
+                ) => {}
+            Err(error) => return Err(error.into()),
+        }
+
         let linked_repo_b = repo_a.join("linked-repo-b");
         match create_directory_symlink(&repo_b, &linked_repo_b) {
             Ok(()) => {

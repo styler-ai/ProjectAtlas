@@ -4464,11 +4464,19 @@ mod tests {
             )
             .into());
         };
+        let error = error.to_string();
         require(
-            error
-                .to_string()
-                .contains(AMBIGUOUS_NEAREST_PROJECT_PATH_ERROR),
+            error.contains(AMBIGUOUS_NEAREST_PROJECT_PATH_ERROR),
             "project-local alias did not return the ambiguity diagnostic",
+        )?;
+        let root_diagnostic = format!(
+            "{MCP_ERROR_LEXICAL_ROOT_FRAGMENT}{}{MCP_ERROR_RESOLVED_ROOT_FRAGMENT}{}{MCP_ERROR_GUIDANCE_FRAGMENT}",
+            normalize_native_path_display(&active_state.root),
+            normalize_native_path_display(&canonical_project_root(&repo_b)?),
+        );
+        require(
+            error.contains(&root_diagnostic),
+            "project-local alias diagnostic did not identify both indexed roots",
         )?;
         Ok(())
     }
