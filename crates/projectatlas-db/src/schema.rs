@@ -1,12 +1,13 @@
 //! `SQLite` schema initialization and legacy repair behind the store facade.
 
-use crate::{DbError, DbResult, sqlite_read_uri};
+use crate::{DbError, DbResult, normalize_metadata_path, sqlite_read_uri};
 use fs4::{FileExt, TryLockError};
 use projectatlas_core::budget::DefaultCoreBudgetKind;
 use projectatlas_core::graph::{
     CoverageRecord, CoverageScope, CoverageState, GraphRelationKind, IdentityText, IndexEpoch,
     OmittedFactCount, ProjectInstanceId, PublicationState, RepositoryFilePath, StructuralSlot,
 };
+#[cfg(test)]
 use projectatlas_core::normalize_native_path_display;
 use rusqlite::{
     Connection, DatabaseName, OpenFlags, OptionalExtension, Transaction, params, types::ValueRef,
@@ -1008,7 +1009,7 @@ fn inspect_fresh_database(path: &Path) -> DbResult<SchemaPreflightReport> {
         root_binding: RootBindingState {
             status: RootBindingStatus::Unbound,
             stored_root: None,
-            expected_root: inferred_project_root(path),
+            expected_root: inferred_project_root(path)?,
             project_instance_id: None,
         },
         supported_source_range: (MIN_SUPPORTED_SCHEMA_VERSION, SCHEMA_VERSION),
@@ -1569,11 +1570,13 @@ fn root_binding_state(
         return Ok(RootBindingState {
             status: RootBindingStatus::Unbound,
             stored_root: None,
-            expected_root: inferred_project_root(path),
+            expected_root: inferred_project_root(path)?,
             project_instance_id: None,
         });
     }
-    let stored_root = metadata_value(connection, "project_root")?;
+    let stored_root = metadata_value(connection, "project_root")?
+        .map(|root| normalize_metadata_path(Path::new(&root)))
+        .transpose()?;
     let stored_identity = metadata_value(connection, PROJECT_INSTANCE_ID_METADATA_KEY)?;
     let project_instance_id = stored_identity.map(parse_project_instance_id).transpose()?;
     if matches!(
@@ -1586,7 +1589,7 @@ fn root_binding_state(
     {
         return Err(DbError::ProjectInstanceIdMissing);
     }
-    let expected_root = inferred_project_root(path);
+    let expected_root = inferred_project_root(path)?;
     let status = match (&stored_root, &expected_root) {
         (None, _) => RootBindingStatus::Unbound,
         (Some(_), None) => RootBindingStatus::UnverifiedLocation,
@@ -1612,19 +1615,30 @@ fn metadata_value(connection: &Connection, key: &str) -> DbResult<Option<String>
 }
 
 /// Infer the owning project root only for a standard project-local database path.
-fn inferred_project_root(path: &Path) -> Option<String> {
-    let atlas_directory = path.parent()?;
-    if atlas_directory.file_name()? != PROJECTATLAS_DIRECTORY_NAME {
-        return None;
+fn inferred_project_root(path: &Path) -> DbResult<Option<String>> {
+    let Some(atlas_directory) = path.parent() else {
+        return Ok(None);
+    };
+    if atlas_directory
+        .file_name()
+        .is_none_or(|name| name != PROJECTATLAS_DIRECTORY_NAME)
+    {
+        return Ok(None);
     }
-    let project_root = atlas_directory.parent()?;
+    let Some(project_root) = atlas_directory.parent() else {
+        return Ok(None);
+    };
     let project_root = if project_root.as_os_str().is_empty() {
         Path::new(".")
     } else {
         project_root
     };
-    let project_root = std::path::absolute(project_root).ok()?;
-    Some(normalize_native_path_display(project_root))
+    let project_root =
+        std::path::absolute(project_root).map_err(|source| DbError::ProjectRootResolution {
+            path: project_root.to_path_buf(),
+            source,
+        })?;
+    normalize_metadata_path(&project_root).map(Some)
 }
 
 /// Record journal mode and all `SQLite` sidecar file sizes.
@@ -5542,9 +5556,9 @@ mod tests {
             .into());
         }
 
-        let expected_relative_root = normalize_native_path_display(std::env::current_dir()?);
+        let expected_relative_root = normalize_metadata_path(&std::env::current_dir()?)?;
         let inferred_relative_root =
-            inferred_project_root(Path::new(".projectatlas/projectatlas.db"));
+            inferred_project_root(Path::new(".projectatlas/projectatlas.db"))?;
         if inferred_relative_root.as_deref() != Some(expected_relative_root.as_str()) {
             return Err(io::Error::other(format!(
                 "relative project-local database inferred {inferred_relative_root:?} instead of {expected_relative_root:?}"

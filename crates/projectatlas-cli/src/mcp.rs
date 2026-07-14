@@ -2036,7 +2036,7 @@ impl ProjectAtlasMcpServer {
         state: &McpProjectState,
         params: &AtlasLintParams,
     ) -> Result<McpLintReport, CliError> {
-        let config = Self::load_config_for_state(state)?;
+        let config = Self::load_config_for_state(state)?.with_db_path(state.db_path.clone());
         let (mut report, mut exit_code) = lint_map(
             &config,
             LintOptions {
@@ -3909,6 +3909,43 @@ mod tests {
         } else {
             Err(io::Error::other(message.to_string()).into())
         }
+    }
+
+    #[test]
+    fn lint_report_uses_selected_database_for_untracked_purposes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        let atlas_dir = repo.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        fs::write(repo.join("logo.png"), b"png")?;
+        fs::write(atlas_dir.join("projectatlas.db"), b"not a SQLite database")?;
+
+        let selected_db = atlas_dir.join("selected.db");
+        let store = open_atlas_store(&selected_db)?;
+        store.set_project_root(&repo)?;
+        drop(store);
+        let state = McpProjectState {
+            root: canonical_project_root(&repo)?,
+            db_path: selected_db,
+            config_path: None,
+        };
+        let report = ProjectAtlasMcpServer::lint_report_for_state(
+            &state,
+            &AtlasLintParams {
+                project_path: None,
+                strict_folders: None,
+                purpose_level: Some("low".to_string()),
+                report_untracked: Some(true),
+                strict_untracked: None,
+            },
+        )?;
+        require(
+            report.report.contains("Untracked files"),
+            "selected-database lint omitted the untracked report",
+        )?;
+
+        Ok(())
     }
 
     #[test]

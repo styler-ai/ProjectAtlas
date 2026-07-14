@@ -27,6 +27,7 @@ nonsource_files[]:
   Cargo.lock,Locked Rust dependency versions for ProjectAtlas 3
   crates/projectatlas-core/Cargo.toml,Core Rust crate manifest for ProjectAtlas 3
   crates/projectatlas-db/Cargo.toml,SQLite Rust crate manifest for ProjectAtlas 3
+  crates/projectatlas-db/tests/fixtures/schema-migrations/schema-v15.db,SQLite schema-v15 fixture for migration preservation and rollback verification
   crates/projectatlas-fs/Cargo.toml,Filesystem scanner Rust crate manifest for ProjectAtlas 3
   crates/projectatlas-cli/Cargo.toml,CLI Rust crate manifest for ProjectAtlas 3
   .githooks/commit-msg,Git hook to enforce issue references in commits

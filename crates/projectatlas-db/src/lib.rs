@@ -48,7 +48,7 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::num::TryFromIntError;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// Maximum persisted text for denormalized symbol-name search summaries.
@@ -202,6 +202,15 @@ pub enum DbError {
     SchemaPreflight {
         /// Actionable incompatibility or readiness detail.
         message: String,
+    },
+    /// An existing project root could not be resolved to one filesystem identity.
+    #[error("cannot resolve project root {path}: {source}")]
+    ProjectRootResolution {
+        /// Project root that could not be resolved.
+        path: PathBuf,
+        /// Native filesystem resolution failure.
+        #[source]
+        source: std::io::Error,
     },
     /// Required persistent project identity metadata is missing.
     #[error("project instance identity is missing from database metadata")]
@@ -987,7 +996,7 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn set_project_root(&self, root: &Path) -> DbResult<()> {
-        let value = normalize_metadata_path(root);
+        let value = normalize_metadata_path(root)?;
         self.connection.execute(
             "
             INSERT INTO metadata(key, value)
@@ -1005,14 +1014,17 @@ impl AtlasStore {
     ///
     /// Returns an error if reading fails.
     pub fn project_root(&self) -> DbResult<Option<String>> {
-        self.connection
+        let root = self
+            .connection
             .query_row(
                 "SELECT value FROM metadata WHERE key = 'project_root'",
                 [],
                 |row| row.get::<_, String>(0),
             )
             .optional()
-            .map_err(DbError::from)
+            .map_err(DbError::from)?;
+        root.map(|value| normalize_metadata_path(Path::new(&value)))
+            .transpose()
     }
 
     /// Load the persistent identity of this independently initialized database.
@@ -3773,10 +3785,11 @@ pub fn read_project_root_read_only(path: &Path) -> DbResult<Option<String>> {
         .query_row(
             "SELECT value FROM metadata WHERE key = 'project_root'",
             [],
-            |row| row.get(0),
+            |row| row.get::<_, String>(0),
         )
         .optional()?;
-    Ok(root)
+    root.map(|value| normalize_metadata_path(Path::new(&value)))
+        .transpose()
 }
 
 /// Build a read-only `SQLite` URI, optionally treating the database as immutable.
@@ -3813,9 +3826,19 @@ fn sqlite_uri_escape_path(path: &str) -> String {
     escaped
 }
 
-/// Normalize a filesystem path stored in `SQLite` metadata.
-fn normalize_metadata_path(path: &Path) -> String {
-    normalize_native_path_display(path)
+/// Resolve an existing filesystem path for metadata identity, retaining lexical
+/// behavior only for deliberately nonexistent roots such as in-memory fixtures.
+fn normalize_metadata_path(path: &Path) -> DbResult<String> {
+    match std::fs::canonicalize(path) {
+        Ok(canonical) => Ok(normalize_native_path_display(canonical)),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            Ok(normalize_native_path_display(path))
+        }
+        Err(source) => Err(DbError::ProjectRootResolution {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
 }
 
 /// Mark selected paths and descendants absent within an existing write boundary.
@@ -6776,6 +6799,35 @@ mod tests {
     }
 
     #[test]
+    fn project_root_metadata_resolves_existing_filesystem_aliases() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let child = root.join("child");
+        fs::create_dir_all(&child)?;
+        let alias = child.join("..");
+        let canonical = normalize_native_path_display(fs::canonicalize(&root)?);
+        let store = AtlasStore::in_memory()?;
+
+        store.set_project_root(&alias)?;
+        require_eq(
+            &store.project_root()?,
+            &Some(canonical.clone()),
+            "existing project root alias",
+        )?;
+
+        store.connection.execute(
+            "UPDATE metadata SET value = ?1 WHERE key = 'project_root'",
+            [normalize_native_path_display(&alias)],
+        )?;
+        require_eq(
+            &store.project_root()?,
+            &Some(canonical),
+            "legacy lexical project root alias",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn read_project_root_read_only_does_not_create_wal_sidecars() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("repo with spaces");
@@ -6802,7 +6854,7 @@ mod tests {
 
         require_eq(
             &read_project_root_read_only(&db_path)?,
-            &Some(normalize_native_path_display(&root)),
+            &Some(normalize_native_path_display(fs::canonicalize(&root)?)),
             "immutable read-only project root",
         )?;
         require_eq(

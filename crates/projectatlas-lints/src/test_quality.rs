@@ -710,7 +710,7 @@ fn normalized_covered_inputs_digest(
         hasher.update(key.as_bytes());
         hasher.update([0]);
         hasher.update(Sha256::digest(bytes));
-        hasher.update([b'\n']);
+        hasher.update(b"\n");
     }
     Ok(encode_hex(&hasher.finalize()))
 }
@@ -4743,21 +4743,24 @@ impl MutationCounts {
         ] {
             counts.insert(name.to_string(), value);
         }
-        if self.raw_total != 0 {
-            counts.insert(
-                "raw_kill_basis_points".to_string(),
-                self.caught.saturating_mul(10_000) / self.raw_total,
-            );
+        if let Some(raw_kill_basis_points) = self
+            .caught
+            .saturating_mul(10_000)
+            .checked_div(self.raw_total)
+        {
+            counts.insert("raw_kill_basis_points".to_string(), raw_kill_basis_points);
         }
         let viable = self
             .caught
             .saturating_add(self.missed)
             .saturating_add(self.timed_out)
             .saturating_add(self.unresolved);
-        if viable != 0 {
+        if let Some(adjusted_viable_kill_basis_points) =
+            self.caught.saturating_mul(10_000).checked_div(viable)
+        {
             counts.insert(
                 "adjusted_viable_kill_basis_points".to_string(),
-                self.caught.saturating_mul(10_000) / viable,
+                adjusted_viable_kill_basis_points,
             );
         }
     }

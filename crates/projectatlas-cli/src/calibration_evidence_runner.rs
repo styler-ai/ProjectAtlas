@@ -1586,8 +1586,7 @@ impl GitProbe {
         )?;
         let search_path = env::var_os("PATH")
             .ok_or_else(|| CalibrationError::Binding("Git PATH is not defined".into()))?;
-        let executable = resolve_git_executable(&work_tree, &search_path)?;
-        let executable_sha256 = sha256_file(&executable, GIT_EXECUTABLE_FILE_LIMIT)?;
+        let (executable, executable_sha256) = resolve_git_executable(&work_tree, &search_path)?;
         let git_directory = resolve_git_directory(&work_tree)?;
         Ok(Self {
             executable,
@@ -1598,10 +1597,14 @@ impl GitProbe {
     }
 }
 
-/// Resolve one canonical Git executable and reject repository-local or ambiguous shims.
-fn resolve_git_executable(root: &Path, search_path: &OsStr) -> Result<PathBuf, CalibrationError> {
+/// Resolve the first canonical Git executable and reject distinct PATH identities.
+fn resolve_git_executable(
+    root: &Path,
+    search_path: &OsStr,
+) -> Result<(PathBuf, String), CalibrationError> {
     let executable_name = format!("git{}", env::consts::EXE_SUFFIX);
-    let mut candidates = BTreeSet::new();
+    let mut paths = BTreeSet::new();
+    let mut selected = None;
     for directory in env::split_paths(search_path) {
         if !directory.is_absolute() {
             continue;
@@ -1618,20 +1621,20 @@ fn resolve_git_executable(root: &Path, search_path: &OsStr) -> Result<PathBuf, C
             !canonical.starts_with(root),
             "Git executable resolves inside the repository",
         )?;
-        candidates.insert(canonical);
+        if !paths.insert(canonical.clone()) {
+            continue;
+        }
+        let digest = sha256_file(&canonical, GIT_EXECUTABLE_FILE_LIMIT)?;
+        if let Some((_, selected_digest)) = &selected {
+            require(
+                selected_digest == &digest,
+                "Git executable identity is ambiguous across PATH",
+            )?;
+        } else {
+            selected = Some((canonical, digest));
+        }
     }
-    require(
-        !candidates.is_empty(),
-        "Git executable was not found on PATH",
-    )?;
-    require(
-        candidates.len() == 1,
-        "Git executable identity is ambiguous across PATH",
-    )?;
-    candidates
-        .into_iter()
-        .next()
-        .ok_or_else(|| CalibrationError::Binding("Git executable identity is missing".into()))
+    selected.ok_or_else(|| CalibrationError::Binding("Git executable was not found on PATH".into()))
 }
 
 /// Capture clean Git and Cargo.lock provenance with bounded native probes.
@@ -3253,6 +3256,32 @@ mod tests {
                 && binding.cargo_lock_sha256 == expected.cargo_lock_sha256
                 && binding.runner_source_sha256 == expected.runner_source_sha256,
             "poisoned Git variables changed the captured source binding",
+        )
+    }
+
+    /// Equivalent executable copies keep the first canonical PATH identity.
+    #[test]
+    fn git_provenance_accepts_identical_executable_bytes_on_path() -> Result<(), CalibrationError> {
+        let directory = tempdir()?;
+        let root = directory.path().join("repo");
+        let first_directory = directory.path().join("first");
+        let second_directory = directory.path().join("second");
+        fs::create_dir(&root)?;
+        fs::create_dir(&first_directory)?;
+        fs::create_dir(&second_directory)?;
+        let executable_name = format!("git{}", env::consts::EXE_SUFFIX);
+        let first = first_directory.join(&executable_name);
+        let second = second_directory.join(&executable_name);
+        fs::copy(env::current_exe()?, &first)?;
+        fs::copy(env::current_exe()?, &second)?;
+        let search_path = env::join_paths([&first_directory, &second_directory])
+            .map_err(|error| CalibrationError::Binding(error.to_string()))?;
+
+        let (resolved, digest) = resolve_git_executable(&root, &search_path)?;
+        require(
+            resolved == fs::canonicalize(&first)?
+                && digest == sha256_file(&first, GIT_EXECUTABLE_FILE_LIMIT)?,
+            "identical Git executable bytes did not preserve PATH order",
         )
     }
 

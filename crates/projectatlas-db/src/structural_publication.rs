@@ -205,7 +205,7 @@ impl AtlasStore {
 
         let base_publication = load_publication_state(&self.connection)?;
         let project_instance_id = schema::project_instance_id(&self.connection)?;
-        let project_root = normalize_metadata_path(project_root);
+        let project_root = normalize_metadata_path(project_root)?;
         let base_project_root = self.project_root()?;
         if base_project_root
             .as_ref()
@@ -574,7 +574,7 @@ fn bind_incremental_project_root(
     transaction: &Transaction<'_>,
     project_root: &Path,
 ) -> DbResult<String> {
-    let requested = normalize_metadata_path(project_root);
+    let requested = normalize_metadata_path(project_root)?;
     match load_project_root(transaction, None)? {
         Some(live) if live != requested => Err(publication_error(format!(
             "live project root does not match the incremental delta root: live={live:?}, requested={requested:?}"
@@ -1372,7 +1372,9 @@ fn load_project_root(
     connection: &Connection,
     schema_name: Option<&str>,
 ) -> DbResult<Option<String>> {
-    load_metadata(connection, schema_name, "project_root")
+    load_metadata(connection, schema_name, "project_root")?
+        .map(|root| normalize_metadata_path(Path::new(&root)))
+        .transpose()
 }
 
 /// Load one metadata value from main or an attached schema.
@@ -2545,7 +2547,7 @@ mod tests {
             upsert_structural_state_signature(&store.connection, "reconciled-base")?;
 
             let base = store.publication_state()?;
-            let root_text = normalize_metadata_path(&root);
+            let root_text = normalize_metadata_path(&root)?;
             schema::reconcile_full_structural_publication(&store.connection, &root_text, base)?;
             let base_signature = store.structural_state_signature()?;
             let base_counts = [
@@ -2943,7 +2945,7 @@ mod tests {
         )?;
         require_eq(
             &store.project_root()?,
-            &Some(normalize_metadata_path(&root)),
+            &Some(normalize_metadata_path(&root)?),
             "incremental reconciliation root rollback",
         )?;
         Ok(())

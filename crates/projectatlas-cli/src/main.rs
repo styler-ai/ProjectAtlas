@@ -1385,7 +1385,8 @@ fn run() -> Result<(), CliError> {
             report_untracked,
             strict_untracked,
         } => {
-            let config = load_atlas_config(cli.config.as_deref())?;
+            let db_path = absolute_path(&cli.db)?;
+            let config = load_atlas_config(cli.config.as_deref())?.with_db_path(db_path.clone());
             let (mut report, mut exit_code) = lint_map(
                 &config,
                 LintOptions {
@@ -1395,7 +1396,7 @@ fn run() -> Result<(), CliError> {
                 },
             )?;
             let (db_report, db_exit_code) =
-                lint_database_if_present(&cli.db, (*purpose_level).into())?;
+                lint_database_if_present(&db_path, (*purpose_level).into())?;
             if !db_report.is_empty() {
                 if !report.ends_with('\n') {
                     report.push('\n');

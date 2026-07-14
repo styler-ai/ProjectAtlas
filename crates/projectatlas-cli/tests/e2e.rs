@@ -28,6 +28,7 @@ const SRC_DIR_NAME: &str = "src";
 const TESTS_DIR_NAME: &str = "tests";
 const INSTALLER_RS_FILE_NAME: &str = "installer.rs";
 const ATLAS_DIR_NAME: &str = ".projectatlas";
+const LINT_FIXTURE_ASSET_FILE_NAME: &str = "logo.png";
 const CODEX_CONFIG_DIR: &str = ".codex";
 const CODEX_PLUGIN_MANIFEST_DIR: &str = ".codex-plugin";
 const FAKE_CODEX_LOG_FILE: &str = "fake-codex.log";
@@ -1502,6 +1503,8 @@ fn rust_quality_ci_jobs_are_independent_bounded_and_pinned() -> Result<(), Box<d
             "nextest",
             &[
                 "timeout-minutes: 25",
+                "fetch-depth: 0",
+                "cargo fetch --locked",
                 "cargo-nextest@0.9.140",
                 "cargo nextest list --workspace --all-features --locked --profile ci",
                 "cargo nextest run --workspace --all-features --locked --profile ci",
@@ -1533,6 +1536,8 @@ fn rust_quality_ci_jobs_are_independent_bounded_and_pinned() -> Result<(), Box<d
             "coverage",
             &[
                 "timeout-minutes: 45",
+                "fetch-depth: 0",
+                "cargo fetch --locked",
                 "cargo-nextest@0.9.140,cargo-llvm-cov@0.8.7",
                 "llvm-tools-preview",
                 "cargo llvm-cov nextest --workspace --all-features --locked",
@@ -1550,7 +1555,9 @@ fn rust_quality_ci_jobs_are_independent_bounded_and_pinned() -> Result<(), Box<d
                 "timeout-minutes: 50",
                 "fetch-depth: 0",
                 "cargo-nextest@0.9.140,cargo-mutants@27.1.0",
-                "--in-diff \"$BASE_SHA..$QUALITY_SHA\"",
+                "--output=target/projectatlas-quality/changed-mutation/source.diff",
+                "--in-diff target/projectatlas-quality/changed-mutation/source.diff",
+                "role:\"diagnostics\",path:\"source.diff\"",
                 "test-quality mutation-changed",
                 "native/mutants.out/outcomes.json",
                 "gate:\"changed_mutation\"",
@@ -3427,7 +3434,12 @@ fn windows_release_binary_only_rejects_invalid_runtime_without_fallback()
         ))
         .into());
     }
-    if !installer_output_text.contains("produced an invalid runtime") {
+    if !installer_output_text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .contains("produced an invalid runtime")
+    {
         return Err(io::Error::other(format!(
             "installer failure did not report invalid release runtime\n{installer_output_text}"
         ))
@@ -3638,6 +3650,45 @@ fn bare_relative_projectatlas_config_path_drives_scan_map_and_lint() -> Result<(
         .assert()
         .success()
         .stderr(predicate::str::contains("io error for \"\"").not());
+    Ok(())
+}
+
+#[test]
+fn lint_report_untracked_uses_explicit_database() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(atlas_dir.join("config.toml"), "[project]\nroot = \".\"\n")?;
+    fs::write(
+        atlas_dir.join("projectatlas-nonsource-files.toon"),
+        "nonsource_files[]:\n  # path,summary\n  logo.png,Selected database lint fixture asset\n",
+    )?;
+    fs::write(repo.join(LINT_FIXTURE_ASSET_FILE_NAME), b"png")?;
+    fs::write(atlas_dir.join("projectatlas.db"), b"not a SQLite database")?;
+
+    let selected_db = atlas_dir.join("selected.db");
+    let store = AtlasStore::open(&selected_db)?;
+    store.set_project_root(&repo)?;
+    drop(store);
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args([
+            "--db",
+            ".projectatlas/selected.db",
+            "--config",
+            ".projectatlas/config.toml",
+            "lint",
+            "--report-untracked",
+        ])
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("Untracked files")
+                .and(predicate::str::contains("database error").not()),
+        );
+
     Ok(())
 }
 
@@ -4805,6 +4856,7 @@ fn large_repository_agent_funnel_stays_bounded() -> Result<(), Box<dyn Error>> {
     const TARGET_FILE: usize = 13;
     const TARGET_PATH: &str = "src/module_17/file_13.rs";
     const SCAN_TIMEOUT_SECONDS: u64 = 60;
+    let enforce_timing = std::env::var_os("LLVM_PROFILE_FILE").is_none();
 
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("large-repo");
@@ -4855,7 +4907,7 @@ fn large_repository_agent_funnel_stays_bounded() -> Result<(), Box<dyn Error>> {
         ))
         .into());
     }
-    if scan_started.elapsed() > Duration::from_secs(SCAN_TIMEOUT_SECONDS) {
+    if enforce_timing && scan_started.elapsed() > Duration::from_secs(SCAN_TIMEOUT_SECONDS) {
         return Err(io::Error::other(format!(
             "large repo scan exceeded 60s: {:?}",
             scan_started.elapsed()
@@ -4886,7 +4938,7 @@ fn large_repository_agent_funnel_stays_bounded() -> Result<(), Box<dyn Error>> {
     if !raw_files.status.success() {
         return Err(io::Error::other("large repo files command failed").into());
     }
-    if files_started.elapsed() > Duration::from_secs(15) {
+    if enforce_timing && files_started.elapsed() > Duration::from_secs(15) {
         return Err(io::Error::other(format!(
             "large repo files query exceeded 15s: {:?}",
             files_started.elapsed()
@@ -4913,7 +4965,7 @@ fn large_repository_agent_funnel_stays_bounded() -> Result<(), Box<dyn Error>> {
     if !raw_summary.status.success() {
         return Err(io::Error::other("large repo summary command failed").into());
     }
-    if summary_started.elapsed() > Duration::from_secs(15) {
+    if enforce_timing && summary_started.elapsed() > Duration::from_secs(15) {
         return Err(io::Error::other(format!(
             "large repo summary exceeded 15s: {:?}",
             summary_started.elapsed()
@@ -11663,7 +11715,7 @@ fn init_map_and_lint_flow_uses_rust_implementation() -> Result<(), Box<dyn Error
         repo.join("README.md"),
         "# Demo readme for Rust map lint tests\n",
     )?;
-    fs::write(repo.join("logo.png"), b"png")?;
+    fs::write(repo.join(LINT_FIXTURE_ASSET_FILE_NAME), b"png")?;
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)

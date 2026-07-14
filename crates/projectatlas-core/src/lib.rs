@@ -383,6 +383,17 @@ pub fn normalize_repo_path(root: &Path, path: &Path) -> CoreResult<String> {
 /// prefixes such as `\\?\`, and converts extended UNC paths to `//server/share`
 /// form. This helper is for persisted metadata and agent-facing output; use
 /// `Path`/`PathBuf` for host filesystem access.
+///
+/// # Examples
+///
+/// ```
+/// use projectatlas_core::normalize_native_path_display;
+///
+/// assert_eq!(
+///     normalize_native_path_display(r"\\?\C:\workspace\repo"),
+///     "C:/workspace/repo"
+/// );
+/// ```
 #[must_use]
 pub fn normalize_native_path_display(path: impl AsRef<Path>) -> String {
     normalize_native_path_display_str(&path.as_ref().to_string_lossy())

@@ -264,6 +264,12 @@ pub(crate) struct AtlasMapConfig {
 }
 
 impl AtlasMapConfig {
+    /// Bind map and lint database reads to the adapter-selected index.
+    pub(crate) fn with_db_path(mut self, db_path: PathBuf) -> Self {
+        self.db_path = db_path;
+        self
+    }
+
     /// Return scanner options derived from the normalized project config.
     pub(crate) fn scan_options(&self) -> ScanOptions {
         ScanOptions {
