@@ -3450,6 +3450,22 @@
             },
             {
               "kind": "file",
+              "path": "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/calibration_evidence_runner.rs"
+            },
+            {
+              "kind": "file",
+              "path": "docs/benchmarks/projectatlas-v0.4-host-safety.json"
+            },
+            {
+              "kind": "file",
+              "path": "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/design.md"
             },
             {
