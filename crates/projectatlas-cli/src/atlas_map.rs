@@ -2608,6 +2608,7 @@ fn default_gitignore_text() -> String {
         "# ProjectAtlas local runtime state",
         ".projectatlas/*.db",
         ".projectatlas/*.db-*",
+        ".projectatlas/*.db.migration-backup.lock",
         ".projectatlas/projectatlas.mcp.json",
         "",
     ]

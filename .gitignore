@@ -5,6 +5,7 @@
 # ProjectAtlas runtime state
 .projectatlas/*.db
 .projectatlas/*.db-*
+.projectatlas/*.db.migration-backup.lock
 .projectatlas/projectatlas.toon
 .projectatlas/projectatlas.mcp.json
 .projectatlas/projectatlas.claude.mcp.json

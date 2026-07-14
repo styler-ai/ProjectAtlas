@@ -6781,9 +6781,11 @@ fn ignore_commands_preserve_manual_layer_while_gitignore_updates_apply()
     require_json_bool(&init_gitignore_json, &["gitignore_inherited"], true)?;
     let gitignore_path = repo.join(".gitignore");
     let gitignore_text = fs::read_to_string(&gitignore_path)?;
-    if !gitignore_text.contains(".projectatlas/*.db") {
+    if !gitignore_text.contains(".projectatlas/*.db")
+        || !gitignore_text.contains(".projectatlas/*.db.migration-backup.lock")
+    {
         return Err(io::Error::other(format!(
-            "created .gitignore did not protect ProjectAtlas runtime DBs: {gitignore_text}"
+            "created .gitignore did not protect ProjectAtlas runtime databases and migration leases: {gitignore_text}"
         ))
         .into());
     }
