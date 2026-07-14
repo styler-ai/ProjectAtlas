@@ -1059,7 +1059,22 @@ fn quality_workflows_bind_declared_runner_and_phase_contracts() {
     assert!(ci.contains("filtered_path+=(\"$directory\")"));
     assert!(ci.contains("shasum -a 256 -- \"$1\""));
     assert!(ci.contains("trusted_git_sha256=\"$(sha256_file \"$trusted_git\")\""));
-    assert!(ci.contains("--arg llvm_json_sha256 \"$(sha256_file \"$evidence/coverage.json\")\""));
+    let manifest_start = assert_ok!(required_text_position(
+        &ci,
+        "      - name: Build and validate coverage manifest",
+    ));
+    let manifest_end = manifest_start
+        + assert_ok!(required_text_position(
+            &ci[manifest_start..],
+            "      - name: Record coverage outcome",
+        ));
+    let coverage_manifest = &ci[manifest_start..manifest_end];
+    assert!(coverage_manifest.contains("sha256_file()"));
+    assert!(coverage_manifest.contains("shasum -a 256 -- \"$1\""));
+    assert!(
+        coverage_manifest
+            .contains("--arg llvm_json_sha256 \"$(sha256_file \"$evidence/coverage.json\")\"")
+    );
 
     let normalized_rustc_version = "--arg rustc_version \"$(rustc --version | awk '{print $2}')\"";
     assert!(ci.contains(normalized_rustc_version));
@@ -1083,6 +1098,84 @@ fn quality_workflows_bind_declared_runner_and_phase_contracts() {
     assert!(workflow_docs.contains("--in-diff \"$mutation_root/source.diff\""));
     assert!(workflow_docs.contains("--output \"$mutation_root/native\""));
     assert!(!workflow_docs.contains("--in-diff \"$base..HEAD\""));
+}
+
+#[test]
+fn strict_lint_metadata_covers_retained_repository_artifacts() {
+    let root = assert_ok!(workspace_root());
+    let fixture_directory = root
+        .0
+        .join("crates/projectatlas-db/tests/fixtures/schema-migrations");
+    let nonsource = assert_ok!(read_text(&assert_ok!(
+        root.input(".projectatlas/projectatlas-nonsource-files.toon")
+    )));
+    let review_text = assert_ok!(read_text(&assert_ok!(
+        root.input(".projectatlas/projectatlas-purpose-review.json")
+    )));
+    let review: serde_json::Value = assert_ok!(serde_json::from_str(&review_text));
+    let reviewed = review
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("path").and_then(serde_json::Value::as_str))
+        .collect::<BTreeSet<_>>();
+    let fixture_entries =
+        assert_ok!(assert_ok!(std::fs::read_dir(fixture_directory)).collect::<Result<Vec<_>, _>>());
+    let mut fixtures = fixture_entries
+        .into_iter()
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.extension().and_then(|extension| extension.to_str()) == Some("db"))
+                .then(|| entry.file_name().to_string_lossy().into_owned())
+        })
+        .map(|name| format!("crates/projectatlas-db/tests/fixtures/schema-migrations/{name}"))
+        .collect::<Vec<_>>();
+    fixtures.sort();
+    assert!(!fixtures.is_empty(), "migration fixture inventory is empty");
+
+    for fixture in fixtures {
+        assert!(
+            nonsource
+                .lines()
+                .any(|line| line.trim_start().starts_with(&format!("{fixture},"))),
+            "migration fixture is missing from non-source metadata: {fixture}"
+        );
+        assert!(
+            reviewed.contains(fixture.as_str()),
+            "migration fixture is missing from reviewed-purpose replay: {fixture}"
+        );
+    }
+
+    let result_directory = root
+        .0
+        .join("docs/benchmarks/results/phase-0-truth-and-baselines");
+    let result_entries =
+        assert_ok!(assert_ok!(std::fs::read_dir(result_directory)).collect::<Result<Vec<_>, _>>());
+    let mut retained_results = result_entries
+        .into_iter()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            (name.starts_with("task-verification-")
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("json")))
+            .then_some(name)
+        })
+        .map(|name| format!("docs/benchmarks/results/phase-0-truth-and-baselines/{name}"))
+        .collect::<Vec<_>>();
+    retained_results.sort();
+    assert!(
+        !retained_results.is_empty(),
+        "retained task-verification inventory is empty"
+    );
+    for result in retained_results {
+        assert!(
+            reviewed.contains(result.as_str()),
+            "retained task-verification result is missing from reviewed-purpose replay: {result}"
+        );
+    }
 }
 
 #[test]

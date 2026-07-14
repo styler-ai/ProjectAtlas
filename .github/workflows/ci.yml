@@ -646,16 +646,6 @@ jobs:
         run: |
           set -o pipefail
           evidence="target/projectatlas-quality/coverage/$PLATFORM_ID"
-          sha256_file() {
-            if command -v sha256sum >/dev/null 2>&1; then
-              sha256sum -- "$1" | awk '{print $1}'
-            elif command -v shasum >/dev/null 2>&1; then
-              shasum -a 256 -- "$1" | awk '{print $1}'
-            else
-              echo "no SHA-256 utility is available" >&2
-              return 1
-            fi
-          }
           mkdir -p "$evidence"
           cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
             test-quality coverage \
@@ -678,6 +668,16 @@ jobs:
         run: |
           set -o pipefail
           evidence="target/projectatlas-quality/coverage/$PLATFORM_ID"
+          sha256_file() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum -- "$1" | awk '{print $1}'
+            elif command -v shasum >/dev/null 2>&1; then
+              shasum -a 256 -- "$1" | awk '{print $1}'
+            else
+              echo "no SHA-256 utility is available" >&2
+              return 1
+            fi
+          }
           : "${DECLARED_RUNNER_IMAGE:?declared runner image is unavailable}"
           : "${ImageVersion:?hosted runner image version is unavailable}"
           case "$RUNNER_OS" in
