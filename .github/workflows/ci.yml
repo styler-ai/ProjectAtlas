@@ -43,6 +43,7 @@ env:
   QUALITY_SHA: ${{ inputs.expected_sha || github.event.pull_request.head.sha || github.sha }}
   COVERAGE_ENFORCEMENT: ${{ inputs.coverage_enforcement || 'implementation-checkpoint' }}
   DECLARED_LINUX_RUNNER_IMAGE: ubuntu-latest
+  RUSTUP_TOOLCHAIN: "1.93.1"
 
 jobs:
   verify:
@@ -71,8 +72,8 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal --component clippy,rustfmt
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
@@ -256,8 +257,8 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Fetch locked dependency graph
         timeout-minutes: 5
@@ -327,7 +328,7 @@ jobs:
             --arg target "$(rustc -Vv | sed -n 's/^host: //p')" \
             --arg runner_image "$DECLARED_LINUX_RUNNER_IMAGE" \
             --arg runner_image_version "$ImageVersion" \
-            --arg rustc_version "$(rustc --version)" \
+            --arg rustc_version "$(rustc --version | awk '{print $2}')" \
             --arg llvm_version "$(rustc -Vv | sed -n 's/^LLVM version: //p')" \
             --arg cargo_lock_sha256 "$(sha256sum Cargo.lock | cut -d ' ' -f1)" \
             --arg policy_sha256 "$(sha256sum test-quality.toml | cut -d ' ' -f1)" \
@@ -403,8 +404,8 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Record tool identity
         run: |
@@ -463,9 +464,8 @@ jobs:
             --arg target "$(rustc -Vv | sed -n 's/^host: //p')" \
             --arg runner_image "$DECLARED_LINUX_RUNNER_IMAGE" \
             --arg runner_image_version "$ImageVersion" \
-            --arg rustc_version "$(rustc --version)" \
+            --arg rustc_version "$(rustc --version | awk '{print $2}')" \
             --arg llvm_version "$(rustc -Vv | sed -n 's/^LLVM version: //p')" \
-            --arg cargo_version "$(cargo --version | awk '{print $2}')" \
             --arg cargo_lock_sha256 "$(sha256sum Cargo.lock | cut -d ' ' -f1)" \
             --arg policy_sha256 "$(sha256sum test-quality.toml | cut -d ' ' -f1)" \
             --arg source_scope_sha256 "$source_scope_sha256" \
@@ -485,7 +485,7 @@ jobs:
             --argjson measured "$(jq -er '.counts.measured' "$evidence/validation.json")" \
             --argjson filtered "$(jq -er '.counts.filtered' "$evidence/validation.json")" \
             --argjson summaries "$(jq -er '.counts.summaries' "$evidence/validation.json")" \
-            '{schema_version:1,repository:$repository,gate:"doctest",status:"passed",commit_sha:$commit_sha,platform:{id:"linux-x86_64-gnu",os:"linux",arch:"x86_64",target:$target,runner_image:$runner_image,runner_image_version:$runner_image_version},toolchain:{rustc_version:$rustc_version,llvm_version:$llvm_version},tool:{name:"cargo",version:$cargo_version},inputs:{cargo_lock_sha256:$cargo_lock_sha256,policy_sha256:$policy_sha256,source_scope_sha256:$source_scope_sha256,configs:[]},command:{executable:"cargo",arguments:["test","--doc","--workspace","--all-features","--locked"],profile:"doc"},timeouts:{command_seconds:900,job_seconds:1200,test_seconds:null,build_seconds:null},started_at_utc:$started_at_utc,completed_at_utc:$completed_at_utc,run:{kind:"github_actions",run_id:$run_id,run_attempt:$run_attempt,job_id:$job_id,job_name:$job_name,workflow_ref:$workflow_ref},artifacts:[{role:"doctest_log",path:"run.log",sha256:$log_sha256},{role:"validation_summary",path:"validation.json",sha256:$validation_sha256},{role:"diagnostics",path:"native-exit-code.txt",sha256:$diagnostics_sha256}],result:{kind:"doctest",passed:$passed,failed:$failed,ignored:$ignored,measured:$measured,filtered:$filtered,summaries:$summaries}}' \
+            '{schema_version:1,repository:$repository,gate:"doctest",status:"passed",commit_sha:$commit_sha,platform:{id:"linux-x86_64-gnu",os:"linux",arch:"x86_64",target:$target,runner_image:$runner_image,runner_image_version:$runner_image_version},toolchain:{rustc_version:$rustc_version,llvm_version:$llvm_version},tool:{name:"rustc",version:$rustc_version},inputs:{cargo_lock_sha256:$cargo_lock_sha256,policy_sha256:$policy_sha256,source_scope_sha256:$source_scope_sha256,configs:[]},command:{executable:"cargo",arguments:["test","--doc","--workspace","--all-features","--locked"],profile:"doc"},timeouts:{command_seconds:900,job_seconds:1200,test_seconds:null,build_seconds:null},started_at_utc:$started_at_utc,completed_at_utc:$completed_at_utc,run:{kind:"github_actions",run_id:$run_id,run_attempt:$run_attempt,job_id:$job_id,job_name:$job_name,workflow_ref:$workflow_ref},artifacts:[{role:"doctest_log",path:"run.log",sha256:$log_sha256},{role:"validation_summary",path:"validation.json",sha256:$validation_sha256},{role:"diagnostics",path:"native-exit-code.txt",sha256:$diagnostics_sha256}],result:{kind:"doctest",passed:$passed,failed:$failed,ignored:$ignored,measured:$measured,filtered:$filtered,summaries:$summaries}}' \
             > "$evidence/manifest.json"
           cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
             test-quality evidence --root . --policy test-quality.toml \
@@ -550,8 +550,8 @@ jobs:
       - name: Setup Rust with matching LLVM tools
         shell: bash
         run: |
-          rustup toolchain install stable --profile minimal --component llvm-tools-preview
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component llvm-tools-preview
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Fetch locked dependency graph
         timeout-minutes: 5
@@ -586,6 +586,16 @@ jobs:
           PLATFORM_ID: ${{ matrix.label }}
         run: |
           evidence="target/projectatlas-quality/coverage/$PLATFORM_ID"
+          sha256_file() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum -- "$1" | awk '{print $1}'
+            elif command -v shasum >/dev/null 2>&1; then
+              shasum -a 256 -- "$1" | awk '{print $1}'
+            else
+              echo "no SHA-256 utility is available" >&2
+              return 1
+            fi
+          }
           case "$RUNNER_OS" in
             Linux|macOS)
               trusted_git=/usr/bin/git
@@ -605,7 +615,7 @@ jobs:
             exit 1
           fi
           trusted_git_directory="$(dirname "$trusted_git")"
-          trusted_git_sha256="$(sha256sum "$trusted_git" | cut -d ' ' -f1)"
+          trusted_git_sha256="$(sha256_file "$trusted_git")"
           filtered_path=("$trusted_git_directory")
           IFS=: read -r -a path_entries <<<"$PATH"
           for directory in "${path_entries[@]}"; do
@@ -614,7 +624,7 @@ jobs:
             fi
             candidate="$directory/git$git_suffix"
             if [[ -f "$candidate" ]] \
-              && [[ "$(sha256sum "$candidate" | cut -d ' ' -f1)" != "$trusted_git_sha256" ]]; then
+              && [[ "$(sha256_file "$candidate")" != "$trusted_git_sha256" ]]; then
               continue
             fi
             filtered_path+=("$directory")
@@ -636,6 +646,16 @@ jobs:
         run: |
           set -o pipefail
           evidence="target/projectatlas-quality/coverage/$PLATFORM_ID"
+          sha256_file() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum -- "$1" | awk '{print $1}'
+            elif command -v shasum >/dev/null 2>&1; then
+              shasum -a 256 -- "$1" | awk '{print $1}'
+            else
+              echo "no SHA-256 utility is available" >&2
+              return 1
+            fi
+          }
           mkdir -p "$evidence"
           cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
             test-quality coverage \
@@ -696,15 +716,15 @@ jobs:
             --arg target "$(rustc -Vv | sed -n 's/^host: //p')" \
             --arg runner_image "$DECLARED_RUNNER_IMAGE" \
             --arg runner_image_version "$ImageVersion" \
-            --arg rustc_version "$(rustc --version)" \
+            --arg rustc_version "$(rustc --version | awk '{print $2}')" \
             --arg llvm_version "$(rustc -Vv | sed -n 's/^LLVM version: //p')" \
-            --arg cargo_lock_sha256 "$(sha256sum Cargo.lock | cut -d ' ' -f1)" \
-            --arg policy_sha256 "$(sha256sum test-quality.toml | cut -d ' ' -f1)" \
+            --arg cargo_lock_sha256 "$(sha256_file Cargo.lock)" \
+            --arg policy_sha256 "$(sha256_file test-quality.toml)" \
             --arg source_scope_sha256 "$source_scope_sha256" \
-            --arg nextest_config_sha256 "$(sha256sum .config/nextest.toml | cut -d ' ' -f1)" \
-            --arg llvm_json_sha256 "$(sha256sum "$evidence/coverage.json" | cut -d ' ' -f1)" \
-            --arg coverage_report_sha256 "$(sha256sum "$evidence/coverage.txt" | cut -d ' ' -f1)" \
-            --arg validation_sha256 "$(sha256sum "$evidence/validation.json" | cut -d ' ' -f1)" \
+            --arg nextest_config_sha256 "$(sha256_file .config/nextest.toml)" \
+            --arg llvm_json_sha256 "$(sha256_file "$evidence/coverage.json")" \
+            --arg coverage_report_sha256 "$(sha256_file "$evidence/coverage.txt")" \
+            --arg validation_sha256 "$(sha256_file "$evidence/validation.json")" \
             --arg started_at_utc "$(cat "$evidence/started-at.txt")" \
             --arg completed_at_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
@@ -775,8 +795,8 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Install pinned mutation tools
         uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
@@ -911,7 +931,7 @@ jobs:
             --arg target "$(rustc -Vv | sed -n 's/^host: //p')" \
             --arg runner_image "$DECLARED_LINUX_RUNNER_IMAGE" \
             --arg runner_image_version "$ImageVersion" \
-            --arg rustc_version "$(rustc --version)" \
+            --arg rustc_version "$(rustc --version | awk '{print $2}')" \
             --arg llvm_version "$(rustc -Vv | sed -n 's/^LLVM version: //p')" \
             --arg cargo_lock_sha256 "$(sha256sum Cargo.lock | cut -d ' ' -f1)" \
             --arg policy_sha256 "$(sha256sum test-quality.toml | cut -d ' ' -f1)" \
@@ -990,8 +1010,8 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Install binary
         timeout-minutes: 5
@@ -1052,8 +1072,8 @@ jobs:
       - name: Setup Rust
         shell: bash
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Plugin installer E2E
         timeout-minutes: 5

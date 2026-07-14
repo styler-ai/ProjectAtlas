@@ -998,6 +998,7 @@ fn omitted_coverage_enforcement_remains_release_quality() {
 #[test]
 fn quality_workflows_bind_declared_runner_and_phase_contracts() {
     let root = assert_ok!(workspace_root());
+    let quality_policy = assert_ok!(policy(&root));
     let ci = assert_ok!(read_text(&assert_ok!(
         root.input(".github/workflows/ci.yml")
     )));
@@ -1007,7 +1008,35 @@ fn quality_workflows_bind_declared_runner_and_phase_contracts() {
     let release = assert_ok!(read_text(&assert_ok!(
         root.input(".github/workflows/release.yml")
     )));
+    let failure_smoke = assert_ok!(read_text(&assert_ok!(
+        root.input(".github/workflows/07-quality-failure-smoke.yml")
+    )));
+    let docs = assert_ok!(read_text(&assert_ok!(
+        root.input(".github/workflows/04-docs.yml")
+    )));
     let workflow_docs = assert_ok!(read_text(&assert_ok!(root.input("docs/workflow.md"))));
+
+    let pinned_toolchain = format!(
+        "RUSTUP_TOOLCHAIN: \"{}\"",
+        quality_policy.reference_toolchain.rust
+    );
+    for (name, workflow) in [
+        ("CI", ci.as_str()),
+        ("full mutation", mutation.as_str()),
+        ("release", release.as_str()),
+        ("failure smoke", failure_smoke.as_str()),
+        ("docs", docs.as_str()),
+    ] {
+        assert!(
+            workflow.contains(&pinned_toolchain),
+            "{name} does not pin the quality-policy Rust toolchain"
+        );
+        assert!(
+            !workflow.contains("rustup toolchain install stable")
+                && !workflow.contains("rustup default stable"),
+            "{name} follows the moving stable toolchain"
+        );
+    }
 
     assert!(ci.contains("runs-on: ${{ matrix.runner_image }}"));
     for selector in [
@@ -1028,6 +1057,18 @@ fn quality_workflows_bind_declared_runner_and_phase_contracts() {
     assert!(ci.contains("trusted_git=\"$(command -v git.exe)\""));
     assert!(ci.contains("trusted_git_sha256"));
     assert!(ci.contains("filtered_path+=(\"$directory\")"));
+    assert!(ci.contains("shasum -a 256 -- \"$1\""));
+    assert!(ci.contains("trusted_git_sha256=\"$(sha256_file \"$trusted_git\")\""));
+    assert!(ci.contains("--arg llvm_json_sha256 \"$(sha256_file \"$evidence/coverage.json\")\""));
+
+    let normalized_rustc_version = "--arg rustc_version \"$(rustc --version | awk '{print $2}')\"";
+    assert!(ci.contains(normalized_rustc_version));
+    assert!(mutation.contains(normalized_rustc_version));
+    assert!(!ci.contains("--arg rustc_version \"$(rustc --version)\""));
+    assert!(!mutation.contains("--arg rustc_version \"$(rustc --version)\""));
+    assert!(ci.contains("tool:{name:\"rustc\",version:$rustc_version}"));
+    assert!(release.contains("rustup toolchain install \"$env:RUSTUP_TOOLCHAIN\""));
+    assert!(release.contains("rustup default \"$env:RUSTUP_TOOLCHAIN\""));
 
     assert!(ci.contains("required: true\n        type: string\n\npermissions:"));
     assert!(ci.contains("'implementation-checkpoint'"));

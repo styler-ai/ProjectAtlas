@@ -27,6 +27,7 @@ permissions:
 env:
   RELEASE_VERSION: ${{ inputs.version }}
   RELEASE_SHA: ${{ inputs.commit_sha }}
+  RUSTUP_TOOLCHAIN: "1.93.1"
 
 jobs:
   release-policy:
@@ -45,8 +46,8 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Release notes generator self-test
         run: python3 .github/scripts/release-notes.py --self-test
@@ -148,8 +149,8 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Prepare release evidence summary
         env:
@@ -246,8 +247,8 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Build
         run: cargo build --locked -p projectatlas-cli --release
@@ -281,8 +282,8 @@ jobs:
       - name: Setup Rust
         shell: pwsh
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$env:RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$env:RUSTUP_TOOLCHAIN"
 
       - name: Build
         shell: pwsh

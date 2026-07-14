@@ -26,6 +26,7 @@ permissions:
 env:
   MUTATION_SHA: ${{ inputs.expected_sha || github.sha }}
   DECLARED_LINUX_RUNNER_IMAGE: ubuntu-latest
+  RUSTUP_TOOLCHAIN: "1.93.1"
 
 jobs:
   inventory:
@@ -47,8 +48,8 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Install pinned mutation tools
         uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
@@ -171,8 +172,8 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Install pinned mutation tools
         uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
@@ -228,7 +229,7 @@ jobs:
           mutants_path="$shard_root/native/mutants.out/mutants.json"
           outcomes_path="$shard_root/native/mutants.out/outcomes.json"
           completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          rustc_version="$(rustc --version)"
+          rustc_version="$(rustc --version | awk '{print $2}')"
           llvm_version="$(rustc -Vv | sed -n 's/^LLVM version: //p')"
           target_triple="$(rustc -Vv | sed -n 's/^host: //p')"
           cargo_mutants_version="$(cargo mutants --version | awk '{print $2}')"
@@ -310,8 +311,8 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Prepare aggregate diagnostics
         if: always()
@@ -420,7 +421,7 @@ jobs:
             --arg target "$(rustc -Vv | sed -n 's/^host: //p')" \
             --arg runner_image "$DECLARED_LINUX_RUNNER_IMAGE" \
             --arg runner_image_version "$ImageVersion" \
-            --arg rustc_version "$(rustc --version)" \
+            --arg rustc_version "$(rustc --version | awk '{print $2}')" \
             --arg llvm_version "$(rustc -Vv | sed -n 's/^LLVM version: //p')" \
             --arg cargo_lock_sha256 "$(sha256sum Cargo.lock | cut -d ' ' -f1)" \
             --arg policy_sha256 "$(sha256sum test-quality.toml | cut -d ' ' -f1)" \

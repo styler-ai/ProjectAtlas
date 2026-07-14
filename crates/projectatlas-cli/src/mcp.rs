@@ -4423,11 +4423,8 @@ mod tests {
             fs::create_dir_all(repo.join(".projectatlas"))?;
             fs::create_dir_all(repo.join("src"))?;
             fs::write(repo.join("src").join("lib.rs"), "pub fn marker() {}\n")?;
-            let store = open_atlas_store(
-                &repo
-                    .join(".projectatlas")
-                    .join(PROJECTATLAS_DATABASE_FILE_NAME),
-            )?;
+            let store =
+                open_atlas_store(&repo.join(".projectatlas").join(PROJECTATLAS_DB_FILE_NAME))?;
             store.set_project_root(repo)?;
         }
         let active_state = ProjectAtlasMcpServer::project_state_from_root(&repo_a)?;
