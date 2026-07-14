@@ -1071,6 +1071,8 @@ fn quality_workflows_bind_declared_runner_and_phase_contracts() {
     let coverage_manifest = &ci[manifest_start..manifest_end];
     assert!(coverage_manifest.contains("sha256_file()"));
     assert!(coverage_manifest.contains("shasum -a 256 -- \"$1\""));
+    assert!(coverage_manifest.contains("test_seconds:null,build_seconds:null"));
+    assert!(!coverage_manifest.contains("test_seconds:120"));
     assert!(
         coverage_manifest
             .contains("--arg llvm_json_sha256 \"$(sha256_file \"$evidence/coverage.json\")\"")
@@ -1170,29 +1172,48 @@ fn strict_lint_review_replays_retained_repository_artifacts() {
 }
 
 #[test]
-fn changed_mutation_normalizes_only_successful_empty_source_runs() {
+fn changed_mutation_preflights_candidates_before_empty_normalization() {
     let root = assert_ok!(workspace_root());
     let ci = assert_ok!(read_text(&assert_ok!(
         root.input(".github/workflows/ci.yml")
     )));
-    let command = assert_ok!(required_text_position(&ci, "if ! cargo mutants"));
+    let candidate_inventory = assert_ok!(required_text_position(
+        &ci,
+        "candidate_inventory=\"$RUNNER_TEMP/projectatlas-changed-mutation-candidates.json\""
+    ));
+    let inventory_failure = assert_ok!(required_text_position(
+        &ci,
+        "changed-source mutation candidate inventory failed"
+    ));
+    let inventory_shape = assert_ok!(required_text_position(
+        &ci,
+        "jq -e 'type == \"array\"' \"$candidate_inventory\""
+    ));
+    let candidate_count = assert_ok!(required_text_position(
+        &ci,
+        "candidate_count=\"$(jq -er 'length' \"$candidate_inventory\")\""
+    ));
+    let empty_inventory = assert_ok!(required_text_position(
+        &ci,
+        "cp \"$candidate_inventory\" \"$inventory\""
+    ));
     let execution_failure = assert_ok!(required_text_position(
         &ci,
         "changed-source mutation execution failed"
     ));
-    let source_guard = assert_ok!(required_text_position(
-        &ci,
-        "cargo-mutants omitted native output for an applicable Rust source change"
-    ));
-    let empty_inventory = assert_ok!(required_text_position(
-        &ci,
-        "printf '[]\\n' > \"$inventory\""
-    ));
-    assert!(command < execution_failure);
-    assert!(execution_failure < source_guard);
-    assert!(source_guard < empty_inventory);
-    assert!(ci.contains("^crates/[^/]+/src/(.*/)?[^/]+\\.rs$"));
+    assert!(candidate_inventory < inventory_failure);
+    assert!(inventory_failure < inventory_shape);
+    assert!(inventory_shape < candidate_count);
+    assert!(candidate_count < empty_inventory);
+    assert!(empty_inventory < execution_failure);
+    assert_eq!(ci.matches("\n          if ! cargo mutants").count(), 1);
+    assert!(ci.contains("elif ! cargo mutants"));
+    assert!(ci.contains("--list \\\n              --json > \"$candidate_inventory\""));
+    assert!(ci.contains("if (( candidate_count == 0 )); then"));
+    assert!(ci.contains("cargo-mutants produced an incomplete native result"));
     assert!(ci.contains("cargo_mutants_version:\"27.1.0\""));
+    assert!(!ci.contains("cargo-mutants omitted native output"));
+    assert!(!ci.contains("^crates/[^/]+/src/(.*/)?[^/]+\\.rs$"));
     assert!(!ci.contains("cargo mutants || true"));
 }
 

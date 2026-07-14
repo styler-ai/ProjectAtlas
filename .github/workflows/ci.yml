@@ -740,7 +740,7 @@ jobs:
             --argjson regions_total "$regions_total" \
             --argjson functions_covered "$functions_covered" \
             --argjson functions_total "$functions_total" \
-            '{schema_version:1,repository:$repository,gate:"coverage",status:"passed",commit_sha:$commit_sha,platform:{id:$platform_id,os:$platform_os,arch:$platform_arch,target:$target,runner_image:$runner_image,runner_image_version:$runner_image_version},toolchain:{rustc_version:$rustc_version,llvm_version:$llvm_version},tool:{name:"cargo-llvm-cov",version:"0.8.7"},inputs:{cargo_lock_sha256:$cargo_lock_sha256,policy_sha256:$policy_sha256,source_scope_sha256:$source_scope_sha256,configs:[{role:"nextest",path:".config/nextest.toml",sha256:$nextest_config_sha256}]},command:{executable:"cargo",arguments:["llvm-cov","nextest","--workspace","--all-features","--locked","--json","--output-path",$coverage_path],profile:"ci"},timeouts:{command_seconds:2400,job_seconds:2700,test_seconds:120,build_seconds:null},started_at_utc:$started_at_utc,completed_at_utc:$completed_at_utc,run:{kind:"github_actions",run_id:$run_id,run_attempt:$run_attempt,job_id:$job_id,job_name:$job_name,workflow_ref:$workflow_ref},artifacts:[{role:"llvm_json",path:"coverage.json",sha256:$llvm_json_sha256},{role:"coverage_report",path:"coverage.txt",sha256:$coverage_report_sha256},{role:"validation_summary",path:"validation.json",sha256:$validation_sha256}],result:{kind:"coverage",enforcement:$enforcement,raw:{lines:{covered:$lines_covered,total:$lines_total},regions:{covered:$regions_covered,total:$regions_total},functions:{covered:$functions_covered,total:$functions_total}},adjusted:{lines:{covered:$lines_covered,total:$lines_total},regions:{covered:$regions_covered,total:$regions_total},functions:{covered:$functions_covered,total:$functions_total}},exceptions_used:0}}' \
+            '{schema_version:1,repository:$repository,gate:"coverage",status:"passed",commit_sha:$commit_sha,platform:{id:$platform_id,os:$platform_os,arch:$platform_arch,target:$target,runner_image:$runner_image,runner_image_version:$runner_image_version},toolchain:{rustc_version:$rustc_version,llvm_version:$llvm_version},tool:{name:"cargo-llvm-cov",version:"0.8.7"},inputs:{cargo_lock_sha256:$cargo_lock_sha256,policy_sha256:$policy_sha256,source_scope_sha256:$source_scope_sha256,configs:[{role:"nextest",path:".config/nextest.toml",sha256:$nextest_config_sha256}]},command:{executable:"cargo",arguments:["llvm-cov","nextest","--workspace","--all-features","--locked","--json","--output-path",$coverage_path],profile:"ci"},timeouts:{command_seconds:2400,job_seconds:2700,test_seconds:null,build_seconds:null},started_at_utc:$started_at_utc,completed_at_utc:$completed_at_utc,run:{kind:"github_actions",run_id:$run_id,run_attempt:$run_attempt,job_id:$job_id,job_name:$job_name,workflow_ref:$workflow_ref},artifacts:[{role:"llvm_json",path:"coverage.json",sha256:$llvm_json_sha256},{role:"coverage_report",path:"coverage.txt",sha256:$coverage_report_sha256},{role:"validation_summary",path:"validation.json",sha256:$validation_sha256}],result:{kind:"coverage",enforcement:$enforcement,raw:{lines:{covered:$lines_covered,total:$lines_total},regions:{covered:$regions_covered,total:$regions_total},functions:{covered:$functions_covered,total:$functions_total}},adjusted:{lines:{covered:$lines_covered,total:$lines_total},regions:{covered:$regions_covered,total:$regions_total},functions:{covered:$functions_covered,total:$functions_total}},exceptions_used:0}}' \
             > "$evidence/manifest.json"
           cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
             test-quality evidence --root . --policy test-quality.toml \
@@ -851,7 +851,35 @@ jobs:
         run: |
           evidence=target/projectatlas-quality/changed-mutation
           native="$evidence/native/mutants.out"
+          inventory="$native/mutants.json"
+          outcomes="$native/outcomes.json"
+          candidate_inventory="$RUNNER_TEMP/projectatlas-changed-mutation-candidates.json"
           if ! cargo mutants \
+              --config .cargo/mutants.toml \
+              --workspace \
+              --in-diff target/projectatlas-quality/changed-mutation/source.diff \
+              --list \
+              --json > "$candidate_inventory"; then
+            echo "changed-source mutation candidate inventory failed" >&2
+            exit 1
+          fi
+          if [[ ! -s "$candidate_inventory" ]]; then
+            printf '[]\n' > "$candidate_inventory"
+          fi
+          if ! jq -e 'type == "array"' "$candidate_inventory" > /dev/null; then
+            echo "cargo-mutants produced a malformed candidate inventory" >&2
+            exit 1
+          fi
+          candidate_count="$(jq -er 'length' "$candidate_inventory")"
+          if (( candidate_count == 0 )); then
+            mkdir -p "$native"
+            cp "$candidate_inventory" "$inventory"
+            jq -n \
+              --arg start_time "$(cat "$evidence/started-at.txt")" \
+              --arg end_time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '{outcomes:[],total_mutants:0,missed:0,caught:0,timeout:0,unviable:0,success:0,start_time:$start_time,end_time:$end_time,cargo_mutants_version:"27.1.0"}' \
+              > "$outcomes"
+          elif ! cargo mutants \
               --config .cargo/mutants.toml \
               --workspace \
               --in-diff target/projectatlas-quality/changed-mutation/source.diff \
@@ -862,27 +890,11 @@ jobs:
               --annotations github; then
             echo "changed-source mutation execution failed" >&2
             exit 1
-          fi
-          inventory="$native/mutants.json"
-          outcomes="$native/outcomes.json"
-          changed_paths="$(git diff --name-only --diff-filter=ACDMRTUXB \
-            "$BASE_SHA..$QUALITY_SHA" --)"
-          if [[ -f "$inventory" || -f "$outcomes" ]]; then
+          else
             if [[ ! -f "$inventory" || ! -f "$outcomes" ]]; then
               echo "cargo-mutants produced an incomplete native result" >&2
               exit 1
             fi
-          elif grep -Eq '^crates/[^/]+/src/(.*/)?[^/]+\.rs$' <<<"$changed_paths"; then
-            echo "cargo-mutants omitted native output for an applicable Rust source change" >&2
-            exit 1
-          else
-            mkdir -p "$native"
-            printf '[]\n' > "$inventory"
-            jq -n \
-              --arg start_time "$(cat "$evidence/started-at.txt")" \
-              --arg end_time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              '{outcomes:[],total_mutants:0,missed:0,caught:0,timeout:0,unviable:0,success:0,start_time:$start_time,end_time:$end_time,cargo_mutants_version:"27.1.0"}' \
-              > "$outcomes"
           fi
 
       - name: Validate changed-source mutation policy
