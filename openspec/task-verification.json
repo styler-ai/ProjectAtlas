@@ -3351,7 +3351,7 @@
           "test_ids": [
             "UT:ARRI-4.21"
           ],
-          "assertion": "Verify implement only the benchmark-selected compact graph layout, using contiguous storage, numeric hot-path IDs, string/path interning, typed relation identity, and bounded worker-local batches where measurements justify them.",
+          "assertion": "Verify exact expanded/compact/expanded graph equivalence; four-byte interned and optional text IDs; selected symbol and relation row-size ceilings; representative retained storage below half of the expanded repeated-fact graph; preserved typed relation identity; one authoritative actual worker count for pool reporting, bounded result batches, and complete input-order coverage; and direct compact-row persistence through existing symbol, relation, and parse-metadata queries.",
           "command": {
             "executable": "cargo",
             "arguments": [
@@ -3364,6 +3364,26 @@
           },
           "timeout_seconds": 300,
           "covered_inputs": [
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/runtime.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-core/src/symbols.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/lib.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/structural_publication.rs"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/changes/advance-rust-repository-intelligence/design.md"
+            },
             {
               "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"

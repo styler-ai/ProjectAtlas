@@ -20,8 +20,8 @@ use projectatlas_core::health::{
     TEMP_FOLDER_BUCKETS, finding_id,
 };
 use projectatlas_core::symbols::{
-    CodeSymbol, ParserKind, RelationKind, SourceParseMetadata, SymbolGraph, SymbolKind,
-    SymbolRelation,
+    CodeSymbol, CompactSymbolGraph, CompactSymbolGraphError, ParserKind, RelationKind,
+    SourceParseMetadata, SymbolGraph, SymbolKind, SymbolRelation,
 };
 use projectatlas_core::telemetry::{
     TokenBucketOverview, TokenOverview, TokenTrendPeriod, TokenTrendReport, TokenTrendWindow,
@@ -37,7 +37,7 @@ use projectatlas_core::{
 use rusqlite::types::Value;
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::num::TryFromIntError;
 use std::path::Path;
 use thiserror::Error;
@@ -86,6 +86,9 @@ pub enum DbError {
         #[source]
         source: Box<GraphContractError>,
     },
+    /// An expanded compatibility graph could not enter the compact persistence path.
+    #[error("invalid compact symbol graph: {0}")]
+    InvalidCompactSymbolGraph(#[from] CompactSymbolGraphError),
     /// Invalid enum value read from the database.
     #[error("invalid {field} value in database: {value}")]
     InvalidEnum {
@@ -675,10 +678,20 @@ impl AtlasStore {
     ///
     /// # Errors
     ///
-    /// Returns an error if persistence fails.
+    /// Returns an error if the graph exceeds the compact representation or persistence fails.
     pub fn replace_symbol_graph(&mut self, graph: &SymbolGraph) -> DbResult<()> {
+        let compact = CompactSymbolGraph::try_from(graph.clone())?;
+        self.replace_compact_symbol_graph(&compact)
+    }
+
+    /// Replace the symbol graph for a file path from compact worker storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if persistence fails.
+    pub fn replace_compact_symbol_graph(&mut self, graph: &CompactSymbolGraph) -> DbResult<()> {
         let transaction = self.connection.transaction()?;
-        replace_symbol_graph_in_connection(&transaction, graph)?;
+        replace_compact_symbol_graph_in_connection(&transaction, graph)?;
         transaction.commit()?;
         Ok(())
     }
@@ -3576,17 +3589,17 @@ fn clear_source_index_in_connection(
 }
 
 /// Replace one parser-owned compatibility graph within an existing write boundary.
-fn replace_symbol_graph_in_connection(
+fn replace_compact_symbol_graph_in_connection(
     connection: &Connection,
-    graph: &SymbolGraph,
+    graph: &CompactSymbolGraph,
 ) -> DbResult<()> {
-    let metadata = SourceParseMetadata::from_graph(graph);
+    let path = graph.path();
     connection
         .prepare_cached("DELETE FROM symbols WHERE path = ?1")?
-        .execute([&graph.path])?;
+        .execute([path])?;
     connection
         .prepare_cached("DELETE FROM symbol_relations WHERE path = ?1")?
-        .execute([&graph.path])?;
+        .execute([path])?;
     connection
         .prepare_cached(
             "INSERT INTO source_parse_metadata(
@@ -3601,16 +3614,16 @@ fn replace_symbol_graph_in_connection(
              updated_at = CURRENT_TIMESTAMP",
         )?
         .execute(params![
-            metadata.path,
-            metadata.language.as_deref(),
-            metadata.parser.to_string(),
-            usize_to_i64(metadata.symbol_count),
-            usize_to_i64(metadata.relation_count),
+            path,
+            graph.language(),
+            graph.parser().to_string(),
+            usize_to_i64(graph.symbol_count()),
+            usize_to_i64(graph.relation_count()),
         ])?;
     let node_id = connection
         .query_row(
             "SELECT id FROM nodes WHERE path = ?1 AND exists_now = 1",
-            [&graph.path],
+            [path],
             |row| row.get::<_, i64>(0),
         )
         .optional()?;
@@ -3621,20 +3634,20 @@ fn replace_symbol_graph_in_connection(
          )
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
     )?;
-    for symbol in &graph.symbols {
+    for symbol in graph.symbols() {
         insert_symbol.execute(params![
-            symbol.path,
-            symbol.language.as_deref(),
-            symbol.name,
-            symbol.kind.to_string(),
-            symbol.signature,
-            symbol.exported,
-            symbol.documentation.as_deref(),
-            usize_to_i64(symbol.line_start),
-            usize_to_i64(symbol.line_end),
-            symbol.parent.as_deref(),
-            symbol.parser.to_string(),
-            symbol.detail.as_deref(),
+            symbol.path(),
+            symbol.language(),
+            symbol.name(),
+            symbol.kind().to_string(),
+            symbol.signature(),
+            symbol.exported(),
+            symbol.documentation(),
+            i64::from(symbol.line_start()),
+            i64::from(symbol.line_end()),
+            symbol.parent(),
+            symbol.parser().to_string(),
+            symbol.detail(),
         ])?;
     }
     let mut insert_relation = connection.prepare_cached(
@@ -3643,15 +3656,15 @@ fn replace_symbol_graph_in_connection(
          )
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?;
-    for relation in &graph.relations {
+    for relation in graph.relations() {
         insert_relation.execute(params![
-            relation.path,
-            relation.source_name,
-            relation.target_name,
-            relation.kind.to_string(),
-            usize_to_i64(relation.line),
-            relation.context,
-            relation.parser.to_string(),
+            relation.path(),
+            relation.source_name(),
+            relation.target_name(),
+            relation.kind().to_string(),
+            i64::from(relation.line()),
+            relation.context(),
+            relation.parser().to_string(),
         ])?;
     }
     if let Some(node_id) = node_id {
@@ -4011,33 +4024,44 @@ fn replace_symbol_search_summary(
 }
 
 /// Build a bounded search-only summary from symbol names.
-fn symbol_search_summary(graph: &SymbolGraph) -> Option<String> {
-    let mut names = graph
-        .symbols
-        .iter()
-        .filter(|symbol| !matches!(symbol.kind, SymbolKind::Import | SymbolKind::Unknown))
-        .map(|symbol| symbol.name.trim())
+fn symbol_search_summary(graph: &CompactSymbolGraph) -> Option<String> {
+    let mut names = BTreeSet::new();
+    for name in graph
+        .symbols()
+        .filter(|symbol| !matches!(symbol.kind(), SymbolKind::Import | SymbolKind::Unknown))
+        .map(|symbol| symbol.name().trim())
         .filter(|name| !name.is_empty())
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
+    {
+        names.insert(name);
+        if names.len() > MAX_SYMBOL_SEARCH_SUMMARY_CHARS {
+            // Every retained name consumes at least one output character, so
+            // later lexical candidates cannot contribute to the bounded prefix.
+            names.pop_last();
+        }
+    }
     if names.is_empty() {
         return None;
     }
-    let summary = format!("symbols {}", names.join(" "));
-    Some(truncate_summary_chars(
-        &summary,
-        MAX_SYMBOL_SEARCH_SUMMARY_CHARS,
-    ))
-}
-
-/// Truncate a summary at a valid UTF-8 boundary.
-fn truncate_summary_chars(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_string();
+    let mut summary = String::with_capacity(MAX_SYMBOL_SEARCH_SUMMARY_CHARS);
+    summary.push_str("symbols ");
+    let mut used_chars = summary.chars().count();
+    for (index, name) in names.into_iter().enumerate() {
+        if index > 0 {
+            if used_chars == MAX_SYMBOL_SEARCH_SUMMARY_CHARS {
+                break;
+            }
+            summary.push(' ');
+            used_chars += 1;
+        }
+        for character in name.chars() {
+            if used_chars == MAX_SYMBOL_SEARCH_SUMMARY_CHARS {
+                return Some(summary);
+            }
+            summary.push(character);
+            used_chars += 1;
+        }
     }
-    value.chars().take(max_chars).collect()
+    Some(summary)
 }
 
 /// Parse a stored purpose source value into the domain enum.
@@ -6490,7 +6514,7 @@ mod tests {
     }
 
     #[test]
-    fn replaces_symbol_graph_idempotently() -> Result<(), Box<dyn Error>> {
+    fn task_arri_ut_arri_4_21_persists_compact_symbol_graph() -> Result<(), Box<dyn Error>> {
         let mut store = AtlasStore::in_memory()?;
         let graph = SymbolGraph {
             path: "src/main.rs".to_string(),
@@ -6521,7 +6545,8 @@ mod tests {
             }],
         };
 
-        store.replace_symbol_graph(&graph)?;
+        let compact = CompactSymbolGraph::try_from(graph.clone())?;
+        store.replace_compact_symbol_graph(&compact)?;
         store.replace_symbol_graph(&graph)?;
         let symbols = store.load_symbols(Some("src/main.rs"), Some("main"), 10)?;
         let relations = store.load_symbol_relations(Some("src/main.rs"), Some("println"), 10)?;
@@ -6539,6 +6564,29 @@ mod tests {
             &Some("Run the application.".to_string()),
             "documentation metadata",
         )?;
+        if let Ok(out_of_range) = usize::try_from(u64::from(u32::MAX) + 1) {
+            let mut invalid = graph.clone();
+            invalid.symbols[0].line_end = out_of_range;
+            require_eq(
+                &matches!(
+                    store.replace_symbol_graph(&invalid),
+                    Err(DbError::InvalidCompactSymbolGraph(
+                        CompactSymbolGraphError::LineOutOfRange {
+                            field: "symbol.line_end",
+                            value,
+                        }
+                    )) if value == out_of_range
+                ),
+                &true,
+                "out-of-range compatibility graph did not fail before persistence",
+            )?;
+            let persisted = store.load_symbols(Some("src/main.rs"), Some("main"), 10)?;
+            require_eq(
+                &persisted[0].line_end,
+                &3,
+                "invalid compatibility graph left the existing row intact",
+            )?;
+        }
         Ok(())
     }
 

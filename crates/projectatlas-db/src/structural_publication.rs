@@ -3,12 +3,13 @@
 use crate::{
     AtlasStore, DbError, DbResult, IndexedFileText, clear_node_summary_in_connection,
     clear_source_index_in_connection, mark_paths_absent_in_connection,
-    node_id_for_path_in_connection, normalize_metadata_path, replace_symbol_graph_in_connection,
-    schema, set_node_summary_in_connection, set_suggested_purpose_in_connection,
-    sql_string_literals, sqlite_read_uri, upsert_file_text_for_publication, upsert_node,
+    node_id_for_path_in_connection, normalize_metadata_path,
+    replace_compact_symbol_graph_in_connection, schema, set_node_summary_in_connection,
+    set_suggested_purpose_in_connection, sql_string_literals, sqlite_read_uri,
+    upsert_file_text_for_publication, upsert_node,
 };
 use projectatlas_core::graph::{IndexEpoch, ProjectInstanceId, PublicationState, StructuralSlot};
-use projectatlas_core::symbols::SymbolGraph;
+use projectatlas_core::symbols::CompactSymbolGraph;
 use projectatlas_core::{AGENT_REVIEWED_SOURCE_VALUES, Node, PurposeSource, PurposeStatus};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
@@ -96,7 +97,7 @@ pub enum IncrementalSourceMutation {
     /// Replace the file's parser graph and observed summary together.
     Replace {
         /// Complete parser graph for the affected path.
-        graph: SymbolGraph,
+        graph: CompactSymbolGraph,
         /// Observed parser summary for the affected path.
         summary: String,
         /// Optional generated purpose suggestion.
@@ -502,7 +503,7 @@ fn validate_incremental_delta(delta: &IncrementalStructuralDelta) -> DbResult<()
     }
     for mutation in &delta.source_mutations {
         let path = match mutation {
-            IncrementalSourceMutation::Replace { graph, .. } => &graph.path,
+            IncrementalSourceMutation::Replace { graph, .. } => graph.path(),
             IncrementalSourceMutation::Clear { path, .. } => path,
         };
         require_path_in_affected_closure(delta, path, "source mutation")?;
@@ -715,11 +716,11 @@ fn apply_incremental_source_mutation(
             summary,
             purpose_suggestion,
         } => {
-            set_node_summary_in_connection(connection, &graph.path, summary)?;
+            set_node_summary_in_connection(connection, graph.path(), summary)?;
             if let Some(suggestion) = purpose_suggestion {
-                set_suggested_purpose_in_connection(connection, &graph.path, suggestion)?;
+                set_suggested_purpose_in_connection(connection, graph.path(), suggestion)?;
             }
-            replace_symbol_graph_in_connection(connection, graph)
+            replace_compact_symbol_graph_in_connection(connection, graph)
         }
         IncrementalSourceMutation::Clear {
             path,

@@ -23,7 +23,9 @@ use projectatlas_core::health::{
 };
 use projectatlas_core::language::{LanguageParserSupport, language_spec};
 use projectatlas_core::outline::estimate_tokens;
-use projectatlas_core::symbols::{RelationKind, SymbolGraph, SymbolKind};
+use projectatlas_core::symbols::{
+    CompactSymbolGraph, CompactSymbolGraphError, RelationKind, SymbolGraph, SymbolKind,
+};
 use projectatlas_core::telemetry::{
     TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_BASELINE_SELECTED_CANDIDATES,
     TOKEN_BUCKET_NAVIGATION_AVOIDANCE, TOKEN_CONFIDENCE_INFERRED, TOKEN_CONFIDENCE_POLICY_ESTIMATE,
@@ -47,8 +49,8 @@ use projectatlas_service::{
     load_ranked_folder_nodes_with_reasons,
 };
 use projectatlas_symbols::extract_symbol_graph;
-use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -1375,7 +1377,7 @@ pub(crate) struct SymbolBuildReport {
     pub(crate) binary_or_non_utf8: usize,
     /// Files skipped because the build deadline was reached.
     pub(crate) timed_out: usize,
-    /// Worker thread count requested for parser work.
+    /// Worker thread count selected for parser work.
     pub(crate) max_workers: usize,
     /// Optional timeout seconds requested for parser work.
     pub(crate) timeout_seconds: Option<u64>,
@@ -1920,8 +1922,8 @@ impl SymbolBuildOptions {
         }
     }
 
-    /// Return the worker count that will be reported.
-    pub(crate) fn reported_workers(self) -> usize {
+    /// Return the requested parser worker count before pool construction.
+    pub(crate) fn requested_workers(self) -> usize {
         self.max_workers
             .unwrap_or_else(|| thread::available_parallelism().map_or(1, usize::from))
     }
@@ -2095,10 +2097,8 @@ pub(crate) struct SymbolParseJob {
 /// Successful parser output waiting for sequential DB persistence.
 #[derive(Debug)]
 pub(crate) struct SymbolParseSuccess {
-    /// Repository-relative file path.
-    pub(crate) path: String,
-    /// Extracted symbol graph.
-    graph: SymbolGraph,
+    /// Extracted symbol graph compacted before it crosses the worker boundary.
+    graph: CompactSymbolGraph,
     /// Observed one-line source summary.
     summary: String,
     /// Optional generated purpose suggestion.
@@ -2126,6 +2126,13 @@ pub(crate) enum SymbolParseOutcome {
         path: PathBuf,
         /// Source IO error.
         source: io::Error,
+    },
+    /// Extracted rows exceeded the compact worker representation.
+    InvalidGraph {
+        /// Repository-relative path whose graph could not be compacted.
+        path: String,
+        /// Compact-layout validation error.
+        source: CompactSymbolGraphError,
     },
 }
 
@@ -2165,7 +2172,7 @@ pub(crate) fn build_symbols_for_paths(
         too_large: 0,
         binary_or_non_utf8: 0,
         timed_out: 0,
-        max_workers: options.reported_workers(),
+        max_workers: options.requested_workers(),
         timeout_seconds: options.timeout_seconds,
         symbols: 0,
         relations: 0,
@@ -2211,54 +2218,73 @@ pub(crate) fn build_symbols_for_paths(
         });
     }
     let started_at = Instant::now();
-    for outcome in parse_symbol_jobs(&jobs, options, started_at)? {
-        match outcome {
-            SymbolParseOutcome::Parsed(parsed) => {
-                report.symbols += parsed.graph.symbols.len();
-                report.relations += parsed.graph.relations.len();
-                store.set_node_summary(&parsed.path, &parsed.summary)?;
-                report.summaries += 1;
-                if let Some(suggestion) = parsed.purpose_suggestion {
-                    store.set_suggested_purpose(&parsed.path, &suggestion)?;
-                    report.purpose_suggestions += 1;
+    let pool = symbol_worker_pool(options)?;
+    report.max_workers = pool.current_num_threads();
+    for batch in symbol_job_batches(&jobs, &pool) {
+        for outcome in parse_symbol_job_batch(&pool, batch, options, started_at) {
+            match outcome {
+                SymbolParseOutcome::Parsed(parsed) => {
+                    report.symbols += parsed.graph.symbol_count();
+                    report.relations += parsed.graph.relation_count();
+                    store.set_node_summary(parsed.graph.path(), &parsed.summary)?;
+                    report.summaries += 1;
+                    if let Some(suggestion) = parsed.purpose_suggestion {
+                        store.set_suggested_purpose(parsed.graph.path(), &suggestion)?;
+                        report.purpose_suggestions += 1;
+                    }
+                    store.replace_compact_symbol_graph(&parsed.graph)?;
+                    report.parsed += 1;
                 }
-                store.replace_symbol_graph(&parsed.graph)?;
-                report.parsed += 1;
-            }
-            SymbolParseOutcome::TimedOut { path } => {
-                clear_skipped_symbol_index_for_path(store, &path)?;
-                report.timed_out += 1;
-            }
-            SymbolParseOutcome::BinaryOrNonUtf8 { path } => {
-                clear_skipped_symbol_index_for_path(store, &path)?;
-                report.binary_or_non_utf8 += 1;
-            }
-            SymbolParseOutcome::Io { path, source } => {
-                return Err(CliError::Io { path, source });
+                SymbolParseOutcome::TimedOut { path } => {
+                    clear_skipped_symbol_index_for_path(store, &path)?;
+                    report.timed_out += 1;
+                }
+                SymbolParseOutcome::BinaryOrNonUtf8 { path } => {
+                    clear_skipped_symbol_index_for_path(store, &path)?;
+                    report.binary_or_non_utf8 += 1;
+                }
+                SymbolParseOutcome::Io { path, source } => {
+                    return Err(CliError::Io { path, source });
+                }
+                SymbolParseOutcome::InvalidGraph { path, source } => {
+                    return Err(CliError::InvalidInput(format!(
+                        "symbol graph for {path:?} could not be compacted: {source}"
+                    )));
+                }
             }
         }
     }
     Ok(report)
 }
 
-/// Parse queued symbol jobs with optional worker limits.
-pub(crate) fn parse_symbol_jobs(
+/// Build the parser pool once for all bounded result batches.
+fn symbol_worker_pool(options: &SymbolBuildOptions) -> Result<ThreadPool, CliError> {
+    ThreadPoolBuilder::new()
+        .num_threads(options.requested_workers().max(1))
+        .build()
+        .map_err(|source| CliError::InvalidInput(format!("symbol worker pool failed: {source}")))
+}
+
+/// Split parser inputs so no completed-result batch exceeds the actual pool size.
+fn symbol_job_batches<'a>(
+    jobs: &'a [SymbolParseJob],
+    pool: &ThreadPool,
+) -> impl ExactSizeIterator<Item = &'a [SymbolParseJob]> {
+    jobs.chunks(pool.current_num_threads().max(1))
+}
+
+/// Parse one bounded batch of queued symbol jobs.
+fn parse_symbol_job_batch(
+    pool: &ThreadPool,
     jobs: &[SymbolParseJob],
     options: &SymbolBuildOptions,
     started_at: Instant,
-) -> Result<Vec<SymbolParseOutcome>, CliError> {
-    let mut builder = ThreadPoolBuilder::new();
-    if let Some(max_workers) = options.max_workers {
-        builder = builder.num_threads(max_workers);
-    }
-    let pool = builder
-        .build()
-        .map_err(|source| CliError::InvalidInput(format!("symbol worker pool failed: {source}")))?;
-    Ok(pool.install(|| {
+) -> Vec<SymbolParseOutcome> {
+    pool.install(|| {
         jobs.par_iter()
             .map(|job| parse_symbol_job(job, options, started_at))
             .collect::<Vec<_>>()
-    }))
+    })
 }
 
 /// Parse one source file into a symbol graph.
@@ -2296,12 +2322,17 @@ pub(crate) fn parse_symbol_job(
     let purpose_suggestion = job
         .purpose_needs_suggestion
         .then(|| suggest_file_purpose(&job.path, &summary));
-    SymbolParseOutcome::Parsed(SymbolParseSuccess {
-        path: job.path.clone(),
-        graph,
-        summary,
-        purpose_suggestion,
-    })
+    match CompactSymbolGraph::try_from(graph) {
+        Ok(graph) => SymbolParseOutcome::Parsed(SymbolParseSuccess {
+            graph,
+            summary,
+            purpose_suggestion,
+        }),
+        Err(source) => SymbolParseOutcome::InvalidGraph {
+            path: job.path.clone(),
+            source,
+        },
+    }
 }
 
 /// Create a deterministic one-line content summary from extracted symbols.
@@ -3290,7 +3321,7 @@ fn unchanged_index_refresh_report(
             too_large: symbol_too_large,
             binary_or_non_utf8: 0,
             timed_out: 0,
-            max_workers: symbol_options.reported_workers(),
+            max_workers: symbol_options.requested_workers(),
             timeout_seconds: symbol_options.timeout_seconds,
             symbols: 0,
             relations: 0,
@@ -3346,7 +3377,7 @@ fn prepare_incremental_source_mutations(
         too_large: 0,
         binary_or_non_utf8: 0,
         timed_out: 0,
-        max_workers: options.reported_workers(),
+        max_workers: options.requested_workers(),
         timeout_seconds: options.timeout_seconds,
         symbols: 0,
         relations: 0,
@@ -3411,38 +3442,47 @@ fn prepare_incremental_source_mutations(
     }
 
     let started_at = Instant::now();
-    for outcome in parse_symbol_jobs(&jobs, options, started_at)? {
-        match outcome {
-            SymbolParseOutcome::Parsed(parsed) => {
-                report.symbols += parsed.graph.symbols.len();
-                report.relations += parsed.graph.relations.len();
-                report.summaries += 1;
-                report.purpose_suggestions += usize::from(parsed.purpose_suggestion.is_some());
-                report.parsed += 1;
-                mutations.push(IncrementalSourceMutation::Replace {
-                    graph: parsed.graph,
-                    summary: parsed.summary,
-                    purpose_suggestion: parsed.purpose_suggestion,
-                });
-            }
-            SymbolParseOutcome::TimedOut { path } => {
-                let language = language_by_path.get(&path).and_then(Option::as_deref);
-                mutations.push(IncrementalSourceMutation::Clear {
-                    preserve_node_summary: is_structural_summary_candidate(&path, language),
-                    path,
-                });
-                report.timed_out += 1;
-            }
-            SymbolParseOutcome::BinaryOrNonUtf8 { path } => {
-                let language = language_by_path.get(&path).and_then(Option::as_deref);
-                mutations.push(IncrementalSourceMutation::Clear {
-                    preserve_node_summary: is_structural_summary_candidate(&path, language),
-                    path,
-                });
-                report.binary_or_non_utf8 += 1;
-            }
-            SymbolParseOutcome::Io { path, source } => {
-                return Err(CliError::Io { path, source });
+    let pool = symbol_worker_pool(options)?;
+    report.max_workers = pool.current_num_threads();
+    for batch in symbol_job_batches(&jobs, &pool) {
+        for outcome in parse_symbol_job_batch(&pool, batch, options, started_at) {
+            match outcome {
+                SymbolParseOutcome::Parsed(parsed) => {
+                    report.symbols += parsed.graph.symbol_count();
+                    report.relations += parsed.graph.relation_count();
+                    report.summaries += 1;
+                    report.purpose_suggestions += usize::from(parsed.purpose_suggestion.is_some());
+                    report.parsed += 1;
+                    mutations.push(IncrementalSourceMutation::Replace {
+                        graph: parsed.graph,
+                        summary: parsed.summary,
+                        purpose_suggestion: parsed.purpose_suggestion,
+                    });
+                }
+                SymbolParseOutcome::TimedOut { path } => {
+                    let language = language_by_path.get(&path).and_then(Option::as_deref);
+                    mutations.push(IncrementalSourceMutation::Clear {
+                        preserve_node_summary: is_structural_summary_candidate(&path, language),
+                        path,
+                    });
+                    report.timed_out += 1;
+                }
+                SymbolParseOutcome::BinaryOrNonUtf8 { path } => {
+                    let language = language_by_path.get(&path).and_then(Option::as_deref);
+                    mutations.push(IncrementalSourceMutation::Clear {
+                        preserve_node_summary: is_structural_summary_candidate(&path, language),
+                        path,
+                    });
+                    report.binary_or_non_utf8 += 1;
+                }
+                SymbolParseOutcome::Io { path, source } => {
+                    return Err(CliError::Io { path, source });
+                }
+                SymbolParseOutcome::InvalidGraph { path, source } => {
+                    return Err(CliError::InvalidInput(format!(
+                        "symbol graph for {path:?} could not be compacted: {source}"
+                    )));
+                }
             }
         }
     }
@@ -3506,9 +3546,9 @@ fn prepare_incremental_summary_mutations(
         for mutation in source_mutations {
             match mutation {
                 IncrementalSourceMutation::Replace { graph, summary, .. }
-                    if graph.path == node.path =>
+                    if graph.path() == node.path =>
                 {
-                    symbol_count = graph.symbols.len();
+                    symbol_count = graph.symbol_count();
                     current_summary = Some(summary.clone());
                     break;
                 }
@@ -3874,4 +3914,60 @@ pub(crate) fn purpose_header_candidates(
         }
     }
     Ok(candidates)
+}
+
+#[cfg(test)]
+mod compact_symbol_batch_tests {
+    use super::*;
+
+    #[test]
+    fn task_arri_ut_arri_4_21_bounds_completed_worker_results() -> Result<(), CliError> {
+        let options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, Some(3), None);
+        let pool = symbol_worker_pool(&options)?;
+        let jobs = (0..10)
+            .map(|index| SymbolParseJob {
+                path: format!("src/file_{index}.rs"),
+                native_path: PathBuf::from(format!("src/file_{index}.rs")),
+                language: Some("rust".to_string()),
+                fallback_summary: None,
+                purpose_needs_suggestion: false,
+            })
+            .collect::<Vec<_>>();
+        let batches = symbol_job_batches(&jobs, &pool).collect::<Vec<_>>();
+        let actual_workers = pool.current_num_threads();
+
+        require(
+            actual_workers == options.requested_workers(),
+            "actual and reported parser worker counts differ",
+        )?;
+        require(
+            batches.iter().map(|batch| batch.len()).sum::<usize>() == jobs.len(),
+            "bounded parser batches did not cover every job",
+        )?;
+        require(
+            batches.iter().all(|batch| batch.len() <= actual_workers),
+            "completed parser batch exceeded the actual worker count",
+        )?;
+        require(
+            batches.iter().map(|batch| batch.len()).collect::<Vec<_>>() == vec![3, 3, 3, 1],
+            "parser job chunking did not preserve the expected batch sizes",
+        )?;
+        require(
+            batches
+                .iter()
+                .flat_map(|batch| batch.iter().map(|job| job.path.as_str()))
+                .eq(jobs.iter().map(|job| job.path.as_str())),
+            "parser job chunking did not preserve complete input order",
+        )?;
+        Ok(())
+    }
+
+    /// Return a typed test failure without using a panic path.
+    fn require(condition: bool, message: &'static str) -> Result<(), CliError> {
+        if condition {
+            Ok(())
+        } else {
+            Err(CliError::InvalidInput(message.to_string()))
+        }
+    }
 }
