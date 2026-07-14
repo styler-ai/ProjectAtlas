@@ -6828,6 +6828,18 @@ mod tests {
     }
 
     #[test]
+    fn project_root_metadata_rejects_non_missing_resolution_failures() {
+        let invalid_root = Path::new("invalid\0root");
+        let result = normalize_metadata_path(invalid_root);
+
+        assert!(matches!(
+            result,
+            Err(DbError::ProjectRootResolution { path, source })
+                if path == invalid_root && source.kind() == io::ErrorKind::InvalidInput
+        ));
+    }
+
+    #[test]
     fn read_project_root_read_only_does_not_create_wal_sidecars() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("repo with spaces");

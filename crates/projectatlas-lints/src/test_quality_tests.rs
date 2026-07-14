@@ -408,6 +408,11 @@ fn task_tqg_ut_3_5() {
     let directory = assert_ok!(tempfile::tempdir());
     let first = directory.path().join("first.txt");
     let second = directory.path().join("second.txt");
+    assert_ok!(std::fs::write(
+        directory.path().join("Cargo.toml"),
+        b"[workspace]\n"
+    ));
+    assert_ok!(std::fs::write(directory.path().join("Cargo.lock"), b""));
     assert_ok!(std::fs::write(&first, b"evidence-a"));
     assert_ok!(std::fs::write(&second, b"evidence-b"));
     let first_digest = assert_ok!(digest_file(&first));
@@ -416,6 +421,34 @@ fn task_tqg_ut_3_5() {
     assert_ok!(validate_digest(&first_digest, "first fixture"));
     assert_ok!(validate_commit("c672442438404411389ef86e2efd767f3a4b2be0"));
     assert!(validate_commit("C672442438404411389EF86E2EFD767F3A4B2BE0").is_err());
+
+    let root = assert_ok!(RepositoryRoot::open(
+        directory.path().to_string_lossy().as_ref(),
+        Path::new(".")
+    ));
+    let task = VerificationTask {
+        task_id: "3.5".to_string(),
+        test_ids: vec!["TQG-UT-3.5".to_string()],
+        assertion: "Covered inputs have a canonical content-sensitive digest.".to_string(),
+        command: VerificationCommand {
+            executable: "cargo".to_string(),
+            arguments: vec!["test".to_string()],
+        },
+        timeout_seconds: 120,
+        covered_inputs: vec![CoveredInput {
+            kind: CoveredInputKind::File,
+            path: "first.txt".to_string(),
+        }],
+        test_sources: Vec::new(),
+    };
+    let covered_digest = assert_ok!(normalized_covered_inputs_digest(&root, &task));
+    assert_eq!(covered_digest.len(), 64);
+    assert!(covered_digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_ok!(std::fs::write(&first, b"evidence-c"));
+    assert_ne!(
+        covered_digest,
+        assert_ok!(normalized_covered_inputs_digest(&root, &task))
+    );
 }
 
 #[test]
@@ -428,6 +461,32 @@ fn task_tqg_ut_3_6() {
     assert!(adjusted.meets(9_500));
     assert!(MetricCounts::new(11, 10).validate().is_err());
     assert!(MetricCounts::new(0, 0).validate().is_err());
+
+    let mutation = MutationCounts {
+        raw_total: 10,
+        caught: 7,
+        missed: 1,
+        timed_out: 1,
+        unviable: 1,
+        excluded: 0,
+        unresolved: 0,
+    };
+    let mut summary = BTreeMap::new();
+    mutation.insert_summary(&mut summary);
+    assert_eq!(
+        summary,
+        BTreeMap::from([
+            ("adjusted_viable_kill_basis_points".to_string(), 7_777),
+            ("caught".to_string(), 7),
+            ("excluded".to_string(), 0),
+            ("missed".to_string(), 1),
+            ("raw_kill_basis_points".to_string(), 7_000),
+            ("raw_total".to_string(), 10),
+            ("timed_out".to_string(), 1),
+            ("unresolved".to_string(), 0),
+            ("unviable".to_string(), 1),
+        ])
+    );
 }
 
 #[test]
