@@ -2591,7 +2591,11 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         "mcp get projectatlas".to_string(),
         "mcp remove projectatlas".to_string(),
         "mcp add projectatlas --".to_string(),
-        runtime.to_string_lossy().into_owned(),
+        runtime
+            .components()
+            .collect::<std::path::PathBuf>()
+            .to_string_lossy()
+            .into_owned(),
         "--require-version".to_string(),
         env!("CARGO_PKG_VERSION").to_string(),
         "--db".to_string(),
