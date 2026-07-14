@@ -7860,7 +7860,7 @@ mod tests {
     }
 
     #[test]
-    fn task_arri_ut_arri_4_19_schema_failures() -> Result<(), Box<dyn Error>> {
+    fn task_arri_ut_arri_4_19() -> Result<(), Box<dyn Error>> {
         fn reject_migration(_: &Connection) -> DbResult<()> {
             Err(preflight_error("injected migration failure"))
         }
@@ -7986,6 +7986,9 @@ mod tests {
             }
         }
         require_database_unchanged(&failed_path, &failed_bytes)?;
+
+        let interrupted = tempfile::tempdir()?;
+        crate::structural_publication::tests::prove_import_rollback(interrupted.path())?;
         Ok(())
     }
 

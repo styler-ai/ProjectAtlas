@@ -1503,7 +1503,7 @@ fn publication_error(message: impl Into<String>) -> DbError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::IndexedFileText;
     use projectatlas_core::{Node, NodeKind, PurposeSource};
@@ -1760,12 +1760,6 @@ mod tests {
     #[test]
     fn task_arri_ut_arri_4_16() -> Result<(), Box<dyn Error>> {
         prove_structural_publication_reconciliation()
-    }
-
-    #[test]
-    fn task_arri_ut_arri_4_19_interrupted_publication() -> Result<(), Box<dyn Error>> {
-        let temp = tempfile::tempdir()?;
-        prove_import_rollback(temp.path())
     }
 
     #[test]
@@ -3836,7 +3830,8 @@ mod tests {
         Ok(())
     }
 
-    fn prove_import_rollback(root: &Path) -> Result<(), Box<dyn Error>> {
+    /// Proves that an interrupted inactive-slot import preserves the published generation.
+    pub(crate) fn prove_import_rollback(root: &Path) -> Result<(), Box<dyn Error>> {
         let case_dir = root.join("import-rollback");
         fs::create_dir(&case_dir)?;
         let live_path = case_dir.join("live.db");
