@@ -6,18 +6,18 @@
       "task_id": "1.1",
       "test_id": "UT:ARRI-1.1",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:5bffaffb29496a6c4efa278b19e2e652b3edc5d7c046327916edddd3d7198fda",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:7a61edd556d0a9bf37e695fe54c4151f347388a5b87948cbc32fcbddaa86ee66",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:08.922Z",
-      "completed_at": "2026-07-14T10:02:38.020Z",
+      "started_at": "2026-07-14T15:41:26.624Z",
+      "completed_at": "2026-07-14T15:41:39.737Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -25,18 +25,18 @@
       "task_id": "1.2",
       "test_id": "UT:ARRI-1.2",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:eb3b602440095a09a39b4e18d64a2d479f5fc81614625081a189a1dab2cf5091",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:cd813298a4af261b732c357dd1ea77c7c177053ee679c3dd30f215391a027836",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:38.020Z",
-      "completed_at": "2026-07-14T10:02:38.789Z",
+      "started_at": "2026-07-14T15:41:39.737Z",
+      "completed_at": "2026-07-14T15:41:40.487Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -44,18 +44,18 @@
       "task_id": "1.3",
       "test_id": "UT:ARRI-1.3",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:50e9c70b6c64d02ce7092b5cd0fe0b9f832a0d5a48756ceffb558c97011e120b",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:18572997e2bc69d6121967fb55e4340f7a0d900ac8376f760599084a9ec86665",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:38.789Z",
-      "completed_at": "2026-07-14T10:02:39.691Z",
+      "started_at": "2026-07-14T15:41:40.487Z",
+      "completed_at": "2026-07-14T15:41:41.108Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -63,18 +63,18 @@
       "task_id": "1.4",
       "test_id": "UT:ARRI-1.4",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:897ac0656a9dc129414bd43e93adba8578b66af1cabef93b36f4deec87d45566",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:2d9341183b425d15ee10c481a8fbb6eb83df477a6cf7fb42b0fea96cf1be8946",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:39.691Z",
-      "completed_at": "2026-07-14T10:02:40.466Z",
+      "started_at": "2026-07-14T15:41:41.108Z",
+      "completed_at": "2026-07-14T15:41:41.962Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -82,18 +82,18 @@
       "task_id": "1.5",
       "test_id": "UT:ARRI-1.5",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:b6061a5bc7a667baa5f28f48ef0e9cc61d512567eed002572caada222636034a",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:2a9ee86deca05c0fbb501674efbb3f892f6abaa580629938c769355a5dbe4fc2",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:40.466Z",
-      "completed_at": "2026-07-14T10:02:41.102Z",
+      "started_at": "2026-07-14T15:41:41.962Z",
+      "completed_at": "2026-07-14T15:41:42.600Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -101,18 +101,18 @@
       "task_id": "1.6",
       "test_id": "UT:ARRI-1.6",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:b9296954951d6b7d93c71a1779c26954e0c916268c4c4a409da5b1c019339d41",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:afd5572d7a542d50374bbd545e728ee2fa4f107870579228cf7374a04cbe70d9",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:41.102Z",
-      "completed_at": "2026-07-14T10:02:42.505Z",
+      "started_at": "2026-07-14T15:41:42.600Z",
+      "completed_at": "2026-07-14T15:41:44.229Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -120,18 +120,18 @@
       "task_id": "2.1",
       "test_id": "UT:ARRI-2.1",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:66900cc94f1329df5fe218fa08785b519298b8596c9e1fe028a727d65bb72ebf",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:879f83959c8f3d007ffd416a7a32ac62aa01101e96d38eb343ca4ef43ceafd0d",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:42.505Z",
-      "completed_at": "2026-07-14T10:02:43.246Z",
+      "started_at": "2026-07-14T15:41:44.229Z",
+      "completed_at": "2026-07-14T15:41:44.870Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -139,18 +139,18 @@
       "task_id": "2.2",
       "test_id": "UT:ARRI-2.2",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:93ac2fdc543da9d1844bbbc292d9b78bbdf1063dfdf1b689fe6444eaabd49d41",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:4d4c0a7fd2c2916eef4251e2f7084a5daa062705fb38a37ec4df125c59d31300",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:43.246Z",
-      "completed_at": "2026-07-14T10:02:44.374Z",
+      "started_at": "2026-07-14T15:41:44.870Z",
+      "completed_at": "2026-07-14T15:41:45.893Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -158,18 +158,18 @@
       "task_id": "2.3",
       "test_id": "UT:ARRI-2.3",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:b12769b27ba109a612d778becbf84b0416a29579236b1fc5fcac4c9d774bb0a8",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:44.374Z",
-      "completed_at": "2026-07-14T10:02:45.163Z",
+      "started_at": "2026-07-14T15:41:45.893Z",
+      "completed_at": "2026-07-14T15:41:46.490Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -177,18 +177,18 @@
       "task_id": "2.4",
       "test_id": "UT:ARRI-2.4",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:16e9a13278b34d9fbf89d426c8122db63004e20425281cce5573c7344788a553",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:45.163Z",
-      "completed_at": "2026-07-14T10:02:45.882Z",
+      "started_at": "2026-07-14T15:41:46.490Z",
+      "completed_at": "2026-07-14T15:41:47.350Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -196,18 +196,18 @@
       "task_id": "2.5",
       "test_id": "UT:ARRI-2.5",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:00cfff7a03da3abffd56d034b0054be31b59db48d2477a9f46d6ef4b82e8f4e7",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:45.882Z",
-      "completed_at": "2026-07-14T10:02:46.447Z",
+      "started_at": "2026-07-14T15:41:47.350Z",
+      "completed_at": "2026-07-14T15:41:48.015Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -215,18 +215,18 @@
       "task_id": "2.6",
       "test_id": "UT:ARRI-2.6",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:f14a986ed58b3a3fd6dada06e1b987a5fc19fd6f7b77037ddd89d99b2ab5a0c6",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:46.447Z",
-      "completed_at": "2026-07-14T10:02:47.003Z",
+      "started_at": "2026-07-14T15:41:48.015Z",
+      "completed_at": "2026-07-14T15:41:48.594Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -234,18 +234,18 @@
       "task_id": "2.7",
       "test_id": "UT:ARRI-2.7",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:e0ed835a468763c21e2306e662857f653a1b5fbf36ffd66a9d207b31005c3ed7",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:47.003Z",
-      "completed_at": "2026-07-14T10:02:47.579Z",
+      "started_at": "2026-07-14T15:41:48.594Z",
+      "completed_at": "2026-07-14T15:41:49.189Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -253,18 +253,18 @@
       "task_id": "2.8",
       "test_id": "UT:ARRI-2.8",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:b6e669f7d8a48d384d6907931d6b4276fececaa388dc900c49ab55699f098f0d",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:47.579Z",
-      "completed_at": "2026-07-14T10:02:48.127Z",
+      "started_at": "2026-07-14T15:41:49.189Z",
+      "completed_at": "2026-07-14T15:41:49.816Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -272,18 +272,18 @@
       "task_id": "2.9",
       "test_id": "UT:ARRI-2.9",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:7fc803a9320206ab1b2ff3d870a0e490796b714b3d943ba79cdd12ade021b1b1",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:48.127Z",
-      "completed_at": "2026-07-14T10:02:48.742Z",
+      "started_at": "2026-07-14T15:41:49.816Z",
+      "completed_at": "2026-07-14T15:41:50.407Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -291,18 +291,18 @@
       "task_id": "2.10",
       "test_id": "UT:ARRI-2.10",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:f993e3d07f71f797e1ddae554582e271ffcd24652995a02ac8cd0bdccf4cac4c",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:48.742Z",
-      "completed_at": "2026-07-14T10:02:49.302Z",
+      "started_at": "2026-07-14T15:41:50.407Z",
+      "completed_at": "2026-07-14T15:41:51.022Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -310,18 +310,18 @@
       "task_id": "2.11",
       "test_id": "UT:ARRI-2.11",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:498ae543dfea1dacb2dab405d2d837aaa6a5bb01b64eb95df6a0cd08eceebb90",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:49.303Z",
-      "completed_at": "2026-07-14T10:02:49.883Z",
+      "started_at": "2026-07-14T15:41:51.022Z",
+      "completed_at": "2026-07-14T15:41:51.587Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -329,18 +329,18 @@
       "task_id": "2.12",
       "test_id": "UT:ARRI-2.12",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:dc0b37518c6f20d61ad98e7e92baef411eed306616ce9207cc8352912a585aa0",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:49.883Z",
-      "completed_at": "2026-07-14T10:02:55.219Z",
+      "started_at": "2026-07-14T15:41:51.587Z",
+      "completed_at": "2026-07-14T15:42:00.329Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -348,18 +348,18 @@
       "task_id": "2.13",
       "test_id": "UT:ARRI-2.13",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:d41969f6033565f6b721a83cea037711a1cf33e2a35f62f2d9b4f0932332e968",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:55.219Z",
-      "completed_at": "2026-07-14T10:02:56.543Z",
+      "started_at": "2026-07-14T15:42:00.329Z",
+      "completed_at": "2026-07-14T15:42:01.908Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -367,18 +367,18 @@
       "task_id": "2.14",
       "test_id": "UT:ARRI-2.14",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:75e57388410b683be811a3b0b3ac917eb16e712252d144fc9ce0764cfda1d312",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:56.543Z",
-      "completed_at": "2026-07-14T10:02:57.474Z",
+      "started_at": "2026-07-14T15:42:01.908Z",
+      "completed_at": "2026-07-14T15:42:02.917Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -386,18 +386,18 @@
       "task_id": "2.15",
       "test_id": "UT:ARRI-2.15",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:5ae2b6b799bf3f40caceee5be897330da7dba178caf4adebc8a393970cc8ac0c",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:57.474Z",
-      "completed_at": "2026-07-14T10:02:58.027Z",
+      "started_at": "2026-07-14T15:42:02.917Z",
+      "completed_at": "2026-07-14T15:42:03.555Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -405,18 +405,18 @@
       "task_id": "2.16",
       "test_id": "UT:ARRI-2.16",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:76ea79ae3e040576755541640ae5cb45fd724de7b6372273bc25ca99ccaad237",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:88868549d237b2585e39f2b0f83a053b46b6649a2c3823feb5d6a1e05e666025",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:58.027Z",
-      "completed_at": "2026-07-14T10:02:58.573Z",
+      "started_at": "2026-07-14T15:42:03.555Z",
+      "completed_at": "2026-07-14T15:42:04.127Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -424,18 +424,18 @@
       "task_id": "2.17",
       "test_id": "UT:ARRI-2.17",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:f30f0eadcb6e277db6c466b914ba40097f0e27d0669b08609a32be7484d7b587",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:58.574Z",
-      "completed_at": "2026-07-14T10:02:59.168Z",
+      "started_at": "2026-07-14T15:42:04.127Z",
+      "completed_at": "2026-07-14T15:42:04.733Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -443,18 +443,18 @@
       "task_id": "2.18",
       "test_id": "UT:ARRI-2.18",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:b7578a029a8168b0f23215ff762b7d3e1e6525777c9b077602dd1ee295ee3734",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:59.168Z",
-      "completed_at": "2026-07-14T10:02:59.743Z",
+      "started_at": "2026-07-14T15:42:04.733Z",
+      "completed_at": "2026-07-14T15:42:05.332Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -462,18 +462,18 @@
       "task_id": "2.19",
       "test_id": "UT:ARRI-2.19",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:6646c410aa65b2765e02cfdaf1218c568eec5b9b6ff1acc1d78d8a0f0fe92c87",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:02:59.743Z",
-      "completed_at": "2026-07-14T10:03:00.330Z",
+      "started_at": "2026-07-14T15:42:05.332Z",
+      "completed_at": "2026-07-14T15:42:05.905Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -481,18 +481,18 @@
       "task_id": "2.20",
       "test_id": "UT:ARRI-2.20",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:01446478932583e9678fd4db30f59e8d4e6a764151bdea966a4819f251f9fd7f",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:00.330Z",
-      "completed_at": "2026-07-14T10:03:00.971Z",
+      "started_at": "2026-07-14T15:42:05.905Z",
+      "completed_at": "2026-07-14T15:42:06.473Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -500,18 +500,18 @@
       "task_id": "2.21",
       "test_id": "UT:ARRI-2.21",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:338a78b72a7af3e92341ae98893ceb4a0be8a08b555c5ba0bc6e4ebad16fe4d2",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:00.971Z",
-      "completed_at": "2026-07-14T10:03:01.677Z",
+      "started_at": "2026-07-14T15:42:06.473Z",
+      "completed_at": "2026-07-14T15:42:07.146Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -519,18 +519,18 @@
       "task_id": "2.22",
       "test_id": "UT:ARRI-2.22",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:120ab40405fcc0b5e9a44eb89a847b46b465e0325ab2c61d2993b76d5dc0d55c",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:01.677Z",
-      "completed_at": "2026-07-14T10:03:02.685Z",
+      "started_at": "2026-07-14T15:42:07.146Z",
+      "completed_at": "2026-07-14T15:42:07.720Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -538,18 +538,18 @@
       "task_id": "2.23",
       "test_id": "UT:ARRI-2.23",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:f15035cd63a61890b3ebf00f6da562e0d1dd2f7a346e88a105fd784c0e2351e7",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:02.685Z",
-      "completed_at": "2026-07-14T10:03:03.322Z",
+      "started_at": "2026-07-14T15:42:07.720Z",
+      "completed_at": "2026-07-14T15:42:08.622Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -557,18 +557,18 @@
       "task_id": "2.24",
       "test_id": "UT:ARRI-2.24",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:b8cac52ec55b3fa7003f8b8722b54e61adaaedb2f7ad23763d52642a90067cd9",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:03.322Z",
-      "completed_at": "2026-07-14T10:03:04.160Z",
+      "started_at": "2026-07-14T15:42:08.623Z",
+      "completed_at": "2026-07-14T15:42:09.797Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -576,18 +576,18 @@
       "task_id": "2.25",
       "test_id": "UT:ARRI-2.25",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:5aabae04293d1f66baa376468ba115050634fce0ea24bf1378010f235610e3ea",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:04.160Z",
-      "completed_at": "2026-07-14T10:03:05.190Z",
+      "started_at": "2026-07-14T15:42:09.797Z",
+      "completed_at": "2026-07-14T15:42:10.807Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -595,18 +595,18 @@
       "task_id": "2.26",
       "test_id": "UT:ARRI-2.26",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:417dba6966046764ca1ebcb85fd720a243df012004f8d0ab20f0434d8eaf090e",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:05.190Z",
-      "completed_at": "2026-07-14T10:03:06.635Z",
+      "started_at": "2026-07-14T15:42:10.808Z",
+      "completed_at": "2026-07-14T15:42:11.848Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -614,18 +614,18 @@
       "task_id": "2.27",
       "test_id": "UT:ARRI-2.27",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:c65e9c823af140a30347f54588e89ba445562c4c54391cbe5b08a5544c872a12",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:06.635Z",
-      "completed_at": "2026-07-14T10:03:08.263Z",
+      "started_at": "2026-07-14T15:42:11.848Z",
+      "completed_at": "2026-07-14T15:42:12.640Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -633,18 +633,18 @@
       "task_id": "2.28",
       "test_id": "UT:ARRI-2.28",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:18d2c7999b37e2e80ecb2a8cfadb36bffc28107fbace20ac3f2d5e7cda82dd85",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:08.263Z",
-      "completed_at": "2026-07-14T10:03:12.679Z",
+      "started_at": "2026-07-14T15:42:12.640Z",
+      "completed_at": "2026-07-14T15:42:17.250Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -652,18 +652,18 @@
       "task_id": "2.29",
       "test_id": "UT:ARRI-2.29",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:8f68cbffe8816d723673462f6591fbf86e87dee97f4639195d4623c75a89c631",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:12.679Z",
-      "completed_at": "2026-07-14T10:03:13.740Z",
+      "started_at": "2026-07-14T15:42:17.250Z",
+      "completed_at": "2026-07-14T15:42:18.121Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -671,18 +671,18 @@
       "task_id": "2.30",
       "test_id": "UT:ARRI-2.30",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:ad3caa19a0f388ec28b3e5dda66400816104d82e16a441415e81965cd07c2cfe",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:13.740Z",
-      "completed_at": "2026-07-14T10:03:14.406Z",
+      "started_at": "2026-07-14T15:42:18.121Z",
+      "completed_at": "2026-07-14T15:42:18.806Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -690,18 +690,18 @@
       "task_id": "2.31",
       "test_id": "UT:ARRI-2.31",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:578b49f9c8c5511a4fde8ca5e1103ad4b46bcfb8851c4d2cc3a2c728281eb8c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:87fedbb50dd1828a31a25993558f80b91890db84fb6616cd49227832ea904f76",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:14.406Z",
-      "completed_at": "2026-07-14T10:03:15.034Z",
+      "started_at": "2026-07-14T15:42:18.806Z",
+      "completed_at": "2026-07-14T15:42:19.451Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -709,18 +709,18 @@
       "task_id": "3.1",
       "test_id": "UT:ARRI-3.1",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:1f6cdc1cfd19e0c1d23364d73c5384b5b2dd5f2aa9ffcb8655538316e37cc27d",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:406ce3a28fc5dea59a3cb27b9def239421004e1669d456c330617da1b1dc7449",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:15.035Z",
-      "completed_at": "2026-07-14T10:03:15.647Z",
+      "started_at": "2026-07-14T15:42:19.451Z",
+      "completed_at": "2026-07-14T15:42:20.154Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -728,18 +728,18 @@
       "task_id": "3.2",
       "test_id": "UT:ARRI-3.2",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:8c39187ce0036936c23ddaac9914ec6dd663809165f1f5266b818f6b0ba93a7d",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:15.647Z",
-      "completed_at": "2026-07-14T10:03:18.943Z",
+      "started_at": "2026-07-14T15:42:20.154Z",
+      "completed_at": "2026-07-14T15:42:21.349Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -747,18 +747,18 @@
       "task_id": "3.3",
       "test_id": "UT:ARRI-3.3",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:9b7192b3f8805a0da4cff57d05b9bc91e139dfaab030758cd7c0fbc0b950ad9c",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:adc5316713a708ec173c566288a48aa89a2d1d815ab52be7ac47d93e2c1a615f",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:18.943Z",
-      "completed_at": "2026-07-14T10:03:25.604Z",
+      "started_at": "2026-07-14T15:42:21.349Z",
+      "completed_at": "2026-07-14T15:42:24.086Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -766,18 +766,18 @@
       "task_id": "3.4",
       "test_id": "UT:ARRI-3.4",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:5c7525a329ca142b1cd40c49de8d90f4af45cd2cb698ebc6b8ad298a2aaadf6f",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:25.604Z",
-      "completed_at": "2026-07-14T10:03:29.571Z",
+      "started_at": "2026-07-14T15:42:24.086Z",
+      "completed_at": "2026-07-14T15:42:25.712Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -785,18 +785,18 @@
       "task_id": "3.6",
       "test_id": "UT:ARRI-3.6",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:e7fab2a1b68460677d0a68bf5d449a485c8a46e21050bf00ffe0adf654421d0d",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:ed7993a035fa4ad0d4568e4303fd1aa64b2a166e8a09f61f06dfd2ddbb7be067",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:29.571Z",
-      "completed_at": "2026-07-14T10:03:31.331Z",
+      "started_at": "2026-07-14T15:42:25.712Z",
+      "completed_at": "2026-07-14T15:42:26.919Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -804,18 +804,18 @@
       "task_id": "4.1",
       "test_id": "UT:ARRI-4.1",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:dd3e9a225258ca9f03d442c97d0a9af93de76c1a6c3caf474fd8e34aaa6b2d76",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:31.331Z",
-      "completed_at": "2026-07-14T10:03:31.900Z",
+      "started_at": "2026-07-14T15:42:26.919Z",
+      "completed_at": "2026-07-14T15:42:27.389Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -823,18 +823,18 @@
       "task_id": "4.2",
       "test_id": "UT:ARRI-4.2",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:abac6ed710dd45faae0032f0904ec350a1522a0effed408fec46bda220809d2e",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:d450f33a4bd68855ca61fc7513c89af55e2d2f274394efda92c0f58391269cef",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:31.900Z",
-      "completed_at": "2026-07-14T10:03:34.450Z",
+      "started_at": "2026-07-14T15:42:27.390Z",
+      "completed_at": "2026-07-14T15:42:28.865Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -842,18 +842,18 @@
       "task_id": "4.3",
       "test_id": "UT:ARRI-4.3",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:d31c9412600a72ac8faf7151657b695e066070cb5a028b9064acd57876ca138f",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:34.450Z",
-      "completed_at": "2026-07-14T10:03:35.346Z",
+      "started_at": "2026-07-14T15:42:28.865Z",
+      "completed_at": "2026-07-14T15:42:29.219Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -861,18 +861,18 @@
       "task_id": "4.4",
       "test_id": "UT:ARRI-4.4",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:8daa0d61cb2beb4c4471e5ac07677c83de78ff6fd2ad12308bac226b5f1b78a6",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:35.346Z",
-      "completed_at": "2026-07-14T10:03:37.737Z",
+      "started_at": "2026-07-14T15:42:29.219Z",
+      "completed_at": "2026-07-14T15:42:29.949Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -880,18 +880,18 @@
       "task_id": "4.5",
       "test_id": "UT:ARRI-4.5",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:08d8b17d7da6fff3efcd24fbcb80b88eb354f1fcd887d677ee34fc6f4b0c0568",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:37.737Z",
-      "completed_at": "2026-07-14T10:03:39.463Z",
+      "started_at": "2026-07-14T15:42:29.949Z",
+      "completed_at": "2026-07-14T15:42:30.597Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -899,18 +899,18 @@
       "task_id": "4.6",
       "test_id": "UT:ARRI-4.6",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:f394a8f8d2a031bb7925fc1ab38673636c692686f389aa58c8c1782c085ec37e",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:305e71115a084013fa3a44197de3c6cb10b25ec29e0b99800f55604d2f90c107",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:39.463Z",
-      "completed_at": "2026-07-14T10:03:43.890Z",
+      "started_at": "2026-07-14T15:42:30.597Z",
+      "completed_at": "2026-07-14T15:42:31.665Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -918,18 +918,18 @@
       "task_id": "4.7",
       "test_id": "UT:ARRI-4.7",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:84e4900d6ac252f0ff0d0af77c6fa465e3651a51a157aa02d73e40cb2092b538",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:599a1bf62400b8b907292b7e963e2f84028703372bc8ae235be467e986c959ce",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:43.890Z",
-      "completed_at": "2026-07-14T10:03:49.190Z",
+      "started_at": "2026-07-14T15:42:31.665Z",
+      "completed_at": "2026-07-14T15:43:18.680Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -937,18 +937,18 @@
       "task_id": "4.8",
       "test_id": "UT:ARRI-4.8",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:5fb779d42fd481e02e299fa70795fd78e43d85f5d97729b8a4cddf444de84f8b",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:ded57572ebd97815987a68915e62fa00301d1b11d6ebf4ed44fca63ea138398c",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:49.190Z",
-      "completed_at": "2026-07-14T10:03:53.398Z",
+      "started_at": "2026-07-14T15:43:18.680Z",
+      "completed_at": "2026-07-14T15:43:21.041Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -956,18 +956,18 @@
       "task_id": "4.9",
       "test_id": "UT:ARRI-4.9",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:00117433458e3050054244a90b1a898ac24c09b64927e0c71f84558f44d7908f",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:53.398Z",
-      "completed_at": "2026-07-14T10:03:56.080Z",
+      "started_at": "2026-07-14T15:43:21.041Z",
+      "completed_at": "2026-07-14T15:43:22.468Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -975,18 +975,18 @@
       "task_id": "4.10",
       "test_id": "UT:ARRI-4.10",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:bdb6ec5a25430b978a4159feeeba5e0c97597b66487ad46fe6375c5efb85b0a8",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:56.080Z",
-      "completed_at": "2026-07-14T10:03:58.537Z",
+      "started_at": "2026-07-14T15:43:22.468Z",
+      "completed_at": "2026-07-14T15:43:24.667Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -994,18 +994,18 @@
       "task_id": "4.11",
       "test_id": "UT:ARRI-4.11",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:c5994d38132d3a6acd76ad60fd32aec304c11a18a5e688bd226098169b94191f",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:5084b5030b492a1bc3dbce371a3e5cda7e5537cc2629dd4af79909377b6f4cde",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:03:58.537Z",
-      "completed_at": "2026-07-14T10:04:00.774Z",
+      "started_at": "2026-07-14T15:43:24.667Z",
+      "completed_at": "2026-07-14T15:43:26.909Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -1013,18 +1013,18 @@
       "task_id": "4.12",
       "test_id": "UT:ARRI-4.12",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:0619325f8fdb5ea95c67b0682e4568f4207860ed854adbed64683d52ff4e29d6",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:cd4c944c8f5583f571c84b408392dc37a4490eb4ff91ffd7f246339902d72b4c",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:04:00.774Z",
-      "completed_at": "2026-07-14T10:04:04.149Z",
+      "started_at": "2026-07-14T15:43:26.909Z",
+      "completed_at": "2026-07-14T15:43:29.308Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -1032,18 +1032,18 @@
       "task_id": "4.13",
       "test_id": "UT:ARRI-4.13",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:ea950e3ce5652147fefd60bc40fade60a1ed6ea87b710d0ee1bd0e1a843eeb8c",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:300e6a22b01baedb78d03935d626af478dec3141c7ef187fdb80d6307d2d606c",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:04:04.150Z",
-      "completed_at": "2026-07-14T10:04:05.081Z",
+      "started_at": "2026-07-14T15:43:29.308Z",
+      "completed_at": "2026-07-14T15:43:30.351Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -1051,18 +1051,18 @@
       "task_id": "4.14",
       "test_id": "UT:ARRI-4.14",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:de3d1b2395cb25c27e377da5121015db791a12cf929f5a06e802921d9396f33c",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:74e6a68a65f45617a875513016b096b7d51d41ad5b27236a5f7d64b7a1f658b6",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:04:05.081Z",
-      "completed_at": "2026-07-14T10:04:05.616Z",
+      "started_at": "2026-07-14T15:43:30.351Z",
+      "completed_at": "2026-07-14T15:43:30.936Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -1070,18 +1070,18 @@
       "task_id": "4.15",
       "test_id": "UT:ARRI-4.15",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:8acb1cda22af3908c3f781d6d70c6157f3a4b029efedaa987bcf700e0c6978e2",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:0d6aec43acc10987ec049c43c625ca3385f32cc0b09b6e304892cbfd863f2e03",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:04:05.616Z",
-      "completed_at": "2026-07-14T10:04:06.113Z",
+      "started_at": "2026-07-14T15:43:30.936Z",
+      "completed_at": "2026-07-14T15:43:31.369Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -1089,18 +1089,18 @@
       "task_id": "4.16",
       "test_id": "UT:ARRI-4.16",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:e49109cef80a9f1af780bea377408fbe83bcf5a874e5125330d97d165e1cbcdd",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:dab835ba1d1a0bdc4edccf2f9986eae8464544cf9b9cca36add40ce2216ee9be",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:04:06.113Z",
-      "completed_at": "2026-07-14T10:04:08.984Z",
+      "started_at": "2026-07-14T15:43:31.369Z",
+      "completed_at": "2026-07-14T15:43:34.369Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -1108,18 +1108,18 @@
       "task_id": "4.17",
       "test_id": "UT:ARRI-4.17",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:144b49276558592b56f9a378b14239949e2c478bc3ca547b6c304c7a15fd14a3",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:ea77942d4afb83b7c4b3ec86c874f9d1553774d2b336bc5e6bf599567ad6be0f",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:04:08.985Z",
-      "completed_at": "2026-07-14T10:04:09.412Z",
+      "started_at": "2026-07-14T15:43:34.369Z",
+      "completed_at": "2026-07-14T15:43:34.955Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -1127,18 +1127,18 @@
       "task_id": "4.18",
       "test_id": "UT:ARRI-4.18",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:e1c4d6b9caa61066c7a9086029a5fc250c0d86940745e1e7b02f5523bb798b7c",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:04:09.412Z",
-      "completed_at": "2026-07-14T10:04:11.787Z",
+      "started_at": "2026-07-14T15:43:34.955Z",
+      "completed_at": "2026-07-14T15:43:37.574Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -1146,18 +1146,18 @@
       "task_id": "4.19",
       "test_id": "UT:ARRI-4.19",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
       "covered_input_digest": "sha256:3f8cabcf44280be25692ac0ebc9628c30ed528daad58a6a49c195148b284f80d",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:04:11.787Z",
-      "completed_at": "2026-07-14T10:04:13.520Z",
+      "started_at": "2026-07-14T15:43:37.575Z",
+      "completed_at": "2026-07-14T15:43:38.987Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -1165,18 +1165,18 @@
       "task_id": "4.20",
       "test_id": "UT:ARRI-4.20",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:28915dff53295ef2b85d9206e2d488ad13d0299987aa8f169e25009d2da20d6d",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:366b27039f18e610e1ff336e4d190788246c4d4db2b0baec444348173ad37012",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:04:13.520Z",
-      "completed_at": "2026-07-14T10:04:15.498Z",
+      "started_at": "2026-07-14T15:43:38.988Z",
+      "completed_at": "2026-07-14T15:43:41.044Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -1184,18 +1184,18 @@
       "task_id": "4.21",
       "test_id": "UT:ARRI-4.21",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:dee61b8cfefb17f1c2cfe090766b19c38e1b1fe8644c0a009e0883cb4c9fd161",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:b5c0bad2416ab97f3c3ed2521853d98a7ab7cf51d0d185f1399b136b9819a673",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:04:15.498Z",
-      "completed_at": "2026-07-14T10:04:16.290Z",
+      "started_at": "2026-07-14T15:43:41.044Z",
+      "completed_at": "2026-07-14T15:43:41.980Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -1203,18 +1203,18 @@
       "task_id": "4.22",
       "test_id": "UT:ARRI-4.22",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:3208ea83689d9e6b75c94ef5083bd69ce888d6b0c00a8e88b6900bfa440706cb",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:458897d810261e128d63d3c87f0f237b73a28dcd36ac1ce39e820f0a2db8887e",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:04:16.291Z",
-      "completed_at": "2026-07-14T10:04:17.497Z",
+      "started_at": "2026-07-14T15:43:41.980Z",
+      "completed_at": "2026-07-14T15:43:43.286Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -1222,18 +1222,18 @@
       "task_id": "7.6",
       "test_id": "UT:ARRI-7.6",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:a7096e68d3bedeae86971052aefb4da17252ea7fc88840bfba03943bff6f776a",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:e21be4c3a9d3b5cef22af2b51529105a05eea258095cf5cee9827ab8d8fcc713",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:04:17.497Z",
-      "completed_at": "2026-07-14T10:04:19.785Z",
+      "started_at": "2026-07-14T15:43:43.286Z",
+      "completed_at": "2026-07-14T15:43:45.497Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -1241,18 +1241,18 @@
       "task_id": "7.7",
       "test_id": "UT:ARRI-7.7",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:43a88731b8b3802c337e4ed7c525415494769ec7df6810b3c454644f2c21c3eb",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:1780e97d468d0cf2b955f4fbe91e00a9f6d16d81038ca13066ed9181afcdc129",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:04:19.786Z",
-      "completed_at": "2026-07-14T10:04:22.734Z",
+      "started_at": "2026-07-14T15:43:45.497Z",
+      "completed_at": "2026-07-14T15:43:49.007Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -1260,18 +1260,18 @@
       "task_id": "7.18",
       "test_id": "UT:ARRI-7.18",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:864f1126d9878da2e362f781c011500d1925d040caf2fbd2c2217b38c2015a6e",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:496888597673222719eec354fc155de0aa2866a419fedc9e8972b0bd1b51aacf",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:04:22.734Z",
-      "completed_at": "2026-07-14T10:04:31.660Z",
+      "started_at": "2026-07-14T15:43:49.007Z",
+      "completed_at": "2026-07-14T15:43:59.552Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     },
     {
@@ -1279,18 +1279,18 @@
       "task_id": "7.19",
       "test_id": "UT:ARRI-7.19",
       "outcome": "passed",
-      "tested_commit": "8395af817e20e4f321ce9f4925b057f24c3da5c8",
-      "covered_input_digest": "sha256:35362faa4b3471cb1dee82889e668b68c12ecdf3798fc252c3a29dbfc040f16b",
+      "tested_commit": "d7bc3b96e3fcfac9e87bd8c32f2152a3eeb7de51",
+      "covered_input_digest": "sha256:8b9a4ea7e0b7f6c21b668ad7e8fa9ac206980a358a604bce35a165c8642ae447",
       "platform": {
         "os": "windows",
         "arch": "x64"
       },
-      "started_at": "2026-07-14T10:04:31.660Z",
-      "completed_at": "2026-07-14T10:04:32.651Z",
+      "started_at": "2026-07-14T15:43:59.552Z",
+      "completed_at": "2026-07-14T15:44:00.700Z",
       "retained_result": {
         "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-8395af8.json",
-        "result_digest": "sha256:2d33536ebfbf4809d6c82a38984a1c1ec563a69e9c30e7c1b5f694c432a59919"
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-d7bc3b9.json",
+        "result_digest": "sha256:2816f0d4d98f3a33b0a6ec76e0bff6ce04facd0b1af637839061812d1fc53d18"
       }
     }
   ]
