@@ -13,9 +13,10 @@ use toml::Value as TomlValue;
 const CONTRACT: &[u8] = include_bytes!(
     "../../../docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json"
 );
-/// Cargo dependency sections that can own direct path edges.
-const CARGO_DEPENDENCY_SECTIONS: [&str; 3] =
-    ["dependencies", "dev-dependencies", "build-dependencies"];
+/// Cargo dependency sections that can own direct product path edges.
+///
+/// Dev dependencies belong to the separately validated test-ownership boundary.
+const CARGO_PRODUCT_DEPENDENCY_SECTIONS: [&str; 2] = ["dependencies", "build-dependencies"];
 /// Workspace-only lint tool outside the product dependency flow.
 const LINT_TOOL_PACKAGE: &str = "projectatlas-lints";
 /// Candidate crate that must remain absent without a real consumer.
@@ -323,7 +324,7 @@ fn local_dependency_path(
         .map(|path| workspace_root.join(path)))
 }
 
-/// Collect direct workspace-member path dependencies from one Cargo table.
+/// Collect direct product workspace-member path dependencies from one Cargo table.
 fn collect_dependency_sections(
     container: &toml::value::Table,
     member_dir: &Path,
@@ -332,7 +333,7 @@ fn collect_dependency_sections(
     package_by_path: &BTreeMap<PathBuf, String>,
     dependencies: &mut BTreeSet<String>,
 ) -> Result<(), Box<dyn Error>> {
-    for section_name in CARGO_DEPENDENCY_SECTIONS {
+    for section_name in CARGO_PRODUCT_DEPENDENCY_SECTIONS {
         let Some(section) = container.get(section_name).and_then(TomlValue::as_table) else {
             continue;
         };
