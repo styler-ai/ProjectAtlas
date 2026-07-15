@@ -2657,10 +2657,10 @@ mod tests {
         assert_executable_filter_is_never_run("process").await
     }
 
-    /// Declared CRLF materialization remains clean without enabling filter drivers.
+    /// Declared and canonical CRLF materialization remain clean without filter drivers.
     #[tokio::test(flavor = "current_thread")]
-    async fn git_provenance_accepts_declared_crlf_materialization() -> Result<(), CalibrationError>
-    {
+    async fn git_provenance_accepts_declared_and_canonical_crlf_materialization()
+    -> Result<(), CalibrationError> {
         let trusted_git = RepositoryGitProbe::resolve(&repository_root()?)?
             .executable()
             .to_owned();
@@ -2679,6 +2679,7 @@ mod tests {
         .await?;
         fs::write(root.join(".gitattributes"), b"*.ps1 text eol=crlf\n")?;
         fs::write(root.join("script.ps1"), b"Write-Output 'clean'\n")?;
+        fs::write(root.join("script.txt"), b"first\nsecond\n")?;
         run_git_fixture_command(
             &trusted_git,
             &[
@@ -2706,11 +2707,12 @@ mod tests {
         )
         .await?;
         fs::write(root.join("script.ps1"), b"Write-Output 'clean'\r\n")?;
+        fs::write(root.join("script.txt"), b"first\r\nsecond\r\n")?;
 
         let git = RepositoryGitProbe::resolve(&root)?;
         require(
             git.worktree_state().await?.is_empty(),
-            "declared CRLF materialization was not recognized as Git-clean",
+            "declared or canonical CRLF materialization was not recognized as Git-clean",
         )
     }
 

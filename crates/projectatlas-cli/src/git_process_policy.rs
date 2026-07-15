@@ -765,8 +765,10 @@ impl SanitizedGitWorkspace {
         fs::write(git_directory.join("HEAD"), b"ref: refs/heads/sanitized\n")?;
         fs::write(git_directory.join("info").join("exclude"), b"")?;
 
+        // Canonical input conversion accepts platform line-ending materialization while the
+        // private config still leaves every external filter driver undefined and unexecutable.
         let config = format!(
-            "[core]\nrepositoryformatversion = {}\nbare = false\nfilemode = {}\nsymlinks = {}\nignorecase = {}\nlogallrefupdates = false\nautocrlf = false\nsafecrlf = false\nfsmonitor = false\nuntrackedCache = false\nhooksPath = {}\nattributesFile = {}\nexcludesFile = {}\n{}",
+            "[core]\nrepositoryformatversion = {}\nbare = false\nfilemode = {}\nsymlinks = {}\nignorecase = {}\nlogallrefupdates = false\nautocrlf = input\nsafecrlf = false\nfsmonitor = false\nuntrackedCache = false\nhooksPath = {}\nattributesFile = {}\nexcludesFile = {}\n{}",
             object_format.repository_format_version(),
             cfg!(unix),
             cfg!(unix),
