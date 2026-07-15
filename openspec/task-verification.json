@@ -3424,7 +3424,7 @@
               "anchor": "task_arri_ut_arri_4_22_uses_indexed_graph_adjacency"
             }
           ],
-          "assertion": "Verify schema-v15 preservation and transactional schema-16 installation of the exact ordered slot/source, slot/target, slot/kind, and slot/entity-kind/qualified-name indexes; indexed primary-key, package/module, inbound/outbound adjacency, and relation-family plans with bounded typed decoding and no JSON calls or whole-table scans; one canonical-key arena with fixed entity/relation/evidence/resolution handles plus shared qualified-name text and a contiguous deterministic name index; normal compact extraction into active-slot entities, High-confidence calls, Exact containment, and Exact file-owned Cargo dependencies only under the complete producer/parser/language/basename contract; typed non-traversable unresolved and ambiguous resolution occurrences with bounded deterministic candidates; overload signature/discriminator distinction and unchanged-publication two-hop composition; one logical edge with distinct repository-origin evidence occurrences; pre-invalidation fail-closed canonical digest collisions for entity, relation, evidence, and resolution identities; injected evidence, collision, and migration-verification rollback across typed rows, resolution candidates, compatibility rows, ledger, and publication state; and incremental versus full-scan staging ownership of slot/epoch publication.",
+          "assertion": "Verify normal compact symbol and Cargo-manifest extraction persists typed active-slot entities, relations, evidence, confidence, and exact or unresolved outcomes; stable-key and qualified-name lookup preserves overload distinction; typed inbound, outbound, relation-family, dependency, and bounded two-hop queries preserve the observed publication; and SQLite query plans use the stable-key primary key plus named slot/entity-kind/qualified-name, slot/source/kind, slot/target/kind, and slot/kind indexes without JSON decoding or graph-table scans.",
           "command": {
             "executable": "cargo",
             "arguments": [
@@ -3432,7 +3432,7 @@
               "--locked",
               "--workspace",
               "--all-features",
-              "task_arri_ut_arri_4_22"
+              "task_arri_ut_arri_4_22_uses_indexed_graph_adjacency"
             ]
           },
           "timeout_seconds": 300,
