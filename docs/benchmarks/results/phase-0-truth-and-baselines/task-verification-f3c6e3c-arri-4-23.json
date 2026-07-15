@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "projectatlas_task_verification_receipt",
+  "change": "advance-rust-repository-intelligence",
+  "task_id": "4.23",
+  "test_id": "UT:ARRI-4.23",
+  "tested_commit": "f3c6e3c85255f1ad3f5d564cd79eba6e044ddb9e",
+  "outcome": "passed",
+  "executed_test_count": 5,
+  "started_at": "2026-07-15T01:17:29.818022600Z",
+  "completed_at": "2026-07-15T02:35:09.549993800Z",
+  "platform": {
+    "os": "windows",
+    "arch": "x86_64"
+  },
+  "scale": {
+    "entities": 1000000,
+    "logical_relations": 3000000,
+    "evidence_occurrences": 3000000
+  },
+  "process": {
+    "containment": "windows_job_object",
+    "membership_complete": true,
+    "successful_samples": 38543,
+    "exit_code": 0,
+    "timed_out": false,
+    "output_truncated": false,
+    "sampler_drain_completed": true,
+    "teardown_completed": true
+  },
+  "provenance": {
+    "source_commit_verified": true,
+    "source_worktree_dirty_before": false,
+    "source_worktree_dirty_after": false,
+    "source_binding_count": 22,
+    "exact_source_binding_count": 22,
+    "checkpoint_rebinding": "The successor plan repair changed only ARRI-4.22 verification metadata; the ARRI-4.23 row and all 22 compiled source bindings remain byte-identical to the tested commit."
+  },
+  "scale_artifact": {
+    "retention": "local_target",
+    "path": "target/arri-4-23-evidence/f3c6e3c85255f1ad3f5d564cd79eba6e044ddb9e-1784078249818022600-graph-scale-evidence.json",
+    "bytes": 11960915,
+    "sha256": "604e9f41389f254e1ce2d30a55f434b47c707dbb37cebc99cf3e6bb38d580502",
+    "payload_sha256": "40c17c5687125e896207a6b6650fe835964fed166ac5f3cb04358c346c86f181",
+    "receipt_path": "target/arri-4-23-evidence/f3c6e3c85255f1ad3f5d564cd79eba6e044ddb9e-1784078249818022600-graph-scale-evidence.json.sha256",
+    "receipt_bytes": 153,
+    "receipt_sha256": "13314d0da4103a90074ca26f5ae61c57cc1b7fb3f856def190407c7aeeac1a93"
+  }
+}

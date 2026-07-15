@@ -1779,6 +1779,14 @@
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-3a04be5.json",
       "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 3a04be5."
+    },
+    {
+      "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-697d7c8.json",
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 697d7c8."
+    },
+    {
+      "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-f3c6e3c-arri-4-23.json",
+      "purpose": "Retain the exact-commit ARRI 4.23 graph-scale verification receipt for implementation checkpoint f3c6e3c."
     }
   ]
 }
