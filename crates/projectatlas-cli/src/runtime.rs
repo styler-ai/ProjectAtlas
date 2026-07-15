@@ -4017,6 +4017,54 @@ mod compact_symbol_batch_tests {
         Ok(())
     }
 
+    #[test]
+    fn task_arri_ut_arri_4_23() -> Result<(), CliError> {
+        let directory = tempfile::tempdir().map_err(|source| CliError::Io {
+            path: std::env::temp_dir(),
+            source,
+        })?;
+        let mut jobs = Vec::new();
+        for index in 0..7 {
+            let native_path = directory.path().join(format!("file_{index}.rs"));
+            fs::write(&native_path, format!("pub fn item_{index}() {{}}\n")).map_err(|source| {
+                CliError::Io {
+                    path: native_path.clone(),
+                    source,
+                }
+            })?;
+            jobs.push(SymbolParseJob {
+                path: format!("src/file_{index}.rs"),
+                native_path,
+                language: Some("rust".to_owned()),
+                fallback_summary: None,
+                purpose_needs_suggestion: false,
+            });
+        }
+        let expected = jobs.iter().map(|job| job.path.clone()).collect::<Vec<_>>();
+
+        for worker_count in [1, 3] {
+            let options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, Some(worker_count), None);
+            let pool = symbol_worker_pool(&options)?;
+            let mut observed = Vec::new();
+            let started_at = Instant::now();
+            for batch in symbol_job_batches(&jobs, &pool) {
+                for outcome in parse_symbol_job_batch(&pool, batch, &options, started_at) {
+                    let SymbolParseOutcome::Parsed(parsed) = outcome else {
+                        return Err(CliError::InvalidInput(
+                            "producer-order fixture did not parse successfully".to_owned(),
+                        ));
+                    };
+                    observed.push(parsed.graph.path().to_owned());
+                }
+            }
+            require(
+                observed == expected,
+                "indexed parser collection did not preserve producer order",
+            )?;
+        }
+        Ok(())
+    }
+
     /// Return a typed test failure without using a panic path.
     fn require(condition: bool, message: &'static str) -> Result<(), CliError> {
         if condition {

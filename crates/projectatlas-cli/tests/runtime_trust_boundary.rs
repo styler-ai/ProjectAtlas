@@ -252,17 +252,27 @@ fn configure_hostile_install(
     fixture: &HostileTarget,
     fake_bin: &Path,
 ) -> Result<(), Box<dyn Error>> {
+    let app_data = fixture.temp.path().join("app-data");
+    let local_app_data = fixture.temp.path().join("local-app-data");
+    let codex_home = fixture.temp.path().join(".codex");
+    fs::create_dir_all(&app_data)?;
+    fs::create_dir_all(&local_app_data)?;
+    fs::create_dir_all(&codex_home)?;
     command
         .timeout(INSTALL_TIMEOUT)
         .env("PATH", prepend_path(fake_bin)?)
         .env("HOME", fixture.temp.path())
         .env("USERPROFILE", fixture.temp.path())
+        .env("APPDATA", app_data)
+        .env("LOCALAPPDATA", local_app_data)
+        .env("CODEX_HOME", codex_home)
         .env("PROJECTATLAS_FAKE_CARGO_LOG", &fixture.cargo_log)
         .env(
             "PROJECTATLAS_VERSION",
             format!("v{}", env!("CARGO_PKG_VERSION")),
         )
         .env("PROJECTATLAS_RELEASE_BASE_URL", RELEASE_BASE_URL)
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
         .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
         .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
         .env("PROJECTATLAS_NO_TELEMETRY", "1")
@@ -278,6 +288,12 @@ fn run_powershell_runtime_install(
 ) -> Result<std::process::Output, Box<dyn Error>> {
     let installer = workspace_root()?.join("plugins/projectatlas/scripts/install-runtime.ps1");
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let app_data = isolated_root.join("app-data");
+    let local_app_data = isolated_root.join("local-app-data");
+    let codex_home = isolated_root.join(".codex");
+    fs::create_dir_all(&app_data)?;
+    fs::create_dir_all(&local_app_data)?;
+    fs::create_dir_all(&codex_home)?;
     let mut command = Command::new("powershell");
     command
         .timeout(INSTALL_TIMEOUT)
@@ -291,7 +307,10 @@ fn run_powershell_runtime_install(
         .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
         .env("HOME", isolated_root)
         .env("USERPROFILE", isolated_root)
-        .env("LOCALAPPDATA", isolated_root.join("local-app-data"))
+        .env("APPDATA", app_data)
+        .env("LOCALAPPDATA", local_app_data)
+        .env("CODEX_HOME", codex_home)
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
         .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
         .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
         .env("PROJECTATLAS_NO_TELEMETRY", "1");

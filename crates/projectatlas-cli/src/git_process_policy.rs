@@ -1,11 +1,17 @@
 //! Closed configuration and environment policy for bounded local Git subprocesses.
 
+use crate::bounded_process_supervisor::{SupervisionError, run_supervised};
+use processkit::{Command, Stdin};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 use tempfile::{Builder as TempDirBuilder, TempDir};
+use thiserror::Error;
 
 #[cfg(unix)]
 use std::os::unix::{
@@ -26,6 +32,12 @@ const GIT_INVENTORY_ENTRY_LIMIT: usize = 100_000;
 const GIT_PATH_BYTE_LIMIT: usize = 16 * 1024;
 /// Maximum aggregate bytes accepted from tracked symlink materializations.
 const GIT_LITERAL_HASH_BYTE_LIMIT: usize = 1024 * 1024;
+/// Maximum accepted size of one resolved Git executable.
+const GIT_EXECUTABLE_FILE_LIMIT: u64 = 256 * 1024 * 1024;
+/// Deadline for one repository-bound Git query.
+const GIT_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Retained stdout/stderr ceiling for one repository-bound Git query.
+const GIT_QUERY_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 /// Prefix for an explicit Git metadata-directory binding.
 const GIT_DIRECTORY_ARGUMENT_PREFIX: &str = "--git-dir=";
 /// Prefix for an explicit Git worktree binding.
@@ -77,6 +89,234 @@ const ENVIRONMENT_OVERRIDES: &[(&str, &str)] = &[
     ("GIT_TERMINAL_PROMPT", "0"),
     ("LC_ALL", "C"),
 ];
+
+/// Failures while resolving or executing one repository-bound Git probe.
+#[derive(Debug, Error)]
+pub(crate) enum RepositoryGitError {
+    /// Repository, executable, or command evidence violated the closed Git policy.
+    #[error("repository Git policy failed: {0}")]
+    Policy(String),
+    /// A filesystem operation failed while binding the repository or executable.
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    /// The shared process-tree supervisor failed.
+    #[error(transparent)]
+    Supervision(#[from] SupervisionError),
+}
+
+/// Canonical Git executable and repository paths for bounded read-only probes.
+pub(crate) struct RepositoryGitProbe {
+    /// Canonical executable used for every probe query.
+    executable: PathBuf,
+    /// SHA-256 digest of the exact executable bytes resolved from `PATH`.
+    executable_sha256: String,
+    /// Canonical repository worktree bound by every query.
+    work_tree: PathBuf,
+    /// Canonical repository metadata directory bound by every query.
+    git_directory: PathBuf,
+}
+
+impl RepositoryGitProbe {
+    /// Resolve one canonical repository and one unambiguous Git executable identity.
+    pub(crate) fn resolve(root: &Path) -> Result<Self, RepositoryGitError> {
+        let work_tree = fs::canonicalize(root)?;
+        if !fs::metadata(&work_tree)?.is_dir() {
+            return Err(RepositoryGitError::Policy(
+                "Git worktree root is not a canonical directory".into(),
+            ));
+        }
+        let search_path = env::var_os("PATH")
+            .ok_or_else(|| RepositoryGitError::Policy("Git PATH is not defined".into()))?;
+        let (executable, executable_sha256) = resolve_git_executable(&work_tree, &search_path)?;
+        let git_directory = resolve_git_directory(&work_tree)?;
+        Ok(Self {
+            executable,
+            executable_sha256,
+            work_tree,
+            git_directory,
+        })
+    }
+
+    /// Return the canonical Git executable path bound by this probe.
+    pub(crate) fn executable(&self) -> &Path {
+        &self.executable
+    }
+
+    /// Return the SHA-256 digest of the bound Git executable bytes.
+    pub(crate) fn executable_sha256(&self) -> &str {
+        &self.executable_sha256
+    }
+
+    /// Run one repository-bound Git query with closed config, environment, and process bounds.
+    pub(crate) async fn output_bytes(
+        &self,
+        arguments: &[&str],
+    ) -> Result<Vec<u8>, RepositoryGitError> {
+        let mut command_arguments =
+            repository_bound_git_arguments(&self.git_directory, &self.work_tree)?;
+        command_arguments.extend(arguments.iter().map(OsString::from));
+        self.run_command(&self.work_tree, command_arguments, None)
+            .await
+    }
+
+    /// Compute one filter-free HEAD/index/worktree state twice and reject concurrent drift.
+    pub(crate) async fn worktree_state(&self) -> Result<Vec<u8>, RepositoryGitError> {
+        let first = self.worktree_state_pass().await?;
+        let second = self.worktree_state_pass().await?;
+        consistent_worktree_state(&first, second)
+    }
+
+    /// Compute one filter-free repository state pass through a private sanitized index.
+    async fn worktree_state_pass(&self) -> Result<SanitizedWorktreeEvidence, RepositoryGitError> {
+        let head = self.output_bytes(raw_head_tree_query()).await?;
+        let index = self.output_bytes(raw_index_query()).await?;
+        let index_flags = self.output_bytes(index_flags_query()).await?;
+        let plan =
+            plan_sanitized_worktree_comparison(&self.work_tree, &head, &index, &index_flags)?;
+        let workspace = SanitizedGitWorkspace::create(
+            &self.git_directory,
+            &self.work_tree,
+            plan.object_format(),
+        )?;
+        let literal_input =
+            workspace.materialize_literal_hash_inputs(plan.literal_hash_inputs())?;
+        self.run_command(
+            &self.work_tree,
+            workspace.command_arguments(sanitized_index_import_query())?,
+            Some(plan.index_input()),
+        )
+        .await?;
+        let hashes = self
+            .run_command(
+                &self.work_tree,
+                workspace.command_arguments(sanitized_hash_query())?,
+                Some(plan.hash_input()),
+            )
+            .await?;
+        let literal_hashes = self
+            .run_command(
+                workspace.literal_directory(),
+                workspace.command_arguments(sanitized_literal_hash_query())?,
+                Some(&literal_input),
+            )
+            .await?;
+        let untracked = self
+            .run_command(
+                &self.work_tree,
+                workspace.command_arguments(sanitized_untracked_query())?,
+                None,
+            )
+            .await?;
+        Ok(plan.finish(&hashes, &literal_hashes, &untracked)?)
+    }
+
+    /// Execute one already-bound Git command with the shared process policy.
+    async fn run_command(
+        &self,
+        current_directory: &Path,
+        command_arguments: Vec<OsString>,
+        stdin: Option<&[u8]>,
+    ) -> Result<Vec<u8>, RepositoryGitError> {
+        let executable_directory = self.executable.parent().ok_or_else(|| {
+            RepositoryGitError::Policy("Git executable has no parent directory".into())
+        })?;
+        let mut command = Command::new(&self.executable)
+            .args(&command_arguments)
+            .current_dir(current_directory)
+            .env_clear()
+            .env("PATH", executable_directory)
+            .env("GIT_CONFIG_GLOBAL", git_null_device())
+            .env("GIT_CONFIG_SYSTEM", git_null_device());
+        for (name, value) in closed_git_environment() {
+            command = command.env(name, value);
+        }
+        #[cfg(windows)]
+        for name in ["SYSTEMROOT", "WINDIR"] {
+            if let Some(value) = env::var_os(name) {
+                command = command.env(name, value);
+            }
+        }
+        if let Some(bytes) = stdin {
+            command = command.stdin(Stdin::from_bytes(bytes));
+        }
+        let output = run_supervised(command, GIT_QUERY_TIMEOUT, GIT_QUERY_OUTPUT_LIMIT).await?;
+        if output.output_truncated {
+            return Err(RepositoryGitError::Policy(
+                "Git query exceeded the retained output limit".into(),
+            ));
+        }
+        if !output.is_success() {
+            return Err(RepositoryGitError::Policy(format!(
+                "Git query failed: {}",
+                String::from_utf8_lossy(&output.stderr.retained).trim()
+            )));
+        }
+        Ok(output.stdout.retained)
+    }
+}
+
+/// Resolve one canonical Git executable identity and reject ambiguous `PATH` entries.
+fn resolve_git_executable(
+    root: &Path,
+    search_path: &std::ffi::OsStr,
+) -> Result<(PathBuf, String), RepositoryGitError> {
+    let executable_name = format!("git{}", env::consts::EXE_SUFFIX);
+    let mut paths = BTreeSet::new();
+    let mut selected: Option<(PathBuf, String)> = None;
+    for directory in env::split_paths(search_path) {
+        if !directory.is_absolute() {
+            continue;
+        }
+        let candidate = directory.join(&executable_name);
+        let Ok(metadata) = fs::metadata(&candidate) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.len() > GIT_EXECUTABLE_FILE_LIMIT {
+            continue;
+        }
+        let canonical = fs::canonicalize(candidate)?;
+        if canonical.starts_with(root) {
+            return Err(RepositoryGitError::Policy(
+                "Git executable resolves inside the repository".into(),
+            ));
+        }
+        if !paths.insert(canonical.clone()) {
+            continue;
+        }
+        let executable_bytes = read_bounded_file(
+            &canonical,
+            usize::try_from(GIT_EXECUTABLE_FILE_LIMIT).map_err(|source| {
+                RepositoryGitError::Policy(format!(
+                    "Git executable byte limit does not fit this platform: {source}"
+                ))
+            })?,
+        )?;
+        let sha256 = format!("{:x}", Sha256::digest(executable_bytes));
+        if let Some((_, selected_sha256)) = &selected {
+            if selected_sha256 != &sha256 {
+                return Err(RepositoryGitError::Policy(
+                    "Git executable identity is ambiguous across PATH".into(),
+                ));
+            }
+        } else {
+            selected = Some((canonical, sha256));
+        }
+    }
+    selected.ok_or_else(|| RepositoryGitError::Policy("Git executable not found".into()))
+}
+
+/// Require both complete sanitized observations to match before returning state bytes.
+fn consistent_worktree_state(
+    first: &SanitizedWorktreeEvidence,
+    second: SanitizedWorktreeEvidence,
+) -> Result<Vec<u8>, RepositoryGitError> {
+    if first != &second {
+        return Err(RepositoryGitError::Policy(
+            "sanitized Git worktree state changed between verification passes".into(),
+        ));
+    }
+    Ok(second.into_state())
+}
 
 /// Build the global arguments that close Git configuration and helper execution.
 pub(crate) fn closed_git_arguments() -> Vec<OsString> {
@@ -976,7 +1216,7 @@ fn read_bounded_file(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
         .read_to_end(&mut bytes)?;
     if bytes.len() > limit {
         return Err(invalid_git_metadata(
-            "tracked symlink materialization exceeds the byte limit",
+            "file exceeds the requested byte limit",
         ));
     }
     Ok(bytes)
@@ -1195,6 +1435,58 @@ mod tests {
         } else {
             Err(io::Error::other(message))
         }
+    }
+
+    /// Equivalent executable copies preserve the first canonical `PATH` identity.
+    #[test]
+    fn git_executable_resolution_accepts_identical_bytes() -> Result<(), RepositoryGitError> {
+        let repository = tempdir()?;
+        let root = fs::canonicalize(repository.path())?;
+        let executables = tempdir()?;
+        let first_directory = executables.path().join("first");
+        let second_directory = executables.path().join("second");
+        fs::create_dir(&first_directory)?;
+        fs::create_dir(&second_directory)?;
+        let executable_name = format!("git{}", env::consts::EXE_SUFFIX);
+        let first = first_directory.join(&executable_name);
+        let second = second_directory.join(&executable_name);
+        fs::copy(env::current_exe()?, &first)?;
+        fs::copy(env::current_exe()?, &second)?;
+        let search_path = env::join_paths([&first_directory, &second_directory])
+            .map_err(|source| RepositoryGitError::Policy(source.to_string()))?;
+
+        let (resolved, digest) = resolve_git_executable(&root, &search_path)?;
+        let expected_digest = format!(
+            "{:x}",
+            Sha256::digest(read_bounded_file(
+                &first,
+                usize::try_from(GIT_EXECUTABLE_FILE_LIMIT)
+                    .map_err(|source| RepositoryGitError::Policy(source.to_string()))?,
+            )?)
+        );
+        if resolved != fs::canonicalize(first)? || digest != expected_digest {
+            return Err(RepositoryGitError::Policy(
+                "identical Git executable bytes did not preserve PATH order".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Equal dirty-state bytes cannot hide drift in the bound repository inventories.
+    #[test]
+    fn worktree_consistency_rejects_different_bindings() -> io::Result<()> {
+        let first = SanitizedWorktreeEvidence {
+            state: Vec::new(),
+            binding: b"first binding".to_vec(),
+        };
+        let second = SanitizedWorktreeEvidence {
+            state: Vec::new(),
+            binding: b"second binding".to_vec(),
+        };
+        verify(
+            consistent_worktree_state(&first, second).is_err(),
+            "different repository bindings were accepted because state bytes matched",
+        )
     }
 
     /// Matching HEAD, index, flags, and sanitized hashes produce clean state.

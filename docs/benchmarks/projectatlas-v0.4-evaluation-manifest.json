@@ -9,7 +9,7 @@
     "baseline_runtime_commit": "d3b3e157f954c7d360d821ed0385762e8b044385",
     "baseline_runtime_tree": "3ec62b574e61c861cb562080c10d52c749b78866",
     "baseline_runtime_cargo_lock_sha256": "1e925a59e00fc8c0e82e925e64cf248e16fe08a37809b4923618342c382f073c",
-    "cargo_lock_sha256": "be5bd7e1249986c7d9c3497c906e54e14b95474f9df6c734da72a0d4a9e208fe",
+    "cargo_lock_sha256": "ca39dffa4b6a89f4f6ad6871aee0fabd00b7d556cd6e03643054a6933b38809c",
     "baseline_release_artifacts": [
       {
         "target": "x86_64-pc-windows-msvc",
@@ -762,6 +762,27 @@
       "repetitions": 15,
       "selection_policy": "highest-correctness-preserving-total-strategy-rows-per-second-then-lowest-stable-cell-id",
       "dropped_failures_are_failure": true
+    },
+    "graph_scale": {
+      "schema_version": 1,
+      "graph_count": 500,
+      "declarations_per_graph": 1999,
+      "call_edges_per_declaration": 3,
+      "extra_call_edges_per_graph": 3,
+      "worker_count": 8,
+      "completed_graphs_per_batch": 8,
+      "query_warmups": 100,
+      "query_repetitions": 1000,
+      "query_limit": 8,
+      "workload_timeout_seconds": 5400,
+      "process_output_limit_bytes": 8388608,
+      "process_sample_interval_ms": 100,
+      "resource_gates": {
+        "max_rust_allocator_requests_per_logical_fact": 64,
+        "max_process_group_resident_bytes": 17179869184,
+        "min_staging_logical_facts_per_second": 1000,
+        "max_derived_storage_bytes_per_logical_fact": 8192
+      }
     }
   },
   "decision_functions": {

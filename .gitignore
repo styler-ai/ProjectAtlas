@@ -11,6 +11,7 @@
 .projectatlas/projectatlas.claude.mcp.json
 .projectatlas/projectatlas.opencode.json
 .projectatlas/research/
+.projectatlas/runtime-probes/
 
 # Rust/Cargo
 target/

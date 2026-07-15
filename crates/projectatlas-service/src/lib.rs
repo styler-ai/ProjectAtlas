@@ -2,8 +2,11 @@
 
 mod import_aliases;
 
+pub mod graph_query;
+
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use import_aliases::{ImportAliasMap, load_import_alias_map};
+use projectatlas_core::graph::PublicationState;
 use projectatlas_core::outline::estimate_tokens;
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SourceParseMetadata, SymbolKind, SymbolRelation,
@@ -44,6 +47,22 @@ pub enum ServiceError {
     /// Database operation failed.
     #[error("{0}")]
     Db(#[from] DbError),
+    /// A multi-step graph query crossed an atomic structural publication.
+    #[error("graph publication changed during materialization: before={before:?}, after={after:?}")]
+    PublicationDrift {
+        /// Publication captured before the first graph read.
+        before: PublicationState,
+        /// Publication observed after every response row was materialized.
+        after: PublicationState,
+    },
+    /// A bounded graph path ended before its required depth.
+    #[error("bounded graph traversal stopped at depth {depth} from {source_digest:?}")]
+    IncompleteGraphTraversal {
+        /// One-based hop that had no traversable internal target.
+        depth: u8,
+        /// Stable digest whose adjacency could not continue.
+        source_digest: [u8; 32],
+    },
     /// User input or stored metadata was invalid.
     #[error("invalid input: {0}")]
     InvalidInput(String),

@@ -2103,9 +2103,12 @@
             "arguments": [
               "test",
               "--locked",
-              "--workspace",
+              "-p",
+              "projectatlas-service",
               "--all-features",
-              "task_arri_ut_arri_3_5"
+              "graph_query::tests::task_arri_ut_arri_3_5_relations_use_shared_service_boundary",
+              "--",
+              "--exact"
             ]
           },
           "timeout_seconds": 300,
@@ -2113,6 +2116,29 @@
             {
               "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-service/Cargo.toml"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-service/src/lib.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-service/src/graph_query.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/lib.rs"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-3.5",
+              "path": "crates/projectatlas-service/src/graph_query.rs",
+              "anchor": "task_arri_ut_arri_3_5_relations_use_shared_service_boundary"
             }
           ]
         },
@@ -3391,6 +3417,13 @@
           "test_ids": [
             "UT:ARRI-4.22"
           ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-4.22",
+              "path": "crates/projectatlas-db/src/lib.rs",
+              "anchor": "task_arri_ut_arri_4_22_uses_indexed_graph_adjacency"
+            }
+          ],
           "assertion": "Verify schema-v15 preservation and transactional schema-16 installation of the exact ordered slot/source, slot/target, slot/kind, and slot/entity-kind/qualified-name indexes; indexed primary-key, package/module, inbound/outbound adjacency, and relation-family plans with bounded typed decoding and no JSON calls or whole-table scans; one canonical-key arena with fixed entity/relation/evidence/resolution handles plus shared qualified-name text and a contiguous deterministic name index; normal compact extraction into active-slot entities, High-confidence calls, Exact containment, and Exact file-owned Cargo dependencies only under the complete producer/parser/language/basename contract; typed non-traversable unresolved and ambiguous resolution occurrences with bounded deterministic candidates; overload signature/discriminator distinction and unchanged-publication two-hop composition; one logical edge with distinct repository-origin evidence occurrences; pre-invalidation fail-closed canonical digest collisions for entity, relation, evidence, and resolution identities; injected evidence, collision, and migration-verification rollback across typed rows, resolution candidates, compatibility rows, ledger, and publication state; and incremental versus full-scan staging ownership of slot/epoch publication.",
           "command": {
             "executable": "cargo",
@@ -3475,22 +3508,135 @@
           "test_ids": [
             "UT:ARRI-4.23"
           ],
-          "assertion": "Verify add allocation, peak RSS, merge, persistence throughput, DB/WAL bytes, and warm service/SQLite query tests at the declared million-node and multi-million-edge scale.",
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-4.23",
+              "path": "crates/projectatlas-cli/src/graph_scale_evaluation.rs",
+              "anchor": "task_arri_ut_arri_4_23"
+            }
+          ],
+          "assertion": "Verify exactly 1,000,000 active entities, 3,000,000 logical relations, one evidence occurrence per relation, and zero relation/evidence integrity gaps; Rust allocation plus reallocation request accounting with the explicit SQLite/native-allocation limitation; complete-tree process-group peak RSS from raw manifest-declared 100 ms samples with membership discovery, hard timeout, bounded output, sampler drain, and teardown; exact indexed completed-batch producer-order count/digest plus focused 1/N-worker production order; recomputed staging and inactive-slot publication logical-fact throughput; persistent and maximum-observed live/staging main/WAL/SHM bytes, logical index-page bytes, and successful staging cleanup; 100 warmups and 1,000 retained raw measured values for each production SQLite and bounded-three-hop service query cell; semantic no-scan production query plans; exact clean-commit source/command/executable binding before spawn and after child exit; and a create-new external SHA-256 receipt for the retained full-scale artifact.",
           "command": {
             "executable": "cargo",
             "arguments": [
               "test",
+              "--release",
               "--locked",
-              "--workspace",
               "--all-features",
-              "task_arri_ut_arri_4_23"
+              "--all-targets",
+              "-p",
+              "projectatlas-cli",
+              "task_arri_ut_arri_4_23",
+              "--",
+              "--include-ignored",
+              "--nocapture"
             ]
           },
-          "timeout_seconds": 300,
+          "timeout_seconds": 7200,
           "covered_inputs": [
             {
               "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/changes/advance-rust-repository-intelligence/design.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            },
+            {
+              "kind": "file",
+              "path": "Cargo.toml"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/Cargo.toml"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/graph_scale_evaluation.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/graph_scale_plan.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/graph_scale_process.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/bounded_process_supervisor.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/git_process_policy.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/runtime.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-core/Cargo.toml"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-core/src/lib.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-core/src/budget.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-core/src/graph.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-core/src/symbols.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/Cargo.toml"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-service/Cargo.toml"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/examples/graph-scale-evidence-runner.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-service/src/lib.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-service/src/graph_query.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/lib.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/schema.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-db/src/structural_publication.rs"
+            },
+            {
+              "kind": "file",
+              "path": "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json"
+            },
+            {
+              "kind": "file",
+              "path": "Cargo.lock"
             }
           ]
         },

@@ -1,5 +1,6 @@
 //! Dev-only lexical and `SQLite` architecture evaluation over scanned corpus rows.
 
+use crate::graph_scale_plan::GraphScalePlan;
 use regex::RegexBuilder;
 use rusqlite::{Connection, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -174,6 +175,8 @@ pub(super) struct ArchitectureEvaluationPlan {
     fts_differential: FtsDifferentialPlan,
     /// `SQLite` strategy matrix.
     sqlite_strategy: SqliteStrategyPlan,
+    /// Complete-process million-node repository-graph scale plan.
+    graph_scale: GraphScalePlan,
 }
 
 impl ArchitectureEvaluationPlan {
@@ -193,7 +196,10 @@ impl ArchitectureEvaluationPlan {
             "lexical fixture binding drifted",
         )?;
         self.fts_differential.validate(registered_warmups)?;
-        self.sqlite_strategy.validate(registered_warmups)
+        self.sqlite_strategy.validate(registered_warmups)?;
+        self.graph_scale
+            .validate_declared()
+            .map_err(|error| ArchitectureEvaluationError::Policy(error.to_string()))
     }
 
     /// Return the FTS registered repetition count.

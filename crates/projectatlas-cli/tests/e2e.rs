@@ -46,6 +46,7 @@ const SUBDIR_CONFIG_DIR: &str = "config";
 const COMPATIBILITY_BEHAVIOR_CASES: &str =
     include_str!("../../../fixtures/contracts/projectatlas-v0.3.26-behavior-cases.json");
 const COMPATIBILITY_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const INSTALLER_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(windows)]
 const PROJECTATLAS_LOCAL_APPDATA_DIR: &str = "ProjectAtlas";
 
@@ -11237,12 +11238,12 @@ fn run_projectatlas_plugin_installer_with_path_shadow_and_home(
     path_shadow: &Path,
     home: &Path,
 ) -> Result<std::process::Output, Box<dyn Error>> {
-    run_projectatlas_plugin_installer_with_optional_path_and_home(
+    run_projectatlas_plugin_installer_with_optional_path_and_isolated_home(
         workspace_root,
         repo,
         runtime,
         Some(path_shadow),
-        Some(home),
+        home,
     )
 }
 
@@ -11253,25 +11254,29 @@ fn run_projectatlas_plugin_installer_with_optional_path(
     runtime: &Path,
     path_shadow: Option<&Path>,
 ) -> Result<std::process::Output, Box<dyn Error>> {
-    run_projectatlas_plugin_installer_with_optional_path_and_home(
+    let isolated_home = repo
+        .parent()
+        .ok_or_else(|| io::Error::other("plugin installer test repository parent missing"))?
+        .join(ISOLATED_HOME_DIR);
+    run_projectatlas_plugin_installer_with_optional_path_and_isolated_home(
         workspace_root,
         repo,
         runtime,
         path_shadow,
-        None,
+        &isolated_home,
     )
 }
 
-/// Run the bundled plugin installer and return its process output.
-fn run_projectatlas_plugin_installer_with_optional_path_and_home(
+/// Run the bundled plugin installer with isolated user-local directories.
+fn run_projectatlas_plugin_installer_with_optional_path_and_isolated_home(
     workspace_root: &Path,
     repo: &Path,
     runtime: &Path,
     path_shadow: Option<&Path>,
-    home: Option<&Path>,
+    home: &Path,
 ) -> Result<std::process::Output, Box<dyn Error>> {
     let mut command = if cfg!(windows) {
-        let mut command = StdCommand::new("powershell");
+        let mut command = Command::new("powershell");
         command
             .arg("-NoProfile")
             .arg("-ExecutionPolicy")
@@ -11290,7 +11295,7 @@ fn run_projectatlas_plugin_installer_with_optional_path_and_home(
             .arg(runtime);
         command
     } else {
-        let mut command = StdCommand::new("bash");
+        let mut command = Command::new("bash");
         command
             .arg(
                 workspace_root
@@ -11303,8 +11308,10 @@ fn run_projectatlas_plugin_installer_with_optional_path_and_home(
         command
     };
     command
+        .timeout(INSTALLER_COMMAND_TIMEOUT)
         .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
         .env("PROJECTATLAS_RUNTIME_PATH", runtime)
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
         .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
         .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1");
     if let Some(path_shadow) = path_shadow {
@@ -11321,32 +11328,33 @@ fn run_projectatlas_plugin_installer_with_optional_path_and_home(
                 .env_remove("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE");
         }
     }
-    if let Some(home) = home {
-        let app_data = home.join("AppData").join("Roaming");
-        let local_app_data = home.join("AppData").join("Local");
-        fs::create_dir_all(&app_data)?;
-        fs::create_dir_all(&local_app_data)?;
-        command
-            .env("HOME", home)
-            .env("USERPROFILE", home)
-            .env("APPDATA", app_data)
-            .env("LOCALAPPDATA", local_app_data)
-            .env(
-                "PROJECTATLAS_FAKE_CODEX_LOG",
-                home.join(FAKE_CODEX_LOG_FILE),
-            )
-            .env(
-                FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_ENV,
-                home.join(FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_FILE),
-            )
-            .env(
-                "PROJECTATLAS_FAKE_PLUGIN_MANIFEST",
-                home.join(FAKE_CODEX_PLUGIN_CACHE_DIR)
-                    .join("projectatlas")
-                    .join(CODEX_PLUGIN_MANIFEST_DIR)
-                    .join("plugin.json"),
-            );
-    }
+    let app_data = home.join("AppData").join("Roaming");
+    let local_app_data = home.join("AppData").join("Local");
+    let codex_home = home.join(CODEX_CONFIG_DIR);
+    fs::create_dir_all(&app_data)?;
+    fs::create_dir_all(&local_app_data)?;
+    fs::create_dir_all(&codex_home)?;
+    command
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("APPDATA", app_data)
+        .env("LOCALAPPDATA", local_app_data)
+        .env("CODEX_HOME", codex_home)
+        .env(
+            "PROJECTATLAS_FAKE_CODEX_LOG",
+            home.join(FAKE_CODEX_LOG_FILE),
+        )
+        .env(
+            FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_ENV,
+            home.join(FAKE_CODEX_PLUGIN_ADD_FAILURE_MARKER_FILE),
+        )
+        .env(
+            "PROJECTATLAS_FAKE_PLUGIN_MANIFEST",
+            home.join(FAKE_CODEX_PLUGIN_CACHE_DIR)
+                .join("projectatlas")
+                .join(CODEX_PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+        );
     let output = command.output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!(

@@ -3,20 +3,16 @@
 use super::bounded_process_supervisor::{
     CapturedStream, SupervisedCommandOutput, SupervisionError, run_supervised,
 };
-use crate::git_process_policy::{
-    SanitizedGitWorkspace, SanitizedWorktreeEvidence, closed_git_environment, git_null_device,
-    index_flags_query, plan_sanitized_worktree_comparison, raw_head_tree_query, raw_index_query,
-    repository_bound_git_arguments, resolve_git_directory, sanitized_hash_query,
-    sanitized_index_import_query, sanitized_literal_hash_query, sanitized_untracked_query,
-};
-use processkit::{Command, Stdin};
+#[cfg(test)]
+use crate::git_process_policy::git_null_device;
+use crate::git_process_policy::{RepositoryGitError, RepositoryGitProbe};
+use processkit::Command;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::ffi::OsStr;
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
@@ -28,7 +24,7 @@ use thiserror::Error;
 const MANIFEST_BYTES: &[u8] =
     include_bytes!("../../../docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json");
 /// Digest of the frozen evaluation manifest.
-const MANIFEST_SHA256: &str = "d641c44a8609410377b6c36ffb5abe1a47e0839f0c724e6e564d71556dac897e";
+const MANIFEST_SHA256: &str = "35ed0bbb3560d0b68657309f4117fd61edc6471020a1a462364d71f5b4e018d8";
 /// Calibration runner source compiled into the executable.
 const RUNNER_BYTES: &[u8] = include_bytes!("calibration_evidence_runner.rs");
 /// Repository-relative path of the dedicated runner source.
@@ -45,12 +41,6 @@ const STREAM_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 const CONTROL_FILE_LIMIT: u64 = 1024 * 1024;
 /// Maximum aggregate size.
 const AGGREGATE_FILE_LIMIT: u64 = 16 * 1024 * 1024;
-/// Maximum accepted size for the resolved Git executable.
-const GIT_EXECUTABLE_FILE_LIMIT: u64 = 256 * 1024 * 1024;
-/// Git provenance subprocess timeout.
-const GIT_TIMEOUT_SECONDS: u64 = 30;
-/// Bounded Git provenance output ceiling.
-const GIT_OUTPUT_LIMIT: usize = CONTROL_FILE_LIMIT as usize;
 /// Maximum retained failure diagnostic.
 const FAILURE_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 /// Warmup attempts for each calibration workload.
@@ -184,6 +174,16 @@ pub(super) enum CalibrationError {
     /// A native `processkit` source probe failed.
     #[error(transparent)]
     Process(#[from] processkit::Error),
+}
+
+impl From<RepositoryGitError> for CalibrationError {
+    fn from(error: RepositoryGitError) -> Self {
+        match error {
+            RepositoryGitError::Policy(message) => Self::Binding(message),
+            RepositoryGitError::Io(source) => Self::Io(source),
+            RepositoryGitError::Supervision(source) => Self::Supervision(source),
+        }
+    }
 }
 
 /// Before/after calibration position around one benchmark block.
@@ -672,18 +672,6 @@ struct BoundEvidenceFile {
     file: File,
     /// Identity captured from the open handle.
     identity: FileIdentity,
-}
-
-/// Resolved executable plus explicit repository identities for closed Git probes.
-struct GitProbe {
-    /// Canonical absolute Git executable.
-    executable: PathBuf,
-    /// Digest over exact Git executable bytes.
-    executable_sha256: String,
-    /// Canonical worktree root.
-    work_tree: PathBuf,
-    /// Canonical Git metadata directory.
-    git_directory: PathBuf,
 }
 
 /// Validated subset of the frozen manifest executed by this runner.
@@ -1576,73 +1564,24 @@ fn summarize_workload(
     })
 }
 
-impl GitProbe {
-    /// Resolve one unambiguous Git executable and bind it to explicit repository metadata.
-    fn resolve(root: &Path) -> Result<Self, CalibrationError> {
-        let work_tree = fs::canonicalize(root)?;
-        require(
-            work_tree.is_absolute() && fs::metadata(&work_tree)?.is_dir(),
-            "Git worktree root is not a canonical directory",
-        )?;
-        let search_path = env::var_os("PATH")
-            .ok_or_else(|| CalibrationError::Binding("Git PATH is not defined".into()))?;
-        let (executable, executable_sha256) = resolve_git_executable(&work_tree, &search_path)?;
-        let git_directory = resolve_git_directory(&work_tree)?;
-        Ok(Self {
-            executable,
-            executable_sha256,
-            work_tree,
-            git_directory,
-        })
-    }
-}
-
-/// Resolve the first canonical Git executable and reject distinct PATH identities.
-fn resolve_git_executable(
-    root: &Path,
-    search_path: &OsStr,
-) -> Result<(PathBuf, String), CalibrationError> {
-    let executable_name = format!("git{}", env::consts::EXE_SUFFIX);
-    let mut paths = BTreeSet::new();
-    let mut selected = None;
-    for directory in env::split_paths(search_path) {
-        if !directory.is_absolute() {
-            continue;
-        }
-        let candidate = directory.join(&executable_name);
-        let Ok(metadata) = fs::metadata(&candidate) else {
-            continue;
-        };
-        if !metadata.is_file() {
-            continue;
-        }
-        let canonical = fs::canonicalize(candidate)?;
-        require(
-            !canonical.starts_with(root),
-            "Git executable resolves inside the repository",
-        )?;
-        if !paths.insert(canonical.clone()) {
-            continue;
-        }
-        let digest = sha256_file(&canonical, GIT_EXECUTABLE_FILE_LIMIT)?;
-        if let Some((_, selected_digest)) = &selected {
-            require(
-                selected_digest == &digest,
-                "Git executable identity is ambiguous across PATH",
-            )?;
-        } else {
-            selected = Some((canonical, digest));
-        }
-    }
-    selected.ok_or_else(|| CalibrationError::Binding("Git executable was not found on PATH".into()))
+/// Run one repository-bound Git query and decode its line-oriented text strictly.
+async fn git_text_output(
+    git: &RepositoryGitProbe,
+    arguments: &[&str],
+) -> Result<String, CalibrationError> {
+    let output = git.output_bytes(arguments).await?;
+    Ok(std::str::from_utf8(&output)
+        .map_err(|source| CalibrationError::Binding(source.to_string()))?
+        .trim_end_matches(['\r', '\n'])
+        .to_owned())
 }
 
 /// Capture clean Git and Cargo.lock provenance with bounded native probes.
 async fn source_binding(root: &Path) -> Result<SourceBinding, CalibrationError> {
-    let git = GitProbe::resolve(root)?;
-    let version = git_output(&git, ["--version"]).await?;
-    let head = git_output(&git, ["rev-parse", "HEAD"]).await?;
-    let status = git_worktree_status(&git).await?;
+    let git = RepositoryGitProbe::resolve(root)?;
+    let version = git_text_output(&git, &["--version"]).await?;
+    let head = git_text_output(&git, &["rev-parse", "HEAD"]).await?;
+    let status = git.worktree_state().await?;
     let head_commit = head.trim().to_owned();
     require(
         (head_commit.len() == 40 || head_commit.len() == 64)
@@ -1656,8 +1595,8 @@ async fn source_binding(root: &Path) -> Result<SourceBinding, CalibrationError> 
     )?;
     Ok(SourceBinding {
         git: GitExecutableBinding {
-            path: path_text(&git.executable)?,
-            sha256: git.executable_sha256,
+            path: path_text(git.executable())?,
+            sha256: git.executable_sha256().to_owned(),
             version,
         },
         head_commit,
@@ -1666,140 +1605,6 @@ async fn source_binding(root: &Path) -> Result<SourceBinding, CalibrationError> 
         cargo_lock_sha256: sha256_file(&root.join("Cargo.lock"), CONTROL_FILE_LIMIT * 4)?,
         runner_source_sha256,
     })
-}
-
-/// Compute sanitized worktree state twice and reject concurrent drift.
-async fn git_worktree_status(git: &GitProbe) -> Result<Vec<u8>, CalibrationError> {
-    let first = sanitized_worktree_status_pass(git).await?;
-    let second = sanitized_worktree_status_pass(git).await?;
-    require(
-        first == second,
-        "sanitized Git worktree state changed between verification passes",
-    )?;
-    Ok(first.into_state())
-}
-
-/// Compute one HEAD/index/worktree pass with built-in conversion and no filter drivers.
-async fn sanitized_worktree_status_pass(
-    git: &GitProbe,
-) -> Result<SanitizedWorktreeEvidence, CalibrationError> {
-    let head = git_output_bytes(git, raw_head_tree_query(), None).await?;
-    let index = git_output_bytes(git, raw_index_query(), None).await?;
-    let index_flags = git_output_bytes(git, index_flags_query(), None).await?;
-    let plan = plan_sanitized_worktree_comparison(&git.work_tree, &head, &index, &index_flags)?;
-    let workspace =
-        SanitizedGitWorkspace::create(&git.git_directory, &git.work_tree, plan.object_format())?;
-    let literal_input = workspace.materialize_literal_hash_inputs(plan.literal_hash_inputs())?;
-    run_git_command_bytes(
-        git,
-        &git.work_tree,
-        workspace.command_arguments(sanitized_index_import_query())?,
-        Some(plan.index_input()),
-    )
-    .await?;
-    let hashes = run_git_command_bytes(
-        git,
-        &git.work_tree,
-        workspace.command_arguments(sanitized_hash_query())?,
-        Some(plan.hash_input()),
-    )
-    .await?;
-    let literal_hashes = run_git_command_bytes(
-        git,
-        workspace.literal_directory(),
-        workspace.command_arguments(sanitized_literal_hash_query())?,
-        Some(&literal_input),
-    )
-    .await?;
-    let untracked = run_git_command_bytes(
-        git,
-        &git.work_tree,
-        workspace.command_arguments(sanitized_untracked_query())?,
-        None,
-    )
-    .await?;
-    plan.finish(&hashes, &literal_hashes, &untracked)
-        .map_err(Into::into)
-}
-
-/// Run one bounded Git query with an explicit executable, repository, config, and environment.
-async fn git_output<I, S>(git: &GitProbe, arguments: I) -> Result<String, CalibrationError>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let output = git_output_bytes(git, arguments, None).await?;
-    let output = std::str::from_utf8(&output)
-        .map_err(|error| CalibrationError::Binding(error.to_string()))?;
-    Ok(output.trim_end_matches(['\r', '\n']).to_owned())
-}
-
-/// Run one bounded Git query with optional raw stdin and return exact stdout bytes.
-async fn git_output_bytes<I, S>(
-    git: &GitProbe,
-    arguments: I,
-    stdin: Option<&[u8]>,
-) -> Result<Vec<u8>, CalibrationError>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let mut command_arguments = repository_bound_git_arguments(&git.git_directory, &git.work_tree)?;
-    command_arguments.extend(
-        arguments
-            .into_iter()
-            .map(|argument| argument.as_ref().to_owned()),
-    );
-
-    run_git_command_bytes(git, &git.work_tree, command_arguments, stdin).await
-}
-
-/// Run one already-bound Git command with the calibration process policy.
-async fn run_git_command_bytes(
-    git: &GitProbe,
-    current_directory: &Path,
-    command_arguments: Vec<std::ffi::OsString>,
-    stdin: Option<&[u8]>,
-) -> Result<Vec<u8>, CalibrationError> {
-    let executable_directory = git.executable.parent().ok_or_else(|| {
-        CalibrationError::Binding("Git executable has no parent directory".into())
-    })?;
-    let mut command = Command::new(&git.executable)
-        .args(&command_arguments)
-        .current_dir(current_directory)
-        .env_clear()
-        .env("PATH", executable_directory)
-        .env("GIT_CONFIG_GLOBAL", git_null_device())
-        .env("GIT_CONFIG_SYSTEM", git_null_device());
-    for (name, value) in closed_git_environment() {
-        command = command.env(name, value);
-    }
-    #[cfg(windows)]
-    for name in ["SYSTEMROOT", "WINDIR"] {
-        if let Some(value) = env::var_os(name) {
-            command = command.env(name, value);
-        }
-    }
-    if let Some(bytes) = stdin {
-        command = command.stdin(Stdin::from_bytes(bytes));
-    }
-    let result = run_supervised(
-        command,
-        Duration::from_secs(GIT_TIMEOUT_SECONDS),
-        GIT_OUTPUT_LIMIT,
-    )
-    .await?;
-    if !result.is_success() {
-        return Err(CalibrationError::Binding(format!(
-            "Git provenance query failed: {}",
-            String::from_utf8_lossy(&result.stderr.retained).trim()
-        )));
-    }
-    require(
-        !result.output_truncated,
-        "Git provenance query was truncated",
-    )?;
-    Ok(result.stdout.retained)
 }
 
 /// Capture the closed transient child environment.
@@ -2740,7 +2545,9 @@ mod tests {
     async fn assert_executable_filter_is_never_run(
         filter_kind: &str,
     ) -> Result<(), CalibrationError> {
-        let trusted_git = GitProbe::resolve(&repository_root()?)?.executable;
+        let trusted_git = RepositoryGitProbe::resolve(&repository_root()?)?
+            .executable()
+            .to_owned();
         let directory = tempdir()?;
         let root = directory.path().join("repository with filters");
         fs::create_dir(&root)?;
@@ -2826,8 +2633,8 @@ mod tests {
         )?;
         fs::remove_file(&marker)?;
 
-        let git = GitProbe::resolve(&root)?;
-        let result = git_worktree_status(&git).await;
+        let git = RepositoryGitProbe::resolve(&root)?;
+        let result = git.worktree_state().await;
         require(
             result.is_ok_and(|status| !status.is_empty()),
             "calibration provenance did not report raw filter-transformed bytes as dirty",
@@ -2854,7 +2661,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn git_provenance_accepts_declared_crlf_materialization() -> Result<(), CalibrationError>
     {
-        let trusted_git = GitProbe::resolve(&repository_root()?)?.executable;
+        let trusted_git = RepositoryGitProbe::resolve(&repository_root()?)?
+            .executable()
+            .to_owned();
         let directory = tempdir()?;
         let root = fs::canonicalize(directory.path())?;
         let root_argument = root.as_os_str().to_owned();
@@ -2898,9 +2707,9 @@ mod tests {
         .await?;
         fs::write(root.join("script.ps1"), b"Write-Output 'clean'\r\n")?;
 
-        let git = GitProbe::resolve(&root)?;
+        let git = RepositoryGitProbe::resolve(&root)?;
         require(
-            git_worktree_status(&git).await?.is_empty(),
+            git.worktree_state().await?.is_empty(),
             "declared CRLF materialization was not recognized as Git-clean",
         )
     }
@@ -2990,30 +2799,24 @@ mod tests {
         let root = repository_root()?;
         let manifest_path = root.join("docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json");
         let policy = calibration_policy(&manifest_path)?;
-        let git = GitProbe::resolve(&root)?;
+        let git = RepositoryGitProbe::resolve(&root)?;
         for position in [RunPosition::Before, RunPosition::After] {
             let paths = output_paths(&policy.manifest, position)?;
             for relative_path in [paths.aggregate, paths.raw_attempts] {
-                let mut arguments = [
+                let relative_path = path_text(&relative_path)?;
+                let arguments = [
                     "--no-literal-pathspecs",
                     "check-ignore",
                     "--no-index",
                     "--verbose",
                     "--",
-                ]
-                .into_iter()
-                .map(OsString::from)
-                .collect::<Vec<_>>();
-                arguments.push(relative_path.as_os_str().to_owned());
-                let output = git_output(&git, &arguments).await?;
-                let not_ignored = format!(
-                    "manifest output {} is not ignored by Git",
-                    relative_path.display()
-                );
+                    relative_path.as_str(),
+                ];
+                let output = git_text_output(&git, &arguments).await?;
+                let not_ignored = format!("manifest output {relative_path} is not ignored by Git");
                 require(!output.is_empty(), &not_ignored)?;
                 let locally_ignored = format!(
-                    "manifest output {} is ignored only by local Git metadata",
-                    relative_path.display()
+                    "manifest output {relative_path} is ignored only by local Git metadata"
                 );
                 require(
                     output.lines().all(|line| line.starts_with(".gitignore:")),
@@ -3259,32 +3062,6 @@ mod tests {
         )
     }
 
-    /// Equivalent executable copies keep the first canonical PATH identity.
-    #[test]
-    fn git_provenance_accepts_identical_executable_bytes_on_path() -> Result<(), CalibrationError> {
-        let directory = tempdir()?;
-        let root = directory.path().join("repo");
-        let first_directory = directory.path().join("first");
-        let second_directory = directory.path().join("second");
-        fs::create_dir(&root)?;
-        fs::create_dir(&first_directory)?;
-        fs::create_dir(&second_directory)?;
-        let executable_name = format!("git{}", env::consts::EXE_SUFFIX);
-        let first = first_directory.join(&executable_name);
-        let second = second_directory.join(&executable_name);
-        fs::copy(env::current_exe()?, &first)?;
-        fs::copy(env::current_exe()?, &second)?;
-        let search_path = env::join_paths([&first_directory, &second_directory])
-            .map_err(|error| CalibrationError::Binding(error.to_string()))?;
-
-        let (resolved, digest) = resolve_git_executable(&root, &search_path)?;
-        require(
-            resolved == fs::canonicalize(&first)?
-                && digest == sha256_file(&first, GIT_EXECUTABLE_FILE_LIMIT)?,
-            "identical Git executable bytes did not preserve PATH order",
-        )
-    }
-
     /// A PATH-prepended executable cannot silently replace the resolved Git identity.
     #[tokio::test(flavor = "current_thread")]
     async fn git_provenance_rejects_a_path_shim() -> Result<(), CalibrationError> {
@@ -3324,7 +3101,9 @@ mod tests {
     /// Repository-local fsmonitor configuration cannot execute during provenance capture.
     #[tokio::test(flavor = "current_thread")]
     async fn git_provenance_disables_repository_fsmonitor() -> Result<(), CalibrationError> {
-        let trusted_git = GitProbe::resolve(&repository_root()?)?.executable;
+        let trusted_git = RepositoryGitProbe::resolve(&repository_root()?)?
+            .executable()
+            .to_owned();
         let directory = tempdir()?;
         let root = fs::canonicalize(directory.path())?;
         let mut init_arguments = vec![OsString::from("-C")];
@@ -3388,8 +3167,8 @@ mod tests {
         require(marker.is_file(), "fsmonitor fixture was not executable")?;
         fs::remove_file(&marker)?;
 
-        let git = GitProbe::resolve(&root)?;
-        let _status = git_worktree_status(&git).await?;
+        let git = RepositoryGitProbe::resolve(&root)?;
+        let _status = git.worktree_state().await?;
         require(
             !marker.exists(),
             "repository fsmonitor executed during closed Git provenance",
@@ -3399,7 +3178,9 @@ mod tests {
     /// Repository-local `core.worktree` cannot redirect provenance reads outside the bound root.
     #[tokio::test(flavor = "current_thread")]
     async fn git_provenance_pins_the_canonical_worktree() -> Result<(), CalibrationError> {
-        let trusted_git = GitProbe::resolve(&repository_root()?)?.executable;
+        let trusted_git = RepositoryGitProbe::resolve(&repository_root()?)?
+            .executable()
+            .to_owned();
         let directory = tempdir()?;
         let repository = directory.path().join("intended repository");
         let outside = directory.path().join("outside worktree");
@@ -3476,8 +3257,8 @@ mod tests {
             "hostile core.worktree fixture did not redirect unsanitized Git",
         )?;
 
-        let git = GitProbe::resolve(&repository)?;
-        let status = git_worktree_status(&git).await?;
+        let git = RepositoryGitProbe::resolve(&repository)?;
+        let status = git.worktree_state().await?;
         require(
             status.is_empty(),
             "closed Git provenance escaped its canonical worktree",

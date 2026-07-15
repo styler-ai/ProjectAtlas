@@ -3953,6 +3953,10 @@ async fn run_bounded_git(
         OUTPUT_LIMIT_BYTES,
     )
     .await?;
+    require(
+        !output.output_truncated,
+        "bounded local Git command output was truncated",
+    )?;
     if !output.is_success() {
         return Err(EvaluationError::Policy(format!(
             "bounded local Git command failed: argv={command_arguments:?}, exit={:?}, timed_out={}, truncated={}, stderr={}",
@@ -3962,10 +3966,6 @@ async fn run_bounded_git(
             String::from_utf8_lossy(&output.stderr.retained),
         )));
     }
-    require(
-        !output.output_truncated,
-        "bounded local Git command output was truncated",
-    )?;
     Ok(output.stdout.retained)
 }
 

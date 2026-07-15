@@ -71,13 +71,7 @@ pub(super) async fn run_supervised(
     timeout: Duration,
     output_limit: usize,
 ) -> Result<SupervisedCommandOutput, SupervisionError> {
-    if output_limit == 0 {
-        return Err(SupervisionError::ZeroOutputLimit);
-    }
-    let result = command
-        .timeout(timeout)
-        .kill_on_parent_death()
-        .output_buffer(OutputBufferPolicy::unbounded().with_max_bytes(output_limit))
+    let result = configure_supervised_command(command, timeout, output_limit)?
         .output_bytes()
         .await?;
     let truncated = result.truncated();
@@ -89,6 +83,21 @@ pub(super) async fn run_supervised(
         stdout: CapturedStream::new(result.stdout().clone()),
         stderr: CapturedStream::new(result.stderr().as_bytes().to_vec()),
     })
+}
+
+/// Apply the shared parent-death, timeout, and bounded-output process policy.
+pub(super) fn configure_supervised_command(
+    command: Command,
+    timeout: Duration,
+    output_limit: usize,
+) -> Result<Command, SupervisionError> {
+    if output_limit == 0 {
+        return Err(SupervisionError::ZeroOutputLimit);
+    }
+    Ok(command
+        .timeout(timeout)
+        .kill_on_parent_death()
+        .output_buffer(OutputBufferPolicy::unbounded().with_max_bytes(output_limit)))
 }
 
 #[cfg(test)]

@@ -75,6 +75,8 @@ const GRAPH_RELATIONS_TABLE: &str = "graph_relations";
 const GRAPH_EVIDENCE_OCCURRENCES_TABLE: &str = "graph_evidence_occurrences";
 /// Typed non-traversable occurrence table used in stable-key collision diagnostics.
 const GRAPH_RESOLUTION_OCCURRENCES_TABLE: &str = "graph_resolution_occurrences";
+/// Typed resolution-candidate table used in graph counts and snapshot inventories.
+const GRAPH_RESOLUTION_CANDIDATES_TABLE: &str = "graph_resolution_candidates";
 /// Stable entity digest/canonical mismatch probe run before path invalidation.
 const GRAPH_ENTITY_IDENTITY_CONFLICT_SQL: &str = "
     SELECT EXISTS(
@@ -362,6 +364,21 @@ pub struct PersistedGraphRelation {
     pub last_changed_epoch: IndexEpoch,
 }
 
+/// Active-slot typed graph row counts used for reconciliation and scale evidence.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GraphFactCounts {
+    /// Persisted typed entities in the active structural slot.
+    pub entities: usize,
+    /// Persisted logical relations in the active structural slot.
+    pub relations: usize,
+    /// Persisted direct evidence occurrences in the active structural slot.
+    pub evidence_occurrences: usize,
+    /// Persisted unresolved or ambiguous occurrences in the active structural slot.
+    pub resolution_occurrences: usize,
+    /// Persisted candidates for ambiguous resolution occurrences in the active structural slot.
+    pub resolution_candidates: usize,
+}
+
 /// Bounded typed entity row read from the active structural slot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PersistedGraphEntity {
@@ -630,6 +647,26 @@ impl AtlasStore {
         })
     }
 
+    /// Explain the exact active-slot stable-key entity query used by [`Self::load_graph_entity`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot prepare or explain the production query.
+    pub fn graph_entity_query_plan(&self, stable_key_digest: &[u8; 32]) -> DbResult<Vec<String>> {
+        self.with_structural_read_snapshot(|connection, publication| {
+            let sql = format!("EXPLAIN QUERY PLAN {GRAPH_ENTITY_BY_STABLE_KEY_SQL}");
+            let mut statement = connection.prepare(&sql)?;
+            let rows = statement.query_map(
+                params![
+                    structural_publication::slot_text(publication.active_slot),
+                    &stable_key_digest[..]
+                ],
+                |row| row.get::<_, String>(3),
+            )?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
     /// Load active-slot entities by typed kind and exact qualified identity.
     ///
     /// # Errors
@@ -706,6 +743,34 @@ impl AtlasStore {
         })
     }
 
+    /// Explain the exact active-slot outbound relation-family query used by
+    /// [`Self::load_graph_adjacency`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot prepare or explain the production query.
+    pub fn graph_outbound_relations_by_kind_query_plan(
+        &self,
+        entity_digest: &[u8; 32],
+        kind: GraphRelationKind,
+        limit: u32,
+    ) -> DbResult<Vec<String>> {
+        self.with_structural_read_snapshot(|connection, publication| {
+            let sql = format!("EXPLAIN QUERY PLAN {GRAPH_OUTBOUND_RELATIONS_BY_KIND_SQL}");
+            let mut statement = connection.prepare(&sql)?;
+            let rows = statement.query_map(
+                params![
+                    structural_publication::slot_text(publication.active_slot),
+                    &entity_digest[..],
+                    kind.as_str(),
+                    i64::from(limit)
+                ],
+                |row| row.get::<_, String>(3),
+            )?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
     /// Load a bounded active-slot relation family without scanning unrelated kinds.
     ///
     /// # Errors
@@ -729,6 +794,48 @@ impl AtlasStore {
                     i64::from(limit)
                 ],
             )
+        })
+    }
+
+    /// Count every active-slot typed graph table in one read snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot read the active publication or a count is invalid.
+    pub fn graph_fact_counts(&self) -> DbResult<GraphFactCounts> {
+        self.with_structural_read_snapshot(|connection, publication| {
+            let slot = structural_publication::slot_text(publication.active_slot);
+            let (entities, relations, evidence, resolutions, candidates) = connection.query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM graph_entities WHERE structural_slot = ?1),
+                    (SELECT COUNT(*) FROM graph_relations WHERE structural_slot = ?1),
+                    (SELECT COUNT(*) FROM graph_evidence_occurrences WHERE structural_slot = ?1),
+                    (SELECT COUNT(*) FROM graph_resolution_occurrences WHERE structural_slot = ?1),
+                    (SELECT COUNT(*) FROM graph_resolution_candidates WHERE structural_slot = ?1)",
+                [slot],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )?;
+            Ok(GraphFactCounts {
+                entities: count_to_usize(GRAPH_ENTITIES_TABLE, entities)?,
+                relations: count_to_usize(GRAPH_RELATIONS_TABLE, relations)?,
+                evidence_occurrences: count_to_usize(GRAPH_EVIDENCE_OCCURRENCES_TABLE, evidence)?,
+                resolution_occurrences: count_to_usize(
+                    GRAPH_RESOLUTION_OCCURRENCES_TABLE,
+                    resolutions,
+                )?,
+                resolution_candidates: count_to_usize(
+                    GRAPH_RESOLUTION_CANDIDATES_TABLE,
+                    candidates,
+                )?,
+            })
         })
     }
 
@@ -9673,7 +9780,7 @@ mod tests {
             GRAPH_RELATIONS_TABLE,
             GRAPH_EVIDENCE_OCCURRENCES_TABLE,
             GRAPH_RESOLUTION_OCCURRENCES_TABLE,
-            "graph_resolution_candidates",
+            GRAPH_RESOLUTION_CANDIDATES_TABLE,
             "symbols",
             "symbol_relations",
             "source_parse_metadata",
@@ -9689,7 +9796,7 @@ mod tests {
                 GRAPH_RESOLUTION_OCCURRENCES_TABLE => {
                     "SELECT * FROM graph_resolution_occurrences ORDER BY rowid"
                 }
-                "graph_resolution_candidates" => {
+                GRAPH_RESOLUTION_CANDIDATES_TABLE => {
                     "SELECT * FROM graph_resolution_candidates ORDER BY rowid"
                 }
                 "symbols" => "SELECT * FROM symbols ORDER BY rowid",
