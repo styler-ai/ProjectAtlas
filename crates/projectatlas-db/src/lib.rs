@@ -5,7 +5,8 @@ mod structural_publication;
 
 pub use structural_publication::{
     IncrementalBuiltInPurpose, IncrementalPublication, IncrementalSourceMutation,
-    IncrementalStructuralDelta, IncrementalSummaryMutation, StructuralStaging,
+    IncrementalStructuralDelta, IncrementalSummaryMutation, StructuralPublicationProgress,
+    StructuralPublicationStage, StructuralPublicationTransition, StructuralStaging,
 };
 
 use projectatlas_core::budget::DefaultCoreBudgetKind;
@@ -1182,8 +1183,29 @@ impl AtlasStore {
     ///
     /// Returns an error if staging persistence fails.
     pub fn stage_compact_symbol_graph(&mut self, graph: &CompactSymbolGraph) -> DbResult<()> {
+        self.stage_compact_symbol_graphs(std::iter::once(graph))
+    }
+
+    /// Persist one bounded parser-result batch inside a separate full-scan staging database.
+    ///
+    /// The caller retains ownership of the batch and its memory bound. Every graph is written in
+    /// iterator order, and any failure rolls back the complete batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any graph in the batch cannot be persisted or committed.
+    pub fn stage_compact_symbol_graphs<'graph>(
+        &mut self,
+        graphs: impl IntoIterator<Item = &'graph CompactSymbolGraph>,
+    ) -> DbResult<()> {
+        let mut graphs = graphs.into_iter();
+        let Some(first) = graphs.next() else {
+            return Ok(());
+        };
         let transaction = self.connection.transaction()?;
-        replace_compact_symbol_graph_in_connection(&transaction, graph)?;
+        for graph in std::iter::once(first).chain(graphs) {
+            replace_compact_symbol_graph_in_connection(&transaction, graph)?;
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -9317,6 +9339,72 @@ mod tests {
             &store.publication_state()?,
             &publication,
             "evidence failure publication state",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_23_staging_batch_is_ordered_and_atomic() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let retained = compact_call_graph("src/retained.rs", false)?;
+        store.stage_compact_symbol_graph(&retained)?;
+        let before = graph_write_snapshot(&store.connection)?;
+        let publication = store.publication_state()?;
+        let first = compact_call_graph("src/first.rs", false)?;
+        let second = compact_call_graph("src/second.rs", false)?;
+        store.connection.execute_batch(
+            "CREATE TEMP TRIGGER reject_second_staged_graph
+             BEFORE INSERT ON graph_evidence_occurrences
+             WHEN NEW.origin_repository_path = 'src/second.rs'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected second staged graph failure');
+             END;",
+        )?;
+
+        let Err(error) = store.stage_compact_symbol_graphs([&first, &second]) else {
+            return Err(io::Error::other(
+                "injected second-graph failure did not abort the staging batch",
+            )
+            .into());
+        };
+        require_eq(
+            &matches!(error, DbError::Sqlite(ref source) if source.to_string().contains("injected second staged graph failure")),
+            &true,
+            "typed staging batch failure",
+        )?;
+        require_eq(
+            &graph_write_snapshot(&store.connection)?,
+            &before,
+            "failed staging batch retained its complete preexisting state",
+        )?;
+        require_eq(
+            &store.publication_state()?,
+            &publication,
+            "failed staging batch publication state",
+        )?;
+
+        store
+            .connection
+            .execute_batch("DROP TRIGGER reject_second_staged_graph")?;
+        store.stage_compact_symbol_graphs([&first, &second])?;
+        let inserted_paths = store
+            .connection
+            .prepare("SELECT path FROM source_parse_metadata ORDER BY rowid")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        require_eq(
+            &inserted_paths,
+            &vec![
+                "src/retained.rs".to_owned(),
+                "src/first.rs".to_owned(),
+                "src/second.rs".to_owned(),
+            ],
+            "successful staging batch iterator order",
+        )?;
+        require_eq(
+            &store.publication_state()?,
+            &publication,
+            "successful staging batch publication state",
         )?;
         Ok(())
     }

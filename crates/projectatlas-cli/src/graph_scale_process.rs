@@ -249,7 +249,7 @@ pub(super) async fn run_measured_process(
 }
 
 /// Test seam for the exact runner with explicit child-only environment markers.
-async fn run_measured_process_with_environment(
+pub(super) async fn run_measured_process_with_environment(
     executable: &Path,
     arguments: &[String],
     environment: &[(&str, &str)],

@@ -1,5 +1,8 @@
 //! `SQLite` schema initialization and legacy repair behind the store facade.
 
+use crate::structural_publication::{
+    StructuralPublicationProgress, StructuralPublicationStage, run_publication_stage,
+};
 use crate::{DbError, DbResult, normalize_metadata_path, sqlite_read_uri};
 use fs4::{FileExt, TryLockError};
 use projectatlas_core::budget::DefaultCoreBudgetKind;
@@ -16,6 +19,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -2098,23 +2102,77 @@ fn verify_current_schema_objects(connection: &Connection) -> DbResult<()> {
 }
 
 /// Reconcile one complete structural publication inside its owning transaction.
+#[cfg(test)]
 pub(crate) fn reconcile_full_structural_publication(
     connection: &Connection,
     expected_root: &str,
     expected_publication: PublicationState,
 ) -> DbResult<()> {
-    reconcile_quick_check(connection)?;
-    verify_current_schema_objects(connection)?;
-    reconcile_project_root(connection, expected_root)?;
-    reconcile_publication_state(connection, expected_publication)?;
-    reconcile_structural_slots_and_epochs(connection, expected_publication.active_epoch)?;
-    reconcile_structural_text(connection)?;
-    reconcile_resolution_candidate_uniqueness(connection)?;
-    reconcile_relation_families(connection)?;
-    reconcile_foreign_key_integrity(connection)?;
-    reconcile_resolution_candidate_counts(connection)?;
-    reconcile_coverage(connection)?;
-    reconcile_full_file_text_fts(connection)
+    reconcile_full_structural_publication_with_progress(
+        connection,
+        expected_root,
+        expected_publication,
+        &mut |_| ControlFlow::Continue(()),
+    )
+}
+
+/// Reconcile one complete publication while reporting fixed storage boundaries.
+pub(crate) fn reconcile_full_structural_publication_with_progress(
+    connection: &Connection,
+    expected_root: &str,
+    expected_publication: PublicationState,
+    progress: &mut impl FnMut(StructuralPublicationProgress) -> ControlFlow<()>,
+) -> DbResult<()> {
+    run_publication_stage(
+        progress,
+        StructuralPublicationStage::PublicationQuickCheck,
+        || reconcile_quick_check(connection),
+    )?;
+    run_publication_stage(
+        progress,
+        StructuralPublicationStage::SchemaAndPublicationReconciliation,
+        || {
+            verify_current_schema_objects(connection)?;
+            reconcile_project_root(connection, expected_root)?;
+            reconcile_publication_state(connection, expected_publication)?;
+            reconcile_structural_slots_and_epochs(connection, expected_publication.active_epoch)
+        },
+    )?;
+    run_publication_stage(
+        progress,
+        StructuralPublicationStage::StructuralTextReconciliation,
+        || reconcile_structural_text(connection),
+    )?;
+    run_publication_stage(
+        progress,
+        StructuralPublicationStage::ResolutionCandidateUniqueness,
+        || reconcile_resolution_candidate_uniqueness(connection),
+    )?;
+    run_publication_stage(
+        progress,
+        StructuralPublicationStage::RelationFamilyReconciliation,
+        || reconcile_relation_families(connection),
+    )?;
+    run_publication_stage(
+        progress,
+        StructuralPublicationStage::ForeignKeyReconciliation,
+        || reconcile_foreign_key_integrity(connection),
+    )?;
+    run_publication_stage(
+        progress,
+        StructuralPublicationStage::ResolutionCandidateCountReconciliation,
+        || reconcile_resolution_candidate_counts(connection),
+    )?;
+    run_publication_stage(
+        progress,
+        StructuralPublicationStage::CoverageReconciliation,
+        || reconcile_coverage(connection),
+    )?;
+    run_publication_stage(
+        progress,
+        StructuralPublicationStage::FullTextSearchReconciliation,
+        || reconcile_full_file_text_fts(connection),
+    )
 }
 
 /// Reconcile only the active-slot closure changed by one incremental publication.

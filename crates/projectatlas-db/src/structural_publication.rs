@@ -16,6 +16,7 @@ use rusqlite::{
 };
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 /// Attached-database schema name reserved for one validated staging source.
@@ -47,6 +48,114 @@ const STRUCTURAL_DELETE_ORDER: [&str; 7] = [
     GRAPH_ENTITIES_TABLE,
     FILE_TEXTS_TABLE,
 ];
+
+/// Coarse database-owned stage in one full structural publication.
+///
+/// Progress consumers can localize a stalled full publication without
+/// weakening the publication transaction or observing individual rows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StructuralPublicationStage {
+    /// Validate the completed staging database before checkpointing its WAL.
+    StagingValidationBeforeCheckpoint,
+    /// Checkpoint and truncate the completed staging WAL.
+    StagingCheckpoint,
+    /// Validate the sealed staging database after checkpointing.
+    StagingValidationAfterCheckpoint,
+    /// Validate the live database before attaching a staged publication.
+    LiveValidationBeforePublication,
+    /// Validate the immutable staging database before import.
+    ImmutableStagingValidationBeforePublication,
+    /// Acquire the immediate live publication transaction.
+    TransactionAcquisition,
+    /// Revalidate live and staged identities inside the transaction.
+    AttachedIdentityValidation,
+    /// Reconcile compatibility rows and concurrent authored purposes.
+    CompatibilityRowReconciliation,
+    /// Remove rows from the inactive structural slot.
+    InactiveSlotCleanup,
+    /// Import typed graph entities into the inactive slot.
+    GraphEntityImport,
+    /// Import typed graph relations into the inactive slot.
+    GraphRelationImport,
+    /// Import resolved-relation evidence into the inactive slot.
+    GraphEvidenceImport,
+    /// Import ambiguous and unresolved occurrences into the inactive slot.
+    GraphResolutionOccurrenceImport,
+    /// Import bounded resolution candidates into the inactive slot.
+    GraphResolutionCandidateImport,
+    /// Import structural coverage into the inactive slot.
+    GraphCoverageImport,
+    /// Import authoritative lexical source text into the inactive slot.
+    FileTextImport,
+    /// Reconcile per-table staged and inactive-slot row counts.
+    StructuralCountReconciliation,
+    /// Atomically flip the active structural slot and epoch.
+    PublicationFlip,
+    /// Run the complete live-database quick check inside the transaction.
+    PublicationQuickCheck,
+    /// Reconcile schema, root, publication, slot, and epoch metadata.
+    SchemaAndPublicationReconciliation,
+    /// Reconcile storage classes and UTF-8 across structural text columns.
+    StructuralTextReconciliation,
+    /// Reconcile resolution-candidate ordinal uniqueness.
+    ResolutionCandidateUniqueness,
+    /// Reconcile typed graph relation-family invariants.
+    RelationFamilyReconciliation,
+    /// Reconcile all structural foreign keys.
+    ForeignKeyReconciliation,
+    /// Reconcile occurrence and candidate counts.
+    ResolutionCandidateCountReconciliation,
+    /// Reconcile structural coverage rows.
+    CoverageReconciliation,
+    /// Reconcile the authoritative lexical table with optional FTS rows.
+    FullTextSearchReconciliation,
+    /// Commit the complete inactive-slot publication transaction.
+    TransactionCommit,
+}
+
+/// Transition reported for one database-owned publication stage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StructuralPublicationTransition {
+    /// The stage is about to execute.
+    Entered,
+    /// The stage completed successfully.
+    Completed,
+}
+
+/// One bounded progress transition emitted by full structural publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StructuralPublicationProgress {
+    /// Database-owned stage being reported.
+    pub stage: StructuralPublicationStage,
+    /// Whether the stage was entered or completed.
+    pub transition: StructuralPublicationTransition,
+}
+
+/// Report one fixed publication transition through the caller-owned sink.
+pub(crate) fn report_publication_progress(
+    progress: &mut impl FnMut(StructuralPublicationProgress) -> ControlFlow<()>,
+    stage: StructuralPublicationStage,
+    transition: StructuralPublicationTransition,
+) -> DbResult<()> {
+    match progress(StructuralPublicationProgress { stage, transition }) {
+        ControlFlow::Continue(()) => Ok(()),
+        ControlFlow::Break(()) => Err(publication_error(format!(
+            "publication progress cancelled at {stage:?}/{transition:?}"
+        ))),
+    }
+}
+
+/// Run one fixed database operation between entered and completed transitions.
+pub(crate) fn run_publication_stage<T>(
+    progress: &mut impl FnMut(StructuralPublicationProgress) -> ControlFlow<()>,
+    stage: StructuralPublicationStage,
+    operation: impl FnOnce() -> DbResult<T>,
+) -> DbResult<T> {
+    report_publication_progress(progress, stage, StructuralPublicationTransition::Entered)?;
+    let output = operation()?;
+    report_publication_progress(progress, stage, StructuralPublicationTransition::Completed)?;
+    Ok(output)
+}
 
 /// Parent-owned identity and authored-state snapshot for one staging database.
 pub struct StructuralStaging {
@@ -266,18 +375,54 @@ impl AtlasStore {
     /// Returns an error when identity, schema, integrity, or WAL checkpointing
     /// does not reconcile with the staging-start base.
     pub fn seal_structural_staging(&self, staging: &StructuralStaging) -> DbResult<()> {
-        validate_staging_identity(&self.connection, staging)?;
-        let busy = self
-            .connection
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
-        if busy != 0 {
-            return Err(publication_error(format!(
-                "staging WAL checkpoint remained busy: {busy}"
-            )));
-        }
-        verify_database(&self.connection)
+        self.seal_structural_staging_with_progress(staging, |_| ControlFlow::Continue(()))
+    }
+
+    /// Validate and checkpoint a completed staging build while reporting coarse progress.
+    ///
+    /// The callback runs only at fixed database-owned boundaries and never for
+    /// individual rows. Returning [`ControlFlow::Break`] stops sealing immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when progress is cancelled or when identity, schema,
+    /// integrity, or WAL checkpointing does not reconcile with the staging base.
+    pub fn seal_structural_staging_with_progress<F>(
+        &self,
+        staging: &StructuralStaging,
+        mut progress: F,
+    ) -> DbResult<()>
+    where
+        F: FnMut(StructuralPublicationProgress) -> ControlFlow<()>,
+    {
+        run_publication_stage(
+            &mut progress,
+            StructuralPublicationStage::StagingValidationBeforeCheckpoint,
+            || validate_staging_identity(&self.connection, staging),
+        )?;
+        run_publication_stage(
+            &mut progress,
+            StructuralPublicationStage::StagingCheckpoint,
+            || {
+                let busy =
+                    self.connection
+                        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                            row.get::<_, i64>(0)
+                        })?;
+                if busy == 0 {
+                    Ok(())
+                } else {
+                    Err(publication_error(format!(
+                        "staging WAL checkpoint remained busy: {busy}"
+                    )))
+                }
+            },
+        )?;
+        run_publication_stage(
+            &mut progress,
+            StructuralPublicationStage::StagingValidationAfterCheckpoint,
+            || verify_database(&self.connection),
+        )
     }
 
     /// Atomically import a sealed stage into the inactive slot and publish it.
@@ -289,19 +434,57 @@ impl AtlasStore {
     /// # Errors
     ///
     /// Returns an error if validation, import, reconciliation, publication, or
-    /// staging detachment fails. Any transaction error preserves both live
-    /// slots and the prior publication state.
+    /// staging detachment fails. Any error before commit preserves both live
+    /// slots and the prior publication state. A detachment error after a
+    /// successful commit cannot roll back the published generation; callers
+    /// receiving that cleanup error must not infer that the commit rolled back.
     pub fn publish_structural_staging(
         &mut self,
         staging: &StructuralStaging,
     ) -> DbResult<PublicationState> {
-        verify_database(&self.connection)?;
-        let staged_connection = open_immutable(staging.path())?;
-        validate_staging_identity(&staged_connection, staging)?;
-        drop(staged_connection);
+        self.publish_structural_staging_with_progress(staging, |_| ControlFlow::Continue(()))
+    }
 
+    /// Atomically publish a sealed stage while reporting coarse progress.
+    ///
+    /// Returning [`ControlFlow::Break`] before commit aborts and rolls back
+    /// the existing publication transaction. The database reports commit entry
+    /// but deliberately leaves commit completion to the caller after the method
+    /// succeeds; filesystem evidence cannot roll back an already committed
+    /// `SQLite` transaction. Caller-emitted commit completion therefore means
+    /// successful publication-call finalization, including detachment, rather
+    /// than the raw `SQLite` commit instruction alone. Its absence is
+    /// conservative and must not be interpreted as proof that commit rolled
+    /// back. Detachment is attempted for every transaction outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if progress reporting, validation, import,
+    /// reconciliation, publication, or staging detachment fails. A detachment
+    /// failure can occur after commit and cannot reverse the published state.
+    pub fn publish_structural_staging_with_progress<F>(
+        &mut self,
+        staging: &StructuralStaging,
+        mut progress: F,
+    ) -> DbResult<PublicationState>
+    where
+        F: FnMut(StructuralPublicationProgress) -> ControlFlow<()>,
+    {
+        run_publication_stage(
+            &mut progress,
+            StructuralPublicationStage::LiveValidationBeforePublication,
+            || verify_database(&self.connection),
+        )?;
+        run_publication_stage(
+            &mut progress,
+            StructuralPublicationStage::ImmutableStagingValidationBeforePublication,
+            || {
+                let staged_connection = open_immutable(staging.path())?;
+                validate_staging_identity(&staged_connection, staging)
+            },
+        )?;
         attach_structural_staging_read_only(&self.connection, staging.path())?;
-        let result = publish_attached(&mut self.connection, staging);
+        let result = publish_attached(&mut self.connection, staging, &mut progress);
         let detach = self
             .connection
             .execute_batch(&format!("DETACH DATABASE {STAGING_SCHEMA}"));
@@ -763,8 +946,17 @@ fn apply_incremental_summary_mutation(
 fn publish_attached(
     connection: &mut Connection,
     staging: &StructuralStaging,
+    progress: &mut impl FnMut(StructuralPublicationProgress) -> ControlFlow<()>,
 ) -> DbResult<PublicationState> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let transaction = run_publication_stage(
+        progress,
+        StructuralPublicationStage::TransactionAcquisition,
+        || {
+            connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(DbError::Sqlite)
+        },
+    )?;
     let live_publication = load_publication_state(&transaction)?;
     if live_publication != staging.base_publication {
         return Err(publication_error(format!(
@@ -772,16 +964,22 @@ fn publish_attached(
             staging.base_publication, live_publication
         )));
     }
-    validate_attached_identity(&transaction, staging)?;
-    bind_live_project_root(&transaction, staging)?;
-    let signature = load_metadata(
-        &transaction,
-        Some(STAGING_SCHEMA),
-        STRUCTURAL_STATE_SIGNATURE_KEY,
-    )?
-    .ok_or_else(|| publication_error("staging structural state signature is missing"))?;
-    require_structural_state_signature(&signature)?;
-    upsert_structural_state_signature(&transaction, &signature)?;
+    run_publication_stage(
+        progress,
+        StructuralPublicationStage::AttachedIdentityValidation,
+        || {
+            validate_attached_identity(&transaction, staging)?;
+            bind_live_project_root(&transaction, staging)?;
+            let signature = load_metadata(
+                &transaction,
+                Some(STAGING_SCHEMA),
+                STRUCTURAL_STATE_SIGNATURE_KEY,
+            )?
+            .ok_or_else(|| publication_error("staging structural state signature is missing"))?;
+            require_structural_state_signature(&signature)?;
+            upsert_structural_state_signature(&transaction, &signature)
+        },
+    )?;
 
     let next_publication = live_publication
         .next_full()
@@ -794,37 +992,58 @@ fn publish_attached(
     let source_slot = slot_text(staging.base_publication.active_slot);
     let target_slot = slot_text(next_publication.active_slot);
 
-    reconcile_compatibility_rows(&transaction, staging)?;
-    replace_structural_rows(&transaction, source_slot, target_slot, next_epoch)?;
-    reconcile_structural_counts(&transaction, source_slot, target_slot)?;
-
-    let changed = transaction.execute(
-        "UPDATE graph_publication_state
-         SET active_slot = ?1, active_epoch = ?2
-         WHERE singleton = 1 AND active_slot = ?3 AND active_epoch = ?4",
-        params![
-            target_slot,
-            next_epoch,
-            source_slot,
-            i64::try_from(live_publication.active_epoch.get()).map_err(|source| {
-                publication_error(format!("base epoch exceeds SQLite INTEGER: {source}"))
-            })?
-        ],
+    run_publication_stage(
+        progress,
+        StructuralPublicationStage::CompatibilityRowReconciliation,
+        || reconcile_compatibility_rows(&transaction, staging),
     )?;
-    if changed != 1 {
-        return Err(publication_error(
-            "publication singleton changed before the atomic flip",
-        ));
-    }
-    if load_publication_state(&transaction)? != next_publication {
-        return Err(publication_error(
-            "publication singleton did not reconcile after the atomic flip",
-        ));
-    }
-    schema::reconcile_full_structural_publication(
+    replace_structural_rows(&transaction, source_slot, target_slot, next_epoch, progress)?;
+    run_publication_stage(
+        progress,
+        StructuralPublicationStage::StructuralCountReconciliation,
+        || reconcile_structural_counts(&transaction, source_slot, target_slot),
+    )?;
+
+    run_publication_stage(
+        progress,
+        StructuralPublicationStage::PublicationFlip,
+        || {
+            let changed = transaction.execute(
+                "UPDATE graph_publication_state
+                 SET active_slot = ?1, active_epoch = ?2
+                 WHERE singleton = 1 AND active_slot = ?3 AND active_epoch = ?4",
+                params![
+                    target_slot,
+                    next_epoch,
+                    source_slot,
+                    i64::try_from(live_publication.active_epoch.get()).map_err(|source| {
+                        publication_error(format!("base epoch exceeds SQLite INTEGER: {source}"))
+                    })?
+                ],
+            )?;
+            if changed != 1 {
+                return Err(publication_error(
+                    "publication singleton changed before the atomic flip",
+                ));
+            }
+            if load_publication_state(&transaction)? != next_publication {
+                return Err(publication_error(
+                    "publication singleton did not reconcile after the atomic flip",
+                ));
+            }
+            Ok(())
+        },
+    )?;
+    schema::reconcile_full_structural_publication_with_progress(
         &transaction,
         &staging.project_root,
         next_publication,
+        progress,
+    )?;
+    report_publication_progress(
+        progress,
+        StructuralPublicationStage::TransactionCommit,
+        StructuralPublicationTransition::Entered,
     )?;
     transaction.commit()?;
     Ok(next_publication)
@@ -942,25 +1161,38 @@ fn replace_structural_rows(
     source_slot: &str,
     target_slot: &str,
     next_epoch: i64,
+    progress: &mut impl FnMut(StructuralPublicationProgress) -> ControlFlow<()>,
 ) -> DbResult<()> {
     if source_slot == target_slot {
         return Err(publication_error(
             "full publication refused to clean the active structural slot",
         ));
     }
-    for table in STRUCTURAL_DELETE_ORDER {
-        transaction
-            .execute(
-                &format!("DELETE FROM {table} WHERE structural_slot = ?1"),
-                [target_slot],
-            )
-            .map_err(|error| {
-                publication_error(format!(
-                    "recoverable inactive-slot cleanup failure for slot {target_slot:?} in table {table}: {error}; the publication transaction will restore the retained rollback slot and leave the active slot unchanged"
-                ))
-            })?;
-    }
+    run_publication_stage(
+        progress,
+        StructuralPublicationStage::InactiveSlotCleanup,
+        || {
+            for table in STRUCTURAL_DELETE_ORDER {
+                transaction
+                    .execute(
+                        &format!("DELETE FROM {table} WHERE structural_slot = ?1"),
+                        [target_slot],
+                    )
+                    .map_err(|error| {
+                        publication_error(format!(
+                            "recoverable inactive-slot cleanup failure for slot {target_slot:?} in table {table}: {error}; the publication transaction will restore the retained rollback slot and leave the active slot unchanged"
+                        ))
+                    })?;
+            }
+            Ok(())
+        },
+    )?;
 
+    report_publication_progress(
+        progress,
+        StructuralPublicationStage::GraphEntityImport,
+        StructuralPublicationTransition::Entered,
+    )?;
     transaction.execute(
         &format!(
             "INSERT INTO graph_entities(
@@ -982,6 +1214,16 @@ fn replace_structural_rows(
         ),
         params![source_slot, target_slot, next_epoch],
     )?;
+    report_publication_progress(
+        progress,
+        StructuralPublicationStage::GraphEntityImport,
+        StructuralPublicationTransition::Completed,
+    )?;
+    report_publication_progress(
+        progress,
+        StructuralPublicationStage::GraphRelationImport,
+        StructuralPublicationTransition::Entered,
+    )?;
     transaction.execute(
         &format!(
             "INSERT INTO graph_relations(
@@ -1000,6 +1242,16 @@ fn replace_structural_rows(
              WHERE structural_slot = ?1"
         ),
         params![source_slot, target_slot, next_epoch],
+    )?;
+    report_publication_progress(
+        progress,
+        StructuralPublicationStage::GraphRelationImport,
+        StructuralPublicationTransition::Completed,
+    )?;
+    report_publication_progress(
+        progress,
+        StructuralPublicationStage::GraphEvidenceImport,
+        StructuralPublicationTransition::Entered,
     )?;
     transaction.execute(
         &format!(
@@ -1026,6 +1278,16 @@ fn replace_structural_rows(
              WHERE structural_slot = ?1"
         ),
         params![source_slot, target_slot, next_epoch],
+    )?;
+    report_publication_progress(
+        progress,
+        StructuralPublicationStage::GraphEvidenceImport,
+        StructuralPublicationTransition::Completed,
+    )?;
+    report_publication_progress(
+        progress,
+        StructuralPublicationStage::GraphResolutionOccurrenceImport,
+        StructuralPublicationTransition::Entered,
     )?;
     transaction.execute(
         &format!(
@@ -1056,6 +1318,16 @@ fn replace_structural_rows(
         ),
         params![source_slot, target_slot, next_epoch],
     )?;
+    report_publication_progress(
+        progress,
+        StructuralPublicationStage::GraphResolutionOccurrenceImport,
+        StructuralPublicationTransition::Completed,
+    )?;
+    report_publication_progress(
+        progress,
+        StructuralPublicationStage::GraphResolutionCandidateImport,
+        StructuralPublicationTransition::Entered,
+    )?;
     transaction.execute(
         &format!(
             "INSERT INTO graph_resolution_candidates(
@@ -1071,6 +1343,16 @@ fn replace_structural_rows(
              WHERE structural_slot = ?1"
         ),
         params![source_slot, target_slot, next_epoch],
+    )?;
+    report_publication_progress(
+        progress,
+        StructuralPublicationStage::GraphResolutionCandidateImport,
+        StructuralPublicationTransition::Completed,
+    )?;
+    report_publication_progress(
+        progress,
+        StructuralPublicationStage::GraphCoverageImport,
+        StructuralPublicationTransition::Entered,
     )?;
     transaction.execute(
         &format!(
@@ -1088,6 +1370,16 @@ fn replace_structural_rows(
         ),
         params![source_slot, target_slot, next_epoch],
     )?;
+    report_publication_progress(
+        progress,
+        StructuralPublicationStage::GraphCoverageImport,
+        StructuralPublicationTransition::Completed,
+    )?;
+    report_publication_progress(
+        progress,
+        StructuralPublicationStage::FileTextImport,
+        StructuralPublicationTransition::Entered,
+    )?;
     transaction.execute(
         &format!(
             "INSERT INTO file_texts(
@@ -1099,6 +1391,11 @@ fn replace_structural_rows(
              WHERE structural_slot = ?1"
         ),
         params![source_slot, target_slot, next_epoch],
+    )?;
+    report_publication_progress(
+        progress,
+        StructuralPublicationStage::FileTextImport,
+        StructuralPublicationTransition::Completed,
     )?;
     Ok(())
 }
@@ -1618,6 +1915,164 @@ pub(crate) mod tests {
     #[test]
     fn task_arri_ut_arri_7_6() -> Result<(), Box<dyn Error>> {
         prove_parent_owned_full_scan_publication()
+    }
+
+    #[test]
+    fn task_arri_ut_arri_4_23_publication_progress_is_ordered_and_failure_rolls_back()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let live_path = temp.path().join("live.db");
+        let staging_path = temp.path().join("stage.db");
+        fs::create_dir(&root)?;
+
+        let mut live = AtlasStore::open(&live_path)?;
+        live.set_project_root(&root)?;
+        let staging = live.create_structural_staging(&live_path, &staging_path, &root)?;
+        let mut stage = AtlasStore::open(staging.path())?;
+        stage.prepare_structural_full_scan()?;
+        stage.replace_scan(&[file_node("src/current.rs", "current")])?;
+        stage.replace_file_texts_for_paths(
+            &["src/current.rs".to_owned()],
+            &[file_text("src/current.rs", "current generation")],
+        )?;
+        insert_graph_entity(&stage.connection, "current", "src/current.rs")?;
+        stage.set_staged_structural_state_signature(&staging, "current")?;
+
+        let mut observed = Vec::new();
+        stage.seal_structural_staging_with_progress(&staging, |progress| {
+            observed.push(progress);
+            ControlFlow::Continue(())
+        })?;
+        drop(stage);
+        live.publish_structural_staging_with_progress(&staging, |progress| {
+            observed.push(progress);
+            ControlFlow::Continue(())
+        })?;
+
+        let stages = [
+            StructuralPublicationStage::StagingValidationBeforeCheckpoint,
+            StructuralPublicationStage::StagingCheckpoint,
+            StructuralPublicationStage::StagingValidationAfterCheckpoint,
+            StructuralPublicationStage::LiveValidationBeforePublication,
+            StructuralPublicationStage::ImmutableStagingValidationBeforePublication,
+            StructuralPublicationStage::TransactionAcquisition,
+            StructuralPublicationStage::AttachedIdentityValidation,
+            StructuralPublicationStage::CompatibilityRowReconciliation,
+            StructuralPublicationStage::InactiveSlotCleanup,
+            StructuralPublicationStage::GraphEntityImport,
+            StructuralPublicationStage::GraphRelationImport,
+            StructuralPublicationStage::GraphEvidenceImport,
+            StructuralPublicationStage::GraphResolutionOccurrenceImport,
+            StructuralPublicationStage::GraphResolutionCandidateImport,
+            StructuralPublicationStage::GraphCoverageImport,
+            StructuralPublicationStage::FileTextImport,
+            StructuralPublicationStage::StructuralCountReconciliation,
+            StructuralPublicationStage::PublicationFlip,
+            StructuralPublicationStage::PublicationQuickCheck,
+            StructuralPublicationStage::SchemaAndPublicationReconciliation,
+            StructuralPublicationStage::StructuralTextReconciliation,
+            StructuralPublicationStage::ResolutionCandidateUniqueness,
+            StructuralPublicationStage::RelationFamilyReconciliation,
+            StructuralPublicationStage::ForeignKeyReconciliation,
+            StructuralPublicationStage::ResolutionCandidateCountReconciliation,
+            StructuralPublicationStage::CoverageReconciliation,
+            StructuralPublicationStage::FullTextSearchReconciliation,
+            StructuralPublicationStage::TransactionCommit,
+        ];
+        let expected = stages
+            .into_iter()
+            .flat_map(|stage| {
+                [
+                    StructuralPublicationProgress {
+                        stage,
+                        transition: StructuralPublicationTransition::Entered,
+                    },
+                    StructuralPublicationProgress {
+                        stage,
+                        transition: StructuralPublicationTransition::Completed,
+                    },
+                ]
+            })
+            .filter(|progress| {
+                *progress
+                    != (StructuralPublicationProgress {
+                        stage: StructuralPublicationStage::TransactionCommit,
+                        transition: StructuralPublicationTransition::Completed,
+                    })
+            })
+            .collect::<Vec<_>>();
+        require_eq(&observed, &expected, "full publication progress order")?;
+
+        let rollback_path = temp.path().join("rollback-stage.db");
+        let rollback_stage = live.create_structural_staging(&live_path, &rollback_path, &root)?;
+        let mut rollback_store = AtlasStore::open(rollback_stage.path())?;
+        rollback_store.prepare_structural_full_scan()?;
+        rollback_store.replace_scan(&[file_node("src/rollback.rs", "rollback")])?;
+        rollback_store.replace_file_texts_for_paths(
+            &["src/rollback.rs".to_owned()],
+            &[file_text("src/rollback.rs", "must roll back")],
+        )?;
+        insert_graph_entity(&rollback_store.connection, "rollback", "src/rollback.rs")?;
+        rollback_store.set_staged_structural_state_signature(&rollback_stage, "rollback")?;
+        rollback_store.seal_structural_staging(&rollback_stage)?;
+        drop(rollback_store);
+
+        let publication_before = live.publication_state()?;
+        let inactive_before = structural_counts(&live.connection, StructuralSlot::A)?;
+        for cancellation_stage in [
+            StructuralPublicationStage::GraphRelationImport,
+            StructuralPublicationStage::TransactionCommit,
+        ] {
+            let result =
+                live.publish_structural_staging_with_progress(&rollback_stage, |progress| {
+                    if progress
+                        == (StructuralPublicationProgress {
+                            stage: cancellation_stage,
+                            transition: StructuralPublicationTransition::Entered,
+                        })
+                    {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                });
+            let Err(error) = result else {
+                return Err(std::io::Error::other(format!(
+                    "progress cancellation at {cancellation_stage:?}/Entered unexpectedly published"
+                ))
+                .into());
+            };
+            require(
+                error.to_string().contains(&format!(
+                    "progress cancelled at {cancellation_stage:?}/Entered"
+                )),
+                "progress failure diagnostic drifted",
+            )?;
+            require_eq(
+                &live.publication_state()?,
+                &publication_before,
+                "publication state after progress rollback",
+            )?;
+            require_eq(
+                &structural_counts(&live.connection, StructuralSlot::A)?,
+                &inactive_before,
+                "inactive slot after progress rollback",
+            )?;
+            require(
+                live.load_file_text("src/rollback.rs")?.is_none(),
+                "progress failure exposed rolled-back lexical rows",
+            )?;
+            require(
+                live.connection.query_row(
+                    "SELECT COUNT(*) FROM pragma_database_list WHERE name = ?1",
+                    [STAGING_SCHEMA],
+                    |row| row.get::<_, i64>(0),
+                )? == 0,
+                "staging database remained attached after progress failure",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

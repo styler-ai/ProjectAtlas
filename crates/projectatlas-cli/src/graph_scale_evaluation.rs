@@ -14,7 +14,10 @@ use projectatlas_core::symbols::{
     CodeSymbol, CompactSymbolGraph, CompactSymbolGraphError, ParserKind, RelationKind, SymbolGraph,
     SymbolKind, SymbolRelation,
 };
-use projectatlas_db::{AtlasStore, DbError, GraphFactCounts, PersistedGraphTarget};
+use projectatlas_db::{
+    AtlasStore, DbError, GraphFactCounts, PersistedGraphTarget, StructuralPublicationProgress,
+    StructuralPublicationStage, StructuralPublicationTransition,
+};
 use projectatlas_service::{ServiceError, graph_query};
 use rayon::prelude::*;
 use rusqlite::{Connection, OpenFlags, Rows};
@@ -24,12 +27,14 @@ use stats_alloc::{INSTRUMENTED_SYSTEM, Region, Stats};
 use std::cmp::Ordering as Comparison;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::process::Command as StandardCommand;
 use std::time::{Duration, Instant};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, get_current_pid};
 use thiserror::Error;
 
 /// Frozen evaluation manifest compiled into the evidence executable.
@@ -208,6 +213,19 @@ const OUTPUT_OPTION: &str = "--output";
 const TESTED_COMMIT_OPTION: &str = "--tested-commit";
 /// Evidence-profile option accepted by both supervisor and workload modes.
 const PROFILE_OPTION: &str = "--profile";
+/// Internal durable-progress destination passed only to the workload child.
+const PROGRESS_OUTPUT_OPTION: &str = "--progress-output";
+/// Stable identity for the non-acceptance workload progress journal.
+const PROGRESS_ARTIFACT_KIND: &str = "projectatlas_graph_scale_workload_progress";
+/// Maximum number of transitions retained after the progress header.
+const MAX_PROGRESS_TRANSITIONS: usize = 128;
+/// Maximum number of newline-complete records, including the one header.
+const MAX_PROGRESS_COMPLETE_RECORDS: usize = MAX_PROGRESS_TRANSITIONS + 1;
+/// Maximum encoded bytes for one JSONL record, including its newline.
+const MAX_PROGRESS_RECORD_BYTES: usize = 4 * 1024;
+/// Maximum bytes read from one bounded progress journal.
+const MAX_PROGRESS_JOURNAL_BYTES: usize =
+    (MAX_PROGRESS_COMPLETE_RECORDS + 1) * MAX_PROGRESS_RECORD_BYTES;
 /// Graph language retained by the deterministic synthetic fixture.
 const GRAPH_LANGUAGE: &str = "rust";
 /// Graph parser detail retained by the deterministic synthetic fixture.
@@ -270,7 +288,7 @@ pub(super) enum GraphScaleCommand {
     /// Parent mode that supervises and measures the workload child.
     Supervisor(GraphScaleArguments),
     /// Internal mode that performs the database workload and writes raw evidence.
-    Workload(GraphScaleArguments),
+    Workload(GraphScaleWorkloadArguments),
 }
 
 /// Exact command arguments for one graph-scale evidence run.
@@ -286,12 +304,23 @@ pub(super) struct GraphScaleArguments {
     profile: EvidenceProfile,
 }
 
+/// Internal workload arguments that require a supervisor-owned progress path.
+#[derive(Clone, Debug)]
+pub(super) struct GraphScaleWorkloadArguments {
+    /// Public run identity shared with the supervisor.
+    run: GraphScaleArguments,
+    /// Absent sibling path that only the child may create and write.
+    progress_output: PathBuf,
+}
+
 /// Closed workload profile that prevents reduced evidence from satisfying the full gate.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum EvidenceProfile {
     /// Exact manifest-declared million-entity and multi-million-relation workload.
     Full,
+    /// Medium exploratory workload used to choose one scale-performance lever.
+    Medium,
     /// Small real-path workload for focused verification and runtime estimation.
     Reduced,
 }
@@ -309,6 +338,7 @@ impl EvidenceProfile {
     fn parse(value: &str) -> Result<Self, GraphScaleEvaluationError> {
         match value {
             "full" => Ok(Self::Full),
+            "medium" => Ok(Self::Medium),
             "reduced" => Ok(Self::Reduced),
             _ => Err(GraphScaleEvaluationError::Arguments(format!(
                 "unsupported graph-scale profile {value:?}"
@@ -320,9 +350,819 @@ impl EvidenceProfile {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Full => "full",
+            Self::Medium => "medium",
             Self::Reduced => "reduced",
         }
     }
+
+    /// Whether this profile may exercise the exact manifest-declared scale.
+    const fn is_full(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
+/// Return the only final-artifact status permitted for a profile.
+const fn status_for_profile(profile: EvidenceProfile) -> &'static str {
+    match profile {
+        EvidenceProfile::Full => STATUS_PASSED,
+        EvidenceProfile::Medium | EvidenceProfile::Reduced => STATUS_EXPLORATORY,
+    }
+}
+
+/// Return the only claim-scope status permitted for a profile.
+const fn claim_status_for_profile(profile: EvidenceProfile) -> &'static str {
+    match profile {
+        EvidenceProfile::Full => CLAIM_STATUS_IMPLEMENTATION_SCALE,
+        EvidenceProfile::Medium | EvidenceProfile::Reduced => CLAIM_STATUS_EXPLORATORY,
+    }
+}
+
+/// Closed evaluator and database stages retained without changing acceptance evidence.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GraphScaleProgressStage {
+    /// Plan validation, isolated stores, staging creation, and worker-pool setup.
+    WorkloadSetup,
+    /// Graph construction, compact persistence, signature, and pre-seal snapshot.
+    StagingPersistence,
+    /// Validate staging before checkpointing.
+    StagingValidationBeforeCheckpoint,
+    /// Checkpoint and truncate the staging WAL.
+    StagingCheckpoint,
+    /// Validate staging after checkpointing.
+    StagingValidationAfterCheckpoint,
+    /// Validate live storage before publication.
+    LiveValidationBeforePublication,
+    /// Validate immutable staging before publication.
+    ImmutableStagingValidationBeforePublication,
+    /// Acquire the immediate publication transaction.
+    TransactionAcquisition,
+    /// Revalidate attached live/staging identities.
+    AttachedIdentityValidation,
+    /// Reconcile compatibility rows.
+    CompatibilityRowReconciliation,
+    /// Clear the inactive structural slot.
+    InactiveSlotCleanup,
+    /// Import typed graph entities.
+    GraphEntityImport,
+    /// Import typed graph relations.
+    GraphRelationImport,
+    /// Import relation evidence occurrences.
+    GraphEvidenceImport,
+    /// Import resolution occurrences.
+    GraphResolutionOccurrenceImport,
+    /// Import resolution candidates.
+    GraphResolutionCandidateImport,
+    /// Import structural coverage.
+    GraphCoverageImport,
+    /// Import authoritative file text.
+    FileTextImport,
+    /// Reconcile staged and live structural counts.
+    StructuralCountReconciliation,
+    /// Flip the active slot and epoch.
+    PublicationFlip,
+    /// Run transactional publication quick-check.
+    PublicationQuickCheck,
+    /// Reconcile schema and publication metadata.
+    SchemaAndPublicationReconciliation,
+    /// Reconcile structural text storage and UTF-8.
+    StructuralTextReconciliation,
+    /// Reconcile candidate uniqueness.
+    ResolutionCandidateUniqueness,
+    /// Reconcile typed relation families.
+    RelationFamilyReconciliation,
+    /// Reconcile structural foreign keys.
+    ForeignKeyReconciliation,
+    /// Reconcile candidate counts.
+    ResolutionCandidateCountReconciliation,
+    /// Reconcile structural coverage.
+    CoverageReconciliation,
+    /// Reconcile authoritative file text with FTS.
+    FullTextSearchReconciliation,
+    /// Finalize the committed publication call, including staging detachment.
+    ///
+    /// An absent completion is conservative diagnostic state and does not by
+    /// itself prove that the raw `SQLite` commit rolled back.
+    TransactionCommit,
+    /// Post-publication counts, lifecycle timing, and storage snapshot.
+    PostPublicationStorageSnapshot,
+    /// Canonical active-entity digest traversal.
+    EntityDigest,
+    /// Relation/evidence digests and one-to-one integrity merge.
+    RelationEvidenceIntegrityMerge,
+    /// Warm direct `SQLite` stable-key query cell.
+    SqliteWarmQueries,
+    /// Warm production-service bounded-three-hop query cell.
+    ServiceWarmQueries,
+    /// Final live-database close, checkpoint, and snapshot.
+    FinalCheckpoint,
+    /// Staging SQLite-family cleanup.
+    Cleanup,
+}
+
+/// Exact durable stage order for a complete successful diagnostic journal.
+const EXPECTED_PROGRESS_STAGES: [GraphScaleProgressStage; 37] = [
+    GraphScaleProgressStage::WorkloadSetup,
+    GraphScaleProgressStage::StagingPersistence,
+    GraphScaleProgressStage::StagingValidationBeforeCheckpoint,
+    GraphScaleProgressStage::StagingCheckpoint,
+    GraphScaleProgressStage::StagingValidationAfterCheckpoint,
+    GraphScaleProgressStage::LiveValidationBeforePublication,
+    GraphScaleProgressStage::ImmutableStagingValidationBeforePublication,
+    GraphScaleProgressStage::TransactionAcquisition,
+    GraphScaleProgressStage::AttachedIdentityValidation,
+    GraphScaleProgressStage::CompatibilityRowReconciliation,
+    GraphScaleProgressStage::InactiveSlotCleanup,
+    GraphScaleProgressStage::GraphEntityImport,
+    GraphScaleProgressStage::GraphRelationImport,
+    GraphScaleProgressStage::GraphEvidenceImport,
+    GraphScaleProgressStage::GraphResolutionOccurrenceImport,
+    GraphScaleProgressStage::GraphResolutionCandidateImport,
+    GraphScaleProgressStage::GraphCoverageImport,
+    GraphScaleProgressStage::FileTextImport,
+    GraphScaleProgressStage::StructuralCountReconciliation,
+    GraphScaleProgressStage::PublicationFlip,
+    GraphScaleProgressStage::PublicationQuickCheck,
+    GraphScaleProgressStage::SchemaAndPublicationReconciliation,
+    GraphScaleProgressStage::StructuralTextReconciliation,
+    GraphScaleProgressStage::ResolutionCandidateUniqueness,
+    GraphScaleProgressStage::RelationFamilyReconciliation,
+    GraphScaleProgressStage::ForeignKeyReconciliation,
+    GraphScaleProgressStage::ResolutionCandidateCountReconciliation,
+    GraphScaleProgressStage::CoverageReconciliation,
+    GraphScaleProgressStage::FullTextSearchReconciliation,
+    GraphScaleProgressStage::TransactionCommit,
+    GraphScaleProgressStage::PostPublicationStorageSnapshot,
+    GraphScaleProgressStage::EntityDigest,
+    GraphScaleProgressStage::RelationEvidenceIntegrityMerge,
+    GraphScaleProgressStage::SqliteWarmQueries,
+    GraphScaleProgressStage::ServiceWarmQueries,
+    GraphScaleProgressStage::FinalCheckpoint,
+    GraphScaleProgressStage::Cleanup,
+];
+
+/// Entered or successfully completed transition for one closed stage.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GraphScaleProgressTransition {
+    /// The stage is about to execute.
+    Entered,
+    /// The stage returned successfully.
+    Completed,
+}
+
+/// Immutable source and manifest identity written only in the progress header.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GraphScaleProgressBinding {
+    /// Exact source commit exercised by the child.
+    tested_commit: String,
+    /// Full or explicitly exploratory workload profile.
+    profile: EvidenceProfile,
+    /// Digest of the exact compiled and supplied evaluation manifest.
+    manifest_sha256: String,
+    /// Diagnostic records can never satisfy task acceptance.
+    acceptance_eligible: bool,
+}
+
+/// Current-process transfer counters sampled through `sysinfo`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct GraphScaleProcessIo {
+    /// Cumulative bytes read by the record-writing process.
+    total_read_bytes: u64,
+    /// Cumulative bytes written by the record-writing process.
+    total_written_bytes: u64,
+    /// Bytes read since this writer's preceding observation.
+    read_bytes_since_previous_record: u64,
+    /// Bytes written since this writer's preceding observation.
+    written_bytes_since_previous_record: u64,
+}
+
+/// Sequence-zero header that alone owns source and process identity.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GraphScaleProgressHeader {
+    /// Progress journal schema version.
+    schema_version: u32,
+    /// Stable diagnostic artifact identity.
+    artifact_kind: String,
+    /// Header sequence, always zero.
+    sequence: u64,
+    /// Exact source commit exercised by the child.
+    tested_commit: String,
+    /// Digest of the exact compiled and supplied evaluation manifest.
+    manifest_sha256: String,
+    /// Full or explicitly exploratory workload profile.
+    profile: EvidenceProfile,
+    /// PID of the sole process that writes this journal.
+    process_id: u32,
+    /// Diagnostic records can never satisfy task acceptance.
+    acceptance_eligible: bool,
+}
+
+/// One child-owned stage transition without repeated binding fields.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GraphScaleProgressEvent {
+    /// Contiguous sequence after the header.
+    sequence: u64,
+    /// Exact closed workload milestone.
+    stage: GraphScaleProgressStage,
+    /// Entered or successfully completed transition.
+    transition: GraphScaleProgressTransition,
+    /// Monotonic elapsed nanoseconds for this child journal.
+    elapsed_ns: u64,
+    /// Cumulative bytes read by the record-writing process.
+    total_read_bytes: u64,
+    /// Cumulative bytes written by the record-writing process.
+    total_written_bytes: u64,
+    /// Bytes read since the writer's preceding observation.
+    read_bytes_since_previous_record: u64,
+    /// Bytes written since the writer's preceding observation.
+    written_bytes_since_previous_record: u64,
+}
+
+/// One typed line in the durable workload progress journal.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+enum GraphScaleProgressRecord {
+    /// Sole binding header.
+    Header(GraphScaleProgressHeader),
+    /// One lifecycle transition.
+    Event(GraphScaleProgressEvent),
+}
+
+impl GraphScaleProgressRecord {
+    /// Return the contiguous record sequence independent of record shape.
+    const fn sequence(&self) -> u64 {
+        match self {
+            Self::Header(header) => header.sequence,
+            Self::Event(event) => event.sequence,
+        }
+    }
+}
+
+/// Metadata for at most one bounded non-newline final fragment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IncompleteProgressTail {
+    /// Fragment length without exposing its bytes.
+    byte_count: usize,
+    /// SHA-256 identity without exposing its bytes.
+    sha256: String,
+}
+
+/// Strict or diagnostic parse of one bounded JSONL progress journal.
+#[derive(Debug)]
+struct GraphScaleProgressRead {
+    /// Valid contiguous records before any malformed complete line.
+    records: Vec<GraphScaleProgressRecord>,
+    /// Byte length of a non-newline-terminated final fragment.
+    incomplete_tail: Option<IncompleteProgressTail>,
+}
+
+/// Sole child-process writer for one no-clobber progress journal.
+struct GraphScaleProgressJournal {
+    /// Persistent sibling path outside the supervisor temporary directory.
+    path: PathBuf,
+    /// Write-only file handle created by this child.
+    file: File,
+    /// Immutable binding written only in the header.
+    binding: GraphScaleProgressBinding,
+    /// Process-local monotonic start used by this writer.
+    started: Instant,
+    /// PID whose I/O counters are sampled.
+    process_id: u32,
+    /// Reused process-information cache.
+    system: System,
+    /// Previous current-process I/O totals for delta derivation.
+    previous_io: Option<(u64, u64)>,
+    /// Next contiguous record sequence after the header.
+    next_sequence: u64,
+    /// Number of appended transitions.
+    transition_count: usize,
+}
+
+impl GraphScaleProgressJournal {
+    /// Create the child-owned no-clobber journal and synchronize its header.
+    fn create(
+        path: &Path,
+        binding: GraphScaleProgressBinding,
+    ) -> Result<Self, GraphScaleEvaluationError> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+        let process_id = get_current_pid()
+            .map_err(|error| {
+                GraphScaleEvaluationError::Policy(format!(
+                    "progress writer PID was unavailable: {error}"
+                ))
+            })?
+            .as_u32();
+        let mut journal = Self {
+            path: path.to_path_buf(),
+            file,
+            binding: binding.clone(),
+            started: Instant::now(),
+            process_id,
+            system: System::new(),
+            previous_io: None,
+            next_sequence: 0,
+            transition_count: 0,
+        };
+        let _baseline = journal.observe_process_io()?;
+        let record = GraphScaleProgressRecord::Header(GraphScaleProgressHeader {
+            schema_version: 1,
+            artifact_kind: PROGRESS_ARTIFACT_KIND.to_owned(),
+            sequence: 0,
+            tested_commit: binding.tested_commit,
+            manifest_sha256: binding.manifest_sha256,
+            profile: binding.profile,
+            process_id,
+            acceptance_eligible: binding.acceptance_eligible,
+        });
+        journal.append_record(&record)?;
+        Ok(journal)
+    }
+
+    /// Append and synchronize one exact entered/completed transition.
+    fn record(
+        &mut self,
+        stage: GraphScaleProgressStage,
+        transition: GraphScaleProgressTransition,
+    ) -> Result<(), GraphScaleEvaluationError> {
+        require(
+            self.transition_count < MAX_PROGRESS_TRANSITIONS,
+            format!("progress journal exceeded {MAX_PROGRESS_TRANSITIONS} transitions"),
+        )?;
+        let expected = expected_progress_transition(self.transition_count).ok_or_else(|| {
+            GraphScaleEvaluationError::Policy(format!(
+                "unexpected extra progress transition at index {}",
+                self.transition_count
+            ))
+        })?;
+        require(
+            expected == (stage, transition),
+            format!(
+                "progress transition drifted at index {}: expected {expected:?}, found {stage:?}/{transition:?}",
+                self.transition_count
+            ),
+        )?;
+        let event = self.next_event(stage, transition)?;
+        self.append_record(&GraphScaleProgressRecord::Event(event))?;
+        self.transition_count = self.transition_count.saturating_add(1);
+        Ok(())
+    }
+
+    /// Strictly validate the synchronized successful journal.
+    fn finish(self) -> Result<GraphScaleProgressRead, GraphScaleEvaluationError> {
+        require(
+            self.transition_count == EXPECTED_PROGRESS_STAGES.len() * 2,
+            format!(
+                "progress journal retained {} of {} required transitions",
+                self.transition_count,
+                EXPECTED_PROGRESS_STAGES.len() * 2
+            ),
+        )?;
+        self.file.sync_all()?;
+        drop(self.file);
+        let read = read_progress_journal(&self.path)?;
+        validate_progress_journal(
+            &read,
+            &self.binding,
+            Some(self.process_id),
+            ProgressValidationMode::Complete,
+        )?;
+        Ok(read)
+    }
+
+    /// Build one transition from the current monotonic and process-I/O observations.
+    fn next_event(
+        &mut self,
+        stage: GraphScaleProgressStage,
+        transition: GraphScaleProgressTransition,
+    ) -> Result<GraphScaleProgressEvent, GraphScaleEvaluationError> {
+        let process_io = self.observe_process_io()?;
+        Ok(GraphScaleProgressEvent {
+            sequence: self.next_sequence,
+            stage,
+            transition,
+            elapsed_ns: elapsed_ns(self.started),
+            total_read_bytes: process_io.total_read_bytes,
+            total_written_bytes: process_io.total_written_bytes,
+            read_bytes_since_previous_record: process_io.read_bytes_since_previous_record,
+            written_bytes_since_previous_record: process_io.written_bytes_since_previous_record,
+        })
+    }
+
+    /// Append one bounded newline-complete record and force it to durable storage.
+    fn append_record(
+        &mut self,
+        record: &GraphScaleProgressRecord,
+    ) -> Result<(), GraphScaleEvaluationError> {
+        require(
+            usize::try_from(record.sequence())
+                .ok()
+                .is_some_and(|sequence| sequence < MAX_PROGRESS_COMPLETE_RECORDS),
+            format!("progress journal exceeded {MAX_PROGRESS_COMPLETE_RECORDS} complete records"),
+        )?;
+        require(
+            record.sequence() == self.next_sequence,
+            format!(
+                "progress sequence was not contiguous: expected {}, found {}",
+                self.next_sequence,
+                record.sequence()
+            ),
+        )?;
+        let mut bytes = serde_json::to_vec(record)?;
+        bytes.push(b'\n');
+        require(
+            bytes.len() <= MAX_PROGRESS_RECORD_BYTES,
+            format!("progress record exceeded {MAX_PROGRESS_RECORD_BYTES} encoded bytes"),
+        )?;
+        self.file.write_all(&bytes)?;
+        self.file.sync_all()?;
+        self.next_sequence = self.next_sequence.checked_add(1).ok_or_else(|| {
+            GraphScaleEvaluationError::Policy("progress sequence overflowed".into())
+        })?;
+        Ok(())
+    }
+
+    /// Refresh cumulative I/O counters for this exact writer process.
+    fn observe_process_io(&mut self) -> Result<GraphScaleProcessIo, GraphScaleEvaluationError> {
+        let pid = Pid::from_u32(self.process_id);
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            false,
+            ProcessRefreshKind::nothing().with_disk_usage(),
+        );
+        let usage = self
+            .system
+            .process(pid)
+            .ok_or_else(|| {
+                GraphScaleEvaluationError::Policy(format!(
+                    "progress writer process {} was unavailable to sysinfo",
+                    self.process_id
+                ))
+            })?
+            .disk_usage();
+        let (read_delta, written_delta) =
+            if let Some((previous_read, previous_written)) = self.previous_io {
+                (
+                    usage
+                        .total_read_bytes
+                        .checked_sub(previous_read)
+                        .ok_or_else(|| {
+                            GraphScaleEvaluationError::Policy(
+                                "progress writer total read bytes regressed".into(),
+                            )
+                        })?,
+                    usage
+                        .total_written_bytes
+                        .checked_sub(previous_written)
+                        .ok_or_else(|| {
+                            GraphScaleEvaluationError::Policy(
+                                "progress writer total written bytes regressed".into(),
+                            )
+                        })?,
+                )
+            } else {
+                (0, 0)
+            };
+        self.previous_io = Some((usage.total_read_bytes, usage.total_written_bytes));
+        Ok(GraphScaleProcessIo {
+            total_read_bytes: usage.total_read_bytes,
+            total_written_bytes: usage.total_written_bytes,
+            read_bytes_since_previous_record: read_delta,
+            written_bytes_since_previous_record: written_delta,
+        })
+    }
+}
+
+/// Return the exact expected transition at one zero-based transition index.
+fn expected_progress_transition(
+    index: usize,
+) -> Option<(GraphScaleProgressStage, GraphScaleProgressTransition)> {
+    let stage = *EXPECTED_PROGRESS_STAGES.get(index / 2)?;
+    let transition = if index.is_multiple_of(2) {
+        GraphScaleProgressTransition::Entered
+    } else {
+        GraphScaleProgressTransition::Completed
+    };
+    Some((stage, transition))
+}
+
+/// Derive the durable diagnostic sibling of the requested final evidence path.
+fn progress_output_path(output: &Path) -> PathBuf {
+    let mut sibling = output.as_os_str().to_os_string();
+    sibling.push(".progress.jsonl");
+    PathBuf::from(sibling)
+}
+
+/// Translate the complete database-owned progress vocabulary into evaluator records.
+fn map_structural_publication_progress(
+    progress: StructuralPublicationProgress,
+) -> (GraphScaleProgressStage, GraphScaleProgressTransition) {
+    let stage = match progress.stage {
+        StructuralPublicationStage::StagingValidationBeforeCheckpoint => {
+            GraphScaleProgressStage::StagingValidationBeforeCheckpoint
+        }
+        StructuralPublicationStage::StagingCheckpoint => GraphScaleProgressStage::StagingCheckpoint,
+        StructuralPublicationStage::StagingValidationAfterCheckpoint => {
+            GraphScaleProgressStage::StagingValidationAfterCheckpoint
+        }
+        StructuralPublicationStage::LiveValidationBeforePublication => {
+            GraphScaleProgressStage::LiveValidationBeforePublication
+        }
+        StructuralPublicationStage::ImmutableStagingValidationBeforePublication => {
+            GraphScaleProgressStage::ImmutableStagingValidationBeforePublication
+        }
+        StructuralPublicationStage::TransactionAcquisition => {
+            GraphScaleProgressStage::TransactionAcquisition
+        }
+        StructuralPublicationStage::AttachedIdentityValidation => {
+            GraphScaleProgressStage::AttachedIdentityValidation
+        }
+        StructuralPublicationStage::CompatibilityRowReconciliation => {
+            GraphScaleProgressStage::CompatibilityRowReconciliation
+        }
+        StructuralPublicationStage::InactiveSlotCleanup => {
+            GraphScaleProgressStage::InactiveSlotCleanup
+        }
+        StructuralPublicationStage::GraphEntityImport => GraphScaleProgressStage::GraphEntityImport,
+        StructuralPublicationStage::GraphRelationImport => {
+            GraphScaleProgressStage::GraphRelationImport
+        }
+        StructuralPublicationStage::GraphEvidenceImport => {
+            GraphScaleProgressStage::GraphEvidenceImport
+        }
+        StructuralPublicationStage::GraphResolutionOccurrenceImport => {
+            GraphScaleProgressStage::GraphResolutionOccurrenceImport
+        }
+        StructuralPublicationStage::GraphResolutionCandidateImport => {
+            GraphScaleProgressStage::GraphResolutionCandidateImport
+        }
+        StructuralPublicationStage::GraphCoverageImport => {
+            GraphScaleProgressStage::GraphCoverageImport
+        }
+        StructuralPublicationStage::FileTextImport => GraphScaleProgressStage::FileTextImport,
+        StructuralPublicationStage::StructuralCountReconciliation => {
+            GraphScaleProgressStage::StructuralCountReconciliation
+        }
+        StructuralPublicationStage::PublicationFlip => GraphScaleProgressStage::PublicationFlip,
+        StructuralPublicationStage::PublicationQuickCheck => {
+            GraphScaleProgressStage::PublicationQuickCheck
+        }
+        StructuralPublicationStage::SchemaAndPublicationReconciliation => {
+            GraphScaleProgressStage::SchemaAndPublicationReconciliation
+        }
+        StructuralPublicationStage::StructuralTextReconciliation => {
+            GraphScaleProgressStage::StructuralTextReconciliation
+        }
+        StructuralPublicationStage::ResolutionCandidateUniqueness => {
+            GraphScaleProgressStage::ResolutionCandidateUniqueness
+        }
+        StructuralPublicationStage::RelationFamilyReconciliation => {
+            GraphScaleProgressStage::RelationFamilyReconciliation
+        }
+        StructuralPublicationStage::ForeignKeyReconciliation => {
+            GraphScaleProgressStage::ForeignKeyReconciliation
+        }
+        StructuralPublicationStage::ResolutionCandidateCountReconciliation => {
+            GraphScaleProgressStage::ResolutionCandidateCountReconciliation
+        }
+        StructuralPublicationStage::CoverageReconciliation => {
+            GraphScaleProgressStage::CoverageReconciliation
+        }
+        StructuralPublicationStage::FullTextSearchReconciliation => {
+            GraphScaleProgressStage::FullTextSearchReconciliation
+        }
+        StructuralPublicationStage::TransactionCommit => GraphScaleProgressStage::TransactionCommit,
+    };
+    let transition = match progress.transition {
+        StructuralPublicationTransition::Entered => GraphScaleProgressTransition::Entered,
+        StructuralPublicationTransition::Completed => GraphScaleProgressTransition::Completed,
+    };
+    (stage, transition)
+}
+
+/// Read one bounded JSONL journal, retaining only a final incomplete fragment as diagnostic state.
+fn read_progress_journal(path: &Path) -> Result<GraphScaleProgressRead, GraphScaleEvaluationError> {
+    let mut file = File::open(path)?;
+    let mut bytes = Vec::new();
+    let limit = u64::try_from(MAX_PROGRESS_JOURNAL_BYTES).unwrap_or(u64::MAX) + 1;
+    std::io::Read::take(&mut file, limit).read_to_end(&mut bytes)?;
+    require(
+        bytes.len() <= MAX_PROGRESS_JOURNAL_BYTES,
+        format!("progress journal exceeded {MAX_PROGRESS_JOURNAL_BYTES} bounded bytes"),
+    )?;
+
+    let mut records = Vec::new();
+    let mut incomplete_tail = None;
+    for (line_index, line) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
+        if !line.ends_with(b"\n") {
+            require(
+                line.len() <= MAX_PROGRESS_RECORD_BYTES,
+                format!("incomplete progress tail exceeded {MAX_PROGRESS_RECORD_BYTES} bytes"),
+            )?;
+            incomplete_tail = Some(IncompleteProgressTail {
+                byte_count: line.len(),
+                sha256: sha256_hex(line),
+            });
+            break;
+        }
+        require(
+            line.len() <= MAX_PROGRESS_RECORD_BYTES,
+            format!(
+                "progress record on line {} exceeded {MAX_PROGRESS_RECORD_BYTES} bytes",
+                line_index + 1
+            ),
+        )?;
+        let json = &line[..line.len().saturating_sub(1)];
+        let record = serde_json::from_slice(json).map_err(|error| {
+            GraphScaleEvaluationError::Policy(format!(
+                "malformed newline-complete progress record on line {}: {error}",
+                line_index + 1
+            ))
+        })?;
+        records.push(record);
+        require(
+            records.len() <= MAX_PROGRESS_COMPLETE_RECORDS,
+            format!("progress journal exceeded {MAX_PROGRESS_COMPLETE_RECORDS} complete records"),
+        )?;
+    }
+    Ok(GraphScaleProgressRead {
+        records,
+        incomplete_tail,
+    })
+}
+
+/// Complete-success validation or timeout-prefix validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProgressValidationMode {
+    /// Require the complete 37-stage, 74-transition sequence and no tail.
+    Complete,
+    /// Permit only an exact prefix with at most one unmatched entered stage.
+    Prefix,
+}
+
+/// Recompute sequence, transition, identity, monotonic-clock, and I/O invariants.
+fn validate_progress_journal(
+    read: &GraphScaleProgressRead,
+    expected_binding: &GraphScaleProgressBinding,
+    expected_process_id: Option<u32>,
+    mode: ProgressValidationMode,
+) -> Result<(), GraphScaleEvaluationError> {
+    if mode == ProgressValidationMode::Complete {
+        require(
+            read.incomplete_tail.is_none(),
+            "successful progress journal retained an incomplete final record",
+        )?;
+    }
+    require(
+        read.records.len() <= MAX_PROGRESS_COMPLETE_RECORDS,
+        "progress journal retained too many complete records",
+    )?;
+    let header = match read.records.first() {
+        Some(GraphScaleProgressRecord::Header(header)) => header,
+        Some(GraphScaleProgressRecord::Event(_)) | None => {
+            return Err(GraphScaleEvaluationError::Policy(
+                "progress journal header is missing".into(),
+            ));
+        }
+    };
+    validate_git_commit_hex(&header.tested_commit, "progress tested commit")?;
+    validate_sha256_hex(&header.manifest_sha256, "progress manifest digest")?;
+    require(
+        header.schema_version == 1
+            && header.artifact_kind == PROGRESS_ARTIFACT_KIND
+            && header.sequence == 0
+            && header.tested_commit == expected_binding.tested_commit
+            && header.manifest_sha256 == expected_binding.manifest_sha256
+            && header.profile == expected_binding.profile
+            && header.acceptance_eligible == expected_binding.acceptance_eligible
+            && !header.acceptance_eligible
+            && header.process_id > 0
+            && expected_process_id.is_none_or(|expected| expected == header.process_id),
+        "progress header binding, schema, or child PID drifted",
+    )?;
+
+    let events = &read.records[1..];
+    require(
+        events.len() <= MAX_PROGRESS_TRANSITIONS,
+        "progress journal retained too many transitions",
+    )?;
+    let mut previous_elapsed = 0_u64;
+    let mut previous_io = None;
+    for (transition_index, record) in events.iter().enumerate() {
+        let GraphScaleProgressRecord::Event(event) = record else {
+            return Err(GraphScaleEvaluationError::Policy(format!(
+                "progress header was repeated at record {}",
+                transition_index + 1
+            )));
+        };
+        let expected = expected_progress_transition(transition_index).ok_or_else(|| {
+            GraphScaleEvaluationError::Policy(format!(
+                "unexpected extra progress transition at index {transition_index}"
+            ))
+        })?;
+        require(
+            usize::try_from(event.sequence).ok() == Some(transition_index + 1)
+                && (event.stage, event.transition) == expected,
+            format!(
+                "progress sequence or stage drifted at transition {transition_index}: expected {expected:?}, found {:?}/{:?}/sequence={}",
+                event.stage, event.transition, event.sequence
+            ),
+        )?;
+        require(
+            transition_index == 0 || event.elapsed_ns >= previous_elapsed,
+            format!("progress elapsed time regressed at transition {transition_index}"),
+        )?;
+        previous_elapsed = event.elapsed_ns;
+        if let Some((read_total, written_total)) = previous_io {
+            require(
+                event.total_read_bytes >= read_total
+                    && event.total_written_bytes >= written_total
+                    && event.read_bytes_since_previous_record
+                        == event.total_read_bytes - read_total
+                    && event.written_bytes_since_previous_record
+                        == event.total_written_bytes - written_total,
+                format!("progress process I/O counters drifted at transition {transition_index}"),
+            )?;
+        } else {
+            require(
+                event.read_bytes_since_previous_record <= event.total_read_bytes
+                    && event.written_bytes_since_previous_record <= event.total_written_bytes,
+                "first progress process I/O delta exceeds its cumulative total",
+            )?;
+        }
+        previous_io = Some((event.total_read_bytes, event.total_written_bytes));
+    }
+    if mode == ProgressValidationMode::Complete {
+        require(
+            events.len() == EXPECTED_PROGRESS_STAGES.len() * 2,
+            format!(
+                "successful progress journal retained {} of {} transitions",
+                events.len(),
+                EXPECTED_PROGRESS_STAGES.len() * 2
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+/// Return a best-effort timeout diagnostic without replacing the process failure.
+fn progress_diagnostic(
+    path: &Path,
+    binding: &GraphScaleProgressBinding,
+    expected_process_id: Option<u32>,
+) -> String {
+    if !path.exists() {
+        return format!(
+            "path={}, exists=false, complete_records=0, last_complete_transition=none, incomplete_tail=none",
+            path.display()
+        );
+    }
+    let read = match read_progress_journal(path) {
+        Ok(read) => read,
+        Err(error) => {
+            return format!(
+                "path={}, exists=true, last_complete_transition=unavailable, incomplete_tail=unavailable, unreadable_or_malformed={error}",
+                path.display()
+            );
+        }
+    };
+    let last = read
+        .records
+        .iter()
+        .rev()
+        .find_map(|record| match record {
+            GraphScaleProgressRecord::Header(_) => None,
+            GraphScaleProgressRecord::Event(event) => Some(format!(
+                "{:?}/{:?}/sequence={}",
+                event.stage, event.transition, event.sequence
+            )),
+        })
+        .unwrap_or_else(|| "none".to_owned());
+    let tail = read.incomplete_tail.as_ref().map_or_else(
+        || "none".to_owned(),
+        |tail| format!("bytes={},sha256={}", tail.byte_count, tail.sha256),
+    );
+    let prefix = validate_progress_journal(
+        &read,
+        binding,
+        expected_process_id,
+        ProgressValidationMode::Prefix,
+    )
+    .map_or_else(|error| format!("invalid:{error}"), |()| "valid".to_owned());
+    format!(
+        "path={}, exists=true, complete_records={}, last_complete_transition={}, incomplete_tail={}, prefix={}",
+        path.display(),
+        read.records.len(),
+        last,
+        tail,
+        prefix
+    )
 }
 
 /// Partial manifest envelope containing the graph-scale plan owner.
@@ -991,11 +1831,12 @@ pub(super) fn parse_arguments(
             .map_err(|_value| {
                 GraphScaleEvaluationError::Arguments("arguments must be Unicode".into())
             })?;
+        let known_public = matches!(
+            flag.as_str(),
+            MANIFEST_OPTION | OUTPUT_OPTION | TESTED_COMMIT_OPTION | PROFILE_OPTION
+        );
         require_argument(
-            matches!(
-                flag.as_str(),
-                MANIFEST_OPTION | OUTPUT_OPTION | TESTED_COMMIT_OPTION | PROFILE_OPTION
-            ),
+            known_public || (internal && flag == PROGRESS_OUTPUT_OPTION),
             format!("unknown option {flag}"),
         )?;
         require_argument(
@@ -1004,8 +1845,12 @@ pub(super) fn parse_arguments(
         )?;
     }
     require_argument(
-        options.len() == 4,
-        "all four graph-scale options are required",
+        options.len() == if internal { 5 } else { 4 },
+        if internal {
+            "all five internal graph-scale options are required"
+        } else {
+            "all four graph-scale options are required"
+        },
     )?;
     let tested_commit = required_option(&options, TESTED_COMMIT_OPTION)?;
     require_argument(
@@ -1019,7 +1864,10 @@ pub(super) fn parse_arguments(
         profile: EvidenceProfile::parse(&required_option(&options, PROFILE_OPTION)?)?,
     };
     if internal {
-        Ok(GraphScaleCommand::Workload(arguments))
+        Ok(GraphScaleCommand::Workload(GraphScaleWorkloadArguments {
+            run: arguments,
+            progress_output: PathBuf::from(required_option(&options, PROGRESS_OUTPUT_OPTION)?),
+        }))
     } else {
         Ok(GraphScaleCommand::Supervisor(arguments))
     }
@@ -1048,25 +1896,24 @@ async fn run_supervisor(arguments: &GraphScaleArguments) -> Result<(), GraphScal
     )?;
     let worktree_state_before = git.worktree_state().await?;
     let source_worktree_dirty_before = !worktree_state_before.is_empty();
-    if arguments.profile == EvidenceProfile::Full {
+    if arguments.profile.is_full() {
         require(
             !source_worktree_dirty_before,
             "full graph-scale evidence requires a clean committed source worktree",
         )?;
     }
-    let (source_commit_bindings, source_commit_verified) =
-        if arguments.profile == EvidenceProfile::Full {
-            let bindings =
-                source_commit_bindings(&git, &arguments.tested_commit, COMPILED_SOURCE_BINDINGS)
-                    .await?;
-            require(
-                bindings.iter().all(|binding| binding.exact_match),
-                "one or more compiled graph-scale inputs differ from the tested commit",
-            )?;
-            (bindings, true)
-        } else {
-            (Vec::new(), false)
-        };
+    let (source_commit_bindings, source_commit_verified) = if arguments.profile.is_full() {
+        let bindings =
+            source_commit_bindings(&git, &arguments.tested_commit, COMPILED_SOURCE_BINDINGS)
+                .await?;
+        require(
+            bindings.iter().all(|binding| binding.exact_match),
+            "one or more compiled graph-scale inputs differ from the tested commit",
+        )?;
+        (bindings, true)
+    } else {
+        (Vec::new(), false)
+    };
 
     let executable = fs::canonicalize(std::env::current_exe()?)?;
     let executable_path = path_text(&executable)?;
@@ -1074,6 +1921,13 @@ async fn run_supervisor(arguments: &GraphScaleArguments) -> Result<(), GraphScal
     let directory = tempfile::tempdir()?;
     let child_output = directory.path().join("workload-evidence.json");
     let manifest_path = fs::canonicalize(&arguments.manifest)?;
+    let progress_output = progress_output_path(&arguments.output);
+    let progress_binding = GraphScaleProgressBinding {
+        tested_commit: arguments.tested_commit.clone(),
+        profile: arguments.profile,
+        manifest_sha256: sha256_hex(&manifest_bytes),
+        acceptance_eligible: false,
+    };
     let workload_arguments = vec![
         INTERNAL_WORKLOAD_FLAG.to_owned(),
         MANIFEST_OPTION.to_owned(),
@@ -1084,6 +1938,8 @@ async fn run_supervisor(arguments: &GraphScaleArguments) -> Result<(), GraphScal
         arguments.tested_commit.clone(),
         PROFILE_OPTION.to_owned(),
         arguments.profile.as_str().to_owned(),
+        PROGRESS_OUTPUT_OPTION.to_owned(),
+        path_text(&progress_output)?,
     ];
     let workload_command = std::iter::once(executable_path.clone())
         .chain(workload_arguments.iter().cloned())
@@ -1105,13 +1961,18 @@ async fn run_supervisor(arguments: &GraphScaleArguments) -> Result<(), GraphScal
     let child_exit_code = process_outcome.evidence.exit_code;
     let child_output_truncated = process_outcome.evidence.output_truncated;
     let child_stderr = &process_outcome.stderr_diagnostic;
+    let progress_diagnostic = progress_diagnostic(
+        &progress_output,
+        &progress_binding,
+        Some(process_outcome.evidence.root_pid),
+    );
 
     let observed_git_commit_after = git_output_with(&git, &["rev-parse", "HEAD"]).await?;
     let worktree_state_after = git.worktree_state().await?;
     let source_worktree_dirty_after = !worktree_state_after.is_empty();
     let head_matches_requested_commit = observed_git_commit_before == arguments.tested_commit
         && observed_git_commit_after == arguments.tested_commit;
-    if arguments.profile == EvidenceProfile::Full {
+    if arguments.profile.is_full() {
         require(
             head_matches_requested_commit && !source_worktree_dirty_after,
             "full graph-scale evidence source state changed while the workload ran",
@@ -1120,9 +1981,16 @@ async fn run_supervisor(arguments: &GraphScaleArguments) -> Result<(), GraphScal
     require(
         process_outcome.evidence.successful_bounded_completion,
         format!(
-            "workload child failed closed: exit_code={child_exit_code:?}, timed_out={child_timed_out}, output_truncated={child_output_truncated}, workload_artifact_exists={}, stderr={child_stderr}",
-            child_output.exists()
+            "workload child failed closed: exit_code={child_exit_code:?}, timed_out={child_timed_out}, output_truncated={child_output_truncated}, workload_artifact_exists={}, progress={progress_diagnostic}, stderr={child_stderr}",
+            child_output.exists(),
         ),
+    )?;
+    let progress_read = read_progress_journal(&progress_output)?;
+    validate_progress_journal(
+        &progress_read,
+        &progress_binding,
+        Some(process_outcome.evidence.root_pid),
+        ProgressValidationMode::Complete,
     )?;
     validate_process_evidence(
         &process_outcome.evidence,
@@ -1130,9 +1998,9 @@ async fn run_supervisor(arguments: &GraphScaleArguments) -> Result<(), GraphScal
         Duration::from_secs(plan.workload_timeout_seconds),
         plan.process_output_limit_bytes,
         plan.resource_gates.max_process_group_resident_bytes,
-        arguments.profile == EvidenceProfile::Full,
+        arguments.profile.is_full(),
     )?;
-    let source_state_commit_bound = arguments.profile == EvidenceProfile::Full
+    let source_state_commit_bound = arguments.profile.is_full()
         && head_matches_requested_commit
         && !source_worktree_dirty_before
         && !source_worktree_dirty_after
@@ -1203,11 +2071,7 @@ async fn run_supervisor(arguments: &GraphScaleArguments) -> Result<(), GraphScal
         tested_commit: arguments.tested_commit.clone(),
         os: std::env::consts::OS.to_owned(),
         arch: std::env::consts::ARCH.to_owned(),
-        status: match arguments.profile {
-            EvidenceProfile::Full => STATUS_PASSED,
-            EvidenceProfile::Reduced => STATUS_EXPLORATORY,
-        }
-        .to_owned(),
+        status: status_for_profile(arguments.profile).to_owned(),
         profile: arguments.profile,
         plan,
         workload: workload_artifact.evidence,
@@ -1215,12 +2079,8 @@ async fn run_supervisor(arguments: &GraphScaleArguments) -> Result<(), GraphScal
         provenance,
         claim_scope: ClaimScope {
             claim_eligible: false,
-            claim_status: match arguments.profile {
-                EvidenceProfile::Full => CLAIM_STATUS_IMPLEMENTATION_SCALE,
-                EvidenceProfile::Reduced => CLAIM_STATUS_EXPLORATORY,
-            }
-            .to_owned(),
-            full_declared_scale_executed: arguments.profile == EvidenceProfile::Full,
+            claim_status: claim_status_for_profile(arguments.profile).to_owned(),
+            full_declared_scale_executed: arguments.profile.is_full(),
             exclusions: ClaimExclusions {
                 not_calibrated_reference_host: true,
                 not_mcp_latency: true,
@@ -1240,12 +2100,22 @@ async fn run_supervisor(arguments: &GraphScaleArguments) -> Result<(), GraphScal
 }
 
 /// Execute and retain one raw child workload artifact.
-fn run_internal_workload(arguments: &GraphScaleArguments) -> Result<(), GraphScaleEvaluationError> {
-    let (_manifest_bytes, _envelope, plan) = load_plan(arguments)?;
-    let evidence = execute_workload(arguments.profile, &plan)?;
+fn run_internal_workload(
+    arguments: &GraphScaleWorkloadArguments,
+) -> Result<(), GraphScaleEvaluationError> {
+    let (manifest_bytes, _envelope, plan) = load_plan(&arguments.run)?;
+    let binding = GraphScaleProgressBinding {
+        tested_commit: arguments.run.tested_commit.clone(),
+        profile: arguments.run.profile,
+        manifest_sha256: sha256_hex(&manifest_bytes),
+        acceptance_eligible: false,
+    };
+    let mut progress = GraphScaleProgressJournal::create(&arguments.progress_output, binding)?;
+    let evidence = execute_workload(arguments.run.profile, &plan, &mut progress)?;
+    progress.finish()?;
     validate_workload(&evidence)?;
     write_json_create_new(
-        &arguments.output,
+        &arguments.run.output,
         &GraphScaleWorkloadArtifact {
             schema_version: 1,
             artifact_kind: WORKLOAD_ARTIFACT_KIND.to_owned(),
@@ -1267,6 +2137,9 @@ fn load_plan(
     validate_manifest_envelope(&envelope)?;
     let plan = match arguments.profile {
         EvidenceProfile::Full => envelope.architecture_evaluations.graph_scale.clone(),
+        EvidenceProfile::Medium => {
+            medium_evidence_plan(&envelope.architecture_evaluations.graph_scale)
+        }
         EvidenceProfile::Reduced => {
             reduced_evidence_plan(&envelope.architecture_evaluations.graph_scale)
         }
@@ -1297,11 +2170,16 @@ fn validate_manifest_envelope(
 fn execute_workload(
     profile: EvidenceProfile,
     plan: &GraphScalePlan,
+    progress: &mut GraphScaleProgressJournal,
 ) -> Result<GraphScaleWorkloadEvidence, GraphScaleEvaluationError> {
     plan.validate_shape()?;
-    if profile == EvidenceProfile::Full {
+    if profile.is_full() {
         plan.validate_declared()?;
     }
+    progress.record(
+        GraphScaleProgressStage::WorkloadSetup,
+        GraphScaleProgressTransition::Entered,
+    )?;
     let publication_lifecycle_started = Instant::now();
     let directory = tempfile::tempdir()?;
     let live_directory = directory.path().join("live-database");
@@ -1325,6 +2203,14 @@ fn execute_workload(
         .map_err(|error| {
             GraphScaleEvaluationError::Policy(format!("graph worker pool failed: {error}"))
         })?;
+    progress.record(
+        GraphScaleProgressStage::WorkloadSetup,
+        GraphScaleProgressTransition::Completed,
+    )?;
+    progress.record(
+        GraphScaleProgressStage::StagingPersistence,
+        GraphScaleProgressTransition::Entered,
+    )?;
 
     let mut construction_ns = 0_u64;
     let mut staging_persistence_ns = 0_u64;
@@ -1355,12 +2241,11 @@ fn execute_workload(
             )?;
             hash_field(&mut producer_path_sequence, graph.path().as_bytes());
             completed_graph_count = completed_graph_count.saturating_add(1);
-            stage.stage_compact_symbol_graph(graph)?;
         }
+        stage.stage_compact_symbol_graphs(&completed_batch)?;
         staging_persistence_ns =
             staging_persistence_ns.saturating_add(elapsed_ns(persistence_started));
     }
-
     let staging_signature = format!(
         "graph-scale:{}:{}",
         profile.as_str(),
@@ -1368,15 +2253,58 @@ fn execute_workload(
     );
     stage.set_staged_structural_state_signature(&staging, &staging_signature)?;
     let staging_before_seal = sqlite_storage_snapshot(&staging_path, &staging_directory)?;
+    progress.record(
+        GraphScaleProgressStage::StagingPersistence,
+        GraphScaleProgressTransition::Completed,
+    )?;
     let sealing_started = Instant::now();
-    stage.seal_structural_staging(&staging)?;
+    let mut sealing_progress_error = None;
+    let sealing_result = stage.seal_structural_staging_with_progress(&staging, |event| {
+        let (stage, transition) = map_structural_publication_progress(event);
+        match progress.record(stage, transition) {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(error) => {
+                if sealing_progress_error.is_none() {
+                    sealing_progress_error = Some(error);
+                }
+                ControlFlow::Break(())
+            }
+        }
+    });
+    if let Some(error) = sealing_progress_error {
+        return Err(error);
+    }
+    sealing_result?;
     let sealing_checkpoint_ns = elapsed_ns(sealing_started);
     let staging_after_seal = sqlite_storage_snapshot(&staging_path, &staging_directory)?;
     drop(stage);
 
     let live_before_publication = sqlite_storage_snapshot(&live_path, &live_directory)?;
     let publication_started = Instant::now();
-    let publication_after = live.publish_structural_staging(&staging)?;
+    let mut publication_progress_error = None;
+    let publication_result = live.publish_structural_staging_with_progress(&staging, |event| {
+        let (stage, transition) = map_structural_publication_progress(event);
+        match progress.record(stage, transition) {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(error) => {
+                if publication_progress_error.is_none() {
+                    publication_progress_error = Some(error);
+                }
+                ControlFlow::Break(())
+            }
+        }
+    });
+    if let Some(error) = publication_progress_error {
+        return Err(error);
+    }
+    let publication_after = publication_result?;
+    // Completion means the database call finalized successfully, including
+    // detachment. A post-commit detach error intentionally leaves only Entered;
+    // this diagnostic journal must never claim that absence proves rollback.
+    progress.record(
+        GraphScaleProgressStage::TransactionCommit,
+        GraphScaleProgressTransition::Completed,
+    )?;
     let inactive_slot_publication_ns = elapsed_ns(publication_started);
     let expected_publication_after = publication_before.next_full().map_err(|error| {
         GraphScaleEvaluationError::Policy(format!("publication epoch overflowed: {error}"))
@@ -1388,19 +2316,91 @@ fn execute_workload(
         exact_transition: publication_after == expected_publication_after,
     };
 
+    progress.record(
+        GraphScaleProgressStage::PostPublicationStorageSnapshot,
+        GraphScaleProgressTransition::Entered,
+    )?;
     let expected_entities = plan.expected_entities()?;
     let expected_relations = plan.expected_relations()?;
     let logical_facts = expected_entities.saturating_add(expected_relations);
     let observed = live.graph_fact_counts()?;
     let total_publication_lifecycle_ns = elapsed_ns(publication_lifecycle_started);
     let live_after_publication = sqlite_storage_snapshot(&live_path, &live_directory)?;
-    let integrity = graph_integrity_evidence(&live_path, publication_after)?;
-    let queries = run_warm_queries(&live, plan)?;
+    progress.record(
+        GraphScaleProgressStage::PostPublicationStorageSnapshot,
+        GraphScaleProgressTransition::Completed,
+    )?;
+
+    let integrity_connection = read_only_connection(&live_path)?;
+    let active_slot = slot_text(publication_after.active_slot);
+    progress.record(
+        GraphScaleProgressStage::EntityDigest,
+        GraphScaleProgressTransition::Entered,
+    )?;
+    let entity_identity_digest_sha256 = entity_digest(&integrity_connection, active_slot)?;
+    progress.record(
+        GraphScaleProgressStage::EntityDigest,
+        GraphScaleProgressTransition::Completed,
+    )?;
+    progress.record(
+        GraphScaleProgressStage::RelationEvidenceIntegrityMerge,
+        GraphScaleProgressTransition::Entered,
+    )?;
+    let integrity = relation_evidence_integrity(
+        &integrity_connection,
+        active_slot,
+        entity_identity_digest_sha256,
+    )?;
+    progress.record(
+        GraphScaleProgressStage::RelationEvidenceIntegrityMerge,
+        GraphScaleProgressTransition::Completed,
+    )?;
+    drop(integrity_connection);
+
+    progress.record(
+        GraphScaleProgressStage::SqliteWarmQueries,
+        GraphScaleProgressTransition::Entered,
+    )?;
+    let (query_seed, sqlite_stable_key) = run_sqlite_warm_queries(&live, plan)?;
+    progress.record(
+        GraphScaleProgressStage::SqliteWarmQueries,
+        GraphScaleProgressTransition::Completed,
+    )?;
+    progress.record(
+        GraphScaleProgressStage::ServiceWarmQueries,
+        GraphScaleProgressTransition::Entered,
+    )?;
+    let service_bounded_three_hop = run_service_warm_queries(&live, plan, &query_seed)?;
+    progress.record(
+        GraphScaleProgressStage::ServiceWarmQueries,
+        GraphScaleProgressTransition::Completed,
+    )?;
+    let queries = QueryMeasurements {
+        clock: QUERY_CLOCK.to_owned(),
+        sqlite_stable_key,
+        service_bounded_three_hop,
+    };
     drop(live);
+    progress.record(
+        GraphScaleProgressStage::FinalCheckpoint,
+        GraphScaleProgressTransition::Entered,
+    )?;
     checkpoint_database(&live_path)?;
     let live_final_after_checkpoint = sqlite_storage_snapshot(&live_path, &live_directory)?;
+    progress.record(
+        GraphScaleProgressStage::FinalCheckpoint,
+        GraphScaleProgressTransition::Completed,
+    )?;
+    progress.record(
+        GraphScaleProgressStage::Cleanup,
+        GraphScaleProgressTransition::Entered,
+    )?;
     cleanup_sqlite_file_family(&staging_path)?;
     let staging_after_cleanup = sqlite_file_family_observation(&staging_path)?;
+    progress.record(
+        GraphScaleProgressStage::Cleanup,
+        GraphScaleProgressTransition::Completed,
+    )?;
     let persistent_live_bytes = live_final_after_checkpoint.total_bytes;
     let max_observed_live_and_staging_bytes = max_observed_live_and_staging_bytes(
         &live_before_publication,
@@ -1499,6 +2499,27 @@ fn execute_workload(
     };
     validate_workload(&evidence)?;
     Ok(evidence)
+}
+
+/// Return the explicitly non-certifying 50k-entity exploratory plan.
+fn medium_evidence_plan(plan: &GraphScalePlan) -> GraphScalePlan {
+    let mut plan = plan.clone();
+    plan.graph_count = 25;
+    plan.declarations_per_graph = 1_999;
+    plan.call_edges_per_declaration = 3;
+    plan.extra_call_edges_per_graph = 3;
+    plan.worker_count = 8;
+    plan.completed_graphs_per_batch = 5;
+    plan.query_warmups = 3;
+    plan.query_repetitions = 50;
+    plan.workload_timeout_seconds = 1_800;
+    plan.resource_gates
+        .max_rust_allocator_requests_per_logical_fact = 10_000.0;
+    plan.resource_gates.max_process_group_resident_bytes = u64::MAX;
+    plan.resource_gates.min_staging_logical_facts_per_second = 1;
+    plan.resource_gates
+        .max_derived_storage_bytes_per_logical_fact = u64::MAX;
+    plan
 }
 
 /// Return an explicitly non-certifying small real-path evidence plan.
@@ -1628,11 +2649,11 @@ fn symbol_name(graph_index: usize, symbol_index: usize) -> String {
     format!("graph_{graph_index:04}_symbol_{symbol_index:04}")
 }
 
-/// Measure warmed direct adapter and production bounded-three-hop service cells.
-fn run_warm_queries(
+/// Measure the warmed direct stable-key query cell and return its seed.
+fn run_sqlite_warm_queries(
     store: &AtlasStore,
     plan: &GraphScalePlan,
-) -> Result<QueryMeasurements, GraphScaleEvaluationError> {
+) -> Result<(projectatlas_db::PersistedGraphEntity, QueryCellEvidence), GraphScaleEvaluationError> {
     let seed = store
         .load_graph_entities_by_qualified_name(GraphEntityKind::Declaration, &symbol_name(0, 0), 1)?
         .into_iter()
@@ -1641,14 +2662,6 @@ fn run_warm_queries(
     let direct_query_plan = query_plan_evidence(
         store.graph_entity_query_plan(&seed.stable_key_digest)?,
         QueryPlanRequirement::stable_entity_lookup(),
-    )?;
-    let service_query_plan = query_plan_evidence(
-        store.graph_outbound_relations_by_kind_query_plan(
-            &seed.stable_key_digest,
-            GraphRelationKind::Calls,
-            plan.query_limit,
-        )?,
-        QueryPlanRequirement::outbound_call_adjacency(),
     )?;
     let mut direct_expected = None;
     for _ in 0..plan.query_warmups {
@@ -1673,6 +2686,31 @@ fn run_warm_queries(
         direct_digests.push(observation.1);
     }
 
+    let direct_cell = query_cell(
+        plan,
+        direct_durations,
+        direct_counts,
+        direct_digests,
+        direct_expected,
+        direct_query_plan,
+    )?;
+    Ok((seed, direct_cell))
+}
+
+/// Measure the warmed production bounded-three-hop service query cell.
+fn run_service_warm_queries(
+    store: &AtlasStore,
+    plan: &GraphScalePlan,
+    seed: &projectatlas_db::PersistedGraphEntity,
+) -> Result<QueryCellEvidence, GraphScaleEvaluationError> {
+    let service_query_plan = query_plan_evidence(
+        store.graph_outbound_relations_by_kind_query_plan(
+            &seed.stable_key_digest,
+            GraphRelationKind::Calls,
+            plan.query_limit,
+        )?,
+        QueryPlanRequirement::outbound_call_adjacency(),
+    )?;
     let mut service_expected = None;
     for _ in 0..plan.query_warmups {
         let result = graph_query::bounded_three_hop(
@@ -1706,25 +2744,14 @@ fn run_warm_queries(
         service_digests.push(observation.1);
     }
 
-    Ok(QueryMeasurements {
-        clock: QUERY_CLOCK.to_owned(),
-        sqlite_stable_key: query_cell(
-            plan,
-            direct_durations,
-            direct_counts,
-            direct_digests,
-            direct_expected,
-            direct_query_plan,
-        )?,
-        service_bounded_three_hop: query_cell(
-            plan,
-            service_durations,
-            service_counts,
-            service_digests,
-            service_expected,
-            service_query_plan,
-        )?,
-    })
+    query_cell(
+        plan,
+        service_durations,
+        service_counts,
+        service_digests,
+        service_expected,
+        service_query_plan,
+    )
 }
 
 /// Build one complete query-cell artifact without destroying raw execution order.
@@ -2079,14 +3106,12 @@ fn sidecar_path(database_path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-/// Retain canonical entity/relation/evidence digests and reconcile one-to-one evidence.
-fn graph_integrity_evidence(
-    database_path: &Path,
-    publication: PublicationState,
+/// Retain relation/evidence digests and reconcile one-to-one evidence.
+fn relation_evidence_integrity(
+    connection: &Connection,
+    slot: &str,
+    entity_identity_digest_sha256: String,
 ) -> Result<GraphIntegrityEvidence, GraphScaleEvaluationError> {
-    let connection = read_only_connection(database_path)?;
-    let slot = slot_text(publication.active_slot);
-    let entity_identity_digest_sha256 = entity_digest(&connection, slot)?;
     let mut relation_statement = connection.prepare(
         "SELECT stable_key_digest, source_entity_digest, relation_kind, target_scope,
                 target_entity_digest, external_target_namespace, external_target_value
@@ -2542,7 +3567,7 @@ fn validate_provenance(
             && workload_timeout_seconds > 0,
         "commit or external-timeout provenance is incomplete",
     )?;
-    if profile == EvidenceProfile::Full {
+    if profile.is_full() {
         require(
             evidence.source_state_commit_bound
                 && evidence.head_matches_requested_commit
@@ -2640,7 +3665,7 @@ fn validate_command_provenance(
     let workload = &evidence.workload_command;
     require(
         supervisor.len() == 9
-            && workload.len() == 10
+            && workload.len() == 12
             && supervisor[0] == workload[0]
             && Path::new(&supervisor[0]).is_absolute()
             && supervisor[1] == MANIFEST_OPTION
@@ -2656,12 +3681,16 @@ fn validate_command_provenance(
             && workload[7] == tested_commit
             && workload[8] == PROFILE_OPTION
             && workload[9] == profile.as_str()
+            && workload[10] == PROGRESS_OUTPUT_OPTION
+            && Path::new(&workload[11])
+                == progress_output_path(Path::new(&supervisor[4])).as_path()
             && !supervisor[0].is_empty()
             && !supervisor[2].is_empty()
             && !supervisor[4].is_empty()
             && !workload[0].is_empty()
             && !workload[3].is_empty()
             && !workload[5].is_empty()
+            && !workload[11].is_empty()
             && supervisor[4] != workload[5],
         "supervisor or same-executable workload command tuple drifted",
     )
@@ -2672,14 +3701,22 @@ fn validate_workload(
     evidence: &GraphScaleWorkloadEvidence,
 ) -> Result<(), GraphScaleEvaluationError> {
     evidence.plan.validate_shape()?;
-    if evidence.profile == EvidenceProfile::Full {
-        evidence.plan.validate_declared()?;
-    } else {
-        require(
-            evidence.plan.expected_entities()? < 1_000_000
-                && evidence.plan.expected_relations()? < 3_000_000,
-            "reduced profile unexpectedly matches declared full scale",
-        )?;
+    match evidence.profile {
+        EvidenceProfile::Full => evidence.plan.validate_declared()?,
+        EvidenceProfile::Medium => require(
+            evidence.plan.graph_count == 25
+                && evidence.plan.declarations_per_graph == 1_999
+                && evidence.plan.call_edges_per_declaration == 3
+                && evidence.plan.extra_call_edges_per_graph == 3
+                && evidence.plan.expected_entities()? == 50_000
+                && evidence.plan.expected_relations()? == 150_000,
+            "medium profile drifted from its exact exploratory shape",
+        )?,
+        EvidenceProfile::Reduced => require(
+            evidence.plan.expected_entities()? < 50_000
+                && evidence.plan.expected_relations()? < 150_000,
+            "reduced profile unexpectedly reached medium scale",
+        )?,
     }
     let expected_entities = evidence.plan.expected_entities()?;
     let expected_relations = evidence.plan.expected_relations()?;
@@ -2849,11 +3886,7 @@ fn validate_artifact(
         "final artifact payload digest drifted",
     )?;
     require(
-        artifact.payload.status
-            == match artifact.payload.profile {
-                EvidenceProfile::Full => STATUS_PASSED,
-                EvidenceProfile::Reduced => STATUS_EXPLORATORY,
-            },
+        artifact.payload.status == status_for_profile(artifact.payload.profile),
         "final artifact status disagrees with its profile",
     )?;
     let manifest: EvaluationManifestEnvelope = serde_json::from_slice(MANIFEST_BYTES)?;
@@ -2884,15 +3917,12 @@ fn validate_artifact(
             .plan
             .resource_gates
             .max_process_group_resident_bytes,
-        artifact.payload.profile == EvidenceProfile::Full,
+        artifact.payload.profile.is_full(),
     )?;
     require(
         !artifact.payload.claim_scope.claim_eligible
             && artifact.payload.claim_scope.claim_status
-                == match artifact.payload.profile {
-                    EvidenceProfile::Full => CLAIM_STATUS_IMPLEMENTATION_SCALE,
-                    EvidenceProfile::Reduced => CLAIM_STATUS_EXPLORATORY,
-                }
+                == claim_status_for_profile(artifact.payload.profile)
             && artifact
                 .payload
                 .claim_scope
@@ -2908,7 +3938,7 @@ fn validate_artifact(
     )?;
     require(
         artifact.payload.claim_scope.full_declared_scale_executed
-            == (artifact.payload.profile == EvidenceProfile::Full),
+            == artifact.payload.profile.is_full(),
         "full-scale claim marker differs from the explicit profile",
     )
 }
@@ -3179,8 +4209,623 @@ mod tests {
     use crate::graph_scale_process::{
         ProcessContainmentMechanism, ProcessGateDecision, ProcessMembershipSemantics,
         ProcessStreamEvidence, ResidentMemorySample, ResidentProcessSample,
+        run_measured_process_with_environment,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{env, thread};
+
+    const PROGRESS_TIMEOUT_PROBE_ENV: &str = "PROJECTATLAS_PROGRESS_TIMEOUT_PROBE";
+    const PROGRESS_TIMEOUT_PATH_ENV: &str = "PROJECTATLAS_PROGRESS_TIMEOUT_PATH";
+    const PROGRESS_TIMEOUT_ARTIFACT_ENV: &str = "PROJECTATLAS_PROGRESS_TIMEOUT_ARTIFACT";
+    const PROGRESS_TIMEOUT_PROBE_NAME: &str =
+        "graph_scale_evaluation::tests::task_arri_ut_arri_4_23_progress_timeout_probe";
+
+    fn test_progress_binding(profile: EvidenceProfile) -> GraphScaleProgressBinding {
+        GraphScaleProgressBinding {
+            tested_commit: "0".repeat(40),
+            profile,
+            manifest_sha256: sha256_hex(MANIFEST_BYTES),
+            acceptance_eligible: false,
+        }
+    }
+
+    fn synthetic_progress_records(
+        binding: &GraphScaleProgressBinding,
+        process_id: u32,
+        transition_count: usize,
+    ) -> Result<Vec<GraphScaleProgressRecord>, GraphScaleEvaluationError> {
+        let mut records = vec![GraphScaleProgressRecord::Header(GraphScaleProgressHeader {
+            schema_version: 1,
+            artifact_kind: PROGRESS_ARTIFACT_KIND.to_owned(),
+            sequence: 0,
+            tested_commit: binding.tested_commit.clone(),
+            manifest_sha256: binding.manifest_sha256.clone(),
+            profile: binding.profile,
+            process_id,
+            acceptance_eligible: false,
+        })];
+        for index in 0..transition_count {
+            let (stage, transition) = expected_progress_transition(index).ok_or_else(|| {
+                GraphScaleEvaluationError::Policy(format!(
+                    "synthetic progress transition {index} exceeds the closed sequence"
+                ))
+            })?;
+            let total = 100_u64.saturating_add(usize_to_u64(index).saturating_mul(10));
+            records.push(GraphScaleProgressRecord::Event(GraphScaleProgressEvent {
+                sequence: usize_to_u64(index.saturating_add(1)),
+                stage,
+                transition,
+                elapsed_ns: usize_to_u64(index.saturating_add(1)),
+                total_read_bytes: total,
+                total_written_bytes: total,
+                read_bytes_since_previous_record: 10,
+                written_bytes_since_previous_record: 10,
+            }));
+        }
+        Ok(records)
+    }
+
+    fn write_progress_records(
+        path: &Path,
+        records: &[GraphScaleProgressRecord],
+    ) -> Result<(), GraphScaleEvaluationError> {
+        let mut bytes = Vec::new();
+        for record in records {
+            bytes.extend(serde_json::to_vec(record)?);
+            bytes.push(b'\n');
+        }
+        fs::write(path, bytes)?;
+        Ok(())
+    }
+
+    fn public_test_arguments(profile: &str) -> Vec<OsString> {
+        vec![
+            MANIFEST_OPTION.into(),
+            "清单.json".into(),
+            OUTPUT_OPTION.into(),
+            "结果.json".into(),
+            TESTED_COMMIT_OPTION.into(),
+            "0".repeat(40).into(),
+            PROFILE_OPTION.into(),
+            profile.into(),
+        ]
+    }
+
+    #[test]
+    fn progress_arguments_are_closed_unicode_and_profile_typed()
+    -> Result<(), GraphScaleEvaluationError> {
+        let public = parse_arguments(public_test_arguments("medium"))?;
+        let GraphScaleCommand::Supervisor(public) = public else {
+            return Err(GraphScaleEvaluationError::Policy(
+                "public arguments parsed as internal workload".into(),
+            ));
+        };
+        require(
+            public.profile == EvidenceProfile::Medium
+                && public.manifest == Path::new("清单.json")
+                && public.output == Path::new("结果.json"),
+            "Unicode public arguments or medium profile did not round-trip",
+        )?;
+
+        let mut internal = public_test_arguments("reduced");
+        internal.insert(0, INTERNAL_WORKLOAD_FLAG.into());
+        internal.extend([
+            OsString::from(PROGRESS_OUTPUT_OPTION),
+            OsString::from("结果.json.progress.jsonl"),
+        ]);
+        let GraphScaleCommand::Workload(internal) = parse_arguments(internal)? else {
+            return Err(GraphScaleEvaluationError::Policy(
+                "internal arguments parsed as supervisor".into(),
+            ));
+        };
+        require(
+            internal.progress_output == Path::new("结果.json.progress.jsonl"),
+            "internal progress path did not round-trip",
+        )?;
+
+        let mut public_progress = public_test_arguments("reduced");
+        public_progress.extend([
+            OsString::from(PROGRESS_OUTPUT_OPTION),
+            OsString::from("forbidden.jsonl"),
+        ]);
+        require(
+            parse_arguments(public_progress).is_err(),
+            "public mode accepted the child-only progress option",
+        )?;
+
+        let mut missing_internal_progress = public_test_arguments("reduced");
+        missing_internal_progress.insert(0, INTERNAL_WORKLOAD_FLAG.into());
+        require(
+            parse_arguments(missing_internal_progress).is_err(),
+            "internal mode accepted a missing progress option",
+        )?;
+
+        let mut duplicate_internal_progress = public_test_arguments("reduced");
+        duplicate_internal_progress.insert(0, INTERNAL_WORKLOAD_FLAG.into());
+        duplicate_internal_progress.extend([
+            OsString::from(PROGRESS_OUTPUT_OPTION),
+            OsString::from("first.jsonl"),
+            OsString::from(PROGRESS_OUTPUT_OPTION),
+            OsString::from("second.jsonl"),
+        ]);
+        let mut unknown_internal = public_test_arguments("reduced");
+        unknown_internal.insert(0, INTERNAL_WORKLOAD_FLAG.into());
+        unknown_internal.extend([
+            OsString::from(PROGRESS_OUTPUT_OPTION),
+            OsString::from("progress.jsonl"),
+        ]);
+        unknown_internal[1] = "--unknown-internal".into();
+        require(
+            parse_arguments(duplicate_internal_progress).is_err()
+                && parse_arguments(unknown_internal).is_err(),
+            "duplicate progress or unknown internal option was accepted",
+        )?;
+
+        let mut duplicate = public_test_arguments("reduced");
+        duplicate.extend([OsString::from(PROFILE_OPTION), OsString::from("reduced")]);
+        let mut unknown = public_test_arguments("reduced");
+        unknown[0] = "--unknown".into();
+        let mut missing_value = public_test_arguments("reduced");
+        missing_value.pop();
+        require(
+            parse_arguments(duplicate).is_err()
+                && parse_arguments(unknown).is_err()
+                && parse_arguments(missing_value).is_err(),
+            "duplicate, unknown, or missing graph-scale arguments were accepted",
+        )
+    }
+
+    #[cfg(unix)]
+    fn non_unicode_argument() -> OsString {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(vec![0xff])
+    }
+
+    #[cfg(windows)]
+    fn non_unicode_argument() -> OsString {
+        use std::os::windows::ffi::OsStringExt;
+        OsString::from_wide(&[0xd800])
+    }
+
+    #[test]
+    fn progress_arguments_reject_non_unicode_values() -> Result<(), GraphScaleEvaluationError> {
+        let mut arguments = public_test_arguments("reduced");
+        arguments[1] = non_unicode_argument();
+        require(
+            parse_arguments(arguments).is_err(),
+            "non-Unicode graph-scale argument was accepted",
+        )
+    }
+
+    #[test]
+    fn progress_writer_is_no_clobber_and_bounded() -> Result<(), GraphScaleEvaluationError> {
+        let directory = tempfile::tempdir()?;
+        let binding = test_progress_binding(EvidenceProfile::Reduced);
+        let path = directory.path().join("result.json.progress.jsonl");
+        let mut writer = GraphScaleProgressJournal::create(&path, binding.clone())?;
+        writer.record(
+            GraphScaleProgressStage::WorkloadSetup,
+            GraphScaleProgressTransition::Entered,
+        )?;
+        let original = fs::read(&path)?;
+        require(
+            GraphScaleProgressJournal::create(&path, binding.clone()).is_err()
+                && fs::read(&path)? == original,
+            "second progress writer clobbered existing bytes",
+        )?;
+
+        writer.transition_count = MAX_PROGRESS_TRANSITIONS;
+        writer.next_sequence = usize_to_u64(MAX_PROGRESS_COMPLETE_RECORDS);
+        require(
+            writer
+                .record(
+                    GraphScaleProgressStage::WorkloadSetup,
+                    GraphScaleProgressTransition::Entered,
+                )
+                .is_err()
+                && fs::read(&path)? == original,
+            "transition 129 was appended instead of rejected before write",
+        )?;
+        drop(writer);
+
+        let oversized_path = directory.path().join("oversized.progress.jsonl");
+        let mut oversized_binding = binding;
+        oversized_binding.tested_commit = "a".repeat(MAX_PROGRESS_RECORD_BYTES * 2);
+        require(
+            GraphScaleProgressJournal::create(&oversized_path, oversized_binding).is_err()
+                && fs::metadata(&oversized_path)?.len() == 0,
+            "oversized progress header was appended before its bound was checked",
+        )?;
+        require(
+            progress_output_path(Path::new("result.json"))
+                == Path::new("result.json.progress.jsonl")
+                && progress_output_path(Path::new("result.bin"))
+                    == Path::new("result.bin.progress.jsonl"),
+            "progress sibling derivation collided across output extensions",
+        )?;
+
+        let unicode_path = directory.path().join("进度-ä.jsonl");
+        let unicode_binding = test_progress_binding(EvidenceProfile::Reduced);
+        let unicode_writer =
+            GraphScaleProgressJournal::create(&unicode_path, unicode_binding.clone())?;
+        let unicode_pid = unicode_writer.process_id;
+        drop(unicode_writer);
+        let unicode_read = read_progress_journal(&unicode_path)?;
+        validate_progress_journal(
+            &unicode_read,
+            &unicode_binding,
+            Some(unicode_pid),
+            ProgressValidationMode::Prefix,
+        )
+    }
+
+    #[test]
+    fn strict_progress_validator_accepts_only_the_exact_sequence()
+    -> Result<(), GraphScaleEvaluationError> {
+        let binding = test_progress_binding(EvidenceProfile::Reduced);
+        let records = synthetic_progress_records(&binding, 42, EXPECTED_PROGRESS_STAGES.len() * 2)?;
+        let exact = GraphScaleProgressRead {
+            records,
+            incomplete_tail: None,
+        };
+        validate_progress_journal(&exact, &binding, Some(42), ProgressValidationMode::Complete)?;
+
+        let mut gapped = exact.records.clone();
+        if let GraphScaleProgressRecord::Event(event) = &mut gapped[4] {
+            event.sequence = event.sequence.saturating_add(1);
+        }
+        let mut reordered = exact.records.clone();
+        if let GraphScaleProgressRecord::Event(event) = &mut reordered[3] {
+            event.stage = GraphScaleProgressStage::EntityDigest;
+        }
+        let mut repeated = exact.records.clone();
+        repeated.insert(3, repeated[2].clone());
+        let missing_completion = GraphScaleProgressRead {
+            records: exact.records[..exact.records.len() - 1].to_vec(),
+            incomplete_tail: None,
+        };
+        require(
+            validate_progress_journal(
+                &GraphScaleProgressRead {
+                    records: gapped,
+                    incomplete_tail: None,
+                },
+                &binding,
+                Some(42),
+                ProgressValidationMode::Complete,
+            )
+            .is_err()
+                && validate_progress_journal(
+                    &GraphScaleProgressRead {
+                        records: reordered,
+                        incomplete_tail: None,
+                    },
+                    &binding,
+                    Some(42),
+                    ProgressValidationMode::Complete,
+                )
+                .is_err()
+                && validate_progress_journal(
+                    &GraphScaleProgressRead {
+                        records: repeated,
+                        incomplete_tail: None,
+                    },
+                    &binding,
+                    Some(42),
+                    ProgressValidationMode::Complete,
+                )
+                .is_err()
+                && validate_progress_journal(
+                    &missing_completion,
+                    &binding,
+                    Some(42),
+                    ProgressValidationMode::Complete,
+                )
+                .is_err(),
+            "gapped, repeated, reordered, or missing progress transition was accepted",
+        )?;
+        validate_progress_journal(
+            &missing_completion,
+            &binding,
+            Some(42),
+            ProgressValidationMode::Prefix,
+        )
+    }
+
+    #[test]
+    fn strict_progress_validator_rejects_binding_clock_and_io_forgery()
+    -> Result<(), GraphScaleEvaluationError> {
+        let binding = test_progress_binding(EvidenceProfile::Reduced);
+        let records = synthetic_progress_records(&binding, 42, EXPECTED_PROGRESS_STAGES.len() * 2)?;
+
+        let mut bad_commit = records.clone();
+        if let GraphScaleProgressRecord::Header(header) = &mut bad_commit[0] {
+            header.tested_commit = "A".repeat(40);
+        }
+        let mut bad_manifest = records.clone();
+        if let GraphScaleProgressRecord::Header(header) = &mut bad_manifest[0] {
+            header.manifest_sha256 = "0".repeat(63);
+        }
+        let mut bad_profile = records.clone();
+        if let GraphScaleProgressRecord::Header(header) = &mut bad_profile[0] {
+            header.profile = EvidenceProfile::Medium;
+        }
+        let mut bad_elapsed = records.clone();
+        if let GraphScaleProgressRecord::Event(event) = &mut bad_elapsed[3] {
+            event.elapsed_ns = 0;
+        }
+        let mut bad_io = records.clone();
+        if let GraphScaleProgressRecord::Event(event) = &mut bad_io[3] {
+            event.read_bytes_since_previous_record = 11;
+        }
+        let mut bad_first_io = records.clone();
+        if let GraphScaleProgressRecord::Event(event) = &mut bad_first_io[1] {
+            event.read_bytes_since_previous_record = event.total_read_bytes.saturating_add(1);
+        }
+        for forged in [
+            bad_commit,
+            bad_manifest,
+            bad_profile,
+            bad_elapsed,
+            bad_io,
+            bad_first_io,
+        ] {
+            require(
+                validate_progress_journal(
+                    &GraphScaleProgressRead {
+                        records: forged,
+                        incomplete_tail: None,
+                    },
+                    &binding,
+                    Some(42),
+                    ProgressValidationMode::Complete,
+                )
+                .is_err(),
+                "forged progress binding, clock, or I/O counter was accepted",
+            )?;
+        }
+        require(
+            validate_progress_journal(
+                &GraphScaleProgressRead {
+                    records,
+                    incomplete_tail: None,
+                },
+                &binding,
+                Some(43),
+                ProgressValidationMode::Complete,
+            )
+            .is_err(),
+            "progress header child PID differed from process evidence",
+        )
+    }
+
+    #[test]
+    fn progress_parser_is_strict_and_reports_only_bounded_tail_metadata()
+    -> Result<(), GraphScaleEvaluationError> {
+        let directory = tempfile::tempdir()?;
+        let binding = test_progress_binding(EvidenceProfile::Reduced);
+        let records = synthetic_progress_records(&binding, 42, 2)?;
+        let tail_path = directory.path().join("tail.jsonl");
+        write_progress_records(&tail_path, &records)?;
+        let tail_bytes = br#"{"sequence":3"#;
+        OpenOptions::new()
+            .append(true)
+            .open(&tail_path)?
+            .write_all(tail_bytes)?;
+        let read = read_progress_journal(&tail_path)?;
+        require(
+            read.incomplete_tail
+                == Some(IncompleteProgressTail {
+                    byte_count: tail_bytes.len(),
+                    sha256: sha256_hex(tail_bytes),
+                }),
+            "bounded partial progress tail metadata drifted",
+        )?;
+        validate_progress_journal(&read, &binding, Some(42), ProgressValidationMode::Prefix)?;
+        require(
+            validate_progress_journal(&read, &binding, Some(42), ProgressValidationMode::Complete)
+                .is_err(),
+            "partial progress tail was accepted as a complete journal",
+        )?;
+
+        let malformed_path = directory.path().join("malformed.jsonl");
+        fs::write(&malformed_path, b"{malformed}\n")?;
+        let blank_path = directory.path().join("blank.jsonl");
+        fs::write(&blank_path, b"\n")?;
+        let oversized_tail_path = directory.path().join("oversized-tail.jsonl");
+        fs::write(
+            &oversized_tail_path,
+            vec![b'x'; MAX_PROGRESS_RECORD_BYTES + 1],
+        )?;
+        let unknown_path = directory.path().join("unknown.jsonl");
+        let mut header = serde_json::to_value(&records[0])?;
+        header
+            .as_object_mut()
+            .ok_or_else(|| {
+                GraphScaleEvaluationError::Policy("test header is not an object".into())
+            })?
+            .insert("unknown".to_owned(), serde_json::Value::Bool(true));
+        fs::write(
+            &unknown_path,
+            format!("{}\n", serde_json::to_string(&header)?),
+        )?;
+
+        let unknown_event_path = directory.path().join("unknown-event.jsonl");
+        let mut unknown_event_bytes = serde_json::to_vec(&records[0])?;
+        unknown_event_bytes.push(b'\n');
+        let mut event = serde_json::to_value(&records[1])?;
+        event
+            .as_object_mut()
+            .ok_or_else(|| GraphScaleEvaluationError::Policy("test event is not an object".into()))?
+            .insert("unknown".to_owned(), serde_json::Value::Bool(true));
+        unknown_event_bytes.extend(serde_json::to_vec(&event)?);
+        unknown_event_bytes.push(b'\n');
+        fs::write(&unknown_event_path, unknown_event_bytes)?;
+
+        let overflow_path = directory.path().join("record-overflow.jsonl");
+        let mut overflow_bytes = serde_json::to_vec(&records[0])?;
+        overflow_bytes.push(b'\n');
+        for index in 0..=MAX_PROGRESS_TRANSITIONS {
+            let mut event = match &records[1] {
+                GraphScaleProgressRecord::Event(event) => event.clone(),
+                GraphScaleProgressRecord::Header(_) => {
+                    return Err(GraphScaleEvaluationError::Policy(
+                        "synthetic event fixture was a header".into(),
+                    ));
+                }
+            };
+            event.sequence = usize_to_u64(index.saturating_add(1));
+            overflow_bytes.extend(serde_json::to_vec(&GraphScaleProgressRecord::Event(event))?);
+            overflow_bytes.push(b'\n');
+        }
+        fs::write(&overflow_path, overflow_bytes)?;
+        require(
+            read_progress_journal(&malformed_path).is_err()
+                && read_progress_journal(&blank_path).is_err()
+                && read_progress_journal(&oversized_tail_path).is_err()
+                && read_progress_journal(&unknown_path).is_err()
+                && read_progress_journal(&unknown_event_path).is_err()
+                && read_progress_journal(&overflow_path).is_err(),
+            "malformed, blank, oversized-tail, unknown-field, or record-overflow progress input was accepted",
+        )
+    }
+
+    /// Same-test-executable child that writes a valid prefix and then blocks.
+    #[test]
+    fn task_arri_ut_arri_4_23_progress_timeout_probe() -> Result<(), GraphScaleEvaluationError> {
+        if env::var_os(PROGRESS_TIMEOUT_PROBE_ENV).is_none() {
+            return Ok(());
+        }
+        let path = env::var_os(PROGRESS_TIMEOUT_PATH_ENV).ok_or_else(|| {
+            GraphScaleEvaluationError::Policy("timeout probe progress path is missing".into())
+        })?;
+        let artifact = env::var_os(PROGRESS_TIMEOUT_ARTIFACT_ENV).ok_or_else(|| {
+            GraphScaleEvaluationError::Policy("timeout probe artifact path is missing".into())
+        })?;
+        let mut progress = GraphScaleProgressJournal::create(
+            Path::new(&path),
+            test_progress_binding(EvidenceProfile::Reduced),
+        )?;
+        progress.record(
+            GraphScaleProgressStage::WorkloadSetup,
+            GraphScaleProgressTransition::Entered,
+        )?;
+        progress.record(
+            GraphScaleProgressStage::WorkloadSetup,
+            GraphScaleProgressTransition::Completed,
+        )?;
+        progress.record(
+            GraphScaleProgressStage::StagingPersistence,
+            GraphScaleProgressTransition::Entered,
+        )?;
+        thread::sleep(Duration::from_secs(30));
+        fs::write(artifact, b"workload-completed")?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn forced_timeout_preserves_a_pid_bound_progress_prefix()
+    -> Result<(), GraphScaleEvaluationError> {
+        let directory = tempfile::tempdir()?;
+        let progress_path = directory.path().join("timeout-result.json.progress.jsonl");
+        let absent_workload_artifact = directory.path().join("workload-evidence.json");
+        let executable = env::current_exe()?;
+        let arguments = vec![
+            "--exact".to_owned(),
+            PROGRESS_TIMEOUT_PROBE_NAME.to_owned(),
+            "--nocapture".to_owned(),
+        ];
+        let progress_text = path_text(&progress_path)?;
+        let artifact_text = path_text(&absent_workload_artifact)?;
+        let timeout = Duration::from_millis(750);
+        let sample_interval = Duration::from_millis(20);
+        let output_limit = 64 * 1024;
+        let outcome = run_measured_process_with_environment(
+            &executable,
+            &arguments,
+            &[
+                (PROGRESS_TIMEOUT_PROBE_ENV, "1"),
+                (PROGRESS_TIMEOUT_PATH_ENV, progress_text.as_str()),
+                (PROGRESS_TIMEOUT_ARTIFACT_ENV, artifact_text.as_str()),
+            ],
+            timeout,
+            output_limit,
+            sample_interval,
+            u64::MAX,
+        )
+        .await?;
+        require(
+            outcome.evidence.timed_out
+                && !outcome.evidence.successful_bounded_completion
+                && outcome.evidence.sampler_drain_completed
+                && outcome.evidence.teardown_completed
+                && outcome.evidence.post_teardown_members.is_empty()
+                && !absent_workload_artifact.exists()
+                && progress_path.exists(),
+            "forced timeout did not retain a durable journal after complete teardown",
+        )?;
+        let read = read_progress_journal(&progress_path)?;
+        validate_progress_journal(
+            &read,
+            &test_progress_binding(EvidenceProfile::Reduced),
+            Some(outcome.evidence.root_pid),
+            ProgressValidationMode::Prefix,
+        )?;
+        require(
+            read.records.len() == 4
+                && read.incomplete_tail.is_none()
+                && matches!(
+                    read.records.last(),
+                    Some(GraphScaleProgressRecord::Event(GraphScaleProgressEvent {
+                        stage: GraphScaleProgressStage::StagingPersistence,
+                        transition: GraphScaleProgressTransition::Entered,
+                        ..
+                    }))
+                ),
+            "forced timeout journal was not the exact expected three-transition prefix",
+        )
+    }
+
+    #[test]
+    fn medium_profile_is_exact_and_cannot_claim_acceptance() -> Result<(), GraphScaleEvaluationError>
+    {
+        let envelope: EvaluationManifestEnvelope = serde_json::from_slice(MANIFEST_BYTES)?;
+        let medium = medium_evidence_plan(&envelope.architecture_evaluations.graph_scale);
+        medium.validate_shape()?;
+        require(
+            medium.graph_count == 25
+                && medium.declarations_per_graph == 1_999
+                && medium.call_edges_per_declaration == 3
+                && medium.extra_call_edges_per_graph == 3
+                && medium.expected_entities()? == 50_000
+                && medium.expected_relations()? == 150_000
+                && status_for_profile(EvidenceProfile::Medium) == STATUS_EXPLORATORY
+                && claim_status_for_profile(EvidenceProfile::Medium) == CLAIM_STATUS_EXPLORATORY
+                && !EvidenceProfile::Medium.is_full(),
+            "medium profile shape or non-certifying boundary drifted",
+        )
+    }
+
+    #[test]
+    #[ignore = "runs the explicitly exploratory 50k-entity medium workload"]
+    fn medium_graph_scale_exercises_the_real_path() -> Result<(), GraphScaleEvaluationError> {
+        let envelope: EvaluationManifestEnvelope = serde_json::from_slice(MANIFEST_BYTES)?;
+        let medium = medium_evidence_plan(&envelope.architecture_evaluations.graph_scale);
+        let directory = tempfile::tempdir()?;
+        let binding = test_progress_binding(EvidenceProfile::Medium);
+        let path = directory.path().join("medium.json.progress.jsonl");
+        let mut progress = GraphScaleProgressJournal::create(&path, binding)?;
+        let evidence = execute_workload(EvidenceProfile::Medium, &medium, &mut progress)?;
+        progress.finish()?;
+        validate_workload(&evidence)?;
+        require(
+            evidence.reconciliation.expected_entities == 50_000
+                && evidence.reconciliation.expected_relations == 150_000
+                && evidence.reconciliation.observed.evidence_occurrences == 150_000
+                && !evidence.profile.is_full(),
+            "medium real path drifted from its exploratory 50k/150k/150k shape",
+        )
+    }
 
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "runs the committed release-mode million-entity graph-scale evidence workload"]
@@ -3278,7 +4923,39 @@ mod tests {
         let envelope: EvaluationManifestEnvelope = serde_json::from_slice(MANIFEST_BYTES)?;
         validate_manifest_envelope(&envelope)?;
         let reduced = reduced_evidence_plan(&envelope.architecture_evaluations.graph_scale);
-        let evidence = execute_workload(EvidenceProfile::Reduced, &reduced)?;
+        let tested_commit = "0".repeat(40);
+        let directory = tempfile::tempdir()?;
+        let progress_path = directory.path().join("reduced.json.progress.jsonl");
+        let binding = GraphScaleProgressBinding {
+            tested_commit: tested_commit.clone(),
+            profile: EvidenceProfile::Reduced,
+            manifest_sha256: sha256_hex(MANIFEST_BYTES),
+            acceptance_eligible: false,
+        };
+        let mut progress = GraphScaleProgressJournal::create(&progress_path, binding.clone())?;
+        let progress_process_id = progress.process_id;
+        let evidence = execute_workload(EvidenceProfile::Reduced, &reduced, &mut progress)?;
+        let progress_read = progress.finish()?;
+        validate_progress_journal(
+            &progress_read,
+            &binding,
+            Some(progress_process_id),
+            ProgressValidationMode::Complete,
+        )?;
+        require(
+            progress_read.records.len() == 75
+                && progress_read.incomplete_tail.is_none()
+                && matches!(
+                    progress_read.records.last(),
+                    Some(GraphScaleProgressRecord::Event(GraphScaleProgressEvent {
+                        sequence: 74,
+                        stage: GraphScaleProgressStage::Cleanup,
+                        transition: GraphScaleProgressTransition::Completed,
+                        ..
+                    }))
+                ),
+            "reduced real path did not retain the exact 75-record diagnostic sequence",
+        )?;
         require(
             evidence.reconciliation.expected_entities == 18,
             "reduced entity count drifted",
@@ -3430,7 +5107,6 @@ mod tests {
             "forged aggregate graph evidence digest was accepted",
         )?;
 
-        let tested_commit = "0".repeat(40);
         let payload = GraphScaleEvidencePayload {
             manifest_id: envelope.manifest_id,
             tested_commit: tested_commit.clone(),
@@ -3644,6 +5320,8 @@ mod tests {
             tested_commit.to_owned(),
             PROFILE_OPTION.to_owned(),
             EvidenceProfile::Reduced.as_str().to_owned(),
+            PROGRESS_OUTPUT_OPTION.to_owned(),
+            "final-evidence.json.progress.jsonl".to_owned(),
         ];
         let empty_worktree_digest = sha256_hex(&[]);
         Ok(ProvenanceEvidence {

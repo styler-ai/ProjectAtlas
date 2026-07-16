@@ -2260,7 +2260,22 @@ fn build_symbols_for_paths_with_destination(
     let pool = symbol_worker_pool(options)?;
     report.max_workers = pool.current_num_threads();
     for batch in symbol_job_batches(&jobs, &pool) {
-        for outcome in parse_symbol_job_batch(&pool, batch, options, started_at) {
+        let outcomes = parse_symbol_job_batch(&pool, batch, options, started_at);
+        let staged_batch_is_valid = outcomes.iter().all(|outcome| {
+            !matches!(
+                outcome,
+                SymbolParseOutcome::Io { .. } | SymbolParseOutcome::InvalidGraph { .. }
+            )
+        });
+        if matches!(destination, SymbolGraphDestination::Staging) && staged_batch_is_valid {
+            store.stage_compact_symbol_graphs(outcomes.iter().filter_map(|outcome| {
+                let SymbolParseOutcome::Parsed(parsed) = outcome else {
+                    return None;
+                };
+                Some(&parsed.graph)
+            }))?;
+        }
+        for outcome in outcomes {
             match outcome {
                 SymbolParseOutcome::Parsed(parsed) => {
                     report.symbols += parsed.graph.symbol_count();
@@ -2275,9 +2290,7 @@ fn build_symbols_for_paths_with_destination(
                         SymbolGraphDestination::Published => {
                             store.replace_compact_symbol_graph(&parsed.graph)?;
                         }
-                        SymbolGraphDestination::Staging => {
-                            store.stage_compact_symbol_graph(&parsed.graph)?;
-                        }
+                        SymbolGraphDestination::Staging => {}
                     }
                     report.parsed += 1;
                 }
