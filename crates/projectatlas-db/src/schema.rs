@@ -2737,14 +2737,22 @@ fn validate_persisted_coverage(row: PersistedCoverageRow) -> DbResult<()> {
 /// Require every value in every declared structural TEXT column to be UTF-8.
 fn reconcile_structural_text(connection: &Connection) -> DbResult<()> {
     for table in STRUCTURAL_DERIVED_TABLES {
-        for column in table_text_columns(connection, table)? {
-            let identifier = quote_identifier(&column);
-            let mut statement = connection.prepare(&format!("SELECT {identifier} FROM {table}"))?;
-            let mut rows = statement.query([])?;
-            let mut row_number = 0_u64;
-            while let Some(row) = rows.next()? {
-                row_number += 1;
-                match row.get_ref(0)? {
+        let columns = table_text_columns(connection, table)?;
+        if columns.is_empty() {
+            continue;
+        }
+        let projection = columns
+            .iter()
+            .map(|column| quote_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut statement = connection.prepare(&format!("SELECT {projection} FROM {table}"))?;
+        let mut rows = statement.query([])?;
+        let mut row_number = 0_u64;
+        while let Some(row) = rows.next()? {
+            row_number += 1;
+            for (column_index, column) in columns.iter().enumerate() {
+                match row.get_ref(column_index)? {
                     ValueRef::Null => {}
                     ValueRef::Text(bytes) if std::str::from_utf8(bytes).is_ok() => {}
                     ValueRef::Text(_) => {
@@ -5215,6 +5223,89 @@ mod tests {
     use std::error::Error;
     use std::fmt::Debug;
     use std::io;
+
+    #[test]
+    fn structural_text_reconciliation_validates_each_projected_cell() -> Result<(), Box<dyn Error>>
+    {
+        let store = crate::AtlasStore::in_memory()?;
+        let connection = &store.connection;
+        connection.execute(
+            "INSERT INTO file_texts(
+                 path, content_hash, byte_count, line_count, content, updated_at,
+                 structural_slot, last_changed_epoch
+             ) VALUES (?1, NULL, 5, 1, ?2, ?3, 'a', 0)",
+            params!["src/valid-文字.rs", "hello", "2026-07-16T00:00:00Z"],
+        )?;
+
+        reconcile_structural_text(connection)?;
+
+        connection.execute("UPDATE file_texts SET content = CAST(x'80' AS TEXT)", [])?;
+        let invalid_utf8 = match reconcile_structural_text(connection) {
+            Err(error) => error.to_string(),
+            Ok(()) => {
+                return Err(io::Error::other(
+                    "invalid UTF-8 in a non-first projected column was accepted",
+                )
+                .into());
+            }
+        };
+        if !invalid_utf8
+            .contains("invalid UTF-8 in structural TEXT column file_texts.content at row 1")
+        {
+            return Err(io::Error::other(format!(
+                "projected UTF-8 reconciliation lost its diagnostic: {invalid_utf8}"
+            ))
+            .into());
+        }
+
+        connection.execute(
+            "UPDATE file_texts
+             SET content = 'valid', updated_at = CAST(x'80' AS TEXT)",
+            [],
+        )?;
+        let late_invalid_utf8 = match reconcile_structural_text(connection) {
+            Err(error) => error.to_string(),
+            Ok(()) => {
+                return Err(io::Error::other(
+                    "invalid UTF-8 in a late projected column was accepted",
+                )
+                .into());
+            }
+        };
+        if !late_invalid_utf8
+            .contains("invalid UTF-8 in structural TEXT column file_texts.updated_at at row 1")
+        {
+            return Err(io::Error::other(format!(
+                "late projected UTF-8 reconciliation lost its diagnostic: {late_invalid_utf8}"
+            ))
+            .into());
+        }
+
+        connection.execute(
+            "UPDATE file_texts
+             SET updated_at = '2026-07-16T00:00:00Z', content_hash = x'00'",
+            [],
+        )?;
+        let non_text = match reconcile_structural_text(connection) {
+            Err(error) => error.to_string(),
+            Ok(()) => {
+                return Err(io::Error::other(
+                    "non-TEXT storage in a projected TEXT column was accepted",
+                )
+                .into());
+            }
+        };
+        if !non_text.contains(
+            "non-TEXT value BLOB in structural TEXT column file_texts.content_hash at row 1",
+        ) {
+            return Err(io::Error::other(format!(
+                "projected storage-class reconciliation lost its diagnostic: {non_text}"
+            ))
+            .into());
+        }
+
+        Ok(())
+    }
 
     #[test]
     fn store_facade_preserves_schema_and_legacy_repairs() -> Result<(), Box<dyn Error>> {
