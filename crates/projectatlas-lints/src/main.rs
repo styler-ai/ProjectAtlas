@@ -1,6 +1,7 @@
 //! Purpose: Enforce `ProjectAtlas` source-code policy beyond built-in Clippy lints.
 //! Cargo-adjacent lint gate for `ProjectAtlas`-specific Rust contracts.
 
+mod language_registry;
 mod test_quality;
 
 use proc_macro2::{TokenStream, TokenTree};
@@ -25,6 +26,8 @@ use syn::{
 const COMMAND_STRICT_STRINGS: &str = "strict-strings";
 /// Subcommand group that validates Rust test-quality policy and evidence.
 const COMMAND_TEST_QUALITY: &str = "test-quality";
+/// Subcommand group that validates and generates the language registry.
+const COMMAND_LANGUAGE_REGISTRY: &str = "language-registry";
 /// Successful process exit.
 const EXIT_OK: u8 = 0;
 /// Lint failure process exit.
@@ -259,6 +262,8 @@ fn run(args: impl IntoIterator<Item = OsString>, current_dir: &Path) -> Result<(
     };
     match command.as_str() {
         COMMAND_STRICT_STRINGS => run_strict_strings(current_dir),
+        COMMAND_LANGUAGE_REGISTRY => language_registry::run(&args[1..], current_dir)
+            .map_err(|source| LintError::LanguageRegistry(Box::new(source))),
         COMMAND_TEST_QUALITY => test_quality::run(&args[1..], current_dir)
             .map_err(|source| LintError::Quality(Box::new(source))),
         other => Err(LintError::Usage(format!(
@@ -284,7 +289,7 @@ fn help() -> Result<(), LintError> {
     let mut stdout = io::stdout().lock();
     writeln!(
         stdout,
-        "Usage: cargo projectatlas-lints <COMMAND>\n\nCommands:\n  {COMMAND_STRICT_STRINGS}  Fail on ProjectAtlas source-contract literals and duplicated mutable task counts.\n  {COMMAND_TEST_QUALITY}    Validate Rust test-quality policy and retained evidence."
+        "Usage: cargo projectatlas-lints <COMMAND>\n\nCommands:\n  {COMMAND_STRICT_STRINGS}   Fail on ProjectAtlas source-contract literals and duplicated mutable task counts.\n  {COMMAND_LANGUAGE_REGISTRY}  Validate or generate the typed language registry.\n  {COMMAND_TEST_QUALITY}     Validate Rust test-quality policy and retained evidence."
     )
     .map_err(LintError::Io)
 }
@@ -988,6 +993,8 @@ enum LintError {
     },
     /// Strict string-contract violations.
     Violations(Vec<SourceLiteralViolation>),
+    /// Typed language-registry validation or generation failure.
+    LanguageRegistry(Box<language_registry::LanguageRegistryError>),
     /// Rust test-quality policy or evidence failure.
     Quality(Box<test_quality::QualityError>),
 }
@@ -997,6 +1004,7 @@ impl LintError {
     fn exit_code(&self) -> u8 {
         match self {
             Self::Usage(_) => EXIT_USAGE,
+            Self::LanguageRegistry(source) => source.exit_code(),
             Self::Quality(source) => source.exit_code(),
             Self::Io(_) | Self::ReadFile { .. } | Self::Parse { .. } | Self::Violations(_) => {
                 EXIT_FAILURE
@@ -1017,6 +1025,7 @@ impl Display for LintError {
             Self::Violations(violations) => {
                 write!(formatter, "{} strict source violations", violations.len())
             }
+            Self::LanguageRegistry(source) => Display::fmt(source, formatter),
             Self::Quality(source) => Display::fmt(source, formatter),
         }
     }
@@ -1027,6 +1036,7 @@ impl std::error::Error for LintError {
         match self {
             Self::Io(source) | Self::ReadFile { source, .. } => Some(source),
             Self::Parse { source, .. } => Some(source),
+            Self::LanguageRegistry(source) => Some(source.as_ref()),
             Self::Quality(source) => Some(source.as_ref()),
             Self::Usage(_) | Self::Violations(_) => None,
         }

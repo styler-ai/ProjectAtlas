@@ -1,0 +1,2209 @@
+{
+  "schema_version": 1,
+  "format": "projectatlas.language-registry-lock",
+  "registry_id": "registry.projectatlas-language-runtime",
+  "accepted_target": {
+    "path": "docs/benchmarks/projectatlas-v0.4-capability-registry.json",
+    "registry_id": "projectatlas-v0.4-candidate-212x207",
+    "accepted_set_sha256": "7355cfc034910c87839afe946bdd6c2418766c1792d12a404d2a58586fec8806",
+    "raw_sha256": "d735e9210bfbb9c4e53f1e2631e180116ca8e9345daa42cff1fe279b612dd5a3"
+  },
+  "historical_contract": {
+    "path": "fixtures/languages/projectatlas-v0.3.26-runtime-contract.toon",
+    "release": "v0.3.26",
+    "commit": "d3b3e157f954c7d360d821ed0385762e8b044385",
+    "raw_sha256": "fb9c35414a3fd478de9bf0d1653aac9cca8c1558d3a76947a94d62cbca5038e0"
+  },
+  "packs": [
+    {
+      "pack_id": "default-core",
+      "ownership": "default-core",
+      "runtime": "in-process"
+    },
+    {
+      "pack_id": "broad-language-pack",
+      "ownership": "optional",
+      "runtime": "supervised-worker"
+    },
+    {
+      "pack_id": "semantic-pack",
+      "ownership": "optional",
+      "runtime": "supervised-worker"
+    }
+  ],
+  "capability_tiers": [
+    "detected",
+    "parsed",
+    "symbols",
+    "semantic",
+    "benchmarked"
+  ],
+  "detection_rules": [
+    {
+      "id": "detect.filename.cargo-toml",
+      "layer": "exact-filename",
+      "file_name": "Cargo.toml",
+      "case": "sensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.cargo-manifest"
+    },
+    {
+      "id": "detect.filename.cargo-lock",
+      "layer": "exact-filename",
+      "file_name": "Cargo.lock",
+      "case": "sensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.cargo-lock"
+    },
+    {
+      "id": "detect.filename.build-rs",
+      "layer": "exact-filename",
+      "file_name": "build.rs",
+      "case": "sensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.rust-build-script"
+    },
+    {
+      "id": "detect.filename.dockerfile",
+      "layer": "exact-filename",
+      "file_name": "Dockerfile",
+      "case": "sensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.dockerfile"
+    },
+    {
+      "id": "detect.filename.makefile",
+      "layer": "exact-filename",
+      "file_name": "Makefile",
+      "case": "sensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.makefile"
+    },
+    {
+      "id": "detect.extension.py",
+      "layer": "extension",
+      "extension": ".py",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.python"
+    },
+    {
+      "id": "detect.extension.pyw",
+      "layer": "extension",
+      "extension": ".pyw",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.python"
+    },
+    {
+      "id": "detect.extension.js",
+      "layer": "extension",
+      "extension": ".js",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.javascript"
+    },
+    {
+      "id": "detect.extension.jsx",
+      "layer": "extension",
+      "extension": ".jsx",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.javascript"
+    },
+    {
+      "id": "detect.extension.ts",
+      "layer": "extension",
+      "extension": ".ts",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.typescript"
+    },
+    {
+      "id": "detect.extension.tsx",
+      "layer": "extension",
+      "extension": ".tsx",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.tsx"
+    },
+    {
+      "id": "detect.extension.mjs",
+      "layer": "extension",
+      "extension": ".mjs",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.javascript"
+    },
+    {
+      "id": "detect.extension.cjs",
+      "layer": "extension",
+      "extension": ".cjs",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.javascript"
+    },
+    {
+      "id": "detect.extension.d-ts",
+      "layer": "compound-extension",
+      "extension": ".d.ts",
+      "case": "ascii-insensitive",
+      "path_suffix_case": "sensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.typescript"
+    },
+    {
+      "id": "detect.extension.java",
+      "layer": "extension",
+      "extension": ".java",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.java"
+    },
+    {
+      "id": "detect.extension.c",
+      "layer": "extension",
+      "extension": ".c",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.c"
+    },
+    {
+      "id": "detect.extension.cpp",
+      "layer": "extension",
+      "extension": ".cpp",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.cpp"
+    },
+    {
+      "id": "detect.extension.h",
+      "layer": "extension",
+      "extension": ".h",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.h"
+    },
+    {
+      "id": "detect.extension.hpp",
+      "layer": "extension",
+      "extension": ".hpp",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.hpp"
+    },
+    {
+      "id": "detect.extension.cxx",
+      "layer": "extension",
+      "extension": ".cxx",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.cpp"
+    },
+    {
+      "id": "detect.extension.cc",
+      "layer": "extension",
+      "extension": ".cc",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.cpp"
+    },
+    {
+      "id": "detect.extension.hxx",
+      "layer": "extension",
+      "extension": ".hxx",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.hpp"
+    },
+    {
+      "id": "detect.extension.hh",
+      "layer": "extension",
+      "extension": ".hh",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.hpp"
+    },
+    {
+      "id": "detect.extension.cs",
+      "layer": "extension",
+      "extension": ".cs",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.csharp"
+    },
+    {
+      "id": "detect.extension.go",
+      "layer": "extension",
+      "extension": ".go",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.go"
+    },
+    {
+      "id": "detect.extension.m",
+      "layer": "extension",
+      "extension": ".m",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.objective-c"
+    },
+    {
+      "id": "detect.extension.mm",
+      "layer": "extension",
+      "extension": ".mm",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.objective-c"
+    },
+    {
+      "id": "detect.extension.rb",
+      "layer": "extension",
+      "extension": ".rb",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.ruby"
+    },
+    {
+      "id": "detect.extension.php",
+      "layer": "extension",
+      "extension": ".php",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.php"
+    },
+    {
+      "id": "detect.extension.swift",
+      "layer": "extension",
+      "extension": ".swift",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.swift"
+    },
+    {
+      "id": "detect.extension.kt",
+      "layer": "extension",
+      "extension": ".kt",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.kotlin"
+    },
+    {
+      "id": "detect.extension.kts",
+      "layer": "extension",
+      "extension": ".kts",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.kotlin"
+    },
+    {
+      "id": "detect.extension.rs",
+      "layer": "extension",
+      "extension": ".rs",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.rust"
+    },
+    {
+      "id": "detect.extension.scala",
+      "layer": "extension",
+      "extension": ".scala",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.scala"
+    },
+    {
+      "id": "detect.extension.sh",
+      "layer": "extension",
+      "extension": ".sh",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.shell"
+    },
+    {
+      "id": "detect.extension.bash",
+      "layer": "extension",
+      "extension": ".bash",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.shell"
+    },
+    {
+      "id": "detect.extension.zsh",
+      "layer": "extension",
+      "extension": ".zsh",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.shell"
+    },
+    {
+      "id": "detect.extension.ps1",
+      "layer": "extension",
+      "extension": ".ps1",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.powershell"
+    },
+    {
+      "id": "detect.extension.psm1",
+      "layer": "extension",
+      "extension": ".psm1",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.powershell"
+    },
+    {
+      "id": "detect.extension.psd1",
+      "layer": "extension",
+      "extension": ".psd1",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.powershell"
+    },
+    {
+      "id": "detect.extension.bat",
+      "layer": "extension",
+      "extension": ".bat",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.batch"
+    },
+    {
+      "id": "detect.extension.cmd",
+      "layer": "extension",
+      "extension": ".cmd",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.batch"
+    },
+    {
+      "id": "detect.extension.r",
+      "layer": "extension",
+      "extension": ".r",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.r"
+    },
+    {
+      "id": "detect.extension.r-uppercase",
+      "layer": "extension",
+      "extension": ".R",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.r"
+    },
+    {
+      "id": "detect.extension.pl",
+      "layer": "extension",
+      "extension": ".pl",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.perl"
+    },
+    {
+      "id": "detect.extension.pm",
+      "layer": "extension",
+      "extension": ".pm",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.perl"
+    },
+    {
+      "id": "detect.extension.lua",
+      "layer": "extension",
+      "extension": ".lua",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.lua"
+    },
+    {
+      "id": "detect.extension.dart",
+      "layer": "extension",
+      "extension": ".dart",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.dart"
+    },
+    {
+      "id": "detect.extension.hs",
+      "layer": "extension",
+      "extension": ".hs",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.haskell"
+    },
+    {
+      "id": "detect.extension.ml",
+      "layer": "extension",
+      "extension": ".ml",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.ocaml"
+    },
+    {
+      "id": "detect.extension.mli",
+      "layer": "extension",
+      "extension": ".mli",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.ocaml"
+    },
+    {
+      "id": "detect.extension.fs",
+      "layer": "extension",
+      "extension": ".fs",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.fsharp"
+    },
+    {
+      "id": "detect.extension.fsx",
+      "layer": "extension",
+      "extension": ".fsx",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.fsharp"
+    },
+    {
+      "id": "detect.extension.clj",
+      "layer": "extension",
+      "extension": ".clj",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.clojure"
+    },
+    {
+      "id": "detect.extension.cljs",
+      "layer": "extension",
+      "extension": ".cljs",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.clojure"
+    },
+    {
+      "id": "detect.extension.vim",
+      "layer": "extension",
+      "extension": ".vim",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.vim"
+    },
+    {
+      "id": "detect.extension.zig",
+      "layer": "extension",
+      "extension": ".zig",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.zig"
+    },
+    {
+      "id": "detect.extension.zon",
+      "layer": "extension",
+      "extension": ".zon",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.zig"
+    },
+    {
+      "id": "detect.extension.html",
+      "layer": "extension",
+      "extension": ".html",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.html"
+    },
+    {
+      "id": "detect.extension.htm",
+      "layer": "extension",
+      "extension": ".htm",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.html"
+    },
+    {
+      "id": "detect.extension.css",
+      "layer": "extension",
+      "extension": ".css",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.css"
+    },
+    {
+      "id": "detect.extension.scss",
+      "layer": "extension",
+      "extension": ".scss",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.css"
+    },
+    {
+      "id": "detect.extension.sass",
+      "layer": "extension",
+      "extension": ".sass",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.css"
+    },
+    {
+      "id": "detect.extension.less",
+      "layer": "extension",
+      "extension": ".less",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.css"
+    },
+    {
+      "id": "detect.extension.stylus",
+      "layer": "extension",
+      "extension": ".stylus",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.css"
+    },
+    {
+      "id": "detect.extension.styl",
+      "layer": "extension",
+      "extension": ".styl",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.css"
+    },
+    {
+      "id": "detect.extension.md",
+      "layer": "extension",
+      "extension": ".md",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.markdown"
+    },
+    {
+      "id": "detect.extension.mdx",
+      "layer": "extension",
+      "extension": ".mdx",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.markdown"
+    },
+    {
+      "id": "detect.extension.json",
+      "layer": "extension",
+      "extension": ".json",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.json"
+    },
+    {
+      "id": "detect.extension.jsonc",
+      "layer": "extension",
+      "extension": ".jsonc",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.json"
+    },
+    {
+      "id": "detect.extension.xml",
+      "layer": "extension",
+      "extension": ".xml",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.xml"
+    },
+    {
+      "id": "detect.extension.yml",
+      "layer": "extension",
+      "extension": ".yml",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.yaml"
+    },
+    {
+      "id": "detect.extension.yaml",
+      "layer": "extension",
+      "extension": ".yaml",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.yaml"
+    },
+    {
+      "id": "detect.extension.toml",
+      "layer": "extension",
+      "extension": ".toml",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.toml"
+    },
+    {
+      "id": "detect.extension.toon",
+      "layer": "extension",
+      "extension": ".toon",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.toon"
+    },
+    {
+      "id": "detect.extension.txt",
+      "layer": "extension",
+      "extension": ".txt",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.text"
+    },
+    {
+      "id": "detect.extension.ini",
+      "layer": "extension",
+      "extension": ".ini",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.config"
+    },
+    {
+      "id": "detect.extension.cfg",
+      "layer": "extension",
+      "extension": ".cfg",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.config"
+    },
+    {
+      "id": "detect.extension.conf",
+      "layer": "extension",
+      "extension": ".conf",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.config"
+    },
+    {
+      "id": "detect.extension.vue",
+      "layer": "extension",
+      "extension": ".vue",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.vue"
+    },
+    {
+      "id": "detect.extension.svelte",
+      "layer": "extension",
+      "extension": ".svelte",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.svelte"
+    },
+    {
+      "id": "detect.extension.astro",
+      "layer": "extension",
+      "extension": ".astro",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.astro"
+    },
+    {
+      "id": "detect.extension.jsp",
+      "layer": "extension",
+      "extension": ".jsp",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.jsp"
+    },
+    {
+      "id": "detect.extension.jspx",
+      "layer": "extension",
+      "extension": ".jspx",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.jsp"
+    },
+    {
+      "id": "detect.extension.jspf",
+      "layer": "extension",
+      "extension": ".jspf",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.jsp"
+    },
+    {
+      "id": "detect.extension.tag",
+      "layer": "extension",
+      "extension": ".tag",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.jsp-tag"
+    },
+    {
+      "id": "detect.extension.tagx",
+      "layer": "extension",
+      "extension": ".tagx",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.jsp-tag"
+    },
+    {
+      "id": "detect.extension.gsp",
+      "layer": "extension",
+      "extension": ".gsp",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.gsp"
+    },
+    {
+      "id": "detect.extension.properties",
+      "layer": "extension",
+      "extension": ".properties",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.config"
+    },
+    {
+      "id": "detect.extension.gradle",
+      "layer": "extension",
+      "extension": ".gradle",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.groovy"
+    },
+    {
+      "id": "detect.extension.groovy",
+      "layer": "extension",
+      "extension": ".groovy",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.groovy"
+    },
+    {
+      "id": "detect.extension.proto",
+      "layer": "extension",
+      "extension": ".proto",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.protobuf"
+    },
+    {
+      "id": "detect.extension.hbs",
+      "layer": "extension",
+      "extension": ".hbs",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.handlebars"
+    },
+    {
+      "id": "detect.extension.handlebars",
+      "layer": "extension",
+      "extension": ".handlebars",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.handlebars"
+    },
+    {
+      "id": "detect.extension.ejs",
+      "layer": "extension",
+      "extension": ".ejs",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.ejs"
+    },
+    {
+      "id": "detect.extension.pug",
+      "layer": "extension",
+      "extension": ".pug",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.pug"
+    },
+    {
+      "id": "detect.extension.ftl",
+      "layer": "extension",
+      "extension": ".ftl",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.freemarker"
+    },
+    {
+      "id": "detect.extension.mustache",
+      "layer": "extension",
+      "extension": ".mustache",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.mustache"
+    },
+    {
+      "id": "detect.extension.liquid",
+      "layer": "extension",
+      "extension": ".liquid",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.liquid"
+    },
+    {
+      "id": "detect.extension.erb",
+      "layer": "extension",
+      "extension": ".erb",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.erb"
+    },
+    {
+      "id": "detect.extension.sql",
+      "layer": "extension",
+      "extension": ".sql",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.ddl",
+      "layer": "extension",
+      "extension": ".ddl",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.dml",
+      "layer": "extension",
+      "extension": ".dml",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.mysql",
+      "layer": "extension",
+      "extension": ".mysql",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.postgresql",
+      "layer": "extension",
+      "extension": ".postgresql",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.psql",
+      "layer": "extension",
+      "extension": ".psql",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.sqlite",
+      "layer": "extension",
+      "extension": ".sqlite",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.mssql",
+      "layer": "extension",
+      "extension": ".mssql",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.oracle",
+      "layer": "extension",
+      "extension": ".oracle",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.ora",
+      "layer": "extension",
+      "extension": ".ora",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.db2",
+      "layer": "extension",
+      "extension": ".db2",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.proc",
+      "layer": "extension",
+      "extension": ".proc",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.procedure",
+      "layer": "extension",
+      "extension": ".procedure",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.func",
+      "layer": "extension",
+      "extension": ".func",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.function",
+      "layer": "extension",
+      "extension": ".function",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.view",
+      "layer": "extension",
+      "extension": ".view",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.trigger",
+      "layer": "extension",
+      "extension": ".trigger",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.index",
+      "layer": "extension",
+      "extension": ".index",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.migration",
+      "layer": "extension",
+      "extension": ".migration",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.seed",
+      "layer": "extension",
+      "extension": ".seed",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.fixture",
+      "layer": "extension",
+      "extension": ".fixture",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.schema",
+      "layer": "extension",
+      "extension": ".schema",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.cql",
+      "layer": "extension",
+      "extension": ".cql",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.cypher",
+      "layer": "extension",
+      "extension": ".cypher",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.sparql",
+      "layer": "extension",
+      "extension": ".sparql",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.gql",
+      "layer": "extension",
+      "extension": ".gql",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.graphql"
+    },
+    {
+      "id": "detect.extension.liquibase",
+      "layer": "extension",
+      "extension": ".liquibase",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.flyway",
+      "layer": "extension",
+      "extension": ".flyway",
+      "case": "ascii-insensitive",
+      "scanner_visible": true,
+      "mode_id": "mode.sql"
+    },
+    {
+      "id": "detect.extension.env",
+      "layer": "extension",
+      "extension": ".env",
+      "case": "ascii-insensitive",
+      "scanner_visible": false,
+      "mode_id": "mode.config"
+    },
+    {
+      "id": "detect.extension.gitignore",
+      "layer": "extension",
+      "extension": ".gitignore",
+      "case": "ascii-insensitive",
+      "scanner_visible": false,
+      "mode_id": "mode.config"
+    },
+    {
+      "id": "detect.extension.dockerignore",
+      "layer": "extension",
+      "extension": ".dockerignore",
+      "case": "ascii-insensitive",
+      "scanner_visible": false,
+      "mode_id": "mode.config"
+    },
+    {
+      "id": "detect.extension.editorconfig",
+      "layer": "extension",
+      "extension": ".editorconfig",
+      "case": "ascii-insensitive",
+      "scanner_visible": false,
+      "mode_id": "mode.config"
+    }
+  ],
+  "current_modes": [
+    {
+      "mode_id": "mode.rust",
+      "public_mode": "rust",
+      "accepted_mode_id": "mode.rust",
+      "alias_of": null,
+      "parser_support": "native",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "built-in",
+        "parser": "rust",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.rust-build-script",
+      "public_mode": "rust-build-script",
+      "accepted_mode_id": "mode.rust-build-script",
+      "alias_of": null,
+      "parser_support": "native",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "built-in",
+        "parser": "rust",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.python",
+      "public_mode": "python",
+      "accepted_mode_id": "mode.python",
+      "alias_of": null,
+      "parser_support": "native",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "built-in",
+        "parser": "python",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.javascript",
+      "public_mode": "javascript",
+      "accepted_mode_id": "mode.javascript",
+      "alias_of": null,
+      "parser_support": "native",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "built-in",
+        "parser": "javascript",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.typescript",
+      "public_mode": "typescript",
+      "accepted_mode_id": "mode.typescript",
+      "alias_of": null,
+      "parser_support": "native",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "built-in",
+        "parser": "typescript",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.tsx",
+      "public_mode": "tsx",
+      "accepted_mode_id": "mode.tsx",
+      "alias_of": null,
+      "parser_support": "native",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "built-in",
+        "parser": "tsx",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.java",
+      "public_mode": "java",
+      "accepted_mode_id": "mode.java",
+      "alias_of": null,
+      "parser_support": "native",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "built-in",
+        "parser": "java",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.kotlin",
+      "public_mode": "kotlin",
+      "accepted_mode_id": "mode.kotlin",
+      "alias_of": null,
+      "parser_support": "native",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "built-in",
+        "parser": "kotlin",
+        "augmenters": [
+          "kotlin",
+          "gradle-kotlin"
+        ]
+      }
+    },
+    {
+      "mode_id": "mode.csharp",
+      "public_mode": "csharp",
+      "accepted_mode_id": "mode.csharp",
+      "alias_of": null,
+      "parser_support": "native",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "built-in",
+        "parser": "csharp",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.go",
+      "public_mode": "go",
+      "accepted_mode_id": "mode.go",
+      "alias_of": null,
+      "parser_support": "native",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "built-in",
+        "parser": "go",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.objective-c",
+      "public_mode": "objective-c",
+      "accepted_mode_id": "mode.objective-c",
+      "alias_of": null,
+      "parser_support": "native",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "built-in",
+        "parser": "objective-c",
+        "augmenters": [
+          "objective-c"
+        ]
+      }
+    },
+    {
+      "mode_id": "mode.zig",
+      "public_mode": "zig",
+      "accepted_mode_id": "mode.zig",
+      "alias_of": null,
+      "parser_support": "native",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "built-in",
+        "parser": "zig",
+        "augmenters": [
+          "zig"
+        ]
+      }
+    },
+    {
+      "mode_id": "mode.c",
+      "public_mode": "c",
+      "accepted_mode_id": "mode.c",
+      "alias_of": null,
+      "parser_support": "native",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "built-in",
+        "parser": "c",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.cpp",
+      "public_mode": "cpp",
+      "accepted_mode_id": "mode.cpp",
+      "alias_of": null,
+      "parser_support": "native",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "built-in",
+        "parser": "cpp",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.h",
+      "public_mode": "h",
+      "accepted_mode_id": "mode.h",
+      "alias_of": null,
+      "parser_support": "native",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "built-in",
+        "parser": "c",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.hpp",
+      "public_mode": "hpp",
+      "accepted_mode_id": "mode.hpp",
+      "alias_of": null,
+      "parser_support": "native",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "built-in",
+        "parser": "cpp",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.cargo-manifest",
+      "public_mode": "cargo-manifest",
+      "accepted_mode_id": "mode.cargo-manifest",
+      "alias_of": null,
+      "parser_support": "manifest",
+      "current_pack_id": "default-core",
+      "summary_adapter": "toml",
+      "symbols": {
+        "kind": "manifest",
+        "adapter": "cargo-manifest"
+      }
+    },
+    {
+      "mode_id": "mode.cargo-lock",
+      "public_mode": "cargo-lock",
+      "accepted_mode_id": "mode.cargo-lock",
+      "alias_of": null,
+      "parser_support": "manifest",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "manifest",
+        "adapter": "cargo-lock"
+      }
+    },
+    {
+      "mode_id": "mode.vue",
+      "public_mode": "vue",
+      "accepted_mode_id": "mode.vue",
+      "alias_of": null,
+      "parser_support": "structural",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "structural",
+        "adapter": "vue"
+      }
+    },
+    {
+      "mode_id": "mode.markdown",
+      "public_mode": "markdown",
+      "accepted_mode_id": "mode.markdown",
+      "alias_of": null,
+      "parser_support": "structural",
+      "current_pack_id": "default-core",
+      "summary_adapter": "markdown",
+      "symbols": {
+        "kind": "skip"
+      }
+    },
+    {
+      "mode_id": "mode.json",
+      "public_mode": "json",
+      "accepted_mode_id": "mode.json",
+      "alias_of": null,
+      "parser_support": "structural",
+      "current_pack_id": "default-core",
+      "summary_adapter": "json",
+      "symbols": {
+        "kind": "skip"
+      }
+    },
+    {
+      "mode_id": "mode.yaml",
+      "public_mode": "yaml",
+      "accepted_mode_id": "mode.yaml",
+      "alias_of": null,
+      "parser_support": "structural",
+      "current_pack_id": "default-core",
+      "summary_adapter": "yaml",
+      "symbols": {
+        "kind": "skip"
+      }
+    },
+    {
+      "mode_id": "mode.css",
+      "public_mode": "css",
+      "accepted_mode_id": "mode.css",
+      "alias_of": null,
+      "parser_support": "structural",
+      "current_pack_id": "default-core",
+      "summary_adapter": "css",
+      "symbols": {
+        "kind": "skip"
+      }
+    },
+    {
+      "mode_id": "mode.html",
+      "public_mode": "html",
+      "accepted_mode_id": "mode.html",
+      "alias_of": null,
+      "parser_support": "structural",
+      "current_pack_id": "default-core",
+      "summary_adapter": "html",
+      "symbols": {
+        "kind": "skip"
+      }
+    },
+    {
+      "mode_id": "mode.toon",
+      "public_mode": "toon",
+      "accepted_mode_id": "mode.toon",
+      "alias_of": null,
+      "parser_support": "structural",
+      "current_pack_id": "default-core",
+      "summary_adapter": "toon",
+      "symbols": {
+        "kind": "skip"
+      }
+    },
+    {
+      "mode_id": "mode.dockerfile",
+      "public_mode": "dockerfile",
+      "accepted_mode_id": "mode.dockerfile",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.makefile",
+      "public_mode": "makefile",
+      "accepted_mode_id": "mode.makefile",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.text",
+      "public_mode": "text",
+      "accepted_mode_id": "mode.text",
+      "alias_of": null,
+      "parser_support": "structural",
+      "current_pack_id": "default-core",
+      "summary_adapter": "config-text",
+      "symbols": {
+        "kind": "skip"
+      }
+    },
+    {
+      "mode_id": "mode.toml",
+      "public_mode": "toml",
+      "accepted_mode_id": "mode.toml",
+      "alias_of": null,
+      "parser_support": "structural",
+      "current_pack_id": "default-core",
+      "summary_adapter": "toml",
+      "symbols": {
+        "kind": "skip"
+      }
+    },
+    {
+      "mode_id": "mode.xml",
+      "public_mode": "xml",
+      "accepted_mode_id": "mode.xml",
+      "alias_of": null,
+      "parser_support": "structural",
+      "current_pack_id": "default-core",
+      "summary_adapter": "xml",
+      "symbols": {
+        "kind": "skip"
+      }
+    },
+    {
+      "mode_id": "mode.svelte",
+      "public_mode": "svelte",
+      "accepted_mode_id": "mode.svelte",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.astro",
+      "public_mode": "astro",
+      "accepted_mode_id": "mode.astro",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.jsp",
+      "public_mode": "jsp",
+      "accepted_mode_id": "mode.jsp",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.jsp-tag",
+      "public_mode": "jsp-tag",
+      "accepted_mode_id": "mode.jsp-tag",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.gsp",
+      "public_mode": "gsp",
+      "accepted_mode_id": "mode.gsp",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.groovy",
+      "public_mode": "groovy",
+      "accepted_mode_id": "mode.groovy",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": [
+          "gradle-groovy"
+        ]
+      }
+    },
+    {
+      "mode_id": "mode.protobuf",
+      "public_mode": "protobuf",
+      "accepted_mode_id": "mode.protobuf",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.handlebars",
+      "public_mode": "handlebars",
+      "accepted_mode_id": "mode.handlebars",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.ejs",
+      "public_mode": "ejs",
+      "accepted_mode_id": "mode.ejs",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.pug",
+      "public_mode": "pug",
+      "accepted_mode_id": "mode.pug",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.freemarker",
+      "public_mode": "freemarker",
+      "accepted_mode_id": "mode.freemarker",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.mustache",
+      "public_mode": "mustache",
+      "accepted_mode_id": "mode.mustache",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.liquid",
+      "public_mode": "liquid",
+      "accepted_mode_id": "mode.liquid",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.erb",
+      "public_mode": "erb",
+      "accepted_mode_id": "mode.erb",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.sql",
+      "public_mode": "sql",
+      "accepted_mode_id": "mode.sql",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.graphql",
+      "public_mode": "graphql",
+      "accepted_mode_id": "mode.graphql",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.config",
+      "public_mode": "config",
+      "accepted_mode_id": "mode.config",
+      "alias_of": null,
+      "parser_support": "structural",
+      "current_pack_id": "default-core",
+      "summary_adapter": "config-text",
+      "symbols": {
+        "kind": "skip"
+      }
+    },
+    {
+      "mode_id": "mode.ruby",
+      "public_mode": "ruby",
+      "accepted_mode_id": "mode.ruby",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.php",
+      "public_mode": "php",
+      "accepted_mode_id": "mode.php",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.swift",
+      "public_mode": "swift",
+      "accepted_mode_id": "mode.swift",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.scala",
+      "public_mode": "scala",
+      "accepted_mode_id": "mode.scala",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.shell",
+      "public_mode": "shell",
+      "accepted_mode_id": "mode.shell",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.powershell",
+      "public_mode": "powershell",
+      "accepted_mode_id": "mode.powershell",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "powershell",
+      "symbols": {
+        "kind": "structural",
+        "adapter": "powershell"
+      }
+    },
+    {
+      "mode_id": "mode.batch",
+      "public_mode": "batch",
+      "accepted_mode_id": "mode.batch",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.r",
+      "public_mode": "r",
+      "accepted_mode_id": "mode.r",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.perl",
+      "public_mode": "perl",
+      "accepted_mode_id": "mode.perl",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.lua",
+      "public_mode": "lua",
+      "accepted_mode_id": "mode.lua",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.dart",
+      "public_mode": "dart",
+      "accepted_mode_id": "mode.dart",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.haskell",
+      "public_mode": "haskell",
+      "accepted_mode_id": "mode.haskell",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.ocaml",
+      "public_mode": "ocaml",
+      "accepted_mode_id": "mode.ocaml",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.fsharp",
+      "public_mode": "fsharp",
+      "accepted_mode_id": "mode.fsharp",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.clojure",
+      "public_mode": "clojure",
+      "accepted_mode_id": "mode.clojure",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    },
+    {
+      "mode_id": "mode.vim",
+      "public_mode": "vim",
+      "accepted_mode_id": "mode.vim",
+      "alias_of": null,
+      "parser_support": "fallback",
+      "current_pack_id": "default-core",
+      "summary_adapter": "none",
+      "symbols": {
+        "kind": "fallback",
+        "augmenters": []
+      }
+    }
+  ],
+  "parser_components": [
+    {
+      "parser_id": "parser.builtin.rust",
+      "built_in_parser": "rust",
+      "implementation": "compiled-tree-sitter",
+      "current_pack_id": "default-core",
+      "abi": {
+        "abi_id": "abi.projectatlas-compiled-parser",
+        "version": 1,
+        "state": "current-compiled-contract"
+      },
+      "asset_id": null,
+      "query_pack_id": null,
+      "fixture_ids": [
+        "fixture.historical-runtime-contract"
+      ],
+      "provenance_evidence_ids": [
+        "evidence.historical-runtime-contract"
+      ]
+    },
+    {
+      "parser_id": "parser.builtin.python",
+      "built_in_parser": "python",
+      "implementation": "compiled-tree-sitter",
+      "current_pack_id": "default-core",
+      "abi": {
+        "abi_id": "abi.projectatlas-compiled-parser",
+        "version": 1,
+        "state": "current-compiled-contract"
+      },
+      "asset_id": null,
+      "query_pack_id": null,
+      "fixture_ids": [
+        "fixture.historical-runtime-contract"
+      ],
+      "provenance_evidence_ids": [
+        "evidence.historical-runtime-contract"
+      ]
+    },
+    {
+      "parser_id": "parser.builtin.javascript",
+      "built_in_parser": "javascript",
+      "implementation": "compiled-tree-sitter",
+      "current_pack_id": "default-core",
+      "abi": {
+        "abi_id": "abi.projectatlas-compiled-parser",
+        "version": 1,
+        "state": "current-compiled-contract"
+      },
+      "asset_id": null,
+      "query_pack_id": null,
+      "fixture_ids": [
+        "fixture.historical-runtime-contract"
+      ],
+      "provenance_evidence_ids": [
+        "evidence.historical-runtime-contract"
+      ]
+    },
+    {
+      "parser_id": "parser.builtin.typescript",
+      "built_in_parser": "typescript",
+      "implementation": "compiled-tree-sitter",
+      "current_pack_id": "default-core",
+      "abi": {
+        "abi_id": "abi.projectatlas-compiled-parser",
+        "version": 1,
+        "state": "current-compiled-contract"
+      },
+      "asset_id": null,
+      "query_pack_id": null,
+      "fixture_ids": [
+        "fixture.historical-runtime-contract"
+      ],
+      "provenance_evidence_ids": [
+        "evidence.historical-runtime-contract"
+      ]
+    },
+    {
+      "parser_id": "parser.builtin.tsx",
+      "built_in_parser": "tsx",
+      "implementation": "compiled-tree-sitter",
+      "current_pack_id": "default-core",
+      "abi": {
+        "abi_id": "abi.projectatlas-compiled-parser",
+        "version": 1,
+        "state": "current-compiled-contract"
+      },
+      "asset_id": null,
+      "query_pack_id": null,
+      "fixture_ids": [
+        "fixture.historical-runtime-contract"
+      ],
+      "provenance_evidence_ids": [
+        "evidence.historical-runtime-contract"
+      ]
+    },
+    {
+      "parser_id": "parser.builtin.java",
+      "built_in_parser": "java",
+      "implementation": "compiled-tree-sitter",
+      "current_pack_id": "default-core",
+      "abi": {
+        "abi_id": "abi.projectatlas-compiled-parser",
+        "version": 1,
+        "state": "current-compiled-contract"
+      },
+      "asset_id": null,
+      "query_pack_id": null,
+      "fixture_ids": [
+        "fixture.historical-runtime-contract"
+      ],
+      "provenance_evidence_ids": [
+        "evidence.historical-runtime-contract"
+      ]
+    },
+    {
+      "parser_id": "parser.builtin.kotlin",
+      "built_in_parser": "kotlin",
+      "implementation": "compiled-tree-sitter",
+      "current_pack_id": "default-core",
+      "abi": {
+        "abi_id": "abi.projectatlas-compiled-parser",
+        "version": 1,
+        "state": "current-compiled-contract"
+      },
+      "asset_id": null,
+      "query_pack_id": null,
+      "fixture_ids": [
+        "fixture.historical-runtime-contract"
+      ],
+      "provenance_evidence_ids": [
+        "evidence.historical-runtime-contract"
+      ]
+    },
+    {
+      "parser_id": "parser.builtin.csharp",
+      "built_in_parser": "csharp",
+      "implementation": "compiled-tree-sitter",
+      "current_pack_id": "default-core",
+      "abi": {
+        "abi_id": "abi.projectatlas-compiled-parser",
+        "version": 1,
+        "state": "current-compiled-contract"
+      },
+      "asset_id": null,
+      "query_pack_id": null,
+      "fixture_ids": [
+        "fixture.historical-runtime-contract"
+      ],
+      "provenance_evidence_ids": [
+        "evidence.historical-runtime-contract"
+      ]
+    },
+    {
+      "parser_id": "parser.builtin.go",
+      "built_in_parser": "go",
+      "implementation": "compiled-tree-sitter",
+      "current_pack_id": "default-core",
+      "abi": {
+        "abi_id": "abi.projectatlas-compiled-parser",
+        "version": 1,
+        "state": "current-compiled-contract"
+      },
+      "asset_id": null,
+      "query_pack_id": null,
+      "fixture_ids": [
+        "fixture.historical-runtime-contract"
+      ],
+      "provenance_evidence_ids": [
+        "evidence.historical-runtime-contract"
+      ]
+    },
+    {
+      "parser_id": "parser.builtin.objective-c",
+      "built_in_parser": "objective-c",
+      "implementation": "compiled-tree-sitter",
+      "current_pack_id": "default-core",
+      "abi": {
+        "abi_id": "abi.projectatlas-compiled-parser",
+        "version": 1,
+        "state": "current-compiled-contract"
+      },
+      "asset_id": null,
+      "query_pack_id": null,
+      "fixture_ids": [
+        "fixture.historical-runtime-contract"
+      ],
+      "provenance_evidence_ids": [
+        "evidence.historical-runtime-contract"
+      ]
+    },
+    {
+      "parser_id": "parser.builtin.zig",
+      "built_in_parser": "zig",
+      "implementation": "compiled-tree-sitter",
+      "current_pack_id": "default-core",
+      "abi": {
+        "abi_id": "abi.projectatlas-compiled-parser",
+        "version": 1,
+        "state": "current-compiled-contract"
+      },
+      "asset_id": null,
+      "query_pack_id": null,
+      "fixture_ids": [
+        "fixture.historical-runtime-contract"
+      ],
+      "provenance_evidence_ids": [
+        "evidence.historical-runtime-contract"
+      ]
+    },
+    {
+      "parser_id": "parser.builtin.c",
+      "built_in_parser": "c",
+      "implementation": "compiled-tree-sitter",
+      "current_pack_id": "default-core",
+      "abi": {
+        "abi_id": "abi.projectatlas-compiled-parser",
+        "version": 1,
+        "state": "current-compiled-contract"
+      },
+      "asset_id": null,
+      "query_pack_id": null,
+      "fixture_ids": [
+        "fixture.historical-runtime-contract"
+      ],
+      "provenance_evidence_ids": [
+        "evidence.historical-runtime-contract"
+      ]
+    },
+    {
+      "parser_id": "parser.builtin.cpp",
+      "built_in_parser": "cpp",
+      "implementation": "compiled-tree-sitter",
+      "current_pack_id": "default-core",
+      "abi": {
+        "abi_id": "abi.projectatlas-compiled-parser",
+        "version": 1,
+        "state": "current-compiled-contract"
+      },
+      "asset_id": null,
+      "query_pack_id": null,
+      "fixture_ids": [
+        "fixture.historical-runtime-contract"
+      ],
+      "provenance_evidence_ids": [
+        "evidence.historical-runtime-contract"
+      ]
+    }
+  ],
+  "assets": [],
+  "embedded_adapters": [],
+  "query_packs": [],
+  "semantic_providers": [],
+  "fixtures": [
+    {
+      "fixture_id": "fixture.historical-runtime-contract",
+      "path": "fixtures/languages/projectatlas-v0.3.26-runtime-contract.toon",
+      "verification": {
+        "state": "verified",
+        "evidence_ids": [
+          "evidence.historical-runtime-contract"
+        ]
+      }
+    }
+  ],
+  "evidence": [
+    {
+      "evidence_id": "evidence.historical-runtime-contract",
+      "kind": "frozen-runtime-contract",
+      "path": "fixtures/languages/projectatlas-v0.3.26-runtime-contract.toon",
+      "digest_sha256": "fb9c35414a3fd478de9bf0d1653aac9cca8c1558d3a76947a94d62cbca5038e0"
+    }
+  ]
+}

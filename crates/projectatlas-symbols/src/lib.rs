@@ -1,10 +1,25 @@
 //! Purpose: Extract tree-sitter-backed `ProjectAtlas` symbol graphs.
 
 mod languages;
+#[allow(
+    dead_code,
+    reason = "complete generated registry projection retains validated metadata outside the runtime routing facade"
+)]
+#[allow(
+    clippy::missing_docs_in_private_items,
+    reason = "generated registry fields mirror the documented and validated owning schema"
+)]
+#[rustfmt::skip]
+mod language_parser_registry;
 mod parser_registry;
 
 pub use parser_registry::{has_specialized_parser, specialized_languages};
 
+use language_parser_registry::{
+    BuiltInParser, ManifestAdapter, StructuralAdapter, SymbolRoute, symbol_route_for_public_mode,
+};
+use projectatlas_core::language::detect_language_for_path;
+use projectatlas_core::normalized_extension;
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
 };
@@ -26,55 +41,70 @@ const MAX_DOC_CHARS: usize = 500;
 /// Extract a symbol graph from source or manifest content.
 #[must_use]
 pub fn extract_symbol_graph(path: &str, language: Option<&str>, content: &str) -> SymbolGraph {
-    if is_cargo_manifest(path, language) {
-        return extract_cargo_manifest_graph(path, language, content);
-    }
     let parse_content = content_without_leading_purpose_header(content);
-    if is_vue_sfc(path, language) {
-        return extract_vue_sfc_graph(path, language, parse_content.as_ref());
-    }
-    if is_powershell_script(path, language) {
-        return extract_powershell_graph(path, language, parse_content.as_ref());
-    }
-    if let Some(parsed) = extract_tree_sitter_graph(path, language, parse_content.as_ref()) {
-        if !parsed.graph.symbols.is_empty() || !parsed.graph.relations.is_empty() {
-            return parsed.graph;
-        }
-        if parsed.had_errors {
-            let fallback = extract_fallback_graph(path, language, parse_content.as_ref());
-            if !fallback.symbols.is_empty() || !fallback.relations.is_empty() {
-                return fallback;
+    if let Some(route) = selected_symbol_route(path, language) {
+        match *route {
+            SymbolRoute::Manifest(adapter) => {
+                return extract_cargo_document_graph(path, language, content, adapter);
             }
+            SymbolRoute::Structural(StructuralAdapter::Vue) => {
+                return extract_vue_sfc_graph(path, language, parse_content.as_ref());
+            }
+            SymbolRoute::Structural(StructuralAdapter::PowerShell) => {
+                return extract_powershell_graph(path, language, parse_content.as_ref());
+            }
+            SymbolRoute::BuiltIn {
+                parser, augmenters, ..
+            } => {
+                if let Some(parsed) = extract_tree_sitter_graph(
+                    path,
+                    language,
+                    parse_content.as_ref(),
+                    parser,
+                    augmenters,
+                ) {
+                    if !parsed.graph.symbols.is_empty() || !parsed.graph.relations.is_empty() {
+                        return parsed.graph;
+                    }
+                    if parsed.had_errors {
+                        let fallback =
+                            extract_fallback_graph(path, language, parse_content.as_ref());
+                        if !fallback.symbols.is_empty() || !fallback.relations.is_empty() {
+                            return fallback;
+                        }
+                    }
+                    return parsed.graph;
+                }
+            }
+            SymbolRoute::Skip | SymbolRoute::Fallback { .. } => {}
         }
-        return parsed.graph;
     }
     extract_fallback_graph(path, language, parse_content.as_ref())
 }
 
-/// Return whether a file is a Cargo manifest or lockfile.
-fn is_cargo_manifest(path: &str, language: Option<&str>) -> bool {
-    path.ends_with("Cargo.toml")
-        || path.ends_with("Cargo.lock")
-        || matches!(language, Some("cargo-manifest" | "cargo-lock"))
-}
-
-/// Return whether this source is a Vue single-file component.
-fn is_vue_sfc(path: &str, language: Option<&str>) -> bool {
-    matches!(language, Some("vue"))
-        || Path::new(path)
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("vue"))
-}
-
-/// Return whether this source is a `PowerShell` script or module.
-fn is_powershell_script(path: &str, language: Option<&str>) -> bool {
-    matches!(language, Some("powershell"))
-        || Path::new(path).extension().is_some_and(|extension| {
-            matches!(
-                extension.to_str().map(str::to_ascii_lowercase).as_deref(),
-                Some("ps1" | "psm1" | "psd1")
-            )
-        })
+/// Select a generated route in the frozen Cargo, Vue, `PowerShell`, explicit-mode order.
+fn selected_symbol_route(path: &str, language: Option<&str>) -> Option<&'static SymbolRoute> {
+    let extension = normalized_extension(Path::new(path));
+    let path_route = detect_language_for_path(path, extension.as_deref())
+        .as_deref()
+        .and_then(symbol_route_for_public_mode);
+    let explicit_route = language.and_then(symbol_route_for_public_mode);
+    let candidates = [path_route, explicit_route];
+    for adapter in [ManifestAdapter::CargoLock, ManifestAdapter::CargoManifest] {
+        if let Some(route) = candidates.into_iter().flatten().find(
+            |route| matches!(**route, SymbolRoute::Manifest(candidate) if candidate == adapter),
+        ) {
+            return Some(route);
+        }
+    }
+    for adapter in [StructuralAdapter::Vue, StructuralAdapter::PowerShell] {
+        if let Some(route) = candidates.into_iter().flatten().find(
+            |route| matches!(**route, SymbolRoute::Structural(candidate) if candidate == adapter),
+        ) {
+            return Some(route);
+        }
+    }
+    explicit_route
 }
 
 /// Extract Vue SFC Composition API bindings with a deterministic structural adapter.
@@ -283,10 +313,15 @@ fn vue_initializer_is_macro_call(initializer: &str, macro_name: &str) -> bool {
     rest.starts_with('(') || rest.starts_with('<')
 }
 
-/// Extract Cargo package, workspace, and dependency entries.
-fn extract_cargo_manifest_graph(path: &str, language: Option<&str>, content: &str) -> SymbolGraph {
+/// Extract Cargo manifest or lockfile package and dependency entries.
+fn extract_cargo_document_graph(
+    path: &str,
+    language: Option<&str>,
+    content: &str,
+    adapter: ManifestAdapter,
+) -> SymbolGraph {
     let mut graph = empty_graph(path, language, ParserKind::Manifest);
-    if path.ends_with("Cargo.lock") || matches!(language, Some("cargo-lock")) {
+    if adapter == ManifestAdapter::CargoLock {
         extract_cargo_lock_packages(&mut graph, content);
         return graph;
     }
@@ -553,9 +588,10 @@ fn extract_tree_sitter_graph(
     path: &str,
     language: Option<&str>,
     content: &str,
+    parser: BuiltInParser,
+    augmenters: &[language_parser_registry::SymbolAugmenter],
 ) -> Option<TreeSitterParse> {
-    let language_name = language?;
-    let parser_language = parser_registry::parser_language(language_name)?;
+    let parser_language = parser_registry::parser_language(parser);
     let mut parser = Parser::new();
     if parser.set_language(&parser_language).is_err() {
         return None;
@@ -565,7 +601,7 @@ fn extract_tree_sitter_graph(
     let root = tree.root_node();
     let had_errors = root.has_error();
     visit_node(root, content, &mut graph);
-    languages::augment_language_graph(&mut graph, content);
+    languages::augment_language_graph(&mut graph, content, augmenters);
     Some(TreeSitterParse { graph, had_errors })
 }
 
@@ -1548,7 +1584,8 @@ fn extract_fallback_graph(path: &str, language: Option<&str>, content: &str) -> 
             );
         }
     }
-    languages::augment_fallback_language_graph(&mut graph, content);
+    let augmenters = selected_symbol_route(path, language).map_or(&[][..], SymbolRoute::augmenters);
+    languages::augment_fallback_language_graph(&mut graph, content, augmenters);
     graph
 }
 
@@ -1788,6 +1825,7 @@ mod tests {
     use super::{
         MAX_SYMBOLS_PER_FILE, extract_fallback_graph, extract_symbol_graph, specialized_languages,
     };
+    use crate::language_parser_registry::{CURRENT_SYMBOL_ROUTES, symbol_route_for_public_mode};
     use projectatlas_core::graph::{
         EntityKey, EntitySelector, IdentityText, ProjectInstanceId, RepositoryFilePath,
     };
@@ -3064,6 +3102,145 @@ version = "0.60.0"
             .map(|symbol| symbol.line_start)
             .collect::<Vec<_>>();
         assert_eq!(lines, vec![2, 6]);
+    }
+
+    #[test]
+    fn generated_symbol_route_lookup_resolves_every_declared_row() {
+        for route in CURRENT_SYMBOL_ROUTES {
+            let resolved = symbol_route_for_public_mode(route.public_mode);
+            assert!(
+                resolved.is_some_and(|resolved| {
+                    std::ptr::eq(
+                        std::ptr::from_ref(resolved),
+                        std::ptr::from_ref(&route.route),
+                    )
+                }),
+                "generated lookup did not return the declared route for {}",
+                route.public_mode
+            );
+        }
+        assert!(symbol_route_for_public_mode("unknown-language-mode").is_none());
+    }
+
+    #[test]
+    fn structural_path_routes_override_conflicting_explicit_language_across_path_styles() {
+        let vue_source =
+            "<script setup>\nconst props = defineProps({ value: String })\n</script>\n";
+        for path in [
+            "component.VUE",
+            "nested/component.VUE",
+            "nested\\component.VUE",
+            "dir.with.dot/component.VUE",
+            "dir.with.dot\\component.VUE",
+        ] {
+            let graph = extract_symbol_graph(path, Some("powershell"), vue_source);
+            assert_eq!(graph.parser, ParserKind::Structural, "{path}");
+            assert!(
+                graph.symbols.iter().any(|symbol| {
+                    symbol.kind == SymbolKind::Value
+                        && symbol.name == "props"
+                        && symbol.detail.as_deref() == Some("vue-composition-binding")
+                        && symbol.parser == ParserKind::Structural
+                }),
+                "{path}: {:?}",
+                graph.symbols
+            );
+        }
+
+        let powershell_source = "function Invoke-Fixture { 'ok' }\n";
+        for path in [
+            "script.PS1",
+            "nested/script.PS1",
+            "nested\\script.PS1",
+            "dir.with.dot/script.PS1",
+            "dir.with.dot\\script.PS1",
+        ] {
+            let graph = extract_symbol_graph(path, Some("rust"), powershell_source);
+            assert_eq!(graph.parser, ParserKind::Structural, "{path}");
+            assert!(
+                graph.symbols.iter().any(|symbol| {
+                    symbol.kind == SymbolKind::Function
+                        && symbol.name == "Invoke-Fixture"
+                        && symbol.detail.as_deref() == Some("powershell-function")
+                        && symbol.parser == ParserKind::Structural
+                }),
+                "{path}: {:?}",
+                graph.symbols
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_path_route_does_not_override_explicit_language() {
+        let graph = extract_symbol_graph(
+            "fixture.rs",
+            Some("python"),
+            "def run():\n    return None\n",
+        );
+        assert_eq!(graph.parser, ParserKind::TreeSitter);
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Function
+                && symbol.name == "run"
+                && symbol.parser == ParserKind::TreeSitter
+        }));
+    }
+
+    #[test]
+    fn cargo_document_subtype_preserves_lock_dominance() {
+        let manifest_source = r#"[package]
+name = "manifest-package"
+version = "0.1.0"
+"#;
+        let lock_source = r#"[[package]]
+name = "lock-package"
+version = "1.0.0"
+"#;
+
+        for path in ["Cargo.toml", "nested/Cargo.toml", "nested\\Cargo.toml"] {
+            let graph = extract_symbol_graph(path, Some("cargo-lock"), lock_source);
+            assert!(
+                graph.symbols.iter().any(|symbol| {
+                    symbol.kind == SymbolKind::Dependency && symbol.name == "lock-package"
+                }),
+                "{path}"
+            );
+            assert!(
+                !graph.symbols.iter().any(|symbol| {
+                    symbol.kind == SymbolKind::Package && symbol.name == "manifest-package"
+                }),
+                "{path}"
+            );
+        }
+
+        for path in ["Cargo.lock", "nested/Cargo.lock", "nested\\Cargo.lock"] {
+            let graph = extract_symbol_graph(path, Some("cargo-manifest"), lock_source);
+            assert!(
+                graph.symbols.iter().any(|symbol| {
+                    symbol.kind == SymbolKind::Dependency && symbol.name == "lock-package"
+                }),
+                "{path}"
+            );
+            assert!(
+                !graph.symbols.iter().any(|symbol| {
+                    symbol.kind == SymbolKind::Package && symbol.name == "manifest-package"
+                }),
+                "{path}"
+            );
+        }
+
+        let explicit_lock = extract_symbol_graph("NotCargo.lock", Some("cargo-lock"), lock_source);
+        assert!(explicit_lock.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Dependency && symbol.name == "lock-package"
+        }));
+
+        let explicit_manifest =
+            extract_symbol_graph("NotCargo.lock", Some("cargo-manifest"), manifest_source);
+        assert!(explicit_manifest.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Package && symbol.name == "manifest-package"
+        }));
+        assert!(!explicit_manifest.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Dependency && symbol.name == "lock-package"
+        }));
     }
 
     #[test]

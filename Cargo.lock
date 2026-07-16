@@ -1482,6 +1482,7 @@ version = "0.3.26"
 dependencies = [
  "globset",
  "proc-macro2",
+ "processkit",
  "quick-xml",
  "regex",
  "serde",
@@ -1490,7 +1491,9 @@ dependencies = [
  "syn",
  "tempfile",
  "thiserror",
+ "tokio",
  "toml",
+ "toon-format",
 ]
 
 [[package]]

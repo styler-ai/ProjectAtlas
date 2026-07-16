@@ -1036,9 +1036,9 @@ fn validate_host_command_evidence(policy: &Value) -> Result<(), Box<dyn Error>> 
         "8c66fec898d4535a0cdd4f88ff986f206bb53d7d8f6d548cc9f7d5cd2bcc841d";
     const HISTORICAL_MANIFEST_SHA256: &str =
         "709867f2d9bb4790f5c0e8356633efa2c34aa8466a6aaba524c3ad2cfe4d2bb7";
-    const CURRENT_BINDING_ID: &str = "windows-dev-c8e2937-ca39dffa-20260714T220726Z";
+    const CURRENT_BINDING_ID: &str = "windows-dev-989fa9e-2d6fc6e2-20260716T054055Z";
     const CURRENT_MANIFEST_SHA256: &str =
-        "130bfc8607dfa805b9d498f80f50f54636254d07f5352fd8615f088bede56642";
+        "c48976f3fe674a72105d6394020d62e1bde074d02e0aef41f4b194bba48dadd6";
     let evidence = &policy["command_evidence"];
     let binding_id = evidence["binding_id"]
         .as_str()
@@ -1256,6 +1256,11 @@ fn validate_host_command_evidence(policy: &Value) -> Result<(), Box<dyn Error>> 
             format!("historical command {id} is presented as current lock evidence"),
         )?;
     }
+    require(
+        commands["dependency-inventory"]["result"]
+            == "historical dependency inventory superseded for current-candidate decisions; current counts are owned by unsafe_native_ffi_inventory.dependency_graph and its bounded locked-metadata validator",
+        "historical dependency result duplicates or contradicts current typed counts",
+    )?;
     let stale_rows = current_evidence["unrerun_lock_sensitive_checks"]
         .as_array()
         .ok_or_else(|| io::Error::other("unrerun lock-sensitive checks are not an array"))?;
@@ -1461,9 +1466,8 @@ fn validate_host_lifecycle_owner(policy: &Value) -> Result<(), Box<dyn Error>> {
             && lifecycle["dependency_candidates"][0]["selection_state"]
                 == "not_selected_for_host_lifecycle"
             && lifecycle["dependency_candidates"][0]["development_use"]
-                == "selected_for_calibration_evidence_supervision"
-            && lifecycle["dependency_candidates"][0]["allowed_claim"]
-                == "development-evidence-only"
+                == "selected_for_evidence_process_supervision_and_language_registry_generation"
+            && lifecycle["dependency_candidates"][0]["allowed_claim"] == "development-tooling-only"
             && lifecycle["dependency_candidates"][0]["evidence_state"] == "proven_local"
             && processkit_locked,
         "lifecycle preservation or candidate-selection policy drifted",
@@ -1540,8 +1544,11 @@ fn validate_safety_inventory(
     )?;
     let processkit = &native_rows["processkit-development-process-supervision"];
     require(
-        processkit["safe_wrapper"] == "processkit 2.2.3 with process-control only"
-            && processkit["runtime_location"] == "test-only calibration evidence runner"
+        processkit["path"]
+            == "projectatlas-cli dev-dependency and projectatlas-lints development-tool dependency -> processkit -> windows-sys/libc"
+            && processkit["safe_wrapper"] == "processkit 2.2.3 with process-control only"
+            && processkit["runtime_location"]
+                == "development-only evidence runners and language-registry generator"
             && processkit["production_runtime_dependency"] == false
             && processkit["windows_observation"]
                 == "Job Object process-tree supervision proven by focused local tests"
@@ -1555,7 +1562,7 @@ fn validate_safety_inventory(
             && inventory["containment"]["strength"] == "none-production-runtime"
             && inventory["containment"]["calibration_evidence_containment"]
                 == "windows-job-object-proven-local"
-            && inventory["containment"]["processkit_selection"] == "development-evidence-only"
+            && inventory["containment"]["processkit_selection"] == "development-tooling-only"
             && inventory["containment"]["processkit_production_selection"] == "not_selected"
             && inventory["containment"]["cross_platform_evidence"] == "hosted_required"
             && inventory["containment"]["gate_state"] == "release_blocker",
@@ -1678,6 +1685,17 @@ fn current_safety_evidence() -> Result<CurrentSafetyEvidence, Box<dyn Error>> {
     let members = workspace["workspace"]["members"]
         .as_array()
         .ok_or_else(|| io::Error::other("workspace members are not an array"))?;
+    let processkit = &workspace["workspace"]["dependencies"]["processkit"];
+    let processkit_features = processkit["features"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("workspace processkit features are not an array"))?;
+    require(
+        processkit["version"].as_str() == Some("2.2.3")
+            && processkit["default-features"].as_bool() == Some(false)
+            && processkit_features.len() == 1
+            && processkit_features[0].as_str() == Some("process-control"),
+        "workspace processkit version or feature ownership drifted",
+    )?;
     let mut owned_crates = BTreeSet::new();
     let mut boundaries = OwnedBoundaryVisitor::default();
 
@@ -1713,8 +1731,10 @@ fn current_safety_evidence() -> Result<CurrentSafetyEvidence, Box<dyn Error>> {
         }
     }
 
+    let metadata = current_locked_cargo_metadata()?;
+    validate_processkit_dependency_scope(&metadata)?;
     let (lockfile_packages, workspace_packages, external_packages, custom_build_packages) =
-        current_dependency_counts()?;
+        current_dependency_counts(&metadata)?;
     require(
         workspace_packages == owned_crates.len(),
         format!(
@@ -1762,15 +1782,89 @@ fn rust_source_paths(root: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     Ok(sources)
 }
 
+/// Require process supervision to remain outside the packaged CLI dependency graph.
+fn validate_processkit_dependency_scope(metadata: &Value) -> Result<(), Box<dyn Error>> {
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("cargo metadata packages are not an array"))?;
+    let workspace_members = string_set(&metadata["workspace_members"])?;
+    let mut cli_seen = false;
+    let mut lints_seen = false;
+
+    for package in packages {
+        let package_id = package["id"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("cargo metadata package id is not a string"))?;
+        if !workspace_members.contains(package_id) {
+            continue;
+        }
+        let package_name = package["name"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("cargo metadata package name is not a string"))?;
+        let dependencies = package["dependencies"]
+            .as_array()
+            .ok_or_else(|| io::Error::other("cargo metadata dependencies are not an array"))?;
+        let mut processkit = dependencies
+            .iter()
+            .filter(|dependency| dependency["name"] == "processkit");
+        let dependency = processkit.next();
+        let expected_kind = match package_name {
+            "projectatlas-cli" => {
+                cli_seen = true;
+                Some("dev")
+            }
+            "projectatlas-lints" => {
+                lints_seen = true;
+                None
+            }
+            _ => {
+                require(
+                    dependency.is_none(),
+                    format!("unexpected processkit dependency in workspace package {package_name}"),
+                )?;
+                continue;
+            }
+        };
+        let dependency = dependency.ok_or_else(|| {
+            io::Error::other(format!(
+                "workspace package {package_name} does not declare processkit"
+            ))
+        })?;
+        require(
+            processkit.next().is_none(),
+            format!("workspace package {package_name} must declare processkit exactly once"),
+        )?;
+        let features = dependency["features"]
+            .as_array()
+            .ok_or_else(|| io::Error::other("processkit dependency features are not an array"))?;
+        require(
+            dependency["kind"].as_str() == expected_kind
+                && dependency["req"].as_str() == Some("^2.2.3")
+                && dependency["optional"].as_bool() == Some(false)
+                && dependency["uses_default_features"].as_bool() == Some(false)
+                && features.len() == 1
+                && features[0].as_str() == Some("process-control"),
+            format!(
+                "workspace package {package_name} has an invalid processkit scope or feature set"
+            ),
+        )?;
+    }
+    require(
+        cli_seen && lints_seen,
+        "processkit dependency owners are missing from Cargo metadata",
+    )
+}
+
 /// Derive dependency and custom-build counts from the current locked Cargo graph.
-fn current_dependency_counts() -> Result<(usize, usize, usize, usize), Box<dyn Error>> {
+fn current_dependency_counts(
+    metadata: &Value,
+) -> Result<(usize, usize, usize, usize), Box<dyn Error>> {
     let lock: toml::Value = toml::from_str(CARGO_LOCK)?;
     let lockfile_packages = lock
         .get("package")
         .and_then(toml::Value::as_array)
         .ok_or_else(|| io::Error::other("Cargo.lock has no package array"))?
         .len();
-    let metadata = current_locked_cargo_metadata()?;
     let packages = metadata["packages"]
         .as_array()
         .ok_or_else(|| io::Error::other("cargo metadata packages are not an array"))?;

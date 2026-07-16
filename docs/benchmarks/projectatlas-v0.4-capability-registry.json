@@ -4061,8 +4061,7 @@
       "owner": "projectatlas-core",
       "pack_id": "default-core",
       "public_surfaces": [
-        "atlas_symbol_relations",
-        "atlas_file_summary"
+        "atlas_symbol_relations"
       ],
       "fixture_ids": [
         "graph.relation.cross-repository"

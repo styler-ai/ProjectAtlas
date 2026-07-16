@@ -1075,8 +1075,8 @@
         "test_id": "UT:ARRI-2.28",
         "function": "repository_intelligence_contract_tests::arri_2_28_safety_inventory_fails_closed_on_advisory_or_missing_evidence",
         "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "repository_intelligence_contract_tests::arri_2_28_safety_inventory_fails_closed_on_advisory_or_missing_evidence", "--", "--exact"] },
-        "assertion": "Owned safety, locked dependency/build-script risk signals, known native boundaries, audit-tool gaps, and current advisory remediation are bound to exact evidence without claiming complete transitive unsafe/FFI coverage; malformed states, missing advisories, stale lockfiles, hidden inventory limits, and hidden containment blockers fail.",
-        "covered_inputs": ["seven owned crates", "293-package dependency graph derived from bounded offline locked Cargo metadata", "preliminary five-known-boundary inventory including dev-only process supervision", "explicit missing cargo-geiger/cargo-vet and complete-transitive-proof deferral", "current Cargo.lock digest", "production containment and hosted-import blockers"],
+        "assertion": "Owned safety, locked dependency/build-script risk signals, processkit's exact CLI-dev/lints-development-tool scope and process-control-only selection, known native boundaries, audit-tool gaps, and current advisory remediation are bound to exact evidence without claiming complete transitive unsafe/FFI coverage; malformed states, missing advisories, stale lockfiles, hidden inventory limits, dependency-scope drift, and hidden containment blockers fail.",
+        "covered_inputs": ["Cargo.toml", "Cargo.lock", "crates/projectatlas-cli/Cargo.toml", "crates/projectatlas-lints/Cargo.toml", "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs", "docs/benchmarks/projectatlas-v0.4-host-safety.json", "openspec/changes/advance-rust-repository-intelligence/tasks.md"],
         "state": "implemented_uncommitted"
       },
       "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
@@ -1479,6 +1479,151 @@
         "covered_inputs": ["checkpointed main database bytes", "checkpointed WAL bytes", "no-change target-signature short circuit", "exact no-change main-database byte identity", "exact no-change WAL byte identity", "exact one-file main-database byte identity before checkpoint", "small and large unrelated graph fixtures", "small and large unrelated lexical fixtures", "one-file affected-path invalidation", "complete appended SQLite WAL frames", "whole-database page bound", "fixed B-tree-depth and page-placement frame allowance", "unrelated active lexical row retention", "inactive-slot count retention"],
         "state": "implemented_uncommitted"
       },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "5.1",
+      "requirement": "The version-locked composite language registry owns identifiers, aliases, filename/extension/content rules, parser ABI and provenance, embedded adapters, pack boundaries, extraction queries, semantic providers, fixtures, capability tiers, digests, licenses, and patches without selecting or implementing a future runtime host.",
+      "scenario": "The real lock and accepted target decode under exact supported schema versions, while a typed synthetic witness exercises every pending field family, cross-owner mismatches and schema drift fail, unknown/missing/duplicate fields, invalid parser-asset licenses, and invalid accepted-mode or parser lifecycle spellings fail closed, and representative content-detector, asset-source, asset-version, asset-ABI-version, embedded-mapping, and tier-order mutations each change the deterministic contract digest.",
+      "owner": "language-capability-registry-schema",
+      "changed_artifacts": ["registry/language-registry.json", "crates/projectatlas-lints/Cargo.toml", "crates/projectatlas-lints/src/main.rs", "crates/projectatlas-lints/src/language_registry.rs", "crates/projectatlas-lints/src/language_registry_tests.rs", "fixtures/languages/projectatlas-v0.3.26-runtime-contract.toon", "openspec/task-verification-plan.json", "openspec/task-verification.json"],
+      "risk": "L2-persistence-cross-crate",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-5.1",
+        "function": "language_registry::tests::task_arri_ut_arri_5_1",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-lints", "--bin", "cargo-projectatlas-lints", "language_registry::tests::task_arri_ut_arri_5_1", "--", "--exact", "--nocapture"] },
+        "assertion": "The test binds exact language-registry, accepted-target, historical-runtime-contract, compiled-parser ABI, and semantic-digest schema/version identities; proves the closed accepted precedence exact-filename -> compound-extension -> extension -> shebang -> content-signature -> project-context plus exact, compound, extension, and typed content detection forms; exercises nonempty asset source/version/ABI/digest/license/patch, query, embedded-adapter, semantic-provider, fixture, tier, and accepted-override witnesses; rejects whitespace-only, untrimmed, independently control-bearing, and oversized asset licenses, invalid accepted-mode evidence/advertisement and parser-evidence lifecycle spellings, cross-pack ownership, unsupported versions, missing fields, unknown fields, and duplicate keys; and independently proves deterministic semantic-digest sensitivity for the content-detector ID, asset source, asset version, asset ABI version, embedded mapping, and tier order while allowing honest empty pending live inventories.",
+        "covered_inputs": ["registry/language-registry.json", "docs/benchmarks/projectatlas-v0.4-capability-registry.json", "fixtures/languages/projectatlas-v0.3.26-runtime-contract.toon", "crates/projectatlas-lints/Cargo.toml", "crates/projectatlas-lints/src/main.rs", "crates/projectatlas-lints/src/language_registry.rs", "crates/projectatlas-lints/src/language_registry_tests.rs", "openspec/changes/advance-rust-repository-intelligence/design.md", "openspec/changes/advance-rust-repository-intelligence/specs/language-intelligence-registry/spec.md", "openspec/changes/advance-rust-repository-intelligence/tasks.md", "openspec/task-verification-plan.json", "openspec/task-verification.json"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "5.2",
+      "requirement": "One validated language-registry contract deterministically generates responsibility-named Rust detection, parser, adapter, and settings tables plus accepted parity, conformance, documentation-support, and component SBOM/provenance inputs without claiming pending capabilities are achieved.",
+      "scenario": "Two renders under the repository-pinned formatter are byte-identical and every generated Rust table parses and typechecks; the formatter is selected from the canonical quality policy and runs inside a bounded, reaped process-tree boundary; complete current and representative nonempty detection, parser, adapter, settings, accepted parity, conformance, documentation, and SBOM/provenance rows reconcile field-for-field to the typed source and change when each optional registry family mutates, while every changed or missing physical output is reported exactly by the read-only drift check without repair.",
+      "owner": "language-capability-registry-generation",
+      "changed_artifacts": ["Cargo.lock", "registry/language-registry.json", "crates/projectatlas-lints/Cargo.toml", "crates/projectatlas-lints/src/main.rs", "crates/projectatlas-lints/src/language_registry.rs", "crates/projectatlas-lints/src/language_registry_tests.rs", "crates/projectatlas-lints/tests/cli_contract.rs", "crates/projectatlas-core/src/language_detection_registry.rs", "crates/projectatlas-symbols/src/language_parser_registry.rs", "crates/projectatlas-cli/src/language_capability_settings.rs", "crates/projectatlas-cli/src/calibration_evidence_runner.rs", "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs", "docs/benchmarks/projectatlas-v0.4-host-safety.json", "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json", "docs/benchmarks/projectatlas-v0.4-language-capability-state.json", "docs/language-capabilities.json", "openspec/task-verification-plan.json", "openspec/task-verification.json"],
+      "risk": "L2-persistence-cross-crate",
+      "required_evidence_layers": ["unit", "integration"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-5.2",
+        "function": "language_registry::tests::task_arri_ut_arri_5_2",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-lints", "--bin", "cargo-projectatlas-lints", "language_registry::tests::task_arri_ut_arri_5_2", "--", "--exact", "--nocapture"] },
+        "assertion": "The exact test selects the repository-pinned formatter from test-quality.toml by validating the active sysroot rustc release and rustfmt compiler identity; enforces shell-free 30-second whole-tree supervision, parent-death hardening, 64-KiB-per-stream capture, and actionable launch, toolchain, timeout, descendant teardown/reap, truncation, and nonzero-exit diagnostics; requires unique nonempty byte-identical and rustfmt-stable outputs across two renders; parses and standalone-typechecks every generated Rust table; proves one generated DetectionStage instead of DetectionLayer plus optional ContentDetectionKind, a payload-bearing SymbolRoute instead of SymbolRouteKind plus optional processor fields, distinct CargoManifest and CargoLock adapters, and exhaustive built-in parser lookup; reconciles every Rust row and complete JSON document field against both the real typed registry and a validated nonempty optional-family witness; proves content, asset, query, embedded-adapter, semantic-provider, and registry-evidence provenance mutation sensitivity through owning rows or logical JSON subtrees rather than shared digest headers; preserves fail-closed pending and unadvertised state; and independently corrupts and removes every physical output so read-only drift checks name the exact path without changing or recreating it.",
+        "covered_inputs": ["Cargo.toml", "Cargo.lock", "test-quality.toml", "registry/language-registry.json", "docs/benchmarks/projectatlas-v0.4-capability-registry.json", "fixtures/languages/projectatlas-v0.3.26-runtime-contract.toon", "crates/projectatlas-cli/Cargo.toml", "crates/projectatlas-lints/Cargo.toml", "crates/projectatlas-lints/src/main.rs", "crates/projectatlas-lints/src/language_registry.rs", "crates/projectatlas-lints/src/language_registry_tests.rs", "crates/projectatlas-lints/tests/cli_contract.rs", "crates/projectatlas-core/src/language_detection_registry.rs", "crates/projectatlas-symbols/src/language_parser_registry.rs", "crates/projectatlas-cli/src/language_capability_settings.rs", "crates/projectatlas-cli/src/calibration_evidence_runner.rs", "crates/projectatlas-cli/src/repository_intelligence_contract_tests.rs", "docs/benchmarks/projectatlas-v0.4-host-safety.json", "docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json", "docs/benchmarks/projectatlas-v0.4-language-capability-state.json", "docs/language-capabilities.json", "openspec/changes/advance-rust-repository-intelligence/design.md", "openspec/changes/advance-rust-repository-intelligence/specs/language-intelligence-registry/spec.md", "openspec/changes/advance-rust-repository-intelligence/tasks.md", "openspec/task-verification-plan.json", "openspec/task-verification.json"],
+        "state": "implemented_uncommitted"
+      },
+      "supporting_tests": [
+        {
+          "function": "cli_contract",
+          "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-lints", "--test", "cli_contract", "--", "--nocapture"] },
+          "assertion": "The public lint process registers language-registry check/write and help/usage behavior, writes every fixed generated output in a disposable repository, accepts a current registry, and reports drift without mutating the drifted output."
+        },
+        {
+          "function": "repository_intelligence_contract_tests::arri_2_28_safety_inventory_fails_closed_on_advisory_or_missing_evidence",
+          "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "--all-features", "--bin", "projectatlas", "repository_intelligence_contract_tests::arri_2_28_safety_inventory_fails_closed_on_advisory_or_missing_evidence", "--", "--exact", "--nocapture"] },
+          "assertion": "The native-boundary inventory derives processkit's exact CLI-dev and lints-development-tool dependency scopes from locked Cargo evidence, records it only as non-production development tooling used by the evidence runners and language-registry generator, and fails closed when the boundary, scope, feature set, or safety evidence is missing or overclaimed."
+        },
+        {
+          "function": "repository_intelligence_contract_tests::evaluation_manifest_defines_reproduction_fields",
+          "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "--all-features", "--bin", "projectatlas", "repository_intelligence_contract_tests::evaluation_manifest_defines_reproduction_fields", "--", "--exact", "--nocapture"] },
+          "assertion": "The authoritative evaluation manifest binds the exact current Cargo.lock digest while retaining the separately identified historical baseline and complete run-identity field contract."
+        },
+        {
+          "function": "calibration_evidence_runner::tests::manifest_outputs_are_ignored_by_checked_in_git_policy",
+          "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "--all-features", "--example", "calibration-evidence-runner", "calibration_evidence_runner::tests::manifest_outputs_are_ignored_by_checked_in_git_policy", "--", "--exact", "--nocapture"] },
+          "assertion": "The calibration runner binds the exact authoritative evaluation-manifest bytes and digest before proving every manifest-owned output is ignored by checked-in Git policy rather than local metadata."
+        }
+      ],
+      "supporting_commands": [
+        {
+          "command": { "executable": "cargo", "arguments": ["run", "--locked", "-p", "projectatlas-lints", "--bin", "cargo-projectatlas-lints", "--", "language-registry", "check"] },
+          "assertion": "The repository-level read-only generation gate validates inputs and reports every fixed output current without writing."
+        }
+      ],
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "5.3",
+      "requirement": "The typed language-registry boundary rejects duplicate identities, ambiguous same-precedence extension claims, phantom modes, missing parser assets, incompatible parser ABIs, missing fixtures, undeclared pack ownership, and unsupported tier claims without treating pending accepted assets as delivered.",
+      "scenario": "The real pending registry and a representative nonempty optional-family witness validate, accepted parser templates materialize stable future asset and query identities, and independent semantic mutations fail with exact owner and conflicting-identity diagnostics for every required validation class.",
+      "owner": "language-capability-registry-validation",
+      "changed_artifacts": ["registry/language-registry.json", "docs/benchmarks/projectatlas-v0.4-capability-registry.json", "fixtures/languages/projectatlas-v0.3.26-runtime-contract.toon", "crates/projectatlas-lints/Cargo.toml", "crates/projectatlas-lints/src/main.rs", "crates/projectatlas-lints/src/language_registry.rs", "crates/projectatlas-lints/src/language_registry_tests.rs", "crates/projectatlas-core/src/language_detection_registry.rs", "crates/projectatlas-symbols/src/language_parser_registry.rs", "crates/projectatlas-cli/src/language_capability_settings.rs", "docs/benchmarks/projectatlas-v0.4-language-capability-state.json", "docs/language-capabilities.json", "openspec/changes/advance-rust-repository-intelligence/specs/language-intelligence-registry/spec.md", "openspec/changes/advance-rust-repository-intelligence/tasks.md", "openspec/task-verification-plan.json", "openspec/task-verification.json"],
+      "risk": "L1-pure-domain",
+      "required_evidence_layers": ["unit"],
+      "timeout_seconds": 300,
+      "unit_test": {
+        "test_id": "UT:ARRI-5.3",
+        "function": "language_registry::tests::task_arri_ut_arri_5_3",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-lints", "--bin", "cargo-projectatlas-lints", "language_registry::tests::task_arri_ut_arri_5_3", "--", "--exact", "--nocapture"] },
+        "assertion": "The exact test distinguishes accepted-registry JSON decoding from semantic validation: unknown, missing, and appended precedence stages fail at the JSON-decode boundary, while duplicate and reordered stages fail at the accepted-target validation boundary with owner-specific diagnostics, and a historical runtime schema mismatch fails at the historical validation boundary. It accepts the real pending composite registry and a valid nonempty optional-family witness; proves every accepted parser has stable future asset and query identities without requiring undelivered lock rows; and independently rejects duplicate pack and fixture IDs, order-independent same-precedence extension collisions with both rule and mode IDs, dangling and unreachable current modes, missing current and accepted parser assets, current and accepted ABI mismatches, missing or empty parser/adapter/provider fixtures, undeclared or cross-pack ownership, non-prefix and premature tier claims, and noncanonical accepted aliases. Every rejection asserts the offending identities and owning field rather than accepting an unrelated validation failure.",
+        "covered_inputs": ["registry/language-registry.json", "docs/benchmarks/projectatlas-v0.4-capability-registry.json", "fixtures/languages/projectatlas-v0.3.26-runtime-contract.toon", "crates/projectatlas-lints/Cargo.toml", "crates/projectatlas-lints/src/main.rs", "crates/projectatlas-lints/src/language_registry.rs", "crates/projectatlas-lints/src/language_registry_tests.rs", "crates/projectatlas-core/src/language_detection_registry.rs", "crates/projectatlas-symbols/src/language_parser_registry.rs", "crates/projectatlas-cli/src/language_capability_settings.rs", "docs/benchmarks/projectatlas-v0.4-language-capability-state.json", "docs/language-capabilities.json", "openspec/changes/advance-rust-repository-intelligence/specs/language-intelligence-registry/spec.md", "openspec/changes/advance-rust-repository-intelligence/tasks.md", "openspec/task-verification-plan.json", "openspec/task-verification.json"],
+        "state": "implemented_uncommitted"
+      },
+      "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "5.4",
+      "requirement": "Current ProjectAtlas language detection and specialized-parser selection are generated from the validated registry while preserving the frozen v0.3.26 runtime contract except for the two reviewed Cargo exact-filename corrections.",
+      "scenario": "The independent v0.3.26 oracle proves exact ordered scanner extensions, API-only extensions, case normalization, exact filenames and path separators, public parser-support rows, specialized modes, real tree-sitter extraction, non-specialized fallbacks, adapter precedence, and both reviewed Cargo corrections, while generator reconciliation binds the emitted lookup and parser-component identities to the typed registry.",
+      "owner": "language-runtime-routing-compatibility",
+      "changed_artifacts": ["registry/language-registry.json", "fixtures/languages/projectatlas-v0.3.26-runtime-contract.toon", "crates/projectatlas-lints/src/language_registry.rs", "crates/projectatlas-lints/src/language_registry_tests.rs", "crates/projectatlas-core/src/language_detection_registry.rs", "crates/projectatlas-core/src/language.rs", "crates/projectatlas-core/src/lib.rs", "crates/projectatlas-symbols/src/language_parser_registry.rs", "crates/projectatlas-symbols/src/parser_registry.rs", "crates/projectatlas-symbols/src/languages/c_family.rs", "crates/projectatlas-symbols/src/languages/mod.rs", "crates/projectatlas-symbols/src/lib.rs", "crates/projectatlas-cli/src/main.rs", "crates/projectatlas-cli/src/runtime.rs", "crates/projectatlas-cli/src/structural.rs", "crates/projectatlas-cli/src/language_runtime_contract_tests.rs", "crates/projectatlas-cli/tests/e2e.rs", "openspec/task-verification-plan.json", "openspec/task-verification.json"],
+      "risk": "L2-persistence-cross-crate",
+      "required_evidence_layers": ["unit", "integration", "e2e"],
+      "timeout_seconds": 600,
+      "unit_test": {
+        "test_id": "UT:ARRI-5.4",
+        "function": "language_runtime_contract_tests::task_arri_ut_arri_5_4",
+        "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "--all-features", "--bin", "projectatlas", "language_runtime_contract_tests::task_arri_ut_arri_5_4", "--", "--exact", "--nocapture"] },
+        "assertion": "The exact test proves every generated CLI public-mode lookup returns its exact static policy row, then consumes the frozen v0.3.26 oracle across the complete derived 7 path classes x 8 supplied modes x 5 portable path styles matrix rather than a hardcoded case total. It proves ordered scanner and parser inventories, literal and uppercase extension behavior, API-only exclusions, .r/.R and .d.ts behavior, case-sensitive exact-filename precedence across path styles, adapter-specific parser/symbol/detail identity, Cargo-lock dominance, Cargo before Vue before PowerShell before ordinary supplied-route selection, known versus unknown fallback behavior, explicit supplied summary-mode precedence followed by historical TOON path fallback, Cargo-only path symbol candidacy, no path-only Vue or PowerShell candidacy, every parser-support class, every specialized parser through real tree-sitter extraction, all non-specialized modes, and exactly the reviewed NotCargo.toml and NotCargo.lock corrections.",
+        "covered_inputs": ["registry/language-registry.json", "fixtures/languages/projectatlas-v0.3.26-runtime-contract.toon", "crates/projectatlas-lints/src/language_registry.rs", "crates/projectatlas-lints/src/language_registry_tests.rs", "crates/projectatlas-core/src/language_detection_registry.rs", "crates/projectatlas-core/src/language.rs", "crates/projectatlas-core/src/lib.rs", "crates/projectatlas-symbols/src/language_parser_registry.rs", "crates/projectatlas-symbols/src/parser_registry.rs", "crates/projectatlas-symbols/src/languages/c_family.rs", "crates/projectatlas-symbols/src/languages/mod.rs", "crates/projectatlas-symbols/src/lib.rs", "crates/projectatlas-cli/src/main.rs", "crates/projectatlas-cli/src/runtime.rs", "crates/projectatlas-cli/src/structural.rs", "crates/projectatlas-cli/src/language_runtime_contract_tests.rs", "crates/projectatlas-cli/tests/e2e.rs", "openspec/changes/advance-rust-repository-intelligence/tasks.md", "openspec/task-verification-plan.json", "openspec/task-verification.json"],
+        "state": "implemented_uncommitted"
+      },
+      "supporting_tests": [
+        {
+          "function": "tests::symbol_candidate_policy_keeps_structural_formats_out_of_symbol_scan",
+          "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "--all-features", "--bin", "projectatlas", "tests::symbol_candidate_policy_keeps_structural_formats_out_of_symbol_scan", "--", "--exact", "--nocapture"] },
+          "assertion": "Generated symbol-route policy keeps summary-only formats out of symbol scans, enables exact manifest and structural path precedence, preserves near-miss behavior, and retains conservative unknown-language fallback."
+        },
+        {
+          "function": "tests::structural_path_routes_override_conflicting_explicit_language_across_path_styles",
+          "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-symbols", "--lib", "tests::structural_path_routes_override_conflicting_explicit_language_across_path_styles", "--", "--exact", "--nocapture"] },
+          "assertion": "Uppercase Vue and PowerShell paths across bare, forward-slash, backslash, and dotted-directory forms select their exact structural adapters ahead of conflicting explicit modes, including adapter-specific detail and symbol parser identity."
+        },
+        {
+          "function": "tests::ordinary_path_route_does_not_override_explicit_language",
+          "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-symbols", "--lib", "tests::ordinary_path_route_does_not_override_explicit_language", "--", "--exact", "--nocapture"] },
+          "assertion": "An ordinary built-in path extension does not override a conflicting explicit public mode after path-derived extensions become visible to structural route selection."
+        },
+        {
+          "function": "structural::tests::explicit_summary_modes_precede_conflicting_specialized_paths",
+          "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "--all-features", "--bin", "projectatlas", "structural::tests::explicit_summary_modes_precede_conflicting_specialized_paths", "--", "--exact", "--nocapture"] },
+          "assertion": "Explicit supplied summary modes retain summary ownership for conflicting Cargo, Vue, and PowerShell paths; path-specific summary adapters do not override them."
+        },
+        {
+          "function": "structural::tests::ordinary_path_policies_do_not_override_explicit_summary_modes",
+          "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "--all-features", "--bin", "projectatlas", "structural::tests::ordinary_path_policies_do_not_override_explicit_summary_modes", "--", "--exact", "--nocapture"] },
+          "assertion": "Ordinary detected paths do not override explicit summary modes, while the historical path-derived TOON fallback remains available."
+        },
+        {
+          "function": "tests::generated_symbol_route_lookup_resolves_every_declared_row",
+          "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-symbols", "--lib", "tests::generated_symbol_route_lookup_resolves_every_declared_row", "--", "--exact", "--nocapture"] },
+          "assertion": "Every generated public-mode symbol route resolves to its exact declared payload-bearing route, and an unknown public mode remains unresolved."
+        },
+        {
+          "function": "scan_indexes_every_supported_language_extension",
+          "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "--all-features", "--test", "e2e", "scan_indexes_every_supported_language_extension", "--", "--exact", "--nocapture"] },
+          "assertion": "A real ProjectAtlas CLI scan and files/summary workflow indexes every frozen scanner-visible extension and special exact-filename/dialect witness using the independent v0.3.26 runtime contract, with the expected language and a nonempty non-byte-fallback summary."
+        }
+      ],
       "result": { "state": "pending_commit_bound_run", "implementation_commit": null, "covered_input_digest": null, "run_identity": null, "artifact_digest": null }
     }
   ],

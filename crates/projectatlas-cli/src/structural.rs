@@ -1,7 +1,9 @@
 //! Deterministic structural summaries for files without declaration symbols.
 
+use crate::language_capability_settings::{SummaryAdapter, language_policy_for_public_mode};
 use cssparser::{Parser as CssParser, ParserInput as CssParserInput, Token as CssToken};
 use jsonc_parser::{ParseOptions as JsoncParseOptions, parse_to_serde_value};
+use projectatlas_core::language::detect_language_for_path;
 use pulldown_cmark::{
     Event as MarkdownEvent, HeadingLevel, Options as MarkdownOptions, Parser as MarkdownParser,
     Tag as MarkdownTag, TagEnd as MarkdownTagEnd,
@@ -24,38 +26,40 @@ pub(crate) fn structural_summary_for_path(
     language: Option<&str>,
     content: &str,
 ) -> Option<String> {
-    let language = language.unwrap_or_default();
-    match language {
-        "markdown" => markdown_summary(content),
-        "json" => json_summary(path, content),
-        "yaml" => yaml_summary(path, content),
-        "toml" | "cargo-manifest" => toml_summary(path, content),
-        "xml" => xml_summary(content),
-        "css" => css_summary(content),
-        "html" => html_summary(content),
-        "powershell" => powershell_summary(content),
-        "config" | "text" => config_text_summary(path, content),
-        _ if has_extension(path, "toon") => toon_summary(content),
-        _ => None,
+    match summary_adapter_for_path(path, language) {
+        SummaryAdapter::None => None,
+        SummaryAdapter::Markdown => markdown_summary(content),
+        SummaryAdapter::Json => json_summary(path, content),
+        SummaryAdapter::Yaml => yaml_summary(path, content),
+        SummaryAdapter::Css => css_summary(content),
+        SummaryAdapter::Html => html_summary(content),
+        SummaryAdapter::Toon => toon_summary(content),
+        SummaryAdapter::ConfigText => config_text_summary(path, content),
+        SummaryAdapter::Toml => toml_summary(path, content),
+        SummaryAdapter::Xml => xml_summary(content),
+        SummaryAdapter::PowerShell => powershell_summary(content),
     }
 }
 
 /// Return whether a file family has a lightweight structural adapter.
 pub(crate) fn is_structural_summary_candidate(path: &str, language: Option<&str>) -> bool {
-    matches!(
-        language.unwrap_or_default(),
-        "markdown"
-            | "json"
-            | "yaml"
-            | "toml"
-            | "cargo-manifest"
-            | "xml"
-            | "css"
-            | "html"
-            | "powershell"
-            | "config"
-            | "text"
-    ) || has_extension(path, "toon")
+    summary_adapter_for_path(path, language) != SummaryAdapter::None
+}
+
+/// Select the generated summary adapter while preserving the historical TOON path fallback.
+fn summary_adapter_for_path(path: &str, language: Option<&str>) -> SummaryAdapter {
+    if let Some(adapter) = language
+        .and_then(language_policy_for_public_mode)
+        .map(|policy| policy.summary_adapter)
+        && adapter != SummaryAdapter::None
+    {
+        return adapter;
+    }
+    if has_extension(path, "toon") {
+        SummaryAdapter::Toon
+    } else {
+        SummaryAdapter::None
+    }
 }
 
 /// Return whether a repository path has a case-insensitive extension.
@@ -337,7 +341,10 @@ fn toml_summary(path: &str, content: &str) -> Option<String> {
     let value = toml::from_str::<TomlValue>(content).ok()?;
     let table = value.as_table()?;
     let keys = table.keys().map(String::as_str).collect::<Vec<_>>();
-    if path.ends_with("Cargo.toml") {
+    if matches!(
+        detect_language_for_path(path, None).as_deref(),
+        Some("cargo-manifest")
+    ) {
         let package = table
             .get("package")
             .and_then(TomlValue::as_table)
@@ -861,6 +868,49 @@ mod tests {
     use super::{is_scanner_fallback_summary, structural_summary_for_path};
 
     #[test]
+    fn explicit_summary_modes_precede_conflicting_specialized_paths() {
+        let cargo = structural_summary_for_path(
+            "nested/Cargo.toml",
+            Some("markdown"),
+            "[package]\nname = \"fixture\"\n",
+        );
+        assert_eq!(
+            cargo.as_deref(),
+            Some("markdown document with 2 non-empty lines.")
+        );
+
+        let powershell = structural_summary_for_path(
+            "nested\\script.PS1",
+            Some("markdown"),
+            "function Invoke-Fixture { 'ok' }\n",
+        );
+        assert_eq!(
+            powershell.as_deref(),
+            Some("markdown document with 1 non-empty lines.")
+        );
+
+        assert_eq!(
+            structural_summary_for_path(
+                "component.VUE",
+                Some("markdown"),
+                "<script setup>\nconst fixture = true\n</script>\n",
+            )
+            .as_deref(),
+            Some("markdown document with 3 non-empty lines.")
+        );
+    }
+
+    #[test]
+    fn ordinary_path_policies_do_not_override_explicit_summary_modes() {
+        assert!(structural_summary_for_path("README.md", Some("rust"), "# Fixture\n").is_none());
+        assert_eq!(
+            structural_summary_for_path("fixture.toon", Some("rust"), "fixture:\n  ok: true\n")
+                .as_deref(),
+            Some("TOON document with sections fixture.")
+        );
+    }
+
+    #[test]
     fn summarizes_markdown_headings() {
         let summary = structural_summary_for_path(
             "README.md",
@@ -932,6 +982,25 @@ mod tests {
         assert_eq!(
             summary.as_deref(),
             Some("ProjectAtlas config with tables project, scan and 2 scan excludes.")
+        );
+    }
+
+    #[test]
+    fn cargo_manifest_summary_requires_an_exact_filename() {
+        let source = "[package]\nname = \"fixture\"\n";
+        for path in ["Cargo.toml", "nested/Cargo.toml", "nested\\Cargo.toml"] {
+            let summary = structural_summary_for_path(path, Some("toml"), source);
+            assert_eq!(
+                summary.as_deref(),
+                Some("cargo manifest for fixture with tables package."),
+                "{path}"
+            );
+        }
+
+        let near_miss = structural_summary_for_path("NotCargo.toml", Some("toml"), source);
+        assert_eq!(
+            near_miss.as_deref(),
+            Some("toml document with tables package.")
         );
     }
 

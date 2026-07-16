@@ -9,6 +9,7 @@ use crate::atlas_map::{
     self, imported_purpose_records, init_project_with_config, load_atlas_config,
     load_atlas_config_for_root,
 };
+use crate::language_capability_settings::{SymbolRouteKind, language_policy_for_public_mode};
 use crate::structural::{
     is_scanner_fallback_summary, is_structural_summary_candidate, structural_summary_for_path,
 };
@@ -21,7 +22,7 @@ use projectatlas_core::health::{
     CATEGORY_REPEATED_TEMPORARY_FOLDER, CATEGORY_STALE_PURPOSE, CATEGORY_SUGGESTED_PURPOSE_REVIEW,
     Severity,
 };
-use projectatlas_core::language::{LanguageParserSupport, language_spec};
+use projectatlas_core::language::detect_language_for_path;
 use projectatlas_core::outline::estimate_tokens;
 use projectatlas_core::symbols::{
     CompactSymbolGraph, CompactSymbolGraphError, RelationKind, SymbolGraph, SymbolKind,
@@ -2777,21 +2778,18 @@ fn summary_between<'a>(summary: &'a str, start: &str, end: &str) -> Option<&'a s
 
 /// Return whether a language should be parsed for symbols.
 pub(crate) fn is_symbol_candidate(path: &str, language: Option<&str>) -> bool {
-    if path.ends_with("Cargo.toml")
-        || path.ends_with("Cargo.lock")
-        || matches!(language, Some("cargo-manifest" | "cargo-lock"))
-    {
-        return true;
+    if let Some(language) = language {
+        match language_policy_for_public_mode(language) {
+            Some(policy) if policy.symbol_route != SymbolRouteKind::Skip => return true,
+            None => return true,
+            Some(_) => {}
+        }
     }
-    if matches!(language, Some("vue")) {
-        return true;
-    }
-    language.is_some_and(|language| {
-        !matches!(
-            language_spec(language).map(|spec| spec.parser_support),
-            Some(LanguageParserSupport::Structural)
-        )
-    })
+    let path_route = detect_language_for_path(path, None)
+        .as_deref()
+        .and_then(language_policy_for_public_mode)
+        .map(|policy| policy.symbol_route);
+    matches!(path_route, Some(SymbolRouteKind::Manifest))
 }
 
 /// Clear stale symbol output while preserving structural summaries when present.

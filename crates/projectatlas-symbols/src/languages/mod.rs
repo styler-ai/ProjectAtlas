@@ -1,6 +1,5 @@
 //! Language-specific symbol graph augmenters.
 
-mod c_family;
 mod gradle;
 mod kotlin;
 mod objective_c;
@@ -8,28 +7,38 @@ mod zig;
 
 use projectatlas_core::symbols::{RelationKind, SymbolGraph, SymbolKind};
 
+use crate::language_parser_registry::SymbolAugmenter;
 use crate::{push_relation, push_symbol};
 
 /// Add language-specific facts that are not exposed by the generic node pass.
-pub(crate) fn augment_language_graph(graph: &mut SymbolGraph, content: &str) {
-    match graph.language.as_deref() {
-        Some("kotlin") => {
-            kotlin::augment(graph, content);
-            gradle::augment_kotlin(graph, content);
+pub(crate) fn augment_language_graph(
+    graph: &mut SymbolGraph,
+    content: &str,
+    augmenters: &[SymbolAugmenter],
+) {
+    for augmenter in augmenters {
+        match augmenter {
+            SymbolAugmenter::Kotlin => kotlin::augment(graph, content),
+            SymbolAugmenter::GradleKotlin => gradle::augment_kotlin(graph, content),
+            SymbolAugmenter::ObjectiveC => objective_c::augment(graph, content),
+            SymbolAugmenter::Zig => zig::augment(graph, content),
+            SymbolAugmenter::GradleGroovy => gradle::augment_groovy(graph, content),
         }
-        Some("objective-c") => objective_c::augment(graph, content),
-        Some("zig") => zig::augment(graph, content),
-        Some("c" | "cpp" | "h" | "hpp") => c_family::augment(graph, content),
-        _ => {}
     }
 }
 
 /// Add language-specific fallback facts for languages without a native parser.
-pub(crate) fn augment_fallback_language_graph(graph: &mut SymbolGraph, content: &str) {
-    match graph.language.as_deref() {
-        Some("kotlin") => gradle::augment_kotlin(graph, content),
-        Some("groovy") => gradle::augment_groovy(graph, content),
-        _ => {}
+pub(crate) fn augment_fallback_language_graph(
+    graph: &mut SymbolGraph,
+    content: &str,
+    augmenters: &[SymbolAugmenter],
+) {
+    for augmenter in augmenters {
+        match augmenter {
+            SymbolAugmenter::GradleKotlin => gradle::augment_kotlin(graph, content),
+            SymbolAugmenter::GradleGroovy => gradle::augment_groovy(graph, content),
+            SymbolAugmenter::Kotlin | SymbolAugmenter::ObjectiveC | SymbolAugmenter::Zig => {}
+        }
     }
 }
 

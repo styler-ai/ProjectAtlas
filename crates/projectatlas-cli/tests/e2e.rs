@@ -3,7 +3,6 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use projectatlas_core::PurposeSource;
-use projectatlas_core::language::{BROAD_SOURCE_EXTENSIONS, detect_language_for_path};
 use projectatlas_core::telemetry::{
     READ_AVOIDANCE_CONFIDENCE_MODELED, READ_AVOIDANCE_SCOPE, usage_from_estimates,
 };
@@ -7466,20 +7465,15 @@ fn scan_indexes_every_supported_language_extension() -> Result<(), Box<dyn Error
     let db = temp.path().join("projectatlas.db");
     let mut expected = Vec::new();
 
-    for (index, extension) in BROAD_SOURCE_EXTENSIONS.iter().enumerate() {
+    for (index, baseline) in language_detection_baselines()?.into_iter().enumerate() {
+        let extension = baseline.extension;
         let file_name = format!("file_{index:03}{extension}");
         let relative_path = format!("all/{file_name}");
-        let language =
-            detect_language_for_path(&relative_path, Some(extension)).ok_or_else(|| {
-                io::Error::other(format!(
-                    "language registry has unsupported extension {extension}"
-                ))
-            })?;
         fs::write(
             fixture_root.join(file_name),
-            fixture_content_for_extension(extension),
+            fixture_content_for_extension(&extension),
         )?;
-        expected.push((relative_path, language));
+        expected.push((relative_path, baseline.language));
     }
 
     for (relative_path, expected_language, content) in special_language_fixtures() {
@@ -10457,6 +10451,43 @@ struct LanguageSummaryBaseline {
     summary: String,
     /// Minimum expected symbol count.
     minimum_symbol_count: usize,
+}
+
+/// Frozen extension-to-language behavior used as an independent E2E oracle.
+struct LanguageDetectionBaseline {
+    /// Public scanner extension.
+    extension: String,
+    /// Expected detected language or file family.
+    language: String,
+}
+
+/// Decode the frozen v0.3.26 public scanner-extension contract.
+fn language_detection_baselines() -> Result<Vec<LanguageDetectionBaseline>, Box<dyn Error>> {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .ok_or_else(|| io::Error::other("workspace root not found"))?;
+    let contract_text = fs::read_to_string(
+        workspace_root
+            .join("fixtures")
+            .join("languages")
+            .join("projectatlas-v0.3.26-runtime-contract.toon"),
+    )?;
+    let normalized_contract_text = contract_text.replace("\r\n", "\n").replace('\r', "\n");
+    let decoded: Value = toon_format::decode_default(&normalized_contract_text)
+        .map_err(|error| io::Error::other(format!("language contract decode failed: {error}")))?;
+    let rows = decoded
+        .get("broad_detection")
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("language contract missing broad_detection array"))?;
+    rows.iter()
+        .map(|row| {
+            Ok(LanguageDetectionBaseline {
+                extension: required_baseline_string(row, "extension")?,
+                language: required_baseline_string(row, "language")?,
+            })
+        })
+        .collect()
 }
 
 /// Decode exact baseline summaries for representative supported language families.

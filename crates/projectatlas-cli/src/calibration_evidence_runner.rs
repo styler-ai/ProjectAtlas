@@ -24,7 +24,7 @@ use thiserror::Error;
 const MANIFEST_BYTES: &[u8] =
     include_bytes!("../../../docs/benchmarks/projectatlas-v0.4-evaluation-manifest.json");
 /// Digest of the frozen evaluation manifest.
-const MANIFEST_SHA256: &str = "35ed0bbb3560d0b68657309f4117fd61edc6471020a1a462364d71f5b4e018d8";
+const MANIFEST_SHA256: &str = "762ee0e644b99f5dee16d1458cc7569db7190a645fa784f0f3368d84b42bbacc";
 /// Calibration runner source compiled into the executable.
 const RUNNER_BYTES: &[u8] = include_bytes!("calibration_evidence_runner.rs");
 /// Repository-relative path of the dedicated runner source.

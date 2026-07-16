@@ -1,8 +1,20 @@
 //! Purpose: Provide the `ProjectAtlas` 3 command-line adapter.
 
 mod atlas_map;
+#[allow(
+    dead_code,
+    reason = "complete generated registry projection retains validated settings outside runtime routing"
+)]
+#[allow(
+    clippy::missing_docs_in_private_items,
+    reason = "generated registry fields mirror the documented and validated owning schema"
+)]
+#[rustfmt::skip]
+mod language_capability_settings;
 #[cfg(test)]
 mod language_capability_registry_tests;
+#[cfg(test)]
+mod language_runtime_contract_tests;
 mod mcp;
 #[cfg(test)]
 mod optional_pack_candidate_readiness_tests;
@@ -2969,11 +2981,25 @@ mod tests {
     fn symbol_candidate_policy_keeps_structural_formats_out_of_symbol_scan() {
         assert!(is_symbol_candidate("Cargo.toml", Some("cargo-manifest")));
         assert!(is_symbol_candidate("src/lib.rs", Some("rust")));
+        assert!(is_symbol_candidate("Cargo.toml", Some("markdown")));
+        assert!(!is_symbol_candidate(
+            "nested\\component.VUE",
+            Some("markdown")
+        ));
+        assert!(!is_symbol_candidate("scripts/tool.PS1", Some("markdown")));
+        assert!(is_symbol_candidate("nested/component.vue", Some("vue")));
+        assert!(is_symbol_candidate("scripts/tool.ps1", Some("powershell")));
+        assert!(!is_symbol_candidate("nested/component.vue", None));
+        assert!(!is_symbol_candidate("scripts/tool.ps1", None));
         assert!(!is_symbol_candidate(
             "fixtures/baselines.toon",
             Some("toon")
         ));
         assert!(!is_symbol_candidate("README.md", Some("markdown")));
+        assert!(!is_symbol_candidate("NotCargo.toml", Some("toml")));
+        assert!(!is_symbol_candidate("NotCargo.lock", None));
+        assert!(is_symbol_candidate("fixture", Some("unknown-language")));
+        assert!(!is_symbol_candidate("fixture", None));
     }
 
     #[test]

@@ -3,6 +3,16 @@
 pub mod budget;
 pub mod graph;
 pub mod health;
+#[allow(
+    dead_code,
+    reason = "complete generated registry projection retains validated metadata outside the runtime routing facade"
+)]
+#[allow(
+    clippy::missing_docs_in_private_items,
+    reason = "generated registry fields mirror the documented and validated owning schema"
+)]
+#[rustfmt::skip]
+mod language_detection_registry;
 pub mod language;
 pub mod outline;
 pub mod symbols;
