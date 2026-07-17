@@ -2,7 +2,7 @@
 
 use super::*;
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error as _;
 use std::path::Path;
 
@@ -171,6 +171,38 @@ fn under_target_coverage_export(
             manifest_path: manifest.to_string_lossy().into_owned(),
         },
     })
+}
+
+fn nextest_inventory(test_count: u64, ignored: &[bool]) -> NativeNextestInventory {
+    NativeNextestInventory {
+        test_count,
+        rust_suites: BTreeMap::from([(
+            "suite".to_string(),
+            NativeNextestSuite {
+                status: "listed".to_string(),
+                testcases: ignored
+                    .iter()
+                    .enumerate()
+                    .map(|(index, ignored)| {
+                        (
+                            format!("case-{index}"),
+                            NativeNextestCase {
+                                kind: "test".to_string(),
+                                ignored: *ignored,
+                            },
+                        )
+                    })
+                    .collect(),
+            },
+        )]),
+    }
+}
+
+fn write_nextest_junit(path: &Path, testcases: &str) -> std::io::Result<()> {
+    std::fs::write(
+        path,
+        format!("<testsuites><testsuite name=\"suite\">{testcases}</testsuite></testsuites>"),
+    )
 }
 
 #[test]
@@ -453,6 +485,132 @@ fn task_tqg_ut_3_4() {
     assert_eq!(mutant.package, "projectatlas-core");
     assert!(serde_json::from_value::<NativeNextestInventory>(json!({})).is_err());
     assert!(serde_json::from_value::<NativeMutant>(json!({"name": "truncated"})).is_err());
+}
+
+#[test]
+fn nextest_reconciliation_accepts_omitted_inventory_ignored_cases() {
+    let directory = assert_ok!(tempfile::tempdir());
+    let junit = directory.path().join("junit.xml");
+    assert_ok!(write_nextest_junit(
+        &junit,
+        "<testcase name=\"case-0\"/><testcase name=\"case-2\"/>"
+    ));
+    let counts = assert_ok!(validate_nextest_evidence(
+        &nextest_inventory(3, &[false, true, false]),
+        &junit
+    ));
+    assert_eq!(
+        counts,
+        NextestCounts {
+            tests: 2,
+            suites: 1,
+            ignored: 1,
+            failed: 0,
+            errors: 0,
+            timed_out: 0,
+        }
+    );
+}
+
+#[test]
+fn nextest_reconciliation_accepts_an_ignored_only_inventory_suite() {
+    let directory = assert_ok!(tempfile::tempdir());
+    let junit = directory.path().join("junit.xml");
+    assert_ok!(write_nextest_junit(&junit, "<testcase name=\"runnable\"/>"));
+    let inventory = NativeNextestInventory {
+        test_count: 2,
+        rust_suites: BTreeMap::from([
+            (
+                "ignored-only".to_string(),
+                NativeNextestSuite {
+                    status: "listed".to_string(),
+                    testcases: BTreeMap::from([(
+                        "ignored".to_string(),
+                        NativeNextestCase {
+                            kind: "test".to_string(),
+                            ignored: true,
+                        },
+                    )]),
+                },
+            ),
+            (
+                "suite".to_string(),
+                NativeNextestSuite {
+                    status: "listed".to_string(),
+                    testcases: BTreeMap::from([(
+                        "runnable".to_string(),
+                        NativeNextestCase {
+                            kind: "test".to_string(),
+                            ignored: false,
+                        },
+                    )]),
+                },
+            ),
+        ]),
+    };
+    assert_eq!(
+        assert_ok!(validate_nextest_evidence(&inventory, &junit)),
+        NextestCounts {
+            tests: 1,
+            suites: 2,
+            ignored: 1,
+            failed: 0,
+            errors: 0,
+            timed_out: 0,
+        }
+    );
+}
+
+#[test]
+fn nextest_reconciliation_rejects_all_inventory_tests_ignored() {
+    let directory = assert_ok!(tempfile::tempdir());
+    let junit = directory.path().join("junit.xml");
+    assert_ok!(write_nextest_junit(&junit, ""));
+    assert!(matches!(
+        validate_nextest_evidence(&nextest_inventory(1, &[true]), &junit),
+        Err(QualityError::Status {
+            status: QualityStatus::NoTests,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn nextest_reconciliation_rejects_unexpected_junit_skips() {
+    let directory = assert_ok!(tempfile::tempdir());
+    let junit = directory.path().join("junit.xml");
+    assert_ok!(write_nextest_junit(
+        &junit,
+        "<testcase name=\"case-0\"><skipped/></testcase>"
+    ));
+    assert!(matches!(
+        validate_nextest_evidence(&nextest_inventory(1, &[false]), &junit),
+        Err(QualityError::Status {
+            status: QualityStatus::TestFailure,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn nextest_reconciliation_rejects_inventory_count_drift() {
+    let directory = assert_ok!(tempfile::tempdir());
+    let junit = directory.path().join("junit.xml");
+    assert_ok!(write_nextest_junit(&junit, "<testcase name=\"case-0\"/>"));
+    assert!(matches!(
+        validate_nextest_evidence(&nextest_inventory(2, &[false]), &junit),
+        Err(QualityError::Evidence(message))
+            if message.contains("inventory count mismatch")
+    ));
+}
+
+#[test]
+fn nextest_runnable_test_count_rejects_underflow() {
+    assert!(matches!(
+        nextest_runnable_test_count(0, 1),
+        Err(QualityError::Evidence(message))
+            if message.contains("ignored count 1 exceeds listed count 0")
+    ));
 }
 
 #[test]

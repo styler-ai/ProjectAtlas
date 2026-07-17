@@ -4074,10 +4074,6 @@
             },
             {
               "kind": "file",
-              "path": "crates/projectatlas-symbols/src/languages/c_family.rs"
-            },
-            {
-              "kind": "file",
               "path": "crates/projectatlas-symbols/src/languages/mod.rs"
             },
             {

@@ -477,10 +477,6 @@
       "purpose": "Cargo manifest for ProjectAtlas symbol extraction and tree-sitter dependencies."
     },
     {
-      "path": "crates/projectatlas-symbols/src/languages/c_family.rs",
-      "purpose": "Reserves the C and C++ language augmentation boundary for parser-specific corrections."
-    },
-    {
       "path": "crates/projectatlas-symbols/src/languages/gradle.rs",
       "purpose": "Extract Gradle Kotlin and Groovy DSL task registrations as symbols."
     },
@@ -1787,6 +1783,118 @@
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-f3c6e3c-arri-4-23.json",
       "purpose": "Retain the exact-commit ARRI 4.23 graph-scale verification receipt for implementation checkpoint f3c6e3c."
+    },
+    {
+      "path": "fixtures/parser-packs",
+      "purpose": "Parser-pack fixtures for validating optional grammar packaging, trust, provenance, and containment."
+    },
+    {
+      "path": "fixtures/parser-packs/tree-sitter-wasm-grammar-pack",
+      "purpose": "Fixture bundle for a pinned JavaScript tree-sitter WASM grammar candidate and its trust evidence."
+    },
+    {
+      "path": "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/parsers",
+      "purpose": "Binary parser modules included in parser-pack trust and runtime validation fixtures."
+    },
+    {
+      "path": "registry",
+      "purpose": "Version-controlled ProjectAtlas registries that drive generated language and parser-pack contracts."
+    },
+    {
+      "path": "crates/projectatlas-cli/examples/graph-scale-evidence-runner.rs",
+      "purpose": "Run the dedicated manifest-bound graph-scale evidence executable with allocator instrumentation."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/graph_scale_evaluation.rs",
+      "purpose": "Generate and validate manifest-bound graph-scale storage, process, resource, throughput, and warm-query evidence."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/graph_scale_plan.rs",
+      "purpose": "Define and validate the closed million-entity, three-million-relation graph-scale workload and resource gates."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/graph_scale_process.rs",
+      "purpose": "Supervise graph-scale workload processes and retain bounded containment, lifecycle, output, and process-group RSS evidence."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/language_capability_settings.rs",
+      "purpose": "Provide generated language policy, capability-tier, pack, and parser-trust data for settings and runtime routing."
+    },
+    {
+      "path": "crates/projectatlas-cli/src/language_runtime_contract_tests.rs",
+      "purpose": "Verify generated language routing and v0.3.26 compatibility against the pinned runtime contract."
+    },
+    {
+      "path": "crates/projectatlas-core/src/language_detection_registry.rs",
+      "purpose": "Provide generated language detection rules, current mode metadata, and parser support for ProjectAtlas core."
+    },
+    {
+      "path": "crates/projectatlas-lints/src/language_registry.rs",
+      "purpose": "Validate language and parser-pack contracts and deterministically generate runtime, settings, documentation, and capability artifacts."
+    },
+    {
+      "path": "crates/projectatlas-lints/src/language_registry_tests.rs",
+      "purpose": "Exercise language-registry validation, deterministic generation, filesystem safety, parser-pack trust, and closed runtime routing."
+    },
+    {
+      "path": "crates/projectatlas-service/src/graph_query.rs",
+      "purpose": "Provide bounded publication-consistent repository-graph query services shared by adapters and evaluations."
+    },
+    {
+      "path": "crates/projectatlas-symbols/src/language_parser_registry.rs",
+      "purpose": "Provide generated parser, adapter, augmenter, extraction-query, and component routes for symbol extraction."
+    },
+    {
+      "path": "docs/benchmarks/projectatlas-v0.4-language-capability-state.json",
+      "purpose": "Record generated current and accepted language-capability state, conformance inventory, pack trust, and advertisement readiness."
+    },
+    {
+      "path": "docs/language-capabilities.json",
+      "purpose": "Publish the generated language-capability support matrix and evidence state for documentation consumers."
+    },
+    {
+      "path": "fixtures/languages/projectatlas-v0.3.26-runtime-contract.toon",
+      "purpose": "Pin the v0.3.26 language detection, adapter, parser, and augmentation baseline for migration compatibility tests."
+    },
+    {
+      "path": "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/LICENSE",
+      "purpose": "Retain the MIT license text for the pinned tree-sitter JavaScript WASM parser candidate."
+    },
+    {
+      "path": "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/advisories.json",
+      "purpose": "Record pinned advisory-database results and vulnerability disposition for the parser-pack candidate."
+    },
+    {
+      "path": "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/manifest.json",
+      "purpose": "Bind parser-pack ABI, runtime, provenance, licenses, and artifact checksums for the WASM grammar candidate."
+    },
+    {
+      "path": "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/parsers/javascript.wasm",
+      "purpose": "Provide the pinned tree-sitter JavaScript WASM parser module used by parser-pack trust and ABI validation fixtures."
+    },
+    {
+      "path": "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/provenance.json",
+      "purpose": "Record source, toolchain, reproducibility, patch, and build identities for the parser-pack candidate."
+    },
+    {
+      "path": "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/sbom.spdx.json",
+      "purpose": "Retain the SPDX software bill of materials for the parser-pack candidate."
+    },
+    {
+      "path": "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/wasm-probe.mjs",
+      "purpose": "Probe the pinned WASM module exports, grammar ABI, and digest under a bounded Node host."
+    },
+    {
+      "path": "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/wasm-validation.json",
+      "purpose": "Record the WASM module identity, ABI probe environment, and local and hosted validation state."
+    },
+    {
+      "path": "registry/language-registry.json",
+      "purpose": "Own the version-locked language modes, detection rules, parser routes, packs, assets, and generation contract."
+    },
+    {
+      "path": "registry/parser-pack-trust.json",
+      "purpose": "Own the closed parser-pack candidate inventory, trust requirements, and evidence bindings."
     }
   ]
 }

@@ -2420,6 +2420,10 @@ mod tests {
     const GIT_ENVIRONMENT_PROBE_ENV: &str = "PROJECTATLAS_GIT_ENVIRONMENT_PROBE";
     /// Single-use poisoned Git-environment probe result.
     const GIT_ENVIRONMENT_RESULT_ENV: &str = "PROJECTATLAS_GIT_ENVIRONMENT_RESULT";
+    /// Repository root used by the poisoned Git-environment child probe.
+    const GIT_ENVIRONMENT_REPOSITORY_ENV: &str = "PROJECTATLAS_GIT_ENVIRONMENT_REPOSITORY";
+    /// Exact lockfile bytes compiled into the test executable.
+    const CARGO_LOCK_BYTES: &[u8] = include_bytes!("../../../Cargo.lock");
     /// Exact test-harness Git environment probe.
     const GIT_ENVIRONMENT_PROBE_TEST: &str =
         "calibration_evidence_runner::tests::git_environment_subprocess_probe";
@@ -2927,7 +2931,12 @@ mod tests {
         let result_path = env::var(GIT_ENVIRONMENT_RESULT_ENV)
             .map(PathBuf::from)
             .map_err(|error| CalibrationError::Binding(error.to_string()))?;
-        let result = match source_binding(&repository_root()?).await {
+        let root = env::var_os(GIT_ENVIRONMENT_REPOSITORY_ENV)
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                CalibrationError::Binding("Git environment probe repository is missing".into())
+            })?;
+        let result = match source_binding(&root).await {
             Ok(binding) => GitEnvironmentProbeResult {
                 binding: Some(binding),
                 error: None,
@@ -3012,9 +3021,47 @@ mod tests {
     /// Git provenance ignores inherited repository, index, config, helper, and pager overrides.
     #[tokio::test(flavor = "current_thread")]
     async fn git_provenance_uses_a_closed_environment() -> Result<(), CalibrationError> {
-        let root = repository_root()?;
-        let expected = source_binding(&root).await?;
+        let repository = repository_root()?;
+        let trusted_git = RepositoryGitProbe::resolve(&repository)?
+            .executable()
+            .to_owned();
         let directory = tempdir()?;
+        let fixture = directory.path().join("repository");
+        fs::create_dir(&fixture)?;
+        let root = fs::canonicalize(&fixture)?;
+        let runner_path = root.join(RUNNER_SOURCE_PATH);
+        fs::create_dir_all(runner_path.parent().ok_or_else(|| {
+            CalibrationError::Binding("runner fixture path has no parent".into())
+        })?)?;
+        fs::write(&runner_path, RUNNER_BYTES)?;
+        fs::write(root.join("Cargo.lock"), CARGO_LOCK_BYTES)?;
+        let mut init_arguments = vec![OsString::from("-C")];
+        init_arguments.push(root.as_os_str().to_owned());
+        init_arguments.extend([OsString::from("init"), OsString::from("--quiet")]);
+        run_git_fixture_command(&trusted_git, &init_arguments).await?;
+        let mut add_arguments = vec![OsString::from("-C")];
+        add_arguments.push(root.as_os_str().to_owned());
+        add_arguments.extend([
+            OsString::from("add"),
+            OsString::from("--"),
+            OsString::from("Cargo.lock"),
+            OsString::from(RUNNER_SOURCE_PATH),
+        ]);
+        run_git_fixture_command(&trusted_git, &add_arguments).await?;
+        let mut commit_arguments = vec![OsString::from("-C")];
+        commit_arguments.push(root.as_os_str().to_owned());
+        commit_arguments.extend([
+            OsString::from("-c"),
+            OsString::from("user.name=ProjectAtlas Test"),
+            OsString::from("-c"),
+            OsString::from("user.email=projectatlas@example.invalid"),
+            OsString::from("commit"),
+            OsString::from("--quiet"),
+            OsString::from("-m"),
+            OsString::from("fixture"),
+        ]);
+        run_git_fixture_command(&trusted_git, &commit_arguments).await?;
+        let expected = source_binding(&root).await?;
         let result_path = directory.path().join("git-environment.json");
         let poisoned_config = directory.path().join("poisoned.gitconfig");
         fs::write(
@@ -3026,6 +3073,7 @@ mod tests {
                 .args(["--exact", GIT_ENVIRONMENT_PROBE_TEST, "--nocapture"])
                 .env(GIT_ENVIRONMENT_PROBE_ENV, "child")
                 .env(GIT_ENVIRONMENT_RESULT_ENV, &result_path)
+                .env(GIT_ENVIRONMENT_REPOSITORY_ENV, &root)
                 .env("GIT_DIR", directory.path().join("missing-git-dir"))
                 .env("GIT_WORK_TREE", directory.path())
                 .env("GIT_INDEX_FILE", directory.path().join("foreign-index"))
@@ -3056,10 +3104,7 @@ mod tests {
             ))
         })?;
         require(
-            binding.git == expected.git
-                && binding.head_commit == expected.head_commit
-                && binding.cargo_lock_sha256 == expected.cargo_lock_sha256
-                && binding.runner_source_sha256 == expected.runner_source_sha256,
+            binding == expected,
             "poisoned Git variables changed the captured source binding",
         )
     }
@@ -3067,6 +3112,7 @@ mod tests {
     /// A PATH-prepended executable cannot silently replace the resolved Git identity.
     #[tokio::test(flavor = "current_thread")]
     async fn git_provenance_rejects_a_path_shim() -> Result<(), CalibrationError> {
+        let repository = repository_root()?;
         let directory = tempdir()?;
         let shim_directory = directory.path().join("shim");
         fs::create_dir(&shim_directory)?;
@@ -3084,6 +3130,7 @@ mod tests {
                 .args(["--exact", GIT_ENVIRONMENT_PROBE_TEST, "--nocapture"])
                 .env(GIT_ENVIRONMENT_PROBE_ENV, "child")
                 .env(GIT_ENVIRONMENT_RESULT_ENV, &result_path)
+                .env(GIT_ENVIRONMENT_REPOSITORY_ENV, repository)
                 .env("PATH", poisoned_path),
             Duration::from_mins(2),
             32 * 1024,

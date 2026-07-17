@@ -48,3 +48,5 @@ nonsource_files[]:
   plugins/projectatlas/.codex-plugin/plugin.json,ProjectAtlas Codex plugin manifest
   plugins/projectatlas/skills/projectatlas/SKILL.md,ProjectAtlas installable Codex skill
   templates/AGENTS.md,Agent startup snippet for ProjectAtlas
+  fixtures/parser-packs/tree-sitter-wasm-grammar-pack/LICENSE,MIT license text for the pinned tree-sitter JavaScript WASM parser candidate
+  fixtures/parser-packs/tree-sitter-wasm-grammar-pack/parsers/javascript.wasm,Pinned tree-sitter JavaScript WASM parser module used for parser-pack trust and ABI validation
