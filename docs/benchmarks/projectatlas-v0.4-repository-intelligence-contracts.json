@@ -212,7 +212,7 @@
         "atlas_purpose_set": {},
         "atlas_reset_index": {"apply": false, "dry_run": false, "include_mcp_config": false},
         "atlas_root": {"verify": false},
-        "atlas_root_set": {"nearest_project": false},
+        "atlas_root_set": {"nearest_project": false, "intent": null, "prior_root": null, "project_instance_id": null, "binding_digest": null},
         "atlas_runtime_info": {},
         "atlas_scan": {"path": "selected_project_root", "nearest_project": false, "max_bytes": 2000000, "max_workers": "rayon_auto", "timeout_seconds": null, "text_index_max_bytes": "effective_config_or_2000000"},
         "atlas_search": {"regex": false, "fuzzy": false, "case_sensitive": false, "file_pattern": null, "context_lines": 0, "start_index": 0, "limit": 20},
@@ -763,6 +763,98 @@
       "projectatlas impact",
       "projectatlas trace"
     ],
+    "allowed_frozen_surface_additions": {
+      "cli_arguments": {
+        "projectatlas root set": [
+          {
+            "id": "intent",
+            "short": null,
+            "long": "intent",
+            "index": null,
+            "required": false,
+            "action": "Set",
+            "num_args": null,
+            "defaults": [],
+            "possible_values": ["move", "detach"]
+          },
+          {
+            "id": "prior_root",
+            "short": null,
+            "long": "prior-root",
+            "index": null,
+            "required": false,
+            "action": "Set",
+            "num_args": null,
+            "defaults": [],
+            "possible_values": []
+          },
+          {
+            "id": "project_instance_id",
+            "short": null,
+            "long": "project-instance-id",
+            "index": null,
+            "required": false,
+            "action": "Set",
+            "num_args": null,
+            "defaults": [],
+            "possible_values": []
+          },
+          {
+            "id": "binding_digest",
+            "short": null,
+            "long": "binding-digest",
+            "index": null,
+            "required": false,
+            "action": "Set",
+            "num_args": null,
+            "defaults": [],
+            "possible_values": []
+          }
+        ]
+      },
+      "mcp_input_schema": {
+        "atlas_root_set": {
+          "properties": {
+            "intent": {
+              "description": "Explicit identity transition for a previously reported binding challenge.",
+              "anyOf": [
+                {"$ref": "#/$defs/RootBindingIntentArg"},
+                {"type": "null"}
+              ]
+            },
+            "prior_root": {
+              "description": "Exact persisted prior-root text from the binding challenge.",
+              "type": ["string", "null"]
+            },
+            "project_instance_id": {
+              "description": "Persistent project identity from the binding challenge.",
+              "type": ["string", "null"]
+            },
+            "binding_digest": {
+              "description": "Versioned BLAKE3 digest from the binding challenge.",
+              "type": ["string", "null"]
+            }
+          },
+          "definitions": {
+            "RootBindingIntentArg": {
+              "description": "Closed adapter vocabulary for an explicit root-binding transition.",
+              "oneOf": [
+                {
+                  "description": "Preserve the selected database identity for an operator-declared move.",
+                  "type": "string",
+                  "const": "move"
+                },
+                {
+                  "description": "Generate a new identity for a copied or independently retained database.",
+                  "type": "string",
+                  "const": "detach"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
     "custom_query_language": false,
     "normal_workflow_new_required_calls": 0,
     "optional_packs_disabled_by_default": true,

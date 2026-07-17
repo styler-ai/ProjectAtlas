@@ -11,6 +11,8 @@ name = "cargo-projectatlas-lints"
 path = "src/main.rs"
 
 [dependencies]
+cap-fs-ext.workspace = true
+cap-std.workspace = true
 globset.workspace = true
 proc-macro2.workspace = true
 processkit.workspace = true

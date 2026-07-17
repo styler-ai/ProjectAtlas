@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "format": "projectatlas.parser-pack-provenance",
+  "candidate_id": "tree-sitter-wasm-grammar-pack",
+  "source": {
+    "repository": "https://github.com/tree-sitter/tree-sitter-javascript",
+    "revision": "44c892e0be055ac465d5eeddae6d3e194424e7de",
+    "package_url": "https://crates.io/api/v1/crates/tree-sitter-javascript/0.25.0/download",
+    "package_sha256": "68204f2abc0627a90bdf06e605f5c470aa26fdcb2081ea553a04bdad756693f5"
+  },
+  "evidence_state": {
+    "local_output_identity": "two-byte-identical-clean-outputs",
+    "hosted_reproduction": "pending",
+    "raw_build_logs": "not-retained",
+    "packaged_windows_identity": "pending-refs128-bit-identity-evidence"
+  },
+  "resolved_toolchain": {
+    "tree_sitter_cli": {
+      "version": "0.25.10",
+      "revision": "da6fe9beb4f7f67beb75914ca8e0d48ae48d6406",
+      "package_url": "https://registry.npmjs.org/tree-sitter-cli/-/tree-sitter-cli-0.25.10.tgz",
+      "package_integrity_sha512": "KoebQguKMCIghisEOdA372TIbrUl0kdnfZ9YQIBRAeOvNSKe85XbU4LuFW7hduRUwJj0rAG7pX5wo9sZhbBF1g==",
+      "binary_sha256": "742f962b7ba2c50caf6ae96f23315633e07c7226fdd426400c2eb2d4d85ae277"
+    },
+    "emsdk": {
+      "version": "4.0.4",
+      "revision": "074211759c17c646164d3271ca1d155cc174f78e",
+      "source": "https://github.com/emscripten-core/emsdk",
+      "resolved_release_revision": "ea71afcf5a172125179a07ff1731de6e81c92222"
+    },
+    "emscripten": {
+      "version": "4.0.4",
+      "revision": "273f0216fede04f2445367765eaf2aabeeb60d84",
+      "emcc_sha256": "f39ad73691e7c4fa6a2f42d6afa677503d00d685582ad75d6750b43dfe89b49e"
+    },
+    "llvm": {
+      "version": "21.0.0git",
+      "revision": "148111fdcf0e807fe74274b18fcf65c4cff45d63",
+      "clang_sha256": "ae9063b9ee698382365120899bda9228f95b00dae179e1bfb5e579c97aa495fa",
+      "wasm_ld_sha256": "ab768fa3d2cc0fa88fecb584fd3c47420cdd4a27201adef303d382ec3879b59a"
+    },
+    "node": {
+      "version": "20.18.0",
+      "binary_sha256": "35b7c95a379beb606f5798ed83081690df13190077630b234163c6607aa4cc94"
+    },
+    "python": {
+      "version": "3.9.2",
+      "binary_sha256": "786e68ded8af18f36274d78ea00ff11289c27107dd9f8fdd2f6b4732a3b8a2da"
+    }
+  },
+  "build": {
+    "working_directory": "build-a",
+    "command": "tree-sitter build --wasm --output ../build-a.wasm .",
+    "environment_assumptions": [
+      "each run starts from a separately extracted clean source package",
+      "tool lookup resolves exactly to the recorded toolchain identities",
+      "the output path is outside the extracted source directory"
+    ],
+    "resolved_flags": [
+      "-Os",
+      "-s WASM=1",
+      "-s SIDE_MODULE=2",
+      "-s TOTAL_MEMORY=33554432",
+      "-s NODEJS_CATCH_EXIT=0",
+      "-s EXPORTED_FUNCTIONS=[\"_tree_sitter_javascript\"]",
+      "-fno-exceptions",
+      "-fvisibility=hidden",
+      "-I .",
+      "src/scanner.c",
+      "src/parser.c"
+    ],
+    "source_files": [
+      {
+        "path": "src/parser.c",
+        "sha256": "67209ca7ef6e1a4f74e29e48b5928455f892fe1821a3960fbcd62f4e972f7384"
+      },
+      {
+        "path": "src/scanner.c",
+        "sha256": "b3d3f64284d97bf80749c026862427782cf7ecc0b7dc094e6698ab311c9a42c7"
+      },
+      {
+        "path": "src/tree_sitter/parser.h",
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+      },
+      {
+        "path": "src/tree_sitter/alloc.h",
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+      },
+      {
+        "path": "src/tree_sitter/array.h",
+        "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94"
+      },
+      {
+        "path": "tree-sitter.json",
+        "sha256": "43f1abe79d69601f9699d292ccbdcf04c8c836911984bd6e466c8368711a1d65"
+      }
+    ],
+    "output": {
+      "path": "parsers/javascript.wasm",
+      "bytes": 411759,
+      "sha256": "35070cda936e479202e22c72cf129d6894eee7f4de8b41912a516cfdbe109204"
+    }
+  },
+  "local_output_runs": [
+    {
+      "run_id": "clean-build-a",
+      "working_directory": "build-a",
+      "command": "tree-sitter build --wasm --output ../build-a.wasm .",
+      "raw_log_retention": "not-retained",
+      "bytes": 411759,
+      "sha256": "35070cda936e479202e22c72cf129d6894eee7f4de8b41912a516cfdbe109204"
+    },
+    {
+      "run_id": "clean-build-b",
+      "working_directory": "build-b",
+      "command": "tree-sitter build --wasm --output ../build-b.wasm .",
+      "raw_log_retention": "not-retained",
+      "bytes": 411759,
+      "sha256": "35070cda936e479202e22c72cf129d6894eee7f4de8b41912a516cfdbe109204"
+    }
+  ]
+}

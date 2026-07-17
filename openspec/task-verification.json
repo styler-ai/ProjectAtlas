@@ -3715,7 +3715,7 @@
               "projectatlas-lints",
               "--bin",
               "cargo-projectatlas-lints",
-              "language_registry::tests::task_arri_ut_arri_5_1",
+              "language_registry::tests::language_registry_contract_is_closed_and_semantically_bound",
               "--",
               "--exact",
               "--nocapture"
@@ -3776,7 +3776,7 @@
             {
               "test_id": "UT:ARRI-5.1",
               "path": "crates/projectatlas-lints/src/language_registry_tests.rs",
-              "anchor": "task_arri_ut_arri_5_1"
+              "anchor": "language_registry_contract_is_closed_and_semantically_bound"
             }
           ]
         },
@@ -3795,7 +3795,7 @@
               "projectatlas-lints",
               "--bin",
               "cargo-projectatlas-lints",
-              "language_registry::tests::task_arri_ut_arri_5_2",
+              "language_registry::tests::generated_language_registry_outputs_are_deterministic_and_complete",
               "--",
               "--exact",
               "--nocapture"
@@ -3912,7 +3912,7 @@
             {
               "test_id": "UT:ARRI-5.2",
               "path": "crates/projectatlas-lints/src/language_registry_tests.rs",
-              "anchor": "task_arri_ut_arri_5_2"
+              "anchor": "generated_language_registry_outputs_are_deterministic_and_complete"
             }
           ]
         },
@@ -3931,7 +3931,7 @@
               "projectatlas-lints",
               "--bin",
               "cargo-projectatlas-lints",
-              "language_registry::tests::task_arri_ut_arri_5_3",
+              "language_registry::tests::language_registry_validation_rejects_invalid_or_drifting_contracts",
               "--",
               "--exact",
               "--nocapture"
@@ -4008,7 +4008,7 @@
             {
               "test_id": "UT:ARRI-5.3",
               "path": "crates/projectatlas-lints/src/language_registry_tests.rs",
-              "anchor": "task_arri_ut_arri_5_3"
+              "anchor": "language_registry_validation_rejects_invalid_or_drifting_contracts"
             }
           ]
         },
@@ -4154,22 +4154,82 @@
           "test_ids": [
             "UT:ARRI-5.6"
           ],
-          "assertion": "Verify preserve trusted built-in parsers as closed compile-time choices and place runtime-selected broad parser implementations behind the explicit optional pack boundary rather than making every core parser dynamically dispatched.",
+          "assertion": "The exact task test validates the real lock and accepted target; derives the unique built-in parser inventory; requires canonical default-core, in-process, compiled tree-sitter, current-ABI components; cross-binds every built-in route to its accepted default-core mode and parser; keeps the nonempty broad parser inventory disjoint, supervised-worker-owned, fully pending, and unadvertised; parses the generated enums, direct grammar adapter, and actual tree-sitter runtime caller to reject traits, mutable registries, dynamic lookup, indirect grammar installation, or non-exhaustive dispatch; and rejects adversarial pack, process, runtime, implementation, route, lifecycle, advertisement, relocation, and component-identity drift.",
           "command": {
             "executable": "cargo",
             "arguments": [
               "test",
               "--locked",
-              "--workspace",
-              "--all-features",
-              "task_arri_ut_arri_5_6"
+              "-p",
+              "projectatlas-lints",
+              "--bin",
+              "cargo-projectatlas-lints",
+              "language_registry::tests::built_in_parser_selection_remains_closed_and_pack_isolated",
+              "--",
+              "--exact",
+              "--nocapture"
             ]
           },
           "timeout_seconds": 300,
           "covered_inputs": [
             {
               "kind": "file",
+              "path": "registry/language-registry.json"
+            },
+            {
+              "kind": "file",
+              "path": "docs/benchmarks/projectatlas-v0.4-capability-registry.json"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-lints/src/language_registry.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-lints/src/language_registry_tests.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-symbols/src/language_parser_registry.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-symbols/src/parser_registry.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-symbols/src/lib.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-cli/src/optional_pack_candidate_readiness_tests.rs"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/changes/advance-rust-repository-intelligence/design.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/changes/advance-rust-repository-intelligence/specs/language-intelligence-registry/spec.md"
+            },
+            {
+              "kind": "file",
               "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification-plan.json"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-5.6",
+              "path": "crates/projectatlas-lints/src/language_registry_tests.rs",
+              "anchor": "built_in_parser_selection_remains_closed_and_pack_isolated"
             }
           ]
         },
@@ -4394,22 +4454,82 @@
           "test_ids": [
             "UT:ARRI-5.16"
           ],
-          "assertion": "Verify generate per-component parser provenance, checksums, ABI/toolchain, patches, licenses, advisories, and exact SBOM records and fail closed on modified, missing, extra, stale, absolute-path, or zero-files-checked manifests.",
+          "assertion": "The exact test validates the release-owned trust manifest and isolated broad-language-pack budget; binds every declared payload byte count and SHA-256; verifies provenance, license, advisory, WASM probe, SPDX SBOM, patch, toolchain, ABI, and installed-byte evidence; and rejects digest or byte drift, duplicate keys, undeclared files, hard links, linked or reparse payloads, non-reproducible builds, non-clean advisories, invalid SBOM checksums, default-core budget borrowing, and installed-byte overflow while selection remains blocked.",
           "command": {
             "executable": "cargo",
             "arguments": [
               "test",
               "--locked",
-              "--workspace",
-              "--all-features",
-              "task_arri_ut_arri_5_16"
+              "-p",
+              "projectatlas-lints",
+              "--bin",
+              "cargo-projectatlas-lints",
+              "language_registry::tests::parser_pack_trust_inventory_is_exact_and_fail_closed",
+              "--",
+              "--exact",
+              "--nocapture"
             ]
           },
           "timeout_seconds": 300,
           "covered_inputs": [
             {
               "kind": "file",
-              "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md"
+              "path": "registry/language-registry.json"
+            },
+            {
+              "kind": "file",
+              "path": "registry/parser-pack-trust.json"
+            },
+            {
+              "kind": "tree",
+              "path": "fixtures/parser-packs/tree-sitter-wasm-grammar-pack"
+            },
+            {
+              "kind": "file",
+              "path": "docs/benchmarks/projectatlas-v0.4-capability-registry.json"
+            },
+            {
+              "kind": "file",
+              "path": "fixtures/languages/projectatlas-v0.3.26-runtime-contract.toon"
+            },
+            {
+              "kind": "file",
+              "path": "docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-lints/Cargo.toml"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-lints/src/main.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-lints/src/language_registry.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-lints/src/language_registry_tests.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-lints/tests/cli_contract.rs"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification-plan.json"
+            },
+            {
+              "kind": "file",
+              "path": "openspec/task-verification.json"
+            }
+          ],
+          "test_sources": [
+            {
+              "test_id": "UT:ARRI-5.16",
+              "path": "crates/projectatlas-lints/src/language_registry_tests.rs",
+              "anchor": "parser_pack_trust_inventory_is_exact_and_fail_closed"
             }
           ]
         },

@@ -2,9 +2,9 @@
 //! Generated core detection language-registry projection.
 
 pub(crate) const LANGUAGE_REGISTRY_SOURCE_LOCK_SHA256: &str =
-    "b46485ee2248b0e8018f43f9d386a7fc761484590ed6837da4a153f0f3f2bfdc";
+    "66938d6649fed6dd54a8bd18d60123104c4e116ce90aec2a9b56b7c70166d477";
 pub(crate) const LANGUAGE_REGISTRY_CONTRACT_SHA256: &str =
-    "426a118cb5d67c3ba34efd28c467012391fe116987ff9245619d2d48372f0f66";
+    "3654ffb023ca1621a71d84dc229869e340f5a23b65a90ab016df9bceaf9625d6";
 
 /// Parser coverage level available for a detected language family.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,6 +26,31 @@ pub struct LanguageSpec {
     pub language: &'static str,
     /// Parser coverage level.
     pub parser_support: LanguageParserSupport,
+}
+
+#[allow(
+    dead_code,
+    reason = "closed generated content matcher consumed only by the rich detector"
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LanguageContentDetector {
+    ShebangPython,
+    ShebangShell,
+    ShebangJavascript,
+    ShebangRuby,
+    ShebangPerl,
+    SignaturePhp,
+    SignatureXml,
+    ContextDockerBuild,
+}
+
+/// Optional semantic interpretation layered over a compatible base language.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LanguageSemanticMode {
+    /// Kubernetes resource semantics over YAML.
+    Kubernetes,
+    /// Kustomize configuration semantics over YAML.
+    Kustomize,
 }
 
 #[allow(
@@ -63,8 +88,9 @@ pub(crate) struct LanguageDetectionRule {
     pub(crate) pattern: &'static str,
     pub(crate) lookup_case: DetectionCase,
     pub(crate) path_case: DetectionCase,
+    pub(crate) content_detector: Option<LanguageContentDetector>,
     pub(crate) scanner_visible: bool,
-    pub(crate) mode: &'static str,
+    pub(crate) language: &'static str,
 }
 
 #[allow(
@@ -78,8 +104,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: "Cargo.toml",
         lookup_case: DetectionCase::Sensitive,
         path_case: DetectionCase::Sensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.cargo-manifest",
+        language: "cargo-manifest",
     },
     LanguageDetectionRule {
         id: "detect.filename.cargo-lock",
@@ -87,8 +114,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: "Cargo.lock",
         lookup_case: DetectionCase::Sensitive,
         path_case: DetectionCase::Sensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.cargo-lock",
+        language: "cargo-lock",
     },
     LanguageDetectionRule {
         id: "detect.filename.build-rs",
@@ -96,8 +124,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: "build.rs",
         lookup_case: DetectionCase::Sensitive,
         path_case: DetectionCase::Sensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.rust-build-script",
+        language: "rust-build-script",
     },
     LanguageDetectionRule {
         id: "detect.filename.dockerfile",
@@ -105,8 +134,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: "Dockerfile",
         lookup_case: DetectionCase::Sensitive,
         path_case: DetectionCase::Sensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.dockerfile",
+        language: "dockerfile",
     },
     LanguageDetectionRule {
         id: "detect.filename.makefile",
@@ -114,8 +144,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: "Makefile",
         lookup_case: DetectionCase::Sensitive,
         path_case: DetectionCase::Sensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.makefile",
+        language: "makefile",
     },
     LanguageDetectionRule {
         id: "detect.extension.py",
@@ -123,8 +154,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".py",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.python",
+        language: "python",
     },
     LanguageDetectionRule {
         id: "detect.extension.pyw",
@@ -132,8 +164,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".pyw",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.python",
+        language: "python",
     },
     LanguageDetectionRule {
         id: "detect.extension.js",
@@ -141,8 +174,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".js",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.javascript",
+        language: "javascript",
     },
     LanguageDetectionRule {
         id: "detect.extension.jsx",
@@ -150,8 +184,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".jsx",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.javascript",
+        language: "javascript",
     },
     LanguageDetectionRule {
         id: "detect.extension.ts",
@@ -159,8 +194,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".ts",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.typescript",
+        language: "typescript",
     },
     LanguageDetectionRule {
         id: "detect.extension.tsx",
@@ -168,8 +204,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".tsx",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.tsx",
+        language: "tsx",
     },
     LanguageDetectionRule {
         id: "detect.extension.mjs",
@@ -177,8 +214,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".mjs",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.javascript",
+        language: "javascript",
     },
     LanguageDetectionRule {
         id: "detect.extension.cjs",
@@ -186,8 +224,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".cjs",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.javascript",
+        language: "javascript",
     },
     LanguageDetectionRule {
         id: "detect.extension.d-ts",
@@ -195,8 +234,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".d.ts",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::Sensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.typescript",
+        language: "typescript",
     },
     LanguageDetectionRule {
         id: "detect.extension.java",
@@ -204,8 +244,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".java",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.java",
+        language: "java",
     },
     LanguageDetectionRule {
         id: "detect.extension.c",
@@ -213,8 +254,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".c",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.c",
+        language: "c",
     },
     LanguageDetectionRule {
         id: "detect.extension.cpp",
@@ -222,8 +264,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".cpp",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.cpp",
+        language: "cpp",
     },
     LanguageDetectionRule {
         id: "detect.extension.h",
@@ -231,8 +274,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".h",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.h",
+        language: "h",
     },
     LanguageDetectionRule {
         id: "detect.extension.hpp",
@@ -240,8 +284,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".hpp",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.hpp",
+        language: "hpp",
     },
     LanguageDetectionRule {
         id: "detect.extension.cxx",
@@ -249,8 +294,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".cxx",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.cpp",
+        language: "cpp",
     },
     LanguageDetectionRule {
         id: "detect.extension.cc",
@@ -258,8 +304,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".cc",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.cpp",
+        language: "cpp",
     },
     LanguageDetectionRule {
         id: "detect.extension.hxx",
@@ -267,8 +314,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".hxx",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.hpp",
+        language: "hpp",
     },
     LanguageDetectionRule {
         id: "detect.extension.hh",
@@ -276,8 +324,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".hh",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.hpp",
+        language: "hpp",
     },
     LanguageDetectionRule {
         id: "detect.extension.cs",
@@ -285,8 +334,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".cs",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.csharp",
+        language: "csharp",
     },
     LanguageDetectionRule {
         id: "detect.extension.go",
@@ -294,8 +344,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".go",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.go",
+        language: "go",
     },
     LanguageDetectionRule {
         id: "detect.extension.m",
@@ -303,8 +354,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".m",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.objective-c",
+        language: "objective-c",
     },
     LanguageDetectionRule {
         id: "detect.extension.mm",
@@ -312,8 +364,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".mm",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.objective-c",
+        language: "objective-c",
     },
     LanguageDetectionRule {
         id: "detect.extension.rb",
@@ -321,8 +374,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".rb",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.ruby",
+        language: "ruby",
     },
     LanguageDetectionRule {
         id: "detect.extension.php",
@@ -330,8 +384,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".php",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.php",
+        language: "php",
     },
     LanguageDetectionRule {
         id: "detect.extension.swift",
@@ -339,8 +394,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".swift",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.swift",
+        language: "swift",
     },
     LanguageDetectionRule {
         id: "detect.extension.kt",
@@ -348,8 +404,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".kt",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.kotlin",
+        language: "kotlin",
     },
     LanguageDetectionRule {
         id: "detect.extension.kts",
@@ -357,8 +414,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".kts",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.kotlin",
+        language: "kotlin",
     },
     LanguageDetectionRule {
         id: "detect.extension.rs",
@@ -366,8 +424,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".rs",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.rust",
+        language: "rust",
     },
     LanguageDetectionRule {
         id: "detect.extension.scala",
@@ -375,8 +434,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".scala",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.scala",
+        language: "scala",
     },
     LanguageDetectionRule {
         id: "detect.extension.sh",
@@ -384,8 +444,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".sh",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.shell",
+        language: "shell",
     },
     LanguageDetectionRule {
         id: "detect.extension.bash",
@@ -393,8 +454,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".bash",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.shell",
+        language: "shell",
     },
     LanguageDetectionRule {
         id: "detect.extension.zsh",
@@ -402,8 +464,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".zsh",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.shell",
+        language: "shell",
     },
     LanguageDetectionRule {
         id: "detect.extension.ps1",
@@ -411,8 +474,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".ps1",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.powershell",
+        language: "powershell",
     },
     LanguageDetectionRule {
         id: "detect.extension.psm1",
@@ -420,8 +484,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".psm1",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.powershell",
+        language: "powershell",
     },
     LanguageDetectionRule {
         id: "detect.extension.psd1",
@@ -429,8 +494,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".psd1",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.powershell",
+        language: "powershell",
     },
     LanguageDetectionRule {
         id: "detect.extension.bat",
@@ -438,8 +504,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".bat",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.batch",
+        language: "batch",
     },
     LanguageDetectionRule {
         id: "detect.extension.cmd",
@@ -447,8 +514,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".cmd",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.batch",
+        language: "batch",
     },
     LanguageDetectionRule {
         id: "detect.extension.r",
@@ -456,8 +524,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".r",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.r",
+        language: "r",
     },
     LanguageDetectionRule {
         id: "detect.extension.r-uppercase",
@@ -465,8 +534,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".R",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.r",
+        language: "r",
     },
     LanguageDetectionRule {
         id: "detect.extension.pl",
@@ -474,8 +544,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".pl",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.perl",
+        language: "perl",
     },
     LanguageDetectionRule {
         id: "detect.extension.pm",
@@ -483,8 +554,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".pm",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.perl",
+        language: "perl",
     },
     LanguageDetectionRule {
         id: "detect.extension.lua",
@@ -492,8 +564,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".lua",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.lua",
+        language: "lua",
     },
     LanguageDetectionRule {
         id: "detect.extension.dart",
@@ -501,8 +574,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".dart",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.dart",
+        language: "dart",
     },
     LanguageDetectionRule {
         id: "detect.extension.hs",
@@ -510,8 +584,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".hs",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.haskell",
+        language: "haskell",
     },
     LanguageDetectionRule {
         id: "detect.extension.ml",
@@ -519,8 +594,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".ml",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.ocaml",
+        language: "ocaml",
     },
     LanguageDetectionRule {
         id: "detect.extension.mli",
@@ -528,8 +604,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".mli",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.ocaml",
+        language: "ocaml",
     },
     LanguageDetectionRule {
         id: "detect.extension.fs",
@@ -537,8 +614,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".fs",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.fsharp",
+        language: "fsharp",
     },
     LanguageDetectionRule {
         id: "detect.extension.fsx",
@@ -546,8 +624,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".fsx",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.fsharp",
+        language: "fsharp",
     },
     LanguageDetectionRule {
         id: "detect.extension.clj",
@@ -555,8 +634,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".clj",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.clojure",
+        language: "clojure",
     },
     LanguageDetectionRule {
         id: "detect.extension.cljs",
@@ -564,8 +644,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".cljs",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.clojure",
+        language: "clojure",
     },
     LanguageDetectionRule {
         id: "detect.extension.vim",
@@ -573,8 +654,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".vim",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.vim",
+        language: "vim",
     },
     LanguageDetectionRule {
         id: "detect.extension.zig",
@@ -582,8 +664,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".zig",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.zig",
+        language: "zig",
     },
     LanguageDetectionRule {
         id: "detect.extension.zon",
@@ -591,8 +674,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".zon",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.zig",
+        language: "zig",
     },
     LanguageDetectionRule {
         id: "detect.extension.html",
@@ -600,8 +684,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".html",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.html",
+        language: "html",
     },
     LanguageDetectionRule {
         id: "detect.extension.htm",
@@ -609,8 +694,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".htm",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.html",
+        language: "html",
     },
     LanguageDetectionRule {
         id: "detect.extension.css",
@@ -618,8 +704,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".css",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.css",
+        language: "css",
     },
     LanguageDetectionRule {
         id: "detect.extension.scss",
@@ -627,8 +714,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".scss",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.css",
+        language: "css",
     },
     LanguageDetectionRule {
         id: "detect.extension.sass",
@@ -636,8 +724,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".sass",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.css",
+        language: "css",
     },
     LanguageDetectionRule {
         id: "detect.extension.less",
@@ -645,8 +734,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".less",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.css",
+        language: "css",
     },
     LanguageDetectionRule {
         id: "detect.extension.stylus",
@@ -654,8 +744,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".stylus",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.css",
+        language: "css",
     },
     LanguageDetectionRule {
         id: "detect.extension.styl",
@@ -663,8 +754,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".styl",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.css",
+        language: "css",
     },
     LanguageDetectionRule {
         id: "detect.extension.md",
@@ -672,8 +764,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".md",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.markdown",
+        language: "markdown",
     },
     LanguageDetectionRule {
         id: "detect.extension.mdx",
@@ -681,8 +774,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".mdx",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.markdown",
+        language: "markdown",
     },
     LanguageDetectionRule {
         id: "detect.extension.json",
@@ -690,8 +784,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".json",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.json",
+        language: "json",
     },
     LanguageDetectionRule {
         id: "detect.extension.jsonc",
@@ -699,8 +794,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".jsonc",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.json",
+        language: "json",
     },
     LanguageDetectionRule {
         id: "detect.extension.xml",
@@ -708,8 +804,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".xml",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.xml",
+        language: "xml",
     },
     LanguageDetectionRule {
         id: "detect.extension.yml",
@@ -717,8 +814,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".yml",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.yaml",
+        language: "yaml",
     },
     LanguageDetectionRule {
         id: "detect.extension.yaml",
@@ -726,8 +824,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".yaml",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.yaml",
+        language: "yaml",
     },
     LanguageDetectionRule {
         id: "detect.extension.toml",
@@ -735,8 +834,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".toml",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.toml",
+        language: "toml",
     },
     LanguageDetectionRule {
         id: "detect.extension.toon",
@@ -744,8 +844,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".toon",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.toon",
+        language: "toon",
     },
     LanguageDetectionRule {
         id: "detect.extension.txt",
@@ -753,8 +854,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".txt",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.text",
+        language: "text",
     },
     LanguageDetectionRule {
         id: "detect.extension.ini",
@@ -762,8 +864,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".ini",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.config",
+        language: "config",
     },
     LanguageDetectionRule {
         id: "detect.extension.cfg",
@@ -771,8 +874,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".cfg",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.config",
+        language: "config",
     },
     LanguageDetectionRule {
         id: "detect.extension.conf",
@@ -780,8 +884,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".conf",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.config",
+        language: "config",
     },
     LanguageDetectionRule {
         id: "detect.extension.vue",
@@ -789,8 +894,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".vue",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.vue",
+        language: "vue",
     },
     LanguageDetectionRule {
         id: "detect.extension.svelte",
@@ -798,8 +904,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".svelte",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.svelte",
+        language: "svelte",
     },
     LanguageDetectionRule {
         id: "detect.extension.astro",
@@ -807,8 +914,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".astro",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.astro",
+        language: "astro",
     },
     LanguageDetectionRule {
         id: "detect.extension.jsp",
@@ -816,8 +924,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".jsp",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.jsp",
+        language: "jsp",
     },
     LanguageDetectionRule {
         id: "detect.extension.jspx",
@@ -825,8 +934,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".jspx",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.jsp",
+        language: "jsp",
     },
     LanguageDetectionRule {
         id: "detect.extension.jspf",
@@ -834,8 +944,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".jspf",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.jsp",
+        language: "jsp",
     },
     LanguageDetectionRule {
         id: "detect.extension.tag",
@@ -843,8 +954,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".tag",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.jsp-tag",
+        language: "jsp-tag",
     },
     LanguageDetectionRule {
         id: "detect.extension.tagx",
@@ -852,8 +964,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".tagx",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.jsp-tag",
+        language: "jsp-tag",
     },
     LanguageDetectionRule {
         id: "detect.extension.gsp",
@@ -861,8 +974,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".gsp",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.gsp",
+        language: "gsp",
     },
     LanguageDetectionRule {
         id: "detect.extension.properties",
@@ -870,8 +984,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".properties",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.config",
+        language: "config",
     },
     LanguageDetectionRule {
         id: "detect.extension.gradle",
@@ -879,8 +994,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".gradle",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.groovy",
+        language: "groovy",
     },
     LanguageDetectionRule {
         id: "detect.extension.groovy",
@@ -888,8 +1004,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".groovy",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.groovy",
+        language: "groovy",
     },
     LanguageDetectionRule {
         id: "detect.extension.proto",
@@ -897,8 +1014,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".proto",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.protobuf",
+        language: "protobuf",
     },
     LanguageDetectionRule {
         id: "detect.extension.hbs",
@@ -906,8 +1024,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".hbs",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.handlebars",
+        language: "handlebars",
     },
     LanguageDetectionRule {
         id: "detect.extension.handlebars",
@@ -915,8 +1034,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".handlebars",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.handlebars",
+        language: "handlebars",
     },
     LanguageDetectionRule {
         id: "detect.extension.ejs",
@@ -924,8 +1044,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".ejs",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.ejs",
+        language: "ejs",
     },
     LanguageDetectionRule {
         id: "detect.extension.pug",
@@ -933,8 +1054,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".pug",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.pug",
+        language: "pug",
     },
     LanguageDetectionRule {
         id: "detect.extension.ftl",
@@ -942,8 +1064,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".ftl",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.freemarker",
+        language: "freemarker",
     },
     LanguageDetectionRule {
         id: "detect.extension.mustache",
@@ -951,8 +1074,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".mustache",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.mustache",
+        language: "mustache",
     },
     LanguageDetectionRule {
         id: "detect.extension.liquid",
@@ -960,8 +1084,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".liquid",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.liquid",
+        language: "liquid",
     },
     LanguageDetectionRule {
         id: "detect.extension.erb",
@@ -969,8 +1094,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".erb",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.erb",
+        language: "erb",
     },
     LanguageDetectionRule {
         id: "detect.extension.sql",
@@ -978,8 +1104,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".sql",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.ddl",
@@ -987,8 +1114,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".ddl",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.dml",
@@ -996,8 +1124,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".dml",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.mysql",
@@ -1005,8 +1134,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".mysql",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.postgresql",
@@ -1014,8 +1144,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".postgresql",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.psql",
@@ -1023,8 +1154,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".psql",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.sqlite",
@@ -1032,8 +1164,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".sqlite",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.mssql",
@@ -1041,8 +1174,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".mssql",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.oracle",
@@ -1050,8 +1184,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".oracle",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.ora",
@@ -1059,8 +1194,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".ora",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.db2",
@@ -1068,8 +1204,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".db2",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.proc",
@@ -1077,8 +1214,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".proc",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.procedure",
@@ -1086,8 +1224,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".procedure",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.func",
@@ -1095,8 +1234,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".func",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.function",
@@ -1104,8 +1244,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".function",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.view",
@@ -1113,8 +1254,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".view",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.trigger",
@@ -1122,8 +1264,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".trigger",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.index",
@@ -1131,8 +1274,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".index",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.migration",
@@ -1140,8 +1284,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".migration",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.seed",
@@ -1149,8 +1294,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".seed",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.fixture",
@@ -1158,8 +1304,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".fixture",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.schema",
@@ -1167,8 +1314,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".schema",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.cql",
@@ -1176,8 +1324,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".cql",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.cypher",
@@ -1185,8 +1334,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".cypher",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.sparql",
@@ -1194,8 +1344,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".sparql",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.gql",
@@ -1203,8 +1354,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".gql",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.graphql",
+        language: "graphql",
     },
     LanguageDetectionRule {
         id: "detect.extension.liquibase",
@@ -1212,8 +1364,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".liquibase",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.flyway",
@@ -1221,8 +1374,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".flyway",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: true,
-        mode: "mode.sql",
+        language: "sql",
     },
     LanguageDetectionRule {
         id: "detect.extension.env",
@@ -1230,8 +1384,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".env",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: false,
-        mode: "mode.config",
+        language: "config",
     },
     LanguageDetectionRule {
         id: "detect.extension.gitignore",
@@ -1239,8 +1394,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".gitignore",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: false,
-        mode: "mode.config",
+        language: "config",
     },
     LanguageDetectionRule {
         id: "detect.extension.dockerignore",
@@ -1248,8 +1404,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".dockerignore",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: false,
-        mode: "mode.config",
+        language: "config",
     },
     LanguageDetectionRule {
         id: "detect.extension.editorconfig",
@@ -1257,8 +1414,9 @@ pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[
         pattern: ".editorconfig",
         lookup_case: DetectionCase::AsciiInsensitive,
         path_case: DetectionCase::AsciiInsensitive,
+        content_detector: None,
         scanner_visible: false,
-        mode: "mode.config",
+        language: "config",
     },
 ];
 
@@ -2103,6 +2261,27 @@ pub(crate) static CURRENT_LANGUAGE_SPECS: &[LanguageSpec] = &[
         parser_support: LanguageParserSupport::Fallback,
     },
 ];
+
+pub(crate) fn detect_compound_extension(
+    path: &str,
+    extension: Option<&str>,
+) -> Option<&'static str> {
+    let basename = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    if basename.ends_with(".d.ts")
+        || extension.is_some_and(|candidate| candidate.eq_ignore_ascii_case(".d.ts"))
+    {
+        return Some("typescript");
+    }
+    None
+}
+
+pub(crate) fn normalized_compound_extension(path: &str) -> Option<&'static str> {
+    let basename = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    if basename.ends_with(".d.ts") {
+        return Some(".d.ts");
+    }
+    None
+}
 
 pub(crate) fn detect_extension(extension: &str) -> Option<&'static str> {
     let extension = extension.to_ascii_lowercase();

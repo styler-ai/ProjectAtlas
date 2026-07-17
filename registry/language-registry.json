@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "format": "projectatlas.language-registry-lock",
   "registry_id": "registry.projectatlas-language-runtime",
   "accepted_target": {
@@ -13,6 +13,10 @@
     "release": "v0.3.26",
     "commit": "d3b3e157f954c7d360d821ed0385762e8b044385",
     "raw_sha256": "fb9c35414a3fd478de9bf0d1653aac9cca8c1558d3a76947a94d62cbca5038e0"
+  },
+  "parser_pack_trust": {
+    "path": "registry/parser-pack-trust.json",
+    "raw_sha256": "659ad195797638becfdcd32b32371b514920fbaf429917ce6d0bcc69e5b26ce9"
   },
   "packs": [
     {
@@ -1097,6 +1101,7 @@
       "mode_id": "mode.config"
     }
   ],
+  "semantic_modes": [],
   "current_modes": [
     {
       "mode_id": "mode.rust",

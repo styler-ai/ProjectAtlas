@@ -1,13 +1,24 @@
 //! Typed validation and deterministic generation for the `ProjectAtlas` language registry.
 
+#[cfg(not(windows))]
+use cap_fs_ext::DirExt as _;
+#[cfg(windows)]
+use cap_fs_ext::OpenOptionsMaybeDirExt as _;
+use cap_fs_ext::{FollowSymlinks, MetadataExt as _, OpenOptionsFollowExt as _};
+use cap_std::ambient_authority;
+use cap_std::fs::{
+    Dir as CapabilityDir, File as CapabilityFile, Metadata as CapabilityMetadata,
+    OpenOptions as CapabilityOpenOptions,
+};
 use processkit::{Command as ProcessCommand, OutputBufferPolicy, ProcessResult};
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fmt::{self, Write as FmtWrite};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tempfile::NamedTempFile;
@@ -23,6 +34,11 @@ const ACCEPTED_TARGET_PATH: &str = "docs/benchmarks/projectatlas-v0.4-capability
 /// Repository-relative historical runtime contract path.
 const HISTORICAL_CONTRACT_PATH: &str =
     "fixtures/languages/projectatlas-v0.3.26-runtime-contract.toon";
+/// Repository-relative release-owned parser-pack trust manifest.
+const PARSER_PACK_TRUST_PATH: &str = "registry/parser-pack-trust.json";
+/// Repository-relative authoritative optional-pack budget contract.
+const REPOSITORY_INTELLIGENCE_CONTRACTS_PATH: &str =
+    "docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json";
 /// Generated core language projection path.
 const CORE_OUTPUT_PATH: &str = "crates/projectatlas-core/src/language_detection_registry.rs";
 /// Generated symbols language projection path.
@@ -39,7 +55,31 @@ const REGISTRY_DIGEST_DOMAIN: &str = "projectatlas.language-registry.contract";
 /// Semantic language-registry digest encoding version.
 const REGISTRY_DIGEST_VERSION: u64 = 1;
 /// Exact composite language-registry schema supported by this implementation.
-const LANGUAGE_REGISTRY_SCHEMA_VERSION: u32 = 1;
+const LANGUAGE_REGISTRY_SCHEMA_VERSION: u32 = 2;
+/// Exact parser-pack trust schema supported by this implementation.
+const PARSER_PACK_TRUST_SCHEMA_VERSION: u32 = 1;
+/// Exact tracked parser-pack release-manifest schema supported by this implementation.
+const PARSER_PACK_MANIFEST_SCHEMA_VERSION: u32 = 1;
+/// Exact tracked parser-pack provenance schema supported by this implementation.
+const PARSER_PACK_PROVENANCE_SCHEMA_VERSION: u32 = 1;
+/// Exact tracked parser-pack advisory schema supported by this implementation.
+const PARSER_PACK_ADVISORY_SCHEMA_VERSION: u32 = 1;
+/// Exact tracked parser-pack WASM validation schema supported by this implementation.
+const PARSER_PACK_WASM_VALIDATION_SCHEMA_VERSION: u32 = 1;
+/// External parser ABI family carried by the tracked WebAssembly candidate.
+const TREE_SITTER_WASM_ABI_ID: &str = "abi.tree-sitter-wasm";
+/// Exact Tree-sitter grammar ABI carried by the tracked WebAssembly candidate.
+const TREE_SITTER_WASM_ABI_VERSION: u32 = 15;
+/// Parser-pack lifecycle ABI accepted by the existing `ProjectAtlas` lifecycle owner.
+const PROJECTATLAS_PACK_ABI_ID: &str = "abi.projectatlas-parser-pack";
+/// Exact parser-pack lifecycle ABI version accepted by the lifecycle owner.
+const PROJECTATLAS_PACK_ABI_VERSION: u32 = 1;
+/// Packaged platform carried by the tracked WebAssembly candidate.
+const TREE_SITTER_WASM_PLATFORM: &str = "wasm32-unknown-emscripten";
+/// Required Tree-sitter grammar function export.
+const TREE_SITTER_WASM_REQUIRED_EXPORT: &str = "tree_sitter_javascript";
+/// Exact WebAssembly module version admitted by the evaluation validator.
+const TREE_SITTER_WASM_MODULE_VERSION: u32 = 1;
 /// Exact accepted-capability schema supported by this implementation.
 const ACCEPTED_CAPABILITY_SCHEMA_VERSION: u32 = 2;
 /// Exact frozen runtime-compatibility fixture schema supported by this implementation.
@@ -56,6 +96,12 @@ const CAPABILITY_TIER_ORDER: &[CapabilityTier] = &[
 const CURRENT_COMPILED_PARSER_ABI_VERSION: u32 = 1;
 /// Identity of the built-in compiled-parser ABI contract.
 const CURRENT_COMPILED_PARSER_ABI_ID: &str = "abi.projectatlas-compiled-parser";
+/// Stable identity of the required built-in feature pack.
+const DEFAULT_CORE_PACK_ID: &str = "default-core";
+/// Stable identity of the optional broad-language feature pack.
+const BROAD_LANGUAGE_PACK_ID: &str = "broad-language-pack";
+/// Stable identity of the optional semantic feature pack.
+const SEMANTIC_PACK_ID: &str = "semantic-pack";
 /// Exact compact-mode fields that the accepted target may override.
 const ACCEPTED_MODE_OVERRIDE_FIELDS: &[&str] = &[
     "accepted_delivery_target",
@@ -87,12 +133,49 @@ const MAX_ID_BYTES: usize = 128;
 const MAX_PATH_COMPONENT_BYTES: usize = 120;
 /// Maximum complete portable registry-path length.
 const MAX_REGISTRY_PATH_BYTES: usize = 512;
+/// Maximum evaluation parser-pack candidates admitted by one trust manifest.
+const MAX_PARSER_PACK_CANDIDATES: usize = 64;
+/// Maximum tracked files admitted by one evaluation parser-pack candidate.
+const MAX_PARSER_PACK_FILES: usize = 4096;
+/// Maximum tracked directories admitted by one evaluation parser-pack candidate.
+const MAX_PARSER_PACK_DIRECTORIES: usize = 4096;
+/// Maximum sortable entries admitted from one candidate directory.
+const MAX_PARSER_PACK_DIRECTORY_ENTRIES: usize =
+    MAX_PARSER_PACK_FILES + MAX_PARSER_PACK_DIRECTORIES;
+/// Maximum nested directory depth below one candidate payload root.
+const MAX_PARSER_PACK_DEPTH: usize = 64;
+/// Maximum bytes retained in memory for one candidate metadata record.
+const MAX_PARSER_PACK_METADATA_BYTES: u64 = 4 * 1_024 * 1_024;
+/// Bounded streaming buffer used for candidate digest verification.
+const PARSER_PACK_STREAM_BUFFER_BYTES: usize = 64 * 1_024;
+/// Exact optional-pack resource vocabulary needed before candidate traversal.
+const OPTIONAL_PACK_REQUIRED_LIMIT_FIELDS: &[&str] = &[
+    "input_bytes",
+    "stage_time_ms",
+    "memory_bytes",
+    "output_bytes",
+    "executable_bytes",
+    "installed_bytes",
+    "startup_p95_ms",
+    "active_rss_bytes",
+    "cancellation_grace_ms",
+];
+/// Exact pack-manifest vocabulary required by the authoritative budget owner.
+const OPTIONAL_PACK_REQUIRED_MANIFEST_FIELDS: &[&str] = &[
+    "pack_id",
+    "version",
+    "platform",
+    "digest",
+    "license",
+    "limits",
+    "enforcement",
+];
 /// Repository-owned quality policy compiled into the deterministic generator.
 const TEST_QUALITY_POLICY: &str = include_str!("../../../test-quality.toml");
-/// Maximum wall time for one generated Rust formatter process.
-const RUST_FORMATTER_TIMEOUT: Duration = Duration::from_secs(30);
-/// Maximum retained bytes for each generated Rust formatter output stream.
-const RUST_FORMATTER_STREAM_LIMIT_BYTES: usize = 64 * 1_024;
+/// Maximum wall time for one generated Rust process.
+const GENERATED_RUST_PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum retained bytes for each generated Rust process output stream.
+const GENERATED_RUST_PROCESS_STREAM_LIMIT_BYTES: usize = 64 * 1_024;
 
 /// Run one language-registry command from the repository root.
 pub(crate) fn run(args: &[String], root: &Path) -> Result<(), LanguageRegistryError> {
@@ -226,6 +309,14 @@ pub(crate) enum LanguageRegistryError {
         /// Formatter launch, IO, status, or output diagnostic.
         detail: String,
     },
+    /// A bounded generated Rust process could not complete successfully.
+    #[error("generated Rust process failed for {owner}: {detail}")]
+    GeneratedRustProcess {
+        /// Generated Rust operation owner.
+        owner: &'static str,
+        /// Launch, timeout, capture, status, or output diagnostic.
+        detail: String,
+    },
     /// One or more generated outputs differ or are absent.
     #[error("language registry output drift: {0:?}")]
     Drift(Vec<String>),
@@ -267,6 +358,12 @@ struct FixedInputBytes<'a> {
     accepted_capability_registry: &'a [u8],
     /// Complete historical runtime-contract bytes.
     historical_runtime_contract: &'a [u8],
+    /// Complete parser-pack trust-manifest bytes.
+    parser_pack_trust: &'a [u8],
+    /// Complete authoritative repository-intelligence contract bytes.
+    repository_intelligence_contracts: &'a [u8],
+    /// Streamed snapshots of every candidate payload root.
+    parser_pack_payloads: &'a [CandidatePayloadSnapshot],
 }
 
 /// Owned fixed inputs captured for validation and publication guards.
@@ -277,6 +374,12 @@ struct OwnedInputBytes {
     accepted: Vec<u8>,
     /// Historical runtime-contract bytes.
     historical: Vec<u8>,
+    /// Release-owned parser-pack trust-manifest bytes.
+    parser_pack_trust: Vec<u8>,
+    /// Authoritative repository-intelligence contract bytes.
+    repository_intelligence_contracts: Vec<u8>,
+    /// Streamed and bounded candidate payload snapshots.
+    parser_pack_payloads: Vec<CandidatePayloadSnapshot>,
 }
 
 impl OwnedInputBytes {
@@ -285,6 +388,9 @@ impl OwnedInputBytes {
         FixedInputBytes {
             accepted_capability_registry: &self.accepted,
             historical_runtime_contract: &self.historical,
+            parser_pack_trust: &self.parser_pack_trust,
+            repository_intelligence_contracts: &self.repository_intelligence_contracts,
+            parser_pack_payloads: &self.parser_pack_payloads,
         }
     }
 
@@ -293,6 +399,98 @@ impl OwnedInputBytes {
         self.lock == other.lock
             && self.accepted == other.accepted
             && self.historical == other.historical
+            && self.parser_pack_trust == other.parser_pack_trust
+            && self.repository_intelligence_contracts == other.repository_intelligence_contracts
+            && self.parser_pack_payloads == other.parser_pack_payloads
+    }
+}
+
+/// Complete streamed snapshot of one candidate payload root.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CandidatePayloadSnapshot {
+    /// Stable trust-record identity.
+    candidate_id: ParserPackCandidateId,
+    /// Repository-relative payload root.
+    payload_root: RegistryPath,
+    /// Exact non-root directory inventory.
+    directories: BTreeSet<RegistryPath>,
+    /// Exact file inventory keyed by payload-relative path.
+    files: BTreeMap<RegistryPath, CandidateFileSnapshot>,
+}
+
+/// Streamed identity and optionally retained bounded contents for one candidate file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CandidateFileSnapshot {
+    /// Exact file byte count observed through the opened stream.
+    bytes: u64,
+    /// SHA-256 of the exact opened file bytes.
+    sha256: Sha256Digest,
+    /// Bounded bytes retained only for typed metadata validation.
+    metadata_bytes: Option<Vec<u8>>,
+}
+
+/// Stable identity derived only from an already-open capability handle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CapabilityPathIdentity {
+    /// Filesystem device or volume identity.
+    device: u64,
+    /// Filesystem object identity.
+    inode: u64,
+}
+
+/// Bounded mutable state for one candidate payload traversal.
+struct CandidateCaptureState {
+    /// Exact non-root directory inventory.
+    directories: BTreeSet<RegistryPath>,
+    /// Exact declared file snapshots.
+    files: BTreeMap<RegistryPath, CandidateFileSnapshot>,
+    /// Total child entries observed during the initial traversal pass.
+    entries: usize,
+    /// Total streamed file bytes.
+    captured_bytes: u64,
+}
+
+impl CandidateCaptureState {
+    /// Create empty state for one authorized candidate.
+    fn new() -> Self {
+        Self {
+            directories: BTreeSet::new(),
+            files: BTreeMap::new(),
+            entries: 0,
+            captured_bytes: 0,
+        }
+    }
+
+    /// Account for one child entry before classifying or opening it.
+    fn record_entry(&mut self) -> Result<(), LanguageRegistryError> {
+        if self.entries >= MAX_PARSER_PACK_DIRECTORY_ENTRIES {
+            return Err(LanguageRegistryError::Validation(format!(
+                "candidate payload exceeds {MAX_PARSER_PACK_DIRECTORY_ENTRIES} total entries"
+            )));
+        }
+        self.entries += 1;
+        Ok(())
+    }
+
+    /// Account for one non-root child directory.
+    fn record_directory(&mut self, path: RegistryPath) -> Result<(), LanguageRegistryError> {
+        if self.directories.len() >= MAX_PARSER_PACK_DIRECTORIES {
+            return Err(LanguageRegistryError::Validation(format!(
+                "candidate payload exceeds {MAX_PARSER_PACK_DIRECTORIES} directories"
+            )));
+        }
+        self.directories.insert(path);
+        Ok(())
+    }
+
+    /// Reserve one declared file slot before opening or streaming its bytes.
+    fn reserve_file(&self) -> Result<(), LanguageRegistryError> {
+        if self.files.len() >= MAX_PARSER_PACK_FILES {
+            return Err(LanguageRegistryError::Validation(format!(
+                "candidate payload exceeds {MAX_PARSER_PACK_FILES} files"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -755,6 +953,8 @@ fn permissions_equal(left: &fs::Permissions, right: &fs::Permissions) -> bool {
 struct RegistryWorkspace {
     /// Canonical trusted repository root.
     root: PathBuf,
+    /// Retained no-follow capability for all candidate payload traversal.
+    root_dir: CapabilityDir,
 }
 
 impl RegistryWorkspace {
@@ -780,15 +980,55 @@ impl RegistryWorkspace {
                 path: root.to_path_buf(),
                 source,
             })?;
-        Ok(Self { root })
+        let root_dir = open_registry_root_capability(&root)?;
+        let metadata =
+            root_dir
+                .dir_metadata()
+                .map_err(|source| LanguageRegistryError::ReadFile {
+                    path: root.clone(),
+                    source,
+                })?;
+        if !metadata.is_dir() {
+            return Err(LanguageRegistryError::Validation(format!(
+                "registry root capability {} is not a directory",
+                root.display()
+            )));
+        }
+        Ok(Self { root, root_dir })
     }
 
     /// Read all fixed inputs after link and containment checks.
     fn read_inputs(&self) -> Result<OwnedInputBytes, LanguageRegistryError> {
+        let lock = self.read_input(LOCK_PATH)?;
+        let decoded_lock = decode_language_registry_lock(&lock)?;
+        let repository_intelligence_contracts =
+            self.read_input(REPOSITORY_INTELLIGENCE_CONTRACTS_PATH)?;
+        let parser_pack_trust = self.read_input(PARSER_PACK_TRUST_PATH)?;
+        verify_raw_digest(
+            &parser_pack_trust,
+            &decoded_lock.parser_pack_trust.raw_sha256,
+            "parser-pack trust manifest",
+        )?;
+        let decoded_trust = decode_parser_pack_trust(&parser_pack_trust)?;
+        let parser_pack_installed_byte_limit = validate_parser_pack_capture_authority(
+            &decoded_lock,
+            &decoded_trust,
+            &repository_intelligence_contracts,
+        )?;
+        let parser_pack_payloads = decoded_trust
+            .candidates
+            .iter()
+            .map(|candidate| {
+                self.capture_candidate_payload(candidate, parser_pack_installed_byte_limit)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(OwnedInputBytes {
-            lock: self.read_input(LOCK_PATH)?,
+            lock,
             accepted: self.read_input(ACCEPTED_TARGET_PATH)?,
             historical: self.read_input(HISTORICAL_CONTRACT_PATH)?,
+            parser_pack_trust,
+            repository_intelligence_contracts,
+            parser_pack_payloads,
         })
     }
 
@@ -818,6 +1058,232 @@ impl RegistryWorkspace {
         })?;
         let path = inspection.path;
         fs::read(&path).map_err(|source| LanguageRegistryError::ReadFile { path, source })
+    }
+
+    /// Capture one declared candidate payload with streamed digests and exact inventories.
+    fn capture_candidate_payload(
+        &self,
+        candidate: &ParserPackCandidateTrust,
+        installed_byte_limit: u64,
+    ) -> Result<CandidatePayloadSnapshot, LanguageRegistryError> {
+        let (root, root_identity, root_diagnostic) =
+            self.open_candidate_payload_root(&candidate.payload_root)?;
+        let declared_files = candidate
+            .inventory
+            .iter()
+            .map(|file| (file.path.clone(), file))
+            .collect::<BTreeMap<_, _>>();
+        let mut state = CandidateCaptureState::new();
+        Self::capture_candidate_directory(
+            &root,
+            &root_diagnostic,
+            "",
+            0,
+            &declared_files,
+            candidate.installed_bytes,
+            installed_byte_limit,
+            &mut state,
+        )?;
+        let (reopened_root, reopened_identity, _) =
+            self.open_candidate_payload_root(&candidate.payload_root)?;
+        let reopened_metadata =
+            reopened_root
+                .dir_metadata()
+                .map_err(|source| LanguageRegistryError::ReadFile {
+                    path: root_diagnostic.clone(),
+                    source,
+                })?;
+        require_candidate_directory_metadata(&root_diagnostic, &reopened_metadata)?;
+        if reopened_identity != root_identity {
+            return Err(LanguageRegistryError::Validation(format!(
+                "candidate payload root {} changed identity while it was being verified",
+                root_diagnostic.display()
+            )));
+        }
+        if state.captured_bytes != candidate.installed_bytes
+            || state.files.len() != declared_files.len()
+        {
+            return Err(LanguageRegistryError::Validation(format!(
+                "candidate payload {} does not match its declared file count or installed bytes",
+                candidate.candidate_id.as_str()
+            )));
+        }
+        Ok(CandidatePayloadSnapshot {
+            candidate_id: candidate.candidate_id.clone(),
+            payload_root: candidate.payload_root.clone(),
+            directories: state.directories,
+            files: state.files,
+        })
+    }
+
+    /// Walk one retained candidate directory without following links or accepting unbounded input.
+    fn capture_candidate_directory(
+        directory: &CapabilityDir,
+        diagnostic: &Path,
+        prefix: &str,
+        depth: usize,
+        declared_files: &BTreeMap<RegistryPath, &ParserPackTrustedFile>,
+        declared_candidate_bytes: u64,
+        installed_byte_limit: u64,
+        state: &mut CandidateCaptureState,
+    ) -> Result<(), LanguageRegistryError> {
+        validate_candidate_depth(diagnostic, depth)?;
+        let before =
+            directory
+                .dir_metadata()
+                .map_err(|source| LanguageRegistryError::ReadFile {
+                    path: diagnostic.to_path_buf(),
+                    source,
+                })?;
+        require_candidate_directory_metadata(diagnostic, &before)?;
+        let identity = capability_path_identity(&before);
+        let initial_names = candidate_directory_names(directory, diagnostic)?;
+        for name in &initial_names {
+            state.record_entry()?;
+            let relative = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let relative = RegistryPath::try_from(relative)?;
+            let child_diagnostic = diagnostic.join(name);
+            let metadata = directory.symlink_metadata(name).map_err(|source| {
+                LanguageRegistryError::ReadFile {
+                    path: child_diagnostic.clone(),
+                    source,
+                }
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Err(LanguageRegistryError::Validation(format!(
+                    "candidate payload path {} is a link or reparse point",
+                    child_diagnostic.display()
+                )));
+            }
+            if metadata.is_dir() {
+                let child = open_candidate_directory(directory, name, &child_diagnostic)?;
+                let child_metadata =
+                    child
+                        .dir_metadata()
+                        .map_err(|source| LanguageRegistryError::ReadFile {
+                            path: child_diagnostic.clone(),
+                            source,
+                        })?;
+                require_candidate_directory_metadata(&child_diagnostic, &child_metadata)?;
+                let child_identity = capability_path_identity(&child_metadata);
+                state.record_directory(relative.clone())?;
+                Self::capture_candidate_directory(
+                    &child,
+                    &child_diagnostic,
+                    relative.as_str(),
+                    depth + 1,
+                    declared_files,
+                    declared_candidate_bytes,
+                    installed_byte_limit,
+                    state,
+                )?;
+                let reopened = open_candidate_directory(directory, name, &child_diagnostic)?;
+                let reopened_metadata =
+                    reopened
+                        .dir_metadata()
+                        .map_err(|source| LanguageRegistryError::ReadFile {
+                            path: child_diagnostic.clone(),
+                            source,
+                        })?;
+                require_candidate_directory_metadata(&child_diagnostic, &reopened_metadata)?;
+                if capability_path_identity(&reopened_metadata) != child_identity {
+                    return Err(LanguageRegistryError::Validation(format!(
+                        "candidate directory {} changed identity while it was being verified",
+                        child_diagnostic.display()
+                    )));
+                }
+            } else if metadata.is_file() {
+                state.reserve_file()?;
+                let declared = declared_files.get(&relative).ok_or_else(|| {
+                    LanguageRegistryError::Validation(format!(
+                        "candidate payload contains undeclared file {}",
+                        relative.as_str()
+                    ))
+                })?;
+                let remaining_candidate_bytes = declared_candidate_bytes
+                    .min(installed_byte_limit)
+                    .checked_sub(state.captured_bytes)
+                    .ok_or_else(|| {
+                        LanguageRegistryError::Validation(
+                            "candidate payload exceeded its authorized installed-byte ceiling"
+                                .to_string(),
+                        )
+                    })?;
+                let snapshot = capture_candidate_file(
+                    directory,
+                    name,
+                    &child_diagnostic,
+                    declared.role.requires_metadata_bytes(),
+                    declared.bytes,
+                    remaining_candidate_bytes,
+                    declared_candidate_bytes.min(installed_byte_limit),
+                    state,
+                )?;
+                state.files.insert(relative, snapshot);
+            } else {
+                return Err(LanguageRegistryError::Validation(format!(
+                    "candidate payload path {} is not a regular file or directory",
+                    child_diagnostic.display()
+                )));
+            }
+        }
+        let final_names = candidate_directory_names(directory, diagnostic)?;
+        let after = directory
+            .dir_metadata()
+            .map_err(|source| LanguageRegistryError::ReadFile {
+                path: diagnostic.to_path_buf(),
+                source,
+            })?;
+        require_candidate_directory_metadata(diagnostic, &after)?;
+        require_candidate_directory_stable(
+            diagnostic,
+            &initial_names,
+            &final_names,
+            identity,
+            capability_path_identity(&after),
+        )
+    }
+
+    /// Resolve one exact candidate root while retaining every opened directory capability.
+    fn open_candidate_payload_root(
+        &self,
+        relative: &RegistryPath,
+    ) -> Result<(CapabilityDir, CapabilityPathIdentity, PathBuf), LanguageRegistryError> {
+        let mut opened = None::<CapabilityDir>;
+        let mut diagnostic = self.root.clone();
+        for expected in relative.as_str().split('/') {
+            let parent = opened.as_ref().unwrap_or(&self.root_dir);
+            let actual = exact_candidate_child_name(parent, expected, &diagnostic)?;
+            diagnostic.push(&actual);
+            let child = open_candidate_directory(parent, &actual, &diagnostic)?;
+            let metadata =
+                child
+                    .dir_metadata()
+                    .map_err(|source| LanguageRegistryError::ReadFile {
+                        path: diagnostic.clone(),
+                        source,
+                    })?;
+            require_candidate_directory_metadata(&diagnostic, &metadata)?;
+            opened = Some(child);
+        }
+        let directory = opened.ok_or_else(|| {
+            LanguageRegistryError::Validation(
+                "candidate payload root has no components".to_string(),
+            )
+        })?;
+        let metadata =
+            directory
+                .dir_metadata()
+                .map_err(|source| LanguageRegistryError::ReadFile {
+                    path: diagnostic.clone(),
+                    source,
+                })?;
+        require_candidate_directory_metadata(&diagnostic, &metadata)?;
+        Ok((directory, capability_path_identity(&metadata), diagnostic))
     }
 
     /// Inspect one fixed output before any read, comparison, or mutation.
@@ -947,6 +1413,419 @@ impl RegistryWorkspace {
             Ok(None)
         }
     }
+}
+
+/// Open the canonical repository root once without following its final component.
+fn open_registry_root_capability(root: &Path) -> Result<CapabilityDir, LanguageRegistryError> {
+    let mut options = CapabilityOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(windows)]
+    options.maybe_dir(true);
+    let file = CapabilityFile::open_ambient_with(root, &options, ambient_authority()).map_err(
+        |source| LanguageRegistryError::ReadFile {
+            path: root.to_path_buf(),
+            source,
+        },
+    )?;
+    let metadata = file
+        .metadata()
+        .map_err(|source| LanguageRegistryError::ReadFile {
+            path: root.to_path_buf(),
+            source,
+        })?;
+    require_candidate_directory_metadata(root, &metadata)?;
+    Ok(CapabilityDir::from_std_file(file.into_std()))
+}
+
+/// Enumerate one directory before choosing an exact candidate-root component.
+fn exact_candidate_child_name(
+    parent: &CapabilityDir,
+    expected: &str,
+    diagnostic: &Path,
+) -> Result<String, LanguageRegistryError> {
+    let entries = parent
+        .entries()
+        .map_err(|source| LanguageRegistryError::ReadFile {
+            path: diagnostic.to_path_buf(),
+            source,
+        })?;
+    let mut names = Vec::<OsString>::new();
+    for entry in entries {
+        if names.len() >= MAX_PARSER_PACK_DIRECTORY_ENTRIES {
+            return Err(LanguageRegistryError::Validation(format!(
+                "candidate root parent {} exceeds {MAX_PARSER_PACK_DIRECTORY_ENTRIES} entries",
+                diagnostic.display()
+            )));
+        }
+        let entry = entry.map_err(|source| LanguageRegistryError::ReadFile {
+            path: diagnostic.to_path_buf(),
+            source,
+        })?;
+        names.push(entry.file_name());
+    }
+    let matches = names
+        .iter()
+        .filter_map(|name| name.to_str())
+        .filter(|actual| actual.eq_ignore_ascii_case(expected))
+        .collect::<Vec<_>>();
+    let [actual] = matches.as_slice() else {
+        return Err(LanguageRegistryError::Validation(format!(
+            "required candidate payload component {expected:?} has {} ASCII-case-insensitive matches below {}",
+            matches.len(),
+            diagnostic.display()
+        )));
+    };
+    if *actual != expected {
+        return Err(LanguageRegistryError::Validation(format!(
+            "candidate payload component {expected:?} has wrong filesystem spelling {actual:?} below {}",
+            diagnostic.display()
+        )));
+    }
+    Ok((*actual).to_string())
+}
+
+/// Open one candidate child directory relative to a retained parent without following links.
+#[cfg(not(windows))]
+fn open_candidate_directory(
+    parent: &CapabilityDir,
+    name: &str,
+    diagnostic: &Path,
+) -> Result<CapabilityDir, LanguageRegistryError> {
+    parent
+        .open_dir_nofollow(name)
+        .map_err(|source| LanguageRegistryError::ReadFile {
+            path: diagnostic.to_path_buf(),
+            source,
+        })
+}
+
+/// Open one Windows candidate child directory through a no-follow file capability.
+#[cfg(windows)]
+fn open_candidate_directory(
+    parent: &CapabilityDir,
+    name: &str,
+    diagnostic: &Path,
+) -> Result<CapabilityDir, LanguageRegistryError> {
+    let mut options = CapabilityOpenOptions::new();
+    options
+        .read(true)
+        .maybe_dir(true)
+        .follow(FollowSymlinks::No);
+    let file =
+        parent
+            .open_with(name, &options)
+            .map_err(|source| LanguageRegistryError::ReadFile {
+                path: diagnostic.to_path_buf(),
+                source,
+            })?;
+    Ok(CapabilityDir::from_std_file(file.into_std()))
+}
+
+/// Collect one exact, portable, bounded candidate child-name set in sorted order.
+fn candidate_directory_names(
+    directory: &CapabilityDir,
+    diagnostic: &Path,
+) -> Result<Vec<String>, LanguageRegistryError> {
+    let entries = directory
+        .entries()
+        .map_err(|source| LanguageRegistryError::ReadFile {
+            path: diagnostic.to_path_buf(),
+            source,
+        })?;
+    let mut names = Vec::new();
+    for entry in entries {
+        if names.len() >= MAX_PARSER_PACK_DIRECTORY_ENTRIES {
+            return Err(LanguageRegistryError::Validation(format!(
+                "candidate directory {} exceeds {MAX_PARSER_PACK_DIRECTORY_ENTRIES} entries",
+                diagnostic.display()
+            )));
+        }
+        let entry = entry.map_err(|source| LanguageRegistryError::ReadFile {
+            path: diagnostic.to_path_buf(),
+            source,
+        })?;
+        let name = entry.file_name().into_string().map_err(|value| {
+            LanguageRegistryError::Validation(format!(
+                "candidate payload contains a non-UTF-8 path component {} below {}",
+                Path::new(&value).display(),
+                diagnostic.display()
+            ))
+        })?;
+        RegistryPath::try_from(name.clone())?;
+        names.push(name);
+    }
+    names.sort_unstable();
+    for pair in names.windows(2) {
+        if pair[0].eq_ignore_ascii_case(&pair[1]) {
+            return Err(LanguageRegistryError::Validation(format!(
+                "candidate directory {} contains ASCII-case-colliding entries {:?} and {:?}",
+                diagnostic.display(),
+                pair[0],
+                pair[1]
+            )));
+        }
+    }
+    Ok(names)
+}
+
+/// Require one candidate traversal depth to remain within the hard recursion ceiling.
+fn validate_candidate_depth(diagnostic: &Path, depth: usize) -> Result<(), LanguageRegistryError> {
+    if depth > MAX_PARSER_PACK_DEPTH {
+        Err(LanguageRegistryError::Validation(format!(
+            "candidate directory {} exceeds maximum depth {MAX_PARSER_PACK_DEPTH}",
+            diagnostic.display()
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+/// Require a retained directory handle to preserve its identity and exact child-name set.
+fn require_candidate_directory_stable(
+    diagnostic: &Path,
+    initial_names: &[String],
+    final_names: &[String],
+    initial_identity: CapabilityPathIdentity,
+    final_identity: CapabilityPathIdentity,
+) -> Result<(), LanguageRegistryError> {
+    if initial_names == final_names && initial_identity == final_identity {
+        Ok(())
+    } else {
+        Err(LanguageRegistryError::Validation(format!(
+            "candidate directory {} changed while it was being verified",
+            diagnostic.display()
+        )))
+    }
+}
+
+/// Derive a portable identity only from metadata returned by an opened capability handle.
+fn capability_path_identity(metadata: &CapabilityMetadata) -> CapabilityPathIdentity {
+    CapabilityPathIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    }
+}
+
+/// Require one opened candidate directory handle to identify a directory, not a link.
+fn require_candidate_directory_metadata(
+    diagnostic: &Path,
+    metadata: &CapabilityMetadata,
+) -> Result<(), LanguageRegistryError> {
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        Ok(())
+    } else {
+        Err(LanguageRegistryError::Validation(format!(
+            "candidate payload path {} is not an opened non-link directory",
+            diagnostic.display()
+        )))
+    }
+}
+
+/// Require one opened candidate file handle to retain the trusted type, link count, and length.
+fn require_candidate_file_metadata(
+    diagnostic: &Path,
+    metadata: &CapabilityMetadata,
+    declared_bytes: u64,
+) -> Result<(), LanguageRegistryError> {
+    if metadata.is_file()
+        && !metadata.file_type().is_symlink()
+        && metadata.nlink() == 1
+        && metadata.len() == declared_bytes
+    {
+        Ok(())
+    } else {
+        Err(LanguageRegistryError::Validation(format!(
+            "candidate payload file {} is not a single-link regular file of declared length {declared_bytes}",
+            diagnostic.display()
+        )))
+    }
+}
+
+/// Advance exact streamed-byte counts without crossing file or candidate ceilings.
+fn record_candidate_stream_bytes(
+    diagnostic: &Path,
+    file_bytes: u64,
+    read_bytes: u64,
+    declared_bytes: u64,
+    remaining_candidate_bytes: u64,
+    authorized_candidate_bytes: u64,
+    state: &mut CandidateCaptureState,
+) -> Result<u64, LanguageRegistryError> {
+    let next_file_bytes = file_bytes.checked_add(read_bytes).ok_or_else(|| {
+        LanguageRegistryError::Validation(format!(
+            "candidate file byte count overflowed for {}",
+            diagnostic.display()
+        ))
+    })?;
+    let next_candidate_bytes = state
+        .captured_bytes
+        .checked_add(read_bytes)
+        .ok_or_else(|| {
+            LanguageRegistryError::Validation(
+                "candidate payload captured-byte count overflowed".to_string(),
+            )
+        })?;
+    if next_file_bytes > declared_bytes
+        || next_file_bytes > remaining_candidate_bytes
+        || next_candidate_bytes > authorized_candidate_bytes
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "candidate file {} exceeded its declared streaming byte ceiling {declared_bytes}",
+            diagnostic.display()
+        )));
+    }
+    state.captured_bytes = next_candidate_bytes;
+    Ok(next_file_bytes)
+}
+
+/// Require a completed file stream and both capability identities to remain exact.
+fn require_candidate_file_stable(
+    diagnostic: &Path,
+    streamed_bytes: u64,
+    declared_bytes: u64,
+    initial_identity: CapabilityPathIdentity,
+    final_identity: CapabilityPathIdentity,
+    reopened_identity: CapabilityPathIdentity,
+) -> Result<(), LanguageRegistryError> {
+    if streamed_bytes == declared_bytes
+        && final_identity == initial_identity
+        && reopened_identity == initial_identity
+    {
+        Ok(())
+    } else {
+        Err(LanguageRegistryError::Validation(format!(
+            "candidate file {} changed while it was being verified",
+            diagnostic.display()
+        )))
+    }
+}
+
+/// Stream one capability-opened candidate file while guarding its exact identity and ceilings.
+fn capture_candidate_file(
+    parent: &CapabilityDir,
+    name: &str,
+    diagnostic: &Path,
+    retain_metadata: bool,
+    declared_bytes: u64,
+    remaining_candidate_bytes: u64,
+    authorized_candidate_bytes: u64,
+    state: &mut CandidateCaptureState,
+) -> Result<CandidateFileSnapshot, LanguageRegistryError> {
+    if declared_bytes > remaining_candidate_bytes {
+        return Err(LanguageRegistryError::Validation(format!(
+            "candidate file {} exceeds or differs from its declared byte ceiling {declared_bytes}",
+            diagnostic.display()
+        )));
+    }
+    if retain_metadata && declared_bytes > MAX_PARSER_PACK_METADATA_BYTES {
+        return Err(LanguageRegistryError::Validation(format!(
+            "candidate metadata file {} exceeds {MAX_PARSER_PACK_METADATA_BYTES} bytes",
+            diagnostic.display()
+        )));
+    }
+    let mut options = CapabilityOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let mut file =
+        parent
+            .open_with(name, &options)
+            .map_err(|source| LanguageRegistryError::ReadFile {
+                path: diagnostic.to_path_buf(),
+                source,
+            })?;
+    let before = file
+        .metadata()
+        .map_err(|source| LanguageRegistryError::ReadFile {
+            path: diagnostic.to_path_buf(),
+            source,
+        })?;
+    require_candidate_file_metadata(diagnostic, &before, declared_bytes)?;
+    let identity = capability_path_identity(&before);
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut retained = if retain_metadata {
+        Some(Vec::with_capacity(
+            usize::try_from(declared_bytes).map_err(|source| {
+                LanguageRegistryError::Validation(format!(
+                    "candidate metadata length does not fit memory index for {}: {source}",
+                    diagnostic.display()
+                ))
+            })?,
+        ))
+    } else {
+        None
+    };
+    let mut buffer = vec![0_u8; PARSER_PACK_STREAM_BUFFER_BYTES].into_boxed_slice();
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|source| LanguageRegistryError::ReadFile {
+                path: diagnostic.to_path_buf(),
+                source,
+            })?;
+        if read == 0 {
+            break;
+        }
+        let read = u64::try_from(read).map_err(|source| {
+            LanguageRegistryError::Validation(format!(
+                "candidate read length does not fit u64 for {}: {source}",
+                diagnostic.display()
+            ))
+        })?;
+        total = record_candidate_stream_bytes(
+            diagnostic,
+            total,
+            read,
+            declared_bytes,
+            remaining_candidate_bytes,
+            authorized_candidate_bytes,
+            state,
+        )?;
+        let read = usize::try_from(read).map_err(|source| {
+            LanguageRegistryError::Validation(format!(
+                "candidate read length does not fit memory index for {}: {source}",
+                diagnostic.display()
+            ))
+        })?;
+        hasher.update(&buffer[..read]);
+        if let Some(bytes) = &mut retained {
+            bytes.extend_from_slice(&buffer[..read]);
+        }
+    }
+    let after = file
+        .metadata()
+        .map_err(|source| LanguageRegistryError::ReadFile {
+            path: diagnostic.to_path_buf(),
+            source,
+        })?;
+    require_candidate_file_metadata(diagnostic, &after, declared_bytes)?;
+    let reopened =
+        parent
+            .open_with(name, &options)
+            .map_err(|source| LanguageRegistryError::ReadFile {
+                path: diagnostic.to_path_buf(),
+                source,
+            })?;
+    let reopened_metadata =
+        reopened
+            .metadata()
+            .map_err(|source| LanguageRegistryError::ReadFile {
+                path: diagnostic.to_path_buf(),
+                source,
+            })?;
+    require_candidate_file_metadata(diagnostic, &reopened_metadata, declared_bytes)?;
+    require_candidate_file_stable(
+        diagnostic,
+        total,
+        declared_bytes,
+        identity,
+        capability_path_identity(&after),
+        capability_path_identity(&reopened_metadata),
+    )?;
+    Ok(CandidateFileSnapshot {
+        bytes: total,
+        sha256: Sha256Digest(format!("{:x}", hasher.finalize())),
+        metadata_bytes: retained,
+    })
 }
 
 /// Exact path and metadata returned by the filesystem boundary.
@@ -1099,11 +1978,6 @@ validated_id!(
 validated_id!(ModeId, "mode.", "Language mode identity.");
 validated_id!(ParserId, "parser.", "Built-in parser component identity.");
 validated_id!(DetectionRuleId, "detect.", "Detection-rule identity.");
-validated_id!(
-    ContentDetectorId,
-    "content.",
-    "Built-in content-detector identity."
-);
 validated_id!(FixtureId, "fixture.", "Language fixture identity.");
 validated_id!(AssetId, "asset.", "Parser asset identity.");
 validated_id!(ParserAbiId, "abi.", "Versioned parser ABI identity.");
@@ -1119,6 +1993,58 @@ validated_id!(
     "Semantic-provider identity."
 );
 validated_id!(EvidenceId, "evidence.", "Verification evidence identity.");
+
+/// Stable parser-pack candidate identity shared with optional-pack readiness.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+struct ParserPackCandidateId(String);
+
+impl ParserPackCandidateId {
+    /// Borrow the validated shared candidate identity.
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ParserPackCandidateId {
+    type Error = LanguageRegistryError;
+
+    /// Validate one lowercase, responsibility-named candidate slug.
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let valid = !value.is_empty()
+            && value.len() <= MAX_ID_BYTES
+            && value
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            && value
+                .as_bytes()
+                .last()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            && !value.as_bytes().windows(2).any(|pair| pair == b"--")
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+        if valid {
+            Ok(Self(value))
+        } else {
+            Err(LanguageRegistryError::Validation(format!(
+                "invalid parser-pack candidate identity {value:?}"
+            )))
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ParserPackCandidateId {
+    /// Deserialize and validate one shared parser-pack candidate identity.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::try_from(value).map_err(de::Error::custom)
+    }
+}
 
 /// Validate a bounded lowercase ASCII responsibility-prefixed identifier.
 fn validate_identifier(value: &str, prefix: &str) -> Result<(), LanguageRegistryError> {
@@ -1571,6 +2497,152 @@ impl ContentDetectionKind {
     }
 }
 
+/// Closed built-in content detector with an executable default-core matcher.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+enum BuiltInContentDetector {
+    /// Python-family shebang.
+    #[serde(rename = "content.shebang.python")]
+    ShebangPython,
+    /// Shell-family shebang.
+    #[serde(rename = "content.shebang.shell")]
+    ShebangShell,
+    /// JavaScript-family shebang.
+    #[serde(rename = "content.shebang.javascript")]
+    ShebangJavascript,
+    /// Ruby-family shebang.
+    #[serde(rename = "content.shebang.ruby")]
+    ShebangRuby,
+    /// Perl-family shebang.
+    #[serde(rename = "content.shebang.perl")]
+    ShebangPerl,
+    /// PHP opening-tag signature.
+    #[serde(rename = "content.signature.php")]
+    SignaturePhp,
+    /// XML declaration signature.
+    #[serde(rename = "content.signature.xml")]
+    SignatureXml,
+    /// Docker build-definition context.
+    #[serde(rename = "content.context.docker-build")]
+    ContextDockerBuild,
+}
+
+/// Complete closed matcher inventory consumed by registry validation and generation.
+const BUILT_IN_CONTENT_DETECTORS: [BuiltInContentDetector; 8] = [
+    BuiltInContentDetector::ShebangPython,
+    BuiltInContentDetector::ShebangShell,
+    BuiltInContentDetector::ShebangJavascript,
+    BuiltInContentDetector::ShebangRuby,
+    BuiltInContentDetector::ShebangPerl,
+    BuiltInContentDetector::SignaturePhp,
+    BuiltInContentDetector::SignatureXml,
+    BuiltInContentDetector::ContextDockerBuild,
+];
+
+impl BuiltInContentDetector {
+    /// Return the externally stable detector identity.
+    const fn contract_id(self) -> &'static str {
+        match self {
+            Self::ShebangPython => "content.shebang.python",
+            Self::ShebangShell => "content.shebang.shell",
+            Self::ShebangJavascript => "content.shebang.javascript",
+            Self::ShebangRuby => "content.shebang.ruby",
+            Self::ShebangPerl => "content.shebang.perl",
+            Self::SignaturePhp => "content.signature.php",
+            Self::SignatureXml => "content.signature.xml",
+            Self::ContextDockerBuild => "content.context.docker-build",
+        }
+    }
+
+    /// Return the only valid precedence stage for this matcher.
+    const fn detection_kind(self) -> ContentDetectionKind {
+        match self {
+            Self::ShebangPython
+            | Self::ShebangShell
+            | Self::ShebangJavascript
+            | Self::ShebangRuby
+            | Self::ShebangPerl => ContentDetectionKind::Shebang,
+            Self::SignaturePhp | Self::SignatureXml => ContentDetectionKind::ContentSignature,
+            Self::ContextDockerBuild => ContentDetectionKind::ProjectContext,
+        }
+    }
+
+    /// Return the only valid current base-language mode for this matcher.
+    const fn mode_id(self) -> &'static str {
+        match self {
+            Self::ShebangPython => "mode.python",
+            Self::ShebangShell => "mode.shell",
+            Self::ShebangJavascript => "mode.javascript",
+            Self::ShebangRuby => "mode.ruby",
+            Self::ShebangPerl => "mode.perl",
+            Self::SignaturePhp => "mode.php",
+            Self::SignatureXml => "mode.xml",
+            Self::ContextDockerBuild => "mode.dockerfile",
+        }
+    }
+
+    /// Return the generated Rust enum variant.
+    const fn rust_variant(self) -> &'static str {
+        match self {
+            Self::ShebangPython => "ShebangPython",
+            Self::ShebangShell => "ShebangShell",
+            Self::ShebangJavascript => "ShebangJavascript",
+            Self::ShebangRuby => "ShebangRuby",
+            Self::ShebangPerl => "ShebangPerl",
+            Self::SignaturePhp => "SignaturePhp",
+            Self::SignatureXml => "SignatureXml",
+            Self::ContextDockerBuild => "ContextDockerBuild",
+        }
+    }
+}
+
+/// Closed semantic refinement supported by the current generated detector.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum SemanticMode {
+    /// Kubernetes resource semantics.
+    Kubernetes,
+    /// Kustomize configuration semantics.
+    Kustomize,
+}
+
+/// Complete closed semantic-refinement inventory consumed by registry validation.
+const SEMANTIC_MODES: [SemanticMode; 2] = [SemanticMode::Kubernetes, SemanticMode::Kustomize];
+
+impl SemanticMode {
+    /// Return the generated Rust enum variant.
+    const fn rust_variant(self) -> &'static str {
+        match self {
+            Self::Kubernetes => "Kubernetes",
+            Self::Kustomize => "Kustomize",
+        }
+    }
+
+    /// Return the public semantic-mode spelling.
+    const fn public_mode(self) -> &'static str {
+        match self {
+            Self::Kubernetes => "kubernetes",
+            Self::Kustomize => "kustomize",
+        }
+    }
+
+    /// Return the only compatible current base-language mode.
+    const fn base_mode_id(self) -> &'static str {
+        match self {
+            Self::Kubernetes | Self::Kustomize => "mode.yaml",
+        }
+    }
+}
+
+/// One semantic-mode/base-language compatibility row.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SemanticModeRule {
+    /// Closed semantic refinement.
+    mode: SemanticMode,
+    /// Compatible current base-language mode.
+    base_mode_id: ModeId,
+}
+
 /// One closed current-runtime language detection rule.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "layer", rename_all = "kebab-case", deny_unknown_fields)]
@@ -1621,7 +2693,7 @@ enum DetectionRule {
         /// Stable rule identity.
         id: DetectionRuleId,
         /// Stable built-in detector identity; this is not a plugin or regex payload.
-        detector_id: ContentDetectorId,
+        detector_id: BuiltInContentDetector,
         /// Detector precedence class.
         detector_kind: ContentDetectionKind,
         /// Whether the broad scanner sees this rule directly.
@@ -1687,7 +2759,7 @@ impl DetectionRule {
             Self::CompoundExtension { extension, .. } | Self::Extension { extension, .. } => {
                 extension
             }
-            Self::Content { detector_id, .. } => detector_id.as_str(),
+            Self::Content { detector_id, .. } => detector_id.contract_id(),
         }
     }
 
@@ -1709,16 +2781,6 @@ impl DetectionRule {
             } => *path_suffix_case,
             Self::ExactFilename { case, .. } | Self::Extension { case, .. } => *case,
             Self::Content { .. } => CasePolicy::Sensitive,
-        }
-    }
-
-    /// Return the content-detector class when this is a content rule.
-    const fn content_kind(&self) -> Option<ContentDetectionKind> {
-        match self {
-            Self::Content { detector_kind, .. } => Some(*detector_kind),
-            Self::ExactFilename { .. }
-            | Self::CompoundExtension { .. }
-            | Self::Extension { .. } => None,
         }
     }
 }
@@ -2228,6 +3290,1092 @@ struct HistoricalContractBinding {
     raw_sha256: Sha256Digest,
 }
 
+/// Release-owned parser-pack trust binding stored in the composite lock.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackTrustBinding {
+    /// Fixed repository-relative trust-manifest path.
+    path: RegistryPath,
+    /// Exact trust-manifest raw-byte digest.
+    raw_sha256: Sha256Digest,
+}
+
+/// Closed parser-pack trust-manifest format.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum ParserPackTrustFormat {
+    /// Release-owned evaluation trust projection.
+    #[serde(rename = "projectatlas.parser-pack-trust")]
+    ParserPackTrust,
+}
+
+/// Closed release eligibility for a parser-pack candidate.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum ParserPackCandidateEligibility {
+    /// Candidate may be evaluated but is neither selected nor runtime-reachable.
+    EvaluationOnlyUnselected,
+}
+
+impl ParserPackCandidateEligibility {
+    /// Return the stable semantic-digest tag.
+    const fn contract_tag(self) -> &'static str {
+        match self {
+            Self::EvaluationOnlyUnselected => "evaluation-only-unselected",
+        }
+    }
+}
+
+/// Closed evidence state for an external parser ABI.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum ParserPackAbiState {
+    /// ABI evidence exists but runtime verification and selection remain pending.
+    PendingPackVerification,
+}
+
+impl ParserPackAbiState {
+    /// Return the stable semantic-digest tag.
+    const fn contract_tag(self) -> &'static str {
+        match self {
+            Self::PendingPackVerification => "pending-pack-verification",
+        }
+    }
+}
+
+/// `ProjectAtlas` parser-pack lifecycle ABI carried by an evaluation candidate.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackLifecycleAbi {
+    /// Parser-pack lifecycle ABI family identity.
+    abi_id: ParserAbiId,
+    /// Parser-pack lifecycle ABI version.
+    version: u32,
+}
+
+/// External grammar ABI carried by an evaluation candidate.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackGrammarAbi {
+    /// External grammar ABI family identity.
+    abi_id: ParserAbiId,
+    /// External grammar ABI version.
+    version: u32,
+    /// Evidence state for the external ABI.
+    state: ParserPackAbiState,
+}
+
+/// Closed role for one exact trusted candidate file.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum ParserPackTrustedFileRole {
+    /// Candidate release manifest.
+    Manifest,
+    /// Executable parser module retained only below the strict validation ceiling.
+    ParserModule,
+    /// Typed static and local-probe validation for the parser module.
+    WasmValidation,
+    /// Retained script used to produce the local WASM probe result.
+    WasmProbeScript,
+    /// Reproducible-build provenance record.
+    Provenance,
+    /// License text.
+    License,
+    /// Advisory scan record.
+    AdvisoryReport,
+    /// Software bill of materials.
+    Sbom,
+    /// Tracked source patch applied before the candidate build.
+    Patch,
+}
+
+impl ParserPackTrustedFileRole {
+    /// Return whether typed validation needs the bounded file contents retained.
+    const fn requires_metadata_bytes(self) -> bool {
+        match self {
+            Self::Manifest
+            | Self::ParserModule
+            | Self::WasmValidation
+            | Self::WasmProbeScript
+            | Self::Provenance
+            | Self::License
+            | Self::AdvisoryReport
+            | Self::Sbom
+            | Self::Patch => true,
+        }
+    }
+
+    /// Return the stable semantic-digest tag.
+    const fn contract_tag(self) -> &'static str {
+        match self {
+            Self::Manifest => "manifest",
+            Self::ParserModule => "parser-module",
+            Self::WasmValidation => "wasm-validation",
+            Self::WasmProbeScript => "wasm-probe-script",
+            Self::Provenance => "provenance",
+            Self::License => "license",
+            Self::AdvisoryReport => "advisory-report",
+            Self::Sbom => "sbom",
+            Self::Patch => "patch",
+        }
+    }
+}
+
+/// Closed local output-identity evidence available for an evaluation candidate.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum ParserPackLocalOutputIdentity {
+    /// Two clean local builds produced byte-identical output artifacts.
+    TwoByteIdenticalCleanOutputs,
+}
+
+impl ParserPackLocalOutputIdentity {
+    /// Return the stable semantic-digest tag.
+    const fn contract_tag(self) -> &'static str {
+        match self {
+            Self::TwoByteIdenticalCleanOutputs => "two-byte-identical-clean-outputs",
+        }
+    }
+}
+
+/// Closed hosted reproduction state for an evaluation candidate.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum ParserPackHostedReproductionState {
+    /// Hosted reproduction has not yet run.
+    Pending,
+}
+
+impl ParserPackHostedReproductionState {
+    /// Return the stable semantic-digest tag.
+    const fn contract_tag(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+        }
+    }
+}
+
+/// Closed retention state for raw historical build logs.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum ParserPackRawBuildLogRetention {
+    /// The historical raw process logs were not retained.
+    NotRetained,
+}
+
+impl ParserPackRawBuildLogRetention {
+    /// Return the stable semantic-digest tag.
+    const fn contract_tag(self) -> &'static str {
+        match self {
+            Self::NotRetained => "not-retained",
+        }
+    }
+}
+
+/// Packaged Windows support state for filesystem-identity evidence.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum ParserPackWindowsIdentityEvidence {
+    /// `ReFS` exposes 128-bit file identities while the current capability API reports 64 bits.
+    PendingRefs128BitIdentityEvidence,
+}
+
+impl ParserPackWindowsIdentityEvidence {
+    /// Return the stable semantic-digest tag.
+    const fn contract_tag(self) -> &'static str {
+        match self {
+            Self::PendingRefs128BitIdentityEvidence => "pending-refs128-bit-identity-evidence",
+        }
+    }
+}
+
+/// Honest reproduction evidence carried consistently by trust, manifest, and provenance.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackReproductionEvidenceState {
+    /// Locally observed output identity, not a hosted reproducibility claim.
+    local_output_identity: ParserPackLocalOutputIdentity,
+    /// Hosted reproduction remains a later release gate.
+    hosted_reproduction: ParserPackHostedReproductionState,
+    /// Raw historical process-log retention state.
+    raw_build_logs: ParserPackRawBuildLogRetention,
+    /// Packaged Windows identity evidence that remains a release caveat.
+    packaged_windows_identity: ParserPackWindowsIdentityEvidence,
+}
+
+/// Exact trusted file inventory row.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackTrustedFile {
+    /// Candidate-root-relative portable path.
+    path: RegistryPath,
+    /// File responsibility.
+    role: ParserPackTrustedFileRole,
+    /// Exact nonzero byte count.
+    bytes: u64,
+    /// Exact file digest.
+    sha256: Sha256Digest,
+}
+
+/// Trust-manifest provenance binding for one candidate.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackProvenanceBinding {
+    /// HTTPS upstream repository.
+    source: String,
+    /// Exact upstream source revision.
+    revision: RevisionId,
+    /// Exact downloaded source-package digest.
+    source_package_sha256: Sha256Digest,
+    /// Fully resolved build-toolchain identity.
+    toolchain: String,
+    /// Honest local, hosted, and raw-log evidence state.
+    evidence_state: ParserPackReproductionEvidenceState,
+    /// Candidate-root-relative provenance record.
+    record_path: RegistryPath,
+    /// Candidate-root-relative tracked patches, in application order.
+    patch_paths: Vec<RegistryPath>,
+}
+
+/// One component license bound to an exact candidate file.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackLicenseBinding {
+    /// Component covered by the license.
+    component: String,
+    /// SPDX license expression.
+    expression: String,
+    /// Candidate-root-relative license record.
+    record_path: RegistryPath,
+}
+
+/// One release-owned, evaluation-only parser-pack candidate.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackCandidateTrust {
+    /// Stable candidate identity.
+    candidate_id: ParserPackCandidateId,
+    /// Closed evaluation lifecycle.
+    eligibility: ParserPackCandidateEligibility,
+    /// Candidate is never public support while selection remains blocked.
+    advertised: bool,
+    /// Optional pack that would own the candidate if later selected.
+    pack_id: PackId,
+    /// Versioned candidate release identity.
+    release_version: String,
+    /// `ProjectAtlas` lifecycle ABI needed by the existing pack lifecycle owner.
+    pack_abi: ParserPackLifecycleAbi,
+    /// External Tree-sitter grammar ABI provenance.
+    grammar_abi: ParserPackGrammarAbi,
+    /// Platform of the tracked candidate payload.
+    packaged_platform: PlatformId,
+    /// Repository-relative candidate root.
+    payload_root: RegistryPath,
+    /// Candidate-root-relative manifest path.
+    manifest_path: RegistryPath,
+    /// Exact installed bytes represented by the complete inventory.
+    installed_bytes: u64,
+    /// Complete nonzero candidate file inventory.
+    inventory: Vec<ParserPackTrustedFile>,
+    /// Bound source and build provenance.
+    provenance: ParserPackProvenanceBinding,
+    /// Complete component-license records.
+    licenses: Vec<ParserPackLicenseBinding>,
+    /// Candidate-root-relative advisory record.
+    advisory_record_path: RegistryPath,
+    /// Candidate-root-relative WASM validation record.
+    wasm_validation_record_path: RegistryPath,
+    /// Candidate-root-relative SPDX record.
+    sbom_record_path: RegistryPath,
+}
+
+/// Complete release-owned parser-pack trust manifest.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackTrustManifest {
+    /// Trust-manifest schema version.
+    schema_version: u32,
+    /// Closed trust-manifest format.
+    format: ParserPackTrustFormat,
+    /// Bounded evaluation-only candidate inventory.
+    candidates: Vec<ParserPackCandidateTrust>,
+}
+
+/// One ABI identity stored by the candidate's own release manifest.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackManifestAbi {
+    /// ABI family identity.
+    abi_id: ParserAbiId,
+    /// ABI version.
+    version: u32,
+}
+
+/// Candidate source fields repeated in its release manifest.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackManifestProvenance {
+    /// HTTPS upstream repository.
+    source: String,
+    /// Exact source revision.
+    revision: RevisionId,
+    /// Fully resolved build-toolchain identity.
+    toolchain: String,
+    /// Honest local, hosted, and raw-log evidence state.
+    evidence_state: ParserPackReproductionEvidenceState,
+}
+
+/// Candidate license fields repeated in its release manifest.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackManifestLicense {
+    /// Licensed component.
+    component: String,
+    /// SPDX license expression.
+    expression: String,
+}
+
+/// One non-manifest artifact declared by the candidate release manifest.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackManifestArtifact {
+    /// Candidate-root-relative artifact path.
+    path: RegistryPath,
+    /// Artifact role.
+    role: ParserPackTrustedFileRole,
+    /// Exact artifact digest.
+    sha256: Sha256Digest,
+    /// Exact artifact bytes.
+    bytes: u64,
+}
+
+/// Candidate-owned release manifest reconciled against release-owned trust.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackReleaseManifest {
+    /// Release-manifest schema version.
+    schema_version: u32,
+    /// Owning optional pack.
+    pack_id: PackId,
+    /// Candidate release version.
+    version: String,
+    /// `ProjectAtlas` parser-pack lifecycle ABI.
+    pack_abi: ParserPackManifestAbi,
+    /// External grammar ABI.
+    grammar_abi: ParserPackManifestAbi,
+    /// Required runtime boundary.
+    runtime: PackRuntime,
+    /// Packaged platform.
+    platform: PlatformId,
+    /// Source and build identity.
+    provenance: ParserPackManifestProvenance,
+    /// Component licenses.
+    licenses: Vec<ParserPackManifestLicense>,
+    /// Exact non-manifest artifact inventory.
+    artifacts: Vec<ParserPackManifestArtifact>,
+}
+
+/// Closed candidate provenance-record format.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+enum ParserPackProvenanceFormat {
+    /// `ProjectAtlas` parser-pack build provenance.
+    #[serde(rename = "projectatlas.parser-pack-provenance")]
+    ParserPackProvenance,
+}
+
+/// Exact source package used by a candidate build.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackSourceProvenance {
+    /// HTTPS upstream repository.
+    repository: String,
+    /// Exact source revision.
+    revision: RevisionId,
+    /// HTTPS immutable package URL.
+    package_url: String,
+    /// Exact package digest.
+    package_sha256: Sha256Digest,
+}
+
+/// Resolved Tree-sitter CLI toolchain component.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackTreeSitterToolchain {
+    /// Tool version.
+    version: String,
+    /// Exact source revision.
+    revision: RevisionId,
+    /// HTTPS package URL.
+    package_url: String,
+    /// Registry-provided SHA-512 integrity payload.
+    package_integrity_sha512: String,
+    /// Exact executable digest.
+    binary_sha256: Sha256Digest,
+}
+
+/// Resolved emsdk toolchain component.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackEmsdkToolchain {
+    /// Tool version.
+    version: String,
+    /// Exact tag revision.
+    revision: RevisionId,
+    /// HTTPS source repository.
+    source: String,
+    /// Exact release revision resolved by emsdk.
+    resolved_release_revision: RevisionId,
+}
+
+/// Resolved Emscripten toolchain component.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackEmscriptenToolchain {
+    /// Tool version.
+    version: String,
+    /// Exact source revision.
+    revision: RevisionId,
+    /// Exact compiler-driver digest.
+    emcc_sha256: Sha256Digest,
+}
+
+/// Resolved LLVM toolchain component.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackLlvmToolchain {
+    /// Tool version.
+    version: String,
+    /// Exact source revision.
+    revision: RevisionId,
+    /// Exact Clang executable digest.
+    clang_sha256: Sha256Digest,
+    /// Exact WebAssembly linker digest.
+    wasm_ld_sha256: Sha256Digest,
+}
+
+/// Resolved binary-only toolchain component.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackBinaryToolchain {
+    /// Tool version.
+    version: String,
+    /// Exact executable digest.
+    binary_sha256: Sha256Digest,
+}
+
+/// Fully resolved candidate build toolchain.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackResolvedToolchain {
+    /// Tree-sitter grammar compiler.
+    tree_sitter_cli: ParserPackTreeSitterToolchain,
+    /// Emscripten SDK selector.
+    emsdk: ParserPackEmsdkToolchain,
+    /// Emscripten compiler.
+    emscripten: ParserPackEmscriptenToolchain,
+    /// LLVM and WebAssembly linker.
+    llvm: ParserPackLlvmToolchain,
+    /// JavaScript runtime used by the compiler.
+    node: ParserPackBinaryToolchain,
+    /// Python runtime used by the compiler.
+    python: ParserPackBinaryToolchain,
+}
+
+/// One exact source input to a reproducible candidate build.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackBuildSourceFile {
+    /// Source-root-relative path.
+    path: RegistryPath,
+    /// Exact source-file digest.
+    sha256: Sha256Digest,
+}
+
+/// Candidate parser output from the reproducible build.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackBuildOutput {
+    /// Candidate-root-relative output path.
+    path: RegistryPath,
+    /// Exact output bytes.
+    bytes: u64,
+    /// Exact output digest.
+    sha256: Sha256Digest,
+}
+
+/// Fully resolved candidate build invocation.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackBuildProvenance {
+    /// Exact clean source directory for the first retained local output.
+    working_directory: RegistryPath,
+    /// Exact relative build command without unresolved placeholders.
+    command: String,
+    /// Exact assumptions required to interpret the local build evidence.
+    environment_assumptions: Vec<String>,
+    /// Resolved compiler flags in order.
+    resolved_flags: Vec<String>,
+    /// Exact build source inventory.
+    source_files: Vec<ParserPackBuildSourceFile>,
+    /// Exact candidate output.
+    output: ParserPackBuildOutput,
+}
+
+/// One independent clean reproduction result.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackReproduction {
+    /// Stable run identity.
+    run_id: String,
+    /// Exact clean source directory used by this run.
+    working_directory: RegistryPath,
+    /// Exact relative command used by this run.
+    command: String,
+    /// Raw historical process-log retention state.
+    raw_log_retention: ParserPackRawBuildLogRetention,
+    /// Exact output bytes.
+    bytes: u64,
+    /// Exact output digest.
+    sha256: Sha256Digest,
+}
+
+/// Complete typed candidate build-provenance record.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackProvenanceRecord {
+    /// Provenance schema version.
+    schema_version: u32,
+    /// Closed provenance format.
+    format: ParserPackProvenanceFormat,
+    /// Bound trust candidate.
+    candidate_id: ParserPackCandidateId,
+    /// Exact upstream source package.
+    source: ParserPackSourceProvenance,
+    /// Honest local, hosted, and raw-log evidence state.
+    evidence_state: ParserPackReproductionEvidenceState,
+    /// Fully resolved toolchain.
+    resolved_toolchain: ParserPackResolvedToolchain,
+    /// Fully resolved build.
+    build: ParserPackBuildProvenance,
+    /// Local clean-build output identity records.
+    local_output_runs: Vec<ParserPackReproduction>,
+}
+
+/// Closed advisory-record format.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+enum ParserPackAdvisoryFormat {
+    /// `ProjectAtlas` parser-pack advisory projection.
+    #[serde(rename = "projectatlas.parser-pack-advisories")]
+    ParserPackAdvisories,
+}
+
+/// Pinned advisory database identity.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackAdvisoryDatabase {
+    /// HTTPS advisory database source.
+    source: String,
+    /// Exact advisory database revision.
+    revision: RevisionId,
+}
+
+/// Advisory scanner identity.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackAdvisoryTool {
+    /// Scanner name.
+    name: String,
+    /// Scanner version.
+    version: String,
+    /// Offline scan command.
+    command: String,
+    /// Exact scanner process exit code.
+    exit_code: i32,
+}
+
+/// Candidate source component covered by the advisory record.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackAdvisoryComponent {
+    /// Package ecosystem.
+    ecosystem: String,
+    /// Package name.
+    name: String,
+    /// Package version.
+    version: String,
+    /// Exact source-package digest.
+    checksum_sha256: Sha256Digest,
+}
+
+/// One exact Cargo advisory-scan input.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackAdvisoryInput {
+    /// Source-package-relative input path.
+    path: RegistryPath,
+    /// Exact input bytes.
+    bytes: u64,
+    /// Exact input digest.
+    sha256: Sha256Digest,
+}
+
+/// Parsed summary repeated outside the retained raw advisory result.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackAdvisoryResult {
+    /// Dependency count parsed by the scanner.
+    dependency_count: u64,
+    /// Whether the scanner found any vulnerability.
+    vulnerabilities_found: bool,
+    /// Exact vulnerability count.
+    vulnerability_count: u64,
+}
+
+/// Exact advisory-database section emitted by `cargo audit`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoAuditRawDatabase {
+    /// Advisory count at the pinned database revision.
+    #[serde(rename = "advisory-count")]
+    advisory_count: u64,
+    /// Optional database commit emitted by the offline scanner.
+    #[serde(rename = "last-commit")]
+    last_commit: Option<String>,
+    /// Optional database update time emitted by the offline scanner.
+    #[serde(rename = "last-updated")]
+    last_updated: Option<String>,
+}
+
+/// Exact lockfile summary emitted by `cargo audit`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoAuditRawLockfile {
+    /// Parsed dependency count.
+    #[serde(rename = "dependency-count")]
+    dependency_count: u64,
+}
+
+/// Exact scanner settings emitted by `cargo audit`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoAuditRawSettings {
+    /// Requested target architectures.
+    target_arch: Vec<String>,
+    /// Requested target operating systems.
+    target_os: Vec<String>,
+    /// Optional severity threshold.
+    severity: Option<String>,
+    /// Ignored advisory identities.
+    ignore: Vec<String>,
+    /// Enabled informational warning classes.
+    informational_warnings: Vec<String>,
+}
+
+/// Exact vulnerability section emitted by `cargo audit`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoAuditRawVulnerabilities {
+    /// Whether any vulnerability was found.
+    found: bool,
+    /// Exact vulnerability count.
+    count: u64,
+    /// Raw vulnerability rows; empty for the trusted result.
+    list: Vec<serde_json::Value>,
+}
+
+/// Typed retained raw `cargo audit` result.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoAuditRawResult {
+    /// Advisory database summary.
+    database: CargoAuditRawDatabase,
+    /// Lockfile summary.
+    lockfile: CargoAuditRawLockfile,
+    /// Scanner settings.
+    settings: CargoAuditRawSettings,
+    /// Vulnerability result.
+    vulnerabilities: CargoAuditRawVulnerabilities,
+    /// Warning rows keyed by category.
+    warnings: BTreeMap<String, serde_json::Value>,
+}
+
+/// Complete typed advisory record.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackAdvisoryRecord {
+    /// Advisory-record schema version.
+    schema_version: u32,
+    /// Closed advisory-record format.
+    format: ParserPackAdvisoryFormat,
+    /// Bound trust candidate.
+    candidate_id: ParserPackCandidateId,
+    /// Pinned advisory database.
+    database: ParserPackAdvisoryDatabase,
+    /// Pinned scanner.
+    tool: ParserPackAdvisoryTool,
+    /// Scanned source component.
+    component: ParserPackAdvisoryComponent,
+    /// Exact source-package manifest and lock inputs.
+    inputs: Vec<ParserPackAdvisoryInput>,
+    /// Exact raw UTF-8 scanner result without a trailing newline.
+    raw_result: String,
+    /// Exact raw-result byte count.
+    raw_result_bytes: u64,
+    /// Exact raw-result digest.
+    raw_result_sha256: Sha256Digest,
+    /// Parsed clean-result summary.
+    result: ParserPackAdvisoryResult,
+}
+
+/// Closed candidate WASM-validation record format.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+enum ParserPackWasmValidationFormat {
+    /// `ProjectAtlas` candidate WASM validation.
+    #[serde(rename = "projectatlas.parser-pack-wasm-validation")]
+    ParserPackWasmValidation,
+}
+
+/// Static module identity and ABI requirements.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackWasmModuleValidation {
+    /// Candidate-root-relative module path.
+    path: RegistryPath,
+    /// Exact module bytes.
+    bytes: u64,
+    /// Exact module digest.
+    sha256: Sha256Digest,
+    /// Exact WebAssembly magic bytes in lowercase hexadecimal.
+    magic_hex: String,
+    /// WebAssembly binary-format version.
+    module_version: u32,
+    /// Required exported grammar function.
+    required_function_export: String,
+    /// Bound external grammar ABI version.
+    grammar_abi_version: u32,
+}
+
+/// Local probe lifecycle that does not claim hosted reproduction.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+enum ParserPackWasmProbeState {
+    /// The retained local probe passed while hosted proof remains pending.
+    LocalPassHostedPending,
+}
+
+/// Hosted probe lifecycle.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+enum ParserPackWasmHostedState {
+    /// Hosted validation has not yet run.
+    Pending,
+}
+
+/// Exact local runtime used by the retained WASM probe.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackWasmProbeTool {
+    /// Runtime name.
+    name: String,
+    /// Runtime version without a leading `v`.
+    version: String,
+    /// Exact local runtime path recorded by the probe environment.
+    binary_path: String,
+    /// Exact runtime executable digest.
+    binary_sha256: Sha256Digest,
+}
+
+/// Exact bounded import environment supplied by the retained local probe.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackWasmProbeEnvironment {
+    /// Initial linear-memory pages.
+    memory_initial_pages: u32,
+    /// Maximum linear-memory pages.
+    memory_maximum_pages: u32,
+    /// Initial indirect-table elements.
+    table_initial_elements: u32,
+    /// Initial stack pointer.
+    stack_pointer: u32,
+    /// Relocatable module memory base.
+    memory_base: u32,
+    /// Relocatable module table base.
+    table_base: u32,
+}
+
+/// Parsed retained WASM probe result.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackWasmProbeResult {
+    /// Exact probed module digest.
+    module_sha256: Sha256Digest,
+    /// Returned language-structure pointer.
+    pointer: u32,
+    /// Grammar ABI version read from the returned structure.
+    abi: u32,
+    /// Exact exported-name inventory.
+    exports: Vec<String>,
+}
+
+/// Retained local WASM probe evidence.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackWasmProbe {
+    /// Local/hosted probe lifecycle.
+    state: ParserPackWasmProbeState,
+    /// Exact local runtime identity.
+    tool: ParserPackWasmProbeTool,
+    /// Candidate-root-relative retained probe script.
+    script_path: RegistryPath,
+    /// Exact retained probe-script digest.
+    script_sha256: Sha256Digest,
+    /// Exact relative probe command.
+    command: String,
+    /// Exact bounded import environment.
+    environment: ParserPackWasmProbeEnvironment,
+    /// Exact raw result without a trailing newline.
+    raw_result: String,
+    /// Exact raw-result digest.
+    raw_result_sha256: Sha256Digest,
+    /// Hosted probe lifecycle.
+    hosted_state: ParserPackWasmHostedState,
+}
+
+/// Complete typed candidate WASM-validation record.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackWasmValidationRecord {
+    /// WASM-validation schema version.
+    schema_version: u32,
+    /// Closed record format.
+    format: ParserPackWasmValidationFormat,
+    /// Bound trust candidate.
+    candidate_id: ParserPackCandidateId,
+    /// Static module identity and ABI contract.
+    module: ParserPackWasmModuleValidation,
+    /// Retained local probe evidence.
+    probe: ParserPackWasmProbe,
+}
+
+/// SPDX document creation metadata.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ParserPackSpdxCreationInfo {
+    /// Reproducible record timestamp.
+    created: String,
+    /// Document creators.
+    creators: Vec<String>,
+}
+
+/// One SPDX checksum.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ParserPackSpdxChecksum {
+    /// SPDX checksum algorithm.
+    algorithm: String,
+    /// Hexadecimal checksum value.
+    checksum_value: String,
+}
+
+/// One SPDX external package reference.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackSpdxExternalReference {
+    /// SPDX reference category.
+    #[serde(rename = "referenceCategory")]
+    category: String,
+    /// SPDX reference type.
+    #[serde(rename = "referenceType")]
+    kind: String,
+    /// Package reference locator.
+    #[serde(rename = "referenceLocator")]
+    locator: String,
+}
+
+/// One package in the candidate SPDX document.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ParserPackSpdxPackage {
+    /// Component name.
+    name: String,
+    /// SPDX package identity.
+    #[serde(rename = "SPDXID")]
+    spdx_id: String,
+    /// Component version.
+    version_info: String,
+    /// HTTPS source-package URL.
+    download_location: String,
+    /// Whether exact files were analyzed.
+    files_analyzed: bool,
+    /// Package verification code, absent when complete file analysis is not claimed.
+    package_verification_code: Option<serde_json::Value>,
+    /// Package checksums.
+    checksums: Vec<ParserPackSpdxChecksum>,
+    /// Concluded license expression.
+    license_concluded: String,
+    /// Declared license expression.
+    license_declared: String,
+    /// Copyright notice.
+    copyright_text: String,
+    /// Package references.
+    external_refs: Vec<ParserPackSpdxExternalReference>,
+}
+
+/// One file in the candidate SPDX document.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ParserPackSpdxFile {
+    /// Candidate-root-relative file prefixed with `./`.
+    file_name: String,
+    /// SPDX file identity.
+    #[serde(rename = "SPDXID")]
+    spdx_id: String,
+    /// File checksums.
+    checksums: Vec<ParserPackSpdxChecksum>,
+    /// Concluded license expression.
+    license_concluded: String,
+    /// Licenses found in the file.
+    license_info_in_files: Vec<String>,
+    /// Copyright notice.
+    copyright_text: String,
+}
+
+/// One SPDX relationship.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ParserPackSpdxRelationship {
+    /// Relationship source.
+    spdx_element_id: String,
+    /// Relationship type.
+    relationship_type: String,
+    /// Relationship target.
+    related_spdx_element: String,
+}
+
+/// Minimum exact SPDX 2.3 projection required for a parser-pack candidate.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ParserPackSpdxDocument {
+    /// SPDX format version.
+    spdx_version: String,
+    /// SPDX data license.
+    data_license: String,
+    /// SPDX document identity.
+    #[serde(rename = "SPDXID")]
+    spdx_id: String,
+    /// Human-readable document name.
+    name: String,
+    /// Unique HTTPS document namespace.
+    document_namespace: String,
+    /// Creation metadata.
+    creation_info: ParserPackSpdxCreationInfo,
+    /// Package identities described by the document.
+    document_describes: Vec<String>,
+    /// Package inventory.
+    packages: Vec<ParserPackSpdxPackage>,
+    /// File inventory.
+    files: Vec<ParserPackSpdxFile>,
+    /// Exact relationship graph.
+    relationships: Vec<ParserPackSpdxRelationship>,
+}
+
+/// Repository-intelligence contract projection that owns optional-pack budgets.
+#[derive(Debug, Deserialize)]
+struct ParserPackBudgetDocument {
+    /// Resource budgets.
+    budgets: ParserPackBudgets,
+    /// Unowned repository-intelligence contract sections ignored by this projection.
+    #[serde(flatten)]
+    _unowned: BTreeMap<String, serde_json::Value>,
+}
+
+/// Optional-pack budget owner nested below the repository budget catalog.
+#[derive(Debug, Deserialize)]
+struct ParserPackBudgets {
+    /// Optional-pack isolation and accepted ceilings.
+    optional_pack_contract: ParserPackBudgetContract,
+    /// Unowned default-core budget sections ignored by this projection.
+    #[serde(flatten)]
+    _unowned: BTreeMap<String, serde_json::Value>,
+}
+
+/// Authoritative optional-pack isolation contract.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackBudgetContract {
+    /// Packs are not runtime-enabled by default.
+    disabled_by_default: bool,
+    /// Packs cannot spend the default-core resource allowance.
+    may_spend_default_core_allowance: bool,
+    /// Exact required limit-field vocabulary.
+    required_limit_fields: Vec<String>,
+    /// Exact required pack-manifest field vocabulary.
+    required_manifest_fields: Vec<String>,
+    /// Accepted pack budgets.
+    accepted_pack_budgets: Vec<ParserPackBudget>,
+    /// Fail-closed pack-selection rule.
+    selection_rule: String,
+}
+
+/// One authoritative optional-pack budget row.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackBudget {
+    /// Owning pack.
+    pack_id: PackId,
+    /// Registration lifecycle.
+    status: ParserPackBudgetStatus,
+    /// Numeric limits.
+    limits: ParserPackBudgetLimits,
+    /// Enforcement lifecycle.
+    enforcement: ParserPackBudgetEnforcement,
+    /// Whether this pack may borrow from default core.
+    may_borrow_default_core_allowance: bool,
+    /// Whether this pack is disabled by default.
+    disabled_by_default: bool,
+    /// Whether the pack can be completely removed.
+    removable: bool,
+}
+
+/// Closed registration lifecycle for an optional parser-pack budget.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum ParserPackBudgetStatus {
+    /// The budget is fixed before candidate measurements exist.
+    PreregisteredNotMeasured,
+}
+
+/// Closed enforcement lifecycle for an optional parser-pack budget.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum ParserPackBudgetEnforcement {
+    /// Every candidate must remain bound to its validated pack manifest.
+    PackManifestRequired,
+}
+
+/// Installed-byte ceiling needed by this trust projection.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParserPackBudgetLimits {
+    /// Maximum pack input bytes.
+    input_bytes: u64,
+    /// Maximum pack stage duration in milliseconds.
+    stage_time_ms: u64,
+    /// Maximum pack memory bytes.
+    memory_bytes: u64,
+    /// Maximum pack output bytes.
+    output_bytes: u64,
+    /// Maximum executable bytes.
+    executable_bytes: u64,
+    /// Maximum installed candidate bytes.
+    installed_bytes: u64,
+    /// Maximum startup p95 in milliseconds.
+    startup_p95_ms: u64,
+    /// Maximum active resident bytes.
+    active_rss_bytes: u64,
+    /// Maximum cancellation grace in milliseconds.
+    cancellation_grace_ms: u64,
+}
+
 /// Complete typed composite language registry.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -2242,12 +4390,16 @@ struct LanguageRegistryLock {
     accepted_target: AcceptedTargetBinding,
     /// Bound current-runtime historical contract.
     historical_contract: HistoricalContractBinding,
+    /// Bound release-owned parser-pack evaluation trust.
+    parser_pack_trust: ParserPackTrustBinding,
     /// Declared pack boundaries.
     packs: Vec<RegistryPack>,
     /// Closed capability-tier vocabulary in increasing evidence order.
     capability_tiers: Vec<CapabilityTier>,
     /// Ordered current-runtime detection rules.
     detection_rules: Vec<DetectionRule>,
+    /// Closed semantic refinements and compatible base modes.
+    semantic_modes: Vec<SemanticModeRule>,
     /// Ordered current public modes and behavior.
     current_modes: Vec<CurrentLanguageMode>,
     /// Closed current built-in parser components.
@@ -2366,6 +4518,1276 @@ fn reject_duplicate_json_keys(
         .deserialize(&mut deserializer)
         .and_then(|()| deserializer.end())
         .map_err(|source| LanguageRegistryError::JsonDecode { label, source })
+}
+
+/// Decode release-owned parser-pack trust through the shared duplicate-key guard.
+fn decode_language_registry_lock(
+    bytes: &[u8],
+) -> Result<LanguageRegistryLock, LanguageRegistryError> {
+    reject_duplicate_json_keys(bytes, "language registry lock")?;
+    serde_json::from_slice(bytes).map_err(|source| LanguageRegistryError::JsonDecode {
+        label: "language registry lock",
+        source,
+    })
+}
+
+/// Decode release-owned parser-pack trust through the shared duplicate-key guard.
+fn decode_parser_pack_trust(
+    bytes: &[u8],
+) -> Result<ParserPackTrustManifest, LanguageRegistryError> {
+    reject_duplicate_json_keys(bytes, "parser-pack trust manifest")?;
+    serde_json::from_slice(bytes).map_err(|source| LanguageRegistryError::JsonDecode {
+        label: "parser-pack trust manifest",
+        source,
+    })
+}
+
+/// Decode one bounded candidate metadata file through the shared duplicate-key guard.
+fn decode_parser_pack_metadata<T>(
+    bytes: &[u8],
+    label: &'static str,
+) -> Result<T, LanguageRegistryError>
+where
+    for<'de> T: Deserialize<'de>,
+{
+    reject_duplicate_json_keys(bytes, label)?;
+    serde_json::from_slice(bytes)
+        .map_err(|source| LanguageRegistryError::JsonDecode { label, source })
+}
+
+/// Validate the complete evaluation-only trust projection and return its installed-byte ceiling.
+fn validate_parser_pack_capture_authority(
+    lock: &LanguageRegistryLock,
+    trust: &ParserPackTrustManifest,
+    budget_bytes: &[u8],
+) -> Result<u64, LanguageRegistryError> {
+    if lock.schema_version != LANGUAGE_REGISTRY_SCHEMA_VERSION
+        || lock.format != RegistryFormat::LanguageRegistryLock
+    {
+        return Err(LanguageRegistryError::Validation(
+            "unsupported language registry authority for parser-pack capture".to_string(),
+        ));
+    }
+    require_equal(
+        lock.parser_pack_trust.path.as_str(),
+        PARSER_PACK_TRUST_PATH,
+        "parser-pack trust path",
+    )?;
+    if trust.schema_version != PARSER_PACK_TRUST_SCHEMA_VERSION
+        || trust.format != ParserPackTrustFormat::ParserPackTrust
+        || trust.candidates.is_empty()
+        || trust.candidates.len() > MAX_PARSER_PACK_CANDIDATES
+    {
+        return Err(LanguageRegistryError::Validation(
+            "unsupported or empty parser-pack trust manifest".to_string(),
+        ));
+    }
+
+    reject_duplicate_json_keys(budget_bytes, "repository-intelligence contracts")?;
+    let budget_document = serde_json::from_slice::<ParserPackBudgetDocument>(budget_bytes)
+        .map_err(|source| LanguageRegistryError::JsonDecode {
+            label: "repository-intelligence contracts",
+            source,
+        })?;
+    let contract = &budget_document.budgets.optional_pack_contract;
+    let required_limit_fields = contract
+        .required_limit_fields
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let required_manifest_fields = contract
+        .required_manifest_fields
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if !contract.disabled_by_default
+        || contract.may_spend_default_core_allowance
+        || required_limit_fields != OPTIONAL_PACK_REQUIRED_LIMIT_FIELDS
+        || required_manifest_fields != OPTIONAL_PACK_REQUIRED_MANIFEST_FIELDS
+        || !metadata_text_is_valid(&contract.selection_rule, 1024)
+    {
+        return Err(LanguageRegistryError::Validation(
+            "optional parser packs must remain disabled and isolated from default-core allowances"
+                .to_string(),
+        ));
+    }
+    let mut budget_ids = BTreeSet::new();
+    let mut broad_budget = None;
+    for budget in &contract.accepted_pack_budgets {
+        if !budget_ids.insert(budget.pack_id.clone()) {
+            return Err(LanguageRegistryError::Validation(format!(
+                "duplicate optional-pack budget {}",
+                budget.pack_id.as_str()
+            )));
+        }
+        if budget.limits.input_bytes == 0
+            || budget.limits.stage_time_ms == 0
+            || budget.limits.memory_bytes == 0
+            || budget.limits.output_bytes == 0
+            || budget.limits.executable_bytes == 0
+            || budget.limits.installed_bytes == 0
+            || budget.limits.startup_p95_ms == 0
+            || budget.limits.active_rss_bytes == 0
+            || budget.limits.cancellation_grace_ms == 0
+        {
+            return Err(LanguageRegistryError::Validation(format!(
+                "optional-pack budget {} has a zero hard ceiling",
+                budget.pack_id.as_str()
+            )));
+        }
+        if budget.pack_id.as_str() == BROAD_LANGUAGE_PACK_ID {
+            broad_budget = Some(budget);
+        }
+    }
+    let broad_budget = broad_budget.ok_or_else(|| {
+        LanguageRegistryError::Validation(
+            "broad-language-pack has no authoritative optional-pack budget".to_string(),
+        )
+    })?;
+    if broad_budget.status != ParserPackBudgetStatus::PreregisteredNotMeasured
+        || broad_budget.enforcement != ParserPackBudgetEnforcement::PackManifestRequired
+        || broad_budget.may_borrow_default_core_allowance
+        || !broad_budget.disabled_by_default
+        || !broad_budget.removable
+    {
+        return Err(LanguageRegistryError::Validation(
+            "broad-language-pack budget does not preserve preregistered isolated-pack policy"
+                .to_string(),
+        ));
+    }
+
+    let mut candidate_ids = BTreeSet::new();
+    let mut payload_roots = BTreeSet::new();
+    for candidate in &trust.candidates {
+        if !candidate_ids.insert(candidate.candidate_id.clone()) {
+            return Err(LanguageRegistryError::Validation(format!(
+                "duplicate parser-pack candidate {}",
+                candidate.candidate_id.as_str()
+            )));
+        }
+        if !payload_roots.insert(candidate.payload_root.clone()) {
+            return Err(LanguageRegistryError::Validation(format!(
+                "duplicate parser-pack payload root {}",
+                candidate.payload_root.as_str()
+            )));
+        }
+        validate_parser_pack_capture_declaration(candidate, broad_budget.limits.installed_bytes)?;
+    }
+    Ok(broad_budget.limits.installed_bytes)
+}
+
+/// Validate all declared byte ceilings before a candidate path can be traversed.
+fn validate_parser_pack_capture_declaration(
+    candidate: &ParserPackCandidateTrust,
+    installed_byte_limit: u64,
+) -> Result<(), LanguageRegistryError> {
+    if candidate.eligibility != ParserPackCandidateEligibility::EvaluationOnlyUnselected
+        || candidate.advertised
+        || candidate.pack_id.as_str() != BROAD_LANGUAGE_PACK_ID
+        || candidate.pack_abi.abi_id.as_str() != PROJECTATLAS_PACK_ABI_ID
+        || candidate.pack_abi.version != PROJECTATLAS_PACK_ABI_VERSION
+        || candidate.grammar_abi.abi_id.as_str() != TREE_SITTER_WASM_ABI_ID
+        || candidate.grammar_abi.version != TREE_SITTER_WASM_ABI_VERSION
+        || candidate.grammar_abi.state != ParserPackAbiState::PendingPackVerification
+        || candidate.packaged_platform.as_str() != TREE_SITTER_WASM_PLATFORM
+        || candidate.installed_bytes == 0
+        || candidate.installed_bytes > installed_byte_limit
+        || !metadata_text_is_valid(&candidate.release_version, MAX_ID_BYTES)
+        || candidate.inventory.is_empty()
+        || candidate.inventory.len() > MAX_PARSER_PACK_FILES
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "parser-pack candidate {} crosses its evaluation, ABI, platform, or resource contract",
+            candidate.candidate_id.as_str()
+        )));
+    }
+    let mut paths = BTreeSet::new();
+    let mut declared_bytes = 0_u64;
+    for file in &candidate.inventory {
+        if file.bytes == 0
+            || !paths.insert(file.path.clone())
+            || (file.role.requires_metadata_bytes() && file.bytes > MAX_PARSER_PACK_METADATA_BYTES)
+        {
+            return Err(LanguageRegistryError::Validation(format!(
+                "parser-pack candidate {} has an invalid declared inventory row {}",
+                candidate.candidate_id.as_str(),
+                file.path.as_str()
+            )));
+        }
+        declared_bytes = declared_bytes.checked_add(file.bytes).ok_or_else(|| {
+            LanguageRegistryError::Validation(format!(
+                "parser-pack candidate {} declared bytes overflow",
+                candidate.candidate_id.as_str()
+            ))
+        })?;
+        if declared_bytes > candidate.installed_bytes || declared_bytes > installed_byte_limit {
+            return Err(LanguageRegistryError::Validation(format!(
+                "parser-pack candidate {} declared bytes exceed the authorized ceiling",
+                candidate.candidate_id.as_str()
+            )));
+        }
+    }
+    if declared_bytes != candidate.installed_bytes {
+        return Err(LanguageRegistryError::Validation(format!(
+            "parser-pack candidate {} declared inventory does not equal installed bytes",
+            candidate.candidate_id.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// Validate the fully captured evaluation trust projection.
+fn validate_parser_pack_trust(
+    lock: &LanguageRegistryLock,
+    trust: &ParserPackTrustManifest,
+    payloads: &[CandidatePayloadSnapshot],
+    budget_bytes: &[u8],
+) -> Result<u64, LanguageRegistryError> {
+    let installed_byte_limit = validate_parser_pack_capture_authority(lock, trust, budget_bytes)?;
+    if payloads.len() != trust.candidates.len() {
+        return Err(LanguageRegistryError::Validation(
+            "parser-pack trust and captured payload counts differ".to_string(),
+        ));
+    }
+    for candidate in &trust.candidates {
+        let snapshot = payloads
+            .iter()
+            .find(|payload| payload.candidate_id == candidate.candidate_id)
+            .ok_or_else(|| {
+                LanguageRegistryError::Validation(format!(
+                    "parser-pack candidate {} has no captured payload",
+                    candidate.candidate_id.as_str()
+                ))
+            })?;
+        validate_parser_pack_candidate(candidate, snapshot, installed_byte_limit)?;
+    }
+    Ok(installed_byte_limit)
+}
+
+/// Validate one candidate's complete inventory, release manifest, and trust evidence.
+fn validate_parser_pack_candidate(
+    candidate: &ParserPackCandidateTrust,
+    snapshot: &CandidatePayloadSnapshot,
+    installed_byte_limit: u64,
+) -> Result<(), LanguageRegistryError> {
+    validate_parser_pack_capture_declaration(candidate, installed_byte_limit)?;
+    if snapshot.payload_root != candidate.payload_root {
+        return Err(LanguageRegistryError::Validation(format!(
+            "parser-pack candidate {} payload root changed during capture",
+            candidate.candidate_id.as_str()
+        )));
+    }
+    validate_candidate_path_inventory(snapshot)?;
+
+    if candidate.inventory.is_empty() || candidate.inventory.len() > MAX_PARSER_PACK_FILES {
+        return Err(LanguageRegistryError::Validation(format!(
+            "parser-pack candidate {} has an empty or oversized inventory",
+            candidate.candidate_id.as_str()
+        )));
+    }
+    let mut inventory = BTreeMap::new();
+    let mut roles = BTreeMap::<ParserPackTrustedFileRole, usize>::new();
+    let mut installed_bytes = 0_u64;
+    for file in &candidate.inventory {
+        if file.bytes == 0 || inventory.insert(file.path.clone(), file).is_some() {
+            return Err(LanguageRegistryError::Validation(format!(
+                "parser-pack candidate {} has a duplicate or zero-byte inventory row {}",
+                candidate.candidate_id.as_str(),
+                file.path.as_str()
+            )));
+        }
+        *roles.entry(file.role).or_default() += 1;
+        installed_bytes = installed_bytes.checked_add(file.bytes).ok_or_else(|| {
+            LanguageRegistryError::Validation(format!(
+                "parser-pack candidate {} installed bytes overflow",
+                candidate.candidate_id.as_str()
+            ))
+        })?;
+    }
+    for (role, exact_count) in [
+        (ParserPackTrustedFileRole::Manifest, 1),
+        (ParserPackTrustedFileRole::ParserModule, 1),
+        (ParserPackTrustedFileRole::WasmValidation, 1),
+        (ParserPackTrustedFileRole::WasmProbeScript, 1),
+        (ParserPackTrustedFileRole::Provenance, 1),
+        (ParserPackTrustedFileRole::AdvisoryReport, 1),
+        (ParserPackTrustedFileRole::Sbom, 1),
+    ] {
+        if roles.get(&role).copied() != Some(exact_count) {
+            return Err(LanguageRegistryError::Validation(format!(
+                "parser-pack candidate {} must contain exactly one {} file",
+                candidate.candidate_id.as_str(),
+                role.contract_tag()
+            )));
+        }
+    }
+    if roles
+        .get(&ParserPackTrustedFileRole::License)
+        .copied()
+        .unwrap_or_default()
+        == 0
+        || roles
+            .get(&ParserPackTrustedFileRole::Patch)
+            .copied()
+            .unwrap_or_default()
+            != candidate.provenance.patch_paths.len()
+        || installed_bytes != candidate.installed_bytes
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "parser-pack candidate {} license, patch, or installed-byte inventory is incomplete",
+            candidate.candidate_id.as_str()
+        )));
+    }
+    if inventory.len() != snapshot.files.len() {
+        return Err(LanguageRegistryError::Validation(format!(
+            "parser-pack candidate {} has undeclared or missing payload files",
+            candidate.candidate_id.as_str()
+        )));
+    }
+    for (path, trusted) in &inventory {
+        let captured = snapshot.files.get(path).ok_or_else(|| {
+            LanguageRegistryError::Validation(format!(
+                "parser-pack candidate {} is missing trusted file {}",
+                candidate.candidate_id.as_str(),
+                path.as_str()
+            ))
+        })?;
+        if trusted.bytes != captured.bytes || trusted.sha256 != captured.sha256 {
+            return Err(LanguageRegistryError::Validation(format!(
+                "parser-pack candidate {} file {} differs from its trusted size or digest",
+                candidate.candidate_id.as_str(),
+                path.as_str()
+            )));
+        }
+    }
+
+    validate_candidate_role_path(
+        &inventory,
+        &candidate.manifest_path,
+        ParserPackTrustedFileRole::Manifest,
+        "manifest",
+    )?;
+    validate_candidate_role_path(
+        &inventory,
+        &candidate.provenance.record_path,
+        ParserPackTrustedFileRole::Provenance,
+        "provenance",
+    )?;
+    validate_candidate_role_path(
+        &inventory,
+        &candidate.advisory_record_path,
+        ParserPackTrustedFileRole::AdvisoryReport,
+        "advisory",
+    )?;
+    validate_candidate_role_path(
+        &inventory,
+        &candidate.wasm_validation_record_path,
+        ParserPackTrustedFileRole::WasmValidation,
+        "WASM validation",
+    )?;
+    validate_candidate_role_path(
+        &inventory,
+        &candidate.sbom_record_path,
+        ParserPackTrustedFileRole::Sbom,
+        "SBOM",
+    )?;
+    for license in &candidate.licenses {
+        validate_candidate_role_path(
+            &inventory,
+            &license.record_path,
+            ParserPackTrustedFileRole::License,
+            "license",
+        )?;
+    }
+    for patch in &candidate.provenance.patch_paths {
+        validate_candidate_role_path(&inventory, patch, ParserPackTrustedFileRole::Patch, "patch")?;
+    }
+    validate_candidate_release_manifest(candidate, snapshot, &inventory)?;
+    validate_candidate_evidence(candidate, snapshot, &inventory)
+}
+
+/// Reject case-colliding paths and empty undeclared directories in one captured payload.
+fn validate_candidate_path_inventory(
+    snapshot: &CandidatePayloadSnapshot,
+) -> Result<(), LanguageRegistryError> {
+    let mut folded = BTreeSet::new();
+    for path in snapshot.directories.iter().chain(snapshot.files.keys()) {
+        if !folded.insert(path.as_str().to_ascii_lowercase()) {
+            return Err(LanguageRegistryError::Validation(format!(
+                "candidate payload contains a case-insensitive path collision at {}",
+                path.as_str()
+            )));
+        }
+    }
+    for directory in &snapshot.directories {
+        let prefix = format!("{}/", directory.as_str());
+        if !snapshot
+            .files
+            .keys()
+            .any(|path| path.as_str().starts_with(&prefix))
+        {
+            return Err(LanguageRegistryError::Validation(format!(
+                "candidate payload contains an empty directory {}",
+                directory.as_str()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Require one trust path to exist with its exact closed role.
+fn validate_candidate_role_path(
+    inventory: &BTreeMap<RegistryPath, &ParserPackTrustedFile>,
+    path: &RegistryPath,
+    role: ParserPackTrustedFileRole,
+    label: &str,
+) -> Result<(), LanguageRegistryError> {
+    if inventory.get(path).is_some_and(|file| file.role == role) {
+        Ok(())
+    } else {
+        Err(LanguageRegistryError::Validation(format!(
+            "parser-pack {label} path {} is absent or has the wrong role",
+            path.as_str()
+        )))
+    }
+}
+
+/// Borrow retained metadata bytes for one exact candidate path.
+fn candidate_metadata_bytes<'a>(
+    snapshot: &'a CandidatePayloadSnapshot,
+    path: &RegistryPath,
+    label: &str,
+) -> Result<&'a [u8], LanguageRegistryError> {
+    snapshot
+        .files
+        .get(path)
+        .and_then(|file| file.metadata_bytes.as_deref())
+        .ok_or_else(|| {
+            LanguageRegistryError::Validation(format!(
+                "parser-pack {label} metadata {} was not retained",
+                path.as_str()
+            ))
+        })
+}
+
+/// Reconcile the candidate-owned release manifest with release-owned trust.
+fn validate_candidate_release_manifest(
+    candidate: &ParserPackCandidateTrust,
+    snapshot: &CandidatePayloadSnapshot,
+    inventory: &BTreeMap<RegistryPath, &ParserPackTrustedFile>,
+) -> Result<(), LanguageRegistryError> {
+    let bytes = candidate_metadata_bytes(snapshot, &candidate.manifest_path, "manifest")?;
+    let manifest = decode_parser_pack_metadata::<ParserPackReleaseManifest>(
+        bytes,
+        "parser-pack release manifest",
+    )?;
+    if manifest.schema_version != PARSER_PACK_MANIFEST_SCHEMA_VERSION
+        || manifest.pack_id != candidate.pack_id
+        || manifest.version != candidate.release_version
+        || manifest.pack_abi.abi_id != candidate.pack_abi.abi_id
+        || manifest.pack_abi.version != candidate.pack_abi.version
+        || manifest.grammar_abi.abi_id != candidate.grammar_abi.abi_id
+        || manifest.grammar_abi.version != candidate.grammar_abi.version
+        || manifest.runtime != PackRuntime::SupervisedWorker
+        || manifest.platform != candidate.packaged_platform
+        || manifest.provenance.source != candidate.provenance.source
+        || manifest.provenance.revision != candidate.provenance.revision
+        || manifest.provenance.toolchain != candidate.provenance.toolchain
+        || manifest.provenance.evidence_state != candidate.provenance.evidence_state
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "parser-pack candidate {} release manifest disagrees with release-owned trust",
+            candidate.candidate_id.as_str()
+        )));
+    }
+    let trusted_licenses = candidate
+        .licenses
+        .iter()
+        .map(|license| (license.component.as_str(), license.expression.as_str()))
+        .collect::<BTreeSet<_>>();
+    let manifest_licenses = manifest
+        .licenses
+        .iter()
+        .map(|license| (license.component.as_str(), license.expression.as_str()))
+        .collect::<BTreeSet<_>>();
+    if trusted_licenses.len() != candidate.licenses.len()
+        || manifest_licenses.len() != manifest.licenses.len()
+        || trusted_licenses != manifest_licenses
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "parser-pack candidate {} license projection differs from trust",
+            candidate.candidate_id.as_str()
+        )));
+    }
+    let trusted_artifacts = inventory
+        .iter()
+        .filter(|(_, file)| file.role != ParserPackTrustedFileRole::Manifest)
+        .map(|(path, file)| (path.as_str(), (file.role, file.bytes, file.sha256.as_str())))
+        .collect::<BTreeMap<_, _>>();
+    let mut manifest_artifacts = BTreeMap::new();
+    for artifact in &manifest.artifacts {
+        if artifact.role == ParserPackTrustedFileRole::Manifest
+            || manifest_artifacts
+                .insert(
+                    artifact.path.as_str(),
+                    (artifact.role, artifact.bytes, artifact.sha256.as_str()),
+                )
+                .is_some()
+        {
+            return Err(LanguageRegistryError::Validation(format!(
+                "parser-pack candidate {} manifest has a duplicate or nested manifest artifact",
+                candidate.candidate_id.as_str()
+            )));
+        }
+    }
+    if manifest_artifacts != trusted_artifacts {
+        return Err(LanguageRegistryError::Validation(format!(
+            "parser-pack candidate {} manifest artifact inventory is not exact",
+            candidate.candidate_id.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// Validate provenance, license, advisory, and SPDX evidence as one trust chain.
+fn validate_candidate_evidence(
+    candidate: &ParserPackCandidateTrust,
+    snapshot: &CandidatePayloadSnapshot,
+    inventory: &BTreeMap<RegistryPath, &ParserPackTrustedFile>,
+) -> Result<(), LanguageRegistryError> {
+    let provenance_bytes =
+        candidate_metadata_bytes(snapshot, &candidate.provenance.record_path, "provenance")?;
+    let provenance = decode_parser_pack_metadata::<ParserPackProvenanceRecord>(
+        provenance_bytes,
+        "parser-pack provenance record",
+    )?;
+    let parser_file = inventory
+        .iter()
+        .find(|(_, file)| file.role == ParserPackTrustedFileRole::ParserModule)
+        .map(|(path, file)| (path, *file))
+        .ok_or_else(|| {
+            LanguageRegistryError::Validation("parser-pack parser module is absent".to_string())
+        })?;
+    let wasm_validation_bytes = candidate_metadata_bytes(
+        snapshot,
+        &candidate.wasm_validation_record_path,
+        "WASM validation record",
+    )?;
+    let wasm_validation = decode_parser_pack_metadata::<ParserPackWasmValidationRecord>(
+        wasm_validation_bytes,
+        "parser-pack WASM validation record",
+    )?;
+    validate_candidate_wasm(
+        candidate,
+        snapshot,
+        inventory,
+        parser_file,
+        &wasm_validation,
+    )?;
+    validate_candidate_provenance(candidate, &provenance, parser_file)?;
+
+    for license in &candidate.licenses {
+        if !metadata_text_is_valid(&license.component, MAX_ID_BYTES)
+            || !metadata_text_is_valid(&license.expression, MAX_ID_BYTES)
+        {
+            return Err(LanguageRegistryError::Validation(format!(
+                "parser-pack candidate {} has invalid license metadata",
+                candidate.candidate_id.as_str()
+            )));
+        }
+        let bytes = candidate_metadata_bytes(snapshot, &license.record_path, "license")?;
+        let text = std::str::from_utf8(bytes).map_err(|source| {
+            LanguageRegistryError::Validation(format!(
+                "parser-pack license {} is not UTF-8: {source}",
+                license.record_path.as_str()
+            ))
+        })?;
+        if !text.contains(&license.expression) {
+            return Err(LanguageRegistryError::Validation(format!(
+                "parser-pack license {} does not contain expression {}",
+                license.record_path.as_str(),
+                license.expression
+            )));
+        }
+    }
+
+    let advisory_bytes =
+        candidate_metadata_bytes(snapshot, &candidate.advisory_record_path, "advisory record")?;
+    let advisory = decode_parser_pack_metadata::<ParserPackAdvisoryRecord>(
+        advisory_bytes,
+        "parser-pack advisory record",
+    )?;
+    validate_candidate_advisory(candidate, &provenance, &advisory)?;
+
+    let sbom_bytes =
+        candidate_metadata_bytes(snapshot, &candidate.sbom_record_path, "SBOM record")?;
+    let sbom = decode_parser_pack_metadata::<ParserPackSpdxDocument>(
+        sbom_bytes,
+        "parser-pack SPDX record",
+    )?;
+    validate_candidate_spdx(candidate, inventory, &provenance, &advisory, &sbom)
+}
+
+/// Validate the tracked module's binary header, export ABI, and retained local probe.
+fn validate_candidate_wasm(
+    candidate: &ParserPackCandidateTrust,
+    snapshot: &CandidatePayloadSnapshot,
+    inventory: &BTreeMap<RegistryPath, &ParserPackTrustedFile>,
+    parser_file: (&RegistryPath, &ParserPackTrustedFile),
+    record: &ParserPackWasmValidationRecord,
+) -> Result<(), LanguageRegistryError> {
+    let module_bytes = candidate_metadata_bytes(snapshot, parser_file.0, "parser module")?;
+    let exports = wasm_exports(module_bytes)?;
+    if record.schema_version != PARSER_PACK_WASM_VALIDATION_SCHEMA_VERSION
+        || record.format != ParserPackWasmValidationFormat::ParserPackWasmValidation
+        || record.candidate_id != candidate.candidate_id
+        || record.module.path != *parser_file.0
+        || record.module.bytes != parser_file.1.bytes
+        || record.module.sha256 != parser_file.1.sha256
+        || record.module.magic_hex != "0061736d"
+        || record.module.module_version != TREE_SITTER_WASM_MODULE_VERSION
+        || record.module.required_function_export != TREE_SITTER_WASM_REQUIRED_EXPORT
+        || record.module.grammar_abi_version != candidate.grammar_abi.version
+        || !exports
+            .iter()
+            .any(|(name, kind)| name == TREE_SITTER_WASM_REQUIRED_EXPORT && *kind == 0)
+        || record.probe.state != ParserPackWasmProbeState::LocalPassHostedPending
+        || record.probe.hosted_state != ParserPackWasmHostedState::Pending
+        || record.probe.tool.name != "node"
+        || !metadata_text_is_valid(&record.probe.tool.version, MAX_ID_BYTES)
+        || !metadata_text_is_valid(&record.probe.tool.binary_path, 1024)
+        || !hex_digest_has_nonzero_digit(record.probe.tool.binary_sha256.as_str())
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "parser-pack candidate {} WASM validation identity is incomplete or stale",
+            candidate.candidate_id.as_str()
+        )));
+    }
+    let script = inventory.get(&record.probe.script_path).ok_or_else(|| {
+        LanguageRegistryError::Validation(format!(
+            "parser-pack WASM probe script {} is absent from trust",
+            record.probe.script_path.as_str()
+        ))
+    })?;
+    if script.role != ParserPackTrustedFileRole::WasmProbeScript
+        || script.sha256 != record.probe.script_sha256
+        || record.probe.command
+            != format!(
+                "node {} {}",
+                record.probe.script_path.as_str(),
+                record.module.path.as_str()
+            )
+        || record.probe.environment.memory_initial_pages == 0
+        || record.probe.environment.memory_initial_pages
+            != record.probe.environment.memory_maximum_pages
+        || record.probe.environment.table_initial_elements == 0
+        || record.probe.environment.stack_pointer == 0
+        || record.probe.environment.memory_base == 0
+        || record.probe.environment.table_base != 0
+        || record.probe.raw_result.is_empty()
+        || record.probe.raw_result.contains(['\r', '\n'])
+        || sha256_hex(record.probe.raw_result.as_bytes()) != record.probe.raw_result_sha256.as_str()
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "parser-pack candidate {} WASM probe evidence is incomplete or not exactly bound",
+            candidate.candidate_id.as_str()
+        )));
+    }
+    reject_duplicate_json_keys(
+        record.probe.raw_result.as_bytes(),
+        "parser-pack WASM probe result",
+    )?;
+    let result = serde_json::from_str::<ParserPackWasmProbeResult>(&record.probe.raw_result)
+        .map_err(|source| LanguageRegistryError::JsonDecode {
+            label: "parser-pack WASM probe result",
+            source,
+        })?;
+    let export_names = exports
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    if result.module_sha256 != parser_file.1.sha256
+        || result.pointer == 0
+        || result.abi != candidate.grammar_abi.version
+        || result
+            .exports
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            != export_names
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "parser-pack candidate {} WASM probe result differs from the trusted module",
+            candidate.candidate_id.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// Return the exact export names and kinds from one bounded WebAssembly module.
+fn wasm_exports(bytes: &[u8]) -> Result<Vec<(String, u8)>, LanguageRegistryError> {
+    if bytes.len() < 8
+        || bytes[..4] != [0x00, 0x61, 0x73, 0x6d]
+        || u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]])
+            != TREE_SITTER_WASM_MODULE_VERSION
+    {
+        return Err(LanguageRegistryError::Validation(
+            "parser-pack module has invalid WebAssembly magic or version".to_string(),
+        ));
+    }
+    let mut cursor = 8_usize;
+    let mut exports = None::<Vec<(String, u8)>>;
+    while cursor < bytes.len() {
+        let section_id = bytes[cursor];
+        cursor += 1;
+        let section_bytes = usize::try_from(read_wasm_u32(bytes, &mut cursor, bytes.len())?)
+            .map_err(|source| {
+                LanguageRegistryError::Validation(format!(
+                    "WebAssembly section length does not fit memory index: {source}"
+                ))
+            })?;
+        let section_end = cursor.checked_add(section_bytes).ok_or_else(|| {
+            LanguageRegistryError::Validation("WebAssembly section length overflowed".to_string())
+        })?;
+        if section_end > bytes.len() {
+            return Err(LanguageRegistryError::Validation(
+                "WebAssembly section exceeds the candidate module".to_string(),
+            ));
+        }
+        if section_id != 7 {
+            cursor = section_end;
+            continue;
+        }
+        if exports.is_some() {
+            return Err(LanguageRegistryError::Validation(
+                "WebAssembly module contains duplicate export sections".to_string(),
+            ));
+        }
+        let count =
+            usize::try_from(read_wasm_u32(bytes, &mut cursor, section_end)?).map_err(|source| {
+                LanguageRegistryError::Validation(format!(
+                    "WebAssembly export count does not fit memory index: {source}"
+                ))
+            })?;
+        if count > MAX_PARSER_PACK_FILES {
+            return Err(LanguageRegistryError::Validation(
+                "WebAssembly export count exceeds the evaluation ceiling".to_string(),
+            ));
+        }
+        let mut section_exports = Vec::with_capacity(count);
+        for _ in 0..count {
+            let name_bytes = usize::try_from(read_wasm_u32(bytes, &mut cursor, section_end)?)
+                .map_err(|source| {
+                    LanguageRegistryError::Validation(format!(
+                        "WebAssembly export name length does not fit memory index: {source}"
+                    ))
+                })?;
+            let name_end = cursor.checked_add(name_bytes).ok_or_else(|| {
+                LanguageRegistryError::Validation(
+                    "WebAssembly export name length overflowed".to_string(),
+                )
+            })?;
+            if name_end >= section_end {
+                return Err(LanguageRegistryError::Validation(
+                    "WebAssembly export name exceeds its section".to_string(),
+                ));
+            }
+            let name = std::str::from_utf8(&bytes[cursor..name_end])
+                .map_err(|source| {
+                    LanguageRegistryError::Validation(format!(
+                        "WebAssembly export name is not UTF-8: {source}"
+                    ))
+                })?
+                .to_string();
+            cursor = name_end;
+            let kind = bytes[cursor];
+            cursor += 1;
+            let _index = read_wasm_u32(bytes, &mut cursor, section_end)?;
+            section_exports.push((name, kind));
+        }
+        if cursor != section_end {
+            return Err(LanguageRegistryError::Validation(
+                "WebAssembly export section has trailing bytes".to_string(),
+            ));
+        }
+        exports = Some(section_exports);
+    }
+    exports.ok_or_else(|| {
+        LanguageRegistryError::Validation("WebAssembly module has no export section".to_string())
+    })
+}
+
+/// Decode one bounded unsigned WebAssembly LEB128 value.
+fn read_wasm_u32(
+    bytes: &[u8],
+    cursor: &mut usize,
+    end: usize,
+) -> Result<u32, LanguageRegistryError> {
+    let mut value = 0_u32;
+    for shift in (0..35).step_by(7) {
+        if *cursor >= end {
+            return Err(LanguageRegistryError::Validation(
+                "WebAssembly LEB128 value exceeds its section".to_string(),
+            ));
+        }
+        let byte = bytes[*cursor];
+        *cursor += 1;
+        if shift == 28 && byte & 0xf0 != 0 {
+            return Err(LanguageRegistryError::Validation(
+                "WebAssembly LEB128 value exceeds u32".to_string(),
+            ));
+        }
+        value |= u32::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    Err(LanguageRegistryError::Validation(
+        "WebAssembly LEB128 value is unterminated".to_string(),
+    ))
+}
+
+/// Validate exact build inputs, toolchain identity, and honest local output identity.
+fn validate_candidate_provenance(
+    candidate: &ParserPackCandidateTrust,
+    record: &ParserPackProvenanceRecord,
+    parser_file: (&RegistryPath, &ParserPackTrustedFile),
+) -> Result<(), LanguageRegistryError> {
+    let toolchain = &record.resolved_toolchain;
+    let expected_toolchain = format!(
+        "tree-sitter-cli {} {}; emsdk {} {}; emscripten {} {}; llvm {}",
+        toolchain.tree_sitter_cli.version,
+        toolchain.tree_sitter_cli.revision.as_str(),
+        toolchain.emsdk.version,
+        toolchain.emsdk.revision.as_str(),
+        toolchain.emscripten.version,
+        toolchain.emscripten.revision.as_str(),
+        toolchain.llvm.revision.as_str()
+    );
+    if record.schema_version != PARSER_PACK_PROVENANCE_SCHEMA_VERSION
+        || record.format != ParserPackProvenanceFormat::ParserPackProvenance
+        || record.candidate_id != candidate.candidate_id
+        || record.source.repository != candidate.provenance.source
+        || record.source.revision != candidate.provenance.revision
+        || record.source.package_sha256 != candidate.provenance.source_package_sha256
+        || record.evidence_state != candidate.provenance.evidence_state
+        || candidate.provenance.evidence_state.local_output_identity
+            != ParserPackLocalOutputIdentity::TwoByteIdenticalCleanOutputs
+        || candidate.provenance.evidence_state.hosted_reproduction
+            != ParserPackHostedReproductionState::Pending
+        || candidate.provenance.evidence_state.raw_build_logs
+            != ParserPackRawBuildLogRetention::NotRetained
+        || candidate
+            .provenance
+            .evidence_state
+            .packaged_windows_identity
+            != ParserPackWindowsIdentityEvidence::PendingRefs128BitIdentityEvidence
+        || candidate.provenance.toolchain != expected_toolchain
+        || !is_https_url(&record.source.repository)
+        || !is_https_url(&record.source.package_url)
+        || !is_https_url(&toolchain.tree_sitter_cli.package_url)
+        || !is_https_url(&toolchain.emsdk.source)
+        || record.build.working_directory.as_str() != "build-a"
+        || record.build.command != "tree-sitter build --wasm --output ../build-a.wasm ."
+        || record.build.command.contains(['<', '>'])
+        || record.build.output.path != *parser_file.0
+        || record.build.output.bytes != parser_file.1.bytes
+        || record.build.output.sha256 != parser_file.1.sha256
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "parser-pack candidate {} provenance identity or output differs from trust",
+            candidate.candidate_id.as_str()
+        )));
+    }
+    for value in [
+        toolchain.tree_sitter_cli.version.as_str(),
+        toolchain.tree_sitter_cli.package_integrity_sha512.as_str(),
+        toolchain.emsdk.version.as_str(),
+        toolchain.emscripten.version.as_str(),
+        toolchain.llvm.version.as_str(),
+        toolchain.node.version.as_str(),
+        toolchain.python.version.as_str(),
+    ] {
+        if !metadata_text_is_valid(value, 512) {
+            return Err(LanguageRegistryError::Validation(format!(
+                "parser-pack candidate {} has incomplete resolved toolchain metadata",
+                candidate.candidate_id.as_str()
+            )));
+        }
+    }
+    if toolchain.tree_sitter_cli.binary_sha256.as_str().is_empty()
+        || toolchain
+            .emsdk
+            .resolved_release_revision
+            .as_str()
+            .is_empty()
+        || toolchain.emscripten.emcc_sha256.as_str().is_empty()
+        || toolchain.llvm.clang_sha256.as_str().is_empty()
+        || toolchain.llvm.wasm_ld_sha256.as_str().is_empty()
+        || toolchain.node.binary_sha256.as_str().is_empty()
+        || toolchain.python.binary_sha256.as_str().is_empty()
+    {
+        return Err(LanguageRegistryError::Validation(
+            "parser-pack resolved toolchain omitted an exact digest or revision".to_string(),
+        ));
+    }
+    if record.build.resolved_flags.is_empty()
+        || record
+            .build
+            .resolved_flags
+            .iter()
+            .any(|flag| !metadata_text_is_valid(flag, 1024))
+    {
+        return Err(LanguageRegistryError::Validation(
+            "parser-pack provenance has no complete resolved compiler flags".to_string(),
+        ));
+    }
+    if record.build.environment_assumptions.is_empty()
+        || record
+            .build
+            .environment_assumptions
+            .iter()
+            .any(|value| !metadata_text_is_valid(value, 1024))
+    {
+        return Err(LanguageRegistryError::Validation(
+            "parser-pack provenance has no exact environment assumptions".to_string(),
+        ));
+    }
+    let mut source_paths = BTreeSet::new();
+    if record.build.source_files.is_empty()
+        || record.build.source_files.iter().any(|source| {
+            !source_paths.insert(source.path.clone())
+                || !hex_digest_has_nonzero_digit(source.sha256.as_str())
+        })
+    {
+        return Err(LanguageRegistryError::Validation(
+            "parser-pack provenance source-file inventory is empty or duplicated".to_string(),
+        ));
+    }
+    let expected_runs =
+        BTreeMap::from([("clean-build-a", "build-a"), ("clean-build-b", "build-b")]);
+    let mut run_ids = BTreeSet::new();
+    if record.local_output_runs.len() != 2
+        || record.local_output_runs.iter().any(|run| {
+            !metadata_text_is_valid(&run.run_id, MAX_ID_BYTES)
+                || !run_ids.insert(run.run_id.as_str())
+                || expected_runs.get(run.run_id.as_str()).copied()
+                    != Some(run.working_directory.as_str())
+                || run.raw_log_retention != ParserPackRawBuildLogRetention::NotRetained
+                || run.command.contains(['<', '>'])
+                || run.command
+                    != format!(
+                        "tree-sitter build --wasm --output ../{}.wasm .",
+                        run.working_directory.as_str()
+                    )
+                || run.bytes != record.build.output.bytes
+                || run.sha256 != record.build.output.sha256
+        })
+    {
+        return Err(LanguageRegistryError::Validation(
+            "parser-pack provenance does not contain two distinct byte-identical clean builds"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate the pinned offline advisory projection for the exact source package.
+fn validate_candidate_advisory(
+    candidate: &ParserPackCandidateTrust,
+    provenance: &ParserPackProvenanceRecord,
+    advisory: &ParserPackAdvisoryRecord,
+) -> Result<(), LanguageRegistryError> {
+    let expected_inputs = BTreeMap::from([
+        (
+            "Cargo.lock",
+            (
+                5_164_u64,
+                "a10d31bf8f75b7736a97cce7e8f8cce0347b6642489e63953a9ba542826f652e",
+            ),
+        ),
+        (
+            "Cargo.toml",
+            (
+                1_435_u64,
+                "424f2a3176e64503609d6dfc53e5c7e81f0900255412c32b44b602b41a9eb949",
+            ),
+        ),
+        (
+            "Cargo.toml.orig",
+            (
+                792_u64,
+                "00c047f354a97883c34e6336b1db56dc6fbae658740b49841d39d1d7129468a0",
+            ),
+        ),
+    ]);
+    let inputs = advisory
+        .inputs
+        .iter()
+        .map(|input| (input.path.as_str(), (input.bytes, input.sha256.as_str())))
+        .collect::<BTreeMap<_, _>>();
+    if advisory.schema_version != PARSER_PACK_ADVISORY_SCHEMA_VERSION
+        || advisory.format != ParserPackAdvisoryFormat::ParserPackAdvisories
+        || advisory.candidate_id != candidate.candidate_id
+        || !is_https_url(&advisory.database.source)
+        || !hex_digest_has_nonzero_digit(advisory.database.revision.as_str())
+        || advisory.tool.name != "cargo-audit"
+        || advisory.tool.command != "cargo audit --json --no-fetch"
+        || advisory.tool.exit_code != 0
+        || !metadata_text_is_valid(&advisory.tool.version, MAX_ID_BYTES)
+        || advisory.component.ecosystem != "crates.io"
+        || advisory.component.checksum_sha256 != provenance.source.package_sha256
+        || advisory.inputs.len() != expected_inputs.len()
+        || inputs != expected_inputs
+        || advisory.raw_result.len()
+            != usize::try_from(advisory.raw_result_bytes).unwrap_or(usize::MAX)
+        || advisory.raw_result.contains(['\r', '\n'])
+        || sha256_hex(advisory.raw_result.as_bytes()) != advisory.raw_result_sha256.as_str()
+        || candidate.release_version
+            != format!(
+                "{}-{}-wasm",
+                advisory.component.name, advisory.component.version
+            )
+        || !candidate
+            .licenses
+            .iter()
+            .any(|license| license.component == advisory.component.name)
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "parser-pack candidate {} advisory record is stale, incomplete, or non-clean",
+            candidate.candidate_id.as_str()
+        )));
+    }
+    reject_duplicate_json_keys(
+        advisory.raw_result.as_bytes(),
+        "parser-pack cargo-audit raw result",
+    )?;
+    let raw =
+        serde_json::from_str::<CargoAuditRawResult>(&advisory.raw_result).map_err(|source| {
+            LanguageRegistryError::JsonDecode {
+                label: "parser-pack cargo-audit raw result",
+                source,
+            }
+        })?;
+    if raw.database.advisory_count != 1_160
+        || raw.database.last_commit.is_some()
+        || raw.database.last_updated.is_some()
+        || raw.lockfile.dependency_count != 23
+        || !raw.settings.target_arch.is_empty()
+        || !raw.settings.target_os.is_empty()
+        || raw.settings.severity.is_some()
+        || !raw.settings.ignore.is_empty()
+        || raw.settings.informational_warnings != ["unmaintained", "unsound", "notice"]
+        || raw.vulnerabilities.found
+        || raw.vulnerabilities.count != 0
+        || !raw.vulnerabilities.list.is_empty()
+        || !raw.warnings.is_empty()
+        || advisory.result.dependency_count != raw.lockfile.dependency_count
+        || advisory.result.vulnerabilities_found != raw.vulnerabilities.found
+        || advisory.result.vulnerability_count != raw.vulnerabilities.count
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "parser-pack candidate {} raw advisory result does not prove the recorded clean scan",
+            candidate.candidate_id.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// Validate SPDX package/file checksums and relationships against the trusted inventory.
+fn validate_candidate_spdx(
+    candidate: &ParserPackCandidateTrust,
+    inventory: &BTreeMap<RegistryPath, &ParserPackTrustedFile>,
+    provenance: &ParserPackProvenanceRecord,
+    advisory: &ParserPackAdvisoryRecord,
+    document: &ParserPackSpdxDocument,
+) -> Result<(), LanguageRegistryError> {
+    if document.spdx_version != "SPDX-2.3"
+        || document.data_license != "CC0-1.0"
+        || document.spdx_id != "SPDXRef-DOCUMENT"
+        || !metadata_text_is_valid(&document.name, 512)
+        || !is_https_url(&document.document_namespace)
+        || !document
+            .document_namespace
+            .contains(candidate.candidate_id.as_str())
+        || !metadata_text_is_valid(&document.creation_info.created, 128)
+        || document.creation_info.creators.is_empty()
+        || document.packages.len() != 2
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "parser-pack candidate {} SPDX document header is incomplete",
+            candidate.candidate_id.as_str()
+        )));
+    }
+    let candidate_package = document
+        .packages
+        .iter()
+        .find(|package| package.spdx_id == "SPDXRef-Package-ProjectAtlas-parser-pack")
+        .ok_or_else(|| {
+            LanguageRegistryError::Validation(
+                "parser-pack SPDX candidate package is absent".to_string(),
+            )
+        })?;
+    let source_package = document
+        .packages
+        .iter()
+        .find(|package| package.spdx_id == "SPDXRef-Package-tree-sitter-javascript-source")
+        .ok_or_else(|| {
+            LanguageRegistryError::Validation(
+                "parser-pack SPDX upstream source package is absent".to_string(),
+            )
+        })?;
+    let expected_license = candidate
+        .licenses
+        .iter()
+        .find(|license| license.component == advisory.component.name)
+        .ok_or_else(|| {
+            LanguageRegistryError::Validation(
+                "parser-pack SPDX package has no trusted license".to_string(),
+            )
+        })?;
+    let parser_file = inventory
+        .values()
+        .find(|file| file.role == ParserPackTrustedFileRole::ParserModule)
+        .ok_or_else(|| {
+            LanguageRegistryError::Validation(
+                "parser-pack SPDX has no trusted parser module".to_string(),
+            )
+        })?;
+    if candidate_package.name != "ProjectAtlas tree-sitter WASM grammar pack"
+        || candidate_package.version_info != candidate.release_version
+        || candidate_package.download_location != "NOASSERTION"
+        || candidate_package.files_analyzed
+        || candidate_package.package_verification_code.is_some()
+        || spdx_sha256(&candidate_package.checksums) != Some(parser_file.sha256.as_str())
+        || candidate_package.license_declared != expected_license.expression
+        || candidate_package.license_concluded != expected_license.expression
+        || !metadata_text_is_valid(&candidate_package.copyright_text, 1024)
+        || !candidate_package.external_refs.is_empty()
+        || source_package.name != advisory.component.name
+        || source_package.version_info != advisory.component.version
+        || source_package.download_location != provenance.source.package_url
+        || source_package.files_analyzed
+        || source_package.package_verification_code.is_some()
+        || spdx_sha256(&source_package.checksums) != Some(provenance.source.package_sha256.as_str())
+        || source_package.license_declared != expected_license.expression
+        || source_package.license_concluded != expected_license.expression
+        || !metadata_text_is_valid(&source_package.copyright_text, 1024)
+        || !source_package.external_refs.iter().any(|reference| {
+            reference.category == "PACKAGE-MANAGER"
+                && reference.kind == "purl"
+                && reference.locator
+                    == format!(
+                        "pkg:cargo/{}@{}",
+                        advisory.component.name, advisory.component.version
+                    )
+        })
+        || document.document_describes.as_slice() != [candidate_package.spdx_id.as_str()]
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "parser-pack candidate {} SPDX package does not bind the exact source and license",
+            candidate.candidate_id.as_str()
+        )));
+    }
+
+    let expected_files = inventory
+        .iter()
+        .filter(|(_, file)| {
+            matches!(
+                file.role,
+                ParserPackTrustedFileRole::ParserModule | ParserPackTrustedFileRole::License
+            )
+        })
+        .map(|(path, file)| (format!("./{}", path.as_str()), *file))
+        .collect::<BTreeMap<_, _>>();
+    if document.files.len() != expected_files.len() {
+        return Err(LanguageRegistryError::Validation(
+            "parser-pack SPDX file inventory is incomplete".to_string(),
+        ));
+    }
+    let mut spdx_ids = BTreeSet::new();
+    let mut expected_relationships = BTreeSet::from([
+        (
+            document.spdx_id.as_str(),
+            "DESCRIBES",
+            candidate_package.spdx_id.as_str(),
+        ),
+        (
+            candidate_package.spdx_id.as_str(),
+            "GENERATED_FROM",
+            source_package.spdx_id.as_str(),
+        ),
+    ]);
+    for file in &document.files {
+        let trusted = expected_files.get(&file.file_name).ok_or_else(|| {
+            LanguageRegistryError::Validation(format!(
+                "parser-pack SPDX contains untrusted file {}",
+                file.file_name
+            ))
+        })?;
+        if !spdx_ids.insert(file.spdx_id.as_str())
+            || spdx_sha256(&file.checksums) != Some(trusted.sha256.as_str())
+            || !metadata_text_is_valid(&file.copyright_text, 1024)
+            || file.license_info_in_files.is_empty()
+            || (trusted.role == ParserPackTrustedFileRole::ParserModule
+                && file.license_concluded != expected_license.expression)
+            || (trusted.role == ParserPackTrustedFileRole::License
+                && file.license_concluded != "NOASSERTION")
+        {
+            return Err(LanguageRegistryError::Validation(format!(
+                "parser-pack SPDX file {} is not exactly linked to trusted bytes",
+                file.file_name
+            )));
+        }
+        expected_relationships.insert((
+            candidate_package.spdx_id.as_str(),
+            "CONTAINS",
+            file.spdx_id.as_str(),
+        ));
+    }
+    let relationships = document
+        .relationships
+        .iter()
+        .map(|relationship| {
+            (
+                relationship.spdx_element_id.as_str(),
+                relationship.relationship_type.as_str(),
+                relationship.related_spdx_element.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if document.relationships.len() != expected_relationships.len()
+        || relationships != expected_relationships
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "parser-pack candidate {} SPDX relationship graph is not exact",
+            candidate.candidate_id.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// Return an exact SHA-256 checksum from an SPDX checksum set.
+fn spdx_sha256(checksums: &[ParserPackSpdxChecksum]) -> Option<&str> {
+    checksums
+        .iter()
+        .find(|checksum| checksum.algorithm == "SHA256")
+        .map(|checksum| checksum.checksum_value.as_str())
+}
+
+/// Return whether a validated hexadecimal identity is not the all-zero sentinel.
+fn hex_digest_has_nonzero_digit(value: &str) -> bool {
+    value.bytes().any(|byte| byte != b'0')
+}
+
+/// Return whether one metadata field is a bounded absolute HTTPS URL.
+fn is_https_url(value: &str) -> bool {
+    value.starts_with("https://")
+        && value.len() > "https://".len()
+        && value.len() <= 2048
+        && value
+            .bytes()
+            .all(|byte| !byte.is_ascii_control() && !byte.is_ascii_whitespace())
 }
 
 validated_id!(
@@ -2540,7 +5962,7 @@ enum AcceptedDetectionStage {
     ProjectContext,
 }
 
-/// Complete accepted detection order before explicit override support lands.
+/// Complete accepted automatic detection order.
 const ACCEPTED_DETECTION_PRECEDENCE: [AcceptedDetectionStage; 6] = [
     AcceptedDetectionStage::ExactFilename,
     AcceptedDetectionStage::CompoundExtension,
@@ -2731,6 +6153,27 @@ struct AcceptedCompactParser {
     overrides: Option<AcceptedParserOverrides>,
 }
 
+/// Closed accepted process boundary.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+enum AcceptedPackProcess {
+    /// The long-lived default `ProjectAtlas` process.
+    #[serde(rename = "projectatlas")]
+    ProjectAtlas,
+    /// A separately supervised worker process.
+    SupervisedWorker,
+}
+
+impl AcceptedPackProcess {
+    /// Return the lock runtime that owns this accepted process boundary.
+    const fn lock_runtime(self) -> PackRuntime {
+        match self {
+            Self::ProjectAtlas => PackRuntime::InProcess,
+            Self::SupervisedWorker => PackRuntime::SupervisedWorker,
+        }
+    }
+}
+
 /// One pack row in the accepted target.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2743,8 +6186,8 @@ struct AcceptedPack {
     required_for_accepted_breadth: Option<bool>,
     /// Whether the pack is installed by default.
     installed_by_default: bool,
-    /// Process boundary spelling.
-    process: String,
+    /// Closed process boundary.
+    process: AcceptedPackProcess,
     /// Whether scan/query may access the network.
     network_during_scan_or_query: bool,
     /// Optional language owner.
@@ -3573,13 +7016,7 @@ fn validate_and_generate(
     lock_bytes: &[u8],
     fixed_inputs: &FixedInputBytes<'_>,
 ) -> Result<GeneratedArtifacts, LanguageRegistryError> {
-    reject_duplicate_json_keys(lock_bytes, "language registry lock")?;
-    let lock = serde_json::from_slice::<LanguageRegistryLock>(lock_bytes).map_err(|source| {
-        LanguageRegistryError::JsonDecode {
-            label: "language registry lock",
-            source,
-        }
-    })?;
+    let lock = decode_language_registry_lock(lock_bytes)?;
 
     verify_raw_digest(
         fixed_inputs.accepted_capability_registry,
@@ -3590,6 +7027,11 @@ fn validate_and_generate(
         fixed_inputs.historical_runtime_contract,
         &lock.historical_contract.raw_sha256,
         "historical runtime contract",
+    )?;
+    verify_raw_digest(
+        fixed_inputs.parser_pack_trust,
+        &lock.parser_pack_trust.raw_sha256,
+        "parser-pack trust manifest",
     )?;
 
     reject_duplicate_json_keys(
@@ -3611,6 +7053,13 @@ fn validate_and_generate(
         .map_err(|source| LanguageRegistryError::HistoricalDecode(source.to_string()))?;
     let historical = serde_json::from_value::<HistoricalRuntimeContract>(historical_value)
         .map_err(|source| LanguageRegistryError::HistoricalDecode(source.to_string()))?;
+    let parser_pack_trust = decode_parser_pack_trust(fixed_inputs.parser_pack_trust)?;
+    let parser_pack_installed_byte_limit = validate_parser_pack_trust(
+        &lock,
+        &parser_pack_trust,
+        fixed_inputs.parser_pack_payloads,
+        fixed_inputs.repository_intelligence_contracts,
+    )?;
 
     validate_accepted_target(&lock, &accepted)?;
     validate_registry_lock(&lock, &accepted)?;
@@ -3629,11 +7078,19 @@ fn validate_and_generate(
     )?;
 
     let source_lock_sha256 = sha256_hex(lock_bytes);
-    let registry_contract_sha256 = registry_contract_digest(&lock, &accepted, &historical);
+    let registry_contract_sha256 = registry_contract_digest(
+        &lock,
+        &accepted,
+        &historical,
+        &parser_pack_trust,
+        parser_pack_installed_byte_limit,
+    );
     render_generated_artifacts(
         &lock,
         &accepted,
         &historical,
+        &parser_pack_trust,
+        parser_pack_installed_byte_limit,
         &source_lock_sha256,
         &registry_contract_sha256,
     )
@@ -4279,40 +7736,73 @@ fn validate_accepted_target(
         ));
     }
 
+    let lock_pack_runtimes = lock
+        .packs
+        .iter()
+        .map(|pack| (pack.pack_id.clone(), pack.runtime))
+        .collect::<BTreeMap<_, _>>();
     let mut pack_ids = BTreeSet::new();
     let mut pack_language_owners = BTreeMap::new();
     for pack in &source.packs {
-        if !pack_ids.insert(pack.pack_id.clone())
-            || pack.process.trim().is_empty()
-            || pack.network_during_scan_or_query
-        {
+        if !pack_ids.insert(pack.pack_id.clone()) || pack.network_during_scan_or_query {
             return Err(LanguageRegistryError::Validation(format!(
                 "invalid or duplicate accepted pack {}",
                 pack.pack_id.as_str()
             )));
         }
-        match pack.pack_id.as_str() {
-            "default-core"
+        let expected_process = match pack.pack_id.as_str() {
+            DEFAULT_CORE_PACK_ID
                 if pack.required == Some(true)
                     && pack.required_for_accepted_breadth.is_none()
                     && pack.installed_by_default
-                    && pack.language_owner.is_some() => {}
-            "broad-language-pack"
+                    && pack.language_owner.is_some() =>
+            {
+                AcceptedPackProcess::ProjectAtlas
+            }
+            BROAD_LANGUAGE_PACK_ID
                 if pack.required.is_none()
                     && pack.required_for_accepted_breadth == Some(true)
                     && !pack.installed_by_default
-                    && pack.language_owner.is_some() => {}
-            "semantic-pack"
+                    && pack.language_owner.is_some() =>
+            {
+                AcceptedPackProcess::SupervisedWorker
+            }
+            SEMANTIC_PACK_ID
                 if pack.required == Some(false)
                     && pack.required_for_accepted_breadth.is_none()
                     && !pack.installed_by_default
-                    && pack.language_owner.is_none() => {}
+                    && pack.language_owner.is_none() =>
+            {
+                AcceptedPackProcess::SupervisedWorker
+            }
             _ => {
                 return Err(LanguageRegistryError::Validation(format!(
                     "accepted pack {} has inconsistent ownership fields",
                     pack.pack_id.as_str()
                 )));
             }
+        };
+        if pack.process != expected_process {
+            return Err(LanguageRegistryError::Validation(format!(
+                "accepted pack {} crosses its required process boundary: expected {:?}, found {:?}",
+                pack.pack_id.as_str(),
+                expected_process,
+                pack.process
+            )));
+        }
+        let lock_runtime = lock_pack_runtimes.get(&pack.pack_id).ok_or_else(|| {
+            LanguageRegistryError::Validation(format!(
+                "accepted pack {} has no matching lock runtime",
+                pack.pack_id.as_str()
+            ))
+        })?;
+        if pack.process.lock_runtime() != *lock_runtime {
+            return Err(LanguageRegistryError::Validation(format!(
+                "accepted pack {} process {:?} disagrees with lock runtime {:?}",
+                pack.pack_id.as_str(),
+                pack.process,
+                lock_runtime
+            )));
         }
         if let Some(owner) = &pack.language_owner {
             pack_language_owners.insert(pack.pack_id.clone(), owner.clone());
@@ -4514,6 +8004,16 @@ fn validate_accepted_target(
                 parser.parser_id.as_str()
             )));
         }
+        if parser.pack_id.as_str() == BROAD_LANGUAGE_PACK_ID
+            && (parser.evidence_state
+                != AcceptedParserEvidenceState::PendingAssetFixtureAndPlatformVerification
+                || parser.advertised)
+        {
+            return Err(LanguageRegistryError::Validation(format!(
+                "accepted broad parser {} must remain pending asset, fixture, and platform verification and unadvertised",
+                parser.parser_id.as_str()
+            )));
+        }
         if parser.advertised {
             return Err(LanguageRegistryError::Validation(format!(
                 "accepted parser {} is advertised before its evidence is complete",
@@ -4694,9 +8194,9 @@ fn validate_registry_lock(
             )));
         }
         match (pack.pack_id.as_str(), pack.ownership, pack.runtime) {
-            ("default-core", PackOwnership::DefaultCore, PackRuntime::InProcess)
+            (DEFAULT_CORE_PACK_ID, PackOwnership::DefaultCore, PackRuntime::InProcess)
             | (
-                "broad-language-pack" | "semantic-pack",
+                BROAD_LANGUAGE_PACK_ID | SEMANTIC_PACK_ID,
                 PackOwnership::Optional,
                 PackRuntime::SupervisedWorker,
             ) => {}
@@ -4716,6 +8216,11 @@ fn validate_registry_lock(
         .modes
         .iter()
         .map(|mode| (mode.mode_id.clone(), mode))
+        .collect::<BTreeMap<_, _>>();
+    let accepted_parsers = accepted
+        .parsers
+        .iter()
+        .map(|parser| (parser.parser_id.clone(), parser))
         .collect::<BTreeMap<_, _>>();
     for mode in &lock.current_modes {
         if !current_mode_ids.insert(mode.mode_id.clone()) {
@@ -4789,6 +8294,7 @@ fn validate_registry_lock(
     }
 
     validate_detection_rules(lock, &current_mode_ids)?;
+    validate_semantic_modes(lock, &current_mode_ids)?;
 
     let fixture_ids = unique_ids(
         lock.fixtures.iter().map(|fixture| &fixture.fixture_id),
@@ -4823,6 +8329,7 @@ fn validate_registry_lock(
 
     let mut parser_ids = BTreeSet::new();
     let mut built_in_parsers = BTreeSet::new();
+    let mut parser_components_by_builtin = BTreeMap::new();
     for parser in &lock.parser_components {
         if !parser_ids.insert(parser.parser_id.clone()) {
             return Err(LanguageRegistryError::Validation(format!(
@@ -4837,11 +8344,31 @@ fn validate_registry_lock(
                 parser.built_in_parser
             )));
         }
-        if !pack_ids.contains(&parser.current_pack_id) {
+        let (ownership, runtime) =
+            pack_contracts.get(&parser.current_pack_id).ok_or_else(|| {
+                LanguageRegistryError::Validation(format!(
+                    "parser component {} references undeclared pack {}",
+                    parser.parser_id.as_str(),
+                    parser.current_pack_id.as_str()
+                ))
+            })?;
+        if parser.current_pack_id.as_str() != DEFAULT_CORE_PACK_ID
+            || *ownership != PackOwnership::DefaultCore
+            || *runtime != PackRuntime::InProcess
+        {
             return Err(LanguageRegistryError::Validation(format!(
-                "parser component {} references undeclared pack {}",
+                "parser component {} is not a closed default-core in-process parser choice",
+                parser.parser_id.as_str()
+            )));
+        }
+        let expected_component_id =
+            format!("parser.builtin.{}", parser.built_in_parser.contract_tag());
+        if parser.parser_id.as_str() != expected_component_id.as_str() {
+            return Err(LanguageRegistryError::Validation(format!(
+                "parser component {} does not match built-in parser identity {:?}; expected {}",
                 parser.parser_id.as_str(),
-                parser.current_pack_id.as_str()
+                parser.built_in_parser,
+                expected_component_id
             )));
         }
         if parser.implementation != ParserImplementation::CompiledTreeSitter {
@@ -4948,16 +8475,64 @@ fn validate_registry_lock(
                 missing_evidence.as_str()
             )));
         }
+        parser_components_by_builtin.insert(parser.built_in_parser, parser);
     }
+    let mut routed_built_in_parsers = BTreeSet::new();
     for mode in &lock.current_modes {
-        if let SymbolPipeline::BuiltIn { parser, augmenters } = &mode.symbols
-            && (!built_in_parsers.contains(parser)
-                || augmenters.iter().collect::<BTreeSet<_>>().len() != augmenters.len())
-        {
-            return Err(LanguageRegistryError::Validation(format!(
-                "current mode {} references an invalid built-in route",
-                mode.mode_id.as_str()
-            )));
+        if let SymbolPipeline::BuiltIn { parser, augmenters } = &mode.symbols {
+            if augmenters.iter().collect::<BTreeSet<_>>().len() != augmenters.len() {
+                return Err(LanguageRegistryError::Validation(format!(
+                    "current mode {} references an invalid built-in route",
+                    mode.mode_id.as_str()
+                )));
+            }
+            let component = parser_components_by_builtin.get(parser).ok_or_else(|| {
+                LanguageRegistryError::Validation(format!(
+                    "current mode {} has no unique parser component for {:?}",
+                    mode.mode_id.as_str(),
+                    parser
+                ))
+            })?;
+            routed_built_in_parsers.insert(*parser);
+            let accepted_mode = accepted_modes.get(&mode.accepted_mode_id).ok_or_else(|| {
+                LanguageRegistryError::Validation(format!(
+                    "current built-in mode {} references missing accepted mode {}",
+                    mode.mode_id.as_str(),
+                    mode.accepted_mode_id.as_str()
+                ))
+            })?;
+            let expected_accepted_parser_id = AcceptedParserId::try_from(format!(
+                "parse.{}",
+                component.built_in_parser.contract_tag()
+            ))?;
+            if accepted_mode.pack_id.as_str() != DEFAULT_CORE_PACK_ID
+                || accepted_mode.parser_id != expected_accepted_parser_id
+            {
+                return Err(LanguageRegistryError::Validation(format!(
+                    "current built-in mode {} does not remain bound to default-core accepted parser {}",
+                    mode.mode_id.as_str(),
+                    expected_accepted_parser_id.as_str()
+                )));
+            }
+            let accepted_parser =
+                accepted_parsers
+                    .get(&accepted_mode.parser_id)
+                    .ok_or_else(|| {
+                        LanguageRegistryError::Validation(format!(
+                            "current built-in mode {} accepted parser {} is missing",
+                            mode.mode_id.as_str(),
+                            accepted_mode.parser_id.as_str()
+                        ))
+                    })?;
+            if accepted_parser.pack_id.as_str() != DEFAULT_CORE_PACK_ID
+                || accepted_parser.parser_id != expected_accepted_parser_id
+            {
+                return Err(LanguageRegistryError::Validation(format!(
+                    "current built-in parser {:?} crosses the default-core accepted parser boundary through {}",
+                    parser,
+                    accepted_parser.parser_id.as_str()
+                )));
+            }
         }
         if let SymbolPipeline::Fallback { augmenters } = &mode.symbols
             && augmenters.iter().collect::<BTreeSet<_>>().len() != augmenters.len()
@@ -4967,6 +8542,12 @@ fn validate_registry_lock(
                 mode.mode_id.as_str()
             )));
         }
+    }
+    if routed_built_in_parsers != built_in_parsers {
+        return Err(LanguageRegistryError::Validation(
+            "current parser components and built-in routes do not describe the same closed inventory"
+                .to_string(),
+        ));
     }
 
     for asset in &lock.assets {
@@ -5207,6 +8788,30 @@ fn validate_detection_rules(
             )));
         }
         claimed_mode_ids.insert(rule.mode_id().clone());
+        if let DetectionRule::Content {
+            detector_id,
+            detector_kind,
+            mode_id,
+            ..
+        } = rule
+        {
+            if detector_id.detection_kind() != *detector_kind {
+                return Err(LanguageRegistryError::Validation(format!(
+                    "content detector {} requires {} but was declared as {}",
+                    detector_id.contract_id(),
+                    detector_id.detection_kind().contract_tag(),
+                    detector_kind.contract_tag()
+                )));
+            }
+            if detector_id.mode_id() != mode_id.as_str() {
+                return Err(LanguageRegistryError::Validation(format!(
+                    "content detector {} requires mode {} but was declared for {}",
+                    detector_id.contract_id(),
+                    detector_id.mode_id(),
+                    mode_id.as_str()
+                )));
+            }
+        }
         let pattern = rule.pattern();
         let pattern_valid = match rule {
             DetectionRule::ExactFilename { .. } => {
@@ -5233,9 +8838,13 @@ fn validate_detection_rules(
         let key = (rule.layer_tag().to_string(), pattern.to_ascii_lowercase());
         let overlapping = claims.entry(key).or_default();
         for (prior, prior_pattern) in overlapping.iter() {
-            let patterns_overlap = prior_pattern == pattern
+            let lookup_patterns_overlap = prior_pattern == pattern
                 || prior.case_policy() == CasePolicy::AsciiInsensitive
                 || rule.case_policy() == CasePolicy::AsciiInsensitive;
+            let path_patterns_overlap = prior_pattern == pattern
+                || prior.path_case_policy() == CasePolicy::AsciiInsensitive
+                || rule.path_case_policy() == CasePolicy::AsciiInsensitive;
+            let patterns_overlap = lookup_patterns_overlap || path_patterns_overlap;
             let equivalent_scanner_alias = matches!(rule, DetectionRule::Extension { .. })
                 && matches!(prior, DetectionRule::Extension { .. })
                 && prior.mode_id() == rule.mode_id()
@@ -5247,7 +8856,7 @@ fn validate_detection_rules(
                 && prior_pattern.eq_ignore_ascii_case(pattern);
             if patterns_overlap && !equivalent_scanner_alias {
                 return Err(LanguageRegistryError::Validation(format!(
-                    "detection rules {} (mode {}) and {} (mode {}) ambiguously claim {} field values {prior_pattern:?} and {pattern:?} at {} precedence",
+                    "detection rules {} (mode {}) and {} (mode {}) ambiguously claim {} field values {prior_pattern:?} and {pattern:?} at {} precedence across lookup/path matching",
                     prior.id().as_str(),
                     prior.mode_id().as_str(),
                     rule.id().as_str(),
@@ -5258,12 +8867,69 @@ fn validate_detection_rules(
             }
         }
         overlapping.push((rule, pattern.to_string()));
-        let _path_policy = rule.path_case_policy();
     }
     if let Some(phantom_mode) = current_mode_ids.difference(&claimed_mode_ids).next() {
         return Err(LanguageRegistryError::Validation(format!(
             "current mode {} has no detection rule",
             phantom_mode.as_str()
+        )));
+    }
+    let declared_content_detectors = lock
+        .detection_rules
+        .iter()
+        .filter_map(|rule| match rule {
+            DetectionRule::Content { detector_id, .. } => Some(*detector_id),
+            DetectionRule::ExactFilename { .. }
+            | DetectionRule::CompoundExtension { .. }
+            | DetectionRule::Extension { .. } => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let required_content_detectors = BUILT_IN_CONTENT_DETECTORS
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if !declared_content_detectors.is_empty()
+        && declared_content_detectors != required_content_detectors
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "built-in content-detector inventory mismatch: declared {declared_content_detectors:?}, required {required_content_detectors:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate closed semantic modes and their current base-language ownership.
+fn validate_semantic_modes(
+    lock: &LanguageRegistryLock,
+    current_mode_ids: &BTreeSet<ModeId>,
+) -> Result<(), LanguageRegistryError> {
+    let mut declared = BTreeSet::new();
+    for rule in &lock.semantic_modes {
+        if !declared.insert(rule.mode) {
+            return Err(LanguageRegistryError::Validation(format!(
+                "duplicate semantic mode {}",
+                rule.mode.public_mode()
+            )));
+        }
+        if !current_mode_ids.contains(&rule.base_mode_id) {
+            return Err(LanguageRegistryError::Validation(format!(
+                "semantic mode {} references missing base mode {}",
+                rule.mode.public_mode(),
+                rule.base_mode_id.as_str()
+            )));
+        }
+        if rule.mode.base_mode_id() != rule.base_mode_id.as_str() {
+            return Err(LanguageRegistryError::Validation(format!(
+                "semantic mode {} requires base mode {} but was declared for {}",
+                rule.mode.public_mode(),
+                rule.mode.base_mode_id(),
+                rule.base_mode_id.as_str()
+            )));
+        }
+    }
+    let required = SEMANTIC_MODES.into_iter().collect::<BTreeSet<_>>();
+    if !declared.is_empty() && declared != required {
+        return Err(LanguageRegistryError::Validation(format!(
+            "semantic-mode inventory mismatch: declared {declared:?}, required {required:?}"
         )));
     }
     Ok(())
@@ -5794,6 +9460,8 @@ fn registry_contract_digest(
     lock: &LanguageRegistryLock,
     accepted: &AcceptedTargetContract,
     historical: &HistoricalRuntimeContract,
+    parser_pack_trust: &ParserPackTrustManifest,
+    parser_pack_installed_byte_limit: u64,
 ) -> String {
     let mut digest = ContractDigest::new();
     digest.record("registry-lock");
@@ -5813,6 +9481,110 @@ fn registry_contract_digest(
     digest.field("release", lock.historical_contract.release.as_str());
     digest.field("commit", lock.historical_contract.commit.as_str());
     digest.field("raw-sha256", lock.historical_contract.raw_sha256.as_str());
+    digest.record("parser-pack-trust-binding");
+    digest.field("path", lock.parser_pack_trust.path.as_str());
+    digest.field("raw-sha256", lock.parser_pack_trust.raw_sha256.as_str());
+    digest.number(
+        "broad-language-pack-installed-byte-limit",
+        parser_pack_installed_byte_limit,
+    );
+    let mut candidates = parser_pack_trust.candidates.iter().collect::<Vec<_>>();
+    candidates.sort_by_key(|candidate| candidate.candidate_id.as_str());
+    digest.sequence("parser-pack-candidates", candidates.len());
+    for candidate in candidates {
+        digest.record("parser-pack-candidate");
+        digest.field("candidate-id", candidate.candidate_id.as_str());
+        digest.field("eligibility", candidate.eligibility.contract_tag());
+        digest.boolean("advertised", candidate.advertised);
+        digest.field("pack-id", candidate.pack_id.as_str());
+        digest.field("release-version", &candidate.release_version);
+        digest.field("pack-abi-id", candidate.pack_abi.abi_id.as_str());
+        digest.number("pack-abi-version", u64::from(candidate.pack_abi.version));
+        digest.field("grammar-abi-id", candidate.grammar_abi.abi_id.as_str());
+        digest.number(
+            "grammar-abi-version",
+            u64::from(candidate.grammar_abi.version),
+        );
+        digest.field(
+            "grammar-abi-state",
+            candidate.grammar_abi.state.contract_tag(),
+        );
+        digest.field("packaged-platform", candidate.packaged_platform.as_str());
+        digest.field("payload-root", candidate.payload_root.as_str());
+        digest.field("manifest-path", candidate.manifest_path.as_str());
+        digest.number("installed-bytes", candidate.installed_bytes);
+        let mut inventory = candidate.inventory.iter().collect::<Vec<_>>();
+        inventory.sort_by_key(|file| file.path.as_str());
+        digest.sequence("candidate-files", inventory.len());
+        for file in inventory {
+            digest.record("candidate-file");
+            digest.field("path", file.path.as_str());
+            digest.field("role", file.role.contract_tag());
+            digest.number("bytes", file.bytes);
+            digest.field("sha256", file.sha256.as_str());
+        }
+        digest.record("candidate-provenance");
+        digest.field("source", &candidate.provenance.source);
+        digest.field("revision", candidate.provenance.revision.as_str());
+        digest.field(
+            "source-package-sha256",
+            candidate.provenance.source_package_sha256.as_str(),
+        );
+        digest.field("toolchain", &candidate.provenance.toolchain);
+        digest.field(
+            "local-output-identity",
+            candidate
+                .provenance
+                .evidence_state
+                .local_output_identity
+                .contract_tag(),
+        );
+        digest.field(
+            "hosted-reproduction",
+            candidate
+                .provenance
+                .evidence_state
+                .hosted_reproduction
+                .contract_tag(),
+        );
+        digest.field(
+            "raw-build-logs",
+            candidate
+                .provenance
+                .evidence_state
+                .raw_build_logs
+                .contract_tag(),
+        );
+        digest.field(
+            "packaged-windows-identity",
+            candidate
+                .provenance
+                .evidence_state
+                .packaged_windows_identity
+                .contract_tag(),
+        );
+        digest.field("record-path", candidate.provenance.record_path.as_str());
+        digest.sequence("patch-paths", candidate.provenance.patch_paths.len());
+        for path in &candidate.provenance.patch_paths {
+            digest.field("patch-path", path.as_str());
+        }
+        digest.sequence("candidate-licenses", candidate.licenses.len());
+        for license in &candidate.licenses {
+            digest.record("candidate-license");
+            digest.field("component", &license.component);
+            digest.field("expression", &license.expression);
+            digest.field("record-path", license.record_path.as_str());
+        }
+        digest.field(
+            "advisory-record-path",
+            candidate.advisory_record_path.as_str(),
+        );
+        digest.field(
+            "wasm-validation-record-path",
+            candidate.wasm_validation_record_path.as_str(),
+        );
+        digest.field("sbom-record-path", candidate.sbom_record_path.as_str());
+    }
 
     let mut packs = lock.packs.iter().collect::<Vec<_>>();
     packs.sort_by_key(|pack| pack.pack_id.as_str());
@@ -5839,9 +9611,22 @@ fn registry_contract_digest(
         digest.field("path-case", rule.path_case_policy().contract_tag());
         digest.boolean("scanner-visible", rule.scanner_visible());
         digest.field("mode-id", rule.mode_id().as_str());
-        if let Some(content_kind) = rule.content_kind() {
-            digest.field("content-kind", content_kind.contract_tag());
+        if let DetectionRule::Content {
+            detector_id,
+            detector_kind,
+            ..
+        } = rule
+        {
+            digest.field("content-detector", detector_id.contract_id());
+            digest.field("content-kind", detector_kind.contract_tag());
         }
+    }
+
+    digest.sequence("semantic-modes", lock.semantic_modes.len());
+    for semantic_mode in &lock.semantic_modes {
+        digest.record("semantic-mode");
+        digest.field("mode", semantic_mode.mode.public_mode());
+        digest.field("base-mode-id", semantic_mode.base_mode_id.as_str());
     }
 
     digest.sequence("ordered-current-modes", lock.current_modes.len());
@@ -6386,7 +10171,7 @@ impl GeneratedRustFormatter {
 
     /// Build the shell-free, repository-pinned formatter command for one file.
     fn command(&self, path: &Path) -> ProcessCommand {
-        bounded_toolchain_command(&self.program)
+        bounded_generated_rust_command(&self.program)
             .args(["--edition", "2024", "--style-edition", "2024"])
             .arg(path)
     }
@@ -6397,7 +10182,7 @@ impl GeneratedRustFormatter {
         owner: &'static str,
         command: &ProcessCommand,
     ) -> Result<ProcessResult<String>, LanguageRegistryError> {
-        run_bounded_toolchain_process(&self.runtime, owner, command)
+        run_bounded_generated_rust_process(&self.runtime, owner, command)
     }
 
     /// Format one generated Rust projection through the pinned process boundary.
@@ -6422,61 +10207,62 @@ impl GeneratedRustFormatter {
     }
 }
 
-/// Apply the shared timeout, lifetime, window, and capture contract to one toolchain process.
-fn bounded_toolchain_command(program: impl AsRef<std::ffi::OsStr>) -> ProcessCommand {
+/// Apply the shared timeout, lifetime, window, and capture contract to one generated Rust process.
+fn bounded_generated_rust_command(program: impl AsRef<std::ffi::OsStr>) -> ProcessCommand {
     ProcessCommand::new(program)
-        .timeout(RUST_FORMATTER_TIMEOUT)
+        .timeout(GENERATED_RUST_PROCESS_TIMEOUT)
         .kill_on_parent_death()
         .create_no_window()
         .output_buffer(
-            OutputBufferPolicy::unbounded().with_max_bytes(RUST_FORMATTER_STREAM_LIMIT_BYTES),
+            OutputBufferPolicy::unbounded()
+                .with_max_bytes(GENERATED_RUST_PROCESS_STREAM_LIMIT_BYTES),
         )
 }
 
-/// Run one bounded toolchain process to a reaped terminal outcome.
-fn run_bounded_toolchain_process(
+/// Run one bounded generated Rust process to a reaped terminal outcome.
+fn run_bounded_generated_rust_process(
     runtime: &tokio::runtime::Runtime,
     owner: &'static str,
     command: &ProcessCommand,
 ) -> Result<ProcessResult<String>, LanguageRegistryError> {
     let output = runtime
         .block_on(command.output_string())
-        .map_err(|source| LanguageRegistryError::FormatRust {
+        .map_err(|source| LanguageRegistryError::GeneratedRustProcess {
             owner,
-            detail: format!("toolchain process failed to launch or complete: {source}"),
+            detail: format!("process failed to launch or complete: {source}"),
         })?;
     if output.timed_out() {
-        return Err(LanguageRegistryError::FormatRust {
+        return Err(LanguageRegistryError::GeneratedRustProcess {
             owner,
             detail: format!(
-                "formatter process exceeded its configured timeout; stdout: {:?}; stderr: {:?}",
+                "process exceeded its configured timeout; stdout: {:?}; stderr: {:?}",
                 output.stdout(),
                 output.stderr()
             ),
         });
     }
     if output.truncated() {
-        return Err(LanguageRegistryError::FormatRust {
+        return Err(LanguageRegistryError::GeneratedRustProcess {
             owner,
             detail: format!(
-                "formatter process output exceeded {RUST_FORMATTER_STREAM_LIMIT_BYTES} retained bytes per stream"
+                "process output exceeded {GENERATED_RUST_PROCESS_STREAM_LIMIT_BYTES} retained bytes per stream"
             ),
         });
     }
     match output.code() {
         Some(0) => Ok(output),
-        Some(code) => Err(LanguageRegistryError::FormatRust {
+        Some(code) => Err(LanguageRegistryError::GeneratedRustProcess {
             owner,
             detail: format!(
-                "formatter process exited with code {code}; stdout: {:?}; stderr: {:?}",
+                "process exited with code {code}; stdout: {:?}; stderr: {:?}",
                 output.stdout(),
                 output.stderr()
             ),
         }),
-        None => Err(LanguageRegistryError::FormatRust {
+        None => Err(LanguageRegistryError::GeneratedRustProcess {
             owner,
             detail: format!(
-                "formatter process terminated without an exit code; stdout: {:?}; stderr: {:?}",
+                "process terminated without an exit code; stdout: {:?}; stderr: {:?}",
                 output.stdout(),
                 output.stderr()
             ),
@@ -6489,8 +10275,8 @@ fn pinned_rustfmt_program(
     runtime: &tokio::runtime::Runtime,
     toolchain: &str,
 ) -> Result<PathBuf, LanguageRegistryError> {
-    let sysroot_command = bounded_toolchain_command("rustc").args(["--print", "sysroot"]);
-    let sysroot_output = run_bounded_toolchain_process(
+    let sysroot_command = bounded_generated_rust_command("rustc").args(["--print", "sysroot"]);
+    let sysroot_output = run_bounded_generated_rust_process(
         runtime,
         "generated Rust formatter toolchain",
         &sysroot_command,
@@ -6526,8 +10312,8 @@ fn pinned_rustfmt_program(
         }
     }
 
-    let rustc_command = bounded_toolchain_command(&rustc).args(["--version", "--verbose"]);
-    let rustc_output = run_bounded_toolchain_process(
+    let rustc_command = bounded_generated_rust_command(&rustc).args(["--version", "--verbose"]);
+    let rustc_output = run_bounded_generated_rust_process(
         runtime,
         "generated Rust formatter toolchain",
         &rustc_command,
@@ -6544,8 +10330,8 @@ fn pinned_rustfmt_program(
     let rustc_commit = toolchain_version_field(rustc_output.stdout(), "commit-hash")?;
     let rustc_date = toolchain_version_field(rustc_output.stdout(), "commit-date")?;
 
-    let rustfmt_command = bounded_toolchain_command(&rustfmt).arg("--version");
-    let rustfmt_output = run_bounded_toolchain_process(
+    let rustfmt_command = bounded_generated_rust_command(&rustfmt).arg("--version");
+    let rustfmt_output = run_bounded_generated_rust_process(
         runtime,
         "generated Rust formatter toolchain",
         &rustfmt_command,
@@ -6609,6 +10395,8 @@ fn render_generated_artifacts(
     lock: &LanguageRegistryLock,
     accepted: &AcceptedTargetContract,
     historical: &HistoricalRuntimeContract,
+    parser_pack_trust: &ParserPackTrustManifest,
+    parser_pack_installed_byte_limit: u64,
     source_lock_sha256: &str,
     registry_contract_sha256: &str,
 ) -> Result<GeneratedArtifacts, LanguageRegistryError> {
@@ -6629,19 +10417,30 @@ fn render_generated_artifacts(
         cli: formatter
             .format(
                 "CLI language policy registry",
-                &render_cli_registry(lock, accepted, source_lock_sha256, registry_contract_sha256)?,
+                &render_cli_registry(
+                    lock,
+                    accepted,
+                    parser_pack_trust,
+                    parser_pack_installed_byte_limit,
+                    source_lock_sha256,
+                    registry_contract_sha256,
+                )?,
             )?
             .into_bytes(),
         evidence: render_capability_state(
             lock,
             accepted,
             historical,
+            parser_pack_trust,
+            parser_pack_installed_byte_limit,
             source_lock_sha256,
             registry_contract_sha256,
         )?,
         documentation: render_documentation_support_matrix(
             lock,
             accepted,
+            parser_pack_trust,
+            parser_pack_installed_byte_limit,
             source_lock_sha256,
             registry_contract_sha256,
         )?,
@@ -6780,6 +10579,26 @@ fn render_core_registry(
          \x20   /// Parser coverage level.\n\
          \x20   pub parser_support: LanguageParserSupport,\n\
          }\n\n\
+         #[allow(dead_code, reason = \"closed generated content matcher consumed only by the rich detector\")]\n\
+         #[derive(Clone, Copy, Debug, Eq, PartialEq)]\n\
+         pub(crate) enum LanguageContentDetector {\n\
+         \x20   ShebangPython,\n\
+         \x20   ShebangShell,\n\
+         \x20   ShebangJavascript,\n\
+         \x20   ShebangRuby,\n\
+         \x20   ShebangPerl,\n\
+         \x20   SignaturePhp,\n\
+         \x20   SignatureXml,\n\
+         \x20   ContextDockerBuild,\n\
+         }\n\n\
+         /// Optional semantic interpretation layered over a compatible base language.\n\
+         #[derive(Clone, Copy, Debug, Eq, PartialEq)]\n\
+         pub enum LanguageSemanticMode {\n\
+         \x20   /// Kubernetes resource semantics over YAML.\n\
+         \x20   Kubernetes,\n\
+         \x20   /// Kustomize configuration semantics over YAML.\n\
+         \x20   Kustomize,\n\
+         }\n\n\
          #[allow(dead_code, reason = \"complete generated registry projection retains validated metadata outside the runtime routing facade\")]\n\
          #[derive(Clone, Copy, Debug, Eq, PartialEq)]\n\
          pub(crate) enum DetectionStage {\n\
@@ -6804,13 +10623,25 @@ fn render_core_registry(
          \x20   pub(crate) pattern: &'static str,\n\
          \x20   pub(crate) lookup_case: DetectionCase,\n\
          \x20   pub(crate) path_case: DetectionCase,\n\
+         \x20   pub(crate) content_detector: Option<LanguageContentDetector>,\n\
          \x20   pub(crate) scanner_visible: bool,\n\
-         \x20   pub(crate) mode: &'static str,\n\
+         \x20   pub(crate) language: &'static str,\n\
          }\n\n\
          #[allow(dead_code, reason = \"complete generated registry projection retains validated metadata outside the runtime routing facade\")]\n\
          pub(crate) static LANGUAGE_DETECTION_RULES: &[LanguageDetectionRule] = &[\n",
     );
     for rule in &lock.detection_rules {
+        let public_mode = lock
+            .current_modes
+            .iter()
+            .find(|mode| &mode.mode_id == rule.mode_id())
+            .ok_or_else(|| {
+                LanguageRegistryError::Validation(format!(
+                    "detection rule {} references missing current mode {}",
+                    rule.id().as_str(),
+                    rule.mode_id().as_str()
+                ))
+            })?;
         let stage = match rule {
             DetectionRule::ExactFilename { .. } => "DetectionStage::ExactFilename",
             DetectionRule::CompoundExtension { .. } => "DetectionStage::CompoundExtension",
@@ -6836,20 +10667,111 @@ fn render_core_registry(
             CasePolicy::Sensitive => "DetectionCase::Sensitive",
             CasePolicy::AsciiInsensitive => "DetectionCase::AsciiInsensitive",
         };
+        let content_detector = match rule {
+            DetectionRule::Content { detector_id, .. } => format!(
+                "Some(LanguageContentDetector::{})",
+                detector_id.rust_variant()
+            ),
+            DetectionRule::ExactFilename { .. }
+            | DetectionRule::CompoundExtension { .. }
+            | DetectionRule::Extension { .. } => "None".to_string(),
+        };
         push_format(
             &mut output,
             format_args!(
-                "    LanguageDetectionRule {{ id: {}, stage: {stage}, pattern: {}, lookup_case: {lookup_case}, path_case: {path_case}, scanner_visible: {}, mode: {} }},\n",
+                "    LanguageDetectionRule {{ id: {}, stage: {stage}, pattern: {}, lookup_case: {lookup_case}, path_case: {path_case}, content_detector: {content_detector}, scanner_visible: {}, language: {} }},\n",
                 rust_string(rule.id().as_str()),
                 rust_string(rule.pattern()),
                 rule.scanner_visible(),
-                rust_string(rule.mode_id().as_str())
+                rust_string(public_mode.public_mode.as_str())
             ),
         )?;
     }
+    output.push_str("];\n\n");
+    if !lock.semantic_modes.is_empty() {
+        output.push_str(
+            "impl LanguageSemanticMode {\n\
+         \x20   /// Return whether this semantic mode can refine the detected base language.\n\
+         \x20   #[must_use]\n\
+         \x20   pub fn is_compatible_with(self, base_language: &str) -> bool {\n\
+         \x20       match self {\n",
+        );
+        let mut semantic_variants_by_base = BTreeMap::<&str, Vec<&str>>::new();
+        for semantic_mode in &lock.semantic_modes {
+            let base_mode = lock
+                .current_modes
+                .iter()
+                .find(|mode| mode.mode_id == semantic_mode.base_mode_id)
+                .ok_or_else(|| {
+                    LanguageRegistryError::Validation(format!(
+                        "semantic mode {} references missing base mode {}",
+                        semantic_mode.mode.public_mode(),
+                        semantic_mode.base_mode_id.as_str()
+                    ))
+                })?;
+            semantic_variants_by_base
+                .entry(base_mode.public_mode.as_str())
+                .or_default()
+                .push(semantic_mode.mode.rust_variant());
+        }
+        for (base_language, semantic_variants) in semantic_variants_by_base {
+            output.push_str("            ");
+            for (index, semantic_variant) in semantic_variants.iter().enumerate() {
+                if index > 0 {
+                    output.push_str(" | ");
+                }
+                push_format(&mut output, format_args!("Self::{semantic_variant}"))?;
+            }
+            push_format(
+                &mut output,
+                format_args!(" => base_language == {},\n", rust_string(base_language)),
+            )?;
+        }
+        output.push_str("        }\n    }\n}\n\n");
+    }
+
+    if lock
+        .detection_rules
+        .iter()
+        .any(|rule| matches!(rule, DetectionRule::Content { .. }))
+    {
+        output.push_str(
+            "pub(crate) const fn detect_content_language(detector: LanguageContentDetector) -> &'static str {\n\
+         \x20   match detector {\n",
+        );
+        for rule in &lock.detection_rules {
+            let DetectionRule::Content {
+                detector_id,
+                mode_id,
+                ..
+            } = rule
+            else {
+                continue;
+            };
+            let public_mode = lock
+                .current_modes
+                .iter()
+                .find(|mode| &mode.mode_id == mode_id)
+                .ok_or_else(|| {
+                    LanguageRegistryError::Validation(format!(
+                        "content detector {} references missing current mode {}",
+                        detector_id.contract_id(),
+                        mode_id.as_str()
+                    ))
+                })?;
+            push_format(
+                &mut output,
+                format_args!(
+                    "        LanguageContentDetector::{} => {},\n",
+                    detector_id.rust_variant(),
+                    rust_string(public_mode.public_mode.as_str())
+                ),
+            )?;
+        }
+        output.push_str("    }\n}\n\n");
+    }
     output.push_str(
-        "];\n\n\
-         #[allow(dead_code, reason = \"complete generated registry projection retains validated metadata outside the runtime routing facade\")]\n\
+        "#[allow(dead_code, reason = \"complete generated registry projection retains validated metadata outside the runtime routing facade\")]\n\
          #[derive(Clone, Copy, Debug, Eq, PartialEq)]\n\
          pub(crate) struct LanguageMode {\n\
          \x20   pub(crate) mode_id: &'static str,\n\
@@ -6908,13 +10830,110 @@ fn render_core_registry(
     }
     output.push_str("];\n\n");
 
+    let mut compound_rules = lock
+        .detection_rules
+        .iter()
+        .filter(|rule| matches!(rule, DetectionRule::CompoundExtension { .. }))
+        .collect::<Vec<_>>();
+    compound_rules.sort_by(|left, right| {
+        right
+            .pattern()
+            .len()
+            .cmp(&left.pattern().len())
+            .then_with(|| left.id().as_str().cmp(right.id().as_str()))
+    });
     output.push_str(
-        "pub(crate) fn detect_extension(extension: &str) -> Option<&'static str> {\n\
-         \x20   let extension = extension.to_ascii_lowercase();\n\
-         \x20   match extension.as_str() {\n",
+        "pub(crate) fn detect_compound_extension(path: &str, extension: Option<&str>) -> Option<&'static str> {\n\
+         \x20   let basename = path.rsplit(['/', '\\\\']).next().unwrap_or(path);\n",
     );
-    let mut normalized_extensions = BTreeSet::new();
-    let mut extension_groups = Vec::<(String, Vec<String>)>::new();
+    for rule in &compound_rules {
+        let DetectionRule::CompoundExtension {
+            extension,
+            case,
+            path_suffix_case,
+            mode_id,
+            ..
+        } = rule
+        else {
+            continue;
+        };
+        let path_condition = match path_suffix_case {
+            CasePolicy::Sensitive => {
+                format!("basename.ends_with({})", rust_string(extension))
+            }
+            CasePolicy::AsciiInsensitive => format!(
+                "basename.get(basename.len().saturating_sub({}.len())..).is_some_and(|suffix| suffix.eq_ignore_ascii_case({}))",
+                rust_string(extension),
+                rust_string(extension)
+            ),
+        };
+        let extension_condition = match case {
+            CasePolicy::Sensitive => {
+                format!("extension == Some({})", rust_string(extension))
+            }
+            CasePolicy::AsciiInsensitive => format!(
+                "extension.is_some_and(|candidate| candidate.eq_ignore_ascii_case({}))",
+                rust_string(extension)
+            ),
+        };
+        let public_mode = lock
+            .current_modes
+            .iter()
+            .find(|mode| &mode.mode_id == mode_id)
+            .ok_or_else(|| {
+                LanguageRegistryError::Validation(format!(
+                    "compound detection rule {} references missing current mode {}",
+                    rule.id().as_str(),
+                    mode_id.as_str()
+                ))
+            })?;
+        push_format(
+            &mut output,
+            format_args!(
+                "    if {path_condition} || {extension_condition} {{\n        return Some({});\n    }}\n",
+                rust_string(public_mode.public_mode.as_str())
+            ),
+        )?;
+    }
+    output.push_str("    None\n}\n\n");
+
+    output.push_str(
+        "pub(crate) fn normalized_compound_extension(path: &str) -> Option<&'static str> {\n\
+         \x20   let basename = path.rsplit(['/', '\\\\']).next().unwrap_or(path);\n",
+    );
+    for rule in &compound_rules {
+        let DetectionRule::CompoundExtension {
+            extension,
+            path_suffix_case,
+            ..
+        } = rule
+        else {
+            continue;
+        };
+        let path_condition = match path_suffix_case {
+            CasePolicy::Sensitive => {
+                format!("basename.ends_with({})", rust_string(extension))
+            }
+            CasePolicy::AsciiInsensitive => format!(
+                "basename.get(basename.len().saturating_sub({}.len())..).is_some_and(|suffix| suffix.eq_ignore_ascii_case({}))",
+                rust_string(extension),
+                rust_string(extension)
+            ),
+        };
+        push_format(
+            &mut output,
+            format_args!(
+                "    if {path_condition} {{\n        return Some({});\n    }}\n",
+                rust_string(extension)
+            ),
+        )?;
+    }
+    output.push_str("    None\n}\n\n");
+
+    let mut sensitive_extensions = BTreeSet::new();
+    let mut insensitive_extensions = BTreeSet::new();
+    let mut sensitive_extension_groups = Vec::<(String, Vec<String>)>::new();
+    let mut insensitive_extension_groups = Vec::<(String, Vec<String>)>::new();
     for rule in &lock.detection_rules {
         if !matches!(
             rule,
@@ -6922,11 +10941,19 @@ fn render_core_registry(
         ) {
             continue;
         }
-        let normalized = match rule.case_policy() {
-            CasePolicy::Sensitive => rule.pattern().to_string(),
-            CasePolicy::AsciiInsensitive => rule.pattern().to_ascii_lowercase(),
+        let (seen, groups, pattern) = match rule.case_policy() {
+            CasePolicy::Sensitive => (
+                &mut sensitive_extensions,
+                &mut sensitive_extension_groups,
+                rule.pattern().to_string(),
+            ),
+            CasePolicy::AsciiInsensitive => (
+                &mut insensitive_extensions,
+                &mut insensitive_extension_groups,
+                rule.pattern().to_ascii_lowercase(),
+            ),
         };
-        if !normalized_extensions.insert(normalized.clone()) {
+        if !seen.insert(pattern.clone()) {
             continue;
         }
         let public_mode = lock
@@ -6941,61 +10968,151 @@ fn render_core_registry(
                 ))
             })?;
         let public_mode = public_mode.public_mode.as_str();
-        if let Some((_, patterns)) = extension_groups
-            .iter_mut()
-            .find(|(mode, _)| mode == public_mode)
-        {
-            patterns.push(normalized);
+        if let Some((_, patterns)) = groups.iter_mut().find(|(mode, _)| mode == public_mode) {
+            patterns.push(pattern);
         } else {
-            extension_groups.push((public_mode.to_string(), vec![normalized]));
+            groups.push((public_mode.to_string(), vec![pattern]));
         }
     }
-    for (public_mode, patterns) in extension_groups {
-        let patterns = patterns
-            .iter()
-            .map(|pattern| rust_string(pattern))
-            .collect::<Vec<_>>()
-            .join(" | ");
-        push_format(
-            &mut output,
-            format_args!(
-                "        {} => Some({}),\n",
-                patterns,
-                rust_string(&public_mode)
-            ),
-        )?;
-    }
-    output.push_str("        _ => None,\n    }\n}\n\n");
 
-    output.push_str(
-        "pub(crate) fn detect_exact_filename(file_name: &str) -> Option<&'static str> {\n\
-         \x20   match file_name {\n",
-    );
-    for rule in &lock.detection_rules {
-        if !matches!(rule, DetectionRule::ExactFilename { .. }) {
-            continue;
+    output.push_str("pub(crate) fn detect_extension(extension: &str) -> Option<&'static str> {\n");
+    if insensitive_extension_groups.is_empty() {
+        output.push_str("    match extension {\n");
+        for (public_mode, patterns) in sensitive_extension_groups {
+            let patterns = patterns
+                .iter()
+                .map(|pattern| rust_string(pattern))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            push_format(
+                &mut output,
+                format_args!(
+                    "        {} => Some({}),\n",
+                    patterns,
+                    rust_string(&public_mode)
+                ),
+            )?;
         }
-        let public_mode = lock
-            .current_modes
-            .iter()
-            .find(|mode| &mode.mode_id == rule.mode_id())
-            .ok_or_else(|| {
-                LanguageRegistryError::Validation(format!(
-                    "detection rule {} references missing current mode {}",
-                    rule.id().as_str(),
-                    rule.mode_id().as_str()
-                ))
-            })?;
-        push_format(
-            &mut output,
-            format_args!(
-                "        {} => Some({}),\n",
-                rust_string(rule.pattern()),
-                rust_string(public_mode.public_mode.as_str())
-            ),
-        )?;
+        output.push_str("        _ => None,\n    }\n}\n\n");
+    } else {
+        if !sensitive_extension_groups.is_empty() {
+            output.push_str("    match extension {\n");
+            for (public_mode, patterns) in sensitive_extension_groups {
+                let patterns = patterns
+                    .iter()
+                    .map(|pattern| rust_string(pattern))
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                push_format(
+                    &mut output,
+                    format_args!(
+                        "        {} => return Some({}),\n",
+                        patterns,
+                        rust_string(&public_mode)
+                    ),
+                )?;
+            }
+            output.push_str("        _ => {}\n    }\n");
+        }
+        output.push_str(
+            "    let extension = extension.to_ascii_lowercase();\n\
+             \x20   match extension.as_str() {\n",
+        );
+        for (public_mode, patterns) in insensitive_extension_groups {
+            let patterns = patterns
+                .iter()
+                .map(|pattern| rust_string(pattern))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            push_format(
+                &mut output,
+                format_args!(
+                    "        {} => Some({}),\n",
+                    patterns,
+                    rust_string(&public_mode)
+                ),
+            )?;
+        }
+        output.push_str("        _ => None,\n    }\n}\n\n");
     }
-    output.push_str("        _ => None,\n    }\n}\n");
+
+    let has_insensitive_exact_filename = lock.detection_rules.iter().any(|rule| {
+        matches!(rule, DetectionRule::ExactFilename { .. })
+            && rule.case_policy() == CasePolicy::AsciiInsensitive
+    });
+    output.push_str(
+        "pub(crate) fn detect_exact_filename(file_name: &str) -> Option<&'static str> {\n",
+    );
+    let sensitive_exact_filenames = lock
+        .detection_rules
+        .iter()
+        .filter(|rule| {
+            matches!(rule, DetectionRule::ExactFilename { .. })
+                && rule.case_policy() == CasePolicy::Sensitive
+        })
+        .collect::<Vec<_>>();
+    if !sensitive_exact_filenames.is_empty() {
+        output.push_str("    match file_name {\n");
+        for rule in sensitive_exact_filenames {
+            let public_mode = lock
+                .current_modes
+                .iter()
+                .find(|mode| &mode.mode_id == rule.mode_id())
+                .ok_or_else(|| {
+                    LanguageRegistryError::Validation(format!(
+                        "detection rule {} references missing current mode {}",
+                        rule.id().as_str(),
+                        rule.mode_id().as_str()
+                    ))
+                })?;
+            let result = if has_insensitive_exact_filename {
+                format!(
+                    "return Some({})",
+                    rust_string(public_mode.public_mode.as_str())
+                )
+            } else {
+                format!("Some({})", rust_string(public_mode.public_mode.as_str()))
+            };
+            push_format(
+                &mut output,
+                format_args!("        {} => {result},\n", rust_string(rule.pattern())),
+            )?;
+        }
+        if has_insensitive_exact_filename {
+            output.push_str("        _ => {}\n    }\n");
+        } else {
+            output.push_str("        _ => None,\n    }\n}\n");
+        }
+    }
+    if has_insensitive_exact_filename {
+        for rule in &lock.detection_rules {
+            if !matches!(rule, DetectionRule::ExactFilename { .. })
+                || rule.case_policy() != CasePolicy::AsciiInsensitive
+            {
+                continue;
+            }
+            let public_mode = lock
+                .current_modes
+                .iter()
+                .find(|mode| &mode.mode_id == rule.mode_id())
+                .ok_or_else(|| {
+                    LanguageRegistryError::Validation(format!(
+                        "detection rule {} references missing current mode {}",
+                        rule.id().as_str(),
+                        rule.mode_id().as_str()
+                    ))
+                })?;
+            push_format(
+                &mut output,
+                format_args!(
+                    "    if file_name.eq_ignore_ascii_case({}) {{\n        return Some({});\n    }}\n",
+                    rust_string(rule.pattern()),
+                    rust_string(public_mode.public_mode.as_str())
+                ),
+            )?;
+        }
+        output.push_str("    None\n}\n");
+    }
     Ok(output)
 }
 
@@ -7309,6 +11426,8 @@ fn render_symbols_registry(
 fn render_cli_registry(
     lock: &LanguageRegistryLock,
     accepted: &AcceptedTargetContract,
+    parser_pack_trust: &ParserPackTrustManifest,
+    parser_pack_installed_byte_limit: u64,
     source_lock_sha256: &str,
     registry_contract_sha256: &str,
 ) -> Result<String, LanguageRegistryError> {
@@ -7474,8 +11593,67 @@ fn render_cli_registry(
             ),
         )?;
     }
-    output.push_str("];\n");
+    output.push_str("];\n\n");
+    render_evaluation_parser_pack_trust(
+        &mut output,
+        parser_pack_trust,
+        parser_pack_installed_byte_limit,
+    )?;
     Ok(output)
+}
+
+/// Render test-only parser-pack trust records without adding production reachability.
+fn render_evaluation_parser_pack_trust(
+    output: &mut String,
+    parser_pack_trust: &ParserPackTrustManifest,
+    parser_pack_installed_byte_limit: u64,
+) -> Result<(), LanguageRegistryError> {
+    output.push_str(
+        "#[cfg(test)]\n\
+         #[derive(Clone, Copy, Debug, Eq, PartialEq)]\n\
+         pub(crate) struct EvaluationParserPackTrust {\n\
+         \x20   pub(crate) candidate_id: &'static str,\n\
+         \x20   pub(crate) eligibility: &'static str,\n\
+         \x20   pub(crate) pack_id: &'static str,\n\
+         \x20   pub(crate) release_version: &'static str,\n\
+         \x20   pub(crate) advertised: bool,\n\
+         \x20   pub(crate) pack_abi_id: &'static str,\n\
+         \x20   pub(crate) pack_abi_version: u32,\n\
+         \x20   pub(crate) grammar_abi_id: &'static str,\n\
+         \x20   pub(crate) grammar_abi_version: u32,\n\
+         \x20   pub(crate) grammar_abi_state: &'static str,\n\
+         \x20   pub(crate) packaged_platform: &'static str,\n\
+         \x20   pub(crate) payload_root: &'static str,\n\
+         \x20   pub(crate) manifest_path: &'static str,\n\
+         \x20   pub(crate) installed_bytes: u64,\n\
+         \x20   pub(crate) installed_byte_limit: u64,\n\
+         }\n\n\
+         #[cfg(test)]\n\
+         pub(crate) static EVALUATION_PARSER_PACK_TRUST: &[EvaluationParserPackTrust] = &[\n",
+    );
+    for candidate in &parser_pack_trust.candidates {
+        push_format(
+            output,
+            format_args!(
+                "    EvaluationParserPackTrust {{ candidate_id: {}, eligibility: {}, pack_id: {}, release_version: {}, advertised: false, pack_abi_id: {}, pack_abi_version: {}, grammar_abi_id: {}, grammar_abi_version: {}, grammar_abi_state: {}, packaged_platform: {}, payload_root: {}, manifest_path: {}, installed_bytes: {}, installed_byte_limit: {parser_pack_installed_byte_limit} }},\n",
+                rust_string(candidate.candidate_id.as_str()),
+                rust_string(candidate.eligibility.contract_tag()),
+                rust_string(candidate.pack_id.as_str()),
+                rust_string(&candidate.release_version),
+                rust_string(candidate.pack_abi.abi_id.as_str()),
+                candidate.pack_abi.version,
+                rust_string(candidate.grammar_abi.abi_id.as_str()),
+                candidate.grammar_abi.version,
+                rust_string(candidate.grammar_abi.state.contract_tag()),
+                rust_string(candidate.packaged_platform.as_str()),
+                rust_string(candidate.payload_root.as_str()),
+                rust_string(candidate.manifest_path.as_str()),
+                candidate.installed_bytes,
+            ),
+        )?;
+    }
+    output.push_str("];\n");
+    Ok(())
 }
 
 /// Complete structured evidence document generated from separate current and accepted axes.
@@ -7497,6 +11675,8 @@ struct CapabilityStateEvidence<'a> {
     accepted_target: AcceptedCapabilityState<'a>,
     /// Frozen prior-runtime binding.
     historical_contract: HistoricalCapabilityState<'a>,
+    /// Release-owned, exact-digest-bound parser-pack evaluation trust.
+    parser_pack_trust: ParserPackTrustState<'a>,
     /// Accepted capability-set parity projection.
     accepted_capability_parity: AcceptedCapabilityParity<'a>,
     /// Additive language settings projection.
@@ -7505,6 +11685,35 @@ struct CapabilityStateEvidence<'a> {
     conformance_inventory: ConformanceInventory<'a>,
     /// Per-component inputs for later exact SBOM and provenance generation.
     sbom_inputs: SbomInputInventory<'a>,
+}
+
+/// Generated evaluation-only parser-pack trust state with no runtime selection claim.
+#[derive(Serialize)]
+struct ParserPackTrustState<'a> {
+    /// Stable trust projection format.
+    format: ParserPackTrustFormat,
+    /// Exact release-owned trust-manifest path.
+    path: &'a str,
+    /// Exact release-owned trust-manifest digest.
+    raw_sha256: &'a str,
+    /// Authoritative broad-language-pack installed-byte ceiling.
+    installed_byte_limit: u64,
+    /// Explicit selection lifecycle; this projection cannot select a runtime candidate.
+    selection_state: ParserPackSelectionState,
+    /// Candidate selected for runtime use; always absent while selection is blocked.
+    selected_candidate: Option<&'a str>,
+    /// Achieved conformance manifest; always absent before the final evidence gates pass.
+    achieved_manifest: Option<&'a str>,
+    /// Complete validated evaluation candidate inventory.
+    candidates: &'a [ParserPackCandidateTrust],
+}
+
+/// Closed runtime-selection state for the generated parser-pack trust projection.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ParserPackSelectionState {
+    /// No evaluated candidate is reachable by the runtime.
+    Blocked,
 }
 
 /// Accepted-set rows and their current evidence-complete state.
@@ -7658,6 +11867,8 @@ struct DocumentationSupportDocument<'a> {
     accepted_set_sha256: &'a str,
     /// Whether the complete accepted set is currently supportable as a public claim.
     parity_complete: bool,
+    /// Explicitly evaluation-only, unselected parser-pack trust projection.
+    parser_pack_trust: ParserPackTrustState<'a>,
     /// Honest current-versus-accepted support rows and standard-name crosswalk.
     support: DocumentationSupportMatrix<'a>,
 }
@@ -7705,6 +11916,8 @@ struct SbomInputInventory<'a> {
 struct CurrentCapabilityState<'a> {
     /// Ordered detection rules.
     detection_rules: &'a [DetectionRule],
+    /// Closed semantic refinements and compatible base modes.
+    semantic_modes: &'a [SemanticModeRule],
     /// Ordered current modes.
     modes: &'a [CurrentLanguageMode],
     /// Current compiled parser components.
@@ -8169,6 +12382,8 @@ fn render_capability_state(
     lock: &LanguageRegistryLock,
     accepted: &AcceptedTargetContract,
     historical: &HistoricalRuntimeContract,
+    parser_pack_trust: &ParserPackTrustManifest,
+    parser_pack_installed_byte_limit: u64,
     source_lock_sha256: &str,
     registry_contract_sha256: &str,
 ) -> Result<Vec<u8>, LanguageRegistryError> {
@@ -8191,6 +12406,7 @@ fn render_capability_state(
         registry_contract_sha256,
         current: CurrentCapabilityState {
             detection_rules: &lock.detection_rules,
+            semantic_modes: &lock.semantic_modes,
             modes: &lock.current_modes,
             parser_components: &lock.parser_components,
             packs: &lock.packs,
@@ -8210,6 +12426,16 @@ fn render_capability_state(
             raw_sha256: lock.historical_contract.raw_sha256.as_str(),
             language_pipelines: historical.language_pipelines.len(),
             augmenter_routes: historical.augmenter_routes.len(),
+        },
+        parser_pack_trust: ParserPackTrustState {
+            format: ParserPackTrustFormat::ParserPackTrust,
+            path: lock.parser_pack_trust.path.as_str(),
+            raw_sha256: lock.parser_pack_trust.raw_sha256.as_str(),
+            installed_byte_limit: parser_pack_installed_byte_limit,
+            selection_state: ParserPackSelectionState::Blocked,
+            selected_candidate: None,
+            achieved_manifest: None,
+            candidates: &parser_pack_trust.candidates,
         },
         accepted_capability_parity,
         settings: LanguageSettingsState {
@@ -8245,6 +12471,8 @@ fn render_capability_state(
 fn render_documentation_support_matrix(
     lock: &LanguageRegistryLock,
     accepted: &AcceptedTargetContract,
+    parser_pack_trust: &ParserPackTrustManifest,
+    parser_pack_installed_byte_limit: u64,
     source_lock_sha256: &str,
     registry_contract_sha256: &str,
 ) -> Result<Vec<u8>, LanguageRegistryError> {
@@ -8257,6 +12485,16 @@ fn render_documentation_support_matrix(
         accepted_registry_id: accepted.source.registry_id.as_str(),
         accepted_set_sha256: accepted.source.accepted_set_digest.as_str(),
         parity_complete: accepted_parity_complete(accepted),
+        parser_pack_trust: ParserPackTrustState {
+            format: ParserPackTrustFormat::ParserPackTrust,
+            path: lock.parser_pack_trust.path.as_str(),
+            raw_sha256: lock.parser_pack_trust.raw_sha256.as_str(),
+            installed_byte_limit: parser_pack_installed_byte_limit,
+            selection_state: ParserPackSelectionState::Blocked,
+            selected_candidate: None,
+            achieved_manifest: None,
+            candidates: &parser_pack_trust.candidates,
+        },
         support: documentation_support_matrix(lock, accepted),
     };
     let mut bytes = serde_json::to_vec_pretty(&document).map_err(|source| {

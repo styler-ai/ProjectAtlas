@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "format": "projectatlas.parser-pack-wasm-validation",
+  "candidate_id": "tree-sitter-wasm-grammar-pack",
+  "module": {
+    "path": "parsers/javascript.wasm",
+    "bytes": 411759,
+    "sha256": "35070cda936e479202e22c72cf129d6894eee7f4de8b41912a516cfdbe109204",
+    "magic_hex": "0061736d",
+    "module_version": 1,
+    "required_function_export": "tree_sitter_javascript",
+    "grammar_abi_version": 15
+  },
+  "probe": {
+    "state": "local-pass-hosted-pending",
+    "tool": {
+      "name": "node",
+      "version": "22.22.0",
+      "binary_path": "C:\\Program Files\\nodejs\\node.exe",
+      "binary_sha256": "bae898add4643fcf890a83ad8ae56e20dce7e781cab161a53991ceba70c99ffb"
+    },
+    "script_path": "wasm-probe.mjs",
+    "script_sha256": "e3fb1245a1c4d2418db3c6528cad275278b8bcdad41ce4ff60163b2ab79488b3",
+    "command": "node wasm-probe.mjs parsers/javascript.wasm",
+    "environment": {
+      "memory_initial_pages": 1024,
+      "memory_maximum_pages": 1024,
+      "table_initial_elements": 1024,
+      "stack_pointer": 67108848,
+      "memory_base": 1024,
+      "table_base": 0
+    },
+    "raw_result": "{\"module_sha256\":\"35070cda936e479202e22c72cf129d6894eee7f4de8b41912a516cfdbe109204\",\"pointer\":381408,\"abi\":15,\"exports\":[\"__wasm_call_ctors\",\"tree_sitter_javascript\",\"__wasm_apply_data_relocs\"]}",
+    "raw_result_sha256": "e39d66c4a9ed2ee5b2c6bfdf893a7e40dffa9d5f8c0c8d13b4fa17dd52b6c40b",
+    "hosted_state": "pending"
+  }
+}

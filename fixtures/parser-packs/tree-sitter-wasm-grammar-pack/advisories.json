@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "format": "projectatlas.parser-pack-advisories",
+  "candidate_id": "tree-sitter-wasm-grammar-pack",
+  "database": {
+    "source": "https://github.com/RustSec/advisory-db",
+    "revision": "9f3e138091487e69144f536d36976e427a7a3307"
+  },
+  "tool": {
+    "name": "cargo-audit",
+    "version": "0.22.1",
+    "command": "cargo audit --json --no-fetch",
+    "exit_code": 0
+  },
+  "component": {
+    "ecosystem": "crates.io",
+    "name": "tree-sitter-javascript",
+    "version": "0.25.0",
+    "checksum_sha256": "68204f2abc0627a90bdf06e605f5c470aa26fdcb2081ea553a04bdad756693f5"
+  },
+  "inputs": [
+    {
+      "path": "Cargo.toml",
+      "bytes": 1435,
+      "sha256": "424f2a3176e64503609d6dfc53e5c7e81f0900255412c32b44b602b41a9eb949"
+    },
+    {
+      "path": "Cargo.toml.orig",
+      "bytes": 792,
+      "sha256": "00c047f354a97883c34e6336b1db56dc6fbae658740b49841d39d1d7129468a0"
+    },
+    {
+      "path": "Cargo.lock",
+      "bytes": 5164,
+      "sha256": "a10d31bf8f75b7736a97cce7e8f8cce0347b6642489e63953a9ba542826f652e"
+    }
+  ],
+  "raw_result": "{\"database\":{\"advisory-count\":1160,\"last-commit\":null,\"last-updated\":null},\"lockfile\":{\"dependency-count\":23},\"settings\":{\"target_arch\":[],\"target_os\":[],\"severity\":null,\"ignore\":[],\"informational_warnings\":[\"unmaintained\",\"unsound\",\"notice\"]},\"vulnerabilities\":{\"found\":false,\"count\":0,\"list\":[]},\"warnings\":{}}",
+  "raw_result_bytes": 312,
+  "raw_result_sha256": "bf68d4b40873abe3c6216c75daea3bbfed6a2c567a90d5163274ce0891368f05",
+  "result": {
+    "dependency_count": 23,
+    "vulnerabilities_found": false,
+    "vulnerability_count": 0
+  }
+}

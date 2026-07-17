@@ -11,6 +11,10 @@ const ACCEPTED: &[u8] =
     include_bytes!("../../../docs/benchmarks/projectatlas-v0.4-capability-registry.json");
 const HISTORICAL: &[u8] =
     include_bytes!("../../../fixtures/languages/projectatlas-v0.3.26-runtime-contract.toon");
+const PARSER_PACK_TRUST: &[u8] = include_bytes!("../../../registry/parser-pack-trust.json");
+const REPOSITORY_INTELLIGENCE_CONTRACTS: &[u8] = include_bytes!(
+    "../../../docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json"
+);
 const CORE_OUTPUT_PATH: &str = "crates/projectatlas-core/src/language_detection_registry.rs";
 
 fn run_cli(args: &[&str], root: &Path) -> io::Result<std::process::Output> {
@@ -31,6 +35,11 @@ fn seed_registry_workspace(root: &Path) -> Result<(), Box<dyn Error>> {
             "fixtures/languages/projectatlas-v0.3.26-runtime-contract.toon",
             HISTORICAL,
         ),
+        ("registry/parser-pack-trust.json", PARSER_PACK_TRUST),
+        (
+            "docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json",
+            REPOSITORY_INTELLIGENCE_CONTRACTS,
+        ),
     ] {
         let path = root.join(relative);
         let parent = path
@@ -38,6 +47,25 @@ fn seed_registry_workspace(root: &Path) -> Result<(), Box<dyn Error>> {
             .ok_or_else(|| io::Error::other("registry CLI fixture has no parent"))?;
         fs::create_dir_all(parent)?;
         fs::write(path, bytes)?;
+    }
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for relative in [
+        "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/manifest.json",
+        "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/parsers/javascript.wasm",
+        "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/wasm-validation.json",
+        "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/wasm-probe.mjs",
+        "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/provenance.json",
+        "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/LICENSE",
+        "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/advisories.json",
+        "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/sbom.spdx.json",
+    ] {
+        let source = source_root.join(relative);
+        let destination = root.join(relative);
+        let parent = destination
+            .parent()
+            .ok_or_else(|| io::Error::other("parser-pack fixture has no parent"))?;
+        fs::create_dir_all(parent)?;
+        fs::copy(source, destination)?;
     }
     for relative in [
         CORE_OUTPUT_PATH,

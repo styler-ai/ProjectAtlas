@@ -1,0 +1,112 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "ProjectAtlas evaluation parser pack tree-sitter JavaScript 0.25.0",
+  "documentNamespace": "https://styler-ai.github.io/ProjectAtlas/sbom/tree-sitter-wasm-grammar-pack/0.25.0/35070cda936e479202e22c72cf129d6894eee7f4de8b41912a516cfdbe109204",
+  "creationInfo": {
+    "created": "2025-09-01T07:10:57Z",
+    "creators": [
+      "Tool: ProjectAtlas parser-pack trust materialization"
+    ]
+  },
+  "documentDescribes": [
+    "SPDXRef-Package-ProjectAtlas-parser-pack"
+  ],
+  "packages": [
+    {
+      "name": "ProjectAtlas tree-sitter WASM grammar pack",
+      "SPDXID": "SPDXRef-Package-ProjectAtlas-parser-pack",
+      "versionInfo": "tree-sitter-javascript-0.25.0-wasm",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "35070cda936e479202e22c72cf129d6894eee7f4de8b41912a516cfdbe109204"
+        }
+      ],
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright (c) 2014 Max Brunsfeld",
+      "externalRefs": []
+    },
+    {
+      "name": "tree-sitter-javascript",
+      "SPDXID": "SPDXRef-Package-tree-sitter-javascript-source",
+      "versionInfo": "0.25.0",
+      "downloadLocation": "https://crates.io/api/v1/crates/tree-sitter-javascript/0.25.0/download",
+      "filesAnalyzed": false,
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "68204f2abc0627a90bdf06e605f5c470aa26fdcb2081ea553a04bdad756693f5"
+        }
+      ],
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright (c) 2014 Max Brunsfeld",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:cargo/tree-sitter-javascript@0.25.0"
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "fileName": "./parsers/javascript.wasm",
+      "SPDXID": "SPDXRef-File-javascript-wasm",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "35070cda936e479202e22c72cf129d6894eee7f4de8b41912a516cfdbe109204"
+        }
+      ],
+      "licenseConcluded": "MIT",
+      "licenseInfoInFiles": [
+        "MIT"
+      ],
+      "copyrightText": "Copyright (c) 2014 Max Brunsfeld"
+    },
+    {
+      "fileName": "./LICENSE",
+      "SPDXID": "SPDXRef-File-license",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "licenseInfoInFiles": [
+        "MIT"
+      ],
+      "copyrightText": "Copyright (c) 2014 Max Brunsfeld"
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-ProjectAtlas-parser-pack"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-ProjectAtlas-parser-pack",
+      "relationshipType": "GENERATED_FROM",
+      "relatedSpdxElement": "SPDXRef-Package-tree-sitter-javascript-source"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-ProjectAtlas-parser-pack",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-File-javascript-wasm"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-ProjectAtlas-parser-pack",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-File-license"
+    }
+  ]
+}

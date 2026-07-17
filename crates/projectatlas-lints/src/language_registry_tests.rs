@@ -8,22 +8,28 @@ use std::ffi::OsString;
 use std::fmt::Debug;
 use std::process::Command;
 use std::time::{Duration, Instant};
+use syn::visit::Visit;
 
 const LOCK: &[u8] = include_bytes!("../../../registry/language-registry.json");
 const ACCEPTED: &[u8] =
     include_bytes!("../../../docs/benchmarks/projectatlas-v0.4-capability-registry.json");
 const HISTORICAL: &[u8] =
     include_bytes!("../../../fixtures/languages/projectatlas-v0.3.26-runtime-contract.toon");
+const PARSER_PACK_TRUST: &[u8] = include_bytes!("../../../registry/parser-pack-trust.json");
+const REPOSITORY_INTELLIGENCE_CONTRACTS: &[u8] = include_bytes!(
+    "../../../docs/benchmarks/projectatlas-v0.4-repository-intelligence-contracts.json"
+);
+const PARSER_REGISTRY: &str = include_str!("../../projectatlas-symbols/src/parser_registry.rs");
+const SYMBOL_RUNTIME: &str = include_str!("../../projectatlas-symbols/src/lib.rs");
 
-fn fixed_inputs() -> FixedInputBytes<'static> {
-    FixedInputBytes {
-        accepted_capability_registry: ACCEPTED,
-        historical_runtime_contract: HISTORICAL,
-    }
+fn owned_inputs() -> Result<OwnedInputBytes, LanguageRegistryError> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    RegistryWorkspace::new(&root)?.read_inputs()
 }
 
 fn generated() -> Result<GeneratedArtifacts, LanguageRegistryError> {
-    validate_and_generate(LOCK, &fixed_inputs())
+    let inputs = owned_inputs()?;
+    validate_and_generate(LOCK, &inputs.fixed())
 }
 
 fn decoded_contracts() -> Result<
@@ -43,6 +49,21 @@ fn decoded_contracts() -> Result<
     Ok((lock, accepted, historical))
 }
 
+fn decoded_parser_pack_contract() -> Result<(ParserPackTrustManifest, u64), Box<dyn Error>> {
+    let trust = decode_parser_pack_trust(PARSER_PACK_TRUST)?;
+    let budgets =
+        serde_json::from_slice::<ParserPackBudgetDocument>(REPOSITORY_INTELLIGENCE_CONTRACTS)?;
+    let installed_byte_limit = budgets
+        .budgets
+        .optional_pack_contract
+        .accepted_pack_budgets
+        .iter()
+        .find(|budget| budget.pack_id.as_str() == BROAD_LANGUAGE_PACK_ID)
+        .map(|budget| budget.limits.installed_bytes)
+        .ok_or_else(|| io::Error::other("broad parser-pack budget is absent"))?;
+    Ok((trust, installed_byte_limit))
+}
+
 fn validate_accepted_mutation(
     mutate: impl FnOnce(&mut serde_json::Value) -> Result<(), Box<dyn Error>>,
 ) -> Result<Result<GeneratedArtifacts, LanguageRegistryError>, Box<dyn Error>> {
@@ -53,9 +74,13 @@ fn validate_accepted_mutation(
     let mut lock: serde_json::Value = serde_json::from_slice(LOCK)?;
     lock["accepted_target"]["raw_sha256"] = json!(sha256_hex(&accepted_bytes));
     let lock_bytes = serde_json::to_vec(&lock)?;
+    let baseline = owned_inputs()?;
     let fixed = FixedInputBytes {
         accepted_capability_registry: &accepted_bytes,
         historical_runtime_contract: HISTORICAL,
+        parser_pack_trust: PARSER_PACK_TRUST,
+        repository_intelligence_contracts: REPOSITORY_INTELLIGENCE_CONTRACTS,
+        parser_pack_payloads: &baseline.parser_pack_payloads,
     };
     Ok(validate_and_generate(&lock_bytes, &fixed))
 }
@@ -82,9 +107,13 @@ fn validate_historical_schema_mutation(
         .ok_or_else(|| io::Error::other("historical runtime evidence row is absent"))?;
     evidence["digest_sha256"] = json!(digest);
     let lock_bytes = serde_json::to_vec(&lock)?;
+    let baseline = owned_inputs()?;
     let fixed = FixedInputBytes {
         accepted_capability_registry: ACCEPTED,
         historical_runtime_contract: historical_bytes,
+        parser_pack_trust: PARSER_PACK_TRUST,
+        repository_intelligence_contracts: REPOSITORY_INTELLIGENCE_CONTRACTS,
+        parser_pack_payloads: &baseline.parser_pack_payloads,
     };
     Ok(validate_and_generate(&lock_bytes, &fixed))
 }
@@ -129,6 +158,25 @@ fn require_equal<T: Debug + PartialEq + ?Sized>(
         ))
         .into())
     }
+}
+
+fn require_duplicate_metadata_rejected<T>(
+    bytes: &[u8],
+    duplicate_member: &str,
+    label: &'static str,
+    context: &str,
+) -> Result<(), Box<dyn Error>>
+where
+    for<'de> T: Deserialize<'de>,
+{
+    let duplicate = std::str::from_utf8(bytes)?.replacen('{', &format!("{{{duplicate_member}"), 1);
+    require(
+        matches!(
+            decode_parser_pack_metadata::<T>(duplicate.as_bytes(), label),
+            Err(LanguageRegistryError::JsonDecode { .. })
+        ),
+        format!("duplicate {context} keys were accepted"),
+    )
 }
 
 fn require_validation_fragments(
@@ -186,6 +234,11 @@ fn seed_inputs(root: &Path) -> Result<(), Box<dyn Error>> {
         (LOCK_PATH, LOCK),
         (ACCEPTED_TARGET_PATH, ACCEPTED),
         (HISTORICAL_CONTRACT_PATH, HISTORICAL),
+        (PARSER_PACK_TRUST_PATH, PARSER_PACK_TRUST),
+        (
+            REPOSITORY_INTELLIGENCE_CONTRACTS_PATH,
+            REPOSITORY_INTELLIGENCE_CONTRACTS,
+        ),
     ] {
         let path = root.join(relative);
         let parent = path
@@ -193,6 +246,25 @@ fn seed_inputs(root: &Path) -> Result<(), Box<dyn Error>> {
             .ok_or_else(|| io::Error::other("fixture input has no parent"))?;
         fs::create_dir_all(parent)?;
         fs::write(path, bytes)?;
+    }
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for relative in [
+        "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/manifest.json",
+        "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/parsers/javascript.wasm",
+        "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/wasm-validation.json",
+        "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/wasm-probe.mjs",
+        "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/provenance.json",
+        "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/LICENSE",
+        "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/advisories.json",
+        "fixtures/parser-packs/tree-sitter-wasm-grammar-pack/sbom.spdx.json",
+    ] {
+        let source = source_root.join(relative);
+        let destination = root.join(relative);
+        let parent = destination
+            .parent()
+            .ok_or_else(|| io::Error::other("parser-pack fixture has no parent"))?;
+        fs::create_dir_all(parent)?;
+        fs::copy(source, destination)?;
     }
     for relative in [
         CORE_OUTPUT_PATH,
@@ -224,14 +296,77 @@ struct RepresentativeRegistryWitness {
 fn representative_registry_witness(
     base: &LanguageRegistryLock,
 ) -> Result<RepresentativeRegistryWitness, Box<dyn Error>> {
-    let content_rule = serde_json::from_value::<DetectionRule>(json!({
-        "layer": "content",
-        "id": "detect.content.javascript-module",
-        "detector_id": "content.javascript-module",
-        "detector_kind": "content-signature",
-        "scanner_visible": true,
-        "mode_id": "mode.javascript"
-    }))?;
+    let mut lock = base.clone();
+    if !lock
+        .detection_rules
+        .iter()
+        .any(|rule| matches!(rule, DetectionRule::Content { .. }))
+    {
+        for (detector_id, rule_id) in [
+            (
+                BuiltInContentDetector::ShebangPython,
+                "detect.content.shebang-python",
+            ),
+            (
+                BuiltInContentDetector::ShebangShell,
+                "detect.content.shebang-shell",
+            ),
+            (
+                BuiltInContentDetector::ShebangJavascript,
+                "detect.content.shebang-javascript",
+            ),
+            (
+                BuiltInContentDetector::ShebangRuby,
+                "detect.content.shebang-ruby",
+            ),
+            (
+                BuiltInContentDetector::ShebangPerl,
+                "detect.content.shebang-perl",
+            ),
+            (
+                BuiltInContentDetector::SignaturePhp,
+                "detect.content.signature-php",
+            ),
+            (
+                BuiltInContentDetector::SignatureXml,
+                "detect.content.signature-xml",
+            ),
+            (
+                BuiltInContentDetector::ContextDockerBuild,
+                "detect.content.context-docker-build",
+            ),
+        ] {
+            lock.detection_rules.push(DetectionRule::Content {
+                id: DetectionRuleId::try_from(rule_id.to_string())?,
+                detector_id,
+                detector_kind: detector_id.detection_kind(),
+                scanner_visible: false,
+                mode_id: ModeId::try_from(detector_id.mode_id().to_string())?,
+            });
+        }
+    }
+    if lock.semantic_modes.is_empty() {
+        for mode in SEMANTIC_MODES {
+            lock.semantic_modes.push(SemanticModeRule {
+                mode,
+                base_mode_id: ModeId::try_from(mode.base_mode_id().to_string())?,
+            });
+        }
+    }
+    let content_rule = lock
+        .detection_rules
+        .iter()
+        .find(|rule| {
+            matches!(
+                rule,
+                DetectionRule::Content {
+                    detector_id: BuiltInContentDetector::SignaturePhp,
+                    ..
+                }
+            )
+        })
+        .cloned()
+        .ok_or_else(|| io::Error::other("PHP content-detector witness is absent"))?;
     let abi_value = json!({
         "abi_id": "abi.tree-sitter-wasm",
         "version": 15,
@@ -292,8 +427,6 @@ fn representative_registry_witness(
         "required_platforms": ["linux-x86_64"]
     }))?;
 
-    let mut lock = base.clone();
-    lock.detection_rules.push(content_rule.clone());
     lock.assets.push(parser_asset);
     lock.query_packs.push(query_pack);
     lock.embedded_adapters.push(embedded_adapter);
@@ -313,6 +446,9 @@ fn representative_registry_witness(
 fn typecheck_generated_rust(artifacts: &GeneratedArtifacts) -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| std::ffi::OsString::from("rustc"));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     for (index, artifact) in artifacts
         .entries()
         .into_iter()
@@ -325,7 +461,7 @@ fn typecheck_generated_rust(artifacts: &GeneratedArtifacts) -> Result<(), Box<dy
     {
         let source_path = root.path().join(format!("generated_registry_{index}.rs"));
         fs::write(&source_path, artifact.bytes)?;
-        let output = Command::new(&rustc)
+        let command = bounded_generated_rust_command(&rustc)
             .arg("--edition=2024")
             .arg("--crate-type=lib")
             .arg("--emit=metadata")
@@ -335,23 +471,182 @@ fn typecheck_generated_rust(artifacts: &GeneratedArtifacts) -> Result<(), Box<dy
             .arg(format!("generated_registry_{index}"))
             .arg("--out-dir")
             .arg(root.path())
-            .arg(&source_path)
-            .output()?;
+            .arg(&source_path);
+        let output = run_bounded_generated_rust_process(
+            &runtime,
+            "generated registry standalone typecheck",
+            &command,
+        )?;
         require(
-            output.status.success(),
+            output.stdout().is_empty() && output.stderr().is_empty(),
             format!(
-                "generated Rust {} failed standalone typechecking with {}:\n{}{}",
+                "successful standalone typecheck for generated Rust {} emitted output: stdout={:?}; stderr={:?}",
                 artifact.path,
-                output.status,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
+                output.stdout(),
+                output.stderr()
             ),
         )?;
     }
     Ok(())
 }
 
-fn expected_detection_row(rule: &DetectionRule) -> String {
+fn execute_generated_registry(source: &str) -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let source_path = root.path().join("generated_registry_case_policy_probe.rs");
+    let executable_path = root.path().join(format!(
+        "generated_registry_case_policy_probe{}",
+        env::consts::EXE_SUFFIX
+    ));
+    fs::write(&source_path, source)?;
+    let rustc = env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let compilation = bounded_generated_rust_command(&rustc)
+        .arg("--edition=2024")
+        .arg("--crate-type=bin")
+        .arg("-Dwarnings")
+        .arg("-Adead-code")
+        .arg("--crate-name")
+        .arg("generated_registry_case_policy_probe")
+        .arg("-o")
+        .arg(&executable_path)
+        .arg(&source_path);
+    let compilation = run_bounded_generated_rust_process(
+        &runtime,
+        "generated registry case-policy compilation",
+        &compilation,
+    )?;
+    require(
+        compilation.stdout().is_empty() && compilation.stderr().is_empty(),
+        format!(
+            "successful generated registry compilation emitted output: stdout={:?}; stderr={:?}",
+            compilation.stdout(),
+            compilation.stderr()
+        ),
+    )?;
+    let execution = bounded_generated_rust_command(&executable_path);
+    let execution = run_bounded_generated_rust_process(
+        &runtime,
+        "generated registry case-policy execution",
+        &execution,
+    )?;
+    require(
+        execution.stdout().is_empty() && execution.stderr().is_empty(),
+        format!(
+            "successful generated registry execution emitted output: stdout={:?}; stderr={:?}",
+            execution.stdout(),
+            execution.stderr()
+        ),
+    )?;
+    Ok(())
+}
+
+fn path_is_exact(path: &syn::Path, expected: &[&str]) -> bool {
+    path.leading_colon.is_none()
+        && path.segments.len() == expected.len()
+        && path
+            .segments
+            .iter()
+            .zip(expected)
+            .all(|(segment, expected)| segment.ident == *expected && segment.arguments.is_empty())
+}
+
+fn typed_value_argument_is_exact(argument: &syn::FnArg, name: &str, ty: &[&str]) -> bool {
+    matches!(
+        argument,
+        syn::FnArg::Typed(argument)
+            if matches!(
+                argument.pat.as_ref(),
+                syn::Pat::Ident(binding)
+                    if binding.ident == name
+                        && binding.by_ref.is_none()
+                        && binding.mutability.is_none()
+                        && binding.subpat.is_none()
+            ) && matches!(
+                argument.ty.as_ref(),
+                syn::Type::Path(path)
+                    if path.qself.is_none() && path_is_exact(&path.path, ty)
+            )
+    )
+}
+
+#[derive(Default)]
+struct ClosedParserRuntimeVisitor {
+    parser_language_bindings: usize,
+    parser_language_installs: usize,
+}
+
+impl<'ast> Visit<'ast> for ClosedParserRuntimeVisitor {
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        let binds_compiled_language = matches!(
+            &local.pat,
+            syn::Pat::Ident(binding)
+                if binding.ident == "parser_language"
+                    && binding.by_ref.is_none()
+                    && binding.mutability.is_none()
+                    && binding.subpat.is_none()
+        ) && local.init.as_ref().is_some_and(|init| {
+            matches!(
+                init.expr.as_ref(),
+                syn::Expr::Call(call)
+                    if matches!(
+                        call.func.as_ref(),
+                        syn::Expr::Path(path)
+                            if path.qself.is_none()
+                                && path_is_exact(
+                                    &path.path,
+                                    &["parser_registry", "parser_language"],
+                                )
+                    ) && call.args.len() == 1
+                        && call.args.first().is_some_and(|argument| {
+                            matches!(
+                                argument,
+                                syn::Expr::Path(path)
+                                    if path.qself.is_none()
+                                        && path_is_exact(&path.path, &["parser"])
+                            )
+                        })
+            )
+        });
+        if binds_compiled_language {
+            self.parser_language_bindings += 1;
+        }
+        syn::visit::visit_local(self, local);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        let installs_compiled_language = call.method == "set_language"
+            && call.args.len() == 1
+            && matches!(
+                call.receiver.as_ref(),
+                syn::Expr::Path(path)
+                    if path.qself.is_none() && path_is_exact(&path.path, &["parser"])
+            )
+            && call.args.first().is_some_and(|argument| {
+                matches!(
+                    argument,
+                    syn::Expr::Reference(reference)
+                        if reference.mutability.is_none()
+                            && matches!(
+                                reference.expr.as_ref(),
+                                syn::Expr::Path(path)
+                                    if path.qself.is_none()
+                                        && path_is_exact(&path.path, &["parser_language"])
+                            )
+                )
+            });
+        if installs_compiled_language {
+            self.parser_language_installs += 1;
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+}
+
+fn expected_detection_row(
+    lock: &LanguageRegistryLock,
+    rule: &DetectionRule,
+) -> Result<String, Box<dyn Error>> {
     let stage = match rule {
         DetectionRule::ExactFilename { .. } => "DetectionStage::ExactFilename",
         DetectionRule::CompoundExtension { .. } => "DetectionStage::CompoundExtension",
@@ -377,13 +672,27 @@ fn expected_detection_row(rule: &DetectionRule) -> String {
         CasePolicy::Sensitive => "DetectionCase::Sensitive",
         CasePolicy::AsciiInsensitive => "DetectionCase::AsciiInsensitive",
     };
-    format!(
-        "    LanguageDetectionRule {{ id: {}, stage: {stage}, pattern: {}, lookup_case: {lookup_case}, path_case: {path_case}, scanner_visible: {}, mode: {} }},",
+    let content_detector = match rule {
+        DetectionRule::Content { detector_id, .. } => format!(
+            "Some(LanguageContentDetector::{})",
+            detector_id.rust_variant()
+        ),
+        DetectionRule::ExactFilename { .. }
+        | DetectionRule::CompoundExtension { .. }
+        | DetectionRule::Extension { .. } => "None".to_string(),
+    };
+    let public_mode = lock
+        .current_modes
+        .iter()
+        .find(|mode| &mode.mode_id == rule.mode_id())
+        .ok_or_else(|| io::Error::other("detection-rule current mode disappeared"))?;
+    Ok(format!(
+        "    LanguageDetectionRule {{ id: {}, stage: {stage}, pattern: {}, lookup_case: {lookup_case}, path_case: {path_case}, content_detector: {content_detector}, scanner_visible: {}, language: {} }},",
         rust_string(rule.id().as_str()),
         rust_string(rule.pattern()),
         rule.scanner_visible(),
-        rust_string(rule.mode_id().as_str())
-    )
+        rust_string(public_mode.public_mode.as_str())
+    ))
 }
 
 fn expected_mode_row(mode: &CurrentLanguageMode) -> String {
@@ -1045,11 +1354,20 @@ fn representative_artifacts(
     validate_registry_lock(&representative, accepted)?;
     let source_bytes = serde_json::to_vec(&representative)?;
     let source_digest = sha256_hex(&source_bytes);
-    let contract_digest = registry_contract_digest(&representative, accepted, historical);
+    let (parser_pack_trust, parser_pack_installed_byte_limit) = decoded_parser_pack_contract()?;
+    let contract_digest = registry_contract_digest(
+        &representative,
+        accepted,
+        historical,
+        &parser_pack_trust,
+        parser_pack_installed_byte_limit,
+    );
     let artifacts = render_generated_artifacts(
         &representative,
         accepted,
         historical,
+        &parser_pack_trust,
+        parser_pack_installed_byte_limit,
         &source_digest,
         &contract_digest,
     )?;
@@ -1063,11 +1381,20 @@ fn render_test_lock(
 ) -> Result<GeneratedArtifacts, Box<dyn Error>> {
     let source_bytes = serde_json::to_vec(lock)?;
     let source_digest = sha256_hex(&source_bytes);
-    let contract_digest = registry_contract_digest(lock, accepted, historical);
+    let (parser_pack_trust, parser_pack_installed_byte_limit) = decoded_parser_pack_contract()?;
+    let contract_digest = registry_contract_digest(
+        lock,
+        accepted,
+        historical,
+        &parser_pack_trust,
+        parser_pack_installed_byte_limit,
+    );
     Ok(render_generated_artifacts(
         lock,
         accepted,
         historical,
+        &parser_pack_trust,
+        parser_pack_installed_byte_limit,
         &source_digest,
         &contract_digest,
     )?)
@@ -1092,7 +1419,7 @@ fn verify_generated_rust_rows(
     for rule in &lock.detection_rules {
         require_generated_row(
             core,
-            &expected_detection_row(rule),
+            &expected_detection_row(lock, rule)?,
             "core detection projection",
         )?;
     }
@@ -1107,6 +1434,57 @@ fn verify_generated_rust_rows(
             && !core.contains("content_kind: Option"),
         "generated detection metadata reintroduced split or optional stage state",
     )?;
+    for rule in &lock.detection_rules {
+        let DetectionRule::Content {
+            detector_id,
+            mode_id,
+            ..
+        } = rule
+        else {
+            continue;
+        };
+        let public_mode = lock
+            .current_modes
+            .iter()
+            .find(|mode| &mode.mode_id == mode_id)
+            .ok_or_else(|| io::Error::other("content-detector current mode disappeared"))?;
+        require_generated_row(
+            core,
+            &format!(
+                "        LanguageContentDetector::{} => {},",
+                detector_id.rust_variant(),
+                rust_string(public_mode.public_mode.as_str())
+            ),
+            "generated content-detector routing",
+        )?;
+    }
+    let mut semantic_variants_by_base = BTreeMap::<&str, Vec<&str>>::new();
+    for semantic_mode in &lock.semantic_modes {
+        let base_mode = lock
+            .current_modes
+            .iter()
+            .find(|mode| mode.mode_id == semantic_mode.base_mode_id)
+            .ok_or_else(|| io::Error::other("semantic-mode base language disappeared"))?;
+        semantic_variants_by_base
+            .entry(base_mode.public_mode.as_str())
+            .or_default()
+            .push(semantic_mode.mode.rust_variant());
+    }
+    for (base_language, semantic_variants) in semantic_variants_by_base {
+        require_generated_row(
+            core,
+            &format!(
+                "            {} => base_language == {},",
+                semantic_variants
+                    .iter()
+                    .map(|variant| format!("Self::{variant}"))
+                    .collect::<Vec<_>>()
+                    .join(" | "),
+                rust_string(base_language)
+            ),
+            "generated semantic-mode compatibility",
+        )?;
+    }
     for mode in &lock.current_modes {
         require_generated_row(core, &expected_mode_row(mode), "core mode projection")?;
     }
@@ -1410,6 +1788,8 @@ fn verify_generated_json(
     lock: &LanguageRegistryLock,
     accepted: &AcceptedTargetContract,
     historical: &HistoricalRuntimeContract,
+    parser_pack_trust: &ParserPackTrustManifest,
+    parser_pack_installed_byte_limit: u64,
     source_lock_sha256: &str,
     registry_contract_sha256: &str,
     artifacts: &GeneratedArtifacts,
@@ -1424,6 +1804,7 @@ fn verify_generated_json(
         "registry_contract_sha256": registry_contract_sha256,
         "current": {
             "detection_rules": &lock.detection_rules,
+            "semantic_modes": &lock.semantic_modes,
             "modes": &lock.current_modes,
             "parser_components": &lock.parser_components,
             "packs": &lock.packs
@@ -1443,6 +1824,16 @@ fn verify_generated_json(
             "raw_sha256": lock.historical_contract.raw_sha256.as_str(),
             "language_pipelines": historical.language_pipelines.len(),
             "augmenter_routes": historical.augmenter_routes.len()
+        },
+        "parser_pack_trust": {
+            "format": "projectatlas.parser-pack-trust",
+            "path": lock.parser_pack_trust.path.as_str(),
+            "raw_sha256": lock.parser_pack_trust.raw_sha256.as_str(),
+            "installed_byte_limit": parser_pack_installed_byte_limit,
+            "selection_state": "blocked",
+            "selected_candidate": null,
+            "achieved_manifest": null,
+            "candidates": &parser_pack_trust.candidates
         },
         "accepted_capability_parity": {
             "complete": false,
@@ -1500,6 +1891,16 @@ fn verify_generated_json(
         "accepted_registry_id": accepted.source.registry_id.as_str(),
         "accepted_set_sha256": accepted.source.accepted_set_digest.as_str(),
         "parity_complete": false,
+        "parser_pack_trust": {
+            "format": "projectatlas.parser-pack-trust",
+            "path": lock.parser_pack_trust.path.as_str(),
+            "raw_sha256": lock.parser_pack_trust.raw_sha256.as_str(),
+            "installed_byte_limit": parser_pack_installed_byte_limit,
+            "selection_state": "blocked",
+            "selected_candidate": null,
+            "achieved_manifest": null,
+            "candidates": &parser_pack_trust.candidates
+        },
         "support": {
             "modes": expected_documentation_mode_values(lock, accepted),
             "language_crosswalk": expected_crosswalk
@@ -1514,8 +1915,9 @@ fn verify_generated_json(
 }
 
 #[test]
-fn task_arri_ut_arri_5_1() -> Result<(), Box<dyn Error>> {
+fn language_registry_contract_is_closed_and_semantically_bound() -> Result<(), Box<dyn Error>> {
     let (lock, accepted, historical) = decoded_contracts()?;
+    let (parser_pack_trust, parser_pack_installed_byte_limit) = decoded_parser_pack_contract()?;
     require_equal(
         &lock.schema_version,
         &LANGUAGE_REGISTRY_SCHEMA_VERSION,
@@ -1530,6 +1932,44 @@ fn task_arri_ut_arri_5_1() -> Result<(), Box<dyn Error>> {
         &historical.schema_version,
         &HISTORICAL_RUNTIME_CONTRACT_SCHEMA_VERSION,
         "historical runtime contract schema version",
+    )?;
+    require_equal(
+        &parser_pack_trust.schema_version,
+        &PARSER_PACK_TRUST_SCHEMA_VERSION,
+        "parser-pack trust schema version",
+    )?;
+    require_equal(
+        &lock.parser_pack_trust.path.as_str(),
+        &PARSER_PACK_TRUST_PATH,
+        "parser-pack trust lock path",
+    )?;
+    let parser_pack_trust_raw_sha256 = sha256_hex(PARSER_PACK_TRUST);
+    require_equal(
+        lock.parser_pack_trust.raw_sha256.as_str(),
+        parser_pack_trust_raw_sha256.as_str(),
+        "parser-pack trust raw digest",
+    )?;
+    let [candidate] = parser_pack_trust.candidates.as_slice() else {
+        return Err(io::Error::other("expected one parser-pack trust candidate").into());
+    };
+    let trusted_installed_bytes = candidate
+        .inventory
+        .iter()
+        .map(|file| file.bytes)
+        .sum::<u64>();
+    require(
+        candidate.eligibility == ParserPackCandidateEligibility::EvaluationOnlyUnselected
+            && !candidate.advertised
+            && candidate.pack_id.as_str() == BROAD_LANGUAGE_PACK_ID
+            && candidate.pack_abi.abi_id.as_str() == PROJECTATLAS_PACK_ABI_ID
+            && candidate.pack_abi.version == PROJECTATLAS_PACK_ABI_VERSION
+            && candidate.grammar_abi.abi_id.as_str() == TREE_SITTER_WASM_ABI_ID
+            && candidate.grammar_abi.version == TREE_SITTER_WASM_ABI_VERSION
+            && candidate.grammar_abi.state == ParserPackAbiState::PendingPackVerification
+            && candidate.packaged_platform.as_str() == TREE_SITTER_WASM_PLATFORM
+            && candidate.installed_bytes == trusted_installed_bytes
+            && candidate.installed_bytes < parser_pack_installed_byte_limit,
+        "parser-pack candidate lost its evaluation-only parser ABI or isolated budget binding",
     )?;
     require_equal(
         &REGISTRY_DIGEST_VERSION,
@@ -1624,35 +2064,96 @@ fn task_arri_ut_arri_5_1() -> Result<(), Box<dyn Error>> {
 
     validate_registry_lock(&representative, &accepted)?;
 
-    let baseline_digest = registry_contract_digest(&lock, &accepted, &historical);
-    let representative_digest = registry_contract_digest(&representative, &accepted, &historical);
+    let baseline_digest = registry_contract_digest(
+        &lock,
+        &accepted,
+        &historical,
+        &parser_pack_trust,
+        parser_pack_installed_byte_limit,
+    );
+    let representative_digest = registry_contract_digest(
+        &representative,
+        &accepted,
+        &historical,
+        &parser_pack_trust,
+        parser_pack_installed_byte_limit,
+    );
     require(
         baseline_digest != representative_digest,
         "representative 5.1 fields did not participate in the semantic digest",
     )?;
     require_equal(
         &representative_digest,
-        &registry_contract_digest(&representative, &accepted, &historical),
+        &registry_contract_digest(
+            &representative,
+            &accepted,
+            &historical,
+            &parser_pack_trust,
+            parser_pack_installed_byte_limit,
+        ),
         "semantic digest determinism",
+    )?;
+    let mut changed_parser_pack_trust = parser_pack_trust.clone();
+    changed_parser_pack_trust.candidates[0].installed_bytes += 1;
+    require(
+        registry_contract_digest(
+            &representative,
+            &accepted,
+            &historical,
+            &changed_parser_pack_trust,
+            parser_pack_installed_byte_limit,
+        ) != representative_digest,
+        "parser-pack trust was absent from the semantic registry digest",
     )?;
 
     let mut changed_content = representative.clone();
-    if let Some(DetectionRule::Content { detector_id, .. }) =
-        changed_content.detection_rules.last_mut()
-    {
-        detector_id.0.push_str("-variant");
-    }
+    let changed_content_rule = changed_content
+        .detection_rules
+        .iter_mut()
+        .find(|rule| rule.id() == content_rule.id())
+        .ok_or_else(|| io::Error::other("content-detector digest witness disappeared"))?;
+    let DetectionRule::Content { detector_id, .. } = changed_content_rule else {
+        return Err(io::Error::other("content-detector digest witness changed kind").into());
+    };
+    *detector_id = BuiltInContentDetector::SignatureXml;
     require(
-        registry_contract_digest(&changed_content, &accepted, &historical) != representative_digest,
+        registry_contract_digest(
+            &changed_content,
+            &accepted,
+            &historical,
+            &parser_pack_trust,
+            parser_pack_installed_byte_limit,
+        ) != representative_digest,
         "content detector identity was absent from the semantic digest",
+    )?;
+    let mut changed_semantic_mode = representative.clone();
+    changed_semantic_mode
+        .semantic_modes
+        .first_mut()
+        .ok_or_else(|| io::Error::other("semantic-mode digest witness disappeared"))?
+        .base_mode_id = ModeId::try_from("mode.json".to_string())?;
+    require(
+        registry_contract_digest(
+            &changed_semantic_mode,
+            &accepted,
+            &historical,
+            &parser_pack_trust,
+            parser_pack_installed_byte_limit,
+        ) != representative_digest,
+        "semantic-mode compatibility was absent from the semantic digest",
     )?;
     let mut changed_asset_source = representative.clone();
     if let Some(asset) = changed_asset_source.assets.last_mut() {
         asset.source.0.push_str("/mirror");
     }
     require(
-        registry_contract_digest(&changed_asset_source, &accepted, &historical)
-            != representative_digest,
+        registry_contract_digest(
+            &changed_asset_source,
+            &accepted,
+            &historical,
+            &parser_pack_trust,
+            parser_pack_installed_byte_limit,
+        ) != representative_digest,
         "asset source was absent from the semantic digest",
     )?;
     let mut changed_asset_version = representative.clone();
@@ -1660,8 +2161,13 @@ fn task_arri_ut_arri_5_1() -> Result<(), Box<dyn Error>> {
         asset.version.0.push_str("-reviewed");
     }
     require(
-        registry_contract_digest(&changed_asset_version, &accepted, &historical)
-            != representative_digest,
+        registry_contract_digest(
+            &changed_asset_version,
+            &accepted,
+            &historical,
+            &parser_pack_trust,
+            parser_pack_installed_byte_limit,
+        ) != representative_digest,
         "asset version was absent from the semantic digest",
     )?;
     let mut changed_asset_abi_version = representative.clone();
@@ -1669,8 +2175,13 @@ fn task_arri_ut_arri_5_1() -> Result<(), Box<dyn Error>> {
         asset.abi.version += 1;
     }
     require(
-        registry_contract_digest(&changed_asset_abi_version, &accepted, &historical)
-            != representative_digest,
+        registry_contract_digest(
+            &changed_asset_abi_version,
+            &accepted,
+            &historical,
+            &parser_pack_trust,
+            parser_pack_installed_byte_limit,
+        ) != representative_digest,
         "asset ABI version was absent from the semantic digest",
     )?;
     let mut changed_embedded = representative.clone();
@@ -1678,14 +2189,25 @@ fn task_arri_ut_arri_5_1() -> Result<(), Box<dyn Error>> {
         std::mem::swap(&mut adapter.host_mode_id, &mut adapter.embedded_mode_id);
     }
     require(
-        registry_contract_digest(&changed_embedded, &accepted, &historical)
-            != representative_digest,
+        registry_contract_digest(
+            &changed_embedded,
+            &accepted,
+            &historical,
+            &parser_pack_trust,
+            parser_pack_installed_byte_limit,
+        ) != representative_digest,
         "embedded adapter mapping was absent from the semantic digest",
     )?;
     let mut changed_tiers = representative.clone();
     changed_tiers.capability_tiers.swap(0, 1);
     require(
-        registry_contract_digest(&changed_tiers, &accepted, &historical) != representative_digest,
+        registry_contract_digest(
+            &changed_tiers,
+            &accepted,
+            &historical,
+            &parser_pack_trust,
+            parser_pack_installed_byte_limit,
+        ) != representative_digest,
         "capability tier order was absent from the semantic digest",
     )?;
 
@@ -1848,14 +2370,16 @@ fn task_arri_ut_arri_5_1() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn duplicate_object_keys_are_rejected_before_typed_decode() {
+fn duplicate_object_keys_are_rejected_before_typed_decode() -> Result<(), Box<dyn Error>> {
     let source = String::from_utf8_lossy(LOCK);
     let duplicate = source.replacen('{', "{\"schema_version\":1,", 1);
-    let result = validate_and_generate(duplicate.as_bytes(), &fixed_inputs());
-    assert!(matches!(
-        result,
-        Err(LanguageRegistryError::JsonDecode { .. })
-    ));
+    let inputs = owned_inputs()?;
+    let result = validate_and_generate(duplicate.as_bytes(), &inputs.fixed());
+    require(
+        matches!(result, Err(LanguageRegistryError::JsonDecode { .. })),
+        "duplicate registry object keys were accepted",
+    )?;
+    Ok(())
 }
 
 #[test]
@@ -1863,7 +2387,8 @@ fn unknown_nested_fields_are_rejected() -> Result<(), Box<dyn Error>> {
     let mut lock: serde_json::Value = serde_json::from_slice(LOCK)?;
     lock["packs"][0]["unexpected"] = json!(true);
     let bytes = serde_json::to_vec(&lock)?;
-    let result = validate_and_generate(&bytes, &fixed_inputs());
+    let inputs = owned_inputs()?;
+    let result = validate_and_generate(&bytes, &inputs.fixed());
     require(
         matches!(result, Err(LanguageRegistryError::JsonDecode { .. })),
         "unknown nested field was accepted",
@@ -2024,15 +2549,23 @@ fn accepted_target_relation_profile_mutations_are_rejected() -> Result<(), Box<d
 }
 
 #[test]
-fn external_contract_digests_and_identities_are_bound() {
+fn external_contract_digests_and_identities_are_bound() -> Result<(), Box<dyn Error>> {
     let mut accepted = ACCEPTED.to_vec();
     accepted.push(b'\n');
+    let baseline = owned_inputs()?;
     let fixed = FixedInputBytes {
         accepted_capability_registry: &accepted,
         historical_runtime_contract: HISTORICAL,
+        parser_pack_trust: PARSER_PACK_TRUST,
+        repository_intelligence_contracts: REPOSITORY_INTELLIGENCE_CONTRACTS,
+        parser_pack_payloads: &baseline.parser_pack_payloads,
     };
     let result = validate_and_generate(LOCK, &fixed);
-    assert!(matches!(result, Err(LanguageRegistryError::Validation(_))));
+    require(
+        matches!(result, Err(LanguageRegistryError::Validation(_))),
+        "external contract digest drift was accepted",
+    )?;
+    Ok(())
 }
 
 #[test]
@@ -2041,7 +2574,8 @@ fn count_preserving_mode_remaps_are_rejected() -> Result<(), Box<dyn Error>> {
     let replacement = lock["current_modes"][1]["accepted_mode_id"].clone();
     lock["current_modes"][0]["accepted_mode_id"] = replacement;
     let bytes = serde_json::to_vec(&lock)?;
-    let result = validate_and_generate(&bytes, &fixed_inputs());
+    let inputs = owned_inputs()?;
+    let result = validate_and_generate(&bytes, &inputs.fixed());
     require(
         matches!(result, Err(LanguageRegistryError::Validation(_))),
         "count-preserving accepted-mode remap was accepted",
@@ -2091,13 +2625,124 @@ fn mixed_case_policy_detection_overlaps_are_rejected_in_both_orders() -> Result<
             rules.reverse();
         }
         let bytes = serde_json::to_vec(&lock)?;
-        let result = validate_and_generate(&bytes, &fixed_inputs());
+        let inputs = owned_inputs()?;
+        let result = validate_and_generate(&bytes, &inputs.fixed());
         require(
             matches!(result, Err(LanguageRegistryError::Validation(message)) if message.contains("ambiguously claim")),
             format!("mixed case-policy overlap was accepted with reverse={reverse}"),
         )?;
     }
     Ok(())
+}
+
+#[test]
+fn compound_path_case_overlaps_are_rejected_in_both_orders() -> Result<(), Box<dyn Error>> {
+    for reverse in [false, true] {
+        let mut lock: serde_json::Value = serde_json::from_slice(LOCK)?;
+        let rules = lock["detection_rules"]
+            .as_array_mut()
+            .ok_or_else(|| io::Error::other("detection rules are not an array"))?;
+        let compound_index = rules
+            .iter()
+            .position(|rule| rule["extension"] == ".d.ts")
+            .ok_or_else(|| io::Error::other("D.TS compound rule is absent"))?;
+        rules[compound_index]["case"] = json!("sensitive");
+        rules[compound_index]["path_suffix_case"] = json!("ascii-insensitive");
+        let mut conflicting = rules[compound_index].clone();
+        conflicting["id"] = json!("detect.extension.d-ts-path-case-probe");
+        conflicting["extension"] = json!(".D.TS");
+        rules.push(conflicting);
+        if reverse {
+            rules.reverse();
+        }
+        let bytes = serde_json::to_vec(&lock)?;
+        let inputs = owned_inputs()?;
+        let result = validate_and_generate(&bytes, &inputs.fixed());
+        require(
+            matches!(result, Err(LanguageRegistryError::Validation(message)) if message.contains("ambiguously claim")),
+            format!("compound path-case overlap was accepted with reverse={reverse}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn generated_matchers_execute_case_policies() -> Result<(), Box<dyn Error>> {
+    let (mut lock, accepted, _) = decoded_contracts()?;
+    let mut sensitive_extension_mode = None;
+    let mut insensitive_filename_mode = None;
+    let mut compound_mode = None;
+    for rule in &mut lock.detection_rules {
+        match rule {
+            DetectionRule::Extension {
+                extension,
+                case,
+                mode_id,
+                ..
+            } if extension == ".zon" => {
+                *case = CasePolicy::Sensitive;
+                sensitive_extension_mode = Some(mode_id.as_str().to_string());
+            }
+            DetectionRule::ExactFilename {
+                file_name,
+                case,
+                mode_id,
+                ..
+            } if file_name == "Makefile" => {
+                *case = CasePolicy::AsciiInsensitive;
+                insensitive_filename_mode = Some(mode_id.as_str().to_string());
+            }
+            DetectionRule::CompoundExtension {
+                extension, mode_id, ..
+            } if extension == ".d.ts" => {
+                compound_mode = Some(mode_id.as_str().to_string());
+            }
+            DetectionRule::ExactFilename { .. }
+            | DetectionRule::CompoundExtension { .. }
+            | DetectionRule::Extension { .. }
+            | DetectionRule::Content { .. } => {}
+        }
+    }
+    let sensitive_extension_mode =
+        sensitive_extension_mode.ok_or_else(|| io::Error::other("ZON extension rule is absent"))?;
+    let insensitive_filename_mode = insensitive_filename_mode
+        .ok_or_else(|| io::Error::other("Makefile exact-filename rule is absent"))?;
+    let compound_mode =
+        compound_mode.ok_or_else(|| io::Error::other("D.TS compound rule is absent"))?;
+    validate_registry_lock(&lock, &accepted)?;
+
+    let public_mode = |mode_id: &str| {
+        lock.current_modes
+            .iter()
+            .find(|mode| mode.mode_id.as_str() == mode_id)
+            .map(|mode| mode.public_mode.as_str())
+            .ok_or_else(|| io::Error::other(format!("current mode {mode_id} is absent")))
+    };
+    let sensitive_extension_mode = public_mode(&sensitive_extension_mode)?;
+    let insensitive_filename_mode = public_mode(&insensitive_filename_mode)?;
+    let compound_mode = public_mode(&compound_mode)?;
+    let rendered = render_core_registry(&lock, "source-lock", "registry-contract")?;
+    let executable = format!(
+        "{rendered}\n\
+         fn main() {{\n\
+             assert_eq!(detect_extension(\".zon\"), Some({}));\n\
+             assert_eq!(detect_extension(\".ZON\"), None);\n\
+             assert_eq!(detect_extension(\".projectatlas-case-policy-probe\"), None);\n\
+             assert_eq!(detect_exact_filename(\"Makefile\"), Some({}));\n\
+             assert_eq!(detect_exact_filename(\"makefile\"), Some({}));\n\
+             assert_eq!(detect_exact_filename(\"ProjectAtlasCasePolicyProbe\"), None);\n\
+             assert_eq!(detect_compound_extension(\"types.d.ts\", Some(\".projectatlas-case-policy-probe\")), Some({}));\n\
+             assert_eq!(detect_compound_extension(\"types.D.TS\", None), None);\n\
+             assert_eq!(detect_compound_extension(\"types.D.TS\", Some(\".D.TS\")), Some({}));\n\
+             assert_eq!(detect_compound_extension(\"types.D.TS\", Some(\".projectatlas-case-policy-probe\")), None);\n\
+         }}\n",
+        rust_string(sensitive_extension_mode),
+        rust_string(insensitive_filename_mode),
+        rust_string(insensitive_filename_mode),
+        rust_string(compound_mode),
+        rust_string(compound_mode),
+    );
+    execute_generated_registry(&executable)
 }
 
 #[test]
@@ -2123,6 +2768,216 @@ fn compound_path_case_preserves_uppercase_d_ts_normalization() -> Result<(), Box
         &".ts".to_string(),
         "uppercase compound suffix remains ordinary extension",
     )?;
+    Ok(())
+}
+
+#[test]
+fn representative_content_detector_bindings_are_closed() -> Result<(), Box<dyn Error>> {
+    let (base, accepted, _) = decoded_contracts()?;
+    validate_registry_lock(&base, &accepted)?;
+    require(
+        !base
+            .detection_rules
+            .iter()
+            .any(|rule| matches!(rule, DetectionRule::Content { .. }))
+            && base.semantic_modes.is_empty(),
+        "current registry unexpectedly delivers representative content or semantic routing",
+    )?;
+    let lock = representative_registry_witness(&base)?.lock;
+    validate_registry_lock(&lock, &accepted)?;
+
+    let content_rules = lock
+        .detection_rules
+        .iter()
+        .filter_map(|rule| match rule {
+            DetectionRule::Content {
+                detector_id,
+                detector_kind,
+                mode_id,
+                ..
+            } => Some((*detector_id, *detector_kind, mode_id)),
+            DetectionRule::ExactFilename { .. }
+            | DetectionRule::CompoundExtension { .. }
+            | DetectionRule::Extension { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    require_equal(
+        &content_rules.len(),
+        &BUILT_IN_CONTENT_DETECTORS.len(),
+        "closed content-detector inventory size",
+    )?;
+    for (detector, kind, mode_id) in content_rules {
+        require_equal(
+            &kind,
+            &detector.detection_kind(),
+            "content-detector precedence stage",
+        )?;
+        require_equal(
+            &mode_id.as_str(),
+            &detector.mode_id(),
+            "content-detector selected mode",
+        )?;
+    }
+    require_equal(
+        &lock.semantic_modes.len(),
+        &SEMANTIC_MODES.len(),
+        "closed semantic-mode inventory size",
+    )?;
+    for semantic_mode in &lock.semantic_modes {
+        require_equal(
+            &semantic_mode.base_mode_id.as_str(),
+            &semantic_mode.mode.base_mode_id(),
+            "semantic-mode compatible base",
+        )?;
+    }
+
+    let unknown_detector = serde_json::from_value::<DetectionRule>(json!({
+        "layer": "content",
+        "id": "detect.content.unknown",
+        "detector_id": "content.unknown",
+        "detector_kind": "content-signature",
+        "scanner_visible": false,
+        "mode_id": "mode.xml"
+    }));
+    require(
+        matches!(
+            &unknown_detector,
+            Err(source)
+                if source.to_string().contains("unknown variant `content.unknown`")
+        ),
+        format!(
+            "unknown content detector did not fail typed decoding: {:?}",
+            unknown_detector.as_ref().err()
+        ),
+    )?;
+
+    let mut wrong_kind = lock.clone();
+    let wrong_kind_rule = wrong_kind
+        .detection_rules
+        .iter_mut()
+        .find(|rule| {
+            matches!(
+                rule,
+                DetectionRule::Content {
+                    detector_id: BuiltInContentDetector::SignaturePhp,
+                    ..
+                }
+            )
+        })
+        .ok_or_else(|| io::Error::other("PHP detector-kind witness is absent"))?;
+    let DetectionRule::Content { detector_kind, .. } = wrong_kind_rule else {
+        return Err(io::Error::other("PHP detector-kind witness changed kind").into());
+    };
+    *detector_kind = ContentDetectionKind::Shebang;
+    require_validation_fragments(
+        validate_registry_lock(&wrong_kind, &accepted),
+        "content-detector precedence stage",
+        &[
+            "content.signature.php",
+            "requires content-signature",
+            "declared as shebang",
+        ],
+    )?;
+
+    let mut wrong_mode = lock.clone();
+    let wrong_mode_rule = wrong_mode
+        .detection_rules
+        .iter_mut()
+        .find(|rule| {
+            matches!(
+                rule,
+                DetectionRule::Content {
+                    detector_id: BuiltInContentDetector::SignaturePhp,
+                    ..
+                }
+            )
+        })
+        .ok_or_else(|| io::Error::other("PHP detector-mode witness is absent"))?;
+    let DetectionRule::Content { mode_id, .. } = wrong_mode_rule else {
+        return Err(io::Error::other("PHP detector-mode witness changed kind").into());
+    };
+    *mode_id = ModeId::try_from("mode.xml".to_string())?;
+    require_validation_fragments(
+        validate_registry_lock(&wrong_mode, &accepted),
+        "content-detector selected mode",
+        &[
+            "content.signature.php",
+            "requires mode mode.php",
+            "declared for mode.xml",
+        ],
+    )?;
+
+    let mut missing_detector = lock.clone();
+    missing_detector.detection_rules.retain(|rule| {
+        !matches!(
+            rule,
+            DetectionRule::Content {
+                detector_id: BuiltInContentDetector::SignaturePhp,
+                ..
+            }
+        )
+    });
+    require_validation_fragments(
+        validate_registry_lock(&missing_detector, &accepted),
+        "missing content detector",
+        &[
+            "built-in content-detector inventory mismatch",
+            "SignaturePhp",
+        ],
+    )?;
+
+    let unknown_semantic_mode = serde_json::from_value::<SemanticModeRule>(json!({
+        "mode": "helm",
+        "base_mode_id": "mode.yaml"
+    }));
+    require(
+        matches!(
+            &unknown_semantic_mode,
+            Err(source) if source.to_string().contains("unknown variant `helm`")
+        ),
+        format!(
+            "unknown semantic mode did not fail typed decoding: {:?}",
+            unknown_semantic_mode.as_ref().err()
+        ),
+    )?;
+
+    let mut wrong_semantic_base = lock.clone();
+    wrong_semantic_base
+        .semantic_modes
+        .first_mut()
+        .ok_or_else(|| io::Error::other("semantic-mode base witness is absent"))?
+        .base_mode_id = ModeId::try_from("mode.json".to_string())?;
+    require_validation_fragments(
+        validate_registry_lock(&wrong_semantic_base, &accepted),
+        "semantic-mode compatible base",
+        &[
+            "semantic mode kubernetes",
+            "requires base mode mode.yaml",
+            "declared for mode.json",
+        ],
+    )?;
+
+    let mut missing_semantic_mode = lock.clone();
+    let _removed = missing_semantic_mode.semantic_modes.pop();
+    require_validation_fragments(
+        validate_registry_lock(&missing_semantic_mode, &accepted),
+        "missing semantic mode",
+        &["semantic-mode inventory mismatch", "Kustomize"],
+    )?;
+
+    let mut duplicate_semantic_mode = lock.clone();
+    let duplicate = duplicate_semantic_mode
+        .semantic_modes
+        .first()
+        .ok_or_else(|| io::Error::other("semantic-mode duplicate witness is absent"))?
+        .clone();
+    duplicate_semantic_mode.semantic_modes.push(duplicate);
+    require_validation_fragments(
+        validate_registry_lock(&duplicate_semantic_mode, &accepted),
+        "duplicate semantic mode",
+        &["duplicate semantic mode kubernetes"],
+    )?;
+
     Ok(())
 }
 
@@ -2165,9 +3020,11 @@ const FORMATTER_DESCENDANT_FIXTURE: &str =
 const FORMATTER_OUTPUT_FIXTURE: &str = "language_registry::tests::formatter_output_process_fixture";
 const FORMATTER_FAILURE_FIXTURE: &str =
     "language_registry::tests::formatter_failure_process_fixture";
+const FORMATTER_TIMEOUT_SENTINEL: &str = "formatter timeout fixture sentinel";
+const FORMATTER_FAILURE_SENTINEL: &str = "formatter failure fixture sentinel";
 
 fn formatter_fixture_command(test_name: &str) -> Result<ProcessCommand, Box<dyn Error>> {
-    Ok(bounded_toolchain_command(env::current_exe()?).args([
+    Ok(bounded_generated_rust_command(env::current_exe()?).args([
         "--exact",
         test_name,
         "--ignored",
@@ -2180,7 +3037,7 @@ fn require_formatter_error(
     context: &str,
 ) -> Result<String, Box<dyn Error>> {
     match result {
-        Err(LanguageRegistryError::FormatRust { detail, .. }) => Ok(detail),
+        Err(LanguageRegistryError::GeneratedRustProcess { detail, .. }) => Ok(detail),
         Err(error) => {
             Err(io::Error::other(format!("{context} returned the wrong error: {error}")).into())
         }
@@ -2216,20 +3073,30 @@ fn verify_formatter_process_contract(
     )?;
     require_equal(
         &command.configured_timeout(),
-        &Some(RUST_FORMATTER_TIMEOUT),
+        &Some(GENERATED_RUST_PROCESS_TIMEOUT),
         "pinned formatter timeout",
+    )?;
+    require_equal(
+        &GENERATED_RUST_PROCESS_TIMEOUT,
+        &Duration::from_secs(30),
+        "literal generated Rust process timeout contract",
+    )?;
+    require_equal(
+        &GENERATED_RUST_PROCESS_STREAM_LIMIT_BYTES,
+        &65_536,
+        "literal generated Rust stream-retention contract",
     )?;
 
     let missing = tempfile::tempdir()?
         .path()
         .join(format!("missing-rustfmt{}", std::env::consts::EXE_SUFFIX));
-    let missing_command = bounded_toolchain_command(missing);
+    let missing_command = bounded_generated_rust_command(missing);
     let missing_detail = require_formatter_error(
         formatter.run("missing formatter fixture", &missing_command),
         "missing formatter fixture",
     )?;
     require(
-        missing_detail.contains("failed to launch") || missing_detail.contains("not found"),
+        missing_detail.contains("missing-rustfmt") && missing_detail.contains("not found"),
         format!("missing formatter diagnostic is not actionable: {missing_detail}"),
     )?;
 
@@ -2246,7 +3113,8 @@ fn verify_formatter_process_contract(
         "formatter timeout fixture",
     )?;
     require(
-        timeout_detail.contains("configured timeout"),
+        timeout_detail.contains("configured timeout")
+            && timeout_detail.contains(FORMATTER_TIMEOUT_SENTINEL),
         format!("formatter timeout was not classified: {timeout_detail}"),
     )?;
     require(
@@ -2269,7 +3137,7 @@ fn verify_formatter_process_contract(
         "formatter output fixture",
     )?;
     require(
-        output_detail.contains("retained bytes per stream"),
+        output_detail.contains("65536 retained bytes per stream"),
         format!("formatter output truncation was not classified: {output_detail}"),
     )?;
 
@@ -2279,7 +3147,8 @@ fn verify_formatter_process_contract(
         "formatter failure fixture",
     )?;
     require(
-        failure_detail.contains("exited with code"),
+        failure_detail.contains("exited with code 101")
+            && failure_detail.contains(FORMATTER_FAILURE_SENTINEL),
         format!("formatter nonzero exit was not classified: {failure_detail}"),
     )?;
     Ok(())
@@ -2305,6 +3174,10 @@ fn formatter_timeout_process_fixture() -> Result<(), Box<dyn Error>> {
             .ok_or_else(|| io::Error::other("formatter descendant ready marker is missing"))?,
         b"ready",
     )?;
+    let mut stderr = io::stderr().lock();
+    stderr.write_all(FORMATTER_TIMEOUT_SENTINEL.as_bytes())?;
+    stderr.flush()?;
+    drop(stderr);
     std::thread::sleep(Duration::from_secs(10));
     Ok(())
 }
@@ -2322,7 +3195,7 @@ fn formatter_descendant_process_fixture() -> Result<(), Box<dyn Error>> {
 #[test]
 #[ignore = "process fixture invoked by the ARRI 5.2 capture-limit test"]
 fn formatter_output_process_fixture() -> Result<(), Box<dyn Error>> {
-    let bytes = vec![b'x'; RUST_FORMATTER_STREAM_LIMIT_BYTES + 1_024];
+    let bytes = vec![b'x'; GENERATED_RUST_PROCESS_STREAM_LIMIT_BYTES + 1_024];
     let mut stdout = io::stdout().lock();
     stdout.write_all(&bytes)?;
     stdout.flush()?;
@@ -2332,16 +3205,18 @@ fn formatter_output_process_fixture() -> Result<(), Box<dyn Error>> {
 #[test]
 #[ignore = "process fixture invoked by the ARRI 5.2 status-diagnostic test"]
 fn formatter_failure_process_fixture() -> Result<(), Box<dyn Error>> {
-    Err(io::Error::other("formatter failure fixture sentinel").into())
+    Err(io::Error::other(FORMATTER_FAILURE_SENTINEL).into())
 }
 
 #[test]
-fn task_arri_ut_arri_5_2() -> Result<(), Box<dyn Error>> {
+fn generated_language_registry_outputs_are_deterministic_and_complete() -> Result<(), Box<dyn Error>>
+{
     let formatter = GeneratedRustFormatter::new()?;
     verify_formatter_process_contract(&formatter)?;
     let first = generated()?;
     let second = generated()?;
     let (lock, accepted, historical) = decoded_contracts()?;
+    let (parser_pack_trust, parser_pack_installed_byte_limit) = decoded_parser_pack_contract()?;
     let mut paths = BTreeSet::new();
     for (left, right) in first.entries().into_iter().zip(second.entries()) {
         require_equal(&left.path, &right.path, "deterministic output owner")?;
@@ -2381,6 +3256,19 @@ fn task_arri_ut_arri_5_2() -> Result<(), Box<dyn Error>> {
 
     typecheck_generated_rust(&first)?;
     verify_generated_rust_rows(&lock, &accepted, &first)?;
+    let [candidate] = parser_pack_trust.candidates.as_slice() else {
+        return Err(io::Error::other("expected one generated parser-pack candidate").into());
+    };
+    let cli = std::str::from_utf8(&first.cli)?;
+    require(
+        cli.contains("#[cfg(test)]")
+            && cli.contains("EVALUATION_PARSER_PACK_TRUST")
+            && cli.contains(candidate.candidate_id.as_str())
+            && cli.contains("advertised: false")
+            && cli.contains("pack_abi_version: 1")
+            && cli.contains("grammar_abi_version: 15"),
+        "generated CLI projection omitted the test-only unselected parser-pack trust record",
+    )?;
     let (representative, representative_outputs) =
         representative_artifacts(&lock, &accepted, &historical)?;
     typecheck_generated_rust(&representative_outputs)?;
@@ -2389,8 +3277,16 @@ fn task_arri_ut_arri_5_2() -> Result<(), Box<dyn Error>> {
         &lock,
         &accepted,
         &historical,
+        &parser_pack_trust,
+        parser_pack_installed_byte_limit,
         &sha256_hex(LOCK),
-        &registry_contract_digest(&lock, &accepted, &historical),
+        &registry_contract_digest(
+            &lock,
+            &accepted,
+            &historical,
+            &parser_pack_trust,
+            parser_pack_installed_byte_limit,
+        ),
         &first,
     )?;
     let representative_bytes = serde_json::to_vec(&representative)?;
@@ -2398,8 +3294,16 @@ fn task_arri_ut_arri_5_2() -> Result<(), Box<dyn Error>> {
         &representative,
         &accepted,
         &historical,
+        &parser_pack_trust,
+        parser_pack_installed_byte_limit,
         &sha256_hex(&representative_bytes),
-        &registry_contract_digest(&representative, &accepted, &historical),
+        &registry_contract_digest(
+            &representative,
+            &accepted,
+            &historical,
+            &parser_pack_trust,
+            parser_pack_installed_byte_limit,
+        ),
         &representative_outputs,
     )?;
     let representative_core = std::str::from_utf8(&representative_outputs.core)?;
@@ -2410,25 +3314,51 @@ fn task_arri_ut_arri_5_2() -> Result<(), Box<dyn Error>> {
     let mut content_mutation = representative.clone();
     let content_before = content_mutation
         .detection_rules
-        .last()
+        .iter()
+        .find(|rule| {
+            matches!(
+                rule,
+                DetectionRule::Content {
+                    detector_id: BuiltInContentDetector::SignaturePhp,
+                    ..
+                }
+            )
+        })
         .ok_or_else(|| io::Error::other("representative content detector disappeared"))?;
-    let content_before_row = expected_detection_row(content_before);
-    let Some(DetectionRule::Content { detector_id, .. }) =
-        content_mutation.detection_rules.last_mut()
+    let content_before_row = expected_detection_row(&content_mutation, content_before)?;
+    let Some(DetectionRule::Content { mode_id, .. }) =
+        content_mutation.detection_rules.iter_mut().find(|rule| {
+            matches!(
+                rule,
+                DetectionRule::Content {
+                    detector_id: BuiltInContentDetector::SignaturePhp,
+                    ..
+                }
+            )
+        })
     else {
         return Err(io::Error::other("representative content detector disappeared").into());
     };
-    detector_id.0.push_str("-projection-change");
+    *mode_id = ModeId::try_from("mode.xml".to_string())?;
     let content_outputs = render_test_lock(&content_mutation, &accepted, &historical)?;
     let content_after = content_mutation
         .detection_rules
-        .last()
+        .iter()
+        .find(|rule| {
+            matches!(
+                rule,
+                DetectionRule::Content {
+                    detector_id: BuiltInContentDetector::SignaturePhp,
+                    ..
+                }
+            )
+        })
         .ok_or_else(|| io::Error::other("mutated content detector disappeared"))?;
     require_generated_row_change(
         representative_core,
         std::str::from_utf8(&content_outputs.core)?,
         &content_before_row,
-        &expected_detection_row(content_after),
+        &expected_detection_row(&content_mutation, content_after)?,
         "content-detection Rust projection",
     )?;
     let content_state = serde_json::from_slice::<serde_json::Value>(&content_outputs.evidence)?;
@@ -2437,6 +3367,21 @@ fn task_arri_ut_arri_5_2() -> Result<(), Box<dyn Error>> {
         &content_state,
         "/current/detection_rules",
         "content-detection evidence",
+    )?;
+
+    let mut semantic_mutation = representative.clone();
+    semantic_mutation
+        .semantic_modes
+        .first_mut()
+        .ok_or_else(|| io::Error::other("semantic-mode projection witness disappeared"))?
+        .base_mode_id = ModeId::try_from("mode.json".to_string())?;
+    let semantic_outputs = render_test_lock(&semantic_mutation, &accepted, &historical)?;
+    let semantic_state = serde_json::from_slice::<serde_json::Value>(&semantic_outputs.evidence)?;
+    require_json_projection_change(
+        &representative_state,
+        &semantic_state,
+        "/current/semantic_modes",
+        "semantic-mode evidence",
     )?;
 
     let mut asset_mutation = representative.clone();
@@ -2578,6 +3523,18 @@ fn task_arri_ut_arri_5_2() -> Result<(), Box<dyn Error>> {
     )?;
 
     let state: serde_json::Value = serde_json::from_slice(&first.evidence)?;
+    let trust_state = &state["parser_pack_trust"];
+    require(
+        trust_state["selection_state"] == "blocked"
+            && trust_state["selected_candidate"].is_null()
+            && trust_state["achieved_manifest"].is_null()
+            && trust_state["installed_byte_limit"] == parser_pack_installed_byte_limit
+            && trust_state["candidates"][0]["candidate_id"] == candidate.candidate_id.as_str()
+            && trust_state["candidates"][0]["advertised"] == false
+            && trust_state["candidates"][0]["pack_abi"]["version"] == 1
+            && trust_state["candidates"][0]["grammar_abi"]["version"] == 15,
+        "generated capability state promoted or omitted parser-pack evaluation trust",
+    )?;
     require_equal(
         &state["format"].as_str(),
         &Some("projectatlas.language-capability-state"),
@@ -2724,6 +3681,15 @@ fn task_arri_ut_arri_5_2() -> Result<(), Box<dyn Error>> {
     )?;
 
     let documentation: serde_json::Value = serde_json::from_slice(&first.documentation)?;
+    require(
+        documentation["parser_pack_trust"]["selection_state"] == "blocked"
+            && documentation["parser_pack_trust"]["selected_candidate"].is_null()
+            && documentation["parser_pack_trust"]["achieved_manifest"].is_null()
+            && documentation["parser_pack_trust"]["candidates"][0]["candidate_id"]
+                == candidate.candidate_id.as_str()
+            && documentation["parser_pack_trust"]["candidates"][0]["advertised"] == false,
+        "generated documentation omitted the unselected parser-pack trust projection",
+    )?;
     require_equal(
         &documentation["format"].as_str(),
         &Some("projectatlas.language-capabilities"),
@@ -2810,10 +3776,46 @@ fn task_arri_ut_arri_5_2() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn task_arri_ut_arri_5_3() -> Result<(), Box<dyn Error>> {
+fn language_registry_validation_rejects_invalid_or_drifting_contracts() -> Result<(), Box<dyn Error>>
+{
     let (lock, accepted, _) = decoded_contracts()?;
     validate_accepted_target(&lock, &accepted)?;
     validate_registry_lock(&lock, &accepted)?;
+
+    let baseline = owned_inputs()?;
+    let mut wrong_trust_digest: serde_json::Value = serde_json::from_slice(LOCK)?;
+    wrong_trust_digest["parser_pack_trust"]["raw_sha256"] = json!("0".repeat(64));
+    let wrong_trust_digest = serde_json::to_vec(&wrong_trust_digest)?;
+    require(
+        matches!(
+            validate_and_generate(&wrong_trust_digest, &baseline.fixed()),
+            Err(LanguageRegistryError::Validation(message))
+                if message.contains("parser-pack trust manifest raw SHA-256")
+        ),
+        "parser-pack trust raw digest was not fail-closed",
+    )?;
+
+    let mut unknown_trust_field: serde_json::Value = serde_json::from_slice(PARSER_PACK_TRUST)?;
+    unknown_trust_field["candidates"][0]["unexpected"] = json!(true);
+    let unknown_trust_bytes = serde_json::to_vec(&unknown_trust_field)?;
+    let mut trust_bound_lock: serde_json::Value = serde_json::from_slice(LOCK)?;
+    trust_bound_lock["parser_pack_trust"]["raw_sha256"] = json!(sha256_hex(&unknown_trust_bytes));
+    let trust_bound_lock = serde_json::to_vec(&trust_bound_lock)?;
+    let unknown_trust_fixed = FixedInputBytes {
+        accepted_capability_registry: ACCEPTED,
+        historical_runtime_contract: HISTORICAL,
+        parser_pack_trust: &unknown_trust_bytes,
+        repository_intelligence_contracts: REPOSITORY_INTELLIGENCE_CONTRACTS,
+        parser_pack_payloads: &baseline.parser_pack_payloads,
+    };
+    require(
+        matches!(
+            validate_and_generate(&trust_bound_lock, &unknown_trust_fixed),
+            Err(LanguageRegistryError::JsonDecode { label, .. })
+                if label == "parser-pack trust manifest"
+        ),
+        "unknown parser-pack trust fields were accepted",
+    )?;
 
     let historical_schema = validate_historical_schema_mutation(2)?;
     require(
@@ -3358,6 +4360,956 @@ fn task_arri_ut_arri_5_3() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn verify_parser_pack_capture_boundaries(
+    candidate: &ParserPackCandidateTrust,
+    installed_byte_limit: u64,
+) -> Result<(), Box<dyn Error>> {
+    let mut entry_limit = CandidateCaptureState::new();
+    entry_limit.entries = MAX_PARSER_PACK_DIRECTORY_ENTRIES;
+    require(
+        matches!(
+            entry_limit.record_entry(),
+            Err(LanguageRegistryError::Validation(message))
+                if message.contains("total entries")
+        ),
+        "the 8,193rd candidate entry was accepted",
+    )?;
+
+    let mut directory_limit = CandidateCaptureState::new();
+    directory_limit.directories = (0..MAX_PARSER_PACK_DIRECTORIES)
+        .map(|index| RegistryPath::try_from(format!("directory-{index}")))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    require(
+        matches!(
+            directory_limit.record_directory(RegistryPath::try_from(
+                "directory-overflow".to_string()
+            )?),
+            Err(LanguageRegistryError::Validation(message))
+                if message.contains("directories")
+        ),
+        "the 4,097th candidate directory was accepted",
+    )?;
+
+    let file_witness = CandidateFileSnapshot {
+        bytes: 1,
+        sha256: Sha256Digest("1".repeat(64)),
+        metadata_bytes: None,
+    };
+    let mut file_limit = CandidateCaptureState::new();
+    file_limit.files = (0..MAX_PARSER_PACK_FILES)
+        .map(|index| {
+            Ok((
+                RegistryPath::try_from(format!("file-{index}"))?,
+                file_witness.clone(),
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, LanguageRegistryError>>()?;
+    require(
+        matches!(
+            file_limit.reserve_file(),
+            Err(LanguageRegistryError::Validation(message)) if message.contains("files")
+        ),
+        "the 4,097th candidate file was accepted",
+    )?;
+
+    let diagnostic = Path::new("candidate-boundary");
+    require(
+        validate_candidate_depth(diagnostic, MAX_PARSER_PACK_DEPTH).is_ok(),
+        "candidate depth 64 was rejected",
+    )?;
+    require(
+        matches!(
+            validate_candidate_depth(diagnostic, MAX_PARSER_PACK_DEPTH + 1),
+            Err(LanguageRegistryError::Validation(message))
+                if message.contains("maximum depth")
+        ),
+        "candidate depth 65 was accepted",
+    )?;
+
+    let identity = CapabilityPathIdentity {
+        device: 7,
+        inode: 11,
+    };
+    let replacement = CapabilityPathIdentity {
+        device: 7,
+        inode: 12,
+    };
+    let initial_names = vec!["manifest.json".to_string()];
+    require(
+        require_candidate_directory_stable(
+            diagnostic,
+            &initial_names,
+            &initial_names,
+            identity,
+            identity,
+        )
+        .is_ok(),
+        "stable candidate directory was rejected",
+    )?;
+    require(
+        matches!(
+            require_candidate_directory_stable(
+                diagnostic,
+                &initial_names,
+                &["provenance.json".to_string()],
+                identity,
+                identity,
+            ),
+            Err(LanguageRegistryError::Validation(message)) if message.contains("changed")
+        ),
+        "candidate directory entry-set drift was accepted",
+    )?;
+    require(
+        matches!(
+            require_candidate_directory_stable(
+                diagnostic,
+                &initial_names,
+                &initial_names,
+                identity,
+                replacement,
+            ),
+            Err(LanguageRegistryError::Validation(message)) if message.contains("changed")
+        ),
+        "candidate directory replacement was accepted",
+    )?;
+
+    let mut stream = CandidateCaptureState::new();
+    let streamed = record_candidate_stream_bytes(diagnostic, 0, 4, 5, 5, 5, &mut stream)?;
+    require_equal(&streamed, &4, "bounded candidate file stream")?;
+    require(
+        matches!(
+            record_candidate_stream_bytes(
+                diagnostic,
+                streamed,
+                2,
+                5,
+                5,
+                5,
+                &mut stream,
+            ),
+            Err(LanguageRegistryError::Validation(message))
+                if message.contains("streaming byte ceiling")
+        ),
+        "growing candidate stream crossed its declared size",
+    )?;
+    let mut cumulative = CandidateCaptureState::new();
+    cumulative.captured_bytes = 5;
+    require(
+        matches!(
+            record_candidate_stream_bytes(
+                diagnostic,
+                0,
+                1,
+                1,
+                1,
+                5,
+                &mut cumulative,
+            ),
+            Err(LanguageRegistryError::Validation(message))
+                if message.contains("streaming byte ceiling")
+        ),
+        "candidate cumulative-byte ceiling was crossed",
+    )?;
+    require(
+        matches!(
+            require_candidate_file_stable(diagnostic, 4, 5, identity, identity, identity),
+            Err(LanguageRegistryError::Validation(message)) if message.contains("changed")
+        ),
+        "short candidate stream was accepted",
+    )?;
+    require(
+        matches!(
+            require_candidate_file_stable(diagnostic, 5, 5, identity, identity, replacement),
+            Err(LanguageRegistryError::Validation(message)) if message.contains("changed")
+        ),
+        "candidate file replacement was accepted",
+    )?;
+
+    let stale_trust_root = tempfile::tempdir()?;
+    seed_inputs(stale_trust_root.path())?;
+    fs::remove_dir_all(
+        stale_trust_root
+            .path()
+            .join(candidate.payload_root.as_str()),
+    )?;
+    let mut stale_trust = PARSER_PACK_TRUST.to_vec();
+    stale_trust.push(b'\n');
+    fs::write(
+        stale_trust_root.path().join(PARSER_PACK_TRUST_PATH),
+        stale_trust,
+    )?;
+    require(
+        matches!(
+            RegistryWorkspace::new(stale_trust_root.path())?.read_inputs(),
+            Err(LanguageRegistryError::Validation(message))
+                if message.contains("parser-pack trust manifest raw SHA-256")
+        ),
+        "stale trust digest did not fail before trust-directed traversal",
+    )?;
+
+    let closed_budget_root = tempfile::tempdir()?;
+    seed_inputs(closed_budget_root.path())?;
+    fs::remove_dir_all(
+        closed_budget_root
+            .path()
+            .join(candidate.payload_root.as_str()),
+    )?;
+    let mut closed_budget: serde_json::Value =
+        serde_json::from_slice(REPOSITORY_INTELLIGENCE_CONTRACTS)?;
+    closed_budget["budgets"]["optional_pack_contract"]["accepted_pack_budgets"][0]["limits"]["unexpected_limit"] =
+        json!(1);
+    fs::write(
+        closed_budget_root
+            .path()
+            .join(REPOSITORY_INTELLIGENCE_CONTRACTS_PATH),
+        serde_json::to_vec(&closed_budget)?,
+    )?;
+    require(
+        matches!(
+            RegistryWorkspace::new(closed_budget_root.path())?.read_inputs(),
+            Err(LanguageRegistryError::JsonDecode { label, .. })
+                if label == "repository-intelligence contracts"
+        ),
+        "unknown nested optional-pack budget field did not fail before traversal",
+    )?;
+
+    let ceiling_root = tempfile::tempdir()?;
+    seed_inputs(ceiling_root.path())?;
+    fs::remove_dir_all(ceiling_root.path().join(candidate.payload_root.as_str()))?;
+    let mut lowered_budget: serde_json::Value =
+        serde_json::from_slice(REPOSITORY_INTELLIGENCE_CONTRACTS)?;
+    let broad_budget = lowered_budget["budgets"]["optional_pack_contract"]["accepted_pack_budgets"]
+        .as_array_mut()
+        .and_then(|budgets| {
+            budgets
+                .iter_mut()
+                .find(|budget| budget["pack_id"] == BROAD_LANGUAGE_PACK_ID)
+        })
+        .ok_or_else(|| io::Error::other("broad parser-pack budget row is absent"))?;
+    broad_budget["limits"]["installed_bytes"] = json!(candidate.installed_bytes - 1);
+    fs::write(
+        ceiling_root
+            .path()
+            .join(REPOSITORY_INTELLIGENCE_CONTRACTS_PATH),
+        serde_json::to_vec(&lowered_budget)?,
+    )?;
+    require(
+        matches!(
+            RegistryWorkspace::new(ceiling_root.path())?.read_inputs(),
+            Err(LanguageRegistryError::Validation(message))
+                if message.contains("resource contract")
+        ),
+        "authoritative installed-byte ceiling did not fail before traversal",
+    )?;
+
+    let declared_size_root = tempfile::tempdir()?;
+    seed_inputs(declared_size_root.path())?;
+    let declared_workspace = RegistryWorkspace::new(declared_size_root.path())?;
+    let mut wrong_declared_size = candidate.clone();
+    wrong_declared_size.inventory[0].bytes += 1;
+    wrong_declared_size.installed_bytes += 1;
+    require(
+        matches!(
+            declared_workspace.capture_candidate_payload(
+                &wrong_declared_size,
+                installed_byte_limit,
+            ),
+            Err(LanguageRegistryError::Validation(message))
+                if message.contains("declared length")
+        ),
+        "candidate declared-size mismatch was streamed",
+    )?;
+
+    let wrong_case_root = tempfile::tempdir()?;
+    seed_inputs(wrong_case_root.path())?;
+    let lower = wrong_case_root.path().join("fixtures/parser-packs");
+    let transition = wrong_case_root
+        .path()
+        .join("fixtures/parser-packs-case-transition");
+    let wrong_case = wrong_case_root.path().join("fixtures/Parser-Packs");
+    fs::rename(&lower, &transition)?;
+    fs::rename(&transition, &wrong_case)?;
+    require(
+        matches!(
+            RegistryWorkspace::new(wrong_case_root.path())?
+                .capture_candidate_payload(candidate, installed_byte_limit),
+            Err(LanguageRegistryError::Validation(message))
+                if message.contains("wrong filesystem spelling")
+        ),
+        "wrong-case candidate-root component was accepted",
+    )?;
+
+    let linked_directory_root = tempfile::tempdir()?;
+    seed_inputs(linked_directory_root.path())?;
+    let parser_directory = linked_directory_root
+        .path()
+        .join(candidate.payload_root.as_str())
+        .join("parsers");
+    let parser_target = linked_directory_root.path().join("parser-directory-target");
+    fs::rename(&parser_directory, &parser_target)?;
+    if create_dir_symlink(&parser_target, &parser_directory).is_ok() {
+        require(
+            matches!(
+                RegistryWorkspace::new(linked_directory_root.path())?
+                    .capture_candidate_payload(candidate, installed_byte_limit),
+                Err(LanguageRegistryError::Validation(message))
+                    if message.contains("link or reparse point")
+                        || message.contains("non-link directory")
+            ),
+            "linked/reparse candidate directory was accepted",
+        )?;
+    }
+    Ok(())
+}
+
+fn verify_parser_pack_metadata_and_evidence_mutations(
+    candidate: &ParserPackCandidateTrust,
+    snapshot: &CandidatePayloadSnapshot,
+    inventory: &BTreeMap<RegistryPath, &ParserPackTrustedFile>,
+    parser_file: (&RegistryPath, &ParserPackTrustedFile),
+) -> Result<(), Box<dyn Error>> {
+    let manifest_bytes = candidate_metadata_bytes(snapshot, &candidate.manifest_path, "manifest")?;
+    let provenance_bytes =
+        candidate_metadata_bytes(snapshot, &candidate.provenance.record_path, "provenance")?;
+    let advisory_bytes =
+        candidate_metadata_bytes(snapshot, &candidate.advisory_record_path, "advisory record")?;
+    let wasm_validation_bytes = candidate_metadata_bytes(
+        snapshot,
+        &candidate.wasm_validation_record_path,
+        "WASM validation record",
+    )?;
+    let sbom_bytes = candidate_metadata_bytes(snapshot, &candidate.sbom_record_path, "SBOM")?;
+
+    require_duplicate_metadata_rejected::<ParserPackReleaseManifest>(
+        manifest_bytes,
+        "\"schema_version\":1,",
+        "parser-pack release manifest",
+        "release manifest",
+    )?;
+    require_duplicate_metadata_rejected::<ParserPackProvenanceRecord>(
+        provenance_bytes,
+        "\"schema_version\":1,",
+        "parser-pack provenance record",
+        "provenance record",
+    )?;
+    require_duplicate_metadata_rejected::<ParserPackAdvisoryRecord>(
+        advisory_bytes,
+        "\"schema_version\":1,",
+        "parser-pack advisory record",
+        "advisory record",
+    )?;
+    require_duplicate_metadata_rejected::<ParserPackWasmValidationRecord>(
+        wasm_validation_bytes,
+        "\"schema_version\":1,",
+        "parser-pack WASM validation record",
+        "WASM validation record",
+    )?;
+    require_duplicate_metadata_rejected::<ParserPackSpdxDocument>(
+        sbom_bytes,
+        "\"spdxVersion\":\"SPDX-2.3\",",
+        "parser-pack SPDX record",
+        "SPDX record",
+    )?;
+
+    let wasm_record = || {
+        decode_parser_pack_metadata::<ParserPackWasmValidationRecord>(
+            wasm_validation_bytes,
+            "parser-pack WASM validation record",
+        )
+    };
+    let mut wrong_magic = wasm_record()?;
+    wrong_magic.module.magic_hex = "0161736d".to_string();
+    require(
+        matches!(
+            validate_candidate_wasm(
+                candidate,
+                snapshot,
+                inventory,
+                parser_file,
+                &wrong_magic,
+            ),
+            Err(LanguageRegistryError::Validation(message))
+                if message.contains("WASM validation identity")
+        ),
+        "wrong recorded WASM magic was accepted",
+    )?;
+
+    let mut wrong_module_version = wasm_record()?;
+    wrong_module_version.module.module_version += 1;
+    require(
+        validate_candidate_wasm(
+            candidate,
+            snapshot,
+            inventory,
+            parser_file,
+            &wrong_module_version,
+        )
+        .is_err(),
+        "wrong recorded WASM module version was accepted",
+    )?;
+
+    let mut wrong_required_export = wasm_record()?;
+    wrong_required_export.module.required_function_export = "tree_sitter_wrong".to_string();
+    require(
+        validate_candidate_wasm(
+            candidate,
+            snapshot,
+            inventory,
+            parser_file,
+            &wrong_required_export,
+        )
+        .is_err(),
+        "wrong required WASM function export was accepted",
+    )?;
+
+    let mut wrong_grammar_abi = wasm_record()?;
+    wrong_grammar_abi.module.grammar_abi_version += 1;
+    require(
+        validate_candidate_wasm(
+            candidate,
+            snapshot,
+            inventory,
+            parser_file,
+            &wrong_grammar_abi,
+        )
+        .is_err(),
+        "wrong WASM grammar ABI was accepted",
+    )?;
+
+    let mut wrong_script_path = wasm_record()?;
+    wrong_script_path.probe.script_path = RegistryPath::try_from("wrong-probe.mjs".to_string())?;
+    require(
+        validate_candidate_wasm(
+            candidate,
+            snapshot,
+            inventory,
+            parser_file,
+            &wrong_script_path,
+        )
+        .is_err(),
+        "wrong WASM probe-script path was accepted",
+    )?;
+
+    let mut wrong_script_digest = wasm_record()?;
+    wrong_script_digest.probe.script_sha256 = Sha256Digest("0".repeat(64));
+    require(
+        validate_candidate_wasm(
+            candidate,
+            snapshot,
+            inventory,
+            parser_file,
+            &wrong_script_digest,
+        )
+        .is_err(),
+        "wrong WASM probe-script digest was accepted",
+    )?;
+
+    let mut wrong_probe_digest = wasm_record()?;
+    wrong_probe_digest.probe.raw_result_sha256 = Sha256Digest("0".repeat(64));
+    require(
+        validate_candidate_wasm(
+            candidate,
+            snapshot,
+            inventory,
+            parser_file,
+            &wrong_probe_digest,
+        )
+        .is_err(),
+        "wrong raw WASM probe-result digest was accepted",
+    )?;
+
+    for (field, value, context) in [
+        ("abi", json!(candidate.grammar_abi.version - 1), "ABI"),
+        ("exports", json!(["tree_sitter_wrong"]), "export"),
+    ] {
+        let mut wrong_probe_result = wasm_record()?;
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&wrong_probe_result.probe.raw_result)?;
+        raw[field] = value;
+        wrong_probe_result.probe.raw_result = serde_json::to_string(&raw)?;
+        wrong_probe_result.probe.raw_result_sha256 =
+            Sha256Digest(sha256_hex(wrong_probe_result.probe.raw_result.as_bytes()));
+        require(
+            validate_candidate_wasm(
+                candidate,
+                snapshot,
+                inventory,
+                parser_file,
+                &wrong_probe_result,
+            )
+            .is_err(),
+            format!("wrong raw WASM probe-result {context} was accepted"),
+        )?;
+    }
+
+    let mut duplicate_probe_result = wasm_record()?;
+    duplicate_probe_result.probe.raw_result =
+        duplicate_probe_result
+            .probe
+            .raw_result
+            .replacen('{', "{\"abi\":15,", 1);
+    duplicate_probe_result.probe.raw_result_sha256 = Sha256Digest(sha256_hex(
+        duplicate_probe_result.probe.raw_result.as_bytes(),
+    ));
+    require(
+        matches!(
+            validate_candidate_wasm(
+                candidate,
+                snapshot,
+                inventory,
+                parser_file,
+                &duplicate_probe_result,
+            ),
+            Err(LanguageRegistryError::JsonDecode { .. })
+        ),
+        "duplicate keys in the retained raw WASM probe result were accepted",
+    )?;
+
+    for (offset, context) in [(0_usize, "magic"), (4_usize, "module version")] {
+        let mut changed_snapshot = snapshot.clone();
+        let module = changed_snapshot
+            .files
+            .get_mut(parser_file.0)
+            .and_then(|file| file.metadata_bytes.as_mut())
+            .ok_or_else(|| io::Error::other("retained WASM module is absent"))?;
+        module[offset] ^= 1;
+        require(
+            validate_candidate_wasm(
+                candidate,
+                &changed_snapshot,
+                inventory,
+                parser_file,
+                &wasm_record()?,
+            )
+            .is_err(),
+            format!("mutated WASM {context} was accepted"),
+        )?;
+    }
+
+    let mut missing_export_snapshot = snapshot.clone();
+    let module = missing_export_snapshot
+        .files
+        .get_mut(parser_file.0)
+        .and_then(|file| file.metadata_bytes.as_mut())
+        .ok_or_else(|| io::Error::other("retained WASM module is absent"))?;
+    let required_export = TREE_SITTER_WASM_REQUIRED_EXPORT.as_bytes();
+    let export_offset = module
+        .windows(required_export.len())
+        .position(|window| window == required_export)
+        .ok_or_else(|| io::Error::other("required WASM export bytes are absent"))?;
+    module[export_offset] = b'x';
+    require(
+        validate_candidate_wasm(
+            candidate,
+            &missing_export_snapshot,
+            inventory,
+            parser_file,
+            &wasm_record()?,
+        )
+        .is_err(),
+        "WASM module without the required function export was accepted",
+    )?;
+
+    let provenance_record = || {
+        decode_parser_pack_metadata::<ParserPackProvenanceRecord>(
+            provenance_bytes,
+            "parser-pack provenance record",
+        )
+    };
+    let mut wrong_run_command = provenance_record()?;
+    wrong_run_command.local_output_runs[0].command = "tree-sitter build --wasm".to_string();
+    require(
+        validate_candidate_provenance(candidate, &wrong_run_command, parser_file).is_err(),
+        "wrong local reproduction command was accepted",
+    )?;
+    let mut wrong_run_directory = provenance_record()?;
+    wrong_run_directory.local_output_runs[1].working_directory =
+        RegistryPath::try_from("build-c".to_string())?;
+    wrong_run_directory.local_output_runs[1].command =
+        "tree-sitter build --wasm --output ../build-c.wasm .".to_string();
+    require(
+        validate_candidate_provenance(candidate, &wrong_run_directory, parser_file).is_err(),
+        "wrong local reproduction directory was accepted",
+    )?;
+    let mut wrong_run_output = provenance_record()?;
+    wrong_run_output.local_output_runs[1].sha256 = Sha256Digest("0".repeat(64));
+    require(
+        validate_candidate_provenance(candidate, &wrong_run_output, parser_file).is_err(),
+        "wrong local reproduction output was accepted",
+    )?;
+
+    let invalid_evidence_state = std::str::from_utf8(provenance_bytes)?.replacen(
+        "\"hosted_reproduction\": \"pending\"",
+        "\"hosted_reproduction\": \"complete\"",
+        1,
+    );
+    require(
+        matches!(
+            decode_parser_pack_metadata::<ParserPackProvenanceRecord>(
+                invalid_evidence_state.as_bytes(),
+                "parser-pack provenance record",
+            ),
+            Err(LanguageRegistryError::JsonDecode { .. })
+        ),
+        "unsupported provenance evidence state was accepted",
+    )?;
+
+    let clean_provenance = provenance_record()?;
+    let advisory_record = || {
+        decode_parser_pack_metadata::<ParserPackAdvisoryRecord>(
+            advisory_bytes,
+            "parser-pack advisory record",
+        )
+    };
+    let mut wrong_advisory_input = advisory_record()?;
+    wrong_advisory_input.inputs[0].bytes += 1;
+    require(
+        validate_candidate_advisory(candidate, &clean_provenance, &wrong_advisory_input).is_err(),
+        "wrong advisory input identity was accepted",
+    )?;
+    let mut advisory_value: serde_json::Value = serde_json::from_slice(advisory_bytes)?;
+    let duplicate_input = advisory_value["inputs"]
+        .as_array()
+        .and_then(|inputs| inputs.first())
+        .cloned()
+        .ok_or_else(|| io::Error::other("advisory input witness is absent"))?;
+    advisory_value["inputs"]
+        .as_array_mut()
+        .ok_or_else(|| io::Error::other("advisory inputs are not an array"))?
+        .push(duplicate_input);
+    let duplicate_input_record =
+        serde_json::from_value::<ParserPackAdvisoryRecord>(advisory_value)?;
+    require(
+        validate_candidate_advisory(candidate, &clean_provenance, &duplicate_input_record).is_err(),
+        "extra advisory input row was accepted",
+    )?;
+    let mut duplicate_advisory_raw = advisory_record()?;
+    duplicate_advisory_raw.raw_result =
+        duplicate_advisory_raw
+            .raw_result
+            .replacen('{', "{\"warnings\":{},", 1);
+    duplicate_advisory_raw.raw_result_bytes = duplicate_advisory_raw.raw_result.len() as u64;
+    duplicate_advisory_raw.raw_result_sha256 =
+        Sha256Digest(sha256_hex(duplicate_advisory_raw.raw_result.as_bytes()));
+    require(
+        matches!(
+            validate_candidate_advisory(candidate, &clean_provenance, &duplicate_advisory_raw,),
+            Err(LanguageRegistryError::JsonDecode { .. })
+        ),
+        "duplicate keys in the retained raw advisory result were accepted",
+    )?;
+
+    let clean_advisory = advisory_record()?;
+    let validate_spdx_value = |value: serde_json::Value| -> Result<_, Box<dyn Error>> {
+        let document = serde_json::from_value::<ParserPackSpdxDocument>(value)?;
+        Ok(validate_candidate_spdx(
+            candidate,
+            inventory,
+            &clean_provenance,
+            &clean_advisory,
+            &document,
+        ))
+    };
+    let mut extra_relationship: serde_json::Value = serde_json::from_slice(sbom_bytes)?;
+    extra_relationship["relationships"]
+        .as_array_mut()
+        .ok_or_else(|| io::Error::other("SPDX relationships are not an array"))?
+        .push(json!({
+            "spdxElementId": "SPDXRef-Package-tree-sitter-javascript-source",
+            "relationshipType": "OTHER",
+            "relatedSpdxElement": "SPDXRef-Package-ProjectAtlas-parser-pack"
+        }));
+    require(
+        matches!(
+            validate_spdx_value(extra_relationship)?,
+            Err(LanguageRegistryError::Validation(message))
+                if message.contains("relationship graph is not exact")
+        ),
+        "extra SPDX relationship row was accepted",
+    )?;
+    let mut duplicate_relationship: serde_json::Value = serde_json::from_slice(sbom_bytes)?;
+    let repeated = duplicate_relationship["relationships"]
+        .as_array()
+        .and_then(|relationships| relationships.first())
+        .cloned()
+        .ok_or_else(|| io::Error::other("SPDX relationship witness is absent"))?;
+    duplicate_relationship["relationships"]
+        .as_array_mut()
+        .ok_or_else(|| io::Error::other("SPDX relationships are not an array"))?
+        .push(repeated);
+    require(
+        validate_spdx_value(duplicate_relationship)?.is_err(),
+        "duplicate SPDX relationship row was accepted",
+    )?;
+    let mut missing_relationship: serde_json::Value = serde_json::from_slice(sbom_bytes)?;
+    missing_relationship["relationships"]
+        .as_array_mut()
+        .and_then(Vec::pop)
+        .ok_or_else(|| io::Error::other("SPDX relationship witness is absent"))?;
+    require(
+        validate_spdx_value(missing_relationship)?.is_err(),
+        "missing SPDX relationship row was accepted",
+    )?;
+    for package_index in 0..2 {
+        let mut verification_code: serde_json::Value = serde_json::from_slice(sbom_bytes)?;
+        verification_code["packages"][package_index]["packageVerificationCode"] = json!({
+            "packageVerificationCodeValue": "0".repeat(40)
+        });
+        require(
+            validate_spdx_value(verification_code)?.is_err(),
+            format!("SPDX package {package_index} verification code was accepted"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn parser_pack_trust_inventory_is_exact_and_fail_closed() -> Result<(), Box<dyn Error>> {
+    let lock = serde_json::from_slice::<LanguageRegistryLock>(LOCK)?;
+    let trust = decode_parser_pack_trust(PARSER_PACK_TRUST)?;
+    let inputs = owned_inputs()?;
+    let installed_byte_limit = validate_parser_pack_trust(
+        &lock,
+        &trust,
+        &inputs.parser_pack_payloads,
+        REPOSITORY_INTELLIGENCE_CONTRACTS,
+    )?;
+    let [candidate] = trust.candidates.as_slice() else {
+        return Err(io::Error::other("expected one parser-pack trust candidate").into());
+    };
+    let snapshot = inputs
+        .parser_pack_payloads
+        .iter()
+        .find(|payload| payload.candidate_id == candidate.candidate_id)
+        .ok_or_else(|| io::Error::other("candidate payload snapshot is absent"))?;
+    let inventory = candidate
+        .inventory
+        .iter()
+        .map(|file| (file.path.clone(), file))
+        .collect::<BTreeMap<_, _>>();
+    let parser_file = inventory
+        .iter()
+        .find(|(_, file)| file.role == ParserPackTrustedFileRole::ParserModule)
+        .map(|(path, file)| (path, *file))
+        .ok_or_else(|| io::Error::other("parser module inventory row is absent"))?;
+
+    verify_parser_pack_capture_boundaries(candidate, installed_byte_limit)?;
+    verify_parser_pack_metadata_and_evidence_mutations(
+        candidate,
+        snapshot,
+        &inventory,
+        parser_file,
+    )?;
+
+    let mut installed_overflow = trust.clone();
+    installed_overflow.candidates[0].installed_bytes = installed_byte_limit + 1;
+    require(
+        matches!(
+            validate_parser_pack_trust(
+                &lock,
+                &installed_overflow,
+                &inputs.parser_pack_payloads,
+                REPOSITORY_INTELLIGENCE_CONTRACTS,
+            ),
+            Err(LanguageRegistryError::Validation(_))
+        ),
+        "parser-pack installed-byte ceiling was not enforced",
+    )?;
+
+    let mut wrong_inventory_digest = trust.clone();
+    wrong_inventory_digest.candidates[0].inventory[0].sha256 =
+        serde_json::from_value(json!("0".repeat(64)))?;
+    require(
+        matches!(
+            validate_parser_pack_trust(
+                &lock,
+                &wrong_inventory_digest,
+                &inputs.parser_pack_payloads,
+                REPOSITORY_INTELLIGENCE_CONTRACTS,
+            ),
+            Err(LanguageRegistryError::Validation(message))
+                if message.contains("trusted size or digest")
+        ),
+        "parser-pack inventory digest drift was accepted",
+    )?;
+
+    let mut wrong_probe_script_bytes = trust.clone();
+    let probe_script = wrong_probe_script_bytes.candidates[0]
+        .inventory
+        .iter_mut()
+        .find(|file| file.role == ParserPackTrustedFileRole::WasmProbeScript)
+        .ok_or_else(|| io::Error::other("WASM probe-script trust row is absent"))?;
+    probe_script.bytes += 1;
+    wrong_probe_script_bytes.candidates[0].installed_bytes += 1;
+    require(
+        matches!(
+            validate_parser_pack_trust(
+                &lock,
+                &wrong_probe_script_bytes,
+                &inputs.parser_pack_payloads,
+                REPOSITORY_INTELLIGENCE_CONTRACTS,
+            ),
+            Err(LanguageRegistryError::Validation(_))
+        ),
+        "wrong WASM probe-script byte count was accepted",
+    )?;
+
+    let mut borrowing_budget: serde_json::Value =
+        serde_json::from_slice(REPOSITORY_INTELLIGENCE_CONTRACTS)?;
+    let broad_budget =
+        borrowing_budget["budgets"]["optional_pack_contract"]["accepted_pack_budgets"]
+            .as_array_mut()
+            .and_then(|budgets| {
+                budgets
+                    .iter_mut()
+                    .find(|budget| budget["pack_id"] == BROAD_LANGUAGE_PACK_ID)
+            })
+            .ok_or_else(|| io::Error::other("broad parser-pack budget row is absent"))?;
+    broad_budget["may_borrow_default_core_allowance"] = json!(true);
+    let borrowing_budget = serde_json::to_vec(&borrowing_budget)?;
+    require(
+        matches!(
+            validate_parser_pack_trust(
+                &lock,
+                &trust,
+                &inputs.parser_pack_payloads,
+                &borrowing_budget,
+            ),
+            Err(LanguageRegistryError::Validation(_))
+        ),
+        "parser pack was allowed to borrow the default-core allowance",
+    )?;
+
+    let provenance_bytes =
+        candidate_metadata_bytes(snapshot, &candidate.provenance.record_path, "provenance")?;
+    let mut provenance = decode_parser_pack_metadata::<ParserPackProvenanceRecord>(
+        provenance_bytes,
+        "parser-pack provenance record",
+    )?;
+    provenance.local_output_runs[1].bytes += 1;
+    require(
+        matches!(
+            validate_candidate_provenance(candidate, &provenance, parser_file),
+            Err(LanguageRegistryError::Validation(message))
+                if message.contains("byte-identical clean builds")
+        ),
+        "non-reproducible parser-pack build evidence was accepted",
+    )?;
+
+    let advisory_bytes =
+        candidate_metadata_bytes(snapshot, &candidate.advisory_record_path, "advisory record")?;
+    let mut advisory = decode_parser_pack_metadata::<ParserPackAdvisoryRecord>(
+        advisory_bytes,
+        "parser-pack advisory record",
+    )?;
+    advisory.raw_result = advisory
+        .raw_result
+        .replacen("\"found\":false", "\"found\":true", 1);
+    advisory.raw_result_bytes = advisory.raw_result.len() as u64;
+    advisory.raw_result_sha256 =
+        serde_json::from_value(json!(sha256_hex(advisory.raw_result.as_bytes())))?;
+    let provenance = decode_parser_pack_metadata::<ParserPackProvenanceRecord>(
+        provenance_bytes,
+        "parser-pack provenance record",
+    )?;
+    require(
+        matches!(
+            validate_candidate_advisory(candidate, &provenance, &advisory),
+            Err(LanguageRegistryError::Validation(_))
+        ),
+        "non-clean parser-pack advisory record was accepted",
+    )?;
+
+    let sbom_bytes =
+        candidate_metadata_bytes(snapshot, &candidate.sbom_record_path, "SBOM record")?;
+    let mut sbom = decode_parser_pack_metadata::<ParserPackSpdxDocument>(
+        sbom_bytes,
+        "parser-pack SPDX record",
+    )?;
+    let sha256 = sbom.files[0]
+        .checksums
+        .iter_mut()
+        .find(|checksum| checksum.algorithm == "SHA256")
+        .ok_or_else(|| io::Error::other("SPDX file SHA-256 is absent"))?;
+    sha256.checksum_value = "0".repeat(64);
+    let clean_advisory = decode_parser_pack_metadata::<ParserPackAdvisoryRecord>(
+        advisory_bytes,
+        "parser-pack advisory record",
+    )?;
+    require(
+        matches!(
+            validate_candidate_spdx(candidate, &inventory, &provenance, &clean_advisory, &sbom,),
+            Err(LanguageRegistryError::Validation(_))
+        ),
+        "parser-pack SPDX file digest drift was accepted",
+    )?;
+
+    let duplicate_key =
+        String::from_utf8_lossy(PARSER_PACK_TRUST).replacen('{', "{\"schema_version\":1,", 1);
+    require(
+        matches!(
+            decode_parser_pack_trust(duplicate_key.as_bytes()),
+            Err(LanguageRegistryError::JsonDecode { .. })
+        ),
+        "duplicate parser-pack trust keys were accepted",
+    )?;
+
+    let extra_file_root = tempfile::tempdir()?;
+    seed_inputs(extra_file_root.path())?;
+    fs::write(
+        extra_file_root
+            .path()
+            .join("fixtures/parser-packs/tree-sitter-wasm-grammar-pack/extra.bin"),
+        b"undeclared",
+    )?;
+    let extra_inputs = RegistryWorkspace::new(extra_file_root.path())?.read_inputs();
+    require(
+        matches!(
+            extra_inputs,
+            Err(LanguageRegistryError::Validation(message))
+                if message.contains("undeclared file")
+        ),
+        "undeclared parser-pack payload file was not rejected during capture",
+    )?;
+
+    let hardlink_root = tempfile::tempdir()?;
+    seed_inputs(hardlink_root.path())?;
+    let parser_path = hardlink_root
+        .path()
+        .join("fixtures/parser-packs/tree-sitter-wasm-grammar-pack/parsers/javascript.wasm");
+    fs::hard_link(
+        &parser_path,
+        hardlink_root.path().join("outside-parser-hardlink.wasm"),
+    )?;
+    require(
+        matches!(
+            RegistryWorkspace::new(hardlink_root.path())?.read_inputs(),
+            Err(LanguageRegistryError::Validation(message))
+                if message.contains("hardlink") || message.contains("single-link")
+        ),
+        "hard-linked parser-pack payload file was accepted",
+    )?;
+
+    let symlink_root = tempfile::tempdir()?;
+    seed_inputs(symlink_root.path())?;
+    let license_path = symlink_root
+        .path()
+        .join("fixtures/parser-packs/tree-sitter-wasm-grammar-pack/LICENSE");
+    let license_target = symlink_root.path().join("license-target");
+    fs::rename(&license_path, &license_target)?;
+    if create_file_symlink(&license_target, &license_path).is_ok() {
+        require(
+            matches!(
+                RegistryWorkspace::new(symlink_root.path())?.read_inputs(),
+                Err(LanguageRegistryError::Validation(message))
+                    if message.contains("link or reparse point")
+            ),
+            "linked/reparse parser-pack payload file was accepted",
+        )?;
+    }
+    Ok(())
+}
+
 #[test]
 fn registry_paths_reject_nonportable_and_colliding_names() -> Result<(), Box<dyn Error>> {
     require(
@@ -3373,10 +5325,606 @@ fn registry_paths_reject_nonportable_and_colliding_names() -> Result<(), Box<dyn
     lock["fixtures"][0]["path"] =
         json!("Fixtures/languages/projectatlas-v0.3.26-runtime-contract.toon");
     let bytes = serde_json::to_vec(&lock)?;
-    let result = validate_and_generate(&bytes, &fixed_inputs());
+    let inputs = owned_inputs()?;
+    let result = validate_and_generate(&bytes, &inputs.fixed());
     require(
         matches!(result, Err(LanguageRegistryError::Validation(message)) if message.contains("collide by ASCII case")),
         "case-colliding registry paths were accepted",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn built_in_parser_selection_remains_closed_and_pack_isolated() -> Result<(), Box<dyn Error>> {
+    let (lock, accepted, _) = decoded_contracts()?;
+    validate_accepted_target(&lock, &accepted)?;
+    validate_registry_lock(&lock, &accepted)?;
+
+    let pack_contracts = lock
+        .packs
+        .iter()
+        .map(|pack| (pack.pack_id.as_str(), (pack.ownership, pack.runtime)))
+        .collect::<BTreeMap<_, _>>();
+    let components_by_parser = lock
+        .parser_components
+        .iter()
+        .map(|component| (component.built_in_parser, component))
+        .collect::<BTreeMap<_, _>>();
+    require_equal(
+        &components_by_parser.len(),
+        &lock.parser_components.len(),
+        "unique built-in parser component inventory",
+    )?;
+    for component in &lock.parser_components {
+        let expected_component_id = format!(
+            "parser.builtin.{}",
+            component.built_in_parser.contract_tag()
+        );
+        require_equal(
+            component.parser_id.as_str(),
+            expected_component_id.as_str(),
+            "built-in parser component identity",
+        )?;
+        require_equal(
+            &component.implementation,
+            &ParserImplementation::CompiledTreeSitter,
+            "built-in parser implementation",
+        )?;
+        require_equal(
+            &component.abi.state,
+            &AbiState::CurrentCompiledContract,
+            "built-in parser ABI state",
+        )?;
+        require_equal(
+            component.abi.abi_id.as_str(),
+            CURRENT_COMPILED_PARSER_ABI_ID,
+            "built-in parser ABI identity",
+        )?;
+        require_equal(
+            &component.abi.version,
+            &CURRENT_COMPILED_PARSER_ABI_VERSION,
+            "built-in parser ABI version",
+        )?;
+        require_equal(
+            component.current_pack_id.as_str(),
+            DEFAULT_CORE_PACK_ID,
+            "built-in parser current pack",
+        )?;
+        require_equal(
+            &pack_contracts
+                .get(component.current_pack_id.as_str())
+                .copied(),
+            &Some((PackOwnership::DefaultCore, PackRuntime::InProcess)),
+            "built-in parser pack runtime boundary",
+        )?;
+    }
+
+    let accepted_modes = accepted
+        .modes
+        .iter()
+        .map(|mode| (&mode.mode_id, mode))
+        .collect::<BTreeMap<_, _>>();
+    let accepted_parsers = accepted
+        .parsers
+        .iter()
+        .map(|parser| (&parser.parser_id, parser))
+        .collect::<BTreeMap<_, _>>();
+    let mut routed_parsers = BTreeSet::new();
+    let mut current_accepted_parser_ids = BTreeSet::new();
+    for mode in &lock.current_modes {
+        let SymbolPipeline::BuiltIn { parser, .. } = &mode.symbols else {
+            continue;
+        };
+        let component = components_by_parser.get(parser).ok_or_else(|| {
+            io::Error::other(format!(
+                "current built-in route {} has no parser component",
+                mode.mode_id.as_str()
+            ))
+        })?;
+        routed_parsers.insert(*parser);
+        let accepted_mode = accepted_modes.get(&mode.accepted_mode_id).ok_or_else(|| {
+            io::Error::other(format!(
+                "current built-in route {} has no accepted mode",
+                mode.mode_id.as_str()
+            ))
+        })?;
+        let expected_accepted_parser_id = AcceptedParserId::try_from(format!(
+            "parse.{}",
+            component.built_in_parser.contract_tag()
+        ))?;
+        require_equal(
+            accepted_mode.pack_id.as_str(),
+            DEFAULT_CORE_PACK_ID,
+            "current built-in accepted-mode pack",
+        )?;
+        require_equal(
+            &accepted_mode.parser_id,
+            &expected_accepted_parser_id,
+            "current built-in accepted-mode parser",
+        )?;
+        let accepted_parser = accepted_parsers
+            .get(&accepted_mode.parser_id)
+            .ok_or_else(|| io::Error::other("current built-in accepted parser disappeared"))?;
+        require_equal(
+            accepted_parser.pack_id.as_str(),
+            DEFAULT_CORE_PACK_ID,
+            "current built-in accepted-parser pack",
+        )?;
+        require_equal(
+            &accepted_parser.parser_id,
+            &expected_accepted_parser_id,
+            "current built-in accepted-parser identity",
+        )?;
+        current_accepted_parser_ids.insert(expected_accepted_parser_id);
+    }
+    require_equal(
+        &routed_parsers,
+        &components_by_parser
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        "closed built-in route and parser-component inventories",
+    )?;
+
+    let broad_parsers = accepted
+        .parsers
+        .iter()
+        .filter(|parser| parser.pack_id.as_str() == BROAD_LANGUAGE_PACK_ID)
+        .collect::<Vec<_>>();
+    let broad_pack_owner = accepted
+        .source
+        .packs
+        .iter()
+        .find(|pack| pack.pack_id.as_str() == BROAD_LANGUAGE_PACK_ID)
+        .and_then(|pack| pack.language_owner.as_deref())
+        .ok_or_else(|| io::Error::other("accepted broad-language pack owner is absent"))?;
+    require(
+        !broad_parsers.is_empty(),
+        "accepted broad-language parser inventory is empty",
+    )?;
+    let broad_parser_ids = broad_parsers
+        .iter()
+        .map(|parser| parser.parser_id.clone())
+        .collect::<BTreeSet<_>>();
+    for parser in &broad_parsers {
+        require_equal(
+            parser.owner.as_str(),
+            broad_pack_owner,
+            "accepted broad parser owner",
+        )?;
+        require_equal(
+            &parser.evidence_state,
+            &AcceptedParserEvidenceState::PendingAssetFixtureAndPlatformVerification,
+            "accepted broad parser evidence state",
+        )?;
+        require(!parser.advertised, "accepted broad parser is advertised")?;
+    }
+    require(
+        current_accepted_parser_ids.is_disjoint(&broad_parser_ids),
+        "current built-in and broad accepted parser inventories overlap",
+    )?;
+
+    let artifacts = generated()?;
+    let symbols = std::str::from_utf8(&artifacts.symbols)?;
+    require_equal(
+        &count_struct_initializers(symbols, "ParserComponentContract")?,
+        &components_by_parser.len(),
+        "generated current parser-component inventory",
+    )?;
+    require_equal(
+        &count_struct_initializers(symbols, "LanguageSymbolRoute")?,
+        &lock.current_modes.len(),
+        "generated current symbol-route inventory",
+    )?;
+    for component in &lock.parser_components {
+        require_generated_row(
+            symbols,
+            &expected_parser_component_row(component),
+            "generated current parser component",
+        )?;
+    }
+    for mode in &lock.current_modes {
+        require_generated_row(
+            symbols,
+            &expected_symbol_route_row(mode),
+            "generated current symbol route",
+        )?;
+    }
+    for parser_id in &broad_parser_ids {
+        require(
+            !symbols.contains(&format!("parser_id: {}", rust_string(parser_id.as_str()))),
+            format!(
+                "accepted broad parser {} leaked into the generated current parser projection",
+                parser_id.as_str()
+            ),
+        )?;
+    }
+
+    let generated_syntax = syn::parse_file(symbols)?;
+    let built_in_parser = generated_syntax
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Enum(item) if item.ident == "BuiltInParser" => Some(item),
+            _ => None,
+        })
+        .ok_or_else(|| io::Error::other("generated BuiltInParser is not an enum"))?;
+    let expected_variants = lock
+        .parser_components
+        .iter()
+        .map(|component| {
+            expected_built_in_parser(component.built_in_parser)
+                .rsplit("::")
+                .next()
+                .ok_or_else(|| io::Error::other("built-in parser variant is malformed"))
+                .map(str::to_string)
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let generated_variants = built_in_parser
+        .variants
+        .iter()
+        .map(|variant| variant.ident.to_string())
+        .collect::<BTreeSet<_>>();
+    require_equal(
+        &generated_variants,
+        &expected_variants,
+        "generated closed BuiltInParser variants",
+    )?;
+    require(
+        generated_syntax
+            .items
+            .iter()
+            .any(|item| matches!(item, syn::Item::Enum(item) if item.ident == "SymbolRoute")),
+        "generated SymbolRoute is not a closed enum",
+    )?;
+
+    let parser_syntax = syn::parse_file(PARSER_REGISTRY)?;
+    require(
+        parser_syntax
+            .items
+            .iter()
+            .all(|item| !matches!(item, syn::Item::Trait(_) | syn::Item::Static(_))),
+        "parser adapter introduced a trait or static parser registry",
+    )?;
+    let parser_language = parser_syntax
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "parser_language" => Some(function),
+            _ => None,
+        })
+        .ok_or_else(|| io::Error::other("parser_language adapter is absent"))?;
+    require_equal(
+        &parser_language.sig.inputs.len(),
+        &1_usize,
+        "parser_language argument count",
+    )?;
+    require(
+        parser_language.sig.inputs.first().is_some_and(|argument| {
+            typed_value_argument_is_exact(argument, "parser", &["BuiltInParser"])
+        }),
+        "parser_language does not accept the generated closed BuiltInParser",
+    )?;
+    require(
+        matches!(
+            &parser_language.sig.output,
+            syn::ReturnType::Type(_, output)
+                if matches!(output.as_ref(), syn::Type::Path(path) if path_is_exact(&path.path, &["Language"]))
+        ),
+        "parser_language does not return tree_sitter::Language through its imported type",
+    )?;
+    let [syn::Stmt::Expr(syn::Expr::Match(parser_match), None)] =
+        parser_language.block.stmts.as_slice()
+    else {
+        return Err(io::Error::other(
+            "parser_language is not one direct exhaustive match expression",
+        )
+        .into());
+    };
+    require(
+        matches!(
+            parser_match.expr.as_ref(),
+            syn::Expr::Path(path) if path_is_exact(&path.path, &["parser"])
+        ),
+        "parser_language does not match its closed parser argument directly",
+    )?;
+    let mut matched_variants = BTreeSet::new();
+    for arm in &parser_match.arms {
+        require(arm.guard.is_none(), "parser_language match arm has a guard")?;
+        let syn::Pat::Path(pattern) = &arm.pat else {
+            return Err(io::Error::other(
+                "parser_language contains a wildcard, compound, or indirect parser pattern",
+            )
+            .into());
+        };
+        let pattern_segments = pattern
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        let [owner, variant] = pattern_segments.as_slice() else {
+            return Err(
+                io::Error::other("parser_language arm is not BuiltInParser::Variant").into(),
+            );
+        };
+        require_equal(
+            owner.as_str(),
+            "BuiltInParser",
+            "parser_language pattern owner",
+        )?;
+        require(
+            matched_variants.insert(variant.clone()),
+            format!("parser_language repeats BuiltInParser::{variant}"),
+        )?;
+        let syn::Expr::MethodCall(into) = arm.body.as_ref() else {
+            return Err(io::Error::other(
+                "parser_language arm does not map a compiled grammar constant directly",
+            )
+            .into());
+        };
+        require(
+            into.method == "into" && into.args.is_empty(),
+            "parser_language arm does not call only Language::into on its grammar constant",
+        )?;
+        let syn::Expr::Path(grammar) = into.receiver.as_ref() else {
+            return Err(io::Error::other(
+                "parser_language arm uses a factory, lookup, registration call, or indirect value",
+            )
+            .into());
+        };
+        let grammar_segments = grammar
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        require(
+            grammar.qself.is_none()
+                && grammar_segments.len() >= 2
+                && grammar_segments
+                    .first()
+                    .is_some_and(|owner| owner.starts_with("tree_sitter_"))
+                && grammar_segments
+                    .last()
+                    .is_some_and(|constant| constant.starts_with("LANGUAGE")),
+            format!(
+                "parser_language arm for BuiltInParser::{variant} does not map directly to a tree_sitter_*::LANGUAGE constant"
+            ),
+        )?;
+    }
+    require_equal(
+        &matched_variants,
+        &generated_variants,
+        "direct compiled parser match coverage",
+    )?;
+
+    let runtime_syntax = syn::parse_file(SYMBOL_RUNTIME)?;
+    let tree_sitter_runtime = runtime_syntax
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "extract_tree_sitter_graph" => {
+                Some(function)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| io::Error::other("tree-sitter runtime caller is absent"))?;
+    require(
+        tree_sitter_runtime
+            .sig
+            .inputs
+            .iter()
+            .any(|argument| typed_value_argument_is_exact(argument, "parser", &["BuiltInParser"])),
+        "tree-sitter runtime caller does not accept the closed BuiltInParser",
+    )?;
+    let mut runtime_visitor = ClosedParserRuntimeVisitor::default();
+    runtime_visitor.visit_block(&tree_sitter_runtime.block);
+    require_equal(
+        &runtime_visitor.parser_language_bindings,
+        &1_usize,
+        "closed parser runtime adapter binding count",
+    )?;
+    require_equal(
+        &runtime_visitor.parser_language_installs,
+        &1_usize,
+        "closed parser runtime grammar installation count",
+    )?;
+
+    for pack_id in [BROAD_LANGUAGE_PACK_ID, SEMANTIC_PACK_ID] {
+        let mut relabeled = lock.clone();
+        let component = relabeled
+            .parser_components
+            .first_mut()
+            .ok_or_else(|| io::Error::other("registry has no current parser component"))?;
+        let parser_id = component.parser_id.clone();
+        component.current_pack_id = PackId(pack_id.to_string());
+        require_validation_fragments(
+            validate_registry_lock(&relabeled, &accepted),
+            "relabeled current parser component",
+            &[
+                parser_id.as_str(),
+                "not a closed default-core in-process parser choice",
+            ],
+        )?;
+    }
+
+    let mut relocated = materialize_accepted_target(serde_json::from_slice(ACCEPTED)?)?;
+    let current_mode = lock
+        .current_modes
+        .iter()
+        .find(|mode| matches!(mode.symbols, SymbolPipeline::BuiltIn { .. }))
+        .ok_or_else(|| io::Error::other("registry has no built-in route witness"))?;
+    let accepted_mode = relocated
+        .modes
+        .iter()
+        .find(|mode| mode.mode_id == current_mode.accepted_mode_id)
+        .ok_or_else(|| io::Error::other("built-in accepted mode witness is absent"))?;
+    let relocated_parser_id = accepted_mode.parser_id.clone();
+    let relocated_mode_id = accepted_mode.mode_id.clone();
+    for mode in relocated
+        .modes
+        .iter_mut()
+        .filter(|mode| mode.parser_id == relocated_parser_id)
+    {
+        mode.pack_id = PackId(BROAD_LANGUAGE_PACK_ID.to_string());
+        mode.owner = broad_pack_owner.to_string();
+    }
+    let relocated_parser = relocated
+        .parsers
+        .iter_mut()
+        .find(|parser| parser.parser_id == relocated_parser_id)
+        .ok_or_else(|| io::Error::other("built-in accepted parser witness is absent"))?;
+    relocated_parser.pack_id = PackId(BROAD_LANGUAGE_PACK_ID.to_string());
+    relocated_parser.owner = broad_pack_owner.to_string();
+    relocated_parser.evidence_state =
+        AcceptedParserEvidenceState::PendingAssetFixtureAndPlatformVerification;
+    validate_accepted_target(&lock, &relocated)?;
+    require_validation_fragments(
+        validate_registry_lock(&lock, &relocated),
+        "coordinated accepted built-in parser relocation",
+        &[
+            relocated_mode_id.as_str(),
+            DEFAULT_CORE_PACK_ID,
+            relocated_parser_id.as_str(),
+        ],
+    )?;
+
+    for (pack_id, process) in [
+        (BROAD_LANGUAGE_PACK_ID, "projectatlas"),
+        (DEFAULT_CORE_PACK_ID, "supervised-worker"),
+        (SEMANTIC_PACK_ID, "projectatlas"),
+    ] {
+        let result = validate_accepted_mutation(|source| {
+            let pack = source["packs"]
+                .as_array_mut()
+                .and_then(|packs| packs.iter_mut().find(|pack| pack["pack_id"] == pack_id))
+                .ok_or_else(|| io::Error::other(format!("accepted pack {pack_id} is absent")))?;
+            pack["process"] = json!(process);
+            Ok(())
+        })?
+        .map(|_| ());
+        require_validation_fragments(
+            result,
+            "accepted pack process mutation",
+            &[pack_id, "required process boundary"],
+        )?;
+    }
+
+    let mut broad_in_process = lock.clone();
+    let broad_pack = broad_in_process
+        .packs
+        .iter_mut()
+        .find(|pack| pack.pack_id.as_str() == BROAD_LANGUAGE_PACK_ID)
+        .ok_or_else(|| io::Error::other("broad lock pack is absent"))?;
+    broad_pack.runtime = PackRuntime::InProcess;
+    require_validation_fragments(
+        validate_registry_lock(&broad_in_process, &accepted),
+        "in-process broad lock pack",
+        &[BROAD_LANGUAGE_PACK_ID, "required runtime boundary"],
+    )?;
+
+    let mut runtime_selected: serde_json::Value = serde_json::from_slice(LOCK)?;
+    runtime_selected["parser_components"][0]["implementation"] = json!("runtime-selected");
+    let runtime_selected_bytes = serde_json::to_vec(&runtime_selected)?;
+    let inputs = owned_inputs()?;
+    let runtime_selected_result = validate_and_generate(&runtime_selected_bytes, &inputs.fixed());
+    require(
+        matches!(
+            &runtime_selected_result,
+            Err(LanguageRegistryError::JsonDecode { label, source })
+                if *label == "language registry lock"
+                    && source.to_string().contains("unknown variant `runtime-selected`")
+        ),
+        format!(
+            "runtime-selected parser implementation did not fail typed decoding: {:?}",
+            runtime_selected_result.as_ref().err()
+        ),
+    )?;
+
+    let broad_suffix = broad_parsers
+        .first()
+        .and_then(|parser| parser.parser_id.as_str().strip_prefix("parse."))
+        .ok_or_else(|| io::Error::other("broad parser suffix is absent"))?;
+    require(
+        !lock
+            .parser_components
+            .iter()
+            .any(|component| component.built_in_parser.contract_tag() == broad_suffix),
+        "broad parser witness unexpectedly belongs to the built-in parser set",
+    )?;
+    let mut broad_route: serde_json::Value = serde_json::from_slice(LOCK)?;
+    let built_in_route = broad_route["current_modes"]
+        .as_array_mut()
+        .and_then(|modes| {
+            modes
+                .iter_mut()
+                .find(|mode| mode["symbols"]["kind"] == "built-in")
+        })
+        .ok_or_else(|| io::Error::other("raw lock has no built-in route witness"))?;
+    built_in_route["symbols"]["parser"] = json!(broad_suffix);
+    let broad_route_bytes = serde_json::to_vec(&broad_route)?;
+    let broad_route_result = validate_and_generate(&broad_route_bytes, &inputs.fixed());
+    require(
+        matches!(
+            &broad_route_result,
+            Err(LanguageRegistryError::JsonDecode { label, source })
+                if *label == "language registry lock"
+                    && source.to_string().contains("unknown variant")
+                    && source.to_string().contains(broad_suffix)
+        ),
+        format!(
+            "broad parser entered a typed current built-in route: {:?}",
+            broad_route_result.as_ref().err()
+        ),
+    )?;
+
+    let mut broad_pending = materialize_accepted_target(serde_json::from_slice(ACCEPTED)?)?;
+    let parser = broad_pending
+        .parsers
+        .iter_mut()
+        .find(|parser| parser.pack_id.as_str() == BROAD_LANGUAGE_PACK_ID)
+        .ok_or_else(|| io::Error::other("accepted broad parser is absent"))?;
+    let broad_pending_id = parser.parser_id.clone();
+    parser.evidence_state = AcceptedParserEvidenceState::Pending;
+    require_validation_fragments(
+        validate_accepted_target(&lock, &broad_pending),
+        "broad parser lifecycle downgrade",
+        &[
+            broad_pending_id.as_str(),
+            "pending asset, fixture, and platform verification",
+        ],
+    )?;
+
+    let mut broad_advertised = materialize_accepted_target(serde_json::from_slice(ACCEPTED)?)?;
+    let parser = broad_advertised
+        .parsers
+        .iter_mut()
+        .find(|parser| parser.pack_id.as_str() == BROAD_LANGUAGE_PACK_ID)
+        .ok_or_else(|| io::Error::other("accepted broad parser is absent"))?;
+    let broad_advertised_id = parser.parser_id.clone();
+    parser.advertised = true;
+    require_validation_fragments(
+        validate_accepted_target(&lock, &broad_advertised),
+        "premature broad parser advertisement",
+        &[broad_advertised_id.as_str(), "unadvertised"],
+    )?;
+
+    let mut mismatched_component = lock.clone();
+    let component = mismatched_component
+        .parser_components
+        .first_mut()
+        .ok_or_else(|| io::Error::other("registry has no parser component"))?;
+    let built_in = component.built_in_parser;
+    component.parser_id = ParserId::try_from("parser.builtin.mismatch".to_string())?;
+    require_validation_fragments(
+        validate_registry_lock(&mismatched_component, &accepted),
+        "mismatched built-in parser component identity",
+        &[
+            "parser.builtin.mismatch",
+            built_in.contract_tag(),
+            "does not match built-in parser identity",
+        ],
     )?;
     Ok(())
 }
@@ -3741,7 +6289,7 @@ fn write_rolls_back_when_inputs_change_between_replacements() -> Result<(), Box<
             .map(|_| ())
             .map_err(|error| error.error)?;
         if replacement == 1 {
-            fs::write(&lock_path, b"changed-after-validation")?;
+            fs::write(&lock_path, [LOCK, b"\n".as_slice()].concat())?;
         }
         Ok(())
     });
@@ -3755,7 +6303,7 @@ fn write_rolls_back_when_inputs_change_between_replacements() -> Result<(), Box<
             }) if source.to_string().contains("inputs changed after validation")
                 && rollback_failures.is_empty()
         ),
-        "input drift did not trigger successful compensation",
+        format!("input drift did not trigger successful compensation: {result:?}"),
     )?;
     require_equal(
         fs::read(root.path().join(CORE_OUTPUT_PATH))?.as_slice(),

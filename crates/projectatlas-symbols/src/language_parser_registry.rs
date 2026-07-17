@@ -2,9 +2,9 @@
 //! Generated symbols routing language-registry projection.
 
 pub(crate) const LANGUAGE_REGISTRY_SOURCE_LOCK_SHA256: &str =
-    "b46485ee2248b0e8018f43f9d386a7fc761484590ed6837da4a153f0f3f2bfdc";
+    "66938d6649fed6dd54a8bd18d60123104c4e116ce90aec2a9b56b7c70166d477";
 pub(crate) const LANGUAGE_REGISTRY_CONTRACT_SHA256: &str =
-    "426a118cb5d67c3ba34efd28c467012391fe116987ff9245619d2d48372f0f66";
+    "3654ffb023ca1621a71d84dc229869e340f5a23b65a90ab016df9bceaf9625d6";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BuiltInParser {

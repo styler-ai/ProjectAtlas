@@ -75,6 +75,8 @@ projectatlas-fs = { path = "crates/projectatlas-fs", version = "0.3.26" }
 projectatlas-service = { path = "crates/projectatlas-service", version = "0.3.26" }
 projectatlas-symbols = { path = "crates/projectatlas-symbols", version = "0.3.26" }
 blake3 = "1.5"
+cap-fs-ext = "4.0.2"
+cap-std = "4.0.2"
 clap = { version = "4.5", features = ["derive"] }
 processkit = { version = "2.2.3", default-features = false, features = ["process-control"] }
 cssparser = "0.37"

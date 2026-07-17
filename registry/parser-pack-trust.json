@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "format": "projectatlas.parser-pack-trust",
+  "candidates": [
+    {
+      "candidate_id": "tree-sitter-wasm-grammar-pack",
+      "eligibility": "evaluation-only-unselected",
+      "advertised": false,
+      "pack_id": "broad-language-pack",
+      "release_version": "tree-sitter-javascript-0.25.0-wasm",
+      "pack_abi": {
+        "abi_id": "abi.projectatlas-parser-pack",
+        "version": 1
+      },
+      "grammar_abi": {
+        "abi_id": "abi.tree-sitter-wasm",
+        "version": 15,
+        "state": "pending-pack-verification"
+      },
+      "packaged_platform": "wasm32-unknown-emscripten",
+      "payload_root": "fixtures/parser-packs/tree-sitter-wasm-grammar-pack",
+      "manifest_path": "manifest.json",
+      "installed_bytes": 427948,
+      "inventory": [
+        {
+          "path": "manifest.json",
+          "role": "manifest",
+          "bytes": 2392,
+          "sha256": "96a70e07095d3217c24e0cfecabe083f862e536207e9f4ae93b61711b8b10ce0"
+        },
+        {
+          "path": "parsers/javascript.wasm",
+          "role": "parser-module",
+          "bytes": 411759,
+          "sha256": "35070cda936e479202e22c72cf129d6894eee7f4de8b41912a516cfdbe109204"
+        },
+        {
+          "path": "wasm-validation.json",
+          "role": "wasm-validation",
+          "bytes": 1480,
+          "sha256": "0e39491a848895971e49ffe49c06e9310e9b4a5f57aafdd6c66855fbe5c966f6"
+        },
+        {
+          "path": "wasm-probe.mjs",
+          "role": "wasm-probe-script",
+          "bytes": 1429,
+          "sha256": "e3fb1245a1c4d2418db3c6528cad275278b8bcdad41ce4ff60163b2ab79488b3"
+        },
+        {
+          "path": "provenance.json",
+          "role": "provenance",
+          "bytes": 4579,
+          "sha256": "d206877c68df641afcd100e30ce425faa4e2522777f5f0f887dfb5cf5e47792d"
+        },
+        {
+          "path": "LICENSE",
+          "role": "license",
+          "bytes": 1080,
+          "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+        },
+        {
+          "path": "advisories.json",
+          "role": "advisory-report",
+          "bytes": 1664,
+          "sha256": "ca9b224b9542081284e5267dd4ce7f5fc1e59bc41755220ed6af9bddca2e412f"
+        },
+        {
+          "path": "sbom.spdx.json",
+          "role": "sbom",
+          "bytes": 3565,
+          "sha256": "a1bcf25bd758925fd01fee34aa52706cc3e1f559ce44b02530482a8bea303cc1"
+        }
+      ],
+      "provenance": {
+        "source": "https://github.com/tree-sitter/tree-sitter-javascript",
+        "revision": "44c892e0be055ac465d5eeddae6d3e194424e7de",
+        "source_package_sha256": "68204f2abc0627a90bdf06e605f5c470aa26fdcb2081ea553a04bdad756693f5",
+        "toolchain": "tree-sitter-cli 0.25.10 da6fe9beb4f7f67beb75914ca8e0d48ae48d6406; emsdk 4.0.4 074211759c17c646164d3271ca1d155cc174f78e; emscripten 4.0.4 273f0216fede04f2445367765eaf2aabeeb60d84; llvm 148111fdcf0e807fe74274b18fcf65c4cff45d63",
+        "evidence_state": {
+          "local_output_identity": "two-byte-identical-clean-outputs",
+          "hosted_reproduction": "pending",
+          "raw_build_logs": "not-retained",
+          "packaged_windows_identity": "pending-refs128-bit-identity-evidence"
+        },
+        "record_path": "provenance.json",
+        "patch_paths": []
+      },
+      "licenses": [
+        {
+          "component": "tree-sitter-javascript",
+          "expression": "MIT",
+          "record_path": "LICENSE"
+        }
+      ],
+      "advisory_record_path": "advisories.json",
+      "wasm_validation_record_path": "wasm-validation.json",
+      "sbom_record_path": "sbom.spdx.json"
+    }
+  ]
+}

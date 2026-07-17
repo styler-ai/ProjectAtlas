@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "pack_id": "broad-language-pack",
+  "version": "tree-sitter-javascript-0.25.0-wasm",
+  "pack_abi": {
+    "abi_id": "abi.projectatlas-parser-pack",
+    "version": 1
+  },
+  "grammar_abi": {
+    "abi_id": "abi.tree-sitter-wasm",
+    "version": 15
+  },
+  "runtime": "supervised-worker",
+  "platform": "wasm32-unknown-emscripten",
+  "provenance": {
+    "source": "https://github.com/tree-sitter/tree-sitter-javascript",
+    "revision": "44c892e0be055ac465d5eeddae6d3e194424e7de",
+    "toolchain": "tree-sitter-cli 0.25.10 da6fe9beb4f7f67beb75914ca8e0d48ae48d6406; emsdk 4.0.4 074211759c17c646164d3271ca1d155cc174f78e; emscripten 4.0.4 273f0216fede04f2445367765eaf2aabeeb60d84; llvm 148111fdcf0e807fe74274b18fcf65c4cff45d63",
+    "evidence_state": {
+      "local_output_identity": "two-byte-identical-clean-outputs",
+      "hosted_reproduction": "pending",
+      "raw_build_logs": "not-retained",
+      "packaged_windows_identity": "pending-refs128-bit-identity-evidence"
+    }
+  },
+  "licenses": [
+    {
+      "component": "tree-sitter-javascript",
+      "expression": "MIT"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "parsers/javascript.wasm",
+      "role": "parser-module",
+      "sha256": "35070cda936e479202e22c72cf129d6894eee7f4de8b41912a516cfdbe109204",
+      "bytes": 411759
+    },
+    {
+      "path": "provenance.json",
+      "role": "provenance",
+      "sha256": "d206877c68df641afcd100e30ce425faa4e2522777f5f0f887dfb5cf5e47792d",
+      "bytes": 4579
+    },
+    {
+      "path": "LICENSE",
+      "role": "license",
+      "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1",
+      "bytes": 1080
+    },
+    {
+      "path": "advisories.json",
+      "role": "advisory-report",
+      "sha256": "ca9b224b9542081284e5267dd4ce7f5fc1e59bc41755220ed6af9bddca2e412f",
+      "bytes": 1664
+    },
+    {
+      "path": "sbom.spdx.json",
+      "role": "sbom",
+      "sha256": "a1bcf25bd758925fd01fee34aa52706cc3e1f559ce44b02530482a8bea303cc1",
+      "bytes": 3565
+    },
+    {
+      "path": "wasm-validation.json",
+      "role": "wasm-validation",
+      "sha256": "0e39491a848895971e49ffe49c06e9310e9b4a5f57aafdd6c66855fbe5c966f6",
+      "bytes": 1480
+    },
+    {
+      "path": "wasm-probe.mjs",
+      "role": "wasm-probe-script",
+      "sha256": "e3fb1245a1c4d2418db3c6528cad275278b8bcdad41ce4ff60163b2ab79488b3",
+      "bytes": 1429
+    }
+  ]
+}
