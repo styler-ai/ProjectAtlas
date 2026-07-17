@@ -175,6 +175,10 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustup default "$RUSTUP_TOOLCHAIN"
 
+      - name: Fetch locked dependency graph
+        timeout-minutes: 5
+        run: cargo fetch --locked
+
       - name: Install pinned mutation tools
         uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
         with:
@@ -195,6 +199,20 @@ jobs:
             > "target/projectatlas-quality/full-mutation/shard-$SHARD/started-at.txt"
           cp target/projectatlas-quality/full-mutation/plan/run.json \
             "target/projectatlas-quality/full-mutation/shard-$SHARD/plan-run.json"
+
+      - name: Verify mutation workspace baseline
+        timeout-minutes: 20
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -o pipefail
+          cargo nextest run \
+            --workspace \
+            --all-features \
+            --locked \
+            --profile mutants \
+            --no-tests=fail 2>&1 \
+            | tee "target/projectatlas-quality/full-mutation/shard-$SHARD/workspace-baseline.log"
 
       - name: Run native mutation shard
         id: mutation_shard
