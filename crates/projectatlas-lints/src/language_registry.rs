@@ -7614,13 +7614,10 @@ fn validate_accepted_pre_parse_transform(
     })?;
     if transform.transform_id.as_str() != OBJECTSCRIPT_EXPORT_XML_TRANSFORM_ID
         || transform.version != OBJECTSCRIPT_EXPORT_XML_TRANSFORM_VERSION
-        || transform.behavior != AcceptedTransformBehavior::ExportContainerToUdlRecords
         || !transform.deterministic
         || transform.target_mode_id != mode.mode_id
         || transform.target_parser_id != mode.parser_id
         || transform.target_parser_id.as_str() != OBJECTSCRIPT_UDL_PARSER_ID
-        || transform.detection_ownership
-            != AcceptedTransformDetectionOwnership::ModeDetectionRuleBeforeTransform
         || transform.detection_rule_id != mode.detection_rule_id
     {
         return Err(LanguageRegistryError::Validation(format!(
@@ -7666,26 +7663,11 @@ fn validate_accepted_pre_parse_transform(
         )));
     }
 
-    let security = &transform.security;
-    if security.dtd != AcceptedTransformCapabilityPolicy::Denied
-        || security.entity_expansion != AcceptedTransformCapabilityPolicy::Denied
-        || security.external_resources != AcceptedTransformCapabilityPolicy::Denied
-        || security.schema_fetch != AcceptedTransformCapabilityPolicy::Denied
-        || security.execution != AcceptedTransformCapabilityPolicy::Denied
-    {
-        return Err(LanguageRegistryError::Validation(format!(
-            "accepted mode {} pre-parse transform security policy is not fail-closed",
-            mode.mode_id.as_str()
-        )));
-    }
-
     let failure = &transform.failure_policy;
     if failure.empty_input != AcceptedTransformFailureCoverage::Unavailable
         || failure.malformed_input != AcceptedTransformFailureCoverage::PartialOrUnavailable
         || failure.oversized_input != AcceptedTransformFailureCoverage::Unavailable
         || failure.deeply_nested_input != AcceptedTransformFailureCoverage::Unavailable
-        || failure.multi_record_input
-            != AcceptedTransformMultiRecordBehavior::ParseEachRecordInSourceOrder
         || failure.unrelated_parser_fallback
         || failure.guessed_symbols_after_failure
         || failure.coverage_after_failure != AcceptedTransformFailureCoverage::PartialOrUnavailable

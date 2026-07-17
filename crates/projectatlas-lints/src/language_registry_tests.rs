@@ -151,6 +151,29 @@ fn accepted_pre_parse_transform_mut(
         .ok_or_else(|| io::Error::other("ObjectScript export transform fixture is absent").into())
 }
 
+fn accepted_contract_pre_parse_transform_mut(
+    mode: &mut AcceptedModeContract,
+) -> Result<&mut AcceptedPreParseTransform, Box<dyn Error>> {
+    mode.pre_parse_transform.as_mut().ok_or_else(|| {
+        io::Error::other("materialized ObjectScript export transform is absent").into()
+    })
+}
+
+fn require_pre_parse_transform_mutation_rejected(
+    baseline: &AcceptedModeContract,
+    context: &str,
+    diagnostic: &str,
+    mutate: impl FnOnce(&mut AcceptedModeContract) -> Result<(), Box<dyn Error>>,
+) -> Result<(), Box<dyn Error>> {
+    let mut mutated = baseline.clone();
+    mutate(&mut mutated)?;
+    require_validation_fragments(
+        validate_accepted_pre_parse_transform(&mutated),
+        context,
+        &[diagnostic],
+    )
+}
+
 fn require(condition: bool, message: impl Into<String>) -> Result<(), Box<dyn Error>> {
     if condition {
         Ok(())
@@ -2589,6 +2612,294 @@ fn accepted_pre_parse_transform_is_fail_closed_and_digest_bound() -> Result<(), 
             ) != composite_digest,
         "transform values were absent from accepted or composite semantic identity",
     )
+}
+
+#[test]
+fn accepted_pre_parse_transform_contract_tags_are_exact() -> Result<(), Box<dyn Error>> {
+    for (actual, expected, context) in [
+        (
+            AcceptedTransformBehavior::ExportContainerToUdlRecords.contract_tag(),
+            "export-container-to-udl-records",
+            "transform behavior contract tag",
+        ),
+        (
+            AcceptedTransformDetectionOwnership::ModeDetectionRuleBeforeTransform.contract_tag(),
+            "mode-detection-rule-before-transform",
+            "transform detection ownership contract tag",
+        ),
+        (
+            AcceptedTransformCapabilityPolicy::Denied.contract_tag(),
+            "denied",
+            "transform capability policy contract tag",
+        ),
+        (
+            AcceptedTransformMultiRecordBehavior::ParseEachRecordInSourceOrder.contract_tag(),
+            "parse-each-record-in-source-order",
+            "transform multi-record behavior contract tag",
+        ),
+    ] {
+        require_equal(actual, expected, context)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn accepted_pre_parse_transform_validator_rejects_each_typed_field_drift()
+-> Result<(), Box<dyn Error>> {
+    let (_, accepted, _) = decoded_contracts()?;
+    let baseline = accepted
+        .modes
+        .iter()
+        .find(|mode| mode.mode_id.as_str() == OBJECTSCRIPT_EXPORT_XML_MODE_ID)
+        .cloned()
+        .ok_or_else(|| io::Error::other("materialized ObjectScript export mode is absent"))?;
+    validate_accepted_pre_parse_transform(&baseline)?;
+
+    let identity_diagnostic =
+        "identity, target, detection ownership, or deterministic behavior drifted";
+    require_pre_parse_transform_mutation_rejected(
+        &baseline,
+        "transform identifier drift",
+        identity_diagnostic,
+        |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?.transform_id =
+                TransformId::try_from("transform.objectscript-export-xml-to-udl-v2".to_string())?;
+            Ok(())
+        },
+    )?;
+    require_pre_parse_transform_mutation_rejected(
+        &baseline,
+        "transform version drift",
+        identity_diagnostic,
+        |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?.version += 1;
+            Ok(())
+        },
+    )?;
+    require_pre_parse_transform_mutation_rejected(
+        &baseline,
+        "transform determinism drift",
+        identity_diagnostic,
+        |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?.deterministic = false;
+            Ok(())
+        },
+    )?;
+    require_pre_parse_transform_mutation_rejected(
+        &baseline,
+        "transform target mode drift",
+        identity_diagnostic,
+        |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?.target_mode_id =
+                ModeId::try_from("mode.objectscript-udl".to_string())?;
+            Ok(())
+        },
+    )?;
+    require_pre_parse_transform_mutation_rejected(
+        &baseline,
+        "transform target parser ownership drift",
+        identity_diagnostic,
+        |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?.target_parser_id =
+                AcceptedParserId::try_from("parse.objectscript-routine".to_string())?;
+            Ok(())
+        },
+    )?;
+    require_pre_parse_transform_mutation_rejected(
+        &baseline,
+        "transform required target parser drift",
+        identity_diagnostic,
+        |mode| {
+            mode.parser_id = AcceptedParserId::try_from("parse.objectscript-routine".to_string())?;
+            accepted_contract_pre_parse_transform_mut(mode)?.target_parser_id =
+                AcceptedParserId::try_from("parse.objectscript-routine".to_string())?;
+            Ok(())
+        },
+    )?;
+    require_pre_parse_transform_mutation_rejected(
+        &baseline,
+        "transform detection rule drift",
+        identity_diagnostic,
+        |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?.detection_rule_id =
+                DetectionRuleId::try_from("detect.objectscript-udl".to_string())?;
+            Ok(())
+        },
+    )?;
+
+    for (context, mutate) in [
+        (
+            "transform input byte limit drift",
+            (|mode: &mut AcceptedModeContract| {
+                accepted_contract_pre_parse_transform_mut(mode)?
+                    .limits
+                    .max_input_bytes += 1;
+                Ok(())
+            }) as fn(&mut AcceptedModeContract) -> Result<(), Box<dyn Error>>,
+        ),
+        ("transform derived output byte limit drift", |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?
+                .limits
+                .max_derived_output_bytes += 1;
+            Ok(())
+        }),
+        ("transform record limit drift", |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?
+                .limits
+                .max_records += 1;
+            Ok(())
+        }),
+        ("transform nesting limit drift", |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?
+                .limits
+                .max_nesting_depth += 1;
+            Ok(())
+        }),
+        ("transform diagnostic limit drift", |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?
+                .limits
+                .max_diagnostics += 1;
+            Ok(())
+        }),
+        ("transform deadline drift", |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?
+                .limits
+                .deadline_ms += 1;
+            Ok(())
+        }),
+    ] {
+        require_pre_parse_transform_mutation_rejected(
+            &baseline,
+            context,
+            "limits drifted",
+            mutate,
+        )?;
+    }
+
+    for (context, mutate) in [
+        (
+            "transform cancellation enablement drift",
+            (|mode: &mut AcceptedModeContract| {
+                accepted_contract_pre_parse_transform_mut(mode)?
+                    .cancellation
+                    .enabled = false;
+                Ok(())
+            }) as fn(&mut AcceptedModeContract) -> Result<(), Box<dyn Error>>,
+        ),
+        ("transform cancellation polling drift", |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?
+                .cancellation
+                .poll_interval_ms += 1;
+            Ok(())
+        }),
+        ("transform cancellation grace drift", |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?
+                .cancellation
+                .grace_period_ms += 1;
+            Ok(())
+        }),
+    ] {
+        require_pre_parse_transform_mutation_rejected(
+            &baseline,
+            context,
+            "cancellation contract drifted",
+            mutate,
+        )?;
+    }
+
+    for (context, mutate) in [
+        (
+            "transform original identity mapping drift",
+            (|mode: &mut AcceptedModeContract| {
+                accepted_contract_pre_parse_transform_mut(mode)?
+                    .source_mapping
+                    .original_file_identity = false;
+                Ok(())
+            }) as fn(&mut AcceptedModeContract) -> Result<(), Box<dyn Error>>,
+        ),
+        ("transform record provenance mapping drift", |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?
+                .source_mapping
+                .per_record_provenance = false;
+            Ok(())
+        }),
+        ("transform derived fact mapping drift", |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?
+                .source_mapping
+                .every_derived_fact = false;
+            Ok(())
+        }),
+        ("transform diagnostic mapping drift", |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?
+                .source_mapping
+                .every_diagnostic = false;
+            Ok(())
+        }),
+    ] {
+        require_pre_parse_transform_mutation_rejected(
+            &baseline,
+            context,
+            "source mapping is incomplete",
+            mutate,
+        )?;
+    }
+
+    for (context, mutate) in [
+        (
+            "transform empty-input coverage drift",
+            (|mode: &mut AcceptedModeContract| {
+                accepted_contract_pre_parse_transform_mut(mode)?
+                    .failure_policy
+                    .empty_input = AcceptedTransformFailureCoverage::PartialOrUnavailable;
+                Ok(())
+            }) as fn(&mut AcceptedModeContract) -> Result<(), Box<dyn Error>>,
+        ),
+        ("transform malformed-input coverage drift", |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?
+                .failure_policy
+                .malformed_input = AcceptedTransformFailureCoverage::Unavailable;
+            Ok(())
+        }),
+        ("transform oversized-input coverage drift", |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?
+                .failure_policy
+                .oversized_input = AcceptedTransformFailureCoverage::PartialOrUnavailable;
+            Ok(())
+        }),
+        ("transform nesting-failure coverage drift", |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?
+                .failure_policy
+                .deeply_nested_input = AcceptedTransformFailureCoverage::PartialOrUnavailable;
+            Ok(())
+        }),
+        ("transform unrelated-parser fallback drift", |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?
+                .failure_policy
+                .unrelated_parser_fallback = true;
+            Ok(())
+        }),
+        ("transform guessed-symbol fallback drift", |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?
+                .failure_policy
+                .guessed_symbols_after_failure = true;
+            Ok(())
+        }),
+        ("transform post-failure coverage drift", |mode| {
+            accepted_contract_pre_parse_transform_mut(mode)?
+                .failure_policy
+                .coverage_after_failure = AcceptedTransformFailureCoverage::Unavailable;
+            Ok(())
+        }),
+    ] {
+        require_pre_parse_transform_mutation_rejected(
+            &baseline,
+            context,
+            "failure behavior drifted",
+            mutate,
+        )?;
+    }
+
+    Ok(())
 }
 
 #[test]

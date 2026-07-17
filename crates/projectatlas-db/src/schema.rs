@@ -5314,13 +5314,15 @@ mod tests {
     use std::io;
 
     #[test]
-    fn transient_wal_sidecar_state_settles_when_shared_memory_appears() -> Result<(), Box<dyn Error>>
+    fn empty_rollback_journal_does_not_block_transient_wal_settling() -> Result<(), Box<dyn Error>>
     {
         let temp = tempfile::tempdir()?;
         let database_path = temp.path().join("projectatlas.db");
         let wal_path = sqlite_sidecar_path(&database_path, "-wal");
         let shm_path = sqlite_sidecar_path(&database_path, "-shm");
+        let journal_path = sqlite_sidecar_path(&database_path, "-journal");
         fs::write(&wal_path, b"wal")?;
+        fs::write(&journal_path, [])?;
 
         let mut wait_calls = 0_u8;
         let mut shm_write = None;
@@ -5334,9 +5336,50 @@ mod tests {
             },
         )?;
         shm_write.ok_or_else(|| io::Error::other("settling did not wait for shared memory"))??;
-        if wait_calls != 1 || !state.wal.exists || !state.shm.exists {
+        if wait_calls != 1
+            || !state.wal.exists
+            || !state.shm.exists
+            || !state.rollback_journal.exists
+            || state.rollback_journal.bytes != 0
+        {
             return Err(io::Error::other(format!(
-                "transient WAL-only state did not settle after one re-observation: {state:?}"
+                "an empty rollback journal blocked transient WAL settling: {state:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn non_empty_rollback_journal_returns_without_waiting() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let database_path = temp.path().join("projectatlas.db");
+        let wal_path = sqlite_sidecar_path(&database_path, "-wal");
+        let shm_path = sqlite_sidecar_path(&database_path, "-shm");
+        let journal_path = sqlite_sidecar_path(&database_path, "-journal");
+        fs::write(&wal_path, b"wal")?;
+        fs::write(&journal_path, b"journal")?;
+
+        let mut wait_calls = 0_u8;
+        let mut shm_write = None;
+        let state = settle_sidecar_state_with_wait(
+            &database_path,
+            "wal",
+            std::time::Duration::from_secs(1),
+            |_| {
+                wait_calls = wait_calls.saturating_add(1);
+                shm_write = Some(fs::write(&shm_path, b"shm"));
+            },
+        )?;
+        if wait_calls != 0
+            || shm_write.is_some()
+            || !state.wal.exists
+            || state.shm.exists
+            || !state.rollback_journal.exists
+            || state.rollback_journal.bytes == 0
+        {
+            return Err(io::Error::other(format!(
+                "a non-empty rollback journal did not return immediately: {state:?}"
             ))
             .into());
         }
