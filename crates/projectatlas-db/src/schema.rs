@@ -22,7 +22,7 @@ use std::io::Read;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Last schema version released before the runtime-owned migration ledger.
 const MIGRATION_BASE_SCHEMA_VERSION: i64 = 9;
@@ -1647,6 +1647,37 @@ fn inferred_project_root(path: &Path) -> DbResult<Option<String>> {
 
 /// Record journal mode and all `SQLite` sidecar file sizes.
 fn sidecar_state(path: &Path, journal_mode: &str) -> DbResult<SqliteSidecarState> {
+    settle_sidecar_state_with_wait(
+        path,
+        journal_mode,
+        Duration::from_millis(250),
+        std::thread::sleep,
+    )
+}
+
+/// Re-observe only the transient interval between WAL and shared-memory lifecycle changes.
+fn settle_sidecar_state_with_wait(
+    path: &Path,
+    journal_mode: &str,
+    timeout: Duration,
+    mut wait: impl FnMut(Duration),
+) -> DbResult<SqliteSidecarState> {
+    let started = Instant::now();
+    loop {
+        let state = observe_sidecar_state(path, journal_mode)?;
+        let wal_without_shared_memory = state.wal.exists && !state.shm.exists;
+        let unresolved_rollback_journal =
+            state.rollback_journal.exists && state.rollback_journal.bytes > 0;
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if !wal_without_shared_memory || unresolved_rollback_journal || remaining.is_zero() {
+            return Ok(state);
+        }
+        wait(remaining.min(Duration::from_millis(5)));
+    }
+}
+
+/// Observe one complete `SQLite` sidecar family without creating or modifying files.
+fn observe_sidecar_state(path: &Path, journal_mode: &str) -> DbResult<SqliteSidecarState> {
     Ok(SqliteSidecarState {
         journal_mode: journal_mode.to_string(),
         wal: sidecar_file_state(path, "-wal")?,
@@ -5281,6 +5312,107 @@ mod tests {
     use std::error::Error;
     use std::fmt::Debug;
     use std::io;
+
+    #[test]
+    fn transient_wal_sidecar_state_settles_when_shared_memory_appears() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let database_path = temp.path().join("projectatlas.db");
+        let wal_path = sqlite_sidecar_path(&database_path, "-wal");
+        let shm_path = sqlite_sidecar_path(&database_path, "-shm");
+        fs::write(&wal_path, b"wal")?;
+
+        let mut wait_calls = 0_u8;
+        let mut shm_write = None;
+        let state = settle_sidecar_state_with_wait(
+            &database_path,
+            "wal",
+            std::time::Duration::from_secs(1),
+            |_| {
+                wait_calls = wait_calls.saturating_add(1);
+                shm_write = Some(fs::write(&shm_path, b"shm"));
+            },
+        )?;
+        shm_write.ok_or_else(|| io::Error::other("settling did not wait for shared memory"))??;
+        if wait_calls != 1 || !state.wal.exists || !state.shm.exists {
+            return Err(io::Error::other(format!(
+                "transient WAL-only state did not settle after one re-observation: {state:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn transient_wal_sidecar_state_settles_when_wal_disappears() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let database_path = temp.path().join("projectatlas.db");
+        let wal_path = sqlite_sidecar_path(&database_path, "-wal");
+        fs::write(&wal_path, b"wal")?;
+
+        let mut wait_calls = 0_u8;
+        let mut wal_remove = None;
+        let state = settle_sidecar_state_with_wait(
+            &database_path,
+            "wal",
+            std::time::Duration::from_secs(1),
+            |_| {
+                wait_calls = wait_calls.saturating_add(1);
+                wal_remove = Some(fs::remove_file(&wal_path));
+            },
+        )?;
+        wal_remove.ok_or_else(|| io::Error::other("settling did not re-observe the WAL"))??;
+        if wait_calls != 1 || state.wal.exists || state.shm.exists {
+            return Err(io::Error::other(format!(
+                "transient WAL cleanup did not settle after one re-observation: {state:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn persistent_wal_without_shared_memory_is_rejected_without_writes()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let database_path = temp.path().join("projectatlas.db");
+        let connection = Connection::open(&database_path)?;
+        connection.execute_batch("CREATE TABLE retained(value TEXT NOT NULL);")?;
+        drop(connection);
+        remove_sqlite_sidecars(&database_path)?;
+
+        let database_before = fs::read(&database_path)?;
+        let wal_path = sqlite_sidecar_path(&database_path, "-wal");
+        let shm_path = sqlite_sidecar_path(&database_path, "-shm");
+        let journal_path = sqlite_sidecar_path(&database_path, "-journal");
+        let wal_before = b"persistent-wal";
+        fs::write(&wal_path, wal_before)?;
+
+        match inspect_existing_database(&database_path) {
+            Err(DbError::SchemaPreflight { message })
+                if message.contains("WAL sidecar exists without shared-memory sidecar") => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "persistent WAL-only state returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(_) => {
+                return Err(io::Error::other("persistent WAL-only state passed preflight").into());
+            }
+        }
+        if fs::read(&database_path)? != database_before
+            || fs::read(&wal_path)? != wal_before
+            || shm_path.exists()
+            || journal_path.exists()
+        {
+            return Err(io::Error::other(
+                "persistent WAL-only rejection changed the database sidecar family",
+            )
+            .into());
+        }
+        Ok(())
+    }
 
     #[test]
     fn structural_text_reconciliation_validates_each_projected_cell() -> Result<(), Box<dyn Error>>
