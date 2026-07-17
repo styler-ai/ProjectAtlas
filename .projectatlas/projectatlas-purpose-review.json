@@ -1665,6 +1665,10 @@
       "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 20d4020."
     },
     {
+      "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-22f8b16.json",
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 22f8b16."
+    },
+    {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-2ac4406.json",
       "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 2ac4406."
     },
