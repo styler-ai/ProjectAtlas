@@ -323,7 +323,7 @@
           "test_ids": [
             "UT:ARRI-2.2"
           ],
-          "assertion": "The valid pending candidate passes, while count-only parity, a missing required entry, duplicate IDs, fake aliases, absent fixtures/owners/platforms, inconsistent shared-parser ownership, count-preserving fake parser reuse, unsupported claims, and current-mode shrinkage all fail.",
+          "assertion": "The valid pending 215-by-209 candidate passes, while count-only parity, missing or duplicate entries, fake aliases or parser reuse, unsupported claims, public-mode shrinkage, missing or extra transform ownership, representative ObjectScript transform identity, target, limit, cancellation, provenance, security, failure-policy, and accepted semantic-digest mutations fail closed.",
           "command": {
             "executable": "cargo",
             "arguments": [
@@ -345,6 +345,14 @@
             {
               "kind": "file",
               "path": "crates/projectatlas-cli/src/main.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-lints/src/language_registry.rs"
+            },
+            {
+              "kind": "file",
+              "path": "crates/projectatlas-lints/src/language_registry_tests.rs"
             },
             {
               "kind": "file",
@@ -373,6 +381,10 @@
             {
               "kind": "file",
               "path": "openspec/task-verification.json"
+            },
+            {
+              "kind": "file",
+              "path": "registry/language-registry.json"
             }
           ],
           "test_sources": [

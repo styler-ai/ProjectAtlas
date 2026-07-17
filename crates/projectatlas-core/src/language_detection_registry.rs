@@ -2,9 +2,9 @@
 //! Generated core detection language-registry projection.
 
 pub(crate) const LANGUAGE_REGISTRY_SOURCE_LOCK_SHA256: &str =
-    "66938d6649fed6dd54a8bd18d60123104c4e116ce90aec2a9b56b7c70166d477";
+    "6dfd95d138cd3f575f160c759bc5f63000a897a320c8a3b4d7505e1b803bed4e";
 pub(crate) const LANGUAGE_REGISTRY_CONTRACT_SHA256: &str =
-    "3654ffb023ca1621a71d84dc229869e340f5a23b65a90ab016df9bceaf9625d6";
+    "61153a34d7dd0d53686679726795c5e19ba86a19a5421d98d38b5e0f8b69d564";
 
 /// Parser coverage level available for a detected language family.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -212,13 +212,16 @@
     {
       "change": "advance-rust-repository-intelligence",
       "task_id": "2.2",
-      "requirement": "The accepted language inventory is an exact ProjectAtlas-owned 212-mode union with 207 normalized parser capabilities, all 63 current public modes retained, and no unsupported achieved or advertised claim.",
-      "scenario": "The live candidate and adversarial in-memory mutations are checked against fixed capability IDs, standard-name aliases, dialect distinctions, parser reuse, ownership, fixtures, platforms, evidence state, and digest.",
+      "requirement": "The accepted language inventory is an exact ProjectAtlas-owned 215-mode union with 209 normalized parser capabilities, all 63 current public modes retained, and no unsupported achieved or advertised claim.",
+      "scenario": "The live candidate and adversarial in-memory mutations are checked against the exact 163-row accepted-language crosswalk, 11 standard-name aliases, five dialect rows, five multi-mode parser mappings, ObjectScript mode/grammar ownership, the one bounded fail-closed export-XML transform, fixtures, platforms, evidence state, and semantic digest.",
       "owner": "language-capability-registry-contract",
       "changed_artifacts": [
         "docs/benchmarks/projectatlas-v0.4-capability-registry.json",
         "crates/projectatlas-cli/src/language_capability_registry_tests.rs",
         "crates/projectatlas-cli/src/main.rs",
+        "crates/projectatlas-lints/src/language_registry.rs",
+        "crates/projectatlas-lints/src/language_registry_tests.rs",
+        "registry/language-registry.json",
         "openspec/changes/advance-rust-repository-intelligence/proposal.md",
         "openspec/changes/advance-rust-repository-intelligence/design.md",
         "openspec/changes/advance-rust-repository-intelligence/tasks.md",
@@ -232,10 +235,17 @@
         "test_id": "UT:ARRI-2.2",
         "function": "language_capability_registry_tests::accepted_language_union_rejects_contract_mutations",
         "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-cli", "language_capability_registry_tests::accepted_language_union_rejects_contract_mutations", "--", "--exact"] },
-        "assertion": "The valid pending candidate passes, while count-only parity, a missing required entry, duplicate IDs, fake aliases, absent fixtures/owners/platforms, inconsistent shared-parser ownership, count-preserving fake parser reuse, unsupported claims, and current-mode shrinkage all fail.",
-        "covered_inputs": ["212 accepted modes", "207 normalized parser capabilities", "160 fixed crosswalk entries", "11 standard-name aliases", "two CFML dialect modes", "63 current public modes", "complete four-entry multi-mode parser map", "per-mode ownership, fixtures, and four-platform matrix", "shared-parser ownership consistency", "candidate evidence and advertisement state", "accepted-set digest", "11 negative mutation classes"],
+        "assertion": "The valid pending 215-by-209 candidate passes, while count-only parity, missing or duplicate entries, fake aliases or parser reuse, unsupported claims, public-mode shrinkage, missing or extra transform ownership, representative ObjectScript transform identity, target, limit, cancellation, provenance, security, failure-policy, and accepted semantic-digest mutations fail closed.",
+        "covered_inputs": ["215 accepted modes", "209 normalized parser capabilities", "163 fixed crosswalk entries", "11 standard-name aliases", "five dialect rows", "63 current public modes", "complete five-entry multi-mode parser map", "three ObjectScript modes backed by exactly two grammars", "one deterministic bounded ObjectScript export-XML pre-parse transform", "per-mode ownership, fixtures, and four-platform matrix", "shared-parser ownership consistency", "candidate evidence and advertisement state", "accepted semantic digest", "missing, extra-owner, and representative execution-field transform mutation classes"],
         "state": "implemented_uncommitted"
       },
+      "supporting_tests": [
+        {
+          "function": "language_registry::tests::accepted_pre_parse_transform_is_fail_closed_and_digest_bound",
+          "command": { "executable": "cargo", "arguments": ["test", "--locked", "-p", "projectatlas-lints", "--bin", "cargo-projectatlas-lints", "language_registry::tests::accepted_pre_parse_transform_is_fail_closed_and_digest_bound", "--", "--exact", "--nocapture"] },
+          "assertion": "The production typed registry rejects missing or extra transform owners and drift in every execution-significant transform field, and changing a materialized transform changes both the accepted-set digest and the complete composite registry digest."
+        }
+      ],
       "result": {
         "state": "pending_commit_bound_run",
         "implementation_commit": null,

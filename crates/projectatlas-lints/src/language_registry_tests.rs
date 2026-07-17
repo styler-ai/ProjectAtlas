@@ -137,6 +137,20 @@ fn accepted_capability_mut<'a>(
         })
 }
 
+fn accepted_pre_parse_transform_mut(
+    accepted: &mut serde_json::Value,
+) -> Result<&mut serde_json::Value, Box<dyn Error>> {
+    accepted["modes"]
+        .as_array_mut()
+        .and_then(|modes| {
+            modes
+                .iter_mut()
+                .find(|mode| mode["mode_id"] == OBJECTSCRIPT_EXPORT_XML_MODE_ID)
+        })
+        .and_then(|mode| mode.get_mut("pre_parse_transform"))
+        .ok_or_else(|| io::Error::other("ObjectScript export transform fixture is absent").into())
+}
+
 fn require(condition: bool, message: impl Into<String>) -> Result<(), Box<dyn Error>> {
     if condition {
         Ok(())
@@ -1073,12 +1087,17 @@ fn expected_registry_settings_row(
     accepted: &AcceptedTargetContract,
 ) -> String {
     format!(
-        "pub(crate) static LANGUAGE_REGISTRY_SETTINGS: LanguageRegistrySettings = LanguageRegistrySettings {{ registry_id: {}, accepted_registry_id: {}, accepted_set_sha256: {}, accepted_advertisement: AcceptedAdvertisement::BlockedUntilAchievedManifest, current_mode_count: {}, accepted_mode_count: {}, normalized_parser_capability_count: {}, parser_component_count: {}, parser_asset_count: {}, embedded_adapter_count: {}, query_pack_count: {}, semantic_provider_count: {} }};",
+        "pub(crate) static LANGUAGE_REGISTRY_SETTINGS: LanguageRegistrySettings = LanguageRegistrySettings {{ registry_id: {}, accepted_registry_id: {}, accepted_set_sha256: {}, accepted_advertisement: AcceptedAdvertisement::BlockedUntilAchievedManifest, current_mode_count: {}, accepted_mode_count: {}, accepted_pre_parse_transform_count: {}, normalized_parser_capability_count: {}, parser_component_count: {}, parser_asset_count: {}, embedded_adapter_count: {}, query_pack_count: {}, semantic_provider_count: {} }};",
         rust_string(lock.registry_id.as_str()),
         rust_string(accepted.source.registry_id.as_str()),
         rust_string(accepted.source.accepted_set_digest.as_str()),
         lock.current_modes.len(),
         accepted.modes.len(),
+        accepted
+            .modes
+            .iter()
+            .filter(|mode| mode.pre_parse_transform.is_some())
+            .count(),
         accepted.parsers.len(),
         lock.parser_components.len(),
         lock.assets.len(),
@@ -1147,6 +1166,7 @@ fn expected_accepted_mode_values(
                 "accepted_mode_id": mode.mode_id.as_str(),
                 "public_mode": mode.public_mode.as_str(),
                 "parser_id": mode.parser_id.as_str(),
+                "pre_parse_transform": mode.pre_parse_transform,
                 "future_pack_id": mode.pack_id.as_str(),
                 "owner": mode.owner,
                 "accepted_delivery_target": mode.accepted_delivery_target,
@@ -1239,6 +1259,7 @@ fn expected_conformance_mode_values(
                 "mode_id": mode.mode_id.as_str(),
                 "public_mode": mode.public_mode.as_str(),
                 "parser_id": mode.parser_id.as_str(),
+                "pre_parse_transform": mode.pre_parse_transform,
                 "required_claims": mode.required_claims.iter().map(|tier| tier.contract_tag()).collect::<Vec<_>>(),
                 "achieved_claims": mode.achieved_claims.iter().map(|tier| tier.contract_tag()).collect::<Vec<_>>(),
                 "fixture_ids": mode.fixture_ids,
@@ -1270,6 +1291,7 @@ fn expected_documentation_mode_values(
                 "mode_id": mode.mode_id.as_str(),
                 "public_mode": mode.public_mode.as_str(),
                 "parser_id": mode.parser_id.as_str(),
+                "pre_parse_transform": mode.pre_parse_transform,
                 "future_pack_id": mode.pack_id.as_str(),
                 "required_claims": mode.required_claims.iter().map(|tier| tier.contract_tag()).collect::<Vec<_>>(),
                 "achieved_claims": mode.achieved_claims.iter().map(|tier| tier.contract_tag()).collect::<Vec<_>>(),
@@ -1815,6 +1837,7 @@ fn verify_generated_json(
             "raw_sha256": lock.accepted_target.raw_sha256.as_str(),
             "modes": accepted.modes.len(),
             "normalized_parser_capabilities": accepted.parsers.len(),
+            "pre_parse_transforms": accepted.modes.iter().filter(|mode| mode.pre_parse_transform.is_some()).count(),
             "crosswalk_entries": accepted.source.accepted_language_crosswalk.entries.len(),
             "advertisement": accepted.source.mode_defaults.advertisement
         },
@@ -1854,6 +1877,7 @@ fn verify_generated_json(
             "packs": &lock.packs,
             "current_modes": lock.current_modes.len(),
             "accepted_modes": accepted.modes.len(),
+            "accepted_pre_parse_transforms": accepted.modes.iter().filter(|mode| mode.pre_parse_transform.is_some()).count(),
             "accepted_parser_capabilities": accepted.parsers.len(),
             "parser_components": lock.parser_components.len(),
             "parser_assets": lock.assets.len(),
@@ -2428,6 +2452,143 @@ fn accepted_target_unknown_nested_fields_are_rejected() -> Result<(), Box<dyn Er
         )?;
     }
     Ok(())
+}
+
+#[test]
+fn accepted_pre_parse_transform_is_fail_closed_and_digest_bound() -> Result<(), Box<dyn Error>> {
+    let missing = validate_accepted_mutation(|accepted| {
+        let mode = accepted["modes"]
+            .as_array_mut()
+            .and_then(|modes| {
+                modes
+                    .iter_mut()
+                    .find(|mode| mode["mode_id"] == OBJECTSCRIPT_EXPORT_XML_MODE_ID)
+            })
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| io::Error::other("ObjectScript export mode fixture is absent"))?;
+        mode.remove("pre_parse_transform");
+        Ok(())
+    })?;
+    require(
+        matches!(missing, Err(LanguageRegistryError::Validation(_))),
+        "missing ObjectScript export transform was accepted",
+    )?;
+
+    let extra = validate_accepted_mutation(|accepted| {
+        let transform = accepted_pre_parse_transform_mut(accepted)?.clone();
+        let routine = accepted["modes"]
+            .as_array_mut()
+            .and_then(|modes| {
+                modes
+                    .iter_mut()
+                    .find(|mode| mode["mode_id"] == "mode.objectscript-routine")
+            })
+            .ok_or_else(|| io::Error::other("ObjectScript routine fixture is absent"))?;
+        routine["pre_parse_transform"] = transform;
+        Ok(())
+    })?;
+    require(
+        matches!(extra, Err(LanguageRegistryError::Validation(_))),
+        "an extra ObjectScript transform owner was accepted",
+    )?;
+
+    for (pointer, replacement) in [
+        (
+            "/transform_id",
+            json!("transform.objectscript-export-xml-to-udl-v2"),
+        ),
+        ("/version", json!(2)),
+        ("/behavior", json!("unknown-behavior")),
+        ("/deterministic", json!(false)),
+        ("/target_mode_id", json!("mode.objectscript-udl")),
+        ("/target_parser_id", json!("parse.objectscript-routine")),
+        ("/detection_ownership", json!("after-transform")),
+        ("/detection_rule_id", json!("detect.objectscript-udl")),
+        ("/limits/max_input_bytes", json!(1)),
+        ("/limits/max_derived_output_bytes", json!(1)),
+        ("/limits/max_records", json!(1)),
+        ("/limits/max_nesting_depth", json!(1)),
+        ("/limits/max_diagnostics", json!(1)),
+        ("/limits/deadline_ms", json!(1)),
+        ("/cancellation/enabled", json!(false)),
+        ("/cancellation/poll_interval_ms", json!(1)),
+        ("/cancellation/grace_period_ms", json!(1)),
+        ("/source_mapping/original_file_identity", json!(false)),
+        ("/source_mapping/per_record_provenance", json!(false)),
+        ("/source_mapping/every_derived_fact", json!(false)),
+        ("/source_mapping/every_diagnostic", json!(false)),
+        ("/security/dtd", json!("allowed")),
+        ("/security/entity_expansion", json!("allowed")),
+        ("/security/external_resources", json!("allowed")),
+        ("/security/schema_fetch", json!("allowed")),
+        ("/security/execution", json!("allowed")),
+        (
+            "/failure_policy/empty_input",
+            json!("partial-or-unavailable"),
+        ),
+        ("/failure_policy/malformed_input", json!("unavailable")),
+        (
+            "/failure_policy/oversized_input",
+            json!("partial-or-unavailable"),
+        ),
+        (
+            "/failure_policy/deeply_nested_input",
+            json!("partial-or-unavailable"),
+        ),
+        (
+            "/failure_policy/multi_record_input",
+            json!("parse-first-only"),
+        ),
+        ("/failure_policy/unrelated_parser_fallback", json!(true)),
+        ("/failure_policy/guessed_symbols_after_failure", json!(true)),
+        (
+            "/failure_policy/coverage_after_failure",
+            json!("unavailable"),
+        ),
+    ] {
+        let result = validate_accepted_mutation(|accepted| {
+            let field = accepted_pre_parse_transform_mut(accepted)?
+                .pointer_mut(pointer)
+                .ok_or_else(|| {
+                    io::Error::other(format!("transform pointer {pointer} is absent"))
+                })?;
+            *field = replacement;
+            Ok(())
+        })?;
+        require(
+            result.is_err(),
+            format!("execution-significant transform field {pointer} was accepted after drift"),
+        )?;
+    }
+
+    let (lock, mut accepted, historical) = decoded_contracts()?;
+    let (parser_pack_trust, parser_pack_installed_byte_limit) = decoded_parser_pack_contract()?;
+    let accepted_digest = accepted_set_digest(&accepted)?;
+    let composite_digest = registry_contract_digest(
+        &lock,
+        &accepted,
+        &historical,
+        &parser_pack_trust,
+        parser_pack_installed_byte_limit,
+    );
+    let transform = accepted
+        .modes
+        .iter_mut()
+        .find(|mode| mode.mode_id.as_str() == OBJECTSCRIPT_EXPORT_XML_MODE_ID)
+        .and_then(|mode| mode.pre_parse_transform.as_mut())
+        .ok_or_else(|| io::Error::other("materialized ObjectScript export transform is absent"))?;
+    transform.failure_policy.empty_input = AcceptedTransformFailureCoverage::PartialOrUnavailable;
+    require(
+        accepted_set_digest(&accepted)? != accepted_digest
+            && registry_contract_digest(
+                &lock,
+                &accepted,
+                &historical,
+                &parser_pack_trust,
+                parser_pack_installed_byte_limit,
+            ) != composite_digest,
+        "transform values were absent from accepted or composite semantic identity",
+    )
 }
 
 #[test]
@@ -3647,6 +3808,14 @@ fn generated_language_registry_outputs_are_deterministic_and_complete() -> Resul
     for (field, expected) in [
         ("current_modes", lock.current_modes.len()),
         ("accepted_modes", accepted.modes.len()),
+        (
+            "accepted_pre_parse_transforms",
+            accepted
+                .modes
+                .iter()
+                .filter(|mode| mode.pre_parse_transform.is_some())
+                .count(),
+        ),
         ("accepted_parser_capabilities", accepted.parsers.len()),
         ("parser_components", lock.parser_components.len()),
         ("parser_assets", lock.assets.len()),

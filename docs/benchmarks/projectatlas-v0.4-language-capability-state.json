@@ -2,8 +2,8 @@
   "schema_version": 1,
   "format": "projectatlas.language-capability-state",
   "registry_id": "registry.projectatlas-language-runtime",
-  "source_lock_sha256": "66938d6649fed6dd54a8bd18d60123104c4e116ce90aec2a9b56b7c70166d477",
-  "registry_contract_sha256": "3654ffb023ca1621a71d84dc229869e340f5a23b65a90ab016df9bceaf9625d6",
+  "source_lock_sha256": "6dfd95d138cd3f575f160c759bc5f63000a897a320c8a3b4d7505e1b803bed4e",
+  "registry_contract_sha256": "61153a34d7dd0d53686679726795c5e19ba86a19a5421d98d38b5e0f8b69d564",
   "current": {
     "detection_rules": [
       {
@@ -2169,12 +2169,13 @@
     ]
   },
   "accepted_target": {
-    "registry_id": "projectatlas-v0.4-candidate-212x207",
-    "accepted_set_sha256": "7355cfc034910c87839afe946bdd6c2418766c1792d12a404d2a58586fec8806",
-    "raw_sha256": "d735e9210bfbb9c4e53f1e2631e180116ca8e9345daa42cff1fe279b612dd5a3",
-    "modes": 212,
-    "normalized_parser_capabilities": 207,
-    "crosswalk_entries": 160,
+    "registry_id": "projectatlas-v0.4-candidate-215x209",
+    "accepted_set_sha256": "ed9d1012653830f9efabf2b678c8849e5372a1a8a8b390da4f764a53553e7512",
+    "raw_sha256": "6ba174e0abb474382969aa8b8495f3ae35f3d254eddd852c159d3f57087fdd99",
+    "modes": 215,
+    "normalized_parser_capabilities": 209,
+    "pre_parse_transforms": 1,
+    "crosswalk_entries": 163,
     "advertisement": "blocked-until-achieved-manifest"
   },
   "historical_contract": {
@@ -2296,6 +2297,7 @@
         "accepted_mode_id": "mode.ada",
         "public_mode": "ada",
         "parser_id": "parse.ada",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2325,6 +2327,7 @@
         "accepted_mode_id": "mode.agda",
         "public_mode": "agda",
         "parser_id": "parse.agda",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2354,6 +2357,7 @@
         "accepted_mode_id": "mode.apex",
         "public_mode": "apex",
         "parser_id": "parse.apex",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2383,6 +2387,7 @@
         "accepted_mode_id": "mode.arduino",
         "public_mode": "arduino",
         "parser_id": "parse.arduino",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2412,6 +2417,7 @@
         "accepted_mode_id": "mode.asciidoc",
         "public_mode": "asciidoc",
         "parser_id": "parse.asciidoc",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2441,6 +2447,7 @@
         "accepted_mode_id": "mode.asm",
         "public_mode": "asm",
         "parser_id": "parse.asm",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2470,6 +2477,7 @@
         "accepted_mode_id": "mode.astro",
         "public_mode": "astro",
         "parser_id": "parse.astro",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2505,6 +2513,7 @@
         "accepted_mode_id": "mode.awk",
         "public_mode": "awk",
         "parser_id": "parse.awk",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2534,6 +2543,7 @@
         "accepted_mode_id": "mode.bash",
         "public_mode": "bash",
         "parser_id": "parse.bash",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2563,6 +2573,7 @@
         "accepted_mode_id": "mode.batch",
         "public_mode": "batch",
         "parser_id": "parse.batch",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2598,6 +2609,7 @@
         "accepted_mode_id": "mode.beancount",
         "public_mode": "beancount",
         "parser_id": "parse.beancount",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2627,6 +2639,7 @@
         "accepted_mode_id": "mode.bibtex",
         "public_mode": "bibtex",
         "parser_id": "parse.bibtex",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2656,6 +2669,7 @@
         "accepted_mode_id": "mode.bicep",
         "public_mode": "bicep",
         "parser_id": "parse.bicep",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2685,6 +2699,7 @@
         "accepted_mode_id": "mode.bitbake",
         "public_mode": "bitbake",
         "parser_id": "parse.bitbake",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2714,6 +2729,7 @@
         "accepted_mode_id": "mode.blade",
         "public_mode": "blade",
         "parser_id": "parse.blade",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2743,6 +2759,7 @@
         "accepted_mode_id": "mode.c",
         "public_mode": "c",
         "parser_id": "parse.c",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -2778,6 +2795,7 @@
         "accepted_mode_id": "mode.c3",
         "public_mode": "c3",
         "parser_id": "parse.c3",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2807,6 +2825,7 @@
         "accepted_mode_id": "mode.cairo",
         "public_mode": "cairo",
         "parser_id": "parse.cairo",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2836,6 +2855,7 @@
         "accepted_mode_id": "mode.capnp",
         "public_mode": "capnp",
         "parser_id": "parse.capnp",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2865,6 +2885,7 @@
         "accepted_mode_id": "mode.cargo-lock",
         "public_mode": "cargo-lock",
         "parser_id": "parse.cargo-lock",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -2900,6 +2921,7 @@
         "accepted_mode_id": "mode.cargo-manifest",
         "public_mode": "cargo-manifest",
         "parser_id": "parse.cargo-manifest",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -2935,6 +2957,7 @@
         "accepted_mode_id": "mode.cel",
         "public_mode": "cel",
         "parser_id": "parse.cel",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2964,6 +2987,7 @@
         "accepted_mode_id": "mode.cfml-script",
         "public_mode": "cfml-script",
         "parser_id": "parse.cfml-script",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -2993,6 +3017,7 @@
         "accepted_mode_id": "mode.cfml-tag",
         "public_mode": "cfml-tag",
         "parser_id": "parse.cfml-tag",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3022,6 +3047,7 @@
         "accepted_mode_id": "mode.circom",
         "public_mode": "circom",
         "parser_id": "parse.circom",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3051,6 +3077,7 @@
         "accepted_mode_id": "mode.clojure",
         "public_mode": "clojure",
         "parser_id": "parse.clojure",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3086,6 +3113,7 @@
         "accepted_mode_id": "mode.cmake",
         "public_mode": "cmake",
         "parser_id": "parse.cmake",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3115,6 +3143,7 @@
         "accepted_mode_id": "mode.cobol",
         "public_mode": "cobol",
         "parser_id": "parse.cobol",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3144,6 +3173,7 @@
         "accepted_mode_id": "mode.common-lisp",
         "public_mode": "common-lisp",
         "parser_id": "parse.common-lisp",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3173,6 +3203,7 @@
         "accepted_mode_id": "mode.config",
         "public_mode": "config",
         "parser_id": "parse.config",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -3208,6 +3239,7 @@
         "accepted_mode_id": "mode.cpp",
         "public_mode": "cpp",
         "parser_id": "parse.cpp",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -3243,6 +3275,7 @@
         "accepted_mode_id": "mode.crystal",
         "public_mode": "crystal",
         "parser_id": "parse.crystal",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3272,6 +3305,7 @@
         "accepted_mode_id": "mode.csharp",
         "public_mode": "csharp",
         "parser_id": "parse.csharp",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -3307,6 +3341,7 @@
         "accepted_mode_id": "mode.css",
         "public_mode": "css",
         "parser_id": "parse.css",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -3342,6 +3377,7 @@
         "accepted_mode_id": "mode.csv",
         "public_mode": "csv",
         "parser_id": "parse.csv",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3371,6 +3407,7 @@
         "accepted_mode_id": "mode.cuda",
         "public_mode": "cuda",
         "parser_id": "parse.cuda",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3400,6 +3437,7 @@
         "accepted_mode_id": "mode.cue",
         "public_mode": "cue",
         "parser_id": "parse.cue",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3429,6 +3467,7 @@
         "accepted_mode_id": "mode.d",
         "public_mode": "d",
         "parser_id": "parse.d",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3458,6 +3497,7 @@
         "accepted_mode_id": "mode.dart",
         "public_mode": "dart",
         "parser_id": "parse.dart",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3493,6 +3533,7 @@
         "accepted_mode_id": "mode.devicetree",
         "public_mode": "devicetree",
         "parser_id": "parse.devicetree",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3522,6 +3563,7 @@
         "accepted_mode_id": "mode.dhall",
         "public_mode": "dhall",
         "parser_id": "parse.dhall",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3551,6 +3593,7 @@
         "accepted_mode_id": "mode.diff",
         "public_mode": "diff",
         "parser_id": "parse.diff",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3580,6 +3623,7 @@
         "accepted_mode_id": "mode.dockerfile",
         "public_mode": "dockerfile",
         "parser_id": "parse.dockerfile",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3615,6 +3659,7 @@
         "accepted_mode_id": "mode.dot",
         "public_mode": "dot",
         "parser_id": "parse.dot",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3644,6 +3689,7 @@
         "accepted_mode_id": "mode.dotenv",
         "public_mode": "dotenv",
         "parser_id": "parse.dotenv",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3673,6 +3719,7 @@
         "accepted_mode_id": "mode.ejs",
         "public_mode": "ejs",
         "parser_id": "parse.ejs",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3708,6 +3755,7 @@
         "accepted_mode_id": "mode.elisp",
         "public_mode": "elisp",
         "parser_id": "parse.elisp",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3737,6 +3785,7 @@
         "accepted_mode_id": "mode.elixir",
         "public_mode": "elixir",
         "parser_id": "parse.elixir",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3766,6 +3815,7 @@
         "accepted_mode_id": "mode.elm",
         "public_mode": "elm",
         "parser_id": "parse.elm",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3795,6 +3845,7 @@
         "accepted_mode_id": "mode.erb",
         "public_mode": "erb",
         "parser_id": "parse.erb",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3830,6 +3881,7 @@
         "accepted_mode_id": "mode.erlang",
         "public_mode": "erlang",
         "parser_id": "parse.erlang",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3859,6 +3911,7 @@
         "accepted_mode_id": "mode.fennel",
         "public_mode": "fennel",
         "parser_id": "parse.fennel",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3888,6 +3941,7 @@
         "accepted_mode_id": "mode.fish",
         "public_mode": "fish",
         "parser_id": "parse.fish",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3917,6 +3971,7 @@
         "accepted_mode_id": "mode.form",
         "public_mode": "form",
         "parser_id": "parse.form",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3946,6 +4001,7 @@
         "accepted_mode_id": "mode.fortran",
         "public_mode": "fortran",
         "parser_id": "parse.fortran",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -3975,6 +4031,7 @@
         "accepted_mode_id": "mode.freemarker",
         "public_mode": "freemarker",
         "parser_id": "parse.freemarker",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4010,6 +4067,7 @@
         "accepted_mode_id": "mode.fsharp",
         "public_mode": "fsharp",
         "parser_id": "parse.fsharp",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4045,6 +4103,7 @@
         "accepted_mode_id": "mode.func",
         "public_mode": "func",
         "parser_id": "parse.func",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4074,6 +4133,7 @@
         "accepted_mode_id": "mode.gdscript",
         "public_mode": "gdscript",
         "parser_id": "parse.gdscript",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4103,6 +4163,7 @@
         "accepted_mode_id": "mode.gitattributes",
         "public_mode": "gitattributes",
         "parser_id": "parse.gitattributes",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4132,6 +4193,7 @@
         "accepted_mode_id": "mode.gitignore",
         "public_mode": "gitignore",
         "parser_id": "parse.gitignore",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4161,6 +4223,7 @@
         "accepted_mode_id": "mode.gleam",
         "public_mode": "gleam",
         "parser_id": "parse.gleam",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4190,6 +4253,7 @@
         "accepted_mode_id": "mode.glsl",
         "public_mode": "glsl",
         "parser_id": "parse.glsl",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4219,6 +4283,7 @@
         "accepted_mode_id": "mode.gn",
         "public_mode": "gn",
         "parser_id": "parse.gn",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4248,6 +4313,7 @@
         "accepted_mode_id": "mode.gnuplot",
         "public_mode": "gnuplot",
         "parser_id": "parse.gnuplot",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4277,6 +4343,7 @@
         "accepted_mode_id": "mode.go",
         "public_mode": "go",
         "parser_id": "parse.go",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -4312,6 +4379,7 @@
         "accepted_mode_id": "mode.go-mod",
         "public_mode": "go-mod",
         "parser_id": "parse.go-mod",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4341,6 +4409,7 @@
         "accepted_mode_id": "mode.go-template",
         "public_mode": "go-template",
         "parser_id": "parse.go-template",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4370,6 +4439,7 @@
         "accepted_mode_id": "mode.graphql",
         "public_mode": "graphql",
         "parser_id": "parse.graphql",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4405,6 +4475,7 @@
         "accepted_mode_id": "mode.groovy",
         "public_mode": "groovy",
         "parser_id": "parse.groovy",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4440,6 +4511,7 @@
         "accepted_mode_id": "mode.gsp",
         "public_mode": "gsp",
         "parser_id": "parse.gsp",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4475,6 +4547,7 @@
         "accepted_mode_id": "mode.h",
         "public_mode": "h",
         "parser_id": "parse.c",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -4510,6 +4583,7 @@
         "accepted_mode_id": "mode.hack",
         "public_mode": "hack",
         "parser_id": "parse.hack",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4539,6 +4613,7 @@
         "accepted_mode_id": "mode.handlebars",
         "public_mode": "handlebars",
         "parser_id": "parse.handlebars",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4574,6 +4649,7 @@
         "accepted_mode_id": "mode.hare",
         "public_mode": "hare",
         "parser_id": "parse.hare",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4603,6 +4679,7 @@
         "accepted_mode_id": "mode.haskell",
         "public_mode": "haskell",
         "parser_id": "parse.haskell",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4638,6 +4715,7 @@
         "accepted_mode_id": "mode.haxe",
         "public_mode": "haxe",
         "parser_id": "parse.haxe",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4667,6 +4745,7 @@
         "accepted_mode_id": "mode.hcl",
         "public_mode": "hcl",
         "parser_id": "parse.hcl",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4696,6 +4775,7 @@
         "accepted_mode_id": "mode.heex",
         "public_mode": "heex",
         "parser_id": "parse.heex",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4725,6 +4805,7 @@
         "accepted_mode_id": "mode.hjson",
         "public_mode": "hjson",
         "parser_id": "parse.hjson",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4754,6 +4835,7 @@
         "accepted_mode_id": "mode.hlsl",
         "public_mode": "hlsl",
         "parser_id": "parse.hlsl",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4783,6 +4865,7 @@
         "accepted_mode_id": "mode.hpp",
         "public_mode": "hpp",
         "parser_id": "parse.cpp",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -4818,6 +4901,7 @@
         "accepted_mode_id": "mode.html",
         "public_mode": "html",
         "parser_id": "parse.html",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -4853,6 +4937,7 @@
         "accepted_mode_id": "mode.http",
         "public_mode": "http",
         "parser_id": "parse.http",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4882,6 +4967,7 @@
         "accepted_mode_id": "mode.hyprlang",
         "public_mode": "hyprlang",
         "parser_id": "parse.hyprlang",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4911,6 +4997,7 @@
         "accepted_mode_id": "mode.idris",
         "public_mode": "idris",
         "parser_id": "parse.idris",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4940,6 +5027,7 @@
         "accepted_mode_id": "mode.ini",
         "public_mode": "ini",
         "parser_id": "parse.ini",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4969,6 +5057,7 @@
         "accepted_mode_id": "mode.ispc",
         "public_mode": "ispc",
         "parser_id": "parse.ispc",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -4998,6 +5087,7 @@
         "accepted_mode_id": "mode.janet",
         "public_mode": "janet",
         "parser_id": "parse.janet",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5027,6 +5117,7 @@
         "accepted_mode_id": "mode.java",
         "public_mode": "java",
         "parser_id": "parse.java",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -5062,6 +5153,7 @@
         "accepted_mode_id": "mode.javascript",
         "public_mode": "javascript",
         "parser_id": "parse.javascript",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -5097,6 +5189,7 @@
         "accepted_mode_id": "mode.jinja2",
         "public_mode": "jinja2",
         "parser_id": "parse.jinja2",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5126,6 +5219,7 @@
         "accepted_mode_id": "mode.jq",
         "public_mode": "jq",
         "parser_id": "parse.jq",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5155,6 +5249,7 @@
         "accepted_mode_id": "mode.jsdoc",
         "public_mode": "jsdoc",
         "parser_id": "parse.jsdoc",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5184,6 +5279,7 @@
         "accepted_mode_id": "mode.json",
         "public_mode": "json",
         "parser_id": "parse.json",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -5219,6 +5315,7 @@
         "accepted_mode_id": "mode.json5",
         "public_mode": "json5",
         "parser_id": "parse.json5",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5248,6 +5345,7 @@
         "accepted_mode_id": "mode.jsonnet",
         "public_mode": "jsonnet",
         "parser_id": "parse.jsonnet",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5277,6 +5375,7 @@
         "accepted_mode_id": "mode.jsp",
         "public_mode": "jsp",
         "parser_id": "parse.jsp",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5312,6 +5411,7 @@
         "accepted_mode_id": "mode.jsp-tag",
         "public_mode": "jsp-tag",
         "parser_id": "parse.jsp-tag",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5347,6 +5447,7 @@
         "accepted_mode_id": "mode.julia",
         "public_mode": "julia",
         "parser_id": "parse.julia",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5376,6 +5477,7 @@
         "accepted_mode_id": "mode.just",
         "public_mode": "just",
         "parser_id": "parse.just",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5405,6 +5507,7 @@
         "accepted_mode_id": "mode.kcl",
         "public_mode": "kcl",
         "parser_id": "parse.kcl",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5434,6 +5537,7 @@
         "accepted_mode_id": "mode.kconfig",
         "public_mode": "kconfig",
         "parser_id": "parse.kconfig",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5463,6 +5567,7 @@
         "accepted_mode_id": "mode.kdl",
         "public_mode": "kdl",
         "parser_id": "parse.kdl",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5492,6 +5597,7 @@
         "accepted_mode_id": "mode.kotlin",
         "public_mode": "kotlin",
         "parser_id": "parse.kotlin",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -5527,6 +5633,7 @@
         "accepted_mode_id": "mode.kubernetes",
         "public_mode": "kubernetes",
         "parser_id": "parse.yaml",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -5556,6 +5663,7 @@
         "accepted_mode_id": "mode.kustomize",
         "public_mode": "kustomize",
         "parser_id": "parse.yaml",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -5585,6 +5693,7 @@
         "accepted_mode_id": "mode.latex",
         "public_mode": "latex",
         "parser_id": "parse.latex",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5614,6 +5723,7 @@
         "accepted_mode_id": "mode.lean",
         "public_mode": "lean",
         "parser_id": "parse.lean",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5643,6 +5753,7 @@
         "accepted_mode_id": "mode.ledger",
         "public_mode": "ledger",
         "parser_id": "parse.ledger",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5672,6 +5783,7 @@
         "accepted_mode_id": "mode.linker-script",
         "public_mode": "linker-script",
         "parser_id": "parse.linker-script",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5701,6 +5813,7 @@
         "accepted_mode_id": "mode.liquid",
         "public_mode": "liquid",
         "parser_id": "parse.liquid",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5736,6 +5849,7 @@
         "accepted_mode_id": "mode.llvm",
         "public_mode": "llvm",
         "parser_id": "parse.llvm",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5765,6 +5879,7 @@
         "accepted_mode_id": "mode.lua",
         "public_mode": "lua",
         "parser_id": "parse.lua",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5800,6 +5915,7 @@
         "accepted_mode_id": "mode.luau",
         "public_mode": "luau",
         "parser_id": "parse.luau",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5829,6 +5945,7 @@
         "accepted_mode_id": "mode.magik",
         "public_mode": "magik",
         "parser_id": "parse.magik",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5858,6 +5975,7 @@
         "accepted_mode_id": "mode.magma",
         "public_mode": "magma",
         "parser_id": "parse.magma",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5887,6 +6005,7 @@
         "accepted_mode_id": "mode.makefile",
         "public_mode": "makefile",
         "parser_id": "parse.makefile",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5922,6 +6041,7 @@
         "accepted_mode_id": "mode.markdown",
         "public_mode": "markdown",
         "parser_id": "parse.markdown",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -5957,6 +6077,7 @@
         "accepted_mode_id": "mode.matlab",
         "public_mode": "matlab",
         "parser_id": "parse.matlab",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -5986,6 +6107,7 @@
         "accepted_mode_id": "mode.mermaid",
         "public_mode": "mermaid",
         "parser_id": "parse.mermaid",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6015,6 +6137,7 @@
         "accepted_mode_id": "mode.meson",
         "public_mode": "meson",
         "parser_id": "parse.meson",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6044,6 +6167,7 @@
         "accepted_mode_id": "mode.mlir",
         "public_mode": "mlir",
         "parser_id": "parse.mlir",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6073,6 +6197,7 @@
         "accepted_mode_id": "mode.mojo",
         "public_mode": "mojo",
         "parser_id": "parse.mojo",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6102,6 +6227,7 @@
         "accepted_mode_id": "mode.move",
         "public_mode": "move",
         "parser_id": "parse.move",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6131,6 +6257,7 @@
         "accepted_mode_id": "mode.mustache",
         "public_mode": "mustache",
         "parser_id": "parse.mustache",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6166,6 +6293,7 @@
         "accepted_mode_id": "mode.nasm",
         "public_mode": "nasm",
         "parser_id": "parse.nasm",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6195,6 +6323,7 @@
         "accepted_mode_id": "mode.nginx",
         "public_mode": "nginx",
         "parser_id": "parse.nginx",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6224,6 +6353,7 @@
         "accepted_mode_id": "mode.nickel",
         "public_mode": "nickel",
         "parser_id": "parse.nickel",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6253,6 +6383,7 @@
         "accepted_mode_id": "mode.nim",
         "public_mode": "nim",
         "parser_id": "parse.nim",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6282,6 +6413,7 @@
         "accepted_mode_id": "mode.ninja",
         "public_mode": "ninja",
         "parser_id": "parse.ninja",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6311,6 +6443,7 @@
         "accepted_mode_id": "mode.nix",
         "public_mode": "nix",
         "parser_id": "parse.nix",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6340,6 +6473,7 @@
         "accepted_mode_id": "mode.nushell",
         "public_mode": "nushell",
         "parser_id": "parse.nushell",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6369,6 +6503,7 @@
         "accepted_mode_id": "mode.objective-c",
         "public_mode": "objective-c",
         "parser_id": "parse.objective-c",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -6401,9 +6536,148 @@
         }
       },
       {
+        "accepted_mode_id": "mode.objectscript-export-xml",
+        "public_mode": "objectscript-export-xml",
+        "parser_id": "parse.objectscript-udl",
+        "pre_parse_transform": {
+          "transform_id": "transform.objectscript-export-xml-to-udl",
+          "version": 1,
+          "behavior": "export-container-to-udl-records",
+          "deterministic": true,
+          "target_mode_id": "mode.objectscript-export-xml",
+          "target_parser_id": "parse.objectscript-udl",
+          "detection_ownership": "mode-detection-rule-before-transform",
+          "detection_rule_id": "detect.objectscript-export-xml",
+          "limits": {
+            "max_input_bytes": 2000000,
+            "max_derived_output_bytes": 2000000,
+            "max_records": 1024,
+            "max_nesting_depth": 256,
+            "max_diagnostics": 256,
+            "deadline_ms": 300000
+          },
+          "cancellation": {
+            "enabled": true,
+            "poll_interval_ms": 25,
+            "grace_period_ms": 1000
+          },
+          "source_mapping": {
+            "original_file_identity": true,
+            "per_record_provenance": true,
+            "every_derived_fact": true,
+            "every_diagnostic": true
+          },
+          "security": {
+            "dtd": "denied",
+            "entity_expansion": "denied",
+            "external_resources": "denied",
+            "schema_fetch": "denied",
+            "execution": "denied"
+          },
+          "failure_policy": {
+            "empty_input": "unavailable",
+            "malformed_input": "partial-or-unavailable",
+            "oversized_input": "unavailable",
+            "deeply_nested_input": "unavailable",
+            "multi_record_input": "parse-each-record-in-source-order",
+            "unrelated_parser_fallback": false,
+            "guessed_symbols_after_failure": false,
+            "coverage_after_failure": "partial-or-unavailable"
+          }
+        },
+        "future_pack_id": "broad-language-pack",
+        "owner": "broad-language-pack-worker",
+        "accepted_delivery_target": true,
+        "alias_of": null,
+        "detection_rule_id": "detect.objectscript-export-xml",
+        "fixture_ids": [
+          "lang.objectscript-export-xml.valid",
+          "lang.objectscript-export-xml.malformed"
+        ],
+        "required_platforms": [
+          "windows-x86_64",
+          "linux-x86_64",
+          "macos-aarch64",
+          "macos-x86_64"
+        ],
+        "required_claims": [
+          "detected",
+          "parsed",
+          "symbols"
+        ],
+        "achieved_claims": [],
+        "advertised": false,
+        "evidence_state": "pending",
+        "advertisement": "blocked-until-achieved-manifest",
+        "current": null
+      },
+      {
+        "accepted_mode_id": "mode.objectscript-routine",
+        "public_mode": "objectscript-routine",
+        "parser_id": "parse.objectscript-routine",
+        "pre_parse_transform": null,
+        "future_pack_id": "broad-language-pack",
+        "owner": "broad-language-pack-worker",
+        "accepted_delivery_target": true,
+        "alias_of": null,
+        "detection_rule_id": "detect.objectscript-routine",
+        "fixture_ids": [
+          "lang.objectscript-routine.valid",
+          "lang.objectscript-routine.malformed"
+        ],
+        "required_platforms": [
+          "windows-x86_64",
+          "linux-x86_64",
+          "macos-aarch64",
+          "macos-x86_64"
+        ],
+        "required_claims": [
+          "detected",
+          "parsed",
+          "symbols"
+        ],
+        "achieved_claims": [],
+        "advertised": false,
+        "evidence_state": "pending",
+        "advertisement": "blocked-until-achieved-manifest",
+        "current": null
+      },
+      {
+        "accepted_mode_id": "mode.objectscript-udl",
+        "public_mode": "objectscript-udl",
+        "parser_id": "parse.objectscript-udl",
+        "pre_parse_transform": null,
+        "future_pack_id": "broad-language-pack",
+        "owner": "broad-language-pack-worker",
+        "accepted_delivery_target": true,
+        "alias_of": null,
+        "detection_rule_id": "detect.objectscript-udl",
+        "fixture_ids": [
+          "lang.objectscript-udl.valid",
+          "lang.objectscript-udl.malformed"
+        ],
+        "required_platforms": [
+          "windows-x86_64",
+          "linux-x86_64",
+          "macos-aarch64",
+          "macos-x86_64"
+        ],
+        "required_claims": [
+          "detected",
+          "parsed",
+          "symbols"
+        ],
+        "achieved_claims": [],
+        "advertised": false,
+        "evidence_state": "pending",
+        "advertisement": "blocked-until-achieved-manifest",
+        "current": null
+      },
+      {
         "accepted_mode_id": "mode.ocaml",
         "public_mode": "ocaml",
         "parser_id": "parse.ocaml",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6439,6 +6713,7 @@
         "accepted_mode_id": "mode.odin",
         "public_mode": "odin",
         "parser_id": "parse.odin",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6468,6 +6743,7 @@
         "accepted_mode_id": "mode.openscad",
         "public_mode": "openscad",
         "parser_id": "parse.openscad",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6497,6 +6773,7 @@
         "accepted_mode_id": "mode.org",
         "public_mode": "org",
         "parser_id": "parse.org",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6526,6 +6803,7 @@
         "accepted_mode_id": "mode.pascal",
         "public_mode": "pascal",
         "parser_id": "parse.pascal",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6555,6 +6833,7 @@
         "accepted_mode_id": "mode.perl",
         "public_mode": "perl",
         "parser_id": "parse.perl",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6590,6 +6869,7 @@
         "accepted_mode_id": "mode.php",
         "public_mode": "php",
         "parser_id": "parse.php",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6625,6 +6905,7 @@
         "accepted_mode_id": "mode.pine-script",
         "public_mode": "pine-script",
         "parser_id": "parse.pine-script",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6654,6 +6935,7 @@
         "accepted_mode_id": "mode.pkl",
         "public_mode": "pkl",
         "parser_id": "parse.pkl",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6683,6 +6965,7 @@
         "accepted_mode_id": "mode.po",
         "public_mode": "po",
         "parser_id": "parse.po",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6712,6 +6995,7 @@
         "accepted_mode_id": "mode.pony",
         "public_mode": "pony",
         "parser_id": "parse.pony",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6741,6 +7025,7 @@
         "accepted_mode_id": "mode.postscript",
         "public_mode": "postscript",
         "parser_id": "parse.postscript",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6770,6 +7055,7 @@
         "accepted_mode_id": "mode.powershell",
         "public_mode": "powershell",
         "parser_id": "parse.powershell",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6805,6 +7091,7 @@
         "accepted_mode_id": "mode.prisma",
         "public_mode": "prisma",
         "parser_id": "parse.prisma",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6834,6 +7121,7 @@
         "accepted_mode_id": "mode.prolog",
         "public_mode": "prolog",
         "parser_id": "parse.prolog",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6863,6 +7151,7 @@
         "accepted_mode_id": "mode.promql",
         "public_mode": "promql",
         "parser_id": "parse.promql",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6892,6 +7181,7 @@
         "accepted_mode_id": "mode.properties",
         "public_mode": "properties",
         "parser_id": "parse.properties",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6921,6 +7211,7 @@
         "accepted_mode_id": "mode.protobuf",
         "public_mode": "protobuf",
         "parser_id": "parse.protobuf",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6956,6 +7247,7 @@
         "accepted_mode_id": "mode.prql",
         "public_mode": "prql",
         "parser_id": "parse.prql",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -6985,6 +7277,7 @@
         "accepted_mode_id": "mode.pug",
         "public_mode": "pug",
         "parser_id": "parse.pug",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7020,6 +7313,7 @@
         "accepted_mode_id": "mode.puppet",
         "public_mode": "puppet",
         "parser_id": "parse.puppet",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7049,6 +7343,7 @@
         "accepted_mode_id": "mode.purescript",
         "public_mode": "purescript",
         "parser_id": "parse.purescript",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7078,6 +7373,7 @@
         "accepted_mode_id": "mode.python",
         "public_mode": "python",
         "parser_id": "parse.python",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -7113,6 +7409,7 @@
         "accepted_mode_id": "mode.ql",
         "public_mode": "ql",
         "parser_id": "parse.ql",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7142,6 +7439,7 @@
         "accepted_mode_id": "mode.qmljs",
         "public_mode": "qmljs",
         "parser_id": "parse.qmljs",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7171,6 +7469,7 @@
         "accepted_mode_id": "mode.r",
         "public_mode": "r",
         "parser_id": "parse.r",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7206,6 +7505,7 @@
         "accepted_mode_id": "mode.racket",
         "public_mode": "racket",
         "parser_id": "parse.racket",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7235,6 +7535,7 @@
         "accepted_mode_id": "mode.regex",
         "public_mode": "regex",
         "parser_id": "parse.regex",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7264,6 +7565,7 @@
         "accepted_mode_id": "mode.rego",
         "public_mode": "rego",
         "parser_id": "parse.rego",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7293,6 +7595,7 @@
         "accepted_mode_id": "mode.requirements",
         "public_mode": "requirements",
         "parser_id": "parse.requirements",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7322,6 +7625,7 @@
         "accepted_mode_id": "mode.rescript",
         "public_mode": "rescript",
         "parser_id": "parse.rescript",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7351,6 +7655,7 @@
         "accepted_mode_id": "mode.ron",
         "public_mode": "ron",
         "parser_id": "parse.ron",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7380,6 +7685,7 @@
         "accepted_mode_id": "mode.rst",
         "public_mode": "rst",
         "parser_id": "parse.rst",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7409,6 +7715,7 @@
         "accepted_mode_id": "mode.ruby",
         "public_mode": "ruby",
         "parser_id": "parse.ruby",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7444,6 +7751,7 @@
         "accepted_mode_id": "mode.rust",
         "public_mode": "rust",
         "parser_id": "parse.rust",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -7479,6 +7787,7 @@
         "accepted_mode_id": "mode.rust-build-script",
         "public_mode": "rust-build-script",
         "parser_id": "parse.rust",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -7514,6 +7823,7 @@
         "accepted_mode_id": "mode.scala",
         "public_mode": "scala",
         "parser_id": "parse.scala",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7549,6 +7859,7 @@
         "accepted_mode_id": "mode.scheme",
         "public_mode": "scheme",
         "parser_id": "parse.scheme",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7578,6 +7889,7 @@
         "accepted_mode_id": "mode.scss",
         "public_mode": "scss",
         "parser_id": "parse.scss",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7607,6 +7919,7 @@
         "accepted_mode_id": "mode.shell",
         "public_mode": "shell",
         "parser_id": "parse.shell",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7642,6 +7955,7 @@
         "accepted_mode_id": "mode.slang",
         "public_mode": "slang",
         "parser_id": "parse.slang",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7671,6 +7985,7 @@
         "accepted_mode_id": "mode.smali",
         "public_mode": "smali",
         "parser_id": "parse.smali",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7700,6 +8015,7 @@
         "accepted_mode_id": "mode.smithy",
         "public_mode": "smithy",
         "parser_id": "parse.smithy",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7729,6 +8045,7 @@
         "accepted_mode_id": "mode.solidity",
         "public_mode": "solidity",
         "parser_id": "parse.solidity",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7758,6 +8075,7 @@
         "accepted_mode_id": "mode.soql",
         "public_mode": "soql",
         "parser_id": "parse.soql",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7787,6 +8105,7 @@
         "accepted_mode_id": "mode.sosl",
         "public_mode": "sosl",
         "parser_id": "parse.sosl",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7816,6 +8135,7 @@
         "accepted_mode_id": "mode.sparql",
         "public_mode": "sparql",
         "parser_id": "parse.sparql",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7845,6 +8165,7 @@
         "accepted_mode_id": "mode.sql",
         "public_mode": "sql",
         "parser_id": "parse.sql",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7880,6 +8201,7 @@
         "accepted_mode_id": "mode.squirrel",
         "public_mode": "squirrel",
         "parser_id": "parse.squirrel",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7909,6 +8231,7 @@
         "accepted_mode_id": "mode.ssh-config",
         "public_mode": "ssh-config",
         "parser_id": "parse.ssh-config",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7938,6 +8261,7 @@
         "accepted_mode_id": "mode.starlark",
         "public_mode": "starlark",
         "parser_id": "parse.starlark",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -7967,6 +8291,7 @@
         "accepted_mode_id": "mode.svelte",
         "public_mode": "svelte",
         "parser_id": "parse.svelte",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -8002,6 +8327,7 @@
         "accepted_mode_id": "mode.sway",
         "public_mode": "sway",
         "parser_id": "parse.sway",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -8031,6 +8357,7 @@
         "accepted_mode_id": "mode.swift",
         "public_mode": "swift",
         "parser_id": "parse.swift",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -8066,6 +8393,7 @@
         "accepted_mode_id": "mode.systemverilog",
         "public_mode": "systemverilog",
         "parser_id": "parse.systemverilog",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -8095,6 +8423,7 @@
         "accepted_mode_id": "mode.tablegen",
         "public_mode": "tablegen",
         "parser_id": "parse.tablegen",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -8124,6 +8453,7 @@
         "accepted_mode_id": "mode.tcl",
         "public_mode": "tcl",
         "parser_id": "parse.tcl",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -8153,6 +8483,7 @@
         "accepted_mode_id": "mode.teal",
         "public_mode": "teal",
         "parser_id": "parse.teal",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -8182,6 +8513,7 @@
         "accepted_mode_id": "mode.templ",
         "public_mode": "templ",
         "parser_id": "parse.templ",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -8211,6 +8543,7 @@
         "accepted_mode_id": "mode.text",
         "public_mode": "text",
         "parser_id": "parse.text",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -8246,6 +8579,7 @@
         "accepted_mode_id": "mode.thrift",
         "public_mode": "thrift",
         "parser_id": "parse.thrift",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -8275,6 +8609,7 @@
         "accepted_mode_id": "mode.tlaplus",
         "public_mode": "tlaplus",
         "parser_id": "parse.tlaplus",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -8304,6 +8639,7 @@
         "accepted_mode_id": "mode.toml",
         "public_mode": "toml",
         "parser_id": "parse.toml",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -8339,6 +8675,7 @@
         "accepted_mode_id": "mode.toon",
         "public_mode": "toon",
         "parser_id": "parse.toon",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -8374,6 +8711,7 @@
         "accepted_mode_id": "mode.tsx",
         "public_mode": "tsx",
         "parser_id": "parse.tsx",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -8409,6 +8747,7 @@
         "accepted_mode_id": "mode.typescript",
         "public_mode": "typescript",
         "parser_id": "parse.typescript",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -8444,6 +8783,7 @@
         "accepted_mode_id": "mode.typst",
         "public_mode": "typst",
         "parser_id": "parse.typst",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -8473,6 +8813,7 @@
         "accepted_mode_id": "mode.verilog",
         "public_mode": "verilog",
         "parser_id": "parse.verilog",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -8502,6 +8843,7 @@
         "accepted_mode_id": "mode.vhdl",
         "public_mode": "vhdl",
         "parser_id": "parse.vhdl",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -8531,6 +8873,7 @@
         "accepted_mode_id": "mode.vim",
         "public_mode": "vim",
         "parser_id": "parse.vim",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -8566,6 +8909,7 @@
         "accepted_mode_id": "mode.vue",
         "public_mode": "vue",
         "parser_id": "parse.vue",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -8601,6 +8945,7 @@
         "accepted_mode_id": "mode.wgsl",
         "public_mode": "wgsl",
         "parser_id": "parse.wgsl",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -8630,6 +8975,7 @@
         "accepted_mode_id": "mode.wit",
         "public_mode": "wit",
         "parser_id": "parse.wit",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -8659,6 +9005,7 @@
         "accepted_mode_id": "mode.wolfram",
         "public_mode": "wolfram",
         "parser_id": "parse.wolfram",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -8688,6 +9035,7 @@
         "accepted_mode_id": "mode.xml",
         "public_mode": "xml",
         "parser_id": "parse.xml",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -8723,6 +9071,7 @@
         "accepted_mode_id": "mode.yaml",
         "public_mode": "yaml",
         "parser_id": "parse.yaml",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -8758,6 +9107,7 @@
         "accepted_mode_id": "mode.zig",
         "public_mode": "zig",
         "parser_id": "parse.zig",
+        "pre_parse_transform": null,
         "future_pack_id": "default-core",
         "owner": "projectatlas-symbols",
         "accepted_delivery_target": true,
@@ -8793,6 +9143,7 @@
         "accepted_mode_id": "mode.zsh",
         "public_mode": "zsh",
         "parser_id": "parse.zsh",
+        "pre_parse_transform": null,
         "future_pack_id": "broad-language-pack",
         "owner": "broad-language-pack-worker",
         "accepted_delivery_target": true,
@@ -11423,6 +11774,47 @@
         ]
       },
       {
+        "parser_id": "parse.objectscript-routine",
+        "kind": "tree-sitter-or-vetted-parser",
+        "future_pack_id": "broad-language-pack",
+        "owner": "broad-language-pack-worker",
+        "tree_sitter_abi": null,
+        "asset_id": "asset.objectscript-routine",
+        "query_pack_id": "queries.objectscript-routine",
+        "evidence_state": "pending-asset-fixture-and-platform-verification",
+        "advertised": false,
+        "required_platforms": [
+          "windows-x86_64",
+          "linux-x86_64",
+          "macos-aarch64",
+          "macos-x86_64"
+        ],
+        "normalized_modes": [
+          "objectscript-routine"
+        ]
+      },
+      {
+        "parser_id": "parse.objectscript-udl",
+        "kind": "tree-sitter-or-vetted-parser",
+        "future_pack_id": "broad-language-pack",
+        "owner": "broad-language-pack-worker",
+        "tree_sitter_abi": null,
+        "asset_id": "asset.objectscript-udl",
+        "query_pack_id": "queries.objectscript-udl",
+        "evidence_state": "pending-asset-fixture-and-platform-verification",
+        "advertised": false,
+        "required_platforms": [
+          "windows-x86_64",
+          "linux-x86_64",
+          "macos-aarch64",
+          "macos-x86_64"
+        ],
+        "normalized_modes": [
+          "objectscript-export-xml",
+          "objectscript-udl"
+        ]
+      },
+      {
         "parser_id": "parse.ocaml",
         "kind": "tree-sitter-or-vetted-parser",
         "future_pack_id": "broad-language-pack",
@@ -13640,6 +14032,27 @@
         "mapping": "canonical-mode"
       },
       {
+        "accepted_name_id": "accepted.objectscript-export-xml",
+        "standard_name": "ObjectScript",
+        "dialect": "export-xml",
+        "mode_id": "mode.objectscript-export-xml",
+        "mapping": "dialect-mode"
+      },
+      {
+        "accepted_name_id": "accepted.objectscript-routine",
+        "standard_name": "ObjectScript",
+        "dialect": "routine",
+        "mode_id": "mode.objectscript-routine",
+        "mapping": "dialect-mode"
+      },
+      {
+        "accepted_name_id": "accepted.objectscript-udl",
+        "standard_name": "ObjectScript",
+        "dialect": "udl",
+        "mode_id": "mode.objectscript-udl",
+        "mapping": "dialect-mode"
+      },
+      {
         "accepted_name_id": "accepted.ocaml",
         "standard_name": "OCaml",
         "dialect": null,
@@ -15843,9 +16256,9 @@
   },
   "settings": {
     "registry_id": "registry.projectatlas-language-runtime",
-    "registry_contract_sha256": "3654ffb023ca1621a71d84dc229869e340f5a23b65a90ab016df9bceaf9625d6",
-    "accepted_registry_id": "projectatlas-v0.4-candidate-212x207",
-    "accepted_set_sha256": "7355cfc034910c87839afe946bdd6c2418766c1792d12a404d2a58586fec8806",
+    "registry_contract_sha256": "61153a34d7dd0d53686679726795c5e19ba86a19a5421d98d38b5e0f8b69d564",
+    "accepted_registry_id": "projectatlas-v0.4-candidate-215x209",
+    "accepted_set_sha256": "ed9d1012653830f9efabf2b678c8849e5372a1a8a8b390da4f764a53553e7512",
     "accepted_advertisement": "blocked-until-achieved-manifest",
     "capability_tiers": [
       "detected",
@@ -15872,8 +16285,9 @@
       }
     ],
     "current_modes": 63,
-    "accepted_modes": 212,
-    "accepted_parser_capabilities": 207,
+    "accepted_modes": 215,
+    "accepted_pre_parse_transforms": 1,
+    "accepted_parser_capabilities": 209,
     "parser_components": 13,
     "parser_assets": 0,
     "embedded_adapters": 0,
@@ -15886,6 +16300,7 @@
         "mode_id": "mode.ada",
         "public_mode": "ada",
         "parser_id": "parse.ada",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -15913,6 +16328,7 @@
         "mode_id": "mode.agda",
         "public_mode": "agda",
         "parser_id": "parse.agda",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -15940,6 +16356,7 @@
         "mode_id": "mode.apex",
         "public_mode": "apex",
         "parser_id": "parse.apex",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -15967,6 +16384,7 @@
         "mode_id": "mode.arduino",
         "public_mode": "arduino",
         "parser_id": "parse.arduino",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -15994,6 +16412,7 @@
         "mode_id": "mode.asciidoc",
         "public_mode": "asciidoc",
         "parser_id": "parse.asciidoc",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16021,6 +16440,7 @@
         "mode_id": "mode.asm",
         "public_mode": "asm",
         "parser_id": "parse.asm",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16048,6 +16468,7 @@
         "mode_id": "mode.astro",
         "public_mode": "astro",
         "parser_id": "parse.astro",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16075,6 +16496,7 @@
         "mode_id": "mode.awk",
         "public_mode": "awk",
         "parser_id": "parse.awk",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16102,6 +16524,7 @@
         "mode_id": "mode.bash",
         "public_mode": "bash",
         "parser_id": "parse.bash",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16129,6 +16552,7 @@
         "mode_id": "mode.batch",
         "public_mode": "batch",
         "parser_id": "parse.batch",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16156,6 +16580,7 @@
         "mode_id": "mode.beancount",
         "public_mode": "beancount",
         "parser_id": "parse.beancount",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16183,6 +16608,7 @@
         "mode_id": "mode.bibtex",
         "public_mode": "bibtex",
         "parser_id": "parse.bibtex",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16210,6 +16636,7 @@
         "mode_id": "mode.bicep",
         "public_mode": "bicep",
         "parser_id": "parse.bicep",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16237,6 +16664,7 @@
         "mode_id": "mode.bitbake",
         "public_mode": "bitbake",
         "parser_id": "parse.bitbake",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16264,6 +16692,7 @@
         "mode_id": "mode.blade",
         "public_mode": "blade",
         "parser_id": "parse.blade",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16291,6 +16720,7 @@
         "mode_id": "mode.c",
         "public_mode": "c",
         "parser_id": "parse.c",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16318,6 +16748,7 @@
         "mode_id": "mode.c3",
         "public_mode": "c3",
         "parser_id": "parse.c3",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16345,6 +16776,7 @@
         "mode_id": "mode.cairo",
         "public_mode": "cairo",
         "parser_id": "parse.cairo",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16372,6 +16804,7 @@
         "mode_id": "mode.capnp",
         "public_mode": "capnp",
         "parser_id": "parse.capnp",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16399,6 +16832,7 @@
         "mode_id": "mode.cargo-lock",
         "public_mode": "cargo-lock",
         "parser_id": "parse.cargo-lock",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16426,6 +16860,7 @@
         "mode_id": "mode.cargo-manifest",
         "public_mode": "cargo-manifest",
         "parser_id": "parse.cargo-manifest",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16453,6 +16888,7 @@
         "mode_id": "mode.cel",
         "public_mode": "cel",
         "parser_id": "parse.cel",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16480,6 +16916,7 @@
         "mode_id": "mode.cfml-script",
         "public_mode": "cfml-script",
         "parser_id": "parse.cfml-script",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16507,6 +16944,7 @@
         "mode_id": "mode.cfml-tag",
         "public_mode": "cfml-tag",
         "parser_id": "parse.cfml-tag",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16534,6 +16972,7 @@
         "mode_id": "mode.circom",
         "public_mode": "circom",
         "parser_id": "parse.circom",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16561,6 +17000,7 @@
         "mode_id": "mode.clojure",
         "public_mode": "clojure",
         "parser_id": "parse.clojure",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16588,6 +17028,7 @@
         "mode_id": "mode.cmake",
         "public_mode": "cmake",
         "parser_id": "parse.cmake",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16615,6 +17056,7 @@
         "mode_id": "mode.cobol",
         "public_mode": "cobol",
         "parser_id": "parse.cobol",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16642,6 +17084,7 @@
         "mode_id": "mode.common-lisp",
         "public_mode": "common-lisp",
         "parser_id": "parse.common-lisp",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16669,6 +17112,7 @@
         "mode_id": "mode.config",
         "public_mode": "config",
         "parser_id": "parse.config",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16696,6 +17140,7 @@
         "mode_id": "mode.cpp",
         "public_mode": "cpp",
         "parser_id": "parse.cpp",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16723,6 +17168,7 @@
         "mode_id": "mode.crystal",
         "public_mode": "crystal",
         "parser_id": "parse.crystal",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16750,6 +17196,7 @@
         "mode_id": "mode.csharp",
         "public_mode": "csharp",
         "parser_id": "parse.csharp",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16777,6 +17224,7 @@
         "mode_id": "mode.css",
         "public_mode": "css",
         "parser_id": "parse.css",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16804,6 +17252,7 @@
         "mode_id": "mode.csv",
         "public_mode": "csv",
         "parser_id": "parse.csv",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16831,6 +17280,7 @@
         "mode_id": "mode.cuda",
         "public_mode": "cuda",
         "parser_id": "parse.cuda",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16858,6 +17308,7 @@
         "mode_id": "mode.cue",
         "public_mode": "cue",
         "parser_id": "parse.cue",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16885,6 +17336,7 @@
         "mode_id": "mode.d",
         "public_mode": "d",
         "parser_id": "parse.d",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16912,6 +17364,7 @@
         "mode_id": "mode.dart",
         "public_mode": "dart",
         "parser_id": "parse.dart",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16939,6 +17392,7 @@
         "mode_id": "mode.devicetree",
         "public_mode": "devicetree",
         "parser_id": "parse.devicetree",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16966,6 +17420,7 @@
         "mode_id": "mode.dhall",
         "public_mode": "dhall",
         "parser_id": "parse.dhall",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -16993,6 +17448,7 @@
         "mode_id": "mode.diff",
         "public_mode": "diff",
         "parser_id": "parse.diff",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17020,6 +17476,7 @@
         "mode_id": "mode.dockerfile",
         "public_mode": "dockerfile",
         "parser_id": "parse.dockerfile",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17047,6 +17504,7 @@
         "mode_id": "mode.dot",
         "public_mode": "dot",
         "parser_id": "parse.dot",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17074,6 +17532,7 @@
         "mode_id": "mode.dotenv",
         "public_mode": "dotenv",
         "parser_id": "parse.dotenv",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17101,6 +17560,7 @@
         "mode_id": "mode.ejs",
         "public_mode": "ejs",
         "parser_id": "parse.ejs",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17128,6 +17588,7 @@
         "mode_id": "mode.elisp",
         "public_mode": "elisp",
         "parser_id": "parse.elisp",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17155,6 +17616,7 @@
         "mode_id": "mode.elixir",
         "public_mode": "elixir",
         "parser_id": "parse.elixir",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17182,6 +17644,7 @@
         "mode_id": "mode.elm",
         "public_mode": "elm",
         "parser_id": "parse.elm",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17209,6 +17672,7 @@
         "mode_id": "mode.erb",
         "public_mode": "erb",
         "parser_id": "parse.erb",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17236,6 +17700,7 @@
         "mode_id": "mode.erlang",
         "public_mode": "erlang",
         "parser_id": "parse.erlang",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17263,6 +17728,7 @@
         "mode_id": "mode.fennel",
         "public_mode": "fennel",
         "parser_id": "parse.fennel",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17290,6 +17756,7 @@
         "mode_id": "mode.fish",
         "public_mode": "fish",
         "parser_id": "parse.fish",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17317,6 +17784,7 @@
         "mode_id": "mode.form",
         "public_mode": "form",
         "parser_id": "parse.form",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17344,6 +17812,7 @@
         "mode_id": "mode.fortran",
         "public_mode": "fortran",
         "parser_id": "parse.fortran",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17371,6 +17840,7 @@
         "mode_id": "mode.freemarker",
         "public_mode": "freemarker",
         "parser_id": "parse.freemarker",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17398,6 +17868,7 @@
         "mode_id": "mode.fsharp",
         "public_mode": "fsharp",
         "parser_id": "parse.fsharp",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17425,6 +17896,7 @@
         "mode_id": "mode.func",
         "public_mode": "func",
         "parser_id": "parse.func",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17452,6 +17924,7 @@
         "mode_id": "mode.gdscript",
         "public_mode": "gdscript",
         "parser_id": "parse.gdscript",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17479,6 +17952,7 @@
         "mode_id": "mode.gitattributes",
         "public_mode": "gitattributes",
         "parser_id": "parse.gitattributes",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17506,6 +17980,7 @@
         "mode_id": "mode.gitignore",
         "public_mode": "gitignore",
         "parser_id": "parse.gitignore",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17533,6 +18008,7 @@
         "mode_id": "mode.gleam",
         "public_mode": "gleam",
         "parser_id": "parse.gleam",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17560,6 +18036,7 @@
         "mode_id": "mode.glsl",
         "public_mode": "glsl",
         "parser_id": "parse.glsl",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17587,6 +18064,7 @@
         "mode_id": "mode.gn",
         "public_mode": "gn",
         "parser_id": "parse.gn",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17614,6 +18092,7 @@
         "mode_id": "mode.gnuplot",
         "public_mode": "gnuplot",
         "parser_id": "parse.gnuplot",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17641,6 +18120,7 @@
         "mode_id": "mode.go",
         "public_mode": "go",
         "parser_id": "parse.go",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17668,6 +18148,7 @@
         "mode_id": "mode.go-mod",
         "public_mode": "go-mod",
         "parser_id": "parse.go-mod",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17695,6 +18176,7 @@
         "mode_id": "mode.go-template",
         "public_mode": "go-template",
         "parser_id": "parse.go-template",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17722,6 +18204,7 @@
         "mode_id": "mode.graphql",
         "public_mode": "graphql",
         "parser_id": "parse.graphql",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17749,6 +18232,7 @@
         "mode_id": "mode.groovy",
         "public_mode": "groovy",
         "parser_id": "parse.groovy",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17776,6 +18260,7 @@
         "mode_id": "mode.gsp",
         "public_mode": "gsp",
         "parser_id": "parse.gsp",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17803,6 +18288,7 @@
         "mode_id": "mode.h",
         "public_mode": "h",
         "parser_id": "parse.c",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17830,6 +18316,7 @@
         "mode_id": "mode.hack",
         "public_mode": "hack",
         "parser_id": "parse.hack",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17857,6 +18344,7 @@
         "mode_id": "mode.handlebars",
         "public_mode": "handlebars",
         "parser_id": "parse.handlebars",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17884,6 +18372,7 @@
         "mode_id": "mode.hare",
         "public_mode": "hare",
         "parser_id": "parse.hare",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17911,6 +18400,7 @@
         "mode_id": "mode.haskell",
         "public_mode": "haskell",
         "parser_id": "parse.haskell",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17938,6 +18428,7 @@
         "mode_id": "mode.haxe",
         "public_mode": "haxe",
         "parser_id": "parse.haxe",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17965,6 +18456,7 @@
         "mode_id": "mode.hcl",
         "public_mode": "hcl",
         "parser_id": "parse.hcl",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -17992,6 +18484,7 @@
         "mode_id": "mode.heex",
         "public_mode": "heex",
         "parser_id": "parse.heex",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18019,6 +18512,7 @@
         "mode_id": "mode.hjson",
         "public_mode": "hjson",
         "parser_id": "parse.hjson",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18046,6 +18540,7 @@
         "mode_id": "mode.hlsl",
         "public_mode": "hlsl",
         "parser_id": "parse.hlsl",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18073,6 +18568,7 @@
         "mode_id": "mode.hpp",
         "public_mode": "hpp",
         "parser_id": "parse.cpp",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18100,6 +18596,7 @@
         "mode_id": "mode.html",
         "public_mode": "html",
         "parser_id": "parse.html",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18127,6 +18624,7 @@
         "mode_id": "mode.http",
         "public_mode": "http",
         "parser_id": "parse.http",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18154,6 +18652,7 @@
         "mode_id": "mode.hyprlang",
         "public_mode": "hyprlang",
         "parser_id": "parse.hyprlang",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18181,6 +18680,7 @@
         "mode_id": "mode.idris",
         "public_mode": "idris",
         "parser_id": "parse.idris",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18208,6 +18708,7 @@
         "mode_id": "mode.ini",
         "public_mode": "ini",
         "parser_id": "parse.ini",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18235,6 +18736,7 @@
         "mode_id": "mode.ispc",
         "public_mode": "ispc",
         "parser_id": "parse.ispc",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18262,6 +18764,7 @@
         "mode_id": "mode.janet",
         "public_mode": "janet",
         "parser_id": "parse.janet",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18289,6 +18792,7 @@
         "mode_id": "mode.java",
         "public_mode": "java",
         "parser_id": "parse.java",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18316,6 +18820,7 @@
         "mode_id": "mode.javascript",
         "public_mode": "javascript",
         "parser_id": "parse.javascript",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18343,6 +18848,7 @@
         "mode_id": "mode.jinja2",
         "public_mode": "jinja2",
         "parser_id": "parse.jinja2",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18370,6 +18876,7 @@
         "mode_id": "mode.jq",
         "public_mode": "jq",
         "parser_id": "parse.jq",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18397,6 +18904,7 @@
         "mode_id": "mode.jsdoc",
         "public_mode": "jsdoc",
         "parser_id": "parse.jsdoc",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18424,6 +18932,7 @@
         "mode_id": "mode.json",
         "public_mode": "json",
         "parser_id": "parse.json",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18451,6 +18960,7 @@
         "mode_id": "mode.json5",
         "public_mode": "json5",
         "parser_id": "parse.json5",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18478,6 +18988,7 @@
         "mode_id": "mode.jsonnet",
         "public_mode": "jsonnet",
         "parser_id": "parse.jsonnet",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18505,6 +19016,7 @@
         "mode_id": "mode.jsp",
         "public_mode": "jsp",
         "parser_id": "parse.jsp",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18532,6 +19044,7 @@
         "mode_id": "mode.jsp-tag",
         "public_mode": "jsp-tag",
         "parser_id": "parse.jsp-tag",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18559,6 +19072,7 @@
         "mode_id": "mode.julia",
         "public_mode": "julia",
         "parser_id": "parse.julia",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18586,6 +19100,7 @@
         "mode_id": "mode.just",
         "public_mode": "just",
         "parser_id": "parse.just",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18613,6 +19128,7 @@
         "mode_id": "mode.kcl",
         "public_mode": "kcl",
         "parser_id": "parse.kcl",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18640,6 +19156,7 @@
         "mode_id": "mode.kconfig",
         "public_mode": "kconfig",
         "parser_id": "parse.kconfig",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18667,6 +19184,7 @@
         "mode_id": "mode.kdl",
         "public_mode": "kdl",
         "parser_id": "parse.kdl",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18694,6 +19212,7 @@
         "mode_id": "mode.kotlin",
         "public_mode": "kotlin",
         "parser_id": "parse.kotlin",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18721,6 +19240,7 @@
         "mode_id": "mode.kubernetes",
         "public_mode": "kubernetes",
         "parser_id": "parse.yaml",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18748,6 +19268,7 @@
         "mode_id": "mode.kustomize",
         "public_mode": "kustomize",
         "parser_id": "parse.yaml",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18775,6 +19296,7 @@
         "mode_id": "mode.latex",
         "public_mode": "latex",
         "parser_id": "parse.latex",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18802,6 +19324,7 @@
         "mode_id": "mode.lean",
         "public_mode": "lean",
         "parser_id": "parse.lean",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18829,6 +19352,7 @@
         "mode_id": "mode.ledger",
         "public_mode": "ledger",
         "parser_id": "parse.ledger",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18856,6 +19380,7 @@
         "mode_id": "mode.linker-script",
         "public_mode": "linker-script",
         "parser_id": "parse.linker-script",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18883,6 +19408,7 @@
         "mode_id": "mode.liquid",
         "public_mode": "liquid",
         "parser_id": "parse.liquid",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18910,6 +19436,7 @@
         "mode_id": "mode.llvm",
         "public_mode": "llvm",
         "parser_id": "parse.llvm",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18937,6 +19464,7 @@
         "mode_id": "mode.lua",
         "public_mode": "lua",
         "parser_id": "parse.lua",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18964,6 +19492,7 @@
         "mode_id": "mode.luau",
         "public_mode": "luau",
         "parser_id": "parse.luau",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -18991,6 +19520,7 @@
         "mode_id": "mode.magik",
         "public_mode": "magik",
         "parser_id": "parse.magik",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19018,6 +19548,7 @@
         "mode_id": "mode.magma",
         "public_mode": "magma",
         "parser_id": "parse.magma",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19045,6 +19576,7 @@
         "mode_id": "mode.makefile",
         "public_mode": "makefile",
         "parser_id": "parse.makefile",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19072,6 +19604,7 @@
         "mode_id": "mode.markdown",
         "public_mode": "markdown",
         "parser_id": "parse.markdown",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19099,6 +19632,7 @@
         "mode_id": "mode.matlab",
         "public_mode": "matlab",
         "parser_id": "parse.matlab",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19126,6 +19660,7 @@
         "mode_id": "mode.mermaid",
         "public_mode": "mermaid",
         "parser_id": "parse.mermaid",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19153,6 +19688,7 @@
         "mode_id": "mode.meson",
         "public_mode": "meson",
         "parser_id": "parse.meson",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19180,6 +19716,7 @@
         "mode_id": "mode.mlir",
         "public_mode": "mlir",
         "parser_id": "parse.mlir",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19207,6 +19744,7 @@
         "mode_id": "mode.mojo",
         "public_mode": "mojo",
         "parser_id": "parse.mojo",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19234,6 +19772,7 @@
         "mode_id": "mode.move",
         "public_mode": "move",
         "parser_id": "parse.move",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19261,6 +19800,7 @@
         "mode_id": "mode.mustache",
         "public_mode": "mustache",
         "parser_id": "parse.mustache",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19288,6 +19828,7 @@
         "mode_id": "mode.nasm",
         "public_mode": "nasm",
         "parser_id": "parse.nasm",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19315,6 +19856,7 @@
         "mode_id": "mode.nginx",
         "public_mode": "nginx",
         "parser_id": "parse.nginx",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19342,6 +19884,7 @@
         "mode_id": "mode.nickel",
         "public_mode": "nickel",
         "parser_id": "parse.nickel",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19369,6 +19912,7 @@
         "mode_id": "mode.nim",
         "public_mode": "nim",
         "parser_id": "parse.nim",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19396,6 +19940,7 @@
         "mode_id": "mode.ninja",
         "public_mode": "ninja",
         "parser_id": "parse.ninja",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19423,6 +19968,7 @@
         "mode_id": "mode.nix",
         "public_mode": "nix",
         "parser_id": "parse.nix",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19450,6 +19996,7 @@
         "mode_id": "mode.nushell",
         "public_mode": "nushell",
         "parser_id": "parse.nushell",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19477,6 +20024,7 @@
         "mode_id": "mode.objective-c",
         "public_mode": "objective-c",
         "parser_id": "parse.objective-c",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19501,9 +20049,142 @@
         "advertised": false
       },
       {
+        "mode_id": "mode.objectscript-export-xml",
+        "public_mode": "objectscript-export-xml",
+        "parser_id": "parse.objectscript-udl",
+        "pre_parse_transform": {
+          "transform_id": "transform.objectscript-export-xml-to-udl",
+          "version": 1,
+          "behavior": "export-container-to-udl-records",
+          "deterministic": true,
+          "target_mode_id": "mode.objectscript-export-xml",
+          "target_parser_id": "parse.objectscript-udl",
+          "detection_ownership": "mode-detection-rule-before-transform",
+          "detection_rule_id": "detect.objectscript-export-xml",
+          "limits": {
+            "max_input_bytes": 2000000,
+            "max_derived_output_bytes": 2000000,
+            "max_records": 1024,
+            "max_nesting_depth": 256,
+            "max_diagnostics": 256,
+            "deadline_ms": 300000
+          },
+          "cancellation": {
+            "enabled": true,
+            "poll_interval_ms": 25,
+            "grace_period_ms": 1000
+          },
+          "source_mapping": {
+            "original_file_identity": true,
+            "per_record_provenance": true,
+            "every_derived_fact": true,
+            "every_diagnostic": true
+          },
+          "security": {
+            "dtd": "denied",
+            "entity_expansion": "denied",
+            "external_resources": "denied",
+            "schema_fetch": "denied",
+            "execution": "denied"
+          },
+          "failure_policy": {
+            "empty_input": "unavailable",
+            "malformed_input": "partial-or-unavailable",
+            "oversized_input": "unavailable",
+            "deeply_nested_input": "unavailable",
+            "multi_record_input": "parse-each-record-in-source-order",
+            "unrelated_parser_fallback": false,
+            "guessed_symbols_after_failure": false,
+            "coverage_after_failure": "partial-or-unavailable"
+          }
+        },
+        "required_claims": [
+          "detected",
+          "parsed",
+          "symbols"
+        ],
+        "achieved_claims": [],
+        "fixture_ids": [
+          "lang.objectscript-export-xml.valid",
+          "lang.objectscript-export-xml.malformed"
+        ],
+        "registered_fixture_ids": [],
+        "missing_fixture_ids": [
+          "lang.objectscript-export-xml.valid",
+          "lang.objectscript-export-xml.malformed"
+        ],
+        "required_platforms": [
+          "windows-x86_64",
+          "linux-x86_64",
+          "macos-aarch64",
+          "macos-x86_64"
+        ],
+        "evidence_state": "pending",
+        "advertised": false
+      },
+      {
+        "mode_id": "mode.objectscript-routine",
+        "public_mode": "objectscript-routine",
+        "parser_id": "parse.objectscript-routine",
+        "pre_parse_transform": null,
+        "required_claims": [
+          "detected",
+          "parsed",
+          "symbols"
+        ],
+        "achieved_claims": [],
+        "fixture_ids": [
+          "lang.objectscript-routine.valid",
+          "lang.objectscript-routine.malformed"
+        ],
+        "registered_fixture_ids": [],
+        "missing_fixture_ids": [
+          "lang.objectscript-routine.valid",
+          "lang.objectscript-routine.malformed"
+        ],
+        "required_platforms": [
+          "windows-x86_64",
+          "linux-x86_64",
+          "macos-aarch64",
+          "macos-x86_64"
+        ],
+        "evidence_state": "pending",
+        "advertised": false
+      },
+      {
+        "mode_id": "mode.objectscript-udl",
+        "public_mode": "objectscript-udl",
+        "parser_id": "parse.objectscript-udl",
+        "pre_parse_transform": null,
+        "required_claims": [
+          "detected",
+          "parsed",
+          "symbols"
+        ],
+        "achieved_claims": [],
+        "fixture_ids": [
+          "lang.objectscript-udl.valid",
+          "lang.objectscript-udl.malformed"
+        ],
+        "registered_fixture_ids": [],
+        "missing_fixture_ids": [
+          "lang.objectscript-udl.valid",
+          "lang.objectscript-udl.malformed"
+        ],
+        "required_platforms": [
+          "windows-x86_64",
+          "linux-x86_64",
+          "macos-aarch64",
+          "macos-x86_64"
+        ],
+        "evidence_state": "pending",
+        "advertised": false
+      },
+      {
         "mode_id": "mode.ocaml",
         "public_mode": "ocaml",
         "parser_id": "parse.ocaml",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19531,6 +20212,7 @@
         "mode_id": "mode.odin",
         "public_mode": "odin",
         "parser_id": "parse.odin",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19558,6 +20240,7 @@
         "mode_id": "mode.openscad",
         "public_mode": "openscad",
         "parser_id": "parse.openscad",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19585,6 +20268,7 @@
         "mode_id": "mode.org",
         "public_mode": "org",
         "parser_id": "parse.org",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19612,6 +20296,7 @@
         "mode_id": "mode.pascal",
         "public_mode": "pascal",
         "parser_id": "parse.pascal",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19639,6 +20324,7 @@
         "mode_id": "mode.perl",
         "public_mode": "perl",
         "parser_id": "parse.perl",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19666,6 +20352,7 @@
         "mode_id": "mode.php",
         "public_mode": "php",
         "parser_id": "parse.php",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19693,6 +20380,7 @@
         "mode_id": "mode.pine-script",
         "public_mode": "pine-script",
         "parser_id": "parse.pine-script",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19720,6 +20408,7 @@
         "mode_id": "mode.pkl",
         "public_mode": "pkl",
         "parser_id": "parse.pkl",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19747,6 +20436,7 @@
         "mode_id": "mode.po",
         "public_mode": "po",
         "parser_id": "parse.po",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19774,6 +20464,7 @@
         "mode_id": "mode.pony",
         "public_mode": "pony",
         "parser_id": "parse.pony",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19801,6 +20492,7 @@
         "mode_id": "mode.postscript",
         "public_mode": "postscript",
         "parser_id": "parse.postscript",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19828,6 +20520,7 @@
         "mode_id": "mode.powershell",
         "public_mode": "powershell",
         "parser_id": "parse.powershell",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19855,6 +20548,7 @@
         "mode_id": "mode.prisma",
         "public_mode": "prisma",
         "parser_id": "parse.prisma",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19882,6 +20576,7 @@
         "mode_id": "mode.prolog",
         "public_mode": "prolog",
         "parser_id": "parse.prolog",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19909,6 +20604,7 @@
         "mode_id": "mode.promql",
         "public_mode": "promql",
         "parser_id": "parse.promql",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19936,6 +20632,7 @@
         "mode_id": "mode.properties",
         "public_mode": "properties",
         "parser_id": "parse.properties",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19963,6 +20660,7 @@
         "mode_id": "mode.protobuf",
         "public_mode": "protobuf",
         "parser_id": "parse.protobuf",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -19990,6 +20688,7 @@
         "mode_id": "mode.prql",
         "public_mode": "prql",
         "parser_id": "parse.prql",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20017,6 +20716,7 @@
         "mode_id": "mode.pug",
         "public_mode": "pug",
         "parser_id": "parse.pug",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20044,6 +20744,7 @@
         "mode_id": "mode.puppet",
         "public_mode": "puppet",
         "parser_id": "parse.puppet",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20071,6 +20772,7 @@
         "mode_id": "mode.purescript",
         "public_mode": "purescript",
         "parser_id": "parse.purescript",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20098,6 +20800,7 @@
         "mode_id": "mode.python",
         "public_mode": "python",
         "parser_id": "parse.python",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20125,6 +20828,7 @@
         "mode_id": "mode.ql",
         "public_mode": "ql",
         "parser_id": "parse.ql",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20152,6 +20856,7 @@
         "mode_id": "mode.qmljs",
         "public_mode": "qmljs",
         "parser_id": "parse.qmljs",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20179,6 +20884,7 @@
         "mode_id": "mode.r",
         "public_mode": "r",
         "parser_id": "parse.r",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20206,6 +20912,7 @@
         "mode_id": "mode.racket",
         "public_mode": "racket",
         "parser_id": "parse.racket",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20233,6 +20940,7 @@
         "mode_id": "mode.regex",
         "public_mode": "regex",
         "parser_id": "parse.regex",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20260,6 +20968,7 @@
         "mode_id": "mode.rego",
         "public_mode": "rego",
         "parser_id": "parse.rego",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20287,6 +20996,7 @@
         "mode_id": "mode.requirements",
         "public_mode": "requirements",
         "parser_id": "parse.requirements",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20314,6 +21024,7 @@
         "mode_id": "mode.rescript",
         "public_mode": "rescript",
         "parser_id": "parse.rescript",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20341,6 +21052,7 @@
         "mode_id": "mode.ron",
         "public_mode": "ron",
         "parser_id": "parse.ron",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20368,6 +21080,7 @@
         "mode_id": "mode.rst",
         "public_mode": "rst",
         "parser_id": "parse.rst",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20395,6 +21108,7 @@
         "mode_id": "mode.ruby",
         "public_mode": "ruby",
         "parser_id": "parse.ruby",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20422,6 +21136,7 @@
         "mode_id": "mode.rust",
         "public_mode": "rust",
         "parser_id": "parse.rust",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20449,6 +21164,7 @@
         "mode_id": "mode.rust-build-script",
         "public_mode": "rust-build-script",
         "parser_id": "parse.rust",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20476,6 +21192,7 @@
         "mode_id": "mode.scala",
         "public_mode": "scala",
         "parser_id": "parse.scala",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20503,6 +21220,7 @@
         "mode_id": "mode.scheme",
         "public_mode": "scheme",
         "parser_id": "parse.scheme",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20530,6 +21248,7 @@
         "mode_id": "mode.scss",
         "public_mode": "scss",
         "parser_id": "parse.scss",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20557,6 +21276,7 @@
         "mode_id": "mode.shell",
         "public_mode": "shell",
         "parser_id": "parse.shell",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20584,6 +21304,7 @@
         "mode_id": "mode.slang",
         "public_mode": "slang",
         "parser_id": "parse.slang",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20611,6 +21332,7 @@
         "mode_id": "mode.smali",
         "public_mode": "smali",
         "parser_id": "parse.smali",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20638,6 +21360,7 @@
         "mode_id": "mode.smithy",
         "public_mode": "smithy",
         "parser_id": "parse.smithy",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20665,6 +21388,7 @@
         "mode_id": "mode.solidity",
         "public_mode": "solidity",
         "parser_id": "parse.solidity",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20692,6 +21416,7 @@
         "mode_id": "mode.soql",
         "public_mode": "soql",
         "parser_id": "parse.soql",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20719,6 +21444,7 @@
         "mode_id": "mode.sosl",
         "public_mode": "sosl",
         "parser_id": "parse.sosl",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20746,6 +21472,7 @@
         "mode_id": "mode.sparql",
         "public_mode": "sparql",
         "parser_id": "parse.sparql",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20773,6 +21500,7 @@
         "mode_id": "mode.sql",
         "public_mode": "sql",
         "parser_id": "parse.sql",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20800,6 +21528,7 @@
         "mode_id": "mode.squirrel",
         "public_mode": "squirrel",
         "parser_id": "parse.squirrel",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20827,6 +21556,7 @@
         "mode_id": "mode.ssh-config",
         "public_mode": "ssh-config",
         "parser_id": "parse.ssh-config",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20854,6 +21584,7 @@
         "mode_id": "mode.starlark",
         "public_mode": "starlark",
         "parser_id": "parse.starlark",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20881,6 +21612,7 @@
         "mode_id": "mode.svelte",
         "public_mode": "svelte",
         "parser_id": "parse.svelte",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20908,6 +21640,7 @@
         "mode_id": "mode.sway",
         "public_mode": "sway",
         "parser_id": "parse.sway",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20935,6 +21668,7 @@
         "mode_id": "mode.swift",
         "public_mode": "swift",
         "parser_id": "parse.swift",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20962,6 +21696,7 @@
         "mode_id": "mode.systemverilog",
         "public_mode": "systemverilog",
         "parser_id": "parse.systemverilog",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -20989,6 +21724,7 @@
         "mode_id": "mode.tablegen",
         "public_mode": "tablegen",
         "parser_id": "parse.tablegen",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21016,6 +21752,7 @@
         "mode_id": "mode.tcl",
         "public_mode": "tcl",
         "parser_id": "parse.tcl",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21043,6 +21780,7 @@
         "mode_id": "mode.teal",
         "public_mode": "teal",
         "parser_id": "parse.teal",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21070,6 +21808,7 @@
         "mode_id": "mode.templ",
         "public_mode": "templ",
         "parser_id": "parse.templ",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21097,6 +21836,7 @@
         "mode_id": "mode.text",
         "public_mode": "text",
         "parser_id": "parse.text",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21124,6 +21864,7 @@
         "mode_id": "mode.thrift",
         "public_mode": "thrift",
         "parser_id": "parse.thrift",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21151,6 +21892,7 @@
         "mode_id": "mode.tlaplus",
         "public_mode": "tlaplus",
         "parser_id": "parse.tlaplus",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21178,6 +21920,7 @@
         "mode_id": "mode.toml",
         "public_mode": "toml",
         "parser_id": "parse.toml",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21205,6 +21948,7 @@
         "mode_id": "mode.toon",
         "public_mode": "toon",
         "parser_id": "parse.toon",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21232,6 +21976,7 @@
         "mode_id": "mode.tsx",
         "public_mode": "tsx",
         "parser_id": "parse.tsx",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21259,6 +22004,7 @@
         "mode_id": "mode.typescript",
         "public_mode": "typescript",
         "parser_id": "parse.typescript",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21286,6 +22032,7 @@
         "mode_id": "mode.typst",
         "public_mode": "typst",
         "parser_id": "parse.typst",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21313,6 +22060,7 @@
         "mode_id": "mode.verilog",
         "public_mode": "verilog",
         "parser_id": "parse.verilog",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21340,6 +22088,7 @@
         "mode_id": "mode.vhdl",
         "public_mode": "vhdl",
         "parser_id": "parse.vhdl",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21367,6 +22116,7 @@
         "mode_id": "mode.vim",
         "public_mode": "vim",
         "parser_id": "parse.vim",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21394,6 +22144,7 @@
         "mode_id": "mode.vue",
         "public_mode": "vue",
         "parser_id": "parse.vue",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21421,6 +22172,7 @@
         "mode_id": "mode.wgsl",
         "public_mode": "wgsl",
         "parser_id": "parse.wgsl",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21448,6 +22200,7 @@
         "mode_id": "mode.wit",
         "public_mode": "wit",
         "parser_id": "parse.wit",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21475,6 +22228,7 @@
         "mode_id": "mode.wolfram",
         "public_mode": "wolfram",
         "parser_id": "parse.wolfram",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21502,6 +22256,7 @@
         "mode_id": "mode.xml",
         "public_mode": "xml",
         "parser_id": "parse.xml",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21529,6 +22284,7 @@
         "mode_id": "mode.yaml",
         "public_mode": "yaml",
         "parser_id": "parse.yaml",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21556,6 +22312,7 @@
         "mode_id": "mode.zig",
         "public_mode": "zig",
         "parser_id": "parse.zig",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"
@@ -21583,6 +22340,7 @@
         "mode_id": "mode.zsh",
         "public_mode": "zsh",
         "parser_id": "parse.zsh",
+        "pre_parse_transform": null,
         "required_claims": [
           "detected",
           "parsed"

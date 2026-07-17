@@ -4,9 +4,9 @@
   "registry_id": "registry.projectatlas-language-runtime",
   "accepted_target": {
     "path": "docs/benchmarks/projectatlas-v0.4-capability-registry.json",
-    "registry_id": "projectatlas-v0.4-candidate-212x207",
-    "accepted_set_sha256": "7355cfc034910c87839afe946bdd6c2418766c1792d12a404d2a58586fec8806",
-    "raw_sha256": "d735e9210bfbb9c4e53f1e2631e180116ca8e9345daa42cff1fe279b612dd5a3"
+    "registry_id": "projectatlas-v0.4-candidate-215x209",
+    "accepted_set_sha256": "ed9d1012653830f9efabf2b678c8849e5372a1a8a8b390da4f764a53553e7512",
+    "raw_sha256": "6ba174e0abb474382969aa8b8495f3ae35f3d254eddd852c159d3f57087fdd99"
   },
   "historical_contract": {
     "path": "fixtures/languages/projectatlas-v0.3.26-runtime-contract.toon",

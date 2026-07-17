@@ -7,11 +7,13 @@ use std::io;
 const CAPABILITY_REGISTRY: &str =
     include_str!("../../../docs/benchmarks/projectatlas-v0.4-capability-registry.json");
 const EXPECTED_ACCEPTED_SET_DIGEST: &str =
-    "7355cfc034910c87839afe946bdd6c2418766c1792d12a404d2a58586fec8806";
+    "ed9d1012653830f9efabf2b678c8849e5372a1a8a8b390da4f764a53553e7512";
 const DEFAULT_CORE_PACK_ID: &str = "default-core";
 const DEFAULT_CORE_OWNER: &str = "projectatlas-symbols";
 const BROAD_LANGUAGE_PACK_ID: &str = "broad-language-pack";
 const BROAD_LANGUAGE_PACK_OWNER: &str = "broad-language-pack-worker";
+const OBJECTSCRIPT_EXPORT_XML_MODE_ID: &str = "mode.objectscript-export-xml";
+const OBJECTSCRIPT_UDL_PARSER_ID: &str = "parse.objectscript-udl";
 const REQUIRED_PLATFORMS: [&str; 4] = [
     "windows-x86_64",
     "linux-x86_64",
@@ -137,6 +139,55 @@ fn expected_parser_defaults() -> Value {
     })
 }
 
+fn expected_objectscript_export_transform() -> Value {
+    json!({
+        "transform_id": "transform.objectscript-export-xml-to-udl",
+        "version": 1,
+        "behavior": "export-container-to-udl-records",
+        "deterministic": true,
+        "target_mode_id": OBJECTSCRIPT_EXPORT_XML_MODE_ID,
+        "target_parser_id": OBJECTSCRIPT_UDL_PARSER_ID,
+        "detection_ownership": "mode-detection-rule-before-transform",
+        "detection_rule_id": "detect.objectscript-export-xml",
+        "limits": {
+            "max_input_bytes": 2_000_000,
+            "max_derived_output_bytes": 2_000_000,
+            "max_records": 1_024,
+            "max_nesting_depth": 256,
+            "max_diagnostics": 256,
+            "deadline_ms": 300_000
+        },
+        "cancellation": {
+            "enabled": true,
+            "poll_interval_ms": 25,
+            "grace_period_ms": 1_000
+        },
+        "source_mapping": {
+            "original_file_identity": true,
+            "per_record_provenance": true,
+            "every_derived_fact": true,
+            "every_diagnostic": true
+        },
+        "security": {
+            "dtd": "denied",
+            "entity_expansion": "denied",
+            "external_resources": "denied",
+            "schema_fetch": "denied",
+            "execution": "denied"
+        },
+        "failure_policy": {
+            "empty_input": "unavailable",
+            "malformed_input": "partial-or-unavailable",
+            "oversized_input": "unavailable",
+            "deeply_nested_input": "unavailable",
+            "multi_record_input": "parse-each-record-in-source-order",
+            "unrelated_parser_fallback": false,
+            "guessed_symbols_after_failure": false,
+            "coverage_after_failure": "partial-or-unavailable"
+        }
+    })
+}
+
 fn pack_language_owner(registry: &Value, pack_id: &str) -> Result<String, Box<dyn Error>> {
     let mut matching_packs = required_array(registry, "packs")?
         .iter()
@@ -218,7 +269,7 @@ fn materialize_mode(registry: &Value, compact: &Value) -> Result<Value, Box<dyn 
     validate_object_fields(
         compact,
         &["mode_id", "public_mode", "origin", "parser_id", "pack_id"],
-        &["overrides"],
+        &["pre_parse_transform", "overrides"],
         "compact mode",
     )?;
     let mode_id = required_string(compact, "mode_id")?;
@@ -233,6 +284,10 @@ fn materialize_mode(registry: &Value, compact: &Value) -> Result<Value, Box<dyn 
         "origin": origin,
         "parser_id": parser_id,
         "pack_id": pack_id,
+        "pre_parse_transform": compact
+            .get("pre_parse_transform")
+            .cloned()
+            .unwrap_or(Value::Null),
         "accepted_delivery_target": defaults["accepted_delivery_target"].clone(),
         "alias_of": defaults["alias_of"].clone(),
         "detection_rule_id": format!("detect.{public_mode}"),
@@ -318,8 +373,9 @@ fn accepted_set_digest_from_effective(registry: &Value) -> Result<String, Box<dy
         .collect::<Vec<_>>();
     modes.sort_by_key(|mode| mode["mode_id"].as_str().unwrap_or_default());
     for mode in modes {
+        let pre_parse_transform = serde_json::to_string(&mode["pre_parse_transform"])?;
         parts.push(format!(
-            "mode|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "mode|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             required_string(mode, "mode_id")?,
             required_string(mode, "public_mode")?,
             required_string(mode, "parser_id")?,
@@ -328,7 +384,8 @@ fn accepted_set_digest_from_effective(registry: &Value) -> Result<String, Box<dy
             mode["alias_of"].as_str().unwrap_or_default(),
             string_list(mode, "fixture_ids")?.join(","),
             string_list(mode, "required_platforms")?.join(","),
-            string_list(mode, "required_claims")?.join(",")
+            string_list(mode, "required_claims")?.join(","),
+            pre_parse_transform
         ));
     }
 
@@ -370,8 +427,8 @@ fn validate_crosswalk(registry: &Value, mode_ids: &BTreeSet<String>) -> Result<(
     let crosswalk_rows = required_array(&registry["accepted_language_crosswalk"], "entries")?;
     require(
         registry["accepted_language_crosswalk"]["identity"]
-            == "projectatlas-accepted-language-set-212"
-            && crosswalk_rows.len() == 160,
+            == "projectatlas-accepted-language-set-215"
+            && crosswalk_rows.len() == 163,
         "accepted language crosswalk identity or row count drifted",
     )?;
     let mut accepted_name_ids = BTreeSet::new();
@@ -422,7 +479,7 @@ fn validate_crosswalk(registry: &Value, mode_ids: &BTreeSet<String>) -> Result<(
     }
     require(
         mapping_counts.get("standard-name-alias") == Some(&11)
-            && mapping_counts.get("dialect-mode") == Some(&2)
+            && mapping_counts.get("dialect-mode") == Some(&5)
             && dialect_rows
                 == BTreeSet::from([
                     (
@@ -437,8 +494,26 @@ fn validate_crosswalk(registry: &Value, mode_ids: &BTreeSet<String>) -> Result<(
                         "tag".to_string(),
                         "mode.cfml-tag".to_string(),
                     ),
+                    (
+                        "accepted.objectscript-export-xml".to_string(),
+                        "ObjectScript".to_string(),
+                        "export-xml".to_string(),
+                        OBJECTSCRIPT_EXPORT_XML_MODE_ID.to_string(),
+                    ),
+                    (
+                        "accepted.objectscript-routine".to_string(),
+                        "ObjectScript".to_string(),
+                        "routine".to_string(),
+                        "mode.objectscript-routine".to_string(),
+                    ),
+                    (
+                        "accepted.objectscript-udl".to_string(),
+                        "ObjectScript".to_string(),
+                        "udl".to_string(),
+                        "mode.objectscript-udl".to_string(),
+                    ),
                 ]),
-        "standard aliases or distinct CFML dialect modes drifted",
+        "standard aliases or distinct CFML/ObjectScript dialect modes drifted",
     )
 }
 
@@ -450,22 +525,22 @@ fn validate_effective_registry(
     let parsers = required_array(registry, "parsers")?;
     let expected_platforms = REQUIRED_PLATFORMS.map(ToOwned::to_owned);
 
-    require(modes.len() == 212, "accepted mode union is not exactly 212")?;
+    require(modes.len() == 215, "accepted mode union is not exactly 215")?;
     require(
-        parsers.len() == 207,
-        "normalized parser target is not exactly 207",
+        parsers.len() == 209,
+        "normalized parser target is not exactly 209",
     )?;
     require(
-        registry["registry_id"] == "projectatlas-v0.4-candidate-212x207"
+        registry["registry_id"] == "projectatlas-v0.4-candidate-215x209"
             && registry["status"] == "candidate-pending-evidence"
-            && registry["counts"]["modes"] == 212
-            && registry["counts"]["normalized_parser_capabilities"] == 207
-            && registry["counts"]["accepted_language_crosswalk_entries"] == 160
+            && registry["counts"]["modes"] == 215
+            && registry["counts"]["normalized_parser_capabilities"] == 209
+            && registry["counts"]["accepted_language_crosswalk_entries"] == 163
             && registry["counts"]["current_public_modes"] == 63
-            && registry["accepted_set_policy"]["minimum_runnable_modes"] == 212
-            && registry["accepted_set_policy"]["target_runnable_modes"] == 212
-            && registry["accepted_set_policy"]["minimum_normalized_parser_capabilities"] == 207
-            && registry["accepted_set_policy"]["target_normalized_parser_capabilities"] == 207
+            && registry["accepted_set_policy"]["minimum_runnable_modes"] == 215
+            && registry["accepted_set_policy"]["target_runnable_modes"] == 215
+            && registry["accepted_set_policy"]["minimum_normalized_parser_capabilities"] == 209
+            && registry["accepted_set_policy"]["target_normalized_parser_capabilities"] == 209
             && registry["accepted_set_policy"]["minimum_current_public_modes"] == 63
             && registry["accepted_set_policy"]["aliases_count_toward_modes"] == false
             && registry["accepted_set_policy"]["shared_fallback_counts_as_parser"] == false
@@ -481,6 +556,8 @@ fn validate_effective_registry(
     let mut public_modes = BTreeSet::new();
     let mut modes_by_parser = BTreeMap::<String, BTreeSet<String>>::new();
     let mut mode_contracts = BTreeMap::<String, (String, String)>::new();
+    let mut objectscript_modes = BTreeSet::new();
+    let mut pre_parse_transform_count = 0;
     for mode in modes {
         let mode_id = required_string(mode, "mode_id")?;
         let public_mode = required_string(mode, "public_mode")?;
@@ -492,11 +569,14 @@ fn validate_effective_registry(
             BROAD_LANGUAGE_PACK_ID => BROAD_LANGUAGE_PACK_OWNER,
             _ => return Err(io::Error::other("mode has an unknown pack owner").into()),
         };
-        require(mode_ids.insert(mode_id), "duplicate mode ID")?;
+        require(mode_ids.insert(mode_id.clone()), "duplicate mode ID")?;
         require(
             public_modes.insert(public_mode.clone()),
             "duplicate public mode",
         )?;
+        if public_mode.starts_with("objectscript-") {
+            objectscript_modes.insert((mode_id.clone(), public_mode.clone(), parser_id.clone()));
+        }
         require(
             mode["accepted_delivery_target"] == true && mode["alias_of"].is_null(),
             "accepted modes cannot be hidden behind aliases",
@@ -521,10 +601,29 @@ fn validate_effective_registry(
                 ],
             "mode fixture IDs are missing or unstable",
         )?;
+        let expected_claims = if public_mode.starts_with("objectscript-") {
+            ["detected", "parsed", "symbols"]
+                .map(ToOwned::to_owned)
+                .to_vec()
+        } else {
+            ["detected", "parsed"].map(ToOwned::to_owned).to_vec()
+        };
         require(
-            string_list(mode, "required_claims")? == ["detected".to_string(), "parsed".to_string()],
+            string_list(mode, "required_claims")? == expected_claims,
             "accepted mode tier drifted",
         )?;
+        if mode_id == OBJECTSCRIPT_EXPORT_XML_MODE_ID {
+            pre_parse_transform_count += 1;
+            require(
+                mode["pre_parse_transform"] == expected_objectscript_export_transform(),
+                "ObjectScript export-XML transform contract drifted",
+            )?;
+        } else {
+            require(
+                mode["pre_parse_transform"].is_null(),
+                "a non-export mode owns a pre-parse transform",
+            )?;
+        }
         require(
             string_list(mode, "achieved_claims")?.is_empty()
                 && mode["evidence_state"] == "pending"
@@ -544,6 +643,28 @@ fn validate_effective_registry(
             mode_contracts.insert(parser_id, (pack_id, owner));
         }
     }
+    require(
+        pre_parse_transform_count == 1
+            && objectscript_modes
+                == BTreeSet::from([
+                    (
+                        OBJECTSCRIPT_EXPORT_XML_MODE_ID.to_string(),
+                        "objectscript-export-xml".to_string(),
+                        OBJECTSCRIPT_UDL_PARSER_ID.to_string(),
+                    ),
+                    (
+                        "mode.objectscript-routine".to_string(),
+                        "objectscript-routine".to_string(),
+                        "parse.objectscript-routine".to_string(),
+                    ),
+                    (
+                        "mode.objectscript-udl".to_string(),
+                        "objectscript-udl".to_string(),
+                        OBJECTSCRIPT_UDL_PARSER_ID.to_string(),
+                    ),
+                ]),
+        "ObjectScript runnable modes, parser reuse, or transform ownership drifted",
+    )?;
 
     let frozen_current_modes = projectatlas_core::language::LANGUAGE_SPECS
         .iter()
@@ -556,6 +677,7 @@ fn validate_effective_registry(
     validate_crosswalk(registry, &mode_ids)?;
 
     let mut parser_ids = BTreeSet::new();
+    let mut objectscript_parsers = BTreeMap::new();
     for parser in parsers {
         let parser_id = required_string(parser, "parser_id")?;
         require(parser_ids.insert(parser_id.clone()), "duplicate parser ID")?;
@@ -598,6 +720,9 @@ fn validate_effective_registry(
         let normalized_modes = string_list(parser, "normalized_modes")?
             .into_iter()
             .collect::<BTreeSet<_>>();
+        if parser_id.starts_with("parse.objectscript-") {
+            objectscript_parsers.insert(parser_id.clone(), normalized_modes.clone());
+        }
         require(
             modes_by_parser.get(&parser_id) == Some(&normalized_modes),
             "parser reuse does not reconcile with its mode set",
@@ -613,6 +738,23 @@ fn validate_effective_registry(
     require(
         modes_by_parser.keys().all(|id| parser_ids.contains(id)),
         "mode references a missing parser capability",
+    )?;
+    require(
+        objectscript_parsers
+            == BTreeMap::from([
+                (
+                    "parse.objectscript-routine".to_string(),
+                    BTreeSet::from(["objectscript-routine".to_string()]),
+                ),
+                (
+                    OBJECTSCRIPT_UDL_PARSER_ID.to_string(),
+                    BTreeSet::from([
+                        "objectscript-export-xml".to_string(),
+                        "objectscript-udl".to_string(),
+                    ]),
+                ),
+            ]),
+        "ObjectScript must own exactly two parser grammars",
     )?;
     let multi_mode_parsers = modes_by_parser
         .iter()
@@ -633,6 +775,13 @@ fn validate_effective_registry(
                 (
                     "parse.rust".to_string(),
                     BTreeSet::from(["rust".to_string(), "rust-build-script".to_string()]),
+                ),
+                (
+                    OBJECTSCRIPT_UDL_PARSER_ID.to_string(),
+                    BTreeSet::from([
+                        "objectscript-export-xml".to_string(),
+                        "objectscript-udl".to_string(),
+                    ]),
                 ),
                 (
                     "parse.yaml".to_string(),
@@ -687,6 +836,12 @@ fn parser_mut<'a>(
         .iter_mut()
         .find(|parser| parser["parser_id"] == parser_id)
         .ok_or_else(|| io::Error::other(format!("missing test parser {parser_id}")).into())
+}
+
+fn transform_mut(registry: &mut Value) -> Result<&mut Value, Box<dyn Error>> {
+    mode_mut(registry, OBJECTSCRIPT_EXPORT_XML_MODE_ID)?
+        .get_mut("pre_parse_transform")
+        .ok_or_else(|| io::Error::other("missing ObjectScript export transform").into())
 }
 
 fn crosswalk_mut<'a>(
@@ -837,6 +992,112 @@ fn accepted_language_union_rejects_contract_mutations() -> Result<(), Box<dyn Er
     parser_mut(&mut fake_reuse, "parse.yaml")?["normalized_modes"] =
         json!(["h", "kustomize", "yaml"]);
     require_rejected(&fake_reuse, "count-preserving fake parser reuse")?;
+
+    let mut missing_transform = valid.clone();
+    mode_mut(&mut missing_transform, OBJECTSCRIPT_EXPORT_XML_MODE_ID)?
+        .as_object_mut()
+        .ok_or_else(|| io::Error::other("ObjectScript export mode is not an object"))?
+        .remove("pre_parse_transform");
+    require_rejected(&missing_transform, "missing required pre-parse transform")?;
+
+    let mut extra_transform = valid.clone();
+    let transform = transform_mut(&mut extra_transform)?.clone();
+    mode_mut(&mut extra_transform, "mode.objectscript-routine")?["pre_parse_transform"] = transform;
+    require_rejected(&extra_transform, "pre-parse transform on another mode")?;
+
+    let mut changed_transform_id = valid.clone();
+    transform_mut(&mut changed_transform_id)?["transform_id"] =
+        json!("transform.objectscript-export-xml-to-udl-v2");
+    require_rejected(&changed_transform_id, "changed transform identity")?;
+
+    let mut changed_transform_version = valid.clone();
+    transform_mut(&mut changed_transform_version)?["version"] = json!(2);
+    require_rejected(&changed_transform_version, "changed transform version")?;
+
+    let mut wrong_transform_mode = valid.clone();
+    transform_mut(&mut wrong_transform_mode)?["target_mode_id"] = json!("mode.objectscript-udl");
+    require_rejected(&wrong_transform_mode, "wrong transform target mode")?;
+
+    let mut wrong_transform_parser = valid.clone();
+    transform_mut(&mut wrong_transform_parser)?["target_parser_id"] =
+        json!("parse.objectscript-routine");
+    require_rejected(&wrong_transform_parser, "wrong transform target parser")?;
+
+    let mut nondeterministic_transform = valid.clone();
+    transform_mut(&mut nondeterministic_transform)?["deterministic"] = json!(false);
+    require_rejected(&nondeterministic_transform, "nondeterministic transform")?;
+
+    let mut zero_transform_limit = valid.clone();
+    transform_mut(&mut zero_transform_limit)?["limits"]["max_records"] = json!(0);
+    require_rejected(&zero_transform_limit, "zero transform limit")?;
+
+    let mut excessive_transform_limit = valid.clone();
+    transform_mut(&mut excessive_transform_limit)?["limits"]["max_input_bytes"] = json!(2_000_001);
+    require_rejected(&excessive_transform_limit, "excessive transform limit")?;
+
+    let mut cancellation_disabled = valid.clone();
+    transform_mut(&mut cancellation_disabled)?["cancellation"]["enabled"] = json!(false);
+    require_rejected(&cancellation_disabled, "disabled transform cancellation")?;
+
+    for field in [
+        "original_file_identity",
+        "per_record_provenance",
+        "every_derived_fact",
+        "every_diagnostic",
+    ] {
+        let mut missing_source_mapping = valid.clone();
+        transform_mut(&mut missing_source_mapping)?["source_mapping"][field] = json!(false);
+        require_rejected(
+            &missing_source_mapping,
+            &format!("missing transform source mapping {field}"),
+        )?;
+    }
+
+    for field in [
+        "dtd",
+        "entity_expansion",
+        "external_resources",
+        "schema_fetch",
+        "execution",
+    ] {
+        let mut relaxed_security = valid.clone();
+        transform_mut(&mut relaxed_security)?["security"][field] = json!("allowed");
+        require_rejected(
+            &relaxed_security,
+            &format!("relaxed transform security policy {field}"),
+        )?;
+    }
+
+    let mut unrelated_fallback = valid.clone();
+    transform_mut(&mut unrelated_fallback)?["failure_policy"]["unrelated_parser_fallback"] =
+        json!(true);
+    require_rejected(&unrelated_fallback, "unrelated parser fallback")?;
+
+    let mut guessed_symbols = valid.clone();
+    transform_mut(&mut guessed_symbols)?["failure_policy"]["guessed_symbols_after_failure"] =
+        json!(true);
+    require_rejected(&guessed_symbols, "guessed symbols after transform failure")?;
+
+    let mut invalid_multi_record = valid.clone();
+    transform_mut(&mut invalid_multi_record)?["failure_policy"]["multi_record_input"] =
+        json!("parse-first-record-only");
+    require_rejected(
+        &invalid_multi_record,
+        "invalid multi-record transform behavior",
+    )?;
+
+    let mut recomputed_transform_drift = valid.clone();
+    transform_mut(&mut recomputed_transform_drift)?["version"] = json!(2);
+    let recomputed_transform_digest = accepted_set_digest(&recomputed_transform_drift)?;
+    require(
+        recomputed_transform_digest != EXPECTED_ACCEPTED_SET_DIGEST,
+        "transform drift did not change the accepted semantic digest",
+    )?;
+    recomputed_transform_drift["accepted_set_digest"] = json!(recomputed_transform_digest);
+    require_rejected(
+        &recomputed_transform_drift,
+        "transform drift with recomputed stored digest",
+    )?;
 
     let mut unsupported_claim = valid.clone();
     let bash = mode_mut(&mut unsupported_claim, "mode.bash")?;

@@ -4912,9 +4912,9 @@ fn validate_capability_inventory(registry: &Value) -> Result<(), Box<dyn Error>>
     )
 }
 
-/// ARRI-2.2: freeze the neutral 212-mode/207-parser delivery target.
+/// ARRI-2.2: freeze the ratified language union and bounded transform reuse.
 #[test]
-fn language_target_has_212_modes_and_207_parsers() -> Result<(), Box<dyn Error>> {
+fn language_target_matches_ratified_union() -> Result<(), Box<dyn Error>> {
     let registry = capability_registry()?;
     let modes = registry["modes"]
         .as_array()
@@ -4922,10 +4922,10 @@ fn language_target_has_212_modes_and_207_parsers() -> Result<(), Box<dyn Error>>
     let parsers = registry["parsers"]
         .as_array()
         .ok_or_else(|| io::Error::other("parsers is not an array"))?;
-    require(modes.len() == 212, "candidate mode target is not 212")?;
-    require(parsers.len() == 207, "normalized parser target is not 207")?;
+    require(modes.len() == 215, "candidate mode target is not 215")?;
+    require(parsers.len() == 209, "normalized parser target is not 209")?;
     require(
-        registry["counts"]["accepted_language_crosswalk_entries"] == 160
+        registry["counts"]["accepted_language_crosswalk_entries"] == 163
             && registry["counts"]["current_public_modes"] == 63,
         "accepted-language crosswalk or retained public-mode count drifted",
     )?;
@@ -4955,6 +4955,130 @@ fn language_target_has_212_modes_and_207_parsers() -> Result<(), Box<dyn Error>>
         parser_ids.len() == parsers.len(),
         "mode rows inflate normalized parser count",
     )?;
+    let objectscript_modes = modes
+        .iter()
+        .filter(|mode| {
+            mode["public_mode"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("objectscript-"))
+        })
+        .map(|mode| {
+            Ok((
+                mode["mode_id"]
+                    .as_str()
+                    .ok_or_else(|| io::Error::other("ObjectScript mode lacks mode_id"))?
+                    .to_string(),
+                mode["parser_id"]
+                    .as_str()
+                    .ok_or_else(|| io::Error::other("ObjectScript mode lacks parser_id"))?
+                    .to_string(),
+            ))
+        })
+        .collect::<Result<BTreeSet<_>, io::Error>>()?;
+    require(
+        objectscript_modes
+            == BTreeSet::from([
+                (
+                    "mode.objectscript-export-xml".to_string(),
+                    "parse.objectscript-udl".to_string(),
+                ),
+                (
+                    "mode.objectscript-routine".to_string(),
+                    "parse.objectscript-routine".to_string(),
+                ),
+                (
+                    "mode.objectscript-udl".to_string(),
+                    "parse.objectscript-udl".to_string(),
+                ),
+            ]),
+        "ObjectScript runnable-mode or parser ownership drifted",
+    )?;
+    let objectscript_parsers = parsers
+        .iter()
+        .filter(|parser| {
+            parser["parser_id"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("parse.objectscript-"))
+        })
+        .map(|parser| {
+            parser["parser_id"]
+                .as_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| io::Error::other("ObjectScript parser lacks parser_id"))
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    require(
+        objectscript_parsers
+            == BTreeSet::from([
+                "parse.objectscript-routine".to_string(),
+                "parse.objectscript-udl".to_string(),
+            ]),
+        "ObjectScript must own exactly two parser grammars",
+    )?;
+    let export_transform = modes
+        .iter()
+        .find(|mode| mode["mode_id"] == "mode.objectscript-export-xml")
+        .ok_or_else(|| io::Error::other("missing ObjectScript export-XML mode"))?
+        .get("pre_parse_transform")
+        .ok_or_else(|| io::Error::other("missing ObjectScript export-XML transform"))?;
+    require(
+        export_transform
+            == &json!({
+                "transform_id": "transform.objectscript-export-xml-to-udl",
+                "version": 1,
+                "behavior": "export-container-to-udl-records",
+                "deterministic": true,
+                "target_mode_id": "mode.objectscript-export-xml",
+                "target_parser_id": "parse.objectscript-udl",
+                "detection_ownership": "mode-detection-rule-before-transform",
+                "detection_rule_id": "detect.objectscript-export-xml",
+                "limits": {
+                    "max_input_bytes": 2_000_000,
+                    "max_derived_output_bytes": 2_000_000,
+                    "max_records": 1_024,
+                    "max_nesting_depth": 256,
+                    "max_diagnostics": 256,
+                    "deadline_ms": 300_000
+                },
+                "cancellation": {
+                    "enabled": true,
+                    "poll_interval_ms": 25,
+                    "grace_period_ms": 1_000
+                },
+                "source_mapping": {
+                    "original_file_identity": true,
+                    "per_record_provenance": true,
+                    "every_derived_fact": true,
+                    "every_diagnostic": true
+                },
+                "security": {
+                    "dtd": "denied",
+                    "entity_expansion": "denied",
+                    "external_resources": "denied",
+                    "schema_fetch": "denied",
+                    "execution": "denied"
+                },
+                "failure_policy": {
+                    "empty_input": "unavailable",
+                    "malformed_input": "partial-or-unavailable",
+                    "oversized_input": "unavailable",
+                    "deeply_nested_input": "unavailable",
+                    "multi_record_input": "parse-each-record-in-source-order",
+                    "unrelated_parser_fallback": false,
+                    "guessed_symbols_after_failure": false,
+                    "coverage_after_failure": "partial-or-unavailable"
+                }
+            }),
+        "ObjectScript export-XML transform contract drifted",
+    )?;
+    require(
+        modes
+            .iter()
+            .filter(|mode| mode.get("pre_parse_transform").is_some())
+            .count()
+            == 1,
+        "accepted union must contain exactly one pre-parse transform",
+    )?;
     let frozen_modes = projectatlas_core::language::LANGUAGE_SPECS
         .iter()
         .map(|spec| spec.language.to_string())
@@ -4977,8 +5101,8 @@ fn language_target_has_212_modes_and_207_parsers() -> Result<(), Box<dyn Error>>
         registry["status"] == "candidate-pending-evidence"
             && registry["achieved_manifest"].is_null()
             && registry["accepted_set_policy"]["advertisement_requires_achieved_manifest"] == true
-            && registry["accepted_set_policy"]["target_runnable_modes"] == 212
-            && registry["accepted_set_policy"]["target_normalized_parser_capabilities"] == 207,
+            && registry["accepted_set_policy"]["target_runnable_modes"] == 215
+            && registry["accepted_set_policy"]["target_normalized_parser_capabilities"] == 209,
         "candidate counts were converted into unsupported achieved claims",
     )
 }

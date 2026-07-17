@@ -136,25 +136,6 @@
     },
     {
       "change": "advance-rust-repository-intelligence",
-      "task_id": "2.2",
-      "test_id": "UT:ARRI-2.2",
-      "outcome": "passed",
-      "tested_commit": "697d7c8d60aabc3c3f03e6aecefe84d1583efb4b",
-      "covered_input_digest": "sha256:3aecd57f97d64c105a9821aa32733f42fd8ce6a450236c4e87fcfe78c12fa32c",
-      "platform": {
-        "os": "windows",
-        "arch": "x64"
-      },
-      "started_at": "2026-07-15T03:00:57.936Z",
-      "completed_at": "2026-07-15T03:00:59.054Z",
-      "retained_result": {
-        "kind": "repository",
-        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-697d7c8.json",
-        "result_digest": "sha256:bc71e1c844cb7ea941c5675af86886a71b5e777eff9858bac62c2b8102b5a2a8"
-      }
-    },
-    {
-      "change": "advance-rust-repository-intelligence",
       "task_id": "2.3",
       "test_id": "UT:ARRI-2.3",
       "outcome": "passed",

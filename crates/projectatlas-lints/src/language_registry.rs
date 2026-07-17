@@ -102,6 +102,30 @@ const DEFAULT_CORE_PACK_ID: &str = "default-core";
 const BROAD_LANGUAGE_PACK_ID: &str = "broad-language-pack";
 /// Stable identity of the optional semantic feature pack.
 const SEMANTIC_PACK_ID: &str = "semantic-pack";
+/// Accepted mode that owns the `ObjectScript` export-container transform.
+const OBJECTSCRIPT_EXPORT_XML_MODE_ID: &str = "mode.objectscript-export-xml";
+/// Accepted parser reused after the `ObjectScript` export container is transformed.
+const OBJECTSCRIPT_UDL_PARSER_ID: &str = "parse.objectscript-udl";
+/// Stable identity of the `ObjectScript` export-container transform.
+const OBJECTSCRIPT_EXPORT_XML_TRANSFORM_ID: &str = "transform.objectscript-export-xml-to-udl";
+/// Version of the accepted `ObjectScript` export-container transform contract.
+const OBJECTSCRIPT_EXPORT_XML_TRANSFORM_VERSION: u32 = 1;
+/// Maximum original export-container bytes admitted by the transform.
+const OBJECTSCRIPT_EXPORT_XML_MAX_INPUT_BYTES: u64 = 2_000_000;
+/// Maximum total UDL bytes derived from one export container.
+const OBJECTSCRIPT_EXPORT_XML_MAX_DERIVED_OUTPUT_BYTES: u64 = 2_000_000;
+/// Maximum UDL records derived from one export container.
+const OBJECTSCRIPT_EXPORT_XML_MAX_RECORDS: u32 = 1_024;
+/// Maximum XML nesting depth admitted by the transform.
+const OBJECTSCRIPT_EXPORT_XML_MAX_NESTING_DEPTH: u32 = 256;
+/// Maximum diagnostics retained from one transform attempt.
+const OBJECTSCRIPT_EXPORT_XML_MAX_DIAGNOSTICS: u32 = 256;
+/// Maximum transform wall-clock duration in milliseconds.
+const OBJECTSCRIPT_EXPORT_XML_DEADLINE_MS: u64 = 300_000;
+/// Cancellation polling interval in milliseconds.
+const OBJECTSCRIPT_EXPORT_XML_CANCELLATION_POLL_MS: u64 = 25;
+/// Cancellation grace period in milliseconds.
+const OBJECTSCRIPT_EXPORT_XML_CANCELLATION_GRACE_MS: u64 = 1_000;
 /// Exact compact-mode fields that the accepted target may override.
 const ACCEPTED_MODE_OVERRIDE_FIELDS: &[&str] = &[
     "accepted_delivery_target",
@@ -5796,6 +5820,11 @@ validated_id!(
     "Accepted-target parser-capability identity."
 );
 validated_id!(
+    TransformId,
+    "transform.",
+    "Accepted pre-parse transform identity."
+);
+validated_id!(
     AcceptedNameId,
     "accepted.",
     "Accepted language crosswalk identity."
@@ -5986,6 +6015,212 @@ struct AcceptedDetectionPolicy {
     aliases_acyclic: bool,
 }
 
+/// Deterministic operation owned by one accepted pre-parse transform.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum AcceptedTransformBehavior {
+    /// Extract `ObjectScript` UDL records from one export XML container in source order.
+    ExportContainerToUdlRecords,
+}
+
+impl AcceptedTransformBehavior {
+    /// Return the stable serialized contract value.
+    const fn contract_tag(self) -> &'static str {
+        match self {
+            Self::ExportContainerToUdlRecords => "export-container-to-udl-records",
+        }
+    }
+}
+
+/// Detection ownership retained before a pre-parse transform runs.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum AcceptedTransformDetectionOwnership {
+    /// The mode's named detection rule selects the mode before transformation.
+    ModeDetectionRuleBeforeTransform,
+}
+
+impl AcceptedTransformDetectionOwnership {
+    /// Return the stable serialized contract value.
+    const fn contract_tag(self) -> &'static str {
+        match self {
+            Self::ModeDetectionRuleBeforeTransform => "mode-detection-rule-before-transform",
+        }
+    }
+}
+
+/// Closed denial policy for transform-side capabilities.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum AcceptedTransformCapabilityPolicy {
+    /// The capability is denied before any transform parsing or execution.
+    Denied,
+}
+
+impl AcceptedTransformCapabilityPolicy {
+    /// Return the stable serialized contract value.
+    const fn contract_tag(self) -> &'static str {
+        match self {
+            Self::Denied => "denied",
+        }
+    }
+}
+
+/// Coverage state required after a rejected or incomplete transform.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum AcceptedTransformFailureCoverage {
+    /// The mode is unavailable for this input.
+    Unavailable,
+    /// The mode is explicitly partial or unavailable, never silently complete.
+    PartialOrUnavailable,
+}
+
+impl AcceptedTransformFailureCoverage {
+    /// Return the stable serialized contract value.
+    const fn contract_tag(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::PartialOrUnavailable => "partial-or-unavailable",
+        }
+    }
+}
+
+/// Deterministic behavior for an export containing several UDL records.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum AcceptedTransformMultiRecordBehavior {
+    /// Parse every bounded record independently in original source order.
+    ParseEachRecordInSourceOrder,
+}
+
+impl AcceptedTransformMultiRecordBehavior {
+    /// Return the stable serialized contract value.
+    const fn contract_tag(self) -> &'static str {
+        match self {
+            Self::ParseEachRecordInSourceOrder => "parse-each-record-in-source-order",
+        }
+    }
+}
+
+/// Hard resource limits for one accepted pre-parse transform.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AcceptedTransformLimits {
+    /// Maximum bytes accepted from the original file.
+    max_input_bytes: u64,
+    /// Maximum combined bytes emitted for downstream parsing.
+    max_derived_output_bytes: u64,
+    /// Maximum records emitted from one container.
+    max_records: u32,
+    /// Maximum admitted container nesting depth.
+    max_nesting_depth: u32,
+    /// Maximum diagnostics retained from one attempt.
+    max_diagnostics: u32,
+    /// Hard deadline for the complete transform attempt.
+    deadline_ms: u64,
+}
+
+/// Required cancellation behavior for one accepted pre-parse transform.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AcceptedTransformCancellation {
+    /// Whether the transform must honor cancellation.
+    enabled: bool,
+    /// Maximum interval between cancellation checks.
+    poll_interval_ms: u64,
+    /// Maximum grace period after cancellation is observed.
+    grace_period_ms: u64,
+}
+
+/// Required source mapping retained through one accepted transform.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the serialized contract exposes four independent fail-closed mapping requirements"
+)]
+struct AcceptedTransformSourceMapping {
+    /// Preserve the original file identity for every derived record.
+    original_file_identity: bool,
+    /// Preserve the source range and identity of every derived record.
+    per_record_provenance: bool,
+    /// Map every derived fact back to the original file.
+    every_derived_fact: bool,
+    /// Map every diagnostic back to the original file.
+    every_diagnostic: bool,
+}
+
+/// Fail-closed security policy for one XML-backed transform.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AcceptedTransformSecurityPolicy {
+    /// DTD processing policy.
+    dtd: AcceptedTransformCapabilityPolicy,
+    /// Entity-expansion policy.
+    entity_expansion: AcceptedTransformCapabilityPolicy,
+    /// External-resource access policy.
+    external_resources: AcceptedTransformCapabilityPolicy,
+    /// Schema-fetch policy.
+    schema_fetch: AcceptedTransformCapabilityPolicy,
+    /// Embedded execution policy.
+    execution: AcceptedTransformCapabilityPolicy,
+}
+
+/// Explicit failure behavior for every adversarial transform input class.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AcceptedTransformFailurePolicy {
+    /// Coverage state for an empty container.
+    empty_input: AcceptedTransformFailureCoverage,
+    /// Coverage state for malformed XML or malformed records.
+    malformed_input: AcceptedTransformFailureCoverage,
+    /// Coverage state for an oversized container or derived output.
+    oversized_input: AcceptedTransformFailureCoverage,
+    /// Coverage state for excessive nesting.
+    deeply_nested_input: AcceptedTransformFailureCoverage,
+    /// Behavior for a valid multi-record export.
+    multi_record_input: AcceptedTransformMultiRecordBehavior,
+    /// Whether transform failure may fall through to an unrelated parser.
+    unrelated_parser_fallback: bool,
+    /// Whether symbols may be guessed after transform failure.
+    guessed_symbols_after_failure: bool,
+    /// Maximum support claim after any transform failure.
+    coverage_after_failure: AcceptedTransformFailureCoverage,
+}
+
+/// Complete accepted contract for a deterministic pre-parse transform.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AcceptedPreParseTransform {
+    /// Stable transform identity.
+    transform_id: TransformId,
+    /// Stable transform contract version.
+    version: u32,
+    /// Closed deterministic transform behavior.
+    behavior: AcceptedTransformBehavior,
+    /// Whether equal inputs always produce equal ordered outputs and diagnostics.
+    deterministic: bool,
+    /// Accepted mode that owns detection and the transformed parse result.
+    target_mode_id: ModeId,
+    /// Accepted parser that consumes each derived record.
+    target_parser_id: AcceptedParserId,
+    /// Explicit ownership boundary between detection and transformation.
+    detection_ownership: AcceptedTransformDetectionOwnership,
+    /// Named detection rule that selects the target mode before transformation.
+    detection_rule_id: DetectionRuleId,
+    /// Hard transform resource limits.
+    limits: AcceptedTransformLimits,
+    /// Required cancellation behavior.
+    cancellation: AcceptedTransformCancellation,
+    /// Required original-file and per-record source mapping.
+    source_mapping: AcceptedTransformSourceMapping,
+    /// Fail-closed XML and execution policy.
+    security: AcceptedTransformSecurityPolicy,
+    /// Explicit behavior for every failure class.
+    failure_policy: AcceptedTransformFailurePolicy,
+}
+
 /// Default fields materialized for every compact accepted mode.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -6070,6 +6305,8 @@ struct AcceptedCompactMode {
     parser_id: AcceptedParserId,
     /// Future delivery pack.
     pack_id: PackId,
+    /// Optional deterministic transform that runs before the selected parser.
+    pre_parse_transform: Option<AcceptedPreParseTransform>,
     /// Optional reviewed overrides.
     overrides: Option<AcceptedModeOverrides>,
 }
@@ -6597,6 +6834,8 @@ struct AcceptedModeContract {
     parser_id: AcceptedParserId,
     /// Future delivery pack.
     pack_id: PackId,
+    /// Optional deterministic transform that runs before the selected parser.
+    pre_parse_transform: Option<AcceptedPreParseTransform>,
     /// Derived owner.
     owner: String,
     /// Whether the row belongs to the accepted delivery target.
@@ -7065,7 +7304,7 @@ fn validate_and_generate(
     validate_registry_lock(&lock, &accepted)?;
     validate_historical_contract(&lock, &historical)?;
 
-    let accepted_digest = accepted_set_digest(&accepted);
+    let accepted_digest = accepted_set_digest(&accepted)?;
     require_equal(
         accepted_digest.as_str(),
         accepted.source.accepted_set_digest.as_str(),
@@ -7182,6 +7421,7 @@ fn materialize_accepted_target(
                 public_mode: mode.public_mode.clone(),
                 parser_id: mode.parser_id.clone(),
                 pack_id: mode.pack_id.clone(),
+                pre_parse_transform: mode.pre_parse_transform.clone(),
                 owner,
                 accepted_delivery_target: overrides
                     .and_then(|values| values.accepted_delivery_target)
@@ -7352,8 +7592,116 @@ fn validate_accepted_defaults(
     Ok(())
 }
 
-/// Recompute the accepted target's pre-existing delimiter-based semantic digest.
-fn accepted_set_digest(accepted: &AcceptedTargetContract) -> Sha256Digest {
+/// Validate the only accepted pre-parse transform and reject every other owner.
+fn validate_accepted_pre_parse_transform(
+    mode: &AcceptedModeContract,
+) -> Result<(), LanguageRegistryError> {
+    if mode.mode_id.as_str() != OBJECTSCRIPT_EXPORT_XML_MODE_ID {
+        if mode.pre_parse_transform.is_some() {
+            return Err(LanguageRegistryError::Validation(format!(
+                "accepted mode {} cannot own a pre-parse transform",
+                mode.mode_id.as_str()
+            )));
+        }
+        return Ok(());
+    }
+
+    let transform = mode.pre_parse_transform.as_ref().ok_or_else(|| {
+        LanguageRegistryError::Validation(format!(
+            "accepted mode {} is missing its required pre-parse transform",
+            mode.mode_id.as_str()
+        ))
+    })?;
+    if transform.transform_id.as_str() != OBJECTSCRIPT_EXPORT_XML_TRANSFORM_ID
+        || transform.version != OBJECTSCRIPT_EXPORT_XML_TRANSFORM_VERSION
+        || transform.behavior != AcceptedTransformBehavior::ExportContainerToUdlRecords
+        || !transform.deterministic
+        || transform.target_mode_id != mode.mode_id
+        || transform.target_parser_id != mode.parser_id
+        || transform.target_parser_id.as_str() != OBJECTSCRIPT_UDL_PARSER_ID
+        || transform.detection_ownership
+            != AcceptedTransformDetectionOwnership::ModeDetectionRuleBeforeTransform
+        || transform.detection_rule_id != mode.detection_rule_id
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "accepted mode {} pre-parse transform identity, target, detection ownership, or deterministic behavior drifted",
+            mode.mode_id.as_str()
+        )));
+    }
+
+    let limits = &transform.limits;
+    if limits.max_input_bytes != OBJECTSCRIPT_EXPORT_XML_MAX_INPUT_BYTES
+        || limits.max_derived_output_bytes != OBJECTSCRIPT_EXPORT_XML_MAX_DERIVED_OUTPUT_BYTES
+        || limits.max_records != OBJECTSCRIPT_EXPORT_XML_MAX_RECORDS
+        || limits.max_nesting_depth != OBJECTSCRIPT_EXPORT_XML_MAX_NESTING_DEPTH
+        || limits.max_diagnostics != OBJECTSCRIPT_EXPORT_XML_MAX_DIAGNOSTICS
+        || limits.deadline_ms != OBJECTSCRIPT_EXPORT_XML_DEADLINE_MS
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "accepted mode {} pre-parse transform limits drifted",
+            mode.mode_id.as_str()
+        )));
+    }
+
+    let cancellation = &transform.cancellation;
+    if !cancellation.enabled
+        || cancellation.poll_interval_ms != OBJECTSCRIPT_EXPORT_XML_CANCELLATION_POLL_MS
+        || cancellation.grace_period_ms != OBJECTSCRIPT_EXPORT_XML_CANCELLATION_GRACE_MS
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "accepted mode {} pre-parse transform cancellation contract drifted",
+            mode.mode_id.as_str()
+        )));
+    }
+
+    let mapping = &transform.source_mapping;
+    if !mapping.original_file_identity
+        || !mapping.per_record_provenance
+        || !mapping.every_derived_fact
+        || !mapping.every_diagnostic
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "accepted mode {} pre-parse transform source mapping is incomplete",
+            mode.mode_id.as_str()
+        )));
+    }
+
+    let security = &transform.security;
+    if security.dtd != AcceptedTransformCapabilityPolicy::Denied
+        || security.entity_expansion != AcceptedTransformCapabilityPolicy::Denied
+        || security.external_resources != AcceptedTransformCapabilityPolicy::Denied
+        || security.schema_fetch != AcceptedTransformCapabilityPolicy::Denied
+        || security.execution != AcceptedTransformCapabilityPolicy::Denied
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "accepted mode {} pre-parse transform security policy is not fail-closed",
+            mode.mode_id.as_str()
+        )));
+    }
+
+    let failure = &transform.failure_policy;
+    if failure.empty_input != AcceptedTransformFailureCoverage::Unavailable
+        || failure.malformed_input != AcceptedTransformFailureCoverage::PartialOrUnavailable
+        || failure.oversized_input != AcceptedTransformFailureCoverage::Unavailable
+        || failure.deeply_nested_input != AcceptedTransformFailureCoverage::Unavailable
+        || failure.multi_record_input
+            != AcceptedTransformMultiRecordBehavior::ParseEachRecordInSourceOrder
+        || failure.unrelated_parser_fallback
+        || failure.guessed_symbols_after_failure
+        || failure.coverage_after_failure != AcceptedTransformFailureCoverage::PartialOrUnavailable
+    {
+        return Err(LanguageRegistryError::Validation(format!(
+            "accepted mode {} pre-parse transform failure behavior drifted",
+            mode.mode_id.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// Recompute the accepted target's delimiter-based semantic digest.
+fn accepted_set_digest(
+    accepted: &AcceptedTargetContract,
+) -> Result<Sha256Digest, LanguageRegistryError> {
     let policy = &accepted.source.accepted_set_policy;
     let platforms = accepted
         .source
@@ -7370,8 +7718,14 @@ fn accepted_set_digest(accepted: &AcceptedTargetContract) -> Sha256Digest {
     let mut modes = accepted.modes.iter().collect::<Vec<_>>();
     modes.sort_by_key(|mode| mode.mode_id.as_str());
     for mode in modes {
+        let pre_parse_transform =
+            serde_json::to_string(&mode.pre_parse_transform).map_err(|source| {
+                LanguageRegistryError::Validation(format!(
+                    "accepted pre-parse transform serialization failed: {source}"
+                ))
+            })?;
         parts.push(format!(
-            "mode|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "mode|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             mode.mode_id.as_str(),
             mode.public_mode.as_str(),
             mode.parser_id.as_str(),
@@ -7388,7 +7742,8 @@ fn accepted_set_digest(accepted: &AcceptedTargetContract) -> Sha256Digest {
                 .iter()
                 .map(|claim| claim.contract_tag())
                 .collect::<Vec<_>>()
-                .join(",")
+                .join(","),
+            pre_parse_transform
         ));
     }
 
@@ -7435,7 +7790,7 @@ fn accepted_set_digest(accepted: &AcceptedTargetContract) -> Sha256Digest {
     }
 
     let digest = sha256_hex(parts.join("\n").as_bytes());
-    Sha256Digest(digest)
+    Ok(Sha256Digest(digest))
 }
 
 /// Validate accepted capability rows and their closed relation traceability profiles.
@@ -7851,6 +8206,7 @@ fn validate_accepted_target(
                 mode.mode_id.as_str()
             )));
         }
+        validate_accepted_pre_parse_transform(mode)?;
         if !mode_ids.insert(mode.mode_id.clone()) {
             return Err(LanguageRegistryError::Validation(format!(
                 "duplicate accepted mode identifier {}",
@@ -9823,6 +10179,121 @@ fn encode_registry_inventories(digest: &mut ContractDigest, lock: &LanguageRegis
     }
 }
 
+/// Encode one optional accepted pre-parse transform into the composite contract.
+fn encode_accepted_pre_parse_transform(
+    digest: &mut ContractDigest,
+    transform: Option<&AcceptedPreParseTransform>,
+) {
+    digest.boolean("pre-parse-transform-present", transform.is_some());
+    let Some(transform) = transform else {
+        return;
+    };
+    digest.record("accepted-pre-parse-transform");
+    digest.field("transform-id", transform.transform_id.as_str());
+    digest.number("version", u64::from(transform.version));
+    digest.field("behavior", transform.behavior.contract_tag());
+    digest.boolean("deterministic", transform.deterministic);
+    digest.field("target-mode-id", transform.target_mode_id.as_str());
+    digest.field("target-parser-id", transform.target_parser_id.as_str());
+    digest.field(
+        "detection-ownership",
+        transform.detection_ownership.contract_tag(),
+    );
+    digest.field("detection-rule-id", transform.detection_rule_id.as_str());
+    digest.number("max-input-bytes", transform.limits.max_input_bytes);
+    digest.number(
+        "max-derived-output-bytes",
+        transform.limits.max_derived_output_bytes,
+    );
+    digest.number("max-records", u64::from(transform.limits.max_records));
+    digest.number(
+        "max-nesting-depth",
+        u64::from(transform.limits.max_nesting_depth),
+    );
+    digest.number(
+        "max-diagnostics",
+        u64::from(transform.limits.max_diagnostics),
+    );
+    digest.number("deadline-ms", transform.limits.deadline_ms);
+    digest.boolean("cancellation-enabled", transform.cancellation.enabled);
+    digest.number(
+        "cancellation-poll-interval-ms",
+        transform.cancellation.poll_interval_ms,
+    );
+    digest.number(
+        "cancellation-grace-period-ms",
+        transform.cancellation.grace_period_ms,
+    );
+    digest.boolean(
+        "source-map-original-file-identity",
+        transform.source_mapping.original_file_identity,
+    );
+    digest.boolean(
+        "source-map-per-record-provenance",
+        transform.source_mapping.per_record_provenance,
+    );
+    digest.boolean(
+        "source-map-every-derived-fact",
+        transform.source_mapping.every_derived_fact,
+    );
+    digest.boolean(
+        "source-map-every-diagnostic",
+        transform.source_mapping.every_diagnostic,
+    );
+    digest.field("security-dtd", transform.security.dtd.contract_tag());
+    digest.field(
+        "security-entity-expansion",
+        transform.security.entity_expansion.contract_tag(),
+    );
+    digest.field(
+        "security-external-resources",
+        transform.security.external_resources.contract_tag(),
+    );
+    digest.field(
+        "security-schema-fetch",
+        transform.security.schema_fetch.contract_tag(),
+    );
+    digest.field(
+        "security-execution",
+        transform.security.execution.contract_tag(),
+    );
+    digest.field(
+        "empty-input",
+        transform.failure_policy.empty_input.contract_tag(),
+    );
+    digest.field(
+        "malformed-input",
+        transform.failure_policy.malformed_input.contract_tag(),
+    );
+    digest.field(
+        "oversized-input",
+        transform.failure_policy.oversized_input.contract_tag(),
+    );
+    digest.field(
+        "deeply-nested-input",
+        transform.failure_policy.deeply_nested_input.contract_tag(),
+    );
+    digest.field(
+        "multi-record-input",
+        transform.failure_policy.multi_record_input.contract_tag(),
+    );
+    digest.boolean(
+        "unrelated-parser-fallback",
+        transform.failure_policy.unrelated_parser_fallback,
+    );
+    digest.boolean(
+        "guessed-symbols-after-failure",
+        transform.failure_policy.guessed_symbols_after_failure,
+    );
+    digest.field(
+        "coverage-after-failure",
+        transform
+            .failure_policy
+            .coverage_after_failure
+            .contract_tag(),
+    );
+}
+
 /// Encode the materialized accepted delivery axis independently of current routing.
 fn encode_accepted_target(digest: &mut ContractDigest, accepted: &AcceptedTargetContract) {
     let source = &accepted.source;
@@ -9869,6 +10340,7 @@ fn encode_accepted_target(digest: &mut ContractDigest, accepted: &AcceptedTarget
         digest.boolean("accepted-delivery-target", mode.accepted_delivery_target);
         digest.optional("alias-of", mode.alias_of.as_ref().map(ModeId::as_str));
         digest.field("detection-rule-id", mode.detection_rule_id.as_str());
+        encode_accepted_pre_parse_transform(digest, mode.pre_parse_transform.as_ref());
         encode_sorted_ids(
             digest,
             "fixture-ids",
@@ -11536,6 +12008,7 @@ fn render_cli_registry(
          \x20   pub(crate) accepted_advertisement: AcceptedAdvertisement,\n\
          \x20   pub(crate) current_mode_count: usize,\n\
          \x20   pub(crate) accepted_mode_count: usize,\n\
+         \x20   pub(crate) accepted_pre_parse_transform_count: usize,\n\
          \x20   pub(crate) normalized_parser_capability_count: usize,\n\
          \x20   pub(crate) parser_component_count: usize,\n\
          \x20   pub(crate) parser_asset_count: usize,\n\
@@ -11552,12 +12025,17 @@ fn render_cli_registry(
     push_format(
         &mut output,
         format_args!(
-            "pub(crate) static LANGUAGE_REGISTRY_SETTINGS: LanguageRegistrySettings = LanguageRegistrySettings {{ registry_id: {}, accepted_registry_id: {}, accepted_set_sha256: {}, accepted_advertisement: {accepted_advertisement}, current_mode_count: {}, accepted_mode_count: {}, normalized_parser_capability_count: {}, parser_component_count: {}, parser_asset_count: {}, embedded_adapter_count: {}, query_pack_count: {}, semantic_provider_count: {} }};\n\n",
+            "pub(crate) static LANGUAGE_REGISTRY_SETTINGS: LanguageRegistrySettings = LanguageRegistrySettings {{ registry_id: {}, accepted_registry_id: {}, accepted_set_sha256: {}, accepted_advertisement: {accepted_advertisement}, current_mode_count: {}, accepted_mode_count: {}, accepted_pre_parse_transform_count: {}, normalized_parser_capability_count: {}, parser_component_count: {}, parser_asset_count: {}, embedded_adapter_count: {}, query_pack_count: {}, semantic_provider_count: {} }};\n\n",
             rust_string(lock.registry_id.as_str()),
             rust_string(accepted.source.registry_id.as_str()),
             rust_string(accepted.source.accepted_set_digest.as_str()),
             lock.current_modes.len(),
             accepted.modes.len(),
+            accepted
+                .modes
+                .iter()
+                .filter(|mode| mode.pre_parse_transform.is_some())
+                .count(),
             accepted.parsers.len(),
             lock.parser_components.len(),
             lock.assets.len(),
@@ -11770,6 +12248,8 @@ struct LanguageSettingsState<'a> {
     current_modes: usize,
     /// Accepted delivery-mode count.
     accepted_modes: usize,
+    /// Accepted pre-parse-transform count.
+    accepted_pre_parse_transforms: usize,
     /// Accepted normalized parser-capability count.
     accepted_parser_capabilities: usize,
     /// Current compiled parser-component count.
@@ -11793,6 +12273,8 @@ struct ModeConformanceState<'a> {
     public_mode: &'a str,
     /// Accepted normalized parser identity.
     parser_id: &'a str,
+    /// Optional accepted transform that runs before the selected parser.
+    pre_parse_transform: Option<&'a AcceptedPreParseTransform>,
     /// Required evidence tiers.
     required_claims: Vec<&'a str>,
     /// Currently achieved evidence tiers.
@@ -11837,6 +12319,8 @@ struct DocumentationSupportRow<'a> {
     public_mode: &'a str,
     /// Accepted normalized parser identity.
     parser_id: &'a str,
+    /// Optional accepted transform that runs before the selected parser.
+    pre_parse_transform: Option<&'a AcceptedPreParseTransform>,
     /// Accepted future feature-pack owner.
     future_pack_id: &'a str,
     /// Required evidence tiers.
@@ -11953,6 +12437,8 @@ struct AcceptedCapabilityState<'a> {
     modes: usize,
     /// Accepted normalized parser-capability count.
     normalized_parser_capabilities: usize,
+    /// Accepted pre-parse-transform count.
+    pre_parse_transforms: usize,
     /// Accepted crosswalk count.
     crosswalk_entries: usize,
     /// All accepted rows remain unadvertised pending evidence.
@@ -11998,6 +12484,8 @@ struct CapabilityModeState<'a> {
     public_mode: &'a str,
     /// Accepted normalized parser identity.
     parser_id: &'a str,
+    /// Optional accepted transform that runs before the selected parser.
+    pre_parse_transform: Option<&'a AcceptedPreParseTransform>,
     /// Future delivery pack; never used as current routing.
     future_pack_id: &'a str,
     /// Accepted owner.
@@ -12097,6 +12585,7 @@ fn accepted_mode_states<'a>(
             accepted_mode_id: mode.mode_id.as_str(),
             public_mode: mode.public_mode.as_str(),
             parser_id: mode.parser_id.as_str(),
+            pre_parse_transform: mode.pre_parse_transform.as_ref(),
             future_pack_id: mode.pack_id.as_str(),
             owner: &mode.owner,
             accepted_delivery_target: mode.accepted_delivery_target,
@@ -12221,6 +12710,7 @@ fn conformance_inventory<'a>(
                 mode_id: mode.mode_id.as_str(),
                 public_mode: mode.public_mode.as_str(),
                 parser_id: mode.parser_id.as_str(),
+                pre_parse_transform: mode.pre_parse_transform.as_ref(),
                 required_claims: mode
                     .required_claims
                     .iter()
@@ -12272,6 +12762,7 @@ fn documentation_support_matrix<'a>(
             mode_id: mode.mode_id.as_str(),
             public_mode: mode.public_mode.as_str(),
             parser_id: mode.parser_id.as_str(),
+            pre_parse_transform: mode.pre_parse_transform.as_ref(),
             future_pack_id: mode.pack_id.as_str(),
             required_claims: mode
                 .required_claims
@@ -12431,6 +12922,11 @@ fn render_capability_state(
             raw_sha256: lock.accepted_target.raw_sha256.as_str(),
             modes: accepted.modes.len(),
             normalized_parser_capabilities: accepted.parsers.len(),
+            pre_parse_transforms: accepted
+                .modes
+                .iter()
+                .filter(|mode| mode.pre_parse_transform.is_some())
+                .count(),
             crosswalk_entries: accepted.source.accepted_language_crosswalk.entries.len(),
             advertisement: accepted.source.mode_defaults.advertisement,
         },
@@ -12462,6 +12958,11 @@ fn render_capability_state(
             packs: &lock.packs,
             current_modes: lock.current_modes.len(),
             accepted_modes: accepted.modes.len(),
+            accepted_pre_parse_transforms: accepted
+                .modes
+                .iter()
+                .filter(|mode| mode.pre_parse_transform.is_some())
+                .count(),
             accepted_parser_capabilities: accepted.parsers.len(),
             parser_components: lock.parser_components.len(),
             parser_assets: lock.assets.len(),

@@ -1,14 +1,14 @@
 {
   "schema_version": 2,
   "format": "projectatlas.capability-registry",
-  "registry_id": "projectatlas-v0.4-candidate-212x207",
+  "registry_id": "projectatlas-v0.4-candidate-215x209",
   "status": "candidate-pending-evidence",
   "binding_role": "delivery-inventory",
   "accepted_set_policy": {
-    "minimum_runnable_modes": 212,
-    "minimum_normalized_parser_capabilities": 207,
-    "target_runnable_modes": 212,
-    "target_normalized_parser_capabilities": 207,
+    "minimum_runnable_modes": 215,
+    "minimum_normalized_parser_capabilities": 209,
+    "target_runnable_modes": 215,
+    "target_normalized_parser_capabilities": 209,
     "aliases_count_toward_modes": false,
     "shared_fallback_counts_as_parser": false,
     "advertisement_requires_achieved_manifest": true,
@@ -270,10 +270,10 @@
     }
   },
   "counts": {
-    "modes": 212,
-    "normalized_parser_capabilities": 207,
+    "modes": 215,
+    "normalized_parser_capabilities": 209,
     "capabilities": 66,
-    "accepted_language_crosswalk_entries": 160,
+    "accepted_language_crosswalk_entries": 163,
     "current_public_modes": 63
   },
   "mode_defaults": {
@@ -1244,6 +1244,94 @@
       "origin": "v0.3.26-public-mode",
       "parser_id": "parse.objective-c",
       "pack_id": "default-core"
+    },
+    {
+      "mode_id": "mode.objectscript-export-xml",
+      "public_mode": "objectscript-export-xml",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.objectscript-udl",
+      "pack_id": "broad-language-pack",
+      "pre_parse_transform": {
+        "transform_id": "transform.objectscript-export-xml-to-udl",
+        "version": 1,
+        "behavior": "export-container-to-udl-records",
+        "deterministic": true,
+        "target_mode_id": "mode.objectscript-export-xml",
+        "target_parser_id": "parse.objectscript-udl",
+        "detection_ownership": "mode-detection-rule-before-transform",
+        "detection_rule_id": "detect.objectscript-export-xml",
+        "limits": {
+          "max_input_bytes": 2000000,
+          "max_derived_output_bytes": 2000000,
+          "max_records": 1024,
+          "max_nesting_depth": 256,
+          "max_diagnostics": 256,
+          "deadline_ms": 300000
+        },
+        "cancellation": {
+          "enabled": true,
+          "poll_interval_ms": 25,
+          "grace_period_ms": 1000
+        },
+        "source_mapping": {
+          "original_file_identity": true,
+          "per_record_provenance": true,
+          "every_derived_fact": true,
+          "every_diagnostic": true
+        },
+        "security": {
+          "dtd": "denied",
+          "entity_expansion": "denied",
+          "external_resources": "denied",
+          "schema_fetch": "denied",
+          "execution": "denied"
+        },
+        "failure_policy": {
+          "empty_input": "unavailable",
+          "malformed_input": "partial-or-unavailable",
+          "oversized_input": "unavailable",
+          "deeply_nested_input": "unavailable",
+          "multi_record_input": "parse-each-record-in-source-order",
+          "unrelated_parser_fallback": false,
+          "guessed_symbols_after_failure": false,
+          "coverage_after_failure": "partial-or-unavailable"
+        }
+      },
+      "overrides": {
+        "required_claims": [
+          "detected",
+          "parsed",
+          "symbols"
+        ]
+      }
+    },
+    {
+      "mode_id": "mode.objectscript-routine",
+      "public_mode": "objectscript-routine",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.objectscript-routine",
+      "pack_id": "broad-language-pack",
+      "overrides": {
+        "required_claims": [
+          "detected",
+          "parsed",
+          "symbols"
+        ]
+      }
+    },
+    {
+      "mode_id": "mode.objectscript-udl",
+      "public_mode": "objectscript-udl",
+      "origin": "v0.4-addition",
+      "parser_id": "parse.objectscript-udl",
+      "pack_id": "broad-language-pack",
+      "overrides": {
+        "required_claims": [
+          "detected",
+          "parsed",
+          "symbols"
+        ]
+      }
     },
     {
       "mode_id": "mode.ocaml",
@@ -2731,6 +2819,21 @@
       "pack_id": "default-core",
       "normalized_modes": [
         "objective-c"
+      ]
+    },
+    {
+      "parser_id": "parse.objectscript-routine",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "objectscript-routine"
+      ]
+    },
+    {
+      "parser_id": "parse.objectscript-udl",
+      "pack_id": "broad-language-pack",
+      "normalized_modes": [
+        "objectscript-export-xml",
+        "objectscript-udl"
       ]
     },
     {
@@ -4707,7 +4810,7 @@
   "achieved_manifest": null,
   "achieved_manifest_reason": "No breadth or capability claim is advertised until asset locks, fixtures, benchmarks, and required-platform evidence pass.",
   "accepted_language_crosswalk": {
-    "identity": "projectatlas-accepted-language-set-212",
+    "identity": "projectatlas-accepted-language-set-215",
     "entries": [
       {
         "accepted_name_id": "accepted.ada",
@@ -5382,6 +5485,27 @@
         "mapping": "canonical-mode"
       },
       {
+        "accepted_name_id": "accepted.objectscript-export-xml",
+        "standard_name": "ObjectScript",
+        "dialect": "export-xml",
+        "mode_id": "mode.objectscript-export-xml",
+        "mapping": "dialect-mode"
+      },
+      {
+        "accepted_name_id": "accepted.objectscript-routine",
+        "standard_name": "ObjectScript",
+        "dialect": "routine",
+        "mode_id": "mode.objectscript-routine",
+        "mapping": "dialect-mode"
+      },
+      {
+        "accepted_name_id": "accepted.objectscript-udl",
+        "standard_name": "ObjectScript",
+        "dialect": "udl",
+        "mode_id": "mode.objectscript-udl",
+        "mapping": "dialect-mode"
+      },
+      {
         "accepted_name_id": "accepted.ocaml",
         "standard_name": "OCaml",
         "dialect": null,
@@ -5832,5 +5956,5 @@
     ]
   },
   "accepted_set_digest_algorithm": "sha256",
-  "accepted_set_digest": "7355cfc034910c87839afe946bdd6c2418766c1792d12a404d2a58586fec8806"
+  "accepted_set_digest": "ed9d1012653830f9efabf2b678c8849e5372a1a8a8b390da4f764a53553e7512"
 }
