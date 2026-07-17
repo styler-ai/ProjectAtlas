@@ -1252,10 +1252,21 @@ fn quality_workflows_bind_declared_runner_and_phase_contracts() {
     assert!(release.contains("coverage_enforcement: release-quality"));
     assert!(ci.contains("profile:\"doc\""));
     assert!(ci.contains("configs:[{role:\"nextest\""));
+    assert_eq!(
+        quality_policy.timeouts.changed_mutation_command_seconds,
+        2700
+    );
+    assert_eq!(quality_policy.timeouts.changed_mutation_job_seconds, 3600);
+    assert!(ci.contains("  changed-mutation:\n    name: changed-mutation"));
+    assert!(ci.contains(
+        "timeouts:{command_seconds:2700,job_seconds:3600,test_seconds:180,build_seconds:900}"
+    ));
+    assert!(workflow_docs.contains("45/60 for\nchanged-source mutation"));
     assert!(workflow_docs.contains(
         "git diff --binary --no-ext-diff \"$base..HEAD\" -- > \"$mutation_root/source.diff\""
     ));
     assert!(workflow_docs.contains("--in-diff \"$mutation_root/source.diff\""));
+    assert!(workflow_docs.contains("--jobs 2 --baseline run --test-workspace false --timeout 180"));
     assert!(workflow_docs.contains("--output \"$mutation_root/native\""));
     assert!(!workflow_docs.contains("--in-diff \"$base..HEAD\""));
 }
@@ -1342,6 +1353,10 @@ fn changed_mutation_workflow_contract_is_complete_and_bounded() {
             "  install-smoke:\n",
         ));
     let changed_mutation = &ci[job_start..job_end];
+    assert!(
+        changed_mutation
+            .contains("    runs-on: ubuntu-latest\n    timeout-minutes: 60\n    steps:")
+    );
     let dependency_fetch = assert_ok!(required_text_position(
         changed_mutation,
         "        run: cargo fetch --locked"
@@ -1427,10 +1442,17 @@ fn changed_mutation_workflow_contract_is_complete_and_bounded() {
         changed_mutation.contains("--list \\\n              --json > \"$candidate_inventory\"")
     );
     assert_eq!(changed_mutation.matches("--jobs 2 \\").count(), 1);
+    assert_eq!(
+        changed_mutation
+            .matches("--test-workspace false \\")
+            .count(),
+        1
+    );
     assert!(changed_mutation.contains(
         "id: changed_mutation\n        timeout-minutes: 45\n        env:\n          BASE_SHA: ${{ steps.mutation_base.outputs.base }}\n          NEXTEST_TEST_THREADS: \"1\""
     ));
     assert!(ci.contains("\"--jobs\",\"2\",\"--baseline\",\"run\""));
+    assert!(ci.contains("\"--test-workspace\",\"false\",\"--timeout\",\"180\""));
     assert_eq!(ci.matches("mutation_base_sha:").count(), 2);
     assert!(ci.contains("workflow_dispatch:\n    inputs:\n      mutation_base_sha:"));
     assert!(changed_mutation.contains("CALLED_BASE_SHA: ${{ inputs.mutation_base_sha }}"));

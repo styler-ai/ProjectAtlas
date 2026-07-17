@@ -1552,7 +1552,7 @@ fn rust_quality_ci_jobs_are_independent_bounded_and_pinned() -> Result<(), Box<d
         (
             "changed-mutation",
             &[
-                "timeout-minutes: 50",
+                "timeout-minutes: 60",
                 "fetch-depth: 0",
                 "cargo-nextest@0.9.140,cargo-mutants@27.1.0",
                 "--output=target/projectatlas-quality/changed-mutation/source.diff",
@@ -1562,8 +1562,10 @@ fn rust_quality_ci_jobs_are_independent_bounded_and_pinned() -> Result<(), Box<d
                 "native/mutants.out/outcomes.json",
                 "gate:\"changed_mutation\"",
                 "test-quality evidence",
+                "--test-workspace false",
                 "--timeout 180",
                 "--build-timeout 900",
+                "timeouts:{command_seconds:2700,job_seconds:3600",
             ],
         ),
     ];
