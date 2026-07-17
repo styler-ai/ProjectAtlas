@@ -1437,10 +1437,23 @@ def input_covers(path: str, covered_input: dict[str, object]) -> bool:
     return path == target or path.startswith(f"{target}/")
 
 
+def task_verification_receipt_path(path: str) -> bool:
+    """Recognize a retained task-verification receipt below benchmark results."""
+
+    if not path.startswith("docs/benchmarks/results/"):
+        return False
+    filename = path.rsplit("/", 1)[-1]
+    return filename.startswith("task-verification-") and filename.lower().endswith(
+        ".json"
+    )
+
+
 def semantic_metadata_path(path: str, scoped_changes: set[str]) -> bool:
     """Recognize metadata that still requires semantic scope validation."""
 
     if path in {"openspec/task-verification.json", "openspec/task-evidence.json"}:
+        return True
+    if task_verification_receipt_path(path):
         return True
     return any(path == f"openspec/changes/{change}/tasks.md" for change in scoped_changes)
 
@@ -3481,11 +3494,24 @@ def self_test(root: Path, only_test_id: str | None = None) -> None:
                 tasks[1], ["docs/workflow.md"]
             ),
         }
+        receipt = (
+            "docs/benchmarks/results/phase-0-truth-and-baselines/"
+            "task-verification-a95a9de.json"
+        )
+        assert task_verification_receipt_path(receipt)
+        assert not task_verification_receipt_path(
+            "docs/benchmarks/results/phase-0-truth-and-baselines/reviews.json"
+        )
+        assert not task_verification_receipt_path(
+            "docs/benchmarks/results/phase-0-truth-and-baselines/"
+            "task-verification-a95a9de.txt"
+        )
         assert changed_paths_are_owned(
             [
                 "src/lib.rs",
                 "openspec/changes/change/tasks.md",
                 "openspec/task-evidence.json",
+                receipt,
             ],
             scope,
             plan,
