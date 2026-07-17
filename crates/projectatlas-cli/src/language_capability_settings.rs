@@ -624,6 +624,6 @@ pub(crate) static EVALUATION_PARSER_PACK_TRUST: &[EvaluationParserPackTrust] =
         packaged_platform: "wasm32-unknown-emscripten",
         payload_root: "fixtures/parser-packs/tree-sitter-wasm-grammar-pack",
         manifest_path: "manifest.json",
-        installed_bytes: 427948,
-        installed_byte_limit: 805306368,
+        installed_bytes: 427_948,
+        installed_byte_limit: 805_306_368,
     }];

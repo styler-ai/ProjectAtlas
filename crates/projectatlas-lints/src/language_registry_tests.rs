@@ -3211,6 +3211,21 @@ fn formatter_failure_process_fixture() -> Result<(), Box<dyn Error>> {
 #[test]
 fn generated_language_registry_outputs_are_deterministic_and_complete() -> Result<(), Box<dyn Error>>
 {
+    require_equal(
+        rust_u64_literal(999).as_str(),
+        "999",
+        "ungrouped generated Rust boundary literal",
+    )?;
+    require_equal(
+        rust_u64_literal(1_000).as_str(),
+        "1_000",
+        "grouped generated Rust boundary literal",
+    )?;
+    require_equal(
+        rust_u64_literal(1_234_567).as_str(),
+        "1_234_567",
+        "multiply grouped generated Rust literal",
+    )?;
     let formatter = GeneratedRustFormatter::new()?;
     verify_formatter_process_contract(&formatter)?;
     let first = generated()?;
@@ -5976,19 +5991,19 @@ fn filesystem_paths_reject_links_reparse_points_and_wrong_case() -> Result<(), B
             if source.raw_os_error() != Some(ERROR_PRIVILEGE_NOT_HELD) {
                 return Err(source.into());
             }
+            return Ok(());
         }
         #[cfg(not(windows))]
         return Err(source.into());
-    } else {
-        require(
-            matches!(
-                RegistryWorkspace::new(&linked_root),
-                Err(LanguageRegistryError::Validation(message))
-                    if message.contains("not a regular non-reparse directory")
-            ),
-            "linked/reparse registry root was accepted",
-        )?;
     }
+    require(
+        matches!(
+            RegistryWorkspace::new(&linked_root),
+            Err(LanguageRegistryError::Validation(message))
+                if message.contains("not a regular non-reparse directory")
+        ),
+        "linked/reparse registry root was accepted",
+    )?;
     Ok(())
 }
 

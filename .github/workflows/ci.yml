@@ -257,7 +257,7 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt
           rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Fetch locked dependency graph
@@ -550,7 +550,7 @@ jobs:
       - name: Setup Rust with matching LLVM tools
         shell: bash
         run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component llvm-tools-preview
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component llvm-tools-preview,rustfmt
           rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Fetch locked dependency graph
@@ -795,7 +795,7 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt
           rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Install pinned mutation tools

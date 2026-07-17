@@ -10475,6 +10475,19 @@ fn rust_string(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+/// Render one unsigned integer as a readable Rust literal.
+fn rust_u64_literal(value: u64) -> String {
+    let digits = value.to_string();
+    let mut literal = String::new();
+    for (index, digit) in digits.bytes().enumerate() {
+        if index != 0 && (digits.len() - index).is_multiple_of(3) {
+            literal.push('_');
+        }
+        literal.push(char::from(digit));
+    }
+    literal
+}
+
 /// Return the generated Rust expression for one closed built-in parser.
 const fn rust_built_in_parser(parser: BuiltInParserId) -> &'static str {
     match parser {
@@ -11632,10 +11645,12 @@ fn render_evaluation_parser_pack_trust(
          pub(crate) static EVALUATION_PARSER_PACK_TRUST: &[EvaluationParserPackTrust] = &[\n",
     );
     for candidate in &parser_pack_trust.candidates {
+        let installed_bytes = rust_u64_literal(candidate.installed_bytes);
+        let installed_byte_limit = rust_u64_literal(parser_pack_installed_byte_limit);
         push_format(
             output,
             format_args!(
-                "    EvaluationParserPackTrust {{ candidate_id: {}, eligibility: {}, pack_id: {}, release_version: {}, advertised: false, pack_abi_id: {}, pack_abi_version: {}, grammar_abi_id: {}, grammar_abi_version: {}, grammar_abi_state: {}, packaged_platform: {}, payload_root: {}, manifest_path: {}, installed_bytes: {}, installed_byte_limit: {parser_pack_installed_byte_limit} }},\n",
+                "    EvaluationParserPackTrust {{ candidate_id: {}, eligibility: {}, pack_id: {}, release_version: {}, advertised: false, pack_abi_id: {}, pack_abi_version: {}, grammar_abi_id: {}, grammar_abi_version: {}, grammar_abi_state: {}, packaged_platform: {}, payload_root: {}, manifest_path: {}, installed_bytes: {installed_bytes}, installed_byte_limit: {installed_byte_limit} }},\n",
                 rust_string(candidate.candidate_id.as_str()),
                 rust_string(candidate.eligibility.contract_tag()),
                 rust_string(candidate.pack_id.as_str()),
@@ -11648,7 +11663,6 @@ fn render_evaluation_parser_pack_trust(
                 rust_string(candidate.packaged_platform.as_str()),
                 rust_string(candidate.payload_root.as_str()),
                 rust_string(candidate.manifest_path.as_str()),
-                candidate.installed_bytes,
             ),
         )?;
     }
