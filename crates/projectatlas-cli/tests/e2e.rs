@@ -19,6 +19,7 @@ use std::path::Path;
 use std::process::{Command as StdCommand, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+use yaml_rust2::{Yaml, YamlLoader};
 
 const TEST_REPO_DIR: &str = "repo";
 const SRC_DIR_NAME: &str = "src";
@@ -1155,6 +1156,21 @@ fn repository_guidance_keeps_legacy_toon_export_optional() -> Result<(), Box<dyn
     Ok(())
 }
 
+fn dependabot_update<'a>(updates: &'a [Yaml], ecosystem: &str) -> io::Result<&'a Yaml> {
+    let mut matching = updates
+        .iter()
+        .filter(|update| update["package-ecosystem"].as_str() == Some(ecosystem));
+    let update = matching
+        .next()
+        .ok_or_else(|| io::Error::other(format!("Dependabot {ecosystem} update is missing")))?;
+    if matching.next().is_some() {
+        return Err(io::Error::other(format!(
+            "Dependabot {ecosystem} update must be unique"
+        )));
+    }
+    Ok(update)
+}
+
 #[test]
 fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn Error>> {
     let workspace_root = workspace_root()?;
@@ -1279,36 +1295,62 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         assert_actions_are_sha_pinned(name, workflow)?;
     }
 
-    let cargo_update = dependabot
-        .split("  - package-ecosystem: cargo")
-        .nth(1)
-        .and_then(|tail| tail.split("\n  - package-ecosystem:").next())
-        .ok_or_else(|| io::Error::other("Dependabot Cargo update is missing"))?;
-    let actions_update = dependabot
-        .split("  - package-ecosystem: github-actions")
-        .nth(1)
-        .and_then(|tail| tail.split("\n  - package-ecosystem:").next())
-        .ok_or_else(|| io::Error::other("Dependabot GitHub Actions update is missing"))?;
+    let dependabot_documents = YamlLoader::load_from_str(&dependabot)?;
+    let dependabot_config = dependabot_documents
+        .first()
+        .ok_or_else(|| io::Error::other("Dependabot configuration is empty"))?;
+    let dependabot_updates = dependabot_config["updates"]
+        .as_vec()
+        .ok_or_else(|| io::Error::other("Dependabot updates must be a sequence"))?;
+    let cargo_update = dependabot_update(dependabot_updates, "cargo")?;
+    let actions_update = dependabot_update(dependabot_updates, "github-actions")?;
     for (ecosystem, update) in [("cargo", cargo_update), ("github-actions", actions_update)] {
-        for required in ["directory: /", "target-branch: dev", "interval: weekly"] {
-            if !update.contains(required) {
+        for (field, actual, expected) in [
+            ("directory", update["directory"].as_str(), "/"),
+            ("target-branch", update["target-branch"].as_str(), "dev"),
+            (
+                "schedule.interval",
+                update["schedule"]["interval"].as_str(),
+                "weekly",
+            ),
+        ] {
+            if actual != Some(expected) {
                 return Err(io::Error::other(format!(
-                    "Dependabot {ecosystem} update is missing {required:?}"
+                    "Dependabot {ecosystem} update field {field:?} must be {expected:?}, found {actual:?}"
                 ))
                 .into());
             }
         }
     }
-    for required in ["groups:", "update-types:", "- minor", "- patch"] {
-        if !cargo_update.contains(required) {
-            return Err(io::Error::other(format!(
-                "Dependabot Cargo update is missing minor/patch grouping field {required:?}"
+    let cargo_groups = cargo_update["groups"]
+        .as_hash()
+        .filter(|groups| !groups.is_empty())
+        .ok_or_else(|| io::Error::other("Dependabot Cargo update must define a group"))?;
+    let mut grouped_update_types = BTreeSet::new();
+    for (group_name, group) in cargo_groups {
+        let group_name = group_name
+            .as_str()
+            .ok_or_else(|| io::Error::other("Dependabot Cargo group name must be a string"))?;
+        let update_types = group["update-types"].as_vec().ok_or_else(|| {
+            io::Error::other(format!(
+                "Dependabot Cargo group {group_name:?} must define update-types"
             ))
-            .into());
+        })?;
+        for update_type in update_types {
+            let update_type = update_type.as_str().ok_or_else(|| {
+                io::Error::other(format!(
+                    "Dependabot Cargo group {group_name:?} update type must be a string"
+                ))
+            })?;
+            grouped_update_types.insert(update_type.to_string());
         }
     }
-    if cargo_update.contains("- major") {
-        return Err(io::Error::other("Dependabot Cargo major updates must remain separate").into());
+    let expected_grouped_update_types = BTreeSet::from(["minor".to_string(), "patch".to_string()]);
+    if grouped_update_types != expected_grouped_update_types {
+        return Err(io::Error::other(format!(
+            "Dependabot Cargo groups must include only minor and patch updates, found {grouped_update_types:?}"
+        ))
+        .into());
     }
 
     for entry in fs::read_dir(&workflow_dir)? {

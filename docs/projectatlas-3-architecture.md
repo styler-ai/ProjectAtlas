@@ -881,11 +881,11 @@ Rust gates:
 
 ```bash
 cargo fmt --check
-cargo check --workspace --all-targets --all-features
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
-cargo test --doc --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
+cargo check --workspace --all-targets --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
+cargo test --doc --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 ```
 
 Rust documentation policy:
@@ -910,12 +910,12 @@ ProjectAtlas repository gates:
 
 ```bash
 cargo fmt --check
-cargo check --workspace --all-targets --all-features
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
-cargo test --doc --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
-cargo run -p projectatlas-cli -- lint --report-untracked
+cargo check --workspace --all-targets --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
+cargo test --doc --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+cargo run --locked -p projectatlas-cli -- lint --report-untracked
 ```
 
 Parity gate for 3.0 stable:
