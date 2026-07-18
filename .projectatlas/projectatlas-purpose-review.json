@@ -1339,6 +1339,90 @@
     {
       "path": "openspec/changes/centralize-cargo-dependency-management/tasks.md",
       "purpose": "Implementation and verification checklist for centralized Cargo dependency management."
+    },
+    {
+      "path": "docs/agent-navigation.md",
+      "purpose": "Define the agent-facing contract for navigating live local source through purposes, graph context, trust signals, and exact slices."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence",
+      "purpose": "OpenSpec change package for fresh typed repository intelligence and purpose-led graph navigation."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs",
+      "purpose": "Group capability requirements for repository graphs, indexing integrity, language intelligence, optional packs, federation, and benchmarks."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/cross-repository-intelligence",
+      "purpose": "Define explicit read-only bounded cross-repository intelligence requirements."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/graph-retrieval-and-analysis",
+      "purpose": "Define purpose-led graph navigation, bounded analysis, compact MCP discovery, and quiet purpose-curation requirements."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/incremental-index-integrity",
+      "purpose": "Define atomic publication, local-source freshness, convergence, and bounded indexing requirements."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/language-intelligence-registry",
+      "purpose": "Define registry-owned language detection, parser capability truth, resolution, and optional parser containment requirements."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/optional-intelligence-packs",
+      "purpose": "Define optional intelligence lifecycle, supply-chain containment, resource isolation, and snapshot-integrity requirements."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/repository-intelligence-benchmarks",
+      "purpose": "Define correctness-first agent workflow comparisons, separate resource measures, and lean verification requirements."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/repository-knowledge-graph",
+      "purpose": "Define typed graph identity, indexed relation ownership, capability coverage, and authored-data preservation requirements."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/.openspec.yaml",
+      "purpose": "Declare the OpenSpec schema and creation metadata for the repository-intelligence change."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/design.md",
+      "purpose": "Record architecture, dependency order, compatibility, freshness, and agent-navigation decisions for repository intelligence."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/proposal.md",
+      "purpose": "Propose fresh typed repository intelligence that enriches the existing purpose-led agent workflow."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/tasks.md",
+      "purpose": "Track implementation and verification tasks for typed repository intelligence and graph-enriched agent navigation."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/cross-repository-intelligence/spec.md",
+      "purpose": "Specify explicit-root read-only federation, project-qualified results, and bounded static protocol-field tracing."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/graph-retrieval-and-analysis/spec.md",
+      "purpose": "Specify graph-enriched navigation, quiet purpose curation, bounded analysis, compact MCP discovery, and cursor contracts."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/incremental-index-integrity/spec.md",
+      "purpose": "Specify atomic graph publication, dependency-aware local freshness, clean-scan convergence, and bounded work."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/language-intelligence-registry/spec.md",
+      "purpose": "Specify generated language capability truth, parser compatibility, semantic resolution, and optional parser isolation."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/optional-intelligence-packs/spec.md",
+      "purpose": "Specify optional semantic lifecycle, default-core independence, pack containment, evaluation, and snapshot integrity."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/repository-intelligence-benchmarks/spec.md",
+      "purpose": "Specify correctness-first benchmarks for agent workflow improvement, resource trade-offs, and lean verification."
+    },
+    {
+      "path": "openspec/changes/advance-rust-repository-intelligence/specs/repository-knowledge-graph/spec.md",
+      "purpose": "Specify typed stable graph identities, relation occurrences, indexed storage, capability truth, and authored-data preservation."
     }
   ]
 }
