@@ -65,7 +65,7 @@ cargo mutants --version
 
 `01-CI` reports nextest, stable doctests, LLVM coverage, and changed-source mutation as independent
 blocking jobs. A pass in one dimension cannot replace another. Hosted command/job ceilings are read from
-`test-quality.toml`: 20/25 minutes for nextest, 15/20 for doctests, 40/45 for coverage, and 45/50 for
+`test-quality.toml`: 20/25 minutes for nextest, 15/20 for doctests, 40/45 for coverage, and 45/60 for
 changed-source mutation. Native nextest and cargo-mutants timeouts remain active inside those outer bounds.
 Every job uploads its raw report, tool identity, outcome manifest, and diagnostics for 90 days with
 `if: always()`; a successful upload never changes a failed quality conclusion.
@@ -86,11 +86,13 @@ base="$(git merge-base HEAD origin/main)"
 mutation_root=target/projectatlas-quality/local-changed-mutation
 mkdir -p "$mutation_root"
 git diff --binary --no-ext-diff "$base..HEAD" -- > "$mutation_root/source.diff"
-cargo mutants --config .cargo/mutants.toml --workspace --in-diff "$mutation_root/source.diff" --baseline run --timeout 180 --build-timeout 900 --output "$mutation_root/native"
+cargo mutants --config .cargo/mutants.toml --workspace --in-diff "$mutation_root/source.diff" --jobs 2 --baseline run --test-workspace false --timeout 180 --build-timeout 900 --output "$mutation_root/native"
 ```
 
 `--in-diff` accepts a unified-diff file, not a Git revision expression. Keep the native output in a
 child directory so cargo-mutants cannot remove the source patch while preparing its output tree.
+`--workspace` keeps changed-source candidate discovery workspace-wide, while `--test-workspace false`
+keeps each mutant on its owning package after the normal workspace test baseline has passed.
 
 The expensive complete mutation run is not part of the pre-push hook. Dispatch the checked-in workflow,
 which generates one unfiltered master inventory and executes exactly 16 native shards:

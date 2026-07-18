@@ -16,6 +16,11 @@ on:
   pull_request_review_comment:
     types: [created, edited, deleted]
   workflow_dispatch:
+    inputs:
+      mutation_base_sha:
+        description: Trusted base commit for changed-source mutation.
+        required: false
+        type: string
   workflow_call:
     inputs:
       expected_sha:
@@ -257,7 +262,7 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt
           rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Fetch locked dependency graph
@@ -550,7 +555,7 @@ jobs:
       - name: Setup Rust with matching LLVM tools
         shell: bash
         run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component llvm-tools-preview
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component llvm-tools-preview,rustfmt
           rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Fetch locked dependency graph
@@ -779,7 +784,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'workflow_call'
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 60
     steps:
       - name: Checkout full history
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -795,8 +800,12 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt
           rustup default "$RUSTUP_TOOLCHAIN"
+
+      - name: Fetch locked dependency graph
+        timeout-minutes: 5
+        run: cargo fetch --locked
 
       - name: Install pinned mutation tools
         uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
@@ -848,7 +857,9 @@ jobs:
         timeout-minutes: 45
         env:
           BASE_SHA: ${{ steps.mutation_base.outputs.base }}
+          NEXTEST_TEST_THREADS: "1"
         run: |
+          set -o pipefail
           evidence=target/projectatlas-quality/changed-mutation
           native="$evidence/native/mutants.out"
           inventory="$native/mutants.json"
@@ -879,11 +890,22 @@ jobs:
               --arg end_time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
               '{outcomes:[],total_mutants:0,missed:0,caught:0,timeout:0,unviable:0,success:0,start_time:$start_time,end_time:$end_time,cargo_mutants_version:"27.1.0"}' \
               > "$outcomes"
+          elif ! cargo nextest run \
+              --workspace \
+              --all-features \
+              --locked \
+              --profile mutants \
+              --no-tests=fail 2>&1 \
+              | tee "$evidence/workspace-baseline.log"; then
+            echo "changed-source mutation workspace baseline failed" >&2
+            exit 1
           elif ! cargo mutants \
               --config .cargo/mutants.toml \
               --workspace \
               --in-diff target/projectatlas-quality/changed-mutation/source.diff \
+              --jobs 2 \
               --baseline run \
+              --test-workspace false \
               --timeout 180 \
               --build-timeout 900 \
               --output target/projectatlas-quality/changed-mutation/native \
@@ -970,7 +992,7 @@ jobs:
             --argjson excluded "$(jq -er '.counts.excluded' "$evidence/validation.json")" \
             --argjson unresolved "$(jq -er '.counts.unresolved' "$evidence/validation.json")" \
             --argjson baseline_passed "$(jq -er '.counts.baseline_passed == 1' "$evidence/validation.json")" \
-            '{schema_version:1,repository:$repository,gate:"changed_mutation",status:"passed",commit_sha:$commit_sha,platform:{id:"linux-x86_64-gnu",os:"linux",arch:"x86_64",target:$target,runner_image:$runner_image,runner_image_version:$runner_image_version},toolchain:{rustc_version:$rustc_version,llvm_version:$llvm_version},tool:{name:"cargo-mutants",version:"27.1.0"},inputs:{cargo_lock_sha256:$cargo_lock_sha256,policy_sha256:$policy_sha256,source_scope_sha256:$source_scope_sha256,configs:[{role:"nextest",path:".config/nextest.toml",sha256:$nextest_config_sha256},{role:"mutants",path:".cargo/mutants.toml",sha256:$mutants_config_sha256}]},command:{executable:"cargo",arguments:["mutants","--config",".cargo/mutants.toml","--workspace","--in-diff",$diff_path,"--baseline","run","--timeout","180","--build-timeout","900","--output","target/projectatlas-quality/changed-mutation/native","--annotations","github"],profile:"mutants"},timeouts:{command_seconds:2700,job_seconds:3000,test_seconds:180,build_seconds:900},started_at_utc:$started_at_utc,completed_at_utc:$completed_at_utc,run:{kind:"github_actions",run_id:$run_id,run_attempt:$run_attempt,job_id:$job_id,job_name:$job_name,workflow_ref:$workflow_ref},artifacts:[{role:"mutation_inventory",path:"native/mutants.out/mutants.json",sha256:$inventory_sha256},{role:"mutation_outcomes",path:"native/mutants.out/outcomes.json",sha256:$outcomes_sha256},{role:"diagnostics",path:"source.diff",sha256:$diff_sha256},{role:"validation_summary",path:"validation.json",sha256:$validation_sha256}],result:{kind:"changed_mutation",raw_total:$raw_total,caught:$caught,missed:$missed,timed_out:$timed_out,unviable:$unviable,excluded:$excluded,unresolved:$unresolved,baseline_passed:$baseline_passed}}' \
+            '{schema_version:1,repository:$repository,gate:"changed_mutation",status:"passed",commit_sha:$commit_sha,platform:{id:"linux-x86_64-gnu",os:"linux",arch:"x86_64",target:$target,runner_image:$runner_image,runner_image_version:$runner_image_version},toolchain:{rustc_version:$rustc_version,llvm_version:$llvm_version},tool:{name:"cargo-mutants",version:"27.1.0"},inputs:{cargo_lock_sha256:$cargo_lock_sha256,policy_sha256:$policy_sha256,source_scope_sha256:$source_scope_sha256,configs:[{role:"nextest",path:".config/nextest.toml",sha256:$nextest_config_sha256},{role:"mutants",path:".cargo/mutants.toml",sha256:$mutants_config_sha256}]},command:{executable:"cargo",arguments:["mutants","--config",".cargo/mutants.toml","--workspace","--in-diff",$diff_path,"--jobs","2","--baseline","run","--test-workspace","false","--timeout","180","--build-timeout","900","--output","target/projectatlas-quality/changed-mutation/native","--annotations","github"],profile:"mutants"},timeouts:{command_seconds:2700,job_seconds:3600,test_seconds:180,build_seconds:900},started_at_utc:$started_at_utc,completed_at_utc:$completed_at_utc,run:{kind:"github_actions",run_id:$run_id,run_attempt:$run_attempt,job_id:$job_id,job_name:$job_name,workflow_ref:$workflow_ref},artifacts:[{role:"mutation_inventory",path:"native/mutants.out/mutants.json",sha256:$inventory_sha256},{role:"mutation_outcomes",path:"native/mutants.out/outcomes.json",sha256:$outcomes_sha256},{role:"diagnostics",path:"source.diff",sha256:$diff_sha256},{role:"validation_summary",path:"validation.json",sha256:$validation_sha256}],result:{kind:"changed_mutation",raw_total:$raw_total,caught:$caught,missed:$missed,timed_out:$timed_out,unviable:$unviable,excluded:$excluded,unresolved:$unresolved,baseline_passed:$baseline_passed}}' \
             > "$evidence/manifest.json"
           cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- \
             test-quality evidence --root . --policy test-quality.toml \

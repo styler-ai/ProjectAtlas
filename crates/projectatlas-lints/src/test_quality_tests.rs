@@ -2,7 +2,7 @@
 
 use super::*;
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error as _;
 use std::path::Path;
 
@@ -171,6 +171,38 @@ fn under_target_coverage_export(
             manifest_path: manifest.to_string_lossy().into_owned(),
         },
     })
+}
+
+fn nextest_inventory(test_count: u64, ignored: &[bool]) -> NativeNextestInventory {
+    NativeNextestInventory {
+        test_count,
+        rust_suites: BTreeMap::from([(
+            "suite".to_string(),
+            NativeNextestSuite {
+                status: "listed".to_string(),
+                testcases: ignored
+                    .iter()
+                    .enumerate()
+                    .map(|(index, ignored)| {
+                        (
+                            format!("case-{index}"),
+                            NativeNextestCase {
+                                kind: "test".to_string(),
+                                ignored: *ignored,
+                            },
+                        )
+                    })
+                    .collect(),
+            },
+        )]),
+    }
+}
+
+fn write_nextest_junit(path: &Path, testcases: &str) -> std::io::Result<()> {
+    std::fs::write(
+        path,
+        format!("<testsuites><testsuite name=\"suite\">{testcases}</testsuite></testsuites>"),
+    )
 }
 
 #[test]
@@ -453,6 +485,132 @@ fn task_tqg_ut_3_4() {
     assert_eq!(mutant.package, "projectatlas-core");
     assert!(serde_json::from_value::<NativeNextestInventory>(json!({})).is_err());
     assert!(serde_json::from_value::<NativeMutant>(json!({"name": "truncated"})).is_err());
+}
+
+#[test]
+fn nextest_reconciliation_accepts_omitted_inventory_ignored_cases() {
+    let directory = assert_ok!(tempfile::tempdir());
+    let junit = directory.path().join("junit.xml");
+    assert_ok!(write_nextest_junit(
+        &junit,
+        "<testcase name=\"case-0\"/><testcase name=\"case-2\"/>"
+    ));
+    let counts = assert_ok!(validate_nextest_evidence(
+        &nextest_inventory(3, &[false, true, false]),
+        &junit
+    ));
+    assert_eq!(
+        counts,
+        NextestCounts {
+            tests: 2,
+            suites: 1,
+            ignored: 1,
+            failed: 0,
+            errors: 0,
+            timed_out: 0,
+        }
+    );
+}
+
+#[test]
+fn nextest_reconciliation_accepts_an_ignored_only_inventory_suite() {
+    let directory = assert_ok!(tempfile::tempdir());
+    let junit = directory.path().join("junit.xml");
+    assert_ok!(write_nextest_junit(&junit, "<testcase name=\"runnable\"/>"));
+    let inventory = NativeNextestInventory {
+        test_count: 2,
+        rust_suites: BTreeMap::from([
+            (
+                "ignored-only".to_string(),
+                NativeNextestSuite {
+                    status: "listed".to_string(),
+                    testcases: BTreeMap::from([(
+                        "ignored".to_string(),
+                        NativeNextestCase {
+                            kind: "test".to_string(),
+                            ignored: true,
+                        },
+                    )]),
+                },
+            ),
+            (
+                "suite".to_string(),
+                NativeNextestSuite {
+                    status: "listed".to_string(),
+                    testcases: BTreeMap::from([(
+                        "runnable".to_string(),
+                        NativeNextestCase {
+                            kind: "test".to_string(),
+                            ignored: false,
+                        },
+                    )]),
+                },
+            ),
+        ]),
+    };
+    assert_eq!(
+        assert_ok!(validate_nextest_evidence(&inventory, &junit)),
+        NextestCounts {
+            tests: 1,
+            suites: 2,
+            ignored: 1,
+            failed: 0,
+            errors: 0,
+            timed_out: 0,
+        }
+    );
+}
+
+#[test]
+fn nextest_reconciliation_rejects_all_inventory_tests_ignored() {
+    let directory = assert_ok!(tempfile::tempdir());
+    let junit = directory.path().join("junit.xml");
+    assert_ok!(write_nextest_junit(&junit, ""));
+    assert!(matches!(
+        validate_nextest_evidence(&nextest_inventory(1, &[true]), &junit),
+        Err(QualityError::Status {
+            status: QualityStatus::NoTests,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn nextest_reconciliation_rejects_unexpected_junit_skips() {
+    let directory = assert_ok!(tempfile::tempdir());
+    let junit = directory.path().join("junit.xml");
+    assert_ok!(write_nextest_junit(
+        &junit,
+        "<testcase name=\"case-0\"><skipped/></testcase>"
+    ));
+    assert!(matches!(
+        validate_nextest_evidence(&nextest_inventory(1, &[false]), &junit),
+        Err(QualityError::Status {
+            status: QualityStatus::TestFailure,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn nextest_reconciliation_rejects_inventory_count_drift() {
+    let directory = assert_ok!(tempfile::tempdir());
+    let junit = directory.path().join("junit.xml");
+    assert_ok!(write_nextest_junit(&junit, "<testcase name=\"case-0\"/>"));
+    assert!(matches!(
+        validate_nextest_evidence(&nextest_inventory(2, &[false]), &junit),
+        Err(QualityError::Evidence(message))
+            if message.contains("inventory count mismatch")
+    ));
+}
+
+#[test]
+fn nextest_runnable_test_count_rejects_underflow() {
+    assert!(matches!(
+        nextest_runnable_test_count(0, 1),
+        Err(QualityError::Evidence(message))
+            if message.contains("ignored count 1 exceeds listed count 0")
+    ));
 }
 
 #[test]
@@ -1094,10 +1252,21 @@ fn quality_workflows_bind_declared_runner_and_phase_contracts() {
     assert!(release.contains("coverage_enforcement: release-quality"));
     assert!(ci.contains("profile:\"doc\""));
     assert!(ci.contains("configs:[{role:\"nextest\""));
+    assert_eq!(
+        quality_policy.timeouts.changed_mutation_command_seconds,
+        2700
+    );
+    assert_eq!(quality_policy.timeouts.changed_mutation_job_seconds, 3600);
+    assert!(ci.contains("  changed-mutation:\n    name: changed-mutation"));
+    assert!(ci.contains(
+        "timeouts:{command_seconds:2700,job_seconds:3600,test_seconds:180,build_seconds:900}"
+    ));
+    assert!(workflow_docs.contains("45/60 for\nchanged-source mutation"));
     assert!(workflow_docs.contains(
         "git diff --binary --no-ext-diff \"$base..HEAD\" -- > \"$mutation_root/source.diff\""
     ));
     assert!(workflow_docs.contains("--in-diff \"$mutation_root/source.diff\""));
+    assert!(workflow_docs.contains("--jobs 2 --baseline run --test-workspace false --timeout 180"));
     assert!(workflow_docs.contains("--output \"$mutation_root/native\""));
     assert!(!workflow_docs.contains("--in-diff \"$base..HEAD\""));
 }
@@ -1172,49 +1341,164 @@ fn strict_lint_review_replays_retained_repository_artifacts() {
 }
 
 #[test]
-fn changed_mutation_preflights_candidates_before_empty_normalization() {
+fn changed_mutation_workflow_contract_is_complete_and_bounded() {
     let root = assert_ok!(workspace_root());
     let ci = assert_ok!(read_text(&assert_ok!(
         root.input(".github/workflows/ci.yml")
     )));
+    let job_start = assert_ok!(required_text_position(&ci, "  changed-mutation:\n"));
+    let job_end = job_start
+        + assert_ok!(required_text_position(
+            &ci[job_start..],
+            "  install-smoke:\n",
+        ));
+    let changed_mutation = &ci[job_start..job_end];
+    assert!(
+        changed_mutation
+            .contains("    runs-on: ubuntu-latest\n    timeout-minutes: 60\n    steps:")
+    );
+    let dependency_fetch = assert_ok!(required_text_position(
+        changed_mutation,
+        "        run: cargo fetch --locked"
+    ));
     let candidate_inventory = assert_ok!(required_text_position(
-        &ci,
+        changed_mutation,
         "candidate_inventory=\"$RUNNER_TEMP/projectatlas-changed-mutation-candidates.json\""
     ));
     let inventory_failure = assert_ok!(required_text_position(
-        &ci,
+        changed_mutation,
         "changed-source mutation candidate inventory failed"
     ));
     let inventory_shape = assert_ok!(required_text_position(
-        &ci,
+        changed_mutation,
         "jq -e 'type == \"array\"' \"$candidate_inventory\""
     ));
     let candidate_count = assert_ok!(required_text_position(
-        &ci,
+        changed_mutation,
         "candidate_count=\"$(jq -er 'length' \"$candidate_inventory\")\""
     ));
     let empty_inventory = assert_ok!(required_text_position(
-        &ci,
+        changed_mutation,
         "cp \"$candidate_inventory\" \"$inventory\""
     ));
+    let workspace_baseline = assert_ok!(required_text_position(
+        changed_mutation,
+        "          elif ! cargo nextest run \\\n              --workspace \\\n              --all-features \\\n              --locked \\\n              --profile mutants \\\n              --no-tests=fail 2>&1 \\\n              | tee \"$evidence/workspace-baseline.log\"; then"
+    ));
+    let mutation_execution = assert_ok!(required_text_position(
+        changed_mutation,
+        "          elif ! cargo mutants \\"
+    ));
     let execution_failure = assert_ok!(required_text_position(
-        &ci,
+        changed_mutation,
         "changed-source mutation execution failed"
     ));
+    let supplied_base = assert_ok!(required_text_position(
+        changed_mutation,
+        "if [[ -n \"$CALLED_BASE_SHA\" ]]; then\n            base=\"$CALLED_BASE_SHA\""
+    ));
+    let base_shape = assert_ok!(required_text_position(
+        changed_mutation,
+        "if [[ ! \"$base\" =~ ^[0-9a-f]{40}$ ]]"
+    ));
+    let base_commit = assert_ok!(required_text_position(
+        changed_mutation,
+        "git cat-file -e \"$base^{commit}\""
+    ));
+    let base_ancestry = assert_ok!(required_text_position(
+        changed_mutation,
+        "git merge-base --is-ancestor \"$base\" HEAD"
+    ));
+    let source_range = assert_ok!(required_text_position(
+        changed_mutation,
+        "\"$base..$QUALITY_SHA\""
+    ));
+    let retained_base = assert_ok!(required_text_position(
+        changed_mutation,
+        "echo \"$base\" > target/projectatlas-quality/changed-mutation/base-sha.txt"
+    ));
+    assert!(dependency_fetch < candidate_inventory);
     assert!(candidate_inventory < inventory_failure);
     assert!(inventory_failure < inventory_shape);
     assert!(inventory_shape < candidate_count);
     assert!(candidate_count < empty_inventory);
-    assert!(empty_inventory < execution_failure);
-    assert_eq!(ci.matches("\n          if ! cargo mutants").count(), 1);
-    assert!(ci.contains("elif ! cargo mutants"));
-    assert!(ci.contains("--list \\\n              --json > \"$candidate_inventory\""));
-    assert!(ci.contains("if (( candidate_count == 0 )); then"));
-    assert!(ci.contains("cargo-mutants produced an incomplete native result"));
-    assert!(ci.contains("cargo_mutants_version:\"27.1.0\""));
-    assert!(!ci.contains("cargo-mutants omitted native output"));
-    assert!(!ci.contains("^crates/[^/]+/src/(.*/)?[^/]+\\.rs$"));
-    assert!(!ci.contains("cargo mutants || true"));
+    assert!(empty_inventory < workspace_baseline);
+    assert!(workspace_baseline < mutation_execution);
+    assert!(mutation_execution < execution_failure);
+    assert!(supplied_base < base_shape);
+    assert!(base_shape < base_commit);
+    assert!(base_commit < base_ancestry);
+    assert!(base_ancestry < source_range);
+    assert!(source_range < retained_base);
+    assert_eq!(changed_mutation.matches("cargo fetch --locked").count(), 1);
+    assert_eq!(
+        changed_mutation
+            .matches("\n          if ! cargo mutants")
+            .count(),
+        1
+    );
+    assert!(changed_mutation.contains("elif ! cargo mutants"));
+    assert!(
+        changed_mutation.contains("--list \\\n              --json > \"$candidate_inventory\"")
+    );
+    assert_eq!(changed_mutation.matches("--jobs 2 \\").count(), 1);
+    assert_eq!(
+        changed_mutation
+            .matches("--test-workspace false \\")
+            .count(),
+        1
+    );
+    assert!(changed_mutation.contains(
+        "id: changed_mutation\n        timeout-minutes: 45\n        env:\n          BASE_SHA: ${{ steps.mutation_base.outputs.base }}\n          NEXTEST_TEST_THREADS: \"1\""
+    ));
+    assert!(ci.contains("\"--jobs\",\"2\",\"--baseline\",\"run\""));
+    assert!(ci.contains("\"--test-workspace\",\"false\",\"--timeout\",\"180\""));
+    assert_eq!(ci.matches("mutation_base_sha:").count(), 2);
+    assert!(ci.contains("workflow_dispatch:\n    inputs:\n      mutation_base_sha:"));
+    assert!(changed_mutation.contains("CALLED_BASE_SHA: ${{ inputs.mutation_base_sha }}"));
+    assert!(changed_mutation.contains("if [[ -n \"$CALLED_BASE_SHA\" ]]; then"));
+    assert!(changed_mutation.contains("if (( candidate_count == 0 )); then"));
+    assert!(changed_mutation.contains("cargo-mutants produced an incomplete native result"));
+    assert!(changed_mutation.contains("cargo_mutants_version:\"27.1.0\""));
+    assert!(!changed_mutation.contains("cargo-mutants omitted native output"));
+    assert!(!changed_mutation.contains("^crates/[^/]+/src/(.*/)?[^/]+\\.rs$"));
+    assert!(!changed_mutation.contains("cargo mutants || true"));
+}
+
+#[test]
+fn full_mutation_shards_prefetch_and_validate_workspace_baseline() {
+    let root = assert_ok!(workspace_root());
+    let mutation = assert_ok!(read_text(&assert_ok!(
+        root.input(".github/workflows/05-full-mutation.yml")
+    )));
+    let job_start = assert_ok!(required_text_position(&mutation, "  mutation-shard:\n"));
+    let job_end = job_start
+        + assert_ok!(required_text_position(
+            &mutation[job_start..],
+            "  aggregate:\n",
+        ));
+    let shard = &mutation[job_start..job_end];
+    let dependency_fetch = assert_ok!(required_text_position(
+        shard,
+        "        run: cargo fetch --locked"
+    ));
+    let prepare_evidence = assert_ok!(required_text_position(
+        shard,
+        "      - name: Prepare shard evidence"
+    ));
+    let workspace_baseline = assert_ok!(required_text_position(
+        shard,
+        "          cargo nextest run \\\n            --workspace \\\n            --all-features \\\n            --locked \\\n            --profile mutants \\\n            --no-tests=fail 2>&1"
+    ));
+    let mutation_execution =
+        assert_ok!(required_text_position(shard, "          cargo mutants \\"));
+    assert!(dependency_fetch < prepare_evidence);
+    assert!(prepare_evidence < workspace_baseline);
+    assert!(workspace_baseline < mutation_execution);
+    assert_eq!(shard.matches("cargo fetch --locked").count(), 1);
+    assert_eq!(shard.matches("cargo nextest run \\").count(), 1);
+    assert_eq!(shard.matches("cargo mutants \\").count(), 1);
+    assert!(shard.contains("workspace-baseline.log"));
 }
 
 /// Ensure every completed Rust task command runs one real test rather than succeeding with zero tests.

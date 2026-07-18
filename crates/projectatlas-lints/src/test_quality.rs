@@ -3234,6 +3234,15 @@ impl NextestCounts {
     }
 }
 
+/// Derive the runnable test count without allowing inconsistent inventory counts.
+fn nextest_runnable_test_count(listed: u64, ignored: u64) -> Result<u64, QualityError> {
+    listed.checked_sub(ignored).ok_or_else(|| {
+        QualityError::Evidence(format!(
+            "nextest ignored count {ignored} exceeds listed count {listed}"
+        ))
+    })
+}
+
 /// Validate nextest evidence against its repository contract.
 fn validate_nextest_evidence(
     inventory: &NativeNextestInventory,
@@ -3273,11 +3282,25 @@ fn validate_nextest_evidence(
             inventory.test_count
         )));
     }
+    let runnable = nextest_runnable_test_count(listed, ignored)?;
+    if runnable == 0 {
+        return Err(QualityError::Status {
+            status: QualityStatus::NoTests,
+            message: "nextest inventory contains no runnable tests".to_string(),
+        });
+    }
     let junit = parse_junit(junit_path)?;
-    let expected_suites = usize_to_u64(inventory.rust_suites.len())?;
-    if junit.tests != listed
-        || junit.suites != expected_suites
-        || junit.ignored != ignored
+    let listed_suites = usize_to_u64(inventory.rust_suites.len())?;
+    let runnable_suites = usize_to_u64(
+        inventory
+            .rust_suites
+            .values()
+            .filter(|suite| suite.testcases.values().any(|case| !case.ignored))
+            .count(),
+    )?;
+    if junit.tests != runnable
+        || junit.suites != runnable_suites
+        || junit.ignored != 0
         || junit.failed != 0
         || junit.errors != 0
         || junit.timed_out != 0
@@ -3285,7 +3308,7 @@ fn validate_nextest_evidence(
         return Err(QualityError::Status {
             status: QualityStatus::TestFailure,
             message: format!(
-                "nextest/JUnit reconciliation failed: inventory {listed}/{expected_suites}/{ignored}, JUnit {}/{}/{} with {} failures, {} errors, {} timeouts",
+                "nextest/JUnit reconciliation failed: inventory {listed} listed/{runnable} runnable/{listed_suites} listed suites/{runnable_suites} runnable suites/{ignored} ignored, JUnit {}/{}/{} with {} failures, {} errors, {} timeouts",
                 junit.tests,
                 junit.suites,
                 junit.ignored,
@@ -3295,7 +3318,12 @@ fn validate_nextest_evidence(
             ),
         });
     }
-    Ok(junit)
+    Ok(NextestCounts {
+        tests: runnable,
+        suites: listed_suites,
+        ignored,
+        ..junit
+    })
 }
 
 /// Parse junit from retained evidence.
