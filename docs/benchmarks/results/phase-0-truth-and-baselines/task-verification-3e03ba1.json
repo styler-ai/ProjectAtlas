@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "projectatlas_task_verification_run",
+  "change": "advance-rust-repository-intelligence",
+  "tested_commit": "3e03ba1be9528b4c2a1aaa70ca3bc7e03f84d669",
+  "platform": {
+    "os": "windows",
+    "arch": "x64"
+  },
+  "started_at": "2026-07-17T23:54:37.000Z",
+  "completed_at": "2026-07-18T01:06:18.000Z",
+  "result_count": 1,
+  "passed_count": 1,
+  "results": [
+    {
+      "task_id": "4.23",
+      "test_id": "UT:ARRI-4.23",
+      "command": {
+        "executable": "cargo",
+        "arguments": [
+          "test",
+          "--release",
+          "--locked",
+          "--all-features",
+          "--all-targets",
+          "-p",
+          "projectatlas-cli",
+          "task_arri_ut_arri_4_23",
+          "--",
+          "--include-ignored",
+          "--nocapture"
+        ]
+      },
+      "timeout_seconds": 7200,
+      "started_at": "2026-07-17T23:54:37.000Z",
+      "completed_at": "2026-07-18T01:06:18.000Z",
+      "outcome": "passed",
+      "exit_code": 0,
+      "timed_out": false,
+      "executed_test_count": 7,
+      "output_digest": "sha256:cdd5be6225fd83565f4041418011dd092f07bd9de747949aba94fea9c8c2b51b"
+    }
+  ]
+}

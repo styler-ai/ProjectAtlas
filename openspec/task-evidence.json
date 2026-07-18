@@ -1238,6 +1238,118 @@
     },
     {
       "change": "advance-rust-repository-intelligence",
+      "task_id": "4.23",
+      "test_id": "UT:ARRI-4.23",
+      "outcome": "passed",
+      "tested_commit": "3e03ba1be9528b4c2a1aaa70ca3bc7e03f84d669",
+      "covered_input_digest": "sha256:75602c688ead6a920696230480b67bac686d8ece4a5ca7e6e957ffb488702c46",
+      "platform": {"os": "windows", "arch": "x64"},
+      "started_at": "2026-07-17T23:54:37.000Z",
+      "completed_at": "2026-07-18T01:06:18.000Z",
+      "retained_result": {
+        "kind": "repository",
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-3e03ba1.json",
+        "result_digest": "sha256:b6784a9329090532204245595fd12161819019d386376005c3d3a5bfa004fbb0"
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "5.1",
+      "test_id": "UT:ARRI-5.1",
+      "outcome": "passed",
+      "tested_commit": "a3df8d00281c90c6141a9fde7c3666c2d4a42bd6",
+      "covered_input_digest": "sha256:1581a10ea359d2a1f3f4ed758e7ca62b1c9d68a288b0113a70978ab77a7da9b7",
+      "platform": {"os": "windows", "arch": "x64"},
+      "started_at": "2026-07-18T01:19:26.420Z",
+      "completed_at": "2026-07-18T01:19:43.925Z",
+      "retained_result": {
+        "kind": "repository",
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-a3df8d0.json",
+        "result_digest": "sha256:f29a822de7aedc45346ffa7d157d406f19d3d1b1cbcba39ee6db51df4f43708a"
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "5.2",
+      "test_id": "UT:ARRI-5.2",
+      "outcome": "passed",
+      "tested_commit": "a3df8d00281c90c6141a9fde7c3666c2d4a42bd6",
+      "covered_input_digest": "sha256:20b759b8280c4617cfd6a5228d35baa0c0901e3d6067dce500e322226e1c62fe",
+      "platform": {"os": "windows", "arch": "x64"},
+      "started_at": "2026-07-18T01:19:54.779Z",
+      "completed_at": "2026-07-18T01:20:41.870Z",
+      "retained_result": {
+        "kind": "repository",
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-a3df8d0.json",
+        "result_digest": "sha256:f29a822de7aedc45346ffa7d157d406f19d3d1b1cbcba39ee6db51df4f43708a"
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "5.3",
+      "test_id": "UT:ARRI-5.3",
+      "outcome": "passed",
+      "tested_commit": "a3df8d00281c90c6141a9fde7c3666c2d4a42bd6",
+      "covered_input_digest": "sha256:a05f7a2da813dc69d73d01ab353cae129d72bb1ff9fa102a3e33e46539f78c64",
+      "platform": {"os": "windows", "arch": "x64"},
+      "started_at": "2026-07-18T01:20:57.579Z",
+      "completed_at": "2026-07-18T01:20:59.734Z",
+      "retained_result": {
+        "kind": "repository",
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-a3df8d0.json",
+        "result_digest": "sha256:f29a822de7aedc45346ffa7d157d406f19d3d1b1cbcba39ee6db51df4f43708a"
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "5.4",
+      "test_id": "UT:ARRI-5.4",
+      "outcome": "passed",
+      "tested_commit": "a3df8d00281c90c6141a9fde7c3666c2d4a42bd6",
+      "covered_input_digest": "sha256:11a1771289ec5f8f5e95b6b1f37170546eee6ca0466febb5d536b14b73c95c41",
+      "platform": {"os": "windows", "arch": "x64"},
+      "started_at": "2026-07-18T01:21:06.595Z",
+      "completed_at": "2026-07-18T01:21:47.434Z",
+      "retained_result": {
+        "kind": "repository",
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-a3df8d0.json",
+        "result_digest": "sha256:f29a822de7aedc45346ffa7d157d406f19d3d1b1cbcba39ee6db51df4f43708a"
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "5.6",
+      "test_id": "UT:ARRI-5.6",
+      "outcome": "passed",
+      "tested_commit": "a3df8d00281c90c6141a9fde7c3666c2d4a42bd6",
+      "covered_input_digest": "sha256:566175152ef326df077d125dd3418cbc72724076532dccadb2182822b374720a",
+      "platform": {"os": "windows", "arch": "x64"},
+      "started_at": "2026-07-18T01:21:54.240Z",
+      "completed_at": "2026-07-18T01:21:57.818Z",
+      "retained_result": {
+        "kind": "repository",
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-a3df8d0.json",
+        "result_digest": "sha256:f29a822de7aedc45346ffa7d157d406f19d3d1b1cbcba39ee6db51df4f43708a"
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
+      "task_id": "5.16",
+      "test_id": "UT:ARRI-5.16",
+      "outcome": "passed",
+      "tested_commit": "a3df8d00281c90c6141a9fde7c3666c2d4a42bd6",
+      "covered_input_digest": "sha256:0ae411a0c92f7bb29c6cd9725f0f297228d1ccd8869c7c44a735203f184b895f",
+      "platform": {"os": "windows", "arch": "x64"},
+      "started_at": "2026-07-18T01:22:06.208Z",
+      "completed_at": "2026-07-18T01:22:08.088Z",
+      "retained_result": {
+        "kind": "repository",
+        "result_path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-a3df8d0.json",
+        "result_digest": "sha256:f29a822de7aedc45346ffa7d157d406f19d3d1b1cbcba39ee6db51df4f43708a"
+      }
+    },
+    {
+      "change": "advance-rust-repository-intelligence",
       "task_id": "7.6",
       "test_id": "UT:ARRI-7.6",
       "outcome": "passed",
