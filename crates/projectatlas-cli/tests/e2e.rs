@@ -25,6 +25,9 @@ const SRC_DIR_NAME: &str = "src";
 const TESTS_DIR_NAME: &str = "tests";
 const INSTALLER_RS_FILE_NAME: &str = "installer.rs";
 const ATLAS_DIR_NAME: &str = ".projectatlas";
+const GITHOOKS_DIR_NAME: &str = ".githooks";
+const PRE_PUSH_HOOK_FILE_NAME: &str = "pre-push";
+const OPENSPEC_DIR_NAME: &str = "openspec";
 const CODEX_CONFIG_DIR: &str = ".codex";
 const CODEX_PLUGIN_MANIFEST_DIR: &str = ".codex-plugin";
 const FAKE_CODEX_LOG_FILE: &str = "fake-codex.log";
@@ -988,7 +991,11 @@ fn repository_guidance_keeps_legacy_toon_export_optional() -> Result<(), Box<dyn
             .join("workflows")
             .join("release.yml"),
     )?;
-    let pre_push = fs::read_to_string(workspace_root.join(".githooks").join("pre-push"))?;
+    let pre_push = fs::read_to_string(
+        workspace_root
+            .join(GITHOOKS_DIR_NAME)
+            .join(PRE_PUSH_HOOK_FILE_NAME),
+    )?;
     let readme = fs::read_to_string(workspace_root.join("README.md"))?;
     let gitignore = fs::read_to_string(workspace_root.join(".gitignore"))?;
     for required in [
@@ -1234,6 +1241,173 @@ fn release_and_actions_policy_is_hardened() -> Result<(), Box<dyn Error>> {
         )
         .into());
     }
+    Ok(())
+}
+
+#[test]
+fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
+    let github = workspace_root.join(".github");
+    let workflows = github.join("workflows");
+    let issueops = fs::read_to_string(github.join("scripts").join("issue-checklists.py"))?;
+    let ci = fs::read_to_string(workflows.join("ci.yml"))?;
+    let release = fs::read_to_string(workflows.join("release.yml"))?;
+    let hook = fs::read_to_string(
+        workspace_root
+            .join(GITHOOKS_DIR_NAME)
+            .join(PRE_PUSH_HOOK_FILE_NAME),
+    )?;
+    let template = fs::read_to_string(github.join("pull_request_template.md"))?;
+    let workflow_docs = fs::read_to_string(workspace_root.join("docs").join("workflow.md"))?;
+    let toolchain = fs::read_to_string(workspace_root.join("rust-toolchain.toml"))?;
+    let issue_map = fs::read_to_string(
+        workspace_root
+            .join(OPENSPEC_DIR_NAME)
+            .join("issue-map.json"),
+    )?;
+    let tasks = fs::read_to_string(
+        workspace_root
+            .join(OPENSPEC_DIR_NAME)
+            .join("changes")
+            .join("enforce-rust-test-quality-gates")
+            .join("tasks.md"),
+    )?;
+
+    for required in [
+        "validate_unique_issue_ownership",
+        "owner_slices",
+        "visible_markdown",
+        "remote != expected",
+        "milestone_mapping_failures",
+    ] {
+        if !issueops.contains(required) {
+            return Err(io::Error::other(format!(
+                "IssueOps is missing lean checklist behavior {required:?}"
+            ))
+            .into());
+        }
+    }
+    if !issue_map.contains(r#""schema_version": 2"#)
+        || !issue_map.contains(r#""enforce-rust-test-quality-gates": 309"#)
+    {
+        return Err(io::Error::other("#309 must be mapped by the schema-2 issue map").into());
+    }
+
+    for required in [
+        "cargo fmt --all --check",
+        "cargo check --workspace --all-targets --all-features --locked",
+        "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+        "cargo test --workspace --all-features --locked",
+        "cargo test --doc --workspace --all-features --locked",
+        "RUSTDOCFLAGS=\"-D warnings\" cargo doc --workspace --no-deps --all-features --locked",
+        "cargo deny check",
+        "issue-checklists.py --self-test",
+    ] {
+        if !hook.contains(required) || !workflow_docs.contains(required) {
+            return Err(io::Error::other(format!(
+                "hook and workflow docs must share ordinary gate {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "cargo fmt --all --check",
+        "cargo check --workspace --all-targets --all-features --locked",
+        "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+        "cargo test --workspace --all-features --locked",
+        "cargo test --doc --workspace --all-features --locked",
+        "cargo deny check",
+        "--issue-map openspec/issue-map.json",
+    ] {
+        if !ci.contains(required) {
+            return Err(io::Error::other(format!(
+                "ordinary CI is missing blocking gate {required:?}"
+            ))
+            .into());
+        }
+    }
+    let checklist_step = ci
+        .split("- name: Issue checklist check")
+        .nth(1)
+        .and_then(|tail| tail.split("- name:").next())
+        .ok_or_else(|| io::Error::other("ordinary IssueOps step is missing"))?;
+    if checklist_step.contains("--milestone") {
+        return Err(io::Error::other(
+            "ordinary pull requests must not require full milestone completion",
+        )
+        .into());
+    }
+    if !release.contains("--milestone \"${RELEASE_VERSION}-00\"")
+        || !release.contains("cargo fmt --all --check")
+    {
+        return Err(io::Error::other(
+            "release must retain milestone completion and ordinary quality gates",
+        )
+        .into());
+    }
+
+    if !template.contains("Refs #NNN")
+        || !template.contains("Use `Closes #NNN` only when this pull request completes the issue.")
+        || template.contains("every OpenSpec task is checked off before merge")
+    {
+        return Err(io::Error::other(
+            "pull request template must allow meaningful incremental dev slices",
+        )
+        .into());
+    }
+    if !toolchain.contains("channel = \"1.93.1\"") {
+        return Err(io::Error::other("Rust toolchain must be repository-owned and pinned").into());
+    }
+
+    let rejected_terms = [
+        "TQG-UT",
+        "OpenSpec-Task:",
+        "task-verification",
+        "task-evidence",
+        "cargo nextest",
+        "cargo llvm-cov",
+        "cargo mutants",
+        "issue sealing",
+    ];
+    for (name, content) in [
+        ("CI", ci.as_str()),
+        ("hook", hook.as_str()),
+        ("PR template", template.as_str()),
+    ] {
+        for rejected in rejected_terms {
+            if content.contains(rejected) {
+                return Err(io::Error::other(format!(
+                    "{name} retains rejected evidence ceremony {rejected:?}"
+                ))
+                .into());
+            }
+        }
+    }
+    if tasks.contains("TQG-UT") || tasks.contains("[UT:") {
+        return Err(io::Error::other(
+            "OpenSpec tasks must not assign one test identifier per task",
+        )
+        .into());
+    }
+    for removed in [
+        ".cargo/mutants.toml",
+        ".config/nextest.toml",
+        ".github/workflows/05-full-mutation.yml",
+        ".github/workflows/06-task-evidence-render.yml",
+        ".github/workflows/07-quality-failure-smoke.yml",
+        "openspec/task-evidence.json",
+        "openspec/task-verification-plan.json",
+        "openspec/task-verification.json",
+        "test-quality.toml",
+    ] {
+        if workspace_root.join(removed).exists() {
+            return Err(io::Error::other(format!(
+                "rejected evidence artifact still exists: {removed}"
+            ))
+            .into());
+        }
+    }
+
     Ok(())
 }
 

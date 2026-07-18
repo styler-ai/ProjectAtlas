@@ -32,16 +32,34 @@ symbol-level slices matter.
 Run the full local check suite with Cargo:
 
 ```bash
-cargo fmt --check
-cargo check --workspace --all-targets --all-features
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
-cargo test --doc --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
-cargo run -p projectatlas-cli -- --format json scan .
-cargo run -p projectatlas-cli -- purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply
-cargo run -p projectatlas-cli -- lint --report-untracked --purpose-level strict
+cargo fmt --all --check
+cargo check --workspace --all-targets --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
+cargo test --doc --workspace --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
+cargo deny check
+python3 .github/scripts/issue-checklists.py --self-test
+python3 .github/scripts/issue-checklists.py --repo "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" --root . --issue-map openspec/issue-map.json
+cargo run --locked -p projectatlas-cli -- --format json scan .
+cargo run --locked -p projectatlas-cli -- purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply
+cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level strict
 ```
+
+## Lean implementation and IssueOps
+
+ProjectAtlas uses the implementation loop that produced v0.3.26:
+
+1. Implement a meaningful compiling behavior slice.
+2. Add or update the smallest focused unit, integration, E2E, smoke, or validation test appropriate to the risk. One coherent test may cover several related tasks.
+3. Run the ordinary locked Rust/workspace gates.
+4. Commit and integrate significant working slices into `dev`.
+5. Use normal CI and review, then synchronize the local OpenSpec checklist with its mapped GitHub issue.
+
+Task completion does not require unique test identifiers, task-level verification plans or ledgers, commit receipts, rendered evidence comments, hosted links per checkbox, or post-merge issue sealing. GitHub Actions already records the commit and outcome of the normal checks.
+
+Ordinary pull requests require exact local/GitHub checklist synchronization but do not require the whole release milestone to be complete. Full milestone checklist completion is a release-only gate. SHA-pinned Actions, locked Cargo commands, least privilege, parser/package/signature/digest validation, release checksums, and other executable integrity controls remain independent of task bookkeeping.
 
 ## Issue hygiene
 
@@ -79,6 +97,8 @@ cargo run -p projectatlas-cli -- lint --report-untracked --purpose-level strict
 - `projectatlas lint` checks purpose/header health, non-source declarations, and untracked files; it does not require or validate the optional compatibility TOON export.
 - `projectatlas lint --purpose-level low` is the default first-pass agent gate: stale, duplicate, and repeated temporary-folder findings fail, while missing/suggested/agent-review purpose curation for folders plus high-impact files remains advisory. Use `projectatlas purpose queue` for the actionable curation list, `--purpose-level medium` when all source files must be agent-reviewed, and `--purpose-level strict` only when every indexed file and folder must be agent-reviewed.
 - PRs must reference a GitHub issue and have a milestone.
+- Ordinary PRs may reference an issue without closing it; use `Closes #NNN` only when the issue's complete checklist is ready to close.
+- Active OpenSpec task lists must be mapped in `openspec/issue-map.json`, and their authoritative GitHub task sections must exactly mirror local text, order, ownership, and checked state.
 - CI can be run manually via `workflow_dispatch` when checks do not auto-trigger.
 
 Environment toggles:

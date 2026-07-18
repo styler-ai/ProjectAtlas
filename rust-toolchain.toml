@@ -1,0 +1,6 @@
+# Purpose: Pin the Rust toolchain and components used by ProjectAtlas builds and generators.
+
+[toolchain]
+channel = "1.93.1"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

@@ -1,4 +1,5 @@
 {
+  "schema_version": 2,
   "changes": {
     "add-agent-session-brief": 292,
     "add-mcp-task-progress-model": 295,
@@ -7,6 +8,7 @@
     "converge-claude-code-installer": 278,
     "converge-opencode-installer": 279,
     "delegate-bulk-purpose-curation": 301,
+    "enforce-rust-test-quality-gates": 309,
     "expose-mcp-capabilities-settings": 293,
     "gate-codex-pr-review-threads": 299,
     "harden-project-path-types": 294,

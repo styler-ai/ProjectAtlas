@@ -20,6 +20,7 @@ permissions:
 
 env:
   RELEASE_VERSION: ${{ inputs.version }}
+  RUSTUP_TOOLCHAIN: "1.93.1"
 
 jobs:
   verify:
@@ -31,8 +32,8 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal --component clippy,rustfmt
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
@@ -40,7 +41,7 @@ jobs:
           tool: cargo-deny
 
       - name: Format
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Check
         run: cargo check --workspace --all-targets --all-features --locked
@@ -142,8 +143,8 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Build
         run: cargo build --locked -p projectatlas-cli --release
@@ -177,8 +178,8 @@ jobs:
       - name: Setup Rust
         shell: pwsh
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "$env:RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$env:RUSTUP_TOOLCHAIN"
 
       - name: Build
         shell: pwsh
