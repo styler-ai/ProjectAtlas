@@ -38,8 +38,8 @@ toon-format.workspace = true
 yaml-rust2.workspace = true
 
 [dev-dependencies]
-assert_cmd = "2.0"
-predicates = "3.1"
+assert_cmd.workspace = true
+predicates.workspace = true
 rmcp = { workspace = true, features = ["client"] }
 serde_json.workspace = true
 sha2.workspace = true

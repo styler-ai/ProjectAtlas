@@ -39,13 +39,38 @@ cargo test --workspace --all-features --locked
 cargo test --doc --workspace --all-features --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
-cargo deny check
+cargo deny --locked --all-features check -D warnings
 python3 .github/scripts/issue-checklists.py --self-test
 python3 .github/scripts/issue-checklists.py --repo "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" --root . --issue-map openspec/issue-map.json
 cargo run --locked -p projectatlas-cli -- --format json scan .
 cargo run --locked -p projectatlas-cli -- purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply
 cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level strict
 ```
+
+## Rust dependency management
+
+The root `[workspace.dependencies]` table owns every direct dependency version used by the seven ProjectAtlas workspace crates. Member manifests inherit those entries with `workspace = true`; fixture manifests remain independent because they model repositories ProjectAtlas scans rather than packages ProjectAtlas builds.
+
+Use Cargo and the committed `Cargo.lock` as the complete dependency inventory:
+
+```bash
+cargo metadata --locked --offline --format-version 1
+cargo tree --workspace --all-features --locked
+cargo tree --duplicates --workspace --all-features --locked
+cargo deny --locked --all-features check -D warnings
+```
+
+The offline metadata command is a deterministic inspection step after the normal locked fetch or build path. It is not a network bootstrap command, and its output is not committed as a second dependency ledger.
+
+For a bounded manual update or Dependabot review:
+
+1. Trace ownership with `cargo tree -i <crate> --workspace --all-features --locked`.
+2. Change the version once in root `[workspace.dependencies]`, or run `cargo update -p <crate> --precise <version>` when only the lockfile resolution changes.
+3. Review `git diff -- Cargo.toml Cargo.lock` and every affected member manifest.
+4. Check the repository Rust toolchain and the dependency's MSRV, default and added features, license, advisories, registry or Git source, duplicate paths, upstream changelog, and breaking changes.
+5. Run the focused repository-policy E2E test, the dependency inventory and deny commands above, and the ordinary locked workspace gates.
+
+Weekly Cargo and GitHub Actions Dependabot updates target `dev`; only Cargo minor and patch updates are grouped, majors remain separate, and no repository automation merges them. Configuration merged only into `dev` is validated but does not become hosted-active until the later normal verified integration into the default branch. GitHub may originate a security-update pull request against the default branch; leave it unmerged until the same dependency change has been routed through and proven on `dev`.
 
 ## Lean implementation and IssueOps
 

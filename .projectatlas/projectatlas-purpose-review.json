@@ -1307,6 +1307,38 @@
     {
       "path": "openspec/changes/fix-token-tui-reference-visual-regression/tasks.md",
       "purpose": "Implementation and verification checklist for Token Impact TUI reference visual regression fixes."
+    },
+    {
+      "path": "openspec/changes/centralize-cargo-dependency-management",
+      "purpose": "OpenSpec change package for centralized Cargo dependency ownership, automation, and policy."
+    },
+    {
+      "path": "openspec/changes/centralize-cargo-dependency-management/specs",
+      "purpose": "Spec delta folder for centralized Rust dependency management requirements."
+    },
+    {
+      "path": "openspec/changes/centralize-cargo-dependency-management/specs/rust-dependency-management",
+      "purpose": "Requirement delta folder for centralized Rust dependency ownership, updates, and policy enforcement."
+    },
+    {
+      "path": "openspec/changes/centralize-cargo-dependency-management/.openspec.yaml",
+      "purpose": "OpenSpec change metadata for centralized Cargo dependency management."
+    },
+    {
+      "path": "openspec/changes/centralize-cargo-dependency-management/design.md",
+      "purpose": "Design rationale and trade-offs for Cargo-native dependency ownership, inventory, updates, and policy."
+    },
+    {
+      "path": "openspec/changes/centralize-cargo-dependency-management/proposal.md",
+      "purpose": "Proposal for centralized Cargo dependency ownership, automated updates, and policy enforcement."
+    },
+    {
+      "path": "openspec/changes/centralize-cargo-dependency-management/specs/rust-dependency-management/spec.md",
+      "purpose": "Specifies requirements for Cargo dependency ownership, inventory, automated updates, and fail-closed policy."
+    },
+    {
+      "path": "openspec/changes/centralize-cargo-dependency-management/tasks.md",
+      "purpose": "Implementation and verification checklist for centralized Cargo dependency management."
     }
   ]
 }
