@@ -1,6 +1,10 @@
+# Purpose: Document ProjectAtlas TOON response and optional compatibility export format.
+
 # TOON Output Format
 
-ProjectAtlas writes a `atlas.toon` snapshot with these sections:
+ProjectAtlas can write an optional compatibility TOON snapshot at `.projectatlas/projectatlas.toon` with these sections. ProjectAtlas 3's durable source of truth is `.projectatlas/projectatlas.db`; TOON remains the compact MCP/CLI response and explicit export format.
+
+The map snapshot is a compatibility artifact for older map/import workflows and should not be committed as the primary atlas. Agent-facing CLI/MCP payloads use official TOON-compatible text, and TOON fixtures are decoded with the `toon-format` crate in tests. The compatibility map writer keeps a local row reader/writer only to preserve backward-compatible atlas snapshots and must keep escaping/round-trip coverage when the row schema changes.
 
 ```
 version: 1
@@ -15,10 +19,10 @@ exclude_dir_names[]:
   - .git
 exclude_path_prefixes[]:
   - docs/generated
-folders[3]{path,summary,source}:
+folders[3]{path,folder_purpose,source}:
   .,Project root,purpose
-files[4]{path,summary,source}:
-  src/main.py,Main entry,header
+files[4]{path,file_purpose,content_summary,source}:
+  src/main.py,Main entry,Python application entry point,header
 folder_summary_duplicates[]:
   - Shared utils :: src/utils | app/utils
 file_summary_duplicates[]:
@@ -32,12 +36,14 @@ Sections are stable so agents can scan quickly and tooling can diff.
 
 ## Overview fields
 
-- `tracked_source_files` counts files scanned for Purpose headers (source extensions).
-- `tracked_nonsource_files` counts entries supplied by `projectatlas-nonsource-files.toon`.
+- `tracked_source_files` counts indexed source files.
+- `tracked_nonsource_files` counts imported non-source summary entries and indexed non-source records.
 - `tracked_files_total` is the combined total shown in `files[]`.
 - The remaining fields (`tracked_folders`, `source_extensions`, `exclude_*`) describe the scan surface.
 
 ## Non-source list
 
-The generated atlas merges the manual `.projectatlas/projectatlas-nonsource-files.toon` entries into `files[]`
-so the snapshot stays complete without forcing headers into formats that cannot safely accept them.
+The generated atlas can merge `.projectatlas/projectatlas-nonsource-files.toon` entries into `files[]`
+for compatibility. New ProjectAtlas 3 workflows should prefer SQLite `folder_purpose` and
+`file_purpose` records, plus deterministic `content_summary` values from `projectatlas summary`
+or `atlas_file_summary`.

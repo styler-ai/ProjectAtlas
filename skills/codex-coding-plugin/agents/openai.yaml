@@ -1,0 +1,4 @@
+interface:
+  display_name: "ProjectAtlas Plugin Integration"
+  short_description: "Keep ProjectAtlas Codex, Claude Code, and OpenCode integration stable"
+  default_prompt: "Use $codex-coding-plugin to design or review ProjectAtlas plugin/runtime installers, MCP configs, host update flows, stale-cache repair, and release smoke tests."

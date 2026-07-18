@@ -1,0 +1,70 @@
+name: Chore
+description: Track ProjectAtlas maintenance, CI, release, installer, or repository policy work.
+title: "chore: "
+labels:
+  - type:chore
+  - priority:medium
+  - status:ready
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for planned maintenance work that is not a bug report or product feature request.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What maintenance or policy work is needed?
+      placeholder: "Add a PR gate for unresolved GitHub Codex review threads..."
+    validations:
+      required: true
+  - type: textarea
+    id: reason
+    attributes:
+      label: Reason
+      description: Why does this need to change?
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      options:
+        - CI / GitHub Actions
+        - Release process
+        - Plugin installer
+        - Repository policy
+        - Documentation
+        - Tests
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: What must be true before this can close?
+      placeholder: |
+        - CI check fails when ...
+        - Tests cover ...
+        - Documentation updated ...
+    validations:
+      required: true
+  - type: textarea
+    id: openspec
+    attributes:
+      label: OpenSpec plan and task checklist
+      description: Maintainers or agents should fill this before planned implementation. Mirror the linked `openspec/changes/<id>/tasks.md` checklist under an `OpenSpec Tasks` heading before closing or releasing.
+      value: |
+        OpenSpec change: _to be assigned_
+
+        ## OpenSpec Tasks
+
+        <!-- Mirror tasks from `openspec/changes/<id>/tasks.md` here before implementation. -->
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed secrets, tokens, private repository names, and private filesystem paths from this issue.
+          required: true

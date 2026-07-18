@@ -1,3 +1,5 @@
+# Purpose: Guide teams through adopting ProjectAtlas in an existing repository.
+
 # Adoption Checklist
 
 Use this checklist when adding ProjectAtlas to an existing repo.
@@ -5,68 +7,80 @@ Use this checklist when adding ProjectAtlas to an existing repo.
 ## 1. Install
 
 ```bash
-pip install -e .
+cargo install --path crates/projectatlas-cli --locked
 ```
 
 ## 2. Initialize
 
 ```bash
-projectatlas init --seed-purpose
+projectatlas init
 ```
 
-`projectatlas init` auto-detects repo languages to seed `scan.source_extensions` and `purpose.styles_by_extension`.
-Use `--no-detect-languages` to keep the static template.
+Run this from the project root. ProjectAtlas 3 stores one durable index per project at `.projectatlas/projectatlas.db`.
+`projectatlas init` also runs the initial scan/index and writes generated MCP configs under `.projectatlas/`.
+Legacy `.purpose` files are migration input only; new purpose records should be stored with `projectatlas purpose set`.
 
-## 3. Fill folder summaries
+## 3. Inspect or refresh the atlas
 
-- Add a one-line summary to every `.purpose` file.
-- Keep summaries short and single-line.
+```bash
+projectatlas overview
+projectatlas folders <query>
+projectatlas files <query> --folder <path>
+projectatlas files --file-pattern <glob>
+projectatlas summary <file> --limit 25
+```
 
-## 4. Add Purpose headers
+ProjectAtlas 3 stores durable index state in `.projectatlas/projectatlas.db`.
+Run `projectatlas scan` later when you need an explicit refresh after file changes and no watcher is running.
+Legacy `.purpose` files are migration input, not the final storage model.
 
-Add a `Purpose:` header to every tracked source file using the configured comment style.
-Python modules should use a module docstring with `Purpose:`.
+## 4. Add or import purpose summaries
+
+Use `projectatlas purpose set <path> <purpose>` for explicit purpose records.
+Legacy Purpose headers and `.purpose` files are still imported during migration, but lint no longer requires or enforces them.
 
 ## 5. Track non-source files
 
 Add summaries for non-source files in `.projectatlas/projectatlas-nonsource-files.toon` (agent-maintained input).
 
-## 6. Generate the map
+## 6. Optional compatibility map export
 
 ```bash
-projectatlas map
+projectatlas map --force
 ```
+
+Skip this step unless an older integration still reads `.projectatlas/projectatlas.toon`.
 
 ## 7. Lint
 
 ```bash
-projectatlas lint --strict-folders --report-untracked
+projectatlas lint --report-untracked --purpose-level low
 ```
 
 ## 8. Wire into local scripts
 
-Example `package.json`:
+Example recurring refresh target after first-run init:
 
-```json
-{
-  "scripts": {
-    "projectatlas:map": "projectatlas map",
-    "projectatlas:lint": "projectatlas lint --strict-folders --report-untracked"
-  }
-}
+```bash
+projectatlas scan
+projectatlas lint --report-untracked --purpose-level low
 ```
 
 Example `Makefile`:
 
 ```makefile
-projectatlas-map:
-	@projectatlas map
+projectatlas-check:
+	@projectatlas scan
+	@projectatlas lint --report-untracked --purpose-level low
 
-projectatlas-lint:
-	@projectatlas lint --strict-folders --report-untracked
+projectatlas-export-map:
+	@projectatlas map --force
 ```
+
+Keep `projectatlas-export-map` opt-in for older integrations only; normal agent workflows should use the SQLite index.
 
 ## 9. Agent setup
 
 - Add the startup snippet from `templates/AGENTS.md` to your `AGENTS.md`.
-- Copy the Codex skill to `~/.codex/skills/ProjectAtlas.md` if you use Codex.
+- Install the ProjectAtlas plugin skill or copy public guidance from this repository's docs. Keep personal
+  workspace memory local and ignored through `.gitignore`.

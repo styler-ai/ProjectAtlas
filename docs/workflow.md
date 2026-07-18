@@ -1,26 +1,65 @@
+# Purpose: Document ProjectAtlas local workflow troubleshooting and verification commands.
+
 # Workflow and Troubleshooting
 
-ProjectAtlas is designed to run locally and produce a deterministic map.
+ProjectAtlas is designed to run locally with a project-local SQLite atlas and optional TOON exports.
 
 ## Recommended workflow
 
-1. `projectatlas init --seed-purpose` (first-time setup).
-2. Add Purpose headers to new source files.
-3. Add or update `.purpose` summaries for new folders.
-4. Run `projectatlas map`.
-5. Run `projectatlas lint --strict-folders --report-untracked`.
-6. Open a PR that references the GitHub issue (CI requires `#NNN` in title or body).
-7. Commit map updates and any Purpose changes.
-8. Install git hooks with `python scripts/install_hooks.py` to enforce issue references in commit messages.
-   - The pre-push hook runs `python scripts/check_all.py` to validate map/lint/tests/build.
+1. `projectatlas init` (first-time setup, initial scan/index, generated MCP configs, and purpose handoff).
+2. Run `projectatlas scan` or `projectatlas watch --once` later when you need to refresh the SQLite index.
+3. Run `projectatlas config --print` when effective scan, purpose, or exclusion policy is unclear.
+4. Run `projectatlas overview`, `projectatlas folders <query>`, and `projectatlas files <query>` before broad source reads; use `projectatlas files --file-pattern <glob>` for direct glob discovery.
+5. Run `projectatlas summary <file> --limit 25` before opening full files.
+6. Run `projectatlas outline <file>` when line-level compressed context is still needed.
+7. Run `projectatlas lint --report-untracked --purpose-level low`.
+8. Run `projectatlas map --force` only when a compatibility TOON snapshot is explicitly needed.
+9. Open a PR that references the GitHub issue (CI requires `#NNN` in title or body).
+10. Install git hooks by copying or linking files from `.githooks/` into `.git/hooks/`.
+
+For long local sessions, run `projectatlas watch` from the project root. It uses event-backed `notify`
+watching with debounce/exclude handling and falls back to portable polling when the platform watcher is
+unavailable. Ordinary file edits use partial SQLite/symbol refresh; directory/root/ignore-rule events use a
+full scan for correctness. For bounded agent refreshes after edits, use `projectatlas watch --once` or MCP
+`atlas_watch_once`.
+
+Exact line slices validate the file through the atlas database, then read the current file from disk. Symbol slices
+use the stored symbol ranges, then read current disk content, so keep the watcher running during active edits if
+symbol-level slices matter.
 
 ## One-command local verification
 
-Run the full local check suite with:
+Run the full local check suite with Cargo:
 
 ```bash
-python scripts/check_all.py
+cargo fmt --all --check
+cargo check --workspace --all-targets --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
+cargo test --doc --workspace --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
+cargo deny check
+python3 .github/scripts/issue-checklists.py --self-test
+python3 .github/scripts/issue-checklists.py --repo "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" --root . --issue-map openspec/issue-map.json
+cargo run --locked -p projectatlas-cli -- --format json scan .
+cargo run --locked -p projectatlas-cli -- purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply
+cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level strict
 ```
+
+## Lean implementation and IssueOps
+
+ProjectAtlas uses the implementation loop that produced v0.3.26:
+
+1. Implement a meaningful compiling behavior slice.
+2. Add or update the smallest focused unit, integration, E2E, smoke, or validation test appropriate to the risk. One coherent test may cover several related tasks.
+3. Run the ordinary locked Rust/workspace gates.
+4. Commit and integrate significant working slices into `dev`.
+5. Use normal CI and review, then synchronize the local OpenSpec checklist with its mapped GitHub issue.
+
+Task completion does not require unique test identifiers, task-level verification plans or ledgers, commit receipts, rendered evidence comments, hosted links per checkbox, or post-merge issue sealing. GitHub Actions already records the commit and outcome of the normal checks.
+
+Ordinary pull requests require exact local/GitHub checklist synchronization but do not require the whole release milestone to be complete. Full milestone checklist completion is a release-only gate. SHA-pinned Actions, locked Cargo commands, least privilege, parser/package/signature/digest validation, release checksums, and other executable integrity controls remain independent of task bookkeeping.
 
 ## Issue hygiene
 
@@ -37,8 +76,8 @@ python scripts/check_all.py
 
 ## Documentation site
 
-- `04-Docs` publishes to the `gh-pages` branch using `mkdocs gh-deploy`.
-- GitHub Pages should be configured to serve from `gh-pages`.
+- `04-Docs` builds Rust API docs with `cargo doc` and deploys the generated `target/doc` artifact to GitHub Pages.
+- GitHub Pages should be configured for GitHub Actions deployment.
 
 ## Branching
 
@@ -46,57 +85,67 @@ python scripts/check_all.py
 - `main` for stable releases only.
 - Merge `dev` -> `main` via pull request after CI is green.
 - Ensure `dev` includes the latest `main` changes before releasing.
-- Use `python scripts/prepare_release.py --issue <NNN> --bump patch` to create a release branch and PR.
-- If `dev` is behind `main`, the script will stop unless you pass `--allow-base-divergence`.
-- Add `--post-release` to open a dev PR that bumps to the next `.dev` version.
-- Pushes to `main` create a GitHub release when the version is not a `.dev` build.
+- Update the Cargo workspace version in `Cargo.toml`.
+- Pushes to `main` create a GitHub release when the Cargo version is release-eligible.
 - The auto-release workflow generates GitHub release notes from merged PRs.
+- Release archives are published with a `SHA256SUMS` asset. Verify manually with `sha256sum -c SHA256SUMS` or `shasum -a 256 -c SHA256SUMS` from a directory containing the downloaded archives.
+- If a publish run fails after creating a tag or leaves a GitHub release with missing or stale assets, rerun the release workflow for the same version. The publish job recovers when the existing tag points at the current commit, creates the missing release when needed, and uploads release assets with replacement enabled for repair runs.
 
 ## CI behavior
 
-- `projectatlas map` skips in CI unless you pass `--force`.
-- `projectatlas lint` validates that the map is current.
-- PRs must reference a GitHub issue (`scripts/check_pr_issue_reference.py`).
+- CI uses `projectatlas init` for first-run smoke coverage, refreshes the main ProjectAtlas repo index with `projectatlas scan`, replays the reviewed purpose batch with `projectatlas purpose review`, and validates source metadata with strict `projectatlas lint`.
+- `projectatlas lint` checks purpose/header health, non-source declarations, and untracked files; it does not require or validate the optional compatibility TOON export.
+- `projectatlas lint --purpose-level low` is the default first-pass agent gate: stale, duplicate, and repeated temporary-folder findings fail, while missing/suggested/agent-review purpose curation for folders plus high-impact files remains advisory. Use `projectatlas purpose queue` for the actionable curation list, `--purpose-level medium` when all source files must be agent-reviewed, and `--purpose-level strict` only when every indexed file and folder must be agent-reviewed.
+- PRs must reference a GitHub issue and have a milestone.
+- Ordinary PRs may reference an issue without closing it; use `Closes #NNN` only when the issue's complete checklist is ready to close.
+- Active OpenSpec task lists must be mapped in `openspec/issue-map.json`, and their authoritative GitHub task sections must exactly mirror local text, order, ownership, and checked state.
 - CI can be run manually via `workflow_dispatch` when checks do not auto-trigger.
 
 Environment toggles:
 
-- `PROJECTATLAS_SKIP_UPDATE=1` skips map generation locally.
 - `PROJECTATLAS_ALLOW_UNTRACKED=1` allows local builds while still reporting untracked files.
+- `PROJECTATLAS_NO_TELEMETRY=1` runs read/orientation commands without recording usage rows in the local SQLite index.
 
 ## Troubleshooting
 
-### Map is stale
+### Optional compatibility map export
 
-If lint reports stale hashes or an overview mismatch, re-run:
+Only older integrations need a static `.projectatlas/projectatlas.toon` snapshot. Generate it explicitly:
 
 ```bash
-projectatlas map
+projectatlas map --force
 ```
 
-The `overview:` line in the atlas now reports `tracked_source_files`,
-`tracked_nonsource_files`, and `tracked_files_total` so you can see the split at a glance.
+Normal ProjectAtlas 3 agent workflows should read from `.projectatlas/projectatlas.db` through the CLI or MCP tools.
 
-### Missing Purpose headers
+### Missing or suggested purposes
 
-Add a `Purpose:` header using the comment style configured for that file extension
-(Javadoc block, block comment, or line comment). For Python, use a module docstring.
-If the file uses a different style, update `purpose.styles_by_extension` in the config.
-
-### Missing .purpose files
-
-Create a `.purpose` file in the folder and add a one-line summary. You can seed them with:
+Do not add new Purpose headers or `.purpose` files for ProjectAtlas 3. Inspect the folder/file through the atlas funnel and write the correct one-line purpose to SQLite:
 
 ```bash
-projectatlas seed-purpose
+projectatlas purpose queue --limit 20
+projectatlas purpose set <path> "<one-line purpose>"
+projectatlas purpose review --from-file reviewed-purposes.json --apply
+```
+
+The purpose queue is source-focused and folder-first by default, so binary assets, asset-only roots, and low-priority source files do not dominate the next-action list. Pass `--include-low-priority-files` only when intentionally doing broad file-purpose cleanup, and pass `--include-assets` only when intentionally curating non-source files. Generated purpose suggestions remain review-required until an agent approves or corrects them.
+
+Purpose entries live in SQLite and are preserved across normal scans and deep index refreshes. Re-scanning keeps existing reviewed purposes for unchanged paths, marks changed approved files stale for review, and deactivates deleted/excluded paths instead of recreating purpose noise. Use the purpose queue or health output to approve only new or stale entries. If a repository needs reproducible strict lint from a fresh checkout, keep a reviewed batch input in the repo and replay it with `projectatlas purpose review --apply`; do not edit the SQLite database by hand.
+
+### Legacy Purpose headers or .purpose files
+
+Legacy Purpose headers and `.purpose` files are migration inputs. Import them with `projectatlas scan`, then remove them only through an explicit migration command:
+
+```bash
+projectatlas strip-legacy-purpose --dry-run
+projectatlas strip-legacy-purpose --apply
 ```
 
 ### Untracked files
 
 Use `--report-untracked` to list non-source files. Either:
 
-- add to the non-source file list (`.projectatlas/projectatlas-nonsource-files.toon`)
-  (agent-maintained input for non-source summaries)
+- add to the SQLite purpose/index state or, for compatibility, the non-source file list (`.projectatlas/projectatlas-nonsource-files.toon`)
 - add to allowlists/exclusions
 - move into an approved asset root
 

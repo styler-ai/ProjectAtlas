@@ -1,64 +1,618 @@
+# Purpose: Promote ProjectAtlas releases with packaging installer smoke tests and release notes.
+
 name: 02-Release
 
 # /**
-#  * Purpose: Tag and validate ProjectAtlas releases.
+#  * Purpose: Validate, package, tag, and publish ProjectAtlas releases.
 #  */
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. v0.1.0)"
+        description: "Release version (e.g. v0.3.0)"
         required: true
         type: string
 
 permissions:
-  contents: write
+  contents: read
+  issues: read
+
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+  RUSTUP_TOOLCHAIN: "1.93.1"
 
 jobs:
-  release:
-    name: release
+  verify:
+    name: verify
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install
-        run: python -m pip install -e .
-
-      - name: Lint atlas
-        run: projectatlas lint --strict-folders --report-untracked
-
-      - name: Docstring check
-        run: python scripts/check_docstrings.py
-
-      - name: API docs
+      - name: Setup Rust
         run: |
-          python scripts/generate_api_docs.py
-          git diff --exit-code docs/api.md
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
+          rustup default "$RUSTUP_TOOLCHAIN"
 
-      - name: Unit tests
-        run: python -m unittest discover -s tests
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
+        with:
+          tool: cargo-deny
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Check
+        run: cargo check --workspace --all-targets --all-features --locked
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: ProjectAtlas source lints
+        timeout-minutes: 2
+        run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
+
+      - name: Dependency policy
+        run: cargo deny check
+
+      - name: Tests
+        run: cargo test --workspace --all-features --locked
+
+      - name: ProjectAtlas purpose lint levels
+        run: cargo test --locked -p projectatlas-cli lint_purpose_levels_require_agent_review_at_configured_scope --test e2e
+
+      - name: ProjectAtlas purpose preservation
+        run: cargo test --locked -p projectatlas-cli watch_once_preserves_unchanged_deep_summary_and_text_index --test e2e
+
+      - name: Doc tests
+        run: cargo test --doc --workspace --all-features --locked
+
+      - name: Rustdoc
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+
+      - name: Release notes generator self-test
+        run: python3 .github/scripts/release-notes.py --self-test
+
+      - name: Issue checklist self-test
+        run: python3 .github/scripts/issue-checklists.py --self-test
 
       - name: Verify version
-        run: python scripts/verify_version.py "${{ inputs.version }}"
-
-      - name: Build package
         run: |
-          python -m pip install build
-          python -m build --sdist --wheel
+          requested="$RELEASE_VERSION"
+          if [[ ! "$requested" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release version must match vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          requested="${requested#v}"
+          version="$(awk -F'"' '
+            /^\[workspace.package\]/ { in_workspace_package = 1; next }
+            /^\[/ { if (in_workspace_package) exit }
+            in_workspace_package && /^version = / { print $2; exit }
+          ' Cargo.toml)"
+          if [[ -z "$version" ]]; then
+            echo "Could not read workspace package version from Cargo.toml" >&2
+            exit 1
+          fi
+          if [[ "$version" != "$requested" ]]; then
+            echo "Cargo.toml version $version does not match requested $requested" >&2
+            exit 1
+          fi
 
-      - name: Install wheel
+      - name: Release issue checklist gate
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          python -m pip install dist/*.whl
-          projectatlas --help
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --milestone "${RELEASE_VERSION}-00"
 
-      - name: Create tag
+      - name: ProjectAtlas scan
+        run: cargo run --locked -p projectatlas-cli -- --format json scan .
+
+      - name: ProjectAtlas purpose review
+        run: cargo run --locked -p projectatlas-cli -- purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply
+
+      - name: ProjectAtlas parity
+        run: cargo run --locked -p projectatlas-cli -- parity report --profile repository-intelligence
+
+      - name: ProjectAtlas lint
+        run: cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level strict
+
+  package-unix:
+    name: package ${{ matrix.label }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x64
+            suffix: x86_64-unknown-linux-gnu
+          - os: macos-15-intel
+            label: macos-x64
+            suffix: x86_64-apple-darwin
+          - os: macos-14
+            label: macos-arm64
+            suffix: aarch64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Setup Rust
         run: |
-          git tag "${{ inputs.version }}"
-          git push origin "${{ inputs.version }}"
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
+
+      - name: Build
+        run: cargo build --locked -p projectatlas-cli --release
+
+      - name: Package
+        run: |
+          archive="projectatlas-${RELEASE_VERSION}-${{ matrix.suffix }}.tar.gz"
+          mkdir -p "dist/projectatlas"
+          cp target/release/projectatlas "dist/projectatlas/"
+          cp README.md LICENSE "dist/projectatlas/"
+          tar -czf "$archive" -C dist projectatlas
+          mkdir -p release-assets
+          mv "$archive" release-assets/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: projectatlas-${{ matrix.suffix }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  package-windows:
+    name: package windows-x64
+    needs: verify
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Setup Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install "$env:RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$env:RUSTUP_TOOLCHAIN"
+
+      - name: Build
+        shell: pwsh
+        run: cargo build --locked -p projectatlas-cli --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_VERSION -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+            Write-Error "Release version must match vMAJOR.MINOR.PATCH"
+            exit 1
+          }
+          $archive = "projectatlas-$($env:RELEASE_VERSION)-x86_64-pc-windows-msvc.zip"
+          New-Item -ItemType Directory -Force -Path "dist/projectatlas" | Out-Null
+          Copy-Item "target/release/projectatlas.exe" "dist/projectatlas/"
+          Copy-Item "README.md" "dist/projectatlas/"
+          Copy-Item "LICENSE" "dist/projectatlas/"
+          Compress-Archive -Path "dist/projectatlas/*" -DestinationPath $archive -Force
+          New-Item -ItemType Directory -Force -Path "release-assets" | Out-Null
+          Move-Item -LiteralPath $archive -Destination "release-assets/"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: projectatlas-x86_64-pc-windows-msvc
+          path: release-assets/*
+          if-no-files-found: error
+
+  prepublish-installer-smoke-unix:
+    name: prepublish installer smoke ${{ matrix.label }}
+    needs: package-unix
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x64-posix
+            suffix: x86_64-unknown-linux-gnu
+          - os: macos-15-intel
+            label: macos-x64-posix
+            suffix: x86_64-apple-darwin
+          - os: macos-14
+            label: macos-arm64-posix
+            suffix: aarch64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Download packaged runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: projectatlas-${{ matrix.suffix }}
+          path: release-assets
+
+      - name: Install packaged runtime through plugin
+        timeout-minutes: 5
+        env:
+          PROJECTATLAS_SUFFIX: ${{ matrix.suffix }}
+        run: |
+          archive="release-assets/projectatlas-${RELEASE_VERSION}-${PROJECTATLAS_SUFFIX}.tar.gz"
+          mkdir -p "$RUNNER_TEMP/projectatlas-prepublish"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/projectatlas-prepublish"
+          runtime="$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas"
+          chmod +x "$runtime"
+          project_root="$RUNNER_TEMP/projectatlas-installer-prepublish"
+          mkdir -p "$project_root"
+          PROJECTATLAS_VERSION="$RELEASE_VERSION" PROJECTATLAS_RUNTIME_PATH="$runtime" \
+            bash ./plugins/projectatlas/scripts/install-runtime.sh "$project_root"
+          PROJECTATLAS_NO_TELEMETRY=1 "$runtime" --require-version "$RELEASE_VERSION" --format json runtime-info
+          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$runtime" config --print)
+          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$runtime" ignore list)
+          PROJECT_ROOT="$project_root" PROJECTATLAS_RUNTIME="$runtime" python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["PROJECT_ROOT"]).resolve()
+          runtime = Path(os.environ["PROJECTATLAS_RUNTIME"]).resolve()
+          version = os.environ["RELEASE_VERSION"].lstrip("v")
+          db = (root / ".projectatlas" / "projectatlas.db").resolve()
+
+          def load(name):
+              with (root / ".projectatlas" / name).open(encoding="utf-8") as handle:
+                  return json.load(handle)
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          def require_args(args):
+              require(args[0:2] == ["--require-version", version], f"bad version args: {args}")
+              require(args[-1] == "mcp", f"mcp arg missing: {args}")
+              require("--db" in args, f"db arg missing: {args}")
+              require(Path(args[args.index("--db") + 1]).resolve() == db, f"bad db arg: {args}")
+
+          codex = load("projectatlas.mcp.json")["mcpServers"]["projectatlas"]
+          require(Path(codex["command"]).resolve() == runtime, "codex command path mismatch")
+          require_args(codex["args"])
+          require(Path(codex["cwd"]).resolve() == root, "codex cwd mismatch")
+
+          claude = load("projectatlas.claude.mcp.json")["mcpServers"]["projectatlas"]
+          require(Path(claude["command"]).resolve() == runtime, "claude command path mismatch")
+          require_args(claude["args"])
+
+          opencode = load("projectatlas.opencode.json")["mcp"]["projectatlas"]
+          command = opencode["command"]
+          require(opencode["type"] == "local" and opencode["enabled"] is True, "opencode server disabled or non-local")
+          require(Path(command[0]).resolve() == runtime, "opencode command path mismatch")
+          require_args(command[1:])
+          require(Path(opencode["cwd"]).resolve() == root, "opencode cwd mismatch")
+          PY
+
+  prepublish-installer-smoke-windows:
+    name: prepublish installer smoke windows-x64
+    needs: package-windows
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Download packaged runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: projectatlas-x86_64-pc-windows-msvc
+          path: release-assets
+
+      - name: Install packaged runtime through plugin
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $archive = Join-Path "release-assets" "projectatlas-$($env:RELEASE_VERSION)-x86_64-pc-windows-msvc.zip"
+          $extractRoot = Join-Path $env:RUNNER_TEMP "projectatlas-prepublish"
+          Expand-Archive -Path $archive -DestinationPath $extractRoot -Force
+          $runtime = Join-Path $extractRoot "projectatlas.exe"
+          $projectRoot = Join-Path $env:RUNNER_TEMP "projectatlas-installer-prepublish"
+          New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
+          .\plugins\projectatlas\scripts\install-runtime.ps1 -ProjectRoot $projectRoot -ProjectAtlasVersion $env:RELEASE_VERSION -RuntimePath $runtime
+          $env:PROJECTATLAS_NO_TELEMETRY = "1"
+          & $runtime --require-version $env:RELEASE_VERSION --format json runtime-info
+          Push-Location $projectRoot
+          try {
+            & $runtime config --print
+            & $runtime ignore list
+          } finally {
+            Pop-Location
+          }
+          $expectedRuntime = [System.IO.Path]::GetFullPath($runtime)
+          $expectedRoot = [System.IO.Path]::GetFullPath($projectRoot)
+          $expectedDb = [System.IO.Path]::GetFullPath((Join-Path $projectRoot ".projectatlas\projectatlas.db"))
+          $expectedVersion = $env:RELEASE_VERSION.TrimStart("v")
+
+          function Assert-Equal {
+            param([string]$Actual, [string]$Expected, [string]$Message)
+            if ($Actual -ne $Expected) {
+              throw "$Message. Expected '$Expected', found '$Actual'."
+            }
+          }
+
+          function Assert-McpArgs {
+            param([object[]]$McpArgs)
+            Assert-Equal $McpArgs[0] "--require-version" "Missing require-version flag"
+            Assert-Equal $McpArgs[1] $expectedVersion "Runtime version mismatch"
+            $dbIndex = [Array]::IndexOf($McpArgs, "--db")
+            if ($dbIndex -lt 0) {
+              throw "Missing --db argument."
+            }
+            Assert-Equal ([System.IO.Path]::GetFullPath($McpArgs[$dbIndex + 1])) $expectedDb "Database path mismatch"
+            Assert-Equal $McpArgs[-1] "mcp" "Missing mcp command"
+          }
+
+          $atlasDir = Join-Path $projectRoot ".projectatlas"
+          $codex = Get-Content -Raw -LiteralPath (Join-Path $atlasDir "projectatlas.mcp.json") | ConvertFrom-Json
+          $codexServer = $codex.mcpServers.projectatlas
+          Assert-Equal ([System.IO.Path]::GetFullPath($codexServer.command)) $expectedRuntime "Codex command path mismatch"
+          Assert-McpArgs @($codexServer.args)
+          Assert-Equal ([System.IO.Path]::GetFullPath($codexServer.cwd)) $expectedRoot "Codex cwd mismatch"
+
+          $claude = Get-Content -Raw -LiteralPath (Join-Path $atlasDir "projectatlas.claude.mcp.json") | ConvertFrom-Json
+          $claudeServer = $claude.mcpServers.projectatlas
+          Assert-Equal ([System.IO.Path]::GetFullPath($claudeServer.command)) $expectedRuntime "Claude command path mismatch"
+          Assert-McpArgs @($claudeServer.args)
+
+          $opencode = Get-Content -Raw -LiteralPath (Join-Path $atlasDir "projectatlas.opencode.json") | ConvertFrom-Json
+          $opencodeServer = $opencode.mcp.projectatlas
+          if ($opencodeServer.type -ne "local" -or -not $opencodeServer.enabled) {
+            throw "OpenCode server was not enabled as a local MCP server."
+          }
+          $command = @($opencodeServer.command)
+          Assert-Equal ([System.IO.Path]::GetFullPath($command[0])) $expectedRuntime "OpenCode command path mismatch"
+          Assert-McpArgs @($command[1..($command.Count - 1)])
+          Assert-Equal ([System.IO.Path]::GetFullPath($opencodeServer.cwd)) $expectedRoot "OpenCode cwd mismatch"
+
+  publish:
+    name: publish
+    needs: [prepublish-installer-smoke-unix, prepublish-installer-smoke-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: read
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Prepare release assets
+        run: |
+          if [[ ! "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release version must match vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          git fetch --tags
+          release_exists=false
+          if gh release view "$RELEASE_VERSION" >/dev/null 2>&1; then
+            release_exists=true
+            echo "Release $RELEASE_VERSION already exists; continuing asset repair publish."
+          fi
+          if git rev-parse "$RELEASE_VERSION^{commit}" >/dev/null 2>&1; then
+            tag_commit="$(git rev-parse "$RELEASE_VERSION^{commit}")"
+            head_commit="$(git rev-parse HEAD)"
+            if [[ "$tag_commit" != "$head_commit" ]]; then
+              echo "Tag $RELEASE_VERSION already points to $tag_commit, not $head_commit" >&2
+              exit 1
+            fi
+            if [[ "$release_exists" == "true" ]]; then
+              echo "Tag $RELEASE_VERSION matches the workflow commit; continuing asset repair publish."
+            else
+              echo "Tag $RELEASE_VERSION exists without a GitHub release; continuing recovery publish."
+            fi
+          elif [[ "$release_exists" == "true" ]]; then
+            echo "Release $RELEASE_VERSION exists, but its tag was not found after fetching tags" >&2
+            exit 1
+          fi
+          echo "PROJECTATLAS_RELEASE_EXISTS=$release_exists" >> "$GITHUB_ENV"
+          (
+            cd release-assets
+            mapfile -d '' assets < <(find . -maxdepth 1 -type f -name "projectatlas-${RELEASE_VERSION}-*" -printf '%f\0' | sort -z)
+            if [[ ${#assets[@]} -eq 0 ]]; then
+              echo "No release archives matched projectatlas-${RELEASE_VERSION}-*" >&2
+              exit 1
+            fi
+            : > SHA256SUMS
+            for asset in "${assets[@]}"; do
+              sha256sum "$asset" >> SHA256SUMS
+            done
+          )
+
+      - name: Create GitHub release
+        run: |
+          python3 .github/scripts/release-notes.py > release-notes.md
+          if [[ "${PROJECTATLAS_RELEASE_EXISTS:-false}" == "true" ]]; then
+            gh release upload "$RELEASE_VERSION" release-assets/* --clobber
+          else
+            gh release create "$RELEASE_VERSION" release-assets/* \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_VERSION" \
+              --notes-file release-notes.md
+          fi
+
+  installer-smoke-unix:
+    name: installer smoke ${{ matrix.label }}
+    needs: publish
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x64-posix
+            suffix: x86_64-unknown-linux-gnu
+          - os: macos-15-intel
+            label: macos-x64-posix
+            suffix: x86_64-apple-darwin
+          - os: macos-14
+            label: macos-arm64-posix
+            suffix: aarch64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Install release runtime through plugin
+        timeout-minutes: 5
+        env:
+          PROJECTATLAS_RELEASE_BINARY_ONLY: "1"
+        run: |
+          project_root="$RUNNER_TEMP/projectatlas-installer-smoke"
+          mkdir -p "$project_root"
+          PROJECTATLAS_VERSION="$RELEASE_VERSION" bash ./plugins/projectatlas/scripts/install-runtime.sh "$project_root"
+          PROJECTATLAS_NO_TELEMETRY=1 "$HOME/.local/bin/projectatlas" --require-version "$RELEASE_VERSION" --format json runtime-info
+          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$HOME/.local/bin/projectatlas" config --print)
+          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$HOME/.local/bin/projectatlas" ignore list)
+          PROJECT_ROOT="$project_root" PROJECTATLAS_RUNTIME="$HOME/.local/bin/projectatlas" python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["PROJECT_ROOT"]).resolve()
+          runtime = Path(os.environ["PROJECTATLAS_RUNTIME"]).resolve()
+          version = os.environ["RELEASE_VERSION"].lstrip("v")
+          db = (root / ".projectatlas" / "projectatlas.db").resolve()
+
+          def load(name):
+              with (root / ".projectatlas" / name).open(encoding="utf-8") as handle:
+                  return json.load(handle)
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          def require_args(args):
+              require(args[0:2] == ["--require-version", version], f"bad version args: {args}")
+              require(args[-1] == "mcp", f"mcp arg missing: {args}")
+              require("--db" in args, f"db arg missing: {args}")
+              require(Path(args[args.index("--db") + 1]).resolve() == db, f"bad db arg: {args}")
+
+          codex = load("projectatlas.mcp.json")["mcpServers"]["projectatlas"]
+          require(Path(codex["command"]).resolve() == runtime, "codex command path mismatch")
+          require_args(codex["args"])
+          require(Path(codex["cwd"]).resolve() == root, "codex cwd mismatch")
+
+          claude = load("projectatlas.claude.mcp.json")["mcpServers"]["projectatlas"]
+          require(Path(claude["command"]).resolve() == runtime, "claude command path mismatch")
+          require_args(claude["args"])
+
+          opencode = load("projectatlas.opencode.json")["mcp"]["projectatlas"]
+          command = opencode["command"]
+          require(opencode["type"] == "local" and opencode["enabled"] is True, "opencode server disabled or non-local")
+          require(Path(command[0]).resolve() == runtime, "opencode command path mismatch")
+          require_args(command[1:])
+          require(Path(opencode["cwd"]).resolve() == root, "opencode cwd mismatch")
+          PY
+
+  installer-smoke-windows:
+    name: installer smoke windows-x64
+    needs: publish
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Install release runtime through plugin
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $projectRoot = Join-Path $env:RUNNER_TEMP "projectatlas-installer-smoke"
+          New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
+          $expectedVersion = $env:RELEASE_VERSION.TrimStart("v")
+          $stableRuntime = Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin\projectatlas.exe"
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $stableRuntime) | Out-Null
+          $asset = "projectatlas-$env:RELEASE_VERSION-x86_64-pc-windows-msvc.zip"
+          $archive = Join-Path $env:RUNNER_TEMP $asset
+          $extractDir = Join-Path $env:RUNNER_TEMP "projectatlas-stable-lock"
+          Invoke-WebRequest -Uri "https://github.com/styler-ai/ProjectAtlas/releases/download/$env:RELEASE_VERSION/$asset" -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $extractDir -Force
+          $assetRuntime = Get-ChildItem -LiteralPath $extractDir -Filter "projectatlas.exe" -Recurse | Select-Object -First 1
+          if (-not $assetRuntime) {
+            throw "Release archive did not contain projectatlas.exe."
+          }
+          Copy-Item -LiteralPath $assetRuntime.FullName -Destination $stableRuntime -Force
+          $stableHash = (Get-FileHash -LiteralPath $stableRuntime -Algorithm SHA256).Hash
+          $stableLock = [System.IO.File]::Open($stableRuntime, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+          try {
+            .\plugins\projectatlas\scripts\install-runtime.ps1 -ProjectRoot $projectRoot -ProjectAtlasVersion $env:RELEASE_VERSION -ReleaseBinaryOnly
+            $expectedRuntime = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "ProjectAtlas\runtimes\$expectedVersion\x86_64-pc-windows-msvc\projectatlas.exe"))
+            if (-not (Test-Path -LiteralPath $expectedRuntime)) {
+              throw "Versioned release runtime was not installed: $expectedRuntime"
+            }
+            $env:PROJECTATLAS_NO_TELEMETRY = "1"
+            & $expectedRuntime --require-version $env:RELEASE_VERSION --format json runtime-info
+            Push-Location $projectRoot
+            try {
+              & $expectedRuntime config --print
+              & $expectedRuntime ignore list
+            } finally {
+              Pop-Location
+            }
+          } finally {
+            $stableLock.Dispose()
+          }
+          $currentStableHash = (Get-FileHash -LiteralPath $stableRuntime -Algorithm SHA256).Hash
+          if ($currentStableHash -ne $stableHash) {
+            throw "LocalAppData stable mirror unexpectedly changed while locked."
+          }
+          $expectedRoot = [System.IO.Path]::GetFullPath($projectRoot)
+          $expectedDb = [System.IO.Path]::GetFullPath((Join-Path $projectRoot ".projectatlas\projectatlas.db"))
+
+          function Assert-Equal {
+            param([string]$Actual, [string]$Expected, [string]$Message)
+            if ($Actual -ne $Expected) {
+              throw "$Message. Expected '$Expected', found '$Actual'."
+            }
+          }
+
+          function Assert-McpArgs {
+            param([object[]]$McpArgs)
+            Assert-Equal $McpArgs[0] "--require-version" "Missing require-version flag"
+            Assert-Equal $McpArgs[1] $expectedVersion "Runtime version mismatch"
+            $dbIndex = [Array]::IndexOf($McpArgs, "--db")
+            if ($dbIndex -lt 0) {
+              throw "Missing --db argument."
+            }
+            Assert-Equal ([System.IO.Path]::GetFullPath($McpArgs[$dbIndex + 1])) $expectedDb "Database path mismatch"
+            Assert-Equal $McpArgs[-1] "mcp" "Missing mcp command"
+          }
+
+          $atlasDir = Join-Path $projectRoot ".projectatlas"
+          $codex = Get-Content -Raw -LiteralPath (Join-Path $atlasDir "projectatlas.mcp.json") | ConvertFrom-Json
+          $codexServer = $codex.mcpServers.projectatlas
+          Assert-Equal ([System.IO.Path]::GetFullPath($codexServer.command)) $expectedRuntime "Codex command path mismatch"
+          Assert-McpArgs @($codexServer.args)
+          Assert-Equal ([System.IO.Path]::GetFullPath($codexServer.cwd)) $expectedRoot "Codex cwd mismatch"
+
+          $claude = Get-Content -Raw -LiteralPath (Join-Path $atlasDir "projectatlas.claude.mcp.json") | ConvertFrom-Json
+          $claudeServer = $claude.mcpServers.projectatlas
+          Assert-Equal ([System.IO.Path]::GetFullPath($claudeServer.command)) $expectedRuntime "Claude command path mismatch"
+          Assert-McpArgs @($claudeServer.args)
+
+          $opencode = Get-Content -Raw -LiteralPath (Join-Path $atlasDir "projectatlas.opencode.json") | ConvertFrom-Json
+          $opencodeServer = $opencode.mcp.projectatlas
+          if ($opencodeServer.type -ne "local" -or -not $opencodeServer.enabled) {
+            throw "OpenCode server was not enabled as a local MCP server."
+          }
+          $command = @($opencodeServer.command)
+          Assert-Equal ([System.IO.Path]::GetFullPath($command[0])) $expectedRuntime "OpenCode command path mismatch"
+          Assert-McpArgs @($command[1..($command.Count - 1)])
+          Assert-Equal ([System.IO.Path]::GetFullPath($opencodeServer.cwd)) $expectedRoot "OpenCode cwd mismatch"

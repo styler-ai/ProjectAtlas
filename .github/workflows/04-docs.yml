@@ -10,23 +10,109 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
 
 jobs:
   deploy:
     name: deploy
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Build rustdoc
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+
+      - name: Build Pages landing page
+        run: |
+          cat > target/doc/index.html <<'HTML'
+          <!doctype html>
+          <html lang="en">
+            <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1">
+              <title>ProjectAtlas Documentation</title>
+              <style>
+                body {
+                  color: #1f2933;
+                  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                  line-height: 1.55;
+                  margin: 0;
+                  background: #f7f9fb;
+                }
+                main {
+                  max-width: 860px;
+                  margin: 0 auto;
+                  padding: 48px 24px;
+                }
+                h1 {
+                  margin-bottom: 8px;
+                }
+                .lead {
+                  color: #52616f;
+                  font-size: 1.1rem;
+                  margin-top: 0;
+                }
+                .grid {
+                  display: grid;
+                  gap: 12px;
+                  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+                  margin-top: 28px;
+                }
+                a.card {
+                  background: #ffffff;
+                  border: 1px solid #d8e1e8;
+                  border-radius: 8px;
+                  color: #102a43;
+                  display: block;
+                  padding: 16px;
+                  text-decoration: none;
+                }
+                a.card:hover {
+                  border-color: #2f80ed;
+                }
+                .label {
+                  color: #627d98;
+                  display: block;
+                  font-size: 0.9rem;
+                  margin-top: 4px;
+                }
+              </style>
+            </head>
+            <body>
+              <main>
+                <h1>ProjectAtlas Documentation</h1>
+                <p class="lead">Generated Rust API documentation for the ProjectAtlas workspace.</p>
+                <div class="grid">
+                  <a class="card" href="projectatlas/">projectatlas<span class="label">CLI, MCP server, and release-facing runtime logic</span></a>
+                  <a class="card" href="projectatlas_core/">projectatlas_core<span class="label">shared models, TOON rendering, and telemetry</span></a>
+                  <a class="card" href="projectatlas_db/">projectatlas_db<span class="label">SQLite storage layer</span></a>
+                  <a class="card" href="projectatlas_service/">projectatlas_service<span class="label">summaries, search, slices, and health checks</span></a>
+                  <a class="card" href="projectatlas_symbols/">projectatlas_symbols<span class="label">symbol extraction and relation indexing</span></a>
+                </div>
+              </main>
+            </body>
+          </html>
+          HTML
+
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
-          python-version: "3.11"
+          path: target/doc
 
-      - name: Install mkdocs
-        run: python -m pip install mkdocs
-
-      - name: Deploy site
-        run: mkdocs gh-deploy --force
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5

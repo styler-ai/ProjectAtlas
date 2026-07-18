@@ -1,0 +1,44 @@
+[graph]
+targets = [
+  { triple = "x86_64-pc-windows-msvc" },
+  { triple = "x86_64-unknown-linux-gnu" },
+  { triple = "x86_64-apple-darwin" },
+  { triple = "aarch64-apple-darwin" },
+]
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "CC0-1.0",
+  "ISC",
+  "MIT",
+  "MIT-0",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+# Expected transitive duplicates as of 2026-06-30:
+# - hashbrown/hashlink split between rusqlite and yaml-rust2 dependency stacks.
+# - windows-sys split between notify and CLI/dev tooling stacks.
+# Keep these as warnings until normal upstream updates collapse them.
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
