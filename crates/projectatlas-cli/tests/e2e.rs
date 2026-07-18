@@ -10,7 +10,7 @@ use projectatlas_core::telemetry::{
 use projectatlas_db::{AtlasStore, HealthResolution};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::Write as _;
 use std::fs;
@@ -1154,7 +1154,7 @@ fn repository_guidance_keeps_legacy_toon_export_optional() -> Result<(), Box<dyn
 }
 
 #[test]
-fn release_and_actions_policy_is_hardened() -> Result<(), Box<dyn Error>> {
+fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn Error>> {
     let workspace_root = workspace_root()?;
     let workflow_dir = workspace_root.join(".github").join("workflows");
     let release_workflow = fs::read_to_string(workflow_dir.join("release.yml"))?;
@@ -1163,6 +1163,110 @@ fn release_and_actions_policy_is_hardened() -> Result<(), Box<dyn Error>> {
     let docs_workflow = fs::read_to_string(workflow_dir.join("04-docs.yml"))?;
     let dependabot = fs::read_to_string(workspace_root.join(".github").join("dependabot.yml"))?;
     let deny = fs::read_to_string(workspace_root.join("deny.toml"))?;
+    let hook = fs::read_to_string(
+        workspace_root
+            .join(GITHOOKS_DIR_NAME)
+            .join(PRE_PUSH_HOOK_FILE_NAME),
+    )?;
+    let workflow_docs = fs::read_to_string(workspace_root.join("docs").join("workflow.md"))?;
+    let root_manifest_text = fs::read_to_string(workspace_root.join("Cargo.toml"))?;
+    let root_manifest: toml::Value = toml::from_str(&root_manifest_text)?;
+    let workspace = root_manifest
+        .get("workspace")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| io::Error::other("root Cargo.toml is missing [workspace]"))?;
+    let workspace_dependencies = workspace
+        .get("dependencies")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| io::Error::other("root Cargo.toml is missing [workspace.dependencies]"))?;
+    let workspace_members = workspace
+        .get("members")
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| io::Error::other("root Cargo.toml is missing workspace members"))?;
+
+    for (dependency, declaration) in workspace_dependencies {
+        let owns_version = declaration.as_str().is_some()
+            || declaration
+                .as_table()
+                .and_then(|table| table.get("version"))
+                .and_then(toml::Value::as_str)
+                .is_some();
+        if !owns_version {
+            return Err(io::Error::other(format!(
+                "workspace dependency {dependency:?} does not own a version"
+            ))
+            .into());
+        }
+    }
+
+    for member in workspace_members {
+        let member = member
+            .as_str()
+            .ok_or_else(|| io::Error::other("workspace member path must be a string"))?;
+        let manifest_path = workspace_root.join(member).join("Cargo.toml");
+        let manifest_text = fs::read_to_string(&manifest_path)?;
+        let manifest: toml::Value = toml::from_str(&manifest_text)?;
+        let mut dependency_tables = Vec::new();
+        for table_name in ["dependencies", "dev-dependencies", "build-dependencies"] {
+            if let Some(value) = manifest.get(table_name) {
+                let table = value.as_table().ok_or_else(|| {
+                    io::Error::other(format!(
+                        "{} [{table_name}] must be a table",
+                        manifest_path.display()
+                    ))
+                })?;
+                dependency_tables.push((table_name.to_string(), table));
+            }
+        }
+        if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+            for (selector, target) in targets {
+                let target = target.as_table().ok_or_else(|| {
+                    io::Error::other(format!(
+                        "{} target {selector:?} must be a table",
+                        manifest_path.display()
+                    ))
+                })?;
+                for table_name in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                    if let Some(value) = target.get(table_name) {
+                        let table = value.as_table().ok_or_else(|| {
+                            io::Error::other(format!(
+                                "{} [target.{selector}.{table_name}] must be a table",
+                                manifest_path.display()
+                            ))
+                        })?;
+                        dependency_tables.push((format!("target.{selector}.{table_name}"), table));
+                    }
+                }
+            }
+        }
+        for (scope, dependencies) in dependency_tables {
+            for (dependency, declaration) in dependencies {
+                let declaration = declaration.as_table().ok_or_else(|| {
+                    io::Error::other(format!(
+                        "{} dependency {dependency:?} in [{scope}] owns a local version",
+                        manifest_path.display()
+                    ))
+                })?;
+                if declaration.get("version").is_some()
+                    || declaration.get("workspace").and_then(toml::Value::as_bool) != Some(true)
+                {
+                    return Err(io::Error::other(format!(
+                        "{} dependency {dependency:?} in [{scope}] must inherit its workspace version",
+                        manifest_path.display()
+                    ))
+                    .into());
+                }
+                if !workspace_dependencies.contains_key(dependency) {
+                    return Err(io::Error::other(format!(
+                        "{} dependency {dependency:?} in [{scope}] is missing from root [workspace.dependencies]",
+                        manifest_path.display()
+                    ))
+                    .into());
+                }
+            }
+        }
+    }
+
     for (name, workflow) in [
         ("release.yml", &release_workflow),
         ("03-auto-release.yml", &auto_release_workflow),
@@ -1171,22 +1275,186 @@ fn release_and_actions_policy_is_hardened() -> Result<(), Box<dyn Error>> {
     ] {
         assert_actions_are_sha_pinned(name, workflow)?;
     }
-    if !dependabot.contains("package-ecosystem: github-actions")
-        && !dependabot.contains("package-ecosystem: \"github-actions\"")
-    {
-        return Err(
-            io::Error::other("Dependabot must keep pinned GitHub Actions SHAs up to date").into(),
-        );
+
+    let cargo_update = dependabot
+        .split("  - package-ecosystem: cargo")
+        .nth(1)
+        .and_then(|tail| tail.split("\n  - package-ecosystem:").next())
+        .ok_or_else(|| io::Error::other("Dependabot Cargo update is missing"))?;
+    let actions_update = dependabot
+        .split("  - package-ecosystem: github-actions")
+        .nth(1)
+        .and_then(|tail| tail.split("\n  - package-ecosystem:").next())
+        .ok_or_else(|| io::Error::other("Dependabot GitHub Actions update is missing"))?;
+    for (ecosystem, update) in [("cargo", cargo_update), ("github-actions", actions_update)] {
+        for required in ["directory: /", "target-branch: dev", "interval: weekly"] {
+            if !update.contains(required) {
+                return Err(io::Error::other(format!(
+                    "Dependabot {ecosystem} update is missing {required:?}"
+                ))
+                .into());
+            }
+        }
     }
-    if !deny.contains(r#"triple = "x86_64-apple-darwin""#) {
+    for required in ["groups:", "update-types:", "- minor", "- patch"] {
+        if !cargo_update.contains(required) {
+            return Err(io::Error::other(format!(
+                "Dependabot Cargo update is missing minor/patch grouping field {required:?}"
+            ))
+            .into());
+        }
+    }
+    if cargo_update.contains("- major") {
+        return Err(io::Error::other("Dependabot Cargo major updates must remain separate").into());
+    }
+
+    for entry in fs::read_dir(&workflow_dir)? {
+        let path = entry?.path();
+        let extension = path.extension().and_then(std::ffi::OsStr::to_str);
+        if extension != Some("yml") && extension != Some("yaml") {
+            continue;
+        }
+        let workflow = fs::read_to_string(&path)?;
+        for rejected in [
+            "gh pr merge",
+            "enablePullRequestAutoMerge",
+            "enable-pull-request-automerge",
+            "automerge-action",
+        ] {
+            if workflow.contains(rejected) {
+                return Err(io::Error::other(format!(
+                    "{} contains repository-owned auto-merge behavior {rejected:?}",
+                    path.display()
+                ))
+                .into());
+            }
+        }
+    }
+
+    let cargo_deny_version = ci_workflow
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("tool: cargo-deny@"))
+        .ok_or_else(|| io::Error::other("CI cargo-deny install must pin an exact version"))?;
+    let version_parts = cargo_deny_version.split('.').collect::<Vec<_>>();
+    if version_parts.len() != 3
+        || version_parts
+            .iter()
+            .any(|part| part.parse::<u64>().is_err())
+    {
+        return Err(io::Error::other(format!(
+            "cargo-deny version {cargo_deny_version:?} is not an exact numeric release"
+        ))
+        .into());
+    }
+    let cargo_deny_install = format!("tool: cargo-deny@{cargo_deny_version}");
+    if !release_workflow.contains(&cargo_deny_install) {
         return Err(io::Error::other(
-            "cargo-deny target graph must include Intel macOS release target",
+            "CI and release must install the same exact cargo-deny version",
         )
         .into());
     }
-    if !deny.contains("hashbrown") || !deny.contains("windows-sys") {
+    let cargo_deny_command = "cargo deny --locked --all-features check -D warnings";
+    for (owner, content) in [
+        ("CI", ci_workflow.as_str()),
+        ("release", release_workflow.as_str()),
+        ("pre-push hook", hook.as_str()),
+        ("workflow docs", workflow_docs.as_str()),
+    ] {
+        if !content.contains(cargo_deny_command) {
+            return Err(io::Error::other(format!(
+                "{owner} is missing the locked all-feature cargo-deny command"
+            ))
+            .into());
+        }
+    }
+
+    let deny_config: toml::Value = toml::from_str(&deny)?;
+    let bans = deny_config
+        .get("bans")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| io::Error::other("deny.toml is missing [bans]"))?;
+    for required in [
+        "multiple-versions = \"deny\"",
+        "multiple-versions-include-dev = true",
+        "wildcards = \"deny\"",
+        "[bans.workspace-dependencies]",
+        "duplicates = \"deny\"",
+        "include-path-dependencies = true",
+        "unused = \"deny\"",
+        "yanked = \"deny\"",
+        "[licenses]",
+        "unknown-registry = \"deny\"",
+        "unknown-git = \"deny\"",
+        "allow-registry = [\"https://github.com/rust-lang/crates.io-index\"]",
+    ] {
+        if !deny.contains(required) {
+            return Err(io::Error::other(format!(
+                "cargo-deny fail-closed policy is missing {required:?}"
+            ))
+            .into());
+        }
+    }
+    if bans.contains_key("skip-tree") {
+        return Err(io::Error::other("cargo-deny duplicate policy must not use skip-tree").into());
+    }
+
+    if !workspace_root.join("Cargo.lock").is_file() {
+        return Err(io::Error::other("the workspace Cargo.lock must remain committed").into());
+    }
+    let metadata_output = StdCommand::new("cargo")
+        .current_dir(&workspace_root)
+        .args(["metadata", "--locked", "--offline", "--format-version", "1"])
+        .output()?;
+    if !metadata_output.status.success() {
+        return Err(io::Error::other(format!(
+            "locked offline Cargo metadata failed: {}",
+            String::from_utf8_lossy(&metadata_output.stderr)
+        ))
+        .into());
+    }
+    let skip_entries = bans
+        .get("skip")
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| io::Error::other("duplicate policy must declare exact skips"))?;
+    let mut skipped_packages = BTreeSet::new();
+    for entry in skip_entries {
+        let entry = entry
+            .as_table()
+            .ok_or_else(|| io::Error::other("cargo-deny skip entry must be a table"))?;
+        let package = entry
+            .get("crate")
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| io::Error::other("cargo-deny skip entry must name a crate"))?;
+        let reason = entry
+            .get("reason")
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| io::Error::other("cargo-deny skip entry must explain its removal"))?;
+        let (name, version) = package.split_once('@').ok_or_else(|| {
+            io::Error::other(format!(
+                "cargo-deny skip {package:?} must use an exact crate@version package spec"
+            ))
+        })?;
+        if name.is_empty()
+            || version.is_empty()
+            || version.contains(['<', '>', '=', '*', '^', '~', ','])
+            || !reason.to_ascii_lowercase().contains("remove when")
+        {
+            return Err(io::Error::other(format!(
+                "cargo-deny skip {package:?} is not exact or lacks an upstream removal condition"
+            ))
+            .into());
+        }
+        if !skipped_packages.insert(package) {
+            return Err(
+                io::Error::other(format!("cargo-deny skip {package:?} is duplicated")).into(),
+            );
+        }
+    }
+
+    if !deny.contains(r#"triple = "x86_64-apple-darwin""#) {
         return Err(io::Error::other(
-            "cargo-deny duplicate warnings must be documented before remaining at warn",
+            "cargo-deny target graph must include Intel macOS release target",
         )
         .into());
     }
@@ -1300,7 +1568,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "cargo test --workspace --all-features --locked",
         "cargo test --doc --workspace --all-features --locked",
         "RUSTDOCFLAGS=\"-D warnings\" cargo doc --workspace --no-deps --all-features --locked",
-        "cargo deny check",
+        "cargo deny --locked --all-features check -D warnings",
         "issue-checklists.py --self-test",
     ] {
         if !hook.contains(required) || !workflow_docs.contains(required) {
@@ -1316,7 +1584,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
         "cargo test --workspace --all-features --locked",
         "cargo test --doc --workspace --all-features --locked",
-        "cargo deny check",
+        "cargo deny --locked --all-features check -D warnings",
         "--issue-map openspec/issue-map.json",
     ] {
         if !ci.contains(required) {

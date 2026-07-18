@@ -7,7 +7,7 @@ cargo fmt --all --check
 cargo check --workspace --all-targets --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
-cargo deny check
+cargo deny --locked --all-features check -D warnings
 cargo test --workspace --all-features --locked
 cargo test --doc --workspace --all-features --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked

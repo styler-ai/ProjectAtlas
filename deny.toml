@@ -30,13 +30,22 @@ allow = [
 ]
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
+multiple-versions-include-dev = true
 wildcards = "deny"
 highlight = "all"
-# Expected transitive duplicates as of 2026-06-30:
-# - hashbrown/hashlink split between rusqlite and yaml-rust2 dependency stacks.
-# - windows-sys split between notify and CLI/dev tooling stacks.
-# Keep these as warnings until normal upstream updates collapse them.
+skip = [
+  { crate = "cpufeatures@0.2.17", reason = "sha2 0.10 still resolves cpufeatures 0.2; remove when sha2 converges on the retained cpufeatures line." },
+  { crate = "hashbrown@0.14.5", reason = "rusqlite 0.32 resolves hashlink 0.9 and hashbrown 0.14; remove when rusqlite adopts the retained hashlink and hashbrown lines." },
+  { crate = "hashbrown@0.16.1", reason = "yaml-rust2 0.11 and ratatui 0.30 resolve hashbrown 0.16; remove when both upstream paths converge on the retained hashbrown line." },
+  { crate = "hashlink@0.9.1", reason = "rusqlite 0.32 resolves hashlink 0.9; remove when rusqlite adopts the retained hashlink line." },
+  { crate = "windows-sys@0.60.2", reason = "notify 8.2 resolves windows-sys 0.60; remove when notify adopts the retained windows-sys line." },
+]
+
+[bans.workspace-dependencies]
+duplicates = "deny"
+include-path-dependencies = true
+unused = "deny"
 
 [sources]
 unknown-registry = "deny"
