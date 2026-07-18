@@ -21,22 +21,37 @@ use projectatlas_core::telemetry::{
 };
 use projectatlas_core::{
     AGENT_REVIEWED_SOURCE_VALUES, HIGH_IMPACT_FILE_NAMES, HIGH_IMPACT_PATH_PREFIXES,
-    HIGH_IMPACT_PATH_SEGMENTS, IndexedNode, LEGACY_HUMAN_PURPOSE_SOURCE, Node, NodeKind, Overview,
-    Purpose, PurposeSource, PurposeStatus, normalize_native_path_display,
+    HIGH_IMPACT_PATH_SEGMENTS, IndexGeneration, IndexedNode, LEGACY_HUMAN_PURPOSE_SOURCE, Node,
+    NodeKind, Overview, Purpose, PurposeSource, PurposeStatus, normalize_native_path_display,
     normalize_repo_path_prefix,
 };
 use rusqlite::types::Value;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params, params_from_iter};
+use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::num::TryFromIntError;
-use std::path::Path;
+use std::num::{ParseIntError, TryFromIntError};
+use std::ops::{Deref, DerefMut};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
 
 /// Current `SQLite` schema version supported by this crate.
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
+/// Metadata key for the durable schema version.
+const SCHEMA_VERSION_KEY: &str = "schema_version";
+/// Last schema whose derived-index publication metadata is not trustworthy.
+const UNTRUSTED_PUBLICATION_SCHEMA_VERSION: i64 = 8;
 /// Maximum persisted text for denormalized symbol-name search summaries.
 const MAX_SYMBOL_SEARCH_SUMMARY_CHARS: usize = 16_000;
+/// Metadata key for the current derived-index publication state.
+const INDEX_PUBLICATION_STATE_KEY: &str = "index_publication_state";
+/// Metadata key for the completed derived-index contract fingerprint.
+const INDEX_PUBLICATION_FINGERPRINT_KEY: &str = "index_publication_fingerprint";
+/// Metadata key for the monotonically increasing complete index generation.
+const INDEX_PUBLICATION_GENERATION_KEY: &str = "index_publication_generation";
+/// Maximum time a writer waits for another publication on the same database.
+const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Database-layer error type.
 #[derive(Debug, Error)]
@@ -70,6 +85,16 @@ pub enum DbError {
         /// Source conversion error.
         source: TryFromIntError,
     },
+    /// Integer metadata could not be parsed without losing its source error.
+    #[error("invalid integer metadata for {field}: {value:?}: {source}")]
+    InvalidInteger {
+        /// Metadata field name.
+        field: &'static str,
+        /// Invalid persisted value.
+        value: String,
+        /// Source parse failure.
+        source: ParseIntError,
+    },
     /// A caller supplied a path that is not in the current index.
     #[error("path {path:?} is not indexed; run scan, fix the path, or choose an indexed path")]
     PathNotIndexed {
@@ -88,15 +113,168 @@ pub enum DbError {
         /// Requested primary path.
         path: String,
     },
+    /// A projection-only refresh no longer matches the established index contract.
+    #[error("index publication contract changed during projection refresh")]
+    PublicationContractChanged,
+    /// A complete index generation cannot advance any further.
+    #[error("index publication generation overflowed")]
+    PublicationGenerationOverflow,
+    /// The store already has an active read snapshot.
+    #[error("index read snapshot is already active on this store")]
+    IndexReadSnapshotActive,
+    /// A read-only store cannot locate its database for a separate telemetry write.
+    #[error("read-only store has no database path for telemetry persistence")]
+    TelemetryPathUnavailable,
 }
 
 /// Convenient result alias for database operations.
 pub type DbResult<T> = Result<T, DbError>;
 
+/// Durable state of the multi-projection derived index publication.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexPublicationState {
+    /// A publisher may have changed only part of the derived index.
+    Updating,
+    /// Every projection completed under the recorded contract fingerprint.
+    Complete,
+}
+
+impl IndexPublicationState {
+    /// Return the stable `SQLite` representation.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Updating => "updating",
+            Self::Complete => "complete",
+        }
+    }
+
+    /// Parse the stable `SQLite` representation.
+    fn from_db(value: String) -> DbResult<Self> {
+        match value.as_str() {
+            "updating" => Ok(Self::Updating),
+            "complete" => Ok(Self::Complete),
+            _ => Err(DbError::InvalidEnum {
+                field: INDEX_PUBLICATION_STATE_KEY,
+                value,
+            }),
+        }
+    }
+}
+
+/// Persisted state needed to reject mixed or incompatible derived projections.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct IndexPublication {
+    /// Current publication state.
+    pub state: IndexPublicationState,
+    /// Contract fingerprint recorded by the last complete publication.
+    pub contract_fingerprint: Option<String>,
+    /// Monotonic generation of the last complete derived index.
+    pub generation: IndexGeneration,
+}
+
+/// Publication contract applied when one atomic writer commits.
+enum PublicationContract {
+    /// Establish or replace the complete derived-index contract.
+    Full(String),
+    /// Preserve the already established complete contract.
+    Projection(String),
+}
+
+/// Exclusive parent-owned atomic publication over all derived projections.
+pub struct IndexPublicationGuard<'store> {
+    /// Store whose connection owns the active `SQLite` write transaction.
+    store: &'store mut AtlasStore,
+    /// Contract behavior selected when the publication began.
+    contract: PublicationContract,
+    /// Generation visible before this publication began.
+    previous_generation: IndexGeneration,
+    /// Whether drop must roll the transaction back.
+    active: bool,
+}
+
 /// `SQLite`-backed `ProjectAtlas` index store.
 pub struct AtlasStore {
     /// Active database connection for index reads and writes.
     connection: Connection,
+    /// Whether normal reads currently share one explicit `SQLite` snapshot.
+    read_snapshot_active: Cell<bool>,
+    /// Durable database path when the store is file-backed.
+    database_path: Option<PathBuf>,
+    /// Whether this connection is restricted to non-mutating queries.
+    read_only: bool,
+}
+
+impl Deref for IndexPublicationGuard<'_> {
+    type Target = AtlasStore;
+
+    fn deref(&self) -> &Self::Target {
+        self.store
+    }
+}
+
+impl DerefMut for IndexPublicationGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.store
+    }
+}
+
+impl IndexPublicationGuard<'_> {
+    /// Commit every derived projection and advance the complete generation
+    /// exactly once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if generation metadata is invalid, a projection-only
+    /// refresh no longer matches its established contract, or commit fails.
+    pub fn complete(mut self) -> DbResult<()> {
+        let next_generation = self
+            .previous_generation
+            .checked_next()
+            .ok_or(DbError::PublicationGenerationOverflow)?;
+        match &self.contract {
+            PublicationContract::Full(contract_fingerprint) => {
+                set_metadata(
+                    &self.store.connection,
+                    INDEX_PUBLICATION_FINGERPRINT_KEY,
+                    contract_fingerprint,
+                )?;
+            }
+            PublicationContract::Projection(contract_fingerprint) => {
+                let matches =
+                    load_index_publication(&self.store.connection)?.is_some_and(|publication| {
+                        publication.state == IndexPublicationState::Updating
+                            && publication.contract_fingerprint.as_deref()
+                                == Some(contract_fingerprint.as_str())
+                            && publication.generation == self.previous_generation
+                    });
+                if !matches {
+                    return Err(DbError::PublicationContractChanged);
+                }
+            }
+        }
+        set_metadata(
+            &self.store.connection,
+            INDEX_PUBLICATION_GENERATION_KEY,
+            &next_generation.to_string(),
+        )?;
+        set_metadata(
+            &self.store.connection,
+            INDEX_PUBLICATION_STATE_KEY,
+            IndexPublicationState::Complete.as_str(),
+        )?;
+        self.store.connection.execute_batch("COMMIT")?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for IndexPublicationGuard<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            let _rollback_result = self.store.connection.execute_batch("ROLLBACK");
+        }
+    }
 }
 
 /// UTF-8 source text persisted for indexed search.
@@ -301,10 +479,36 @@ impl AtlasStore {
     /// Returns an error if `SQLite` setup or schema validation fails.
     pub fn open(path: &Path) -> DbResult<Self> {
         let connection = Connection::open(path)?;
+        connection.busy_timeout(SQLITE_WRITE_BUSY_TIMEOUT)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
-        let store = Self { connection };
+        let store = Self {
+            connection,
+            read_snapshot_active: Cell::new(false),
+            database_path: Some(path.to_path_buf()),
+            read_only: false,
+        };
         store.initialize_schema()?;
+        Ok(store)
+    }
+
+    /// Open an existing index without creating, migrating, or backfilling it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be opened read-only or its
+    /// schema version is not exactly supported by this runtime.
+    pub fn open_read_only(path: &Path) -> DbResult<Self> {
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.execute_batch("PRAGMA query_only = ON")?;
+        let store = Self {
+            connection,
+            read_snapshot_active: Cell::new(false),
+            database_path: Some(path.to_path_buf()),
+            read_only: true,
+        };
+        store.begin_index_read_snapshot()?;
+        store.validate_current_schema_version()?;
         Ok(store)
     }
 
@@ -316,9 +520,35 @@ impl AtlasStore {
     pub fn in_memory() -> DbResult<Self> {
         let store = Self {
             connection: Connection::open_in_memory()?,
+            read_snapshot_active: Cell::new(false),
+            database_path: None,
+            read_only: false,
         };
         store.initialize_schema()?;
         Ok(store)
+    }
+
+    /// Validate that a non-mutating reader understands the durable schema.
+    fn validate_current_schema_version(&self) -> DbResult<()> {
+        let stored = self.connection.query_row(
+            "SELECT value FROM metadata WHERE key = ?1",
+            [SCHEMA_VERSION_KEY],
+            |row| row.get::<_, String>(0),
+        )?;
+        let found = stored
+            .parse::<i64>()
+            .map_err(|source| DbError::InvalidInteger {
+                field: SCHEMA_VERSION_KEY,
+                value: stored,
+                source,
+            })?;
+        if found != SCHEMA_VERSION {
+            return Err(DbError::SchemaVersion {
+                found,
+                expected: SCHEMA_VERSION,
+            });
+        }
+        Ok(())
     }
 
     /// Initialize schema.
@@ -481,19 +711,37 @@ impl AtlasStore {
         let stored = self
             .connection
             .query_row(
-                "SELECT value FROM metadata WHERE key = 'schema_version'",
-                [],
+                "SELECT value FROM metadata WHERE key = ?1",
+                [SCHEMA_VERSION_KEY],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
         match stored {
             Some(value) => {
-                let found = value.parse::<i64>().map_or(-1, |parsed| parsed);
+                let found = value
+                    .parse::<i64>()
+                    .map_err(|source| DbError::InvalidInteger {
+                        field: SCHEMA_VERSION_KEY,
+                        value,
+                        source,
+                    })?;
                 if (1..SCHEMA_VERSION).contains(&found) {
-                    self.connection.execute(
-                        "UPDATE metadata SET value = ?1 WHERE key = 'schema_version'",
-                        [SCHEMA_VERSION.to_string()],
+                    let migration = self.connection.unchecked_transaction()?;
+                    if found == UNTRUSTED_PUBLICATION_SCHEMA_VERSION {
+                        migration.execute(
+                            "DELETE FROM metadata WHERE key IN (?1, ?2, ?3)",
+                            params![
+                                INDEX_PUBLICATION_STATE_KEY,
+                                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                                INDEX_PUBLICATION_GENERATION_KEY,
+                            ],
+                        )?;
+                    }
+                    migration.execute(
+                        "UPDATE metadata SET value = ?1 WHERE key = ?2",
+                        params![SCHEMA_VERSION.to_string(), SCHEMA_VERSION_KEY],
                     )?;
+                    migration.commit()?;
                 } else if found != SCHEMA_VERSION {
                     return Err(DbError::SchemaVersion {
                         found,
@@ -503,8 +751,8 @@ impl AtlasStore {
             }
             None => {
                 self.connection.execute(
-                    "INSERT INTO metadata(key, value) VALUES('schema_version', ?1)",
-                    [SCHEMA_VERSION.to_string()],
+                    "INSERT INTO metadata(key, value) VALUES(?1, ?2)",
+                    params![SCHEMA_VERSION_KEY, SCHEMA_VERSION.to_string()],
                 )?;
             }
         }
@@ -669,28 +917,28 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn replace_scan(&mut self, nodes: &[Node]) -> DbResult<()> {
-        let transaction = self.connection.transaction()?;
-        transaction.execute("UPDATE nodes SET exists_now = 0", [])?;
+        let savepoint = self.connection.savepoint()?;
+        savepoint.execute("UPDATE nodes SET exists_now = 0", [])?;
         for node in nodes {
-            upsert_node(&transaction, node)?;
+            upsert_node(&savepoint, node)?;
         }
-        transaction.execute(
+        savepoint.execute(
             "DELETE FROM symbol_relations WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
             [],
         )?;
-        transaction.execute(
+        savepoint.execute(
             "DELETE FROM symbols WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
             [],
         )?;
-        transaction.execute(
+        savepoint.execute(
             "DELETE FROM source_parse_metadata WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
             [],
         )?;
-        transaction.execute(
+        savepoint.execute(
             "DELETE FROM file_texts WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
             [],
         )?;
-        transaction.commit()?;
+        savepoint.commit()?;
         Ok(())
     }
 
@@ -700,11 +948,11 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn upsert_scan_nodes(&mut self, nodes: &[Node]) -> DbResult<()> {
-        let transaction = self.connection.transaction()?;
+        let savepoint = self.connection.savepoint()?;
         for node in nodes {
-            upsert_node(&transaction, node)?;
+            upsert_node(&savepoint, node)?;
         }
-        transaction.commit()?;
+        savepoint.commit()?;
         Ok(())
     }
 
@@ -714,34 +962,34 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn mark_paths_absent(&mut self, paths: &[String]) -> DbResult<()> {
-        let transaction = self.connection.transaction()?;
+        let savepoint = self.connection.savepoint()?;
         for path in paths {
             if path == "." || path.is_empty() {
                 continue;
             }
             let descendant_pattern = sqlite_descendant_pattern(path);
-            transaction.execute(
+            savepoint.execute(
                 "UPDATE nodes SET exists_now = 0 WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
                 params![path, descendant_pattern],
             )?;
-            transaction.execute(
+            savepoint.execute(
                 "DELETE FROM symbol_relations WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
                 params![path, descendant_pattern],
             )?;
-            transaction.execute(
+            savepoint.execute(
                 "DELETE FROM symbols WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
                 params![path, descendant_pattern],
             )?;
-            transaction.execute(
+            savepoint.execute(
                 "DELETE FROM source_parse_metadata WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
                 params![path, descendant_pattern],
             )?;
-            transaction.execute(
+            savepoint.execute(
                 "DELETE FROM file_texts WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
                 params![path, descendant_pattern],
             )?;
         }
-        transaction.commit()?;
+        savepoint.commit()?;
         Ok(())
     }
 
@@ -759,14 +1007,14 @@ impl AtlasStore {
         paths: &[String],
         texts: &[IndexedFileText],
     ) -> DbResult<()> {
-        let transaction = self.connection.transaction()?;
+        let savepoint = self.connection.savepoint()?;
         for path in paths {
-            transaction.execute("DELETE FROM file_texts WHERE path = ?1", [path])?;
+            savepoint.execute("DELETE FROM file_texts WHERE path = ?1", [path])?;
         }
         for text in texts {
-            upsert_file_text(&transaction, text)?;
+            upsert_file_text(&savepoint, text)?;
         }
-        transaction.commit()?;
+        savepoint.commit()?;
         Ok(())
     }
 
@@ -942,6 +1190,121 @@ impl AtlasStore {
             .map_err(DbError::from)
     }
 
+    /// Begin one exclusive full derived-index publication.
+    ///
+    /// Every nested projection write remains inside the returned guard's
+    /// `SQLite` transaction. Other connections keep the prior complete
+    /// generation queryable until [`IndexPublicationGuard::complete`] commits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the exclusive write transaction cannot begin.
+    pub fn begin_index_publication(
+        &mut self,
+        contract_fingerprint: &str,
+    ) -> DbResult<IndexPublicationGuard<'_>> {
+        self.begin_publication(PublicationContract::Full(contract_fingerprint.to_string()))
+    }
+
+    /// Begin one exclusive symbol/projection refresh without replacing the
+    /// established full-index contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the index is incomplete, the established contract
+    /// differs, or the exclusive write transaction cannot begin.
+    pub fn begin_index_projection_refresh(
+        &mut self,
+        contract_fingerprint: &str,
+    ) -> DbResult<IndexPublicationGuard<'_>> {
+        self.begin_publication(PublicationContract::Projection(
+            contract_fingerprint.to_string(),
+        ))
+    }
+
+    /// Begin one parent-owned atomic publication transaction.
+    fn begin_publication(
+        &mut self,
+        contract: PublicationContract,
+    ) -> DbResult<IndexPublicationGuard<'_>> {
+        self.connection.execute_batch("BEGIN IMMEDIATE")?;
+        let setup = (|| {
+            let previous = load_index_publication(&self.connection)?;
+            if let PublicationContract::Projection(expected) = &contract {
+                let matches = previous.as_ref().is_some_and(|publication| {
+                    publication.state == IndexPublicationState::Complete
+                        && publication.contract_fingerprint.as_deref() == Some(expected.as_str())
+                });
+                if !matches {
+                    return Err(DbError::PublicationContractChanged);
+                }
+            }
+            set_metadata(
+                &self.connection,
+                INDEX_PUBLICATION_STATE_KEY,
+                IndexPublicationState::Updating.as_str(),
+            )?;
+            Ok(previous.map_or(IndexGeneration::ZERO, |publication| publication.generation))
+        })();
+        let previous_generation = match setup {
+            Ok(generation) => generation,
+            Err(error) => {
+                self.connection.execute_batch("ROLLBACK")?;
+                return Err(error);
+            }
+        };
+        Ok(IndexPublicationGuard {
+            store: self,
+            contract,
+            previous_generation,
+            active: true,
+        })
+    }
+
+    /// Start one stable read snapshot for freshness verification and every
+    /// subsequent query used to construct the response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a snapshot is already active or `SQLite` cannot
+    /// begin the transaction.
+    pub fn begin_index_read_snapshot(&self) -> DbResult<()> {
+        if self.read_snapshot_active.replace(true) {
+            return Err(DbError::IndexReadSnapshotActive);
+        }
+        if let Err(error) = self.connection.execute_batch("BEGIN DEFERRED") {
+            self.read_snapshot_active.set(false);
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    /// Finish an active read snapshot before an optional telemetry write.
+    ///
+    /// This method is a no-op for stores that were not opened for a normal
+    /// freshness-verified read.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `SQLite` cannot finish the read transaction.
+    pub fn finish_index_read_snapshot(&self) -> DbResult<()> {
+        if !self.read_snapshot_active.get() {
+            return Ok(());
+        }
+        self.connection.execute_batch("COMMIT")?;
+        self.read_snapshot_active.set(false);
+        Ok(())
+    }
+
+    /// Load the current derived-index publication state when initialized.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if metadata is invalid or cannot be read.
+    pub fn index_publication(&self) -> DbResult<Option<IndexPublication>> {
+        load_index_publication(&self.connection)
+    }
+
     /// Replace the symbol graph for a file path.
     ///
     /// # Errors
@@ -949,13 +1312,13 @@ impl AtlasStore {
     /// Returns an error if persistence fails.
     pub fn replace_symbol_graph(&mut self, graph: &SymbolGraph) -> DbResult<()> {
         let metadata = SourceParseMetadata::from_graph(graph);
-        let transaction = self.connection.transaction()?;
-        transaction.execute("DELETE FROM symbols WHERE path = ?1", [&graph.path])?;
-        transaction.execute(
+        let savepoint = self.connection.savepoint()?;
+        savepoint.execute("DELETE FROM symbols WHERE path = ?1", [&graph.path])?;
+        savepoint.execute(
             "DELETE FROM symbol_relations WHERE path = ?1",
             [&graph.path],
         )?;
-        transaction.execute(
+        savepoint.execute(
             "
             INSERT INTO source_parse_metadata(
                 path,
@@ -981,7 +1344,7 @@ impl AtlasStore {
                 usize_to_i64(metadata.relation_count),
             ],
         )?;
-        let node_id = transaction
+        let node_id = savepoint
             .query_row(
                 "SELECT id FROM nodes WHERE path = ?1 AND exists_now = 1",
                 [&graph.path],
@@ -989,7 +1352,7 @@ impl AtlasStore {
             )
             .optional()?;
         for symbol in &graph.symbols {
-            transaction.execute(
+            savepoint.execute(
                 "
                 INSERT INTO symbols(
                     path,
@@ -1024,7 +1387,7 @@ impl AtlasStore {
             )?;
         }
         for relation in &graph.relations {
-            transaction.execute(
+            savepoint.execute(
                 "
                 INSERT INTO symbol_relations(
                     path,
@@ -1050,12 +1413,12 @@ impl AtlasStore {
         }
         if let Some(node_id) = node_id {
             replace_symbol_search_summary(
-                &transaction,
+                &savepoint,
                 node_id,
                 symbol_search_summary(graph).as_deref(),
             )?;
         }
-        transaction.commit()?;
+        savepoint.commit()?;
         Ok(())
     }
 
@@ -3314,59 +3677,27 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn record_usage(&self, event: &UsageEvent) -> DbResult<()> {
-        self.connection.execute(
-            "
-            INSERT INTO usage_events(
-                session_id,
-                command,
-                path,
-                query,
-                estimated_tokens_without_projectatlas,
-                estimated_tokens_with_projectatlas,
-                estimated_tokens_saved,
-                token_savings_bucket,
-                provider,
-                model,
-                tokenizer_backend,
-                accuracy,
-                baseline_kind,
-                confidence,
-                calculation_trace,
-                accounting_layer,
-                estimate_method,
-                denominator_kind,
-                baseline_identity,
-                baseline_fingerprint,
-                dedupe_scope,
-                created_at
-            )
-            VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, CURRENT_TIMESTAMP)
-            ",
-            params![
-                event.session_id,
-                event.command,
-                event.path,
-                event.query,
-                event.estimated_tokens_without_projectatlas,
-                event.estimated_tokens_with_projectatlas,
-                event.estimated_tokens_saved,
-                event.token_savings_bucket,
-                event.provider,
-                event.model,
-                event.tokenizer_backend,
-                event.accuracy,
-                event.baseline_kind,
-                event.confidence,
-                event.calculation_trace,
-                event.accounting_layer,
-                event.estimate_method,
-                event.denominator_kind,
-                event.baseline_identity,
-                event.baseline_fingerprint,
-                event.dedupe_scope
-            ],
-        )?;
-        Ok(())
+        if !self.read_only {
+            return record_usage_on_connection(&self.connection, event);
+        }
+        self.finish_index_read_snapshot()?;
+        let path = self
+            .database_path
+            .as_ref()
+            .ok_or(DbError::TelemetryPathUnavailable)?;
+        let connection = Connection::open(path)?;
+        connection.busy_timeout(SQLITE_WRITE_BUSY_TIMEOUT)?;
+        match record_usage_on_connection(&connection, event) {
+            Err(DbError::Sqlite(error))
+                if matches!(
+                    error.sqlite_error_code(),
+                    Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+                ) =>
+            {
+                Ok(())
+            }
+            result => result,
+        }
     }
 
     /// Load usage events.
@@ -3818,11 +4149,21 @@ impl AtlasStore {
 ///
 /// Returns an error if `SQLite` cannot open or query the database read-only.
 pub fn read_project_root_read_only(path: &Path) -> DbResult<Option<String>> {
-    let uri = sqlite_immutable_read_uri(path);
-    let connection = Connection::open_with_flags(
-        uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    )?;
+    let wal_path = sqlite_sidecar_path(path, "-wal");
+    if !wal_path.exists() {
+        let root = read_project_root_immutable(path)?;
+        if !wal_path.exists() {
+            return Ok(root);
+        }
+    }
+
+    read_project_root_from_snapshot(path)
+}
+
+/// Read root metadata from a WAL-aware read transaction.
+fn read_project_root_from_snapshot(path: &Path) -> DbResult<Option<String>> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.execute_batch("PRAGMA query_only = ON; BEGIN DEFERRED")?;
     let root = connection
         .query_row(
             "SELECT value FROM metadata WHERE key = 'project_root'",
@@ -3830,28 +4171,39 @@ pub fn read_project_root_read_only(path: &Path) -> DbResult<Option<String>> {
             |row| row.get(0),
         )
         .optional()?;
+    connection.execute_batch("COMMIT")?;
     Ok(root)
 }
 
-/// Build a read-only immutable `SQLite` URI for non-mutating metadata probes.
-fn sqlite_immutable_read_uri(path: &Path) -> String {
-    let normalized = normalize_native_path_display(path);
-    let uri_path = if normalized.as_bytes().get(1) == Some(&b':') {
-        format!("/{normalized}")
-    } else {
-        normalized
-    };
-    format!(
+/// Read root metadata without creating `SQLite` sidecars when no WAL is present.
+fn read_project_root_immutable(path: &Path) -> DbResult<Option<String>> {
+    #[cfg(unix)]
+    let uri_path = sqlite_uri_path_bytes(path);
+    #[cfg(not(unix))]
+    let uri_path = sqlite_uri_path_bytes(path)?;
+    let uri = format!(
         "file:{}?mode=ro&immutable=1",
         sqlite_uri_escape_path(&uri_path)
-    )
+    );
+    let connection = Connection::open_with_flags(
+        uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'project_root'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
 }
 
-/// Percent-escape a path component while preserving path separators and drive colons.
-fn sqlite_uri_escape_path(path: &str) -> String {
+/// Percent-escape a path while preserving `SQLite` URI path separators and drive colons.
+fn sqlite_uri_escape_path(path: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut escaped = String::with_capacity(path.len());
-    for byte in path.bytes() {
+    for &byte in path {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b':' | b'.' | b'-' | b'_' | b'~' => {
                 escaped.push(char::from(byte));
@@ -3866,14 +4218,158 @@ fn sqlite_uri_escape_path(path: &str) -> String {
     escaped
 }
 
+/// Return native path bytes suitable for an `SQLite` URI on Unix.
+#[cfg(unix)]
+fn sqlite_uri_path_bytes(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.as_os_str().as_bytes().to_vec()
+}
+
+/// Return validated UTF-8 path bytes suitable for an `SQLite` URI on non-Unix hosts.
+#[cfg(not(unix))]
+fn sqlite_uri_path_bytes(path: &Path) -> DbResult<Vec<u8>> {
+    path.to_str()
+        .ok_or_else(|| rusqlite::Error::InvalidPath(path.to_path_buf()))?;
+    let normalized = normalize_native_path_display(path);
+    let uri_path = if normalized.as_bytes().get(1) == Some(&b':') {
+        format!("/{normalized}")
+    } else {
+        normalized
+    };
+    Ok(uri_path.into_bytes())
+}
+
+/// Return a `SQLite` sidecar path for a database path.
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    PathBuf::from(sidecar)
+}
+
 /// Normalize a filesystem path stored in `SQLite` metadata.
 fn normalize_metadata_path(path: &Path) -> String {
     normalize_native_path_display(path)
 }
 
+/// Upsert one metadata value through the caller's active connection/transaction.
+fn set_metadata(connection: &Connection, key: &str, value: &str) -> DbResult<()> {
+    connection.execute(
+        "
+        INSERT INTO metadata(key, value)
+        VALUES(?1, ?2)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        ",
+        [key, value],
+    )?;
+    Ok(())
+}
+
+/// Persist one usage event through the supplied writable connection.
+fn record_usage_on_connection(connection: &Connection, event: &UsageEvent) -> DbResult<()> {
+    connection.execute(
+        "
+        INSERT INTO usage_events(
+            session_id,
+            command,
+            path,
+            query,
+            estimated_tokens_without_projectatlas,
+            estimated_tokens_with_projectatlas,
+            estimated_tokens_saved,
+            token_savings_bucket,
+            provider,
+            model,
+            tokenizer_backend,
+            accuracy,
+            baseline_kind,
+            confidence,
+            calculation_trace,
+            accounting_layer,
+            estimate_method,
+            denominator_kind,
+            baseline_identity,
+            baseline_fingerprint,
+            dedupe_scope,
+            created_at
+        )
+        VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, CURRENT_TIMESTAMP)
+        ",
+        params![
+            event.session_id,
+            event.command,
+            event.path,
+            event.query,
+            event.estimated_tokens_without_projectatlas,
+            event.estimated_tokens_with_projectatlas,
+            event.estimated_tokens_saved,
+            event.token_savings_bucket,
+            event.provider,
+            event.model,
+            event.tokenizer_backend,
+            event.accuracy,
+            event.baseline_kind,
+            event.confidence,
+            event.calculation_trace,
+            event.accounting_layer,
+            event.estimate_method,
+            event.denominator_kind,
+            event.baseline_identity,
+            event.baseline_fingerprint,
+            event.dedupe_scope
+        ],
+    )?;
+    Ok(())
+}
+
+/// Load durable publication metadata from one connection snapshot.
+fn load_index_publication(connection: &Connection) -> DbResult<Option<IndexPublication>> {
+    let row = connection
+        .query_row(
+            "
+            SELECT state.value, fingerprint.value, generation.value
+            FROM metadata AS state
+            LEFT JOIN metadata AS fingerprint ON fingerprint.key = ?2
+            LEFT JOIN metadata AS generation ON generation.key = ?3
+            WHERE state.key = ?1
+            ",
+            params![
+                INDEX_PUBLICATION_STATE_KEY,
+                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                INDEX_PUBLICATION_GENERATION_KEY,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((state, contract_fingerprint, generation)) = row else {
+        return Ok(None);
+    };
+    let generation = generation.map_or(Ok(IndexGeneration::ZERO), |value| {
+        value
+            .parse::<u64>()
+            .map(IndexGeneration::new)
+            .map_err(|source| DbError::InvalidInteger {
+                field: INDEX_PUBLICATION_GENERATION_KEY,
+                value,
+                source,
+            })
+    })?;
+    Ok(Some(IndexPublication {
+        state: IndexPublicationState::from_db(state)?,
+        contract_fingerprint,
+        generation,
+    }))
+}
+
 /// Upsert one scanned node into an existing transaction.
-fn upsert_node(transaction: &Transaction<'_>, node: &Node) -> DbResult<()> {
-    let existing = transaction
+fn upsert_node(connection: &Connection, node: &Node) -> DbResult<()> {
+    let existing = connection
         .query_row(
             "
             SELECT n.content_hash, p.status
@@ -3899,7 +4395,7 @@ fn upsert_node(transaction: &Transaction<'_>, node: &Node) -> DbResult<()> {
     let should_mark_stale = content_changed
         && existing.as_ref().and_then(|(_, status)| status.as_deref())
             == Some(PurposeStatus::Approved.as_str());
-    transaction.execute(
+    connection.execute(
         "
         INSERT INTO nodes(path, kind, parent_path, extension, language, size_bytes, mtime_ns, content_hash, exists_now)
         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
@@ -3926,12 +4422,12 @@ fn upsert_node(transaction: &Transaction<'_>, node: &Node) -> DbResult<()> {
             node.content_hash
         ],
     )?;
-    let node_id = transaction.query_row(
+    let node_id = connection.query_row(
         "SELECT id FROM nodes WHERE path = ?1",
         [&node.path],
         |row| row.get::<_, i64>(0),
     )?;
-    transaction.execute(
+    connection.execute(
         "
         INSERT INTO purposes(node_id, purpose, source, status)
         VALUES(?1, NULL, 'missing', 'missing')
@@ -3940,7 +4436,7 @@ fn upsert_node(transaction: &Transaction<'_>, node: &Node) -> DbResult<()> {
         [node_id],
     )?;
     let summary = generate_node_summary(node);
-    transaction.execute(
+    connection.execute(
         "
         INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
         VALUES(?1, 'node', '', ?2, CURRENT_TIMESTAMP)
@@ -3951,7 +4447,7 @@ fn upsert_node(transaction: &Transaction<'_>, node: &Node) -> DbResult<()> {
         params![node_id, summary, content_changed],
     )?;
     if should_mark_stale {
-        transaction.execute(
+        connection.execute(
             "
             UPDATE purposes
             SET status = 'stale',
@@ -3965,8 +4461,8 @@ fn upsert_node(transaction: &Transaction<'_>, node: &Node) -> DbResult<()> {
 }
 
 /// Upsert one persisted UTF-8 source-text row for indexed search.
-fn upsert_file_text(transaction: &Transaction<'_>, text: &IndexedFileText) -> DbResult<()> {
-    transaction.execute(
+fn upsert_file_text(connection: &Connection, text: &IndexedFileText) -> DbResult<()> {
+    connection.execute(
         "
         INSERT INTO file_texts(path, content_hash, byte_count, line_count, content, updated_at)
         VALUES(?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
@@ -4129,12 +4625,12 @@ fn sqlite_like_escape(value: &str) -> String {
 
 /// Replace the denormalized symbol-name search summary for one file node.
 fn replace_symbol_search_summary(
-    transaction: &Transaction<'_>,
+    connection: &Connection,
     node_id: i64,
     summary: Option<&str>,
 ) -> DbResult<()> {
     if let Some(summary) = summary {
-        transaction.execute(
+        connection.execute(
             "
             INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
             VALUES(?1, 'search', 'symbols', ?2, CURRENT_TIMESTAMP)
@@ -4145,7 +4641,7 @@ fn replace_symbol_search_summary(
             params![node_id, summary],
         )?;
     } else {
-        transaction.execute(
+        connection.execute(
             "
             DELETE FROM summaries
             WHERE node_id = ?1
@@ -4723,6 +5219,352 @@ mod tests {
     }
 
     #[test]
+    fn schema_upgrade_preserves_local_state_and_restarts_publication() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("projectatlas.db");
+        let root = temp.path().join("repository");
+        write_schema_compatibility_fixture(
+            &db_path,
+            &root,
+            UNTRUSTED_PUBLICATION_SCHEMA_VERSION,
+            "legacy",
+        )?;
+        let database_before_read = fs::read(&db_path)?;
+
+        let Err(read_error) = AtlasStore::open_read_only(&db_path) else {
+            return Err(io::Error::other("schema-8 read-only open unexpectedly succeeded").into());
+        };
+        require_eq(
+            &matches!(
+                read_error,
+                DbError::SchemaVersion {
+                    found: UNTRUSTED_PUBLICATION_SCHEMA_VERSION,
+                    expected: SCHEMA_VERSION,
+                }
+            ),
+            &true,
+            "schema-8 read-only rejection",
+        )?;
+        require_eq(
+            &fs::read(&db_path)?,
+            &database_before_read,
+            "read-only rejection leaves database unchanged",
+        )?;
+
+        let mut store = AtlasStore::open(&db_path)?;
+        let stored_schema = store.connection.query_row(
+            "SELECT value FROM metadata WHERE key = ?1",
+            [SCHEMA_VERSION_KEY],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &stored_schema,
+            &SCHEMA_VERSION.to_string(),
+            "upgraded schema version",
+        )?;
+        require_eq(
+            &store.project_root()?,
+            &Some(normalize_native_path_display(&root)),
+            "upgraded project root",
+        )?;
+        let node = store
+            .load_node_by_path("src/lib.rs")?
+            .ok_or_else(|| io::Error::other("upgraded source node missing"))?;
+        require_eq(
+            &node.node.content_hash,
+            &Some("hash-legacy".to_string()),
+            "upgraded source row",
+        )?;
+        require_eq(
+            &node.purpose.purpose,
+            &Some("Schema compatibility source".to_string()),
+            "upgraded purpose text",
+        )?;
+        require_eq(
+            &node.purpose.source,
+            &PurposeSource::Agent,
+            "upgraded purpose source",
+        )?;
+        require_eq(
+            &node.purpose.status,
+            &PurposeStatus::Approved,
+            "upgraded purpose review state",
+        )?;
+        require_eq(
+            &store.resolved_health_ids()?,
+            &vec!["schema-review".to_string()],
+            "upgraded authored review",
+        )?;
+        let telemetry = store.token_overview(Some("schema-session"))?;
+        require_eq(&telemetry.calls, &1, "upgraded telemetry call count")?;
+        require_eq(
+            &telemetry.estimated_saved,
+            &80,
+            "upgraded telemetry savings",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &None,
+            "untrusted publication metadata invalidated",
+        )?;
+        let remaining_publication_keys = store.connection.query_row(
+            "SELECT COUNT(*) FROM metadata WHERE key IN (?1, ?2, ?3)",
+            params![
+                INDEX_PUBLICATION_STATE_KEY,
+                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                INDEX_PUBLICATION_GENERATION_KEY,
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &remaining_publication_keys,
+            &0,
+            "all untrusted publication keys removed",
+        )?;
+
+        {
+            let mut publication = store.begin_index_publication("schema-9-contract")?;
+            write_test_projection(&mut publication, "fresh")?;
+            publication.complete()?;
+        }
+        require_test_projection(&store, 1, "fresh")?;
+        require_eq(
+            &store
+                .index_publication()?
+                .and_then(|publication| publication.contract_fingerprint),
+            &Some("schema-9-contract".to_string()),
+            "fresh publication contract",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn future_schema_rejection_preserves_source_and_authored_rows() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("projectatlas.db");
+        let root = temp.path().join("repository");
+        let future_schema = SCHEMA_VERSION + 1;
+        write_schema_compatibility_fixture(&db_path, &root, future_schema, "future")?;
+
+        let Err(open_error) = AtlasStore::open(&db_path) else {
+            return Err(
+                io::Error::other("future schema writable open unexpectedly succeeded").into(),
+            );
+        };
+        require_eq(
+            &matches!(
+                open_error,
+                DbError::SchemaVersion {
+                    found,
+                    expected: SCHEMA_VERSION,
+                } if found == future_schema
+            ),
+            &true,
+            "future schema rejection",
+        )?;
+
+        let connection = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let stored_schema = connection.query_row(
+            "SELECT value FROM metadata WHERE key = ?1",
+            [SCHEMA_VERSION_KEY],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &stored_schema,
+            &future_schema.to_string(),
+            "future schema remains unchanged",
+        )?;
+        let stored_root = connection.query_row(
+            "SELECT value FROM metadata WHERE key = 'project_root'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &stored_root,
+            &normalize_native_path_display(&root),
+            "future project root remains unchanged",
+        )?;
+        let source_state = connection.query_row(
+            "
+            SELECT n.content_hash, p.purpose, p.source, p.status
+            FROM nodes AS n
+            JOIN purposes AS p ON p.node_id = n.id
+            WHERE n.path = 'src/lib.rs'
+            ",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )?;
+        require_eq(
+            &source_state,
+            &(
+                Some("hash-future".to_string()),
+                Some("Schema compatibility source".to_string()),
+                PurposeSource::Agent.to_string(),
+                PurposeStatus::Approved.as_str().to_string(),
+            ),
+            "future source and purpose rows remain unchanged",
+        )?;
+        let review_rationale = connection.query_row(
+            "SELECT rationale FROM health_resolutions WHERE finding_id = 'schema-review'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &review_rationale,
+            &"Reviewed schema fixture".to_string(),
+            "future authored review remains unchanged",
+        )?;
+        let telemetry_state = connection.query_row(
+            "
+            SELECT COUNT(*), SUM(estimated_tokens_saved)
+            FROM usage_events
+            WHERE session_id = 'schema-session'
+            ",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+        )?;
+        require_eq(
+            &telemetry_state,
+            &(1, Some(80)),
+            "future telemetry remains unchanged",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn projection_refresh_cannot_replace_publication_contract() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.begin_index_publication("contract-a")?.complete()?;
+
+        store
+            .begin_index_projection_refresh("contract-a")?
+            .complete()?;
+        require_eq(
+            &store.index_publication()?,
+            &Some(IndexPublication {
+                state: IndexPublicationState::Complete,
+                contract_fingerprint: Some("contract-a".to_string()),
+                generation: IndexGeneration::new(2),
+            }),
+            "matching projection refresh",
+        )?;
+
+        let publication = store.begin_index_projection_refresh("contract-a")?;
+        set_metadata(
+            &publication.connection,
+            INDEX_PUBLICATION_FINGERPRINT_KEY,
+            "contract-b",
+        )?;
+        let Err(mismatch) = publication.complete() else {
+            return Err(io::Error::other(
+                "projection refresh replaced the global publication contract",
+            )
+            .into());
+        };
+        if !matches!(mismatch, DbError::PublicationContractChanged) {
+            return Err(io::Error::other(format!(
+                "unexpected projection refresh mismatch: {mismatch}"
+            ))
+            .into());
+        }
+        require_eq(
+            &store.index_publication()?,
+            &Some(IndexPublication {
+                state: IndexPublicationState::Complete,
+                contract_fingerprint: Some("contract-a".to_string()),
+                generation: IndexGeneration::new(2),
+            }),
+            "mismatched projection refresh rolls back",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_snapshots_expose_only_complete_publications() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("projectatlas.db");
+        let independent_db_path = temp.path().join("independent.db");
+        let mut writer_a = AtlasStore::open(&db_path)?;
+        {
+            let mut publication = writer_a.begin_index_publication("contract")?;
+            write_test_projection(&mut publication, "old")?;
+            publication.complete()?;
+        }
+        let mut writer_b = AtlasStore::open(&db_path)?;
+        let mut independent_writer = AtlasStore::open(&independent_db_path)?;
+        let old_reader = AtlasStore::open_read_only(&db_path)?;
+        require_test_projection(&old_reader, 1, "old")?;
+
+        {
+            let mut publication = writer_a.begin_index_publication("contract")?;
+            write_test_projection(&mut publication, "new")?;
+            require_test_projection(&old_reader, 1, "old")?;
+
+            let started = std::time::Instant::now();
+            let Err(contention) = writer_b.begin_index_publication("contract") else {
+                return Err(io::Error::other(
+                    "second writer entered an active publication transaction",
+                )
+                .into());
+            };
+            require_eq(
+                &matches!(
+                    contention,
+                    DbError::Sqlite(ref error)
+                        if matches!(
+                            error.sqlite_error_code(),
+                            Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+                        )
+                ),
+                &true,
+                "same-database writer contention",
+            )?;
+            require_eq(
+                &(started.elapsed() < Duration::from_secs(2)),
+                &true,
+                "bounded same-database writer wait",
+            )?;
+
+            independent_writer
+                .begin_index_publication("independent-contract")?
+                .complete()?;
+            require_eq(
+                &independent_writer
+                    .index_publication()?
+                    .ok_or_else(|| io::Error::other("independent publication missing"))?
+                    .generation,
+                &IndexGeneration::new(1),
+                "independent database generation",
+            )?;
+
+            drop(publication);
+        }
+        let rolled_back_reader = AtlasStore::open_read_only(&db_path)?;
+        require_test_projection(&rolled_back_reader, 1, "old")?;
+        rolled_back_reader.finish_index_read_snapshot()?;
+
+        {
+            let mut publication = writer_a.begin_index_publication("contract")?;
+            write_test_projection(&mut publication, "new")?;
+            publication.complete()?;
+        }
+        require_test_projection(&old_reader, 1, "old")?;
+        let new_reader = AtlasStore::open_read_only(&db_path)?;
+        require_test_projection(&new_reader, 2, "new")?;
+        new_reader.finish_index_read_snapshot()?;
+        old_reader.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
     fn records_token_overview() -> Result<(), Box<dyn Error>> {
         let store = AtlasStore::in_memory()?;
         let mut session_event = usage_from_estimates(
@@ -5254,6 +6096,68 @@ mod tests {
         )?;
         require_eq(&wal_path.exists(), &false, "read-only WAL sidecar")?;
         require_eq(&shm_path.exists(), &false, "read-only SHM sidecar")?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_project_root_read_only_observes_active_wal_state() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo-Δ");
+        let atlas_dir = root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let db_path = atlas_dir.join("projectatlas.db");
+        let store = AtlasStore::open(&db_path)?;
+        store
+            .connection
+            .execute_batch("PRAGMA wal_autocheckpoint = 0")?;
+        store.set_project_root(&root)?;
+
+        require_eq(
+            &sqlite_sidecar_path(&db_path, "-wal").exists(),
+            &true,
+            "active WAL exists",
+        )?;
+        require_eq(
+            &read_project_root_read_only(&db_path)?,
+            &Some(normalize_native_path_display(&root)),
+            "WAL-aware read-only project root",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_store_opens_checkpointed_wal_without_existing_sidecars()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo with spaces");
+        let atlas_dir = root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let db_path = atlas_dir.join("projectatlas.db");
+        {
+            let store = AtlasStore::open(&db_path)?;
+            store.set_project_root(&root)?;
+            store
+                .connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        }
+        for sidecar_path in [
+            sqlite_sidecar_path(&db_path, "-wal"),
+            sqlite_sidecar_path(&db_path, "-shm"),
+        ] {
+            match fs::remove_file(sidecar_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        let store = AtlasStore::open_read_only(&db_path)?;
+        require_eq(
+            &store.project_root()?,
+            &Some(normalize_native_path_display(&root)),
+            "read-only checkpointed project root",
+        )?;
+        store.finish_index_read_snapshot()?;
         Ok(())
     }
 
@@ -6828,6 +7732,56 @@ mod tests {
         Ok(())
     }
 
+    /// Write representative source, authored, telemetry, and publication state at one schema.
+    fn write_schema_compatibility_fixture(
+        db_path: &Path,
+        root: &Path,
+        schema_version: i64,
+        label: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::open(db_path)?;
+        store.set_project_root(root)?;
+        {
+            let mut publication = store.begin_index_publication("untrusted-contract")?;
+            write_test_projection(&mut publication, label)?;
+            publication.complete()?;
+        }
+        store.set_purpose(
+            "src/lib.rs",
+            "Schema compatibility source",
+            PurposeSource::Agent,
+        )?;
+        store.connection.execute(
+            "
+            INSERT INTO health_resolutions(
+                finding_id,
+                category,
+                path,
+                rationale
+            )
+            VALUES('schema-review', ?1, 'src/lib.rs', 'Reviewed schema fixture')
+            ",
+            [CATEGORY_DUPLICATE_PURPOSE],
+        )?;
+        store.record_usage(&usage_from_estimates(
+            "schema-session",
+            "summary",
+            Some("src/lib.rs".to_string()),
+            None,
+            100,
+            20,
+        ))?;
+        set_metadata(
+            &store.connection,
+            SCHEMA_VERSION_KEY,
+            &schema_version.to_string(),
+        )?;
+        store
+            .connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        Ok(())
+    }
+
     /// Build a representative Rust file node for store tests.
     fn test_file_node(path: &str, hash: &str) -> Node {
         Node {
@@ -6840,6 +7794,107 @@ mod tests {
             mtime_ns: Some(10),
             content_hash: Some(hash.to_string()),
         }
+    }
+
+    /// Replace every source-derived projection used by publication tests.
+    fn write_test_projection(store: &mut AtlasStore, label: &str) -> DbResult<()> {
+        let path = "src/lib.rs";
+        let hash = format!("hash-{label}");
+        store.replace_scan(&[test_file_node(path, &hash)])?;
+        store.replace_file_texts_for_paths(
+            &[path.to_string()],
+            &[IndexedFileText {
+                path: path.to_string(),
+                content_hash: Some(hash),
+                byte_count: label.len(),
+                line_count: 1,
+                content: label.to_string(),
+            }],
+        )?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: path.to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![CodeSymbol {
+                path: path.to_string(),
+                language: Some("rust".to_string()),
+                name: format!("{label}_symbol"),
+                kind: SymbolKind::Function,
+                signature: format!("fn {label}_symbol()"),
+                exported: true,
+                documentation: None,
+                line_start: 1,
+                line_end: 1,
+                parent: None,
+                parser: ParserKind::TreeSitter,
+                detail: Some("function_item".to_string()),
+            }],
+            relations: vec![SymbolRelation {
+                path: path.to_string(),
+                source_name: format!("{label}_symbol"),
+                target_name: format!("{label}_target"),
+                kind: RelationKind::Calls,
+                line: 1,
+                context: format!("{label}_target();"),
+                parser: ParserKind::TreeSitter,
+            }],
+        })?;
+        store.set_node_summary(path, &format!("{label} summary"))?;
+        Ok(())
+    }
+
+    /// Assert that one snapshot exposes a coherent projection generation.
+    fn require_test_projection(
+        store: &AtlasStore,
+        generation: u64,
+        label: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let path = "src/lib.rs";
+        let publication = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("publication missing"))?;
+        require_eq(
+            &publication.generation,
+            &IndexGeneration::new(generation),
+            "publication generation",
+        )?;
+        let node = store
+            .load_node_by_path(path)?
+            .ok_or_else(|| io::Error::other("projection node missing"))?;
+        require_eq(
+            &node.node.content_hash,
+            &Some(format!("hash-{label}")),
+            "projection node hash",
+        )?;
+        require_eq(
+            &node.summary,
+            &Some(format!("{label} summary")),
+            "projection node summary",
+        )?;
+        let text = store
+            .load_file_text(path)?
+            .ok_or_else(|| io::Error::other("projection text missing"))?;
+        require_eq(&text.content, &label.to_string(), "projection text")?;
+        let symbols = store.load_symbols(Some(path), None, 10)?;
+        require_eq(
+            &symbols.first().map(|symbol| symbol.name.as_str()),
+            &Some(format!("{label}_symbol")).as_deref(),
+            "projection symbol",
+        )?;
+        let relations = store.load_symbol_relations(Some(path), None, 10)?;
+        require_eq(
+            &relations
+                .first()
+                .map(|relation| relation.target_name.as_str()),
+            &Some(format!("{label}_target")).as_deref(),
+            "projection relation",
+        )?;
+        let metadata = store
+            .load_source_parse_metadata(path)?
+            .ok_or_else(|| io::Error::other("projection parse metadata missing"))?;
+        require_eq(&metadata.symbol_count, &1, "projection symbol metadata")?;
+        require_eq(&metadata.relation_count, &1, "projection relation metadata")?;
+        Ok(())
     }
 
     /// Build a representative folder node for store tests.

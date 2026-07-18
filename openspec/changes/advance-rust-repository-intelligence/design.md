@@ -26,7 +26,7 @@ The earlier implementation branch mixed useful graph/storage work with a per-tas
 - No execution of repository code, build hooks, compilers, language servers, or downloaded parsers during normal indexing.
 - No hidden global repository cache, implicit cross-root discovery, or cross-project write.
 - No mechanical translation or mirrored source topology from another implementation.
-- No per-task test identifiers, verification ledgers, SHA receipts, managed evidence comments, issue sealing, or repository-wide mutation/coverage campaign.
+- No per-task test identifiers, verification ledgers, SHA receipts, managed evidence comments, issue sealing, or between-slice mutation/coverage campaign. One combined final changed-surface line-coverage and mutation audit runs only after the complete issue behavior stabilizes.
 
 ## Dependency Order
 
@@ -154,6 +154,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --lock
 ```
 
 Repository source lints, dependency policy, OpenSpec validation, and IssueOps synchronization remain ordinary gates. Exact release packaging/platform/benchmark gates belong to #311 after the combined surface stabilizes.
+
+Only after every #308 functional task and the combined agent workflow stabilize, task 7.4 runs one final line-coverage audit toward near-100% coverage of the changed functional Rust surface plus mutation testing of that final surface. Every uncovered or surviving behavior-relevant branch is fixed with a meaningful test or explicitly justified as unreachable/platform-only/generated. These final audits are not run between slice commits and do not create per-task receipts or evidence ledgers.
 
 ## Migration And Rollback
 

@@ -7,18 +7,19 @@ use crate::atlas_map::{
     remove_ignore_entry, write_map,
 };
 use crate::runtime::{
-    DEFAULT_HEALTH_LIMIT, InitBootstrapOptions, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES,
-    PurposeLintLevel, PurposeReviewRequest, ScanRuntimePlan, SymbolBuildOptions,
-    build_settings_report, build_symbols_for_index, byte_count_to_tokens, canonical_project_root,
-    config_root_mismatch_error, default_mcp_project_root,
-    estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
-    file_summary_usage_baseline, init_config_path, lint_database_if_present, next_step_report,
-    next_step_report_payload, normalized_folder_filter, open_atlas_store, purpose_curation_page,
-    ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
-    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
-    render_health_page, render_purpose_curation_page, render_purpose_review_report,
-    reset_index_files, review_purposes, run_init_bootstrap, run_scan_pipeline, run_watch_loop,
-    strip_legacy_purpose, telemetry_disabled, validated_indexed_file_key, watcher_status_report,
+    DEFAULT_HEALTH_LIMIT, IndexProjectMismatch, IndexRefreshRequired, IndexVerificationIncomplete,
+    InitBootstrapOptions, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel,
+    PurposeReviewRequest, ScanRuntimePlan, SymbolBuildOptions, build_settings_report,
+    byte_count_to_tokens, canonical_project_root, config_root_mismatch_error,
+    default_mcp_project_root, estimated_source_tokens_for_indexed_files,
+    estimated_source_tokens_for_paths, init_config_path, lint_database_if_present,
+    next_step_report, next_step_report_payload, normalized_folder_filter, open_atlas_store,
+    purpose_curation_page, ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons,
+    read_indexed_file_content, record_directory_walk_usage_estimate, record_usage_estimate,
+    record_usage_text, render_health_page, render_purpose_curation_page,
+    render_purpose_review_report, reset_index_files, review_purposes, run_init_bootstrap,
+    run_scan_pipeline, run_symbol_build_pipeline, run_watch_loop, strip_legacy_purpose,
+    telemetry_disabled, validated_indexed_file_key, verify_index_freshness, watcher_status_report,
 };
 use crate::token_tui::{
     TokenDashboardTheme, render_token_dashboard_plain_with_theme,
@@ -39,14 +40,15 @@ use projectatlas_core::toon::{
 };
 use projectatlas_core::{
     Overview, PurposeSource, PurposeStatus, RankedNode, normalize_native_path_display,
-    normalize_repo_path, normalize_repo_path_prefix, validated_repo_node_key,
+    normalize_repo_path, normalize_repo_path_prefix, validated_repo_file_key,
+    validated_repo_node_key,
 };
 use projectatlas_db::{
     AtlasStore, HealthQuery, HealthResolution, HealthScope, read_project_root_read_only,
 };
 use projectatlas_service::{
-    SymbolSliceSelector, build_file_summary, read_indexed_code_slice, read_symbol_slice,
-    search_indexed_files,
+    SymbolSliceSelector, build_file_summary_from_source, read_indexed_code_slice_from_source,
+    read_symbol_slice_from_source, search_indexed_files,
 };
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
@@ -907,9 +909,28 @@ struct McpIndexedRoot {
 struct McpAbsolutePath(PathBuf);
 
 impl McpAbsolutePath {
-    /// Canonicalize a user-supplied absolute path argument.
+    /// Canonicalize an absolute path through its nearest existing ancestor.
+    ///
+    /// File selectors may refer to an indexed path that was deleted offline.
+    /// Canonicalizing the existing ancestor preserves symlink/root-escape
+    /// checks without requiring the selected leaf to still exist.
     fn canonicalize(path: &Path) -> Result<Self, CliError> {
-        canonical_project_root(path).map(Self)
+        let mut existing = path;
+        let mut missing_suffix = Vec::new();
+        while !existing.exists() {
+            let file_name = existing
+                .file_name()
+                .ok_or_else(|| missing_ancestor_error(path))?;
+            missing_suffix.push(PathBuf::from(file_name));
+            existing = existing
+                .parent()
+                .ok_or_else(|| missing_ancestor_error(path))?;
+        }
+        let mut canonical = canonical_project_root(existing)?;
+        for component in missing_suffix.into_iter().rev() {
+            canonical.push(component);
+        }
+        Ok(Self(canonical))
     }
 
     /// Borrow the canonical path.
@@ -925,6 +946,14 @@ impl McpAbsolutePath {
             self.0.parent().unwrap_or(self.as_path())
         }
     }
+}
+
+/// Build the adapter error for an absolute selector without an inspectable ancestor.
+fn missing_ancestor_error(path: &Path) -> CliError {
+    CliError::InvalidInput(format!(
+        "absolute path '{}' has no existing ancestor",
+        path.display()
+    ))
 }
 
 /// Repository-relative path key derived from a typed root/path conversion.
@@ -959,8 +988,45 @@ struct McpErrorResponse {
 /// Stable serialized schema for MCP error details.
 #[derive(Debug, Serialize)]
 struct McpErrorPayload {
+    /// Stable machine-readable error kind.
+    kind: McpErrorKind,
     /// Human-readable error and recovery guidance.
     message: String,
+    /// Bounded local-source mismatch details when refresh is required.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_required: Option<IndexRefreshRequired>,
+    /// Bounded source/policy diagnostic when verification cannot complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification_incomplete: Option<IndexVerificationIncomplete>,
+    /// Project/index identity mismatch details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_mismatch: Option<IndexProjectMismatch>,
+    /// Reusable recovery call when refresh is required.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next: Option<McpRefreshNextCall>,
+}
+
+/// Stable MCP error categories.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpErrorKind {
+    /// General command, input, storage, or service failure.
+    Error,
+    /// Current saved local source differs from the durable index.
+    RefreshRequired,
+    /// Current saved local source could not be inspected completely.
+    VerificationIncomplete,
+    /// The selected project root does not own the opened index.
+    ProjectMismatch,
+}
+
+/// Direct recovery selector for a stale index.
+#[derive(Debug, Serialize)]
+struct McpRefreshNextCall {
+    /// Existing MCP tool that safely refreshes the selected project.
+    tool: &'static str,
+    /// Canonical project root for per-call isolation.
+    project_path: String,
 }
 
 /// Agent-facing payload for the selected MCP project.
@@ -1484,6 +1550,20 @@ impl ProjectAtlasMcpServer {
         AtlasStore::open(&state.db_path).map_err(CliError::from)
     }
 
+    /// Open and verify the durable index before a normal MCP read.
+    fn open_fresh_store(state: &McpProjectState) -> Result<AtlasStore, CliError> {
+        if !state.db_path.exists() {
+            return Err(CliError::InvalidInput(format!(
+                "ProjectAtlas index '{}' is missing for selected project root '{}'; {MISSING_INDEX_GUIDANCE}",
+                state.db_path.display(),
+                state.root.display()
+            )));
+        }
+        let store = AtlasStore::open_read_only(&state.db_path)?;
+        verify_index_freshness(&store, &state.root, state.config_path.as_deref())?;
+        Ok(store)
+    }
+
     /// Open the durable index for mutation.
     fn open_mut_store(state: &McpProjectState) -> Result<AtlasStore, CliError> {
         open_atlas_store(&state.db_path)
@@ -1738,7 +1818,7 @@ impl ProjectAtlasMcpServer {
                 },
             });
         }
-        let store = Self::open_store(&state)?;
+        let store = Self::open_fresh_store(&state)?;
         let overview = store.overview()?;
         let folder_rows =
             ranked_folder_nodes_with_reasons(&store, &query, folder_limit.saturating_add(1))?;
@@ -1753,7 +1833,7 @@ impl ProjectAtlasMcpServer {
         let blockers = Self::brief_blockers(&store, blocker_limit)?;
         let folders_truncated = folder_rows.len() > folder_limit;
         let files_truncated = file_rows.len() > file_limit;
-        Ok(McpSessionBrief {
+        let brief = McpSessionBrief {
             project,
             policy: self.brief_policy(),
             overview: Some(overview),
@@ -1781,7 +1861,9 @@ impl ProjectAtlasMcpServer {
                 folders_truncated,
                 files_truncated,
             },
-        })
+        };
+        store.finish_index_read_snapshot()?;
+        Ok(brief)
     }
 
     /// Build brief policy fields.
@@ -2208,8 +2290,8 @@ impl ProjectAtlasMcpServer {
         let state = self.state_for_project_path(project_path.map(ToString::to_string))?;
         let file_path = PathBuf::from(&file);
         if !file_path.is_absolute() {
-            let store = Self::open_store(&state)?;
-            let file_key = validated_indexed_file_key(&store, &file_path)?;
+            let file_key = validated_repo_file_key(&file_path)
+                .map_err(|source| CliError::InvalidInput(source.to_string()))?;
             return Ok(McpResolvedRepoPath {
                 state,
                 key: file_key,
@@ -2220,16 +2302,16 @@ impl ProjectAtlasMcpServer {
             let resolved = Self::nearest_state_and_repo_key(&state, file)?.ok_or_else(|| {
                 Self::selected_project_path_error(PATH_NOT_INSIDE_INDEXED_PROJECT_ERROR)
             })?;
-            let store = Self::open_store(&resolved.state)?;
-            let file_key = validated_indexed_file_key(&store, Path::new(&resolved.key))?;
+            let file_key = validated_repo_file_key(Path::new(&resolved.key))
+                .map_err(|source| CliError::InvalidInput(source.to_string()))?;
             return Ok(McpResolvedRepoPath {
                 key: file_key,
                 ..resolved
             });
         }
         if let Some(file_key) = Self::absolute_path_key_in_selected_project(&state, &file_path)? {
-            let store = Self::open_store(&state)?;
-            let file_key = validated_indexed_file_key(&store, Path::new(&file_key))?;
+            let file_key = validated_repo_file_key(Path::new(&file_key))
+                .map_err(|source| CliError::InvalidInput(source.to_string()))?;
             return Ok(McpResolvedRepoPath {
                 state,
                 key: file_key,
@@ -2792,9 +2874,42 @@ impl ProjectAtlasMcpServer {
 
     /// Encode an MCP error as a structured agent-readable payload.
     fn encode_error_payload(error: &CliError) -> String {
+        let (kind, refresh_required, verification_incomplete, project_mismatch, next) = match error
+        {
+            CliError::RefreshRequired(report) => (
+                McpErrorKind::RefreshRequired,
+                Some(report.as_ref().clone()),
+                None,
+                None,
+                Some(McpRefreshNextCall {
+                    tool: MCP_TOOL_ATLAS_WATCH_ONCE,
+                    project_path: report.project_root.clone(),
+                }),
+            ),
+            CliError::VerificationIncomplete(report) => (
+                McpErrorKind::VerificationIncomplete,
+                None,
+                Some(report.as_ref().clone()),
+                None,
+                None,
+            ),
+            CliError::ProjectMismatch(report) => (
+                McpErrorKind::ProjectMismatch,
+                None,
+                None,
+                Some(report.as_ref().clone()),
+                None,
+            ),
+            _ => (McpErrorKind::Error, None, None, None, None),
+        };
         let payload = McpErrorResponse {
             error: McpErrorPayload {
+                kind,
                 message: error.to_string(),
+                refresh_required,
+                verification_incomplete,
+                project_mismatch,
+                next,
             },
         };
         serde_json::to_value(payload).map_or_else(
@@ -3100,7 +3215,7 @@ impl ProjectAtlasMcpServer {
     fn atlas_overview(&self, Parameters(params): Parameters<AtlasProjectParams>) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
-            let store = Self::open_store(&state)?;
+            let store = Self::open_fresh_store(&state)?;
             let overview = store.overview()?;
             let toon = render_overview(&overview);
             record_directory_walk_usage_estimate(
@@ -3124,7 +3239,7 @@ impl ProjectAtlasMcpServer {
     fn atlas_folders(&self, Parameters(params): Parameters<AtlasQueryParams>) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
-            let store = Self::open_store(&state)?;
+            let store = Self::open_fresh_store(&state)?;
             let query = Self::query_or_empty(params.query);
             let selected =
                 ranked_folder_nodes_with_reasons(&store, &query, params.limit.unwrap_or(10))?;
@@ -3155,7 +3270,7 @@ impl ProjectAtlasMcpServer {
                 params.folder.as_deref(),
                 nearest_project,
             )?;
-            let store = Self::open_store(&state)?;
+            let store = Self::open_fresh_store(&state)?;
             let query = Self::query_or_empty(params.query);
             let selected = ranked_file_nodes_with_reasons(
                 &store,
@@ -3196,7 +3311,7 @@ impl ProjectAtlasMcpServer {
     fn atlas_next(&self, Parameters(params): Parameters<AtlasQueryParams>) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
-            let store = Self::open_store(&state)?;
+            let store = Self::open_fresh_store(&state)?;
             let query = Self::query_or_empty(params.query);
             let report = next_step_report(&store, &query, params.limit)?;
             let payload = next_step_report_payload(&report);
@@ -3228,8 +3343,8 @@ impl ProjectAtlasMcpServer {
                 nearest_project,
             )?;
             let state = resolved.state;
-            let file_key = resolved.key;
-            let store = Self::open_store(&state)?;
+            let store = Self::open_fresh_store(&state)?;
+            let file_key = validated_indexed_file_key(&store, Path::new(&resolved.key))?;
             let content = read_indexed_file_content(&store, &file_key)?;
             let language = store
                 .load_node_by_path(&file_key)?
@@ -3267,12 +3382,14 @@ impl ProjectAtlasMcpServer {
                 nearest_project,
             )?;
             let state = resolved.state;
-            let file_key = resolved.key;
-            let store = Self::open_store(&state)?;
-            let report = build_file_summary(
+            let store = Self::open_fresh_store(&state)?;
+            let file_key = validated_indexed_file_key(&store, Path::new(&resolved.key))?;
+            let content = read_indexed_file_content(&store, &file_key)?;
+            let report = build_file_summary_from_source(
                 &store,
                 Path::new(&file_key),
                 params.limit.unwrap_or(DEFAULT_FILE_SUMMARY_LIMIT),
+                &content,
             )?;
             let toon = Self::with_selected_project_audit(
                 &state,
@@ -3283,9 +3400,9 @@ impl ProjectAtlasMcpServer {
                 &store,
                 &self.session,
                 MCP_EVENT_ATLAS_FILE_SUMMARY,
-                Some(report.file_path.clone()),
+                Some(report.file_path),
                 None,
-                &file_summary_usage_baseline(&store, &report)?,
+                &content,
                 &toon,
             )?;
             Ok(toon)
@@ -3300,7 +3417,7 @@ impl ProjectAtlasMcpServer {
     fn atlas_search(&self, Parameters(params): Parameters<AtlasSearchParams>) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path.clone())?;
-            let store = Self::open_store(&state)?;
+            let store = Self::open_fresh_store(&state)?;
             let report = search_indexed_files(
                 &store,
                 &params.pattern,
@@ -3340,11 +3457,12 @@ impl ProjectAtlasMcpServer {
                 nearest_project,
             )?;
             let state = resolved.state;
-            let file_key = resolved.key;
+            let store = Self::open_fresh_store(&state)?;
+            let file_key = validated_indexed_file_key(&store, Path::new(&resolved.key))?;
             let file = PathBuf::from(&file_key);
-            let store = Self::open_store(&state)?;
+            let content = read_indexed_file_content(&store, &file_key)?;
             let report = if let Some(symbol) = params.symbol {
-                read_symbol_slice(
+                read_symbol_slice_from_source(
                     &store,
                     &file,
                     &SymbolSliceSelector {
@@ -3353,6 +3471,7 @@ impl ProjectAtlasMcpServer {
                         kind: params.symbol_kind.as_deref(),
                         line: params.symbol_line,
                     },
+                    &content,
                 )?
             } else {
                 if params.symbol_parent.is_some()
@@ -3366,7 +3485,13 @@ impl ProjectAtlasMcpServer {
                 let start_line = params
                     .start_line
                     .ok_or_else(|| CliError::InvalidInput(START_LINE_REQUIRED_ERROR.to_string()))?;
-                read_indexed_code_slice(&store, &file, start_line, params.end_line)?
+                read_indexed_code_slice_from_source(
+                    &store,
+                    &file,
+                    start_line,
+                    params.end_line,
+                    &content,
+                )?
             };
             let toon = Self::with_selected_project_audit(
                 &state,
@@ -3377,9 +3502,9 @@ impl ProjectAtlasMcpServer {
                 &store,
                 &self.session,
                 MCP_EVENT_ATLAS_SLICE,
-                Some(report.path.clone()),
+                Some(report.path),
                 None,
-                &read_indexed_file_content(&store, &report.path)?,
+                &content,
                 &toon,
             )?;
             Ok(toon)
@@ -3402,7 +3527,12 @@ impl ProjectAtlasMcpServer {
                 params.max_workers,
                 params.timeout_seconds,
             );
-            let report = build_symbols_for_index(&mut store, &path, &options, None)?;
+            let plan = ScanRuntimePlan::for_path(
+                state.config_path.as_deref(),
+                &path,
+                params.text_index_max_bytes,
+            )?;
+            let report = run_symbol_build_pipeline(&mut store, &plan, &options, None)?;
             Self::encode_named_payload(MCP_PAYLOAD_SYMBOLS_BUILD, &report)
         })())
     }
@@ -3420,7 +3550,11 @@ impl ProjectAtlasMcpServer {
                 params.file.as_deref(),
                 nearest_project,
             )?;
-            let store = Self::open_store(&state)?;
+            let store = Self::open_fresh_store(&state)?;
+            let file = file
+                .as_deref()
+                .map(|path| validated_indexed_file_key(&store, Path::new(path)))
+                .transpose()?;
             let symbols = store.load_symbols(
                 file.as_deref(),
                 params.query.as_deref(),
@@ -3461,7 +3595,11 @@ impl ProjectAtlasMcpServer {
                 params.file.as_deref(),
                 nearest_project,
             )?;
-            let store = Self::open_store(&state)?;
+            let store = Self::open_fresh_store(&state)?;
+            let file = file
+                .as_deref()
+                .map(|path| validated_indexed_file_key(&store, Path::new(path)))
+                .transpose()?;
             let relations = store.load_symbol_relations(
                 file.as_deref(),
                 params.query.as_deref(),
@@ -3497,7 +3635,7 @@ impl ProjectAtlasMcpServer {
     fn atlas_health(&self, Parameters(params): Parameters<AtlasHealthParams>) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path.clone())?;
-            let store = Self::open_store(&state)?;
+            let store = Self::open_fresh_store(&state)?;
             let scope = if params.source_only.unwrap_or(false) {
                 HealthScope::source_only()
             } else {
@@ -3674,16 +3812,7 @@ impl ProjectAtlasMcpServer {
                 params.max_workers,
                 params.timeout_seconds,
             );
-            let report = run_watch_loop(
-                &mut store,
-                &plan.root,
-                true,
-                1,
-                1,
-                &symbol_options,
-                &plan.scan_options,
-                plan.text_options,
-            )?;
+            let report = run_watch_loop(&mut store, &plan, true, 1, 1, &symbol_options)?;
             Self::encode_named_payload(MCP_PAYLOAD_WATCH, &report)
         })())
     }
@@ -3812,7 +3941,7 @@ impl ProjectAtlasMcpServer {
     fn atlas_purpose_queue(&self, Parameters(params): Parameters<AtlasHealthParams>) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path.clone())?;
-            let store = Self::open_store(&state)?;
+            let store = Self::open_fresh_store(&state)?;
             let query = health_query_from_params(&params, purpose_queue_scope(&params))?;
             let page = purpose_curation_page(&store, &query)?;
             let toon = render_purpose_curation_page(&page);

@@ -27,24 +27,25 @@ use projectatlas_core::{
 };
 use projectatlas_db::{AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope};
 use projectatlas_service::{
-    CodeSlice, FileSummaryReport, SearchReport, SymbolSliceSelector, build_file_summary,
-    read_indexed_code_slice, read_symbol_slice, search_indexed_files,
+    CodeSlice, FileSummaryReport, SearchReport, SymbolSliceSelector,
+    build_file_summary_from_source, read_indexed_code_slice_from_source,
+    read_symbol_slice_from_source, search_indexed_files,
 };
 use runtime::{
     DEFAULT_HEALTH_LIMIT, InitBootstrapOptions, InitHostConfigStatus, InitSetupReport,
     MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel, PurposeReviewRequest,
     ScanRuntimePlan, SettingsReport, SymbolBuildOptions, WatchStatusReport, absolute_path,
-    build_settings_report, build_symbols_for_index, byte_count_to_tokens, canonical_project_root,
-    default_mcp_project_root, defaultable_cli_project_root,
-    estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
-    file_summary_usage_baseline, init_config_path, init_path_status, lint_database_if_present,
-    next_step_report, next_step_report_payload, normalized_folder_filter, open_atlas_store,
-    purpose_curation_page, ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons,
-    read_indexed_file_content, record_directory_walk_usage_estimate, record_usage_estimate,
-    record_usage_text, render_health_page, render_purpose_curation_page,
-    render_purpose_review_report, reset_index_files, resolved_mcp_config_path, review_purposes,
-    run_init_bootstrap, run_scan_pipeline, run_watch_loop, strip_legacy_purpose,
-    validated_indexed_file_key, watcher_status_report,
+    build_settings_report, byte_count_to_tokens, canonical_project_root, default_mcp_project_root,
+    defaultable_cli_project_root, estimated_source_tokens_for_indexed_files,
+    estimated_source_tokens_for_paths, indexed_project_root, init_config_path, init_path_status,
+    lint_database_if_present, next_step_report, next_step_report_payload, normalized_folder_filter,
+    open_atlas_store, purpose_curation_page, ranked_file_nodes_with_reasons,
+    ranked_folder_nodes_with_reasons, read_indexed_file_content,
+    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
+    render_health_page, render_purpose_curation_page, render_purpose_review_report,
+    reset_index_files, resolved_mcp_config_path, review_purposes, run_init_bootstrap,
+    run_scan_pipeline, run_symbol_build_pipeline, run_watch_loop, strip_legacy_purpose,
+    validated_indexed_file_key, verify_index_freshness, watcher_status_report,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -146,6 +147,54 @@ enum CliError {
     /// User input was invalid.
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    /// Current local source differs from the durable index.
+    #[error("{0}")]
+    RefreshRequired(Box<runtime::IndexRefreshRequired>),
+    /// Current local source could not be verified completely.
+    #[error("{0}")]
+    VerificationIncomplete(Box<runtime::IndexVerificationIncomplete>),
+    /// The selected project root does not own the opened index.
+    #[error("{0}")]
+    ProjectMismatch(Box<runtime::IndexProjectMismatch>),
+}
+
+/// Structured CLI error payload for source-state read refusals.
+#[derive(Serialize)]
+struct CliIndexReadErrorResponse<'a> {
+    /// Typed error details.
+    error: CliIndexReadErrorPayload<'a>,
+}
+
+/// Stable CLI error details shared by TOON and JSON output.
+#[derive(Serialize)]
+struct CliIndexReadErrorPayload<'a> {
+    /// Machine-readable source-state status.
+    kind: runtime::IndexReadStatus,
+    /// Human-readable recovery guidance.
+    message: String,
+    /// Local-source mismatch details when a refresh is required.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_required: Option<&'a runtime::IndexRefreshRequired>,
+    /// Source/policy diagnostic when verification cannot complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification_incomplete: Option<&'a runtime::IndexVerificationIncomplete>,
+    /// Project/index identity mismatch details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_mismatch: Option<&'a runtime::IndexProjectMismatch>,
+    /// Direct CLI recovery selector for a confirmed mismatch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next: Option<CliRefreshNextCall<'a>>,
+}
+
+/// Existing CLI command that repairs a confirmed stale index.
+#[derive(Serialize)]
+struct CliRefreshNextCall<'a> {
+    /// Command family accepted by the current runtime.
+    command: &'static str,
+    /// Selected project root to refresh.
+    project_path: &'a str,
+    /// Run exactly one refresh cycle.
+    once: bool,
 }
 
 /// CLI output serialization format.
@@ -804,8 +853,11 @@ enum SymbolsCommand {
 
 /// Parse arguments, execute the command, and convert failures to process exit.
 fn main() {
-    if let Err(error) = run() {
-        if write_stderr(&format!("error: {error}\n")).is_err() {
+    let cli = Cli::parse();
+    if let Err(error) = run(&cli) {
+        let rendered =
+            render_cli_error(cli.format, &error).unwrap_or_else(|_| format!("error: {error}\n"));
+        if write_stderr(&rendered).is_err() {
             std::process::exit(1);
         }
         std::process::exit(1);
@@ -813,8 +865,7 @@ fn main() {
 }
 
 /// Execute the selected CLI command.
-fn run() -> Result<(), CliError> {
-    let cli = Cli::parse();
+fn run(cli: &Cli) -> Result<(), CliError> {
     if let Some(required_version) = cli.require_version.as_deref() {
         validate_required_runtime_version(required_version)?;
     }
@@ -883,7 +934,7 @@ fn run() -> Result<(), CliError> {
             )?;
         }
         Command::Overview => {
-            let store = open_atlas_store(&cli.db)?;
+            let store = open_index_for_read(cli)?;
             let overview = store.overview()?;
             let toon = render_overview(&overview);
             print_tracked_directory_output_estimate(
@@ -899,7 +950,7 @@ fn run() -> Result<(), CliError> {
             )?;
         }
         Command::Folders { query, limit } => {
-            let store = open_atlas_store(&cli.db)?;
+            let store = open_index_for_read(cli)?;
             let selected = ranked_folder_nodes_with_reasons(&store, query, *limit)?;
             let toon = render_ranked_nodes("folders", &selected);
             let payload = render_ranked_node_rows("folders", &selected);
@@ -922,7 +973,7 @@ fn run() -> Result<(), CliError> {
             include_content,
             limit,
         } => {
-            let store = open_atlas_store(&cli.db)?;
+            let store = open_index_for_read(cli)?;
             let query_text = query.as_deref().unwrap_or("");
             let folder_filter = folder
                 .as_deref()
@@ -956,7 +1007,7 @@ fn run() -> Result<(), CliError> {
             )?;
         }
         Command::Next { query, limit } => {
-            let store = open_atlas_store(&cli.db)?;
+            let store = open_index_for_read(cli)?;
             let report = next_step_report(&store, query, Some(*limit))?;
             let payload = next_step_report_payload(&report);
             let toon = encode_agent_payload(&json!({ "next": payload }));
@@ -973,7 +1024,7 @@ fn run() -> Result<(), CliError> {
             )?;
         }
         Command::Outline { file, lines } => {
-            let store = open_atlas_store(&cli.db)?;
+            let store = open_index_for_read(cli)?;
             let file_key = validated_indexed_file_key(&store, file)?;
             let content = read_indexed_file_content(&store, &file_key)?;
             let language = store
@@ -994,8 +1045,11 @@ fn run() -> Result<(), CliError> {
             )?;
         }
         Command::Summary { file, limit } => {
-            let store = open_atlas_store(&cli.db)?;
-            let report = build_file_summary(&store, file, *limit)?;
+            let store = open_index_for_read(cli)?;
+            let file_key = validated_indexed_file_key(&store, file)?;
+            let content = read_indexed_file_content(&store, &file_key)?;
+            let report =
+                build_file_summary_from_source(&store, Path::new(&file_key), *limit, &content)?;
             let toon = render_file_summary(&report);
             print_tracked_output_text(
                 cli.format,
@@ -1004,7 +1058,7 @@ fn run() -> Result<(), CliError> {
                 "summary",
                 Some(report.file_path.clone()),
                 None,
-                &file_summary_usage_baseline(&store, &report)?,
+                &content,
                 &toon,
                 &report,
             )?;
@@ -1019,7 +1073,7 @@ fn run() -> Result<(), CliError> {
             start_index,
             limit,
         } => {
-            let store = open_atlas_store(&cli.db)?;
+            let store = open_index_for_read(cli)?;
             let report = search_indexed_files(
                 &store,
                 pattern,
@@ -1053,17 +1107,20 @@ fn run() -> Result<(), CliError> {
             symbol_kind,
             symbol_line,
         } => {
-            let store = open_atlas_store(&cli.db)?;
+            let store = open_index_for_read(cli)?;
+            let file_key = validated_indexed_file_key(&store, file)?;
+            let content = read_indexed_file_content(&store, &file_key)?;
             let report = if let Some(symbol) = symbol {
-                read_symbol_slice(
+                read_symbol_slice_from_source(
                     &store,
-                    file,
+                    Path::new(&file_key),
                     &SymbolSliceSelector {
                         name: symbol,
                         parent: symbol_parent.as_deref(),
                         kind: symbol_kind.as_deref(),
                         line: *symbol_line,
                     },
+                    &content,
                 )?
             } else {
                 if symbol_parent.is_some() || symbol_kind.is_some() || symbol_line.is_some() {
@@ -1076,7 +1133,13 @@ fn run() -> Result<(), CliError> {
                         "start-line is required unless --symbol is provided".to_string(),
                     )
                 })?;
-                read_indexed_code_slice(&store, file, start_line, *end_line)?
+                read_indexed_code_slice_from_source(
+                    &store,
+                    Path::new(&file_key),
+                    start_line,
+                    *end_line,
+                    &content,
+                )?
             };
             let toon = render_code_slice(&report);
             print_tracked_output_text(
@@ -1086,7 +1149,7 @@ fn run() -> Result<(), CliError> {
                 "slice",
                 Some(report.path.clone()),
                 None,
-                &read_indexed_file_content(&store, &report.path)?,
+                &content,
                 &toon,
                 &report,
             )?;
@@ -1101,7 +1164,8 @@ fn run() -> Result<(), CliError> {
                 let path = defaultable_cli_project_root(path, &cli.db, cli.config.as_deref())?;
                 let mut store = open_atlas_store(&cli.db)?;
                 let options = SymbolBuildOptions::new(*max_bytes, *max_workers, *timeout_seconds);
-                let report = build_symbols_for_index(&mut store, &path, &options, None)?;
+                let plan = ScanRuntimePlan::for_path(cli.config.as_deref(), &path, None)?;
+                let report = run_symbol_build_pipeline(&mut store, &plan, &options, None)?;
                 print_output(
                     cli.format,
                     &encode_agent_payload(&json!({ "symbols_build": report })),
@@ -1109,7 +1173,7 @@ fn run() -> Result<(), CliError> {
                 )?;
             }
             SymbolsCommand::List { file, query, limit } => {
-                let store = open_atlas_store(&cli.db)?;
+                let store = open_index_for_read(cli)?;
                 let symbols = store.load_symbols(file.as_deref(), query.as_deref(), *limit)?;
                 let toon = render_symbols(&symbols);
                 let baseline_tokens = estimated_source_tokens_for_paths(
@@ -1129,7 +1193,7 @@ fn run() -> Result<(), CliError> {
                 )?;
             }
             SymbolsCommand::Relations { file, query, limit } => {
-                let store = open_atlas_store(&cli.db)?;
+                let store = open_index_for_read(cli)?;
                 let relations =
                     store.load_symbol_relations(file.as_deref(), query.as_deref(), *limit)?;
                 let toon = render_symbol_relations(&relations);
@@ -1156,16 +1220,19 @@ fn run() -> Result<(), CliError> {
                 symbol_kind,
                 symbol_line,
             } => {
-                let store = open_atlas_store(&cli.db)?;
-                let report = read_symbol_slice(
+                let store = open_index_for_read(cli)?;
+                let file_key = validated_indexed_file_key(&store, file)?;
+                let content = read_indexed_file_content(&store, &file_key)?;
+                let report = read_symbol_slice_from_source(
                     &store,
-                    file,
+                    Path::new(&file_key),
                     &SymbolSliceSelector {
                         name: symbol,
                         parent: symbol_parent.as_deref(),
                         kind: symbol_kind.as_deref(),
                         line: *symbol_line,
                     },
+                    &content,
                 )?;
                 let toon = render_code_slice(&report);
                 print_tracked_output_text(
@@ -1175,7 +1242,7 @@ fn run() -> Result<(), CliError> {
                     "symbol-slice",
                     Some(report.path.clone()),
                     Some(symbol.clone()),
-                    &read_indexed_file_content(&store, &report.path)?,
+                    &content,
                     &toon,
                     &report,
                 )?;
@@ -1283,13 +1350,11 @@ fn run() -> Result<(), CliError> {
                 SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, *max_workers, *timeout_seconds);
             let report = run_watch_loop(
                 &mut store,
-                &plan.root,
+                &plan,
                 *once,
                 *poll_seconds,
                 *max_cycles,
                 &symbol_options,
-                &plan.scan_options,
-                plan.text_options,
             )?;
             print_output(
                 cli.format,
@@ -1306,7 +1371,7 @@ fn run() -> Result<(), CliError> {
             summary_only,
             source_only,
         } => {
-            let store = open_atlas_store(&cli.db)?;
+            let store = open_index_for_read(cli)?;
             let query = health_query_from_cli(
                 *start_index,
                 *limit,
@@ -1537,7 +1602,7 @@ fn run() -> Result<(), CliError> {
                 include_assets,
                 include_low_priority_files,
             } => {
-                let store = open_atlas_store(&cli.db)?;
+                let store = open_index_for_read(cli)?;
                 let query = health_query_from_cli(
                     *start_index,
                     *limit,
@@ -1548,11 +1613,78 @@ fn run() -> Result<(), CliError> {
                     purpose_queue_scope(*include_assets, *include_low_priority_files),
                 );
                 let page = purpose_curation_page(&store, &query)?;
-                print_output(cli.format, &render_purpose_curation_page(&page), &page)?;
+                let toon = render_purpose_curation_page(&page);
+                store.finish_index_read_snapshot()?;
+                print_output(cli.format, &toon, &page)?;
             }
         },
     }
     Ok(())
+}
+
+/// Render typed source-state failures in the selected agent/script format.
+fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, serde_json::Error> {
+    let details = match error {
+        CliError::RefreshRequired(report) => Some(CliIndexReadErrorPayload {
+            kind: runtime::IndexReadStatus::RefreshRequired,
+            message: error.to_string(),
+            refresh_required: Some(report.as_ref()),
+            verification_incomplete: None,
+            project_mismatch: None,
+            next: Some(CliRefreshNextCall {
+                command: "watch",
+                project_path: &report.project_root,
+                once: true,
+            }),
+        }),
+        CliError::VerificationIncomplete(report) => Some(CliIndexReadErrorPayload {
+            kind: runtime::IndexReadStatus::VerificationIncomplete,
+            message: error.to_string(),
+            refresh_required: None,
+            verification_incomplete: Some(report.as_ref()),
+            project_mismatch: None,
+            next: None,
+        }),
+        CliError::ProjectMismatch(report) => Some(CliIndexReadErrorPayload {
+            kind: runtime::IndexReadStatus::ProjectMismatch,
+            message: error.to_string(),
+            refresh_required: None,
+            verification_incomplete: None,
+            project_mismatch: Some(report.as_ref()),
+            next: None,
+        }),
+        _ => None,
+    };
+    let Some(error) = details else {
+        return Ok(format!("error: {error}\n"));
+    };
+    let response = CliIndexReadErrorResponse { error };
+    match format {
+        OutputFormat::Toon => {
+            serde_json::to_value(response).map(|value| encode_agent_payload(&value))
+        }
+        OutputFormat::Json => {
+            serde_json::to_string_pretty(&response).map(|text| format!("{text}\n"))
+        }
+    }
+}
+
+/// Open and verify the durable index before a normal CLI read.
+fn open_index_for_read(cli: &Cli) -> Result<AtlasStore, CliError> {
+    if !cli.db.is_file() {
+        return Err(CliError::InvalidInput(format!(
+            "ProjectAtlas index '{}' is missing; run `projectatlas scan <project-root>` first",
+            cli.db.display()
+        )));
+    }
+    let store = AtlasStore::open_read_only(&cli.db)?;
+    let root = if cli.config.is_some() {
+        default_mcp_project_root(&cli.db, cli.config.as_deref())?
+    } else {
+        indexed_project_root(&store)?
+    };
+    verify_index_freshness(&store, &root, cli.config.as_deref())?;
+    Ok(store)
 }
 
 /// Build a harness-specific MCP configuration document for this binary.
@@ -3127,7 +3259,7 @@ mod tests {
                 language: Some("text".to_string()),
                 size_bytes: Some(5),
                 mtime_ns: Some(1),
-                content_hash: Some("small-hash".to_string()),
+                content_hash: Some(blake3::hash(b"small").to_hex().to_string()),
             },
             Node {
                 path: "large.txt".to_string(),
@@ -3175,7 +3307,11 @@ mod tests {
             language: Some("toml".to_string()),
             size_bytes: Some(19),
             mtime_ns: Some(1),
-            content_hash: Some("config-hash".to_string()),
+            content_hash: Some(
+                blake3::hash(b"[project]\nroot = \".\"\n")
+                    .to_hex()
+                    .to_string(),
+            ),
         }];
         let mut store = AtlasStore::in_memory()?;
         store.replace_scan(&nodes)?;
@@ -4359,6 +4495,22 @@ mod tests {
                     io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
                 ) => {}
             Err(error) => return Err(error.into()),
+        }
+
+        for changed_repo in [&repo_a, &repo_b] {
+            let mut refresh_args = Map::new();
+            refresh_args.insert(
+                "project_path".to_string(),
+                json!(changed_repo.to_string_lossy().to_string()),
+            );
+            let refresh = call_text!("atlas_scan", refresh_args);
+            if !refresh.contains("scan:") {
+                return Err(format!(
+                    "routing fixture refresh failed for {}: {refresh}",
+                    changed_repo.display()
+                )
+                .into());
+            }
         }
 
         let mut search_b_args = Map::new();

@@ -42,6 +42,43 @@ pub enum CoreError {
 /// Convenient result alias for `ProjectAtlas` core operations.
 pub type CoreResult<T> = Result<T, CoreError>;
 
+/// Monotonic identity of one completely published derived index.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct IndexGeneration(u64);
+
+impl IndexGeneration {
+    /// Generation before the first complete publication.
+    pub const ZERO: Self = Self(0);
+
+    /// Construct a generation from its durable integer representation.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Return the durable integer representation.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Advance to the next complete publication generation.
+    #[must_use]
+    pub const fn checked_next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+}
+
+impl fmt::Display for IndexGeneration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 /// File or folder node kind.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
