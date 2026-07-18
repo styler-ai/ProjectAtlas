@@ -11,6 +11,7 @@ use projectatlas_core::telemetry::{
     READ_AVOIDANCE_CONFIDENCE_MODELED, READ_AVOIDANCE_SCOPE, usage_from_estimates,
 };
 use projectatlas_db::{AtlasStore, HealthResolution, IndexedFileText};
+use rusqlite::Connection;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,7 +19,7 @@ use std::error::Error;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read as IoRead, Write as IoWrite};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -52,6 +53,13 @@ const SUBDIR_CONFIG_DIR: &str = "config";
 const SESSION_TEST_FILE_NAME: &str = "session.rs";
 #[cfg(windows)]
 const PROJECTATLAS_LOCAL_APPDATA_DIR: &str = "ProjectAtlas";
+
+/// Return one `SQLite` sidecar path for exact no-mutation assertions.
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    PathBuf::from(sidecar)
+}
 
 #[test]
 fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn Error>> {
@@ -4560,6 +4568,21 @@ fn root_and_metadata_validation_flow() -> Result<(), Box<dyn Error>> {
         .failure()
         .stdout(predicate::str::contains("mismatches"));
 
+    let other_config = other_repo.join(ATLAS_DIR_NAME).join("config.toml");
+    let copied_db = temp.path().join("copied-projectatlas.db");
+    fs::copy(&db, &copied_db)?;
+    Command::cargo_bin("projectatlas")?
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&copied_db)
+        .arg("--config")
+        .arg(&other_config)
+        .args(["purpose", "set", "src/a.rs", "Wrong project mutation"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("project_mismatch"));
+
     Ok(())
 }
 
@@ -4743,6 +4766,83 @@ fn no_telemetry_readonly_cli_smoke() -> Result<(), Box<dyn Error>> {
             "read-only no-telemetry smoke mutated token calls: before {calls_before}, after {calls_after}"
         ))
         .into());
+    }
+
+    let purpose_review = temp.path().join("purpose-review.json");
+    fs::write(
+        &purpose_review,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "items": [{
+                "path": "src/main.rs",
+                "purpose": "Rust source file for no-telemetry CLI smoke."
+            }]
+        }))?,
+    )?;
+    let mcp_config = mcp_config_for_harness(&repo, &db, "mcp-json")?;
+    let (mcp_command, mcp_args) = mcp_command_and_args(&mcp_config)?;
+    let connection = Connection::open(&db)?;
+    connection.execute(
+        "UPDATE metadata SET value = '8' WHERE key = 'schema_version'",
+        [],
+    )?;
+    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+    connection.pragma_update(None, "journal_mode", "DELETE")?;
+    drop(connection);
+    let released_schema_bytes = fs::read(&db)?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        if sqlite_sidecar_path(&db, suffix).exists() {
+            return Err(io::Error::other("released-schema fixture retained a sidecar").into());
+        }
+    }
+
+    for args in [
+        vec!["settings"],
+        vec!["token"],
+        vec!["parity", "report", "--profile", "repository-intelligence"],
+        vec!["lint", "--purpose-level", "low"],
+    ] {
+        Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .arg("--db")
+            .arg(&db)
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("unsupported schema version 8"));
+    }
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--db")
+        .arg(&db)
+        .args(["purpose", "review", "--from-file"])
+        .arg(&purpose_review)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unsupported schema version 8"));
+
+    let mcp_messages = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_token_report","arguments":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_parity_report","arguments":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_purpose_review","arguments":{"items":[{"path":"src/main.rs","purpose":"Rust source file for no-telemetry CLI smoke."}]}}}"#,
+    ];
+    let mcp_output = run_mcp_stdio(&mcp_command, &repo, &mcp_args, &mcp_messages)?;
+    if mcp_output.matches("unsupported schema version 8").count() < 3 {
+        return Err(io::Error::other(format!(
+            "MCP pure reports did not refuse released schema without migration: {mcp_output}"
+        ))
+        .into());
+    }
+    if fs::read(&db)? != released_schema_bytes {
+        return Err(io::Error::other("pure reports migrated or rewrote released schema").into());
+    }
+    for suffix in ["-wal", "-shm", "-journal"] {
+        if sqlite_sidecar_path(&db, suffix).exists() {
+            return Err(io::Error::other("pure report created a SQLite sidecar").into());
+        }
     }
     Ok(())
 }

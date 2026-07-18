@@ -873,10 +873,35 @@ pub(crate) fn load_scan_import_config(
     Ok(None)
 }
 
-/// Open or create a durable index, creating the parent directory only on demand.
-pub(crate) fn open_atlas_store(path: &Path) -> Result<AtlasStore, CliError> {
+/// Open or create a durable index bound to one selected project root.
+pub(crate) fn open_atlas_store_for_project(
+    path: &Path,
+    root: &Path,
+) -> Result<AtlasStore, CliError> {
     ensure_parent_dir(path)?;
-    AtlasStore::open(path).map_err(CliError::from)
+    AtlasStore::open_for_project(path, root).map_err(project_store_error)
+}
+
+/// Open a current durable index read snapshot bound to one selected root.
+pub(crate) fn open_atlas_store_read_only_for_project(
+    path: &Path,
+    root: &Path,
+) -> Result<AtlasStore, CliError> {
+    AtlasStore::open_read_only_for_project(path, root).map_err(project_store_error)
+}
+
+/// Preserve typed selected-root mismatch diagnostics across store adapters.
+fn project_store_error(source: projectatlas_db::DbError) -> CliError {
+    match source {
+        projectatlas_db::DbError::ProjectRootMismatch { expected, found } => {
+            CliError::ProjectMismatch(Box::new(IndexProjectMismatch {
+                status: IndexReadStatus::ProjectMismatch,
+                selected_project_root: expected,
+                indexed_project_root: found,
+            }))
+        }
+        other => CliError::Db(other),
+    }
 }
 
 /// Return the config path init should preserve or create for a project root.
@@ -916,8 +941,7 @@ pub(crate) fn run_init_bootstrap(
     let db_existed = db_path.exists();
 
     init_project_with_config(&root, Some(&config_file))?;
-    let mut store = open_atlas_store(db_path)?;
-    store.set_project_root(&root)?;
+    let mut store = open_atlas_store_for_project(db_path, &root)?;
 
     let mut ok = true;
     let (scan_status, scan_report, scan_error) = if options.no_scan {
@@ -2187,7 +2211,7 @@ pub(crate) fn build_settings_report(
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let index = if absolute_db.exists() {
-        let store = AtlasStore::open(&absolute_db)?;
+        let store = AtlasStore::open_read_only(&absolute_db)?;
         Some(settings_index_stats(&store)?)
     } else {
         None
@@ -2313,11 +2337,10 @@ pub(crate) fn resolved_mcp_config_path(
         return Ok(Some(absolute_path(path)?));
     }
     let mut candidate_roots = Vec::new();
-    if db.exists() {
-        let store = AtlasStore::open(db)?;
-        if let Some(project_root) = store.project_root()? {
-            candidate_roots.push(PathBuf::from(project_root));
-        }
+    if db.exists()
+        && let Some(project_root) = read_project_root_read_only(db)?
+    {
+        candidate_roots.push(PathBuf::from(project_root));
     }
     let absolute_db = absolute_path(db)?;
     if let Some(project_root) = project_root_from_db_path(&absolute_db) {
@@ -2409,12 +2432,13 @@ pub(crate) fn watcher_status_report(active: bool) -> WatchStatusReport {
 /// Build lint output for an existing `SQLite` index.
 pub(crate) fn lint_database_if_present(
     db: &Path,
+    root: &Path,
     purpose_level: PurposeLintLevel,
 ) -> Result<(String, i32), CliError> {
     if !db.exists() {
         return Ok((String::new(), 0));
     }
-    let store = AtlasStore::open(db)?;
+    let store = AtlasStore::open_read_only_for_project(db, root)?;
     let query = purpose_level.health_query();
     let page = store.unresolved_health_findings_page(&store.resolved_health_ids()?, &query)?;
     let blocking = page

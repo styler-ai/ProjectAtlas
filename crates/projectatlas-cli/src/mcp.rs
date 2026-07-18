@@ -13,13 +13,14 @@ use crate::runtime::{
     byte_count_to_tokens, canonical_project_root, config_root_mismatch_error,
     default_mcp_project_root, estimated_source_tokens_for_indexed_files,
     estimated_source_tokens_for_paths, init_config_path, lint_database_if_present,
-    next_step_report, next_step_report_payload, normalized_folder_filter, open_atlas_store,
-    purpose_curation_page, ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons,
-    read_indexed_file_content, record_directory_walk_usage_estimate, record_usage_estimate,
-    record_usage_text, render_health_page, render_purpose_curation_page,
-    render_purpose_review_report, reset_index_files, review_purposes, run_init_bootstrap,
-    run_scan_pipeline, run_symbol_build_pipeline, run_watch_loop, strip_legacy_purpose,
-    telemetry_disabled, validated_indexed_file_key, verify_index_freshness, watcher_status_report,
+    next_step_report, next_step_report_payload, normalized_folder_filter,
+    open_atlas_store_for_project, open_atlas_store_read_only_for_project, purpose_curation_page,
+    ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
+    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
+    render_health_page, render_purpose_curation_page, render_purpose_review_report,
+    reset_index_files, review_purposes, run_init_bootstrap, run_scan_pipeline,
+    run_symbol_build_pipeline, run_watch_loop, strip_legacy_purpose, telemetry_disabled,
+    validated_indexed_file_key, verify_index_freshness, watcher_status_report,
 };
 use crate::token_tui::{
     TokenDashboardTheme, render_token_dashboard_plain_with_theme,
@@ -1538,8 +1539,8 @@ impl ProjectAtlasMcpServer {
         }
     }
 
-    /// Open the durable index without creating a new project database.
-    fn open_store(state: &McpProjectState) -> Result<AtlasStore, CliError> {
+    /// Open the durable index through one root-bound read snapshot.
+    fn open_read_store(state: &McpProjectState) -> Result<AtlasStore, CliError> {
         if !state.db_path.exists() {
             return Err(CliError::InvalidInput(format!(
                 "ProjectAtlas index '{}' is missing for selected project root '{}'; {MISSING_INDEX_GUIDANCE}",
@@ -1547,26 +1548,31 @@ impl ProjectAtlasMcpServer {
                 state.root.display()
             )));
         }
-        AtlasStore::open(&state.db_path).map_err(CliError::from)
+        open_atlas_store_read_only_for_project(&state.db_path, &state.root)
     }
 
     /// Open and verify the durable index before a normal MCP read.
     fn open_fresh_store(state: &McpProjectState) -> Result<AtlasStore, CliError> {
-        if !state.db_path.exists() {
-            return Err(CliError::InvalidInput(format!(
-                "ProjectAtlas index '{}' is missing for selected project root '{}'; {MISSING_INDEX_GUIDANCE}",
-                state.db_path.display(),
-                state.root.display()
-            )));
-        }
-        let store = AtlasStore::open_read_only(&state.db_path)?;
+        let store = Self::open_read_store(state)?;
         verify_index_freshness(&store, &state.root, state.config_path.as_deref())?;
         Ok(store)
     }
 
     /// Open the durable index for mutation.
     fn open_mut_store(state: &McpProjectState) -> Result<AtlasStore, CliError> {
-        open_atlas_store(&state.db_path)
+        open_atlas_store_for_project(&state.db_path, &state.root)
+    }
+
+    /// Open an existing selected-project index for purpose or health mutation.
+    fn open_existing_mut_store(state: &McpProjectState) -> Result<AtlasStore, CliError> {
+        if !state.db_path.is_file() {
+            return Err(CliError::InvalidInput(format!(
+                "ProjectAtlas index '{}' is missing for selected project root '{}'; {MISSING_INDEX_GUIDANCE}",
+                state.db_path.display(),
+                state.root.display()
+            )));
+        }
+        Self::open_mut_store(state)
     }
 
     /// Load effective atlas config for the selected state.
@@ -2128,7 +2134,8 @@ impl ProjectAtlasMcpServer {
             },
         )?;
         let purpose_level = Self::parse_purpose_lint_level(params.purpose_level.as_deref())?;
-        let (db_report, db_exit_code) = lint_database_if_present(&state.db_path, purpose_level)?;
+        let (db_report, db_exit_code) =
+            lint_database_if_present(&state.db_path, &state.root, purpose_level)?;
         if !db_report.is_empty() {
             if !report.ends_with('\n') {
                 report.push('\n');
@@ -3669,7 +3676,7 @@ impl ProjectAtlasMcpServer {
     ) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
-            let store = Self::open_store(&state)?;
+            let store = Self::open_existing_mut_store(&state)?;
             let resolution = HealthResolution {
                 finding_id: params.finding_id,
                 category: params.category,
@@ -3703,7 +3710,7 @@ impl ProjectAtlasMcpServer {
     fn atlas_token_report(&self, Parameters(params): Parameters<AtlasTokenParams>) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path.clone())?;
-            let store = Self::open_store(&state)?;
+            let store = Self::open_read_store(&state)?;
             let include_chart = params.include_chart.unwrap_or(false);
             let chart_theme = Self::parse_token_chart_theme(params.theme.as_deref())?;
             if let Some(window) = params.trend_window.as_deref() {
@@ -3750,7 +3757,7 @@ impl ProjectAtlasMcpServer {
     fn atlas_parity_report(&self, Parameters(params): Parameters<AtlasParityParams>) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
-            let store = Self::open_store(&state)?;
+            let store = Self::open_fresh_store(&state)?;
             let profile = params
                 .profile
                 .unwrap_or_else(|| crate::REPOSITORY_INTELLIGENCE_PROFILE.to_string());
@@ -3966,7 +3973,7 @@ impl ProjectAtlasMcpServer {
     fn atlas_purpose_set(&self, Parameters(params): Parameters<AtlasPurposeSetParams>) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
-            let store = Self::open_store(&state)?;
+            let store = Self::open_existing_mut_store(&state)?;
             let node_key = Self::validated_indexed_node_key(&store, &params.path)?;
             store.set_purpose(&node_key, &params.purpose, PurposeSource::Agent)?;
             Self::encode_serialized_payload(McpPurposeSetResponse {
@@ -3990,8 +3997,13 @@ impl ProjectAtlasMcpServer {
         Parameters(params): Parameters<AtlasPurposeReviewParams>,
     ) -> String {
         Self::as_mcp_text((|| {
+            let apply = params.apply.unwrap_or(false);
             let state = self.state_for_project_path(params.project_path)?;
-            let store = Self::open_store(&state)?;
+            let store = if apply {
+                Self::open_existing_mut_store(&state)?
+            } else {
+                Self::open_fresh_store(&state)?
+            };
             let requests = params
                 .items
                 .into_iter()
@@ -4001,7 +4013,7 @@ impl ProjectAtlasMcpServer {
                     confirm_existing: item.confirm_existing.unwrap_or(false),
                 })
                 .collect::<Vec<_>>();
-            let report = review_purposes(&store, &requests, params.apply.unwrap_or(false))?;
+            let report = review_purposes(&store, &requests, apply)?;
             Ok(render_purpose_review_report(&report))
         })())
     }
@@ -4137,7 +4149,7 @@ mod tests {
         fs::create_dir(&repo)?;
         let state = ProjectAtlasMcpServer::project_state_from_root(&repo)?;
 
-        let Err(error) = ProjectAtlasMcpServer::open_store(&state) else {
+        let Err(error) = ProjectAtlasMcpServer::open_read_store(&state) else {
             return Err(io::Error::other("missing index opened unexpectedly").into());
         };
         require(
@@ -4307,8 +4319,8 @@ mod tests {
             "const ROUTE: &str = \"hiddenNeedle\";\n",
         )?;
         let db_path = repo.join(".projectatlas").join("projectatlas.db");
-        let mut store = open_atlas_store(&db_path)?;
         let plan = ScanRuntimePlan::for_path(None, &repo, None)?;
+        let mut store = open_atlas_store_for_project(&db_path, &plan.root)?;
         let symbol_options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, Some(1), Some(30));
         run_scan_pipeline(&mut store, &plan, &symbol_options)?;
         drop(store);
@@ -4516,17 +4528,16 @@ mod tests {
 
         let db_path = repo.join(".projectatlas").join("projectatlas.db");
         {
-            let store = open_atlas_store(&db_path)?;
-            store.set_project_root(&other)?;
+            let _store = open_atlas_store_for_project(&db_path, &other)?;
         }
         require(
             ProjectAtlasMcpServer::indexed_root_from_candidate(&repo).is_none(),
             "candidate with mismatched DB root was treated as indexed",
         )?;
 
+        reset_index_files(&db_path, true, false, false)?;
         {
-            let store = open_atlas_store(&db_path)?;
-            store.set_project_root(&repo)?;
+            let _store = open_atlas_store_for_project(&db_path, &repo)?;
         }
         let indexed = ProjectAtlasMcpServer::indexed_root_from_candidate(&repo)
             .ok_or_else(|| io::Error::other("matching DB root was not accepted"))?;
