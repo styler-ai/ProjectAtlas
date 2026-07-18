@@ -4161,7 +4161,14 @@ fn read_project_root_from_snapshot(path: &Path) -> DbResult<Option<String>> {
 
 /// Read root metadata without creating `SQLite` sidecars when no WAL is present.
 fn read_project_root_immutable(path: &Path) -> DbResult<Option<String>> {
-    let uri = sqlite_immutable_read_uri(path)?;
+    #[cfg(unix)]
+    let uri_path = sqlite_uri_path_bytes(path);
+    #[cfg(not(unix))]
+    let uri_path = sqlite_uri_path_bytes(path)?;
+    let uri = format!(
+        "file:{}?mode=ro&immutable=1",
+        sqlite_uri_escape_path(&uri_path)
+    );
     let connection = Connection::open_with_flags(
         uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
@@ -4174,15 +4181,6 @@ fn read_project_root_immutable(path: &Path) -> DbResult<Option<String>> {
         )
         .optional()
         .map_err(Into::into)
-}
-
-/// Build a read-only immutable `SQLite` URI for a sidecar-free metadata probe.
-fn sqlite_immutable_read_uri(path: &Path) -> DbResult<String> {
-    let uri_path = sqlite_uri_path_bytes(path)?;
-    Ok(format!(
-        "file:{}?mode=ro&immutable=1",
-        sqlite_uri_escape_path(&uri_path)
-    ))
 }
 
 /// Percent-escape a path while preserving `SQLite` URI path separators and drive colons.
@@ -4204,12 +4202,12 @@ fn sqlite_uri_escape_path(path: &[u8]) -> String {
     escaped
 }
 
-/// Return native path bytes suitable for an SQLite URI on Unix.
+/// Return native path bytes suitable for an `SQLite` URI on Unix.
 #[cfg(unix)]
-fn sqlite_uri_path_bytes(path: &Path) -> DbResult<Vec<u8>> {
+fn sqlite_uri_path_bytes(path: &Path) -> Vec<u8> {
     use std::os::unix::ffi::OsStrExt;
 
-    Ok(path.as_os_str().as_bytes().to_vec())
+    path.as_os_str().as_bytes().to_vec()
 }
 
 /// Return validated UTF-8 path bytes suitable for an `SQLite` URI on non-Unix hosts.
