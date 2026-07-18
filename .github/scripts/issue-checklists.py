@@ -11,14 +11,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TASK_RE = re.compile(r"(?m)^[ ]{0,3}[-*]\s+\[([ xX])\]\s+(.+?)\s*$")
+UNORDERED_LIST_MARKER_RE = r"[-*+]"
+TASK_RE = re.compile(
+    rf"(?m)^[ ]{{0,3}}{UNORDERED_LIST_MARKER_RE}\s+\[([ xX])\]\s+(.+?)\s*$"
+)
 TASK_ID_RE = re.compile(r"^(\d+(?:\.\d+)*)\s+")
 HEADING_RE = re.compile(r"(?m)^(#{1,6})\s+(.+?)\s*$")
 TASK_SECTION_HEADING_RE = re.compile(r"^(\d+(?:\.\d+)*)\.\s+")
 HTML_COMMENT_RE = re.compile(r"(?s)<!--.*?(?:-->|$)")
 FENCE_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
 MITIGATION_RE = re.compile(
-    r"(?mi)^[ ]{0,3}[-*]\s+\[([ xX])\]\s+(.+?)\s+"
+    rf"(?mi)^[ ]{{0,3}}{UNORDERED_LIST_MARKER_RE}\s+\[([ xX])\]\s+(.+?)\s+"
     r"\(OpenSpec tasks:\s*(\d+(?:\.\d+)*(?:\s*,\s*\d+(?:\.\d+)*)*)\)\s*$"
 )
 REQUIRED_OPEN_ISSUE_HEADINGS = (
@@ -352,7 +355,12 @@ def issue_contract_failures(
         )
         return failures
     likely_failures = premortem[marker.end() : mitigation_marker.start()]
-    if re.search(r"(?m)^[ ]{0,3}[-*]\s+\S", likely_failures) is None:
+    if (
+        re.search(
+            rf"(?m)^[ ]{{0,3}}{UNORDERED_LIST_MARKER_RE}\s+\S", likely_failures
+        )
+        is None
+    ):
         failures.append("pre-mortem must list at least one likely failure mode")
 
     mitigation_text = premortem[mitigation_marker.end() :]
@@ -648,6 +656,23 @@ Mitigations:
     assert issue_contract_failures(
         {"state": "OPEN", "body": issue_contract}, expected
     ) == []
+    plus_marker_contract = issue_contract.replace(
+        "- [ ] Keep the contract synchronized.",
+        "+ [ ] Keep the contract synchronized.",
+    )
+    assert issue_contract_failures(
+        {"state": "OPEN", "body": plus_marker_contract}, expected
+    ) == []
+    unbound_plus_mitigation = issue_contract.replace(
+        "## OpenSpec Tasks",
+        "+ [ ] Unbound mitigation\n## OpenSpec Tasks",
+    )
+    assert any(
+        "every pre-mortem mitigation checkbox" in failure
+        for failure in issue_contract_failures(
+            {"state": "OPEN", "body": unbound_plus_mitigation}, expected
+        )
+    )
     premature = issue_contract.replace(
         "- [ ] Keep the contract synchronized.",
         "- [x] Keep the contract synchronized.",
