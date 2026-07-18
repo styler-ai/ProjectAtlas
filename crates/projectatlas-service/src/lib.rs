@@ -37,7 +37,6 @@ const NEXT_REPORT_MAX_LIMIT: usize = 10;
 const SOURCE_STATUS_LIVE: &str = "live-source";
 /// Status emitted when indexed metadata had to stand in for live source.
 const SOURCE_STATUS_INDEXED: &str = "indexed-metadata";
-
 /// Service-layer failures.
 #[derive(Debug, Error)]
 pub enum ServiceError {
@@ -280,6 +279,60 @@ pub fn build_file_summary(
     limit: usize,
 ) -> ServiceResult<FileSummaryReport> {
     let file_key = validated_indexed_file_key(store, file)?;
+    let source_read =
+        indexed_native_path(store, &file_key).and_then(|path| read_file_content(&path));
+    match source_read {
+        Ok(content) => build_file_summary_with_source_state(
+            store,
+            file,
+            limit,
+            Some(&content),
+            SOURCE_STATUS_LIVE.to_string(),
+            String::new(),
+        ),
+        Err(error) => build_file_summary_with_source_state(
+            store,
+            file,
+            limit,
+            None,
+            SOURCE_STATUS_INDEXED.to_string(),
+            error.to_string(),
+        ),
+    }
+}
+
+/// Build structured file intelligence from caller-verified source bytes.
+///
+/// # Errors
+///
+/// Returns an error when the file path is invalid, not indexed, or indexed
+/// metadata cannot be read.
+pub fn build_file_summary_from_source(
+    store: &AtlasStore,
+    file: &Path,
+    limit: usize,
+    source: &str,
+) -> ServiceResult<FileSummaryReport> {
+    build_file_summary_with_source_state(
+        store,
+        file,
+        limit,
+        Some(source),
+        SOURCE_STATUS_LIVE.to_string(),
+        String::new(),
+    )
+}
+
+/// Build one summary from optional already-selected live source.
+fn build_file_summary_with_source_state(
+    store: &AtlasStore,
+    file: &Path,
+    limit: usize,
+    file_content: Option<&str>,
+    source_status: String,
+    source_error: String,
+) -> ServiceResult<FileSummaryReport> {
+    let file_key = validated_indexed_file_key(store, file)?;
     let effective_limit = limit.max(1);
     let indexed = store
         .load_node_by_path(&file_key)?
@@ -289,18 +342,11 @@ pub fn build_file_summary(
         &metadata_symbol_kinds(),
         FILE_METADATA_SYMBOL_LIMIT,
     )?;
-    let source_read =
-        indexed_native_path(store, &file_key).and_then(|path| read_file_content(&path));
-    let (file_content, source_status, source_error) = match source_read {
-        Ok(content) => (Some(content), SOURCE_STATUS_LIVE.to_string(), String::new()),
-        Err(error) => (None, SOURCE_STATUS_INDEXED.to_string(), error.to_string()),
-    };
-    let line_count = file_content.as_deref().map_or_else(
+    let line_count = file_content.map_or_else(
         || store.max_symbol_end_line_for_path(&file_key),
         |content| Ok(line_count_from_content(content)),
     )?;
     let docstring = file_content
-        .as_deref()
         .and_then(file_level_docstring)
         .unwrap_or_else(|| file_docstring(&metadata_symbols));
     let function_symbols =
@@ -1245,7 +1291,24 @@ pub fn read_indexed_code_slice(
 ) -> ServiceResult<CodeSlice> {
     let file_key = validated_indexed_file_key(store, file)?;
     let native_file = indexed_native_path(store, &file_key)?;
-    read_code_slice(&native_file, &file_key, start_line, end_line)
+    let content = read_file_content(&native_file)?;
+    read_indexed_code_slice_from_source(store, file, start_line, end_line, &content)
+}
+
+/// Read an exact line slice from caller-verified source bytes.
+///
+/// # Errors
+///
+/// Returns an error when the file is not indexed or line numbers are invalid.
+pub fn read_indexed_code_slice_from_source(
+    store: &AtlasStore,
+    file: &Path,
+    start_line: usize,
+    end_line: Option<usize>,
+    source: &str,
+) -> ServiceResult<CodeSlice> {
+    let file_key = validated_indexed_file_key(store, file)?;
+    read_code_slice(source, &file_key, start_line, end_line)
 }
 
 /// Read a symbol body by exact symbol name and optional disambiguators.
@@ -1258,6 +1321,24 @@ pub fn read_symbol_slice(
     store: &AtlasStore,
     file: &Path,
     selector: &SymbolSliceSelector<'_>,
+) -> ServiceResult<CodeSlice> {
+    let file_key = validated_indexed_file_key(store, file)?;
+    let native_file = indexed_native_path(store, &file_key)?;
+    let content = read_file_content(&native_file)?;
+    read_symbol_slice_from_source(store, file, selector, &content)
+}
+
+/// Read a symbol body from caller-verified source bytes.
+///
+/// # Errors
+///
+/// Returns an error when the symbol is absent, ambiguous, filtered out by the
+/// selector, or its indexed range is invalid for the supplied source.
+pub fn read_symbol_slice_from_source(
+    store: &AtlasStore,
+    file: &Path,
+    selector: &SymbolSliceSelector<'_>,
+    source: &str,
 ) -> ServiceResult<CodeSlice> {
     let file_key = validated_indexed_file_key(store, file)?;
     let requested_kind = selector.kind.map(parse_symbol_kind).transpose()?;
@@ -1287,13 +1368,7 @@ pub fn read_symbol_slice(
             )));
         }
     };
-    let native_file = indexed_native_path(store, &file_key)?;
-    read_code_slice(
-        &native_file,
-        &file_key,
-        symbol.line_start,
-        Some(symbol.line_end),
-    )
+    read_code_slice(source, &file_key, symbol.line_start, Some(symbol.line_end))
 }
 
 /// Normalize and validate a user-supplied path as a repository-relative file key.
@@ -1508,7 +1583,7 @@ fn context_after(lines: &[&str], index: usize, context_lines: usize) -> Vec<Stri
 
 /// Read an exact line slice from a previously validated file.
 fn read_code_slice(
-    native_file: &Path,
+    content: &str,
     file_key: &str,
     start_line: usize,
     end_line: Option<usize>,
@@ -1518,7 +1593,6 @@ fn read_code_slice(
             "start-line must be one or greater".to_string(),
         ));
     }
-    let content = read_file_content(native_file)?;
     let lines = content.lines().collect::<Vec<_>>();
     let line_count = lines.len();
     let end_line = end_line.unwrap_or(start_line);

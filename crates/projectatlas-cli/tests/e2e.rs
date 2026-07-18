@@ -4,10 +4,13 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use projectatlas_core::PurposeSource;
 use projectatlas_core::language::{BROAD_SOURCE_EXTENSIONS, detect_language_for_path};
+use projectatlas_core::symbols::{
+    CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
+};
 use projectatlas_core::telemetry::{
     READ_AVOIDANCE_CONFIDENCE_MODELED, READ_AVOIDANCE_SCOPE, usage_from_estimates,
 };
-use projectatlas_db::{AtlasStore, HealthResolution};
+use projectatlas_db::{AtlasStore, HealthResolution, IndexedFileText};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,6 +48,7 @@ const PROJECTATLAS_SKILL_DIR: &str = "skills";
 const PROJECTATLAS_SKILL_NAME: &str = "projectatlas";
 const SKILL_FILE_NAME: &str = "SKILL.md";
 const SUBDIR_CONFIG_DIR: &str = "config";
+const SESSION_TEST_FILE_NAME: &str = "session.rs";
 #[cfg(windows)]
 const PROJECTATLAS_LOCAL_APPDATA_DIR: &str = "ProjectAtlas";
 
@@ -5161,6 +5165,11 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
+        .args(["init", "--no-scan"])
+        .assert()
+        .success();
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
         .arg("--db")
         .arg(&db)
         .args(["scan", "."])
@@ -5185,8 +5194,6 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"atlas_root","arguments":{"project_path":repo_argument,"verify":true}}}).to_string(),
         serde_json::json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"atlas_mcp_config","arguments":{"project_path":repo_argument,"nearest_project":true}}}).to_string(),
         serde_json::json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"atlas_ignore_list","arguments":{"project_path":repo_argument}}}).to_string(),
-        serde_json::json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"atlas_ignore_add","arguments":{"project_path":repo_argument,"kind":"dir-name","value":"generated-cache"}}}).to_string(),
-        serde_json::json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"atlas_ignore_remove","arguments":{"project_path":repo_argument,"kind":"dir-name","value":"generated-cache"}}}).to_string(),
         serde_json::json!({"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"atlas_lint","arguments":{"project_path":repo_argument,"purpose_level":"low"}}}).to_string(),
         r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"atlas_runtime_info","arguments":{}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"atlas_overview","arguments":{}}}"#.to_string(),
@@ -6987,6 +6994,483 @@ fn notify_watch_refreshes_symbols_after_file_change() -> Result<(), Box<dyn Erro
         .assert()
         .success()
         .stdout(predicate::str::contains("changed"));
+    Ok(())
+}
+
+#[test]
+fn normal_reads_do_not_serve_offline_stale_index_state() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    for with_git_metadata in [false, true] {
+        let repository_name = if with_git_metadata {
+            "git-repository"
+        } else {
+            "local-source"
+        };
+        let repo = temp.path().join(repository_name);
+        let db = temp.path().join(format!("{repository_name}.db"));
+        exercise_normal_read_freshness(&repo, &db, with_git_metadata)?;
+    }
+    Ok(())
+}
+
+/// Exercise the same local-source freshness contract with and without Git metadata.
+fn exercise_normal_read_freshness(
+    repo: &Path,
+    db: &Path,
+    with_git_metadata: bool,
+) -> Result<(), Box<dyn Error>> {
+    const CONFIG: &str = "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n";
+    const CONTRACT_CHANGED_CONFIG: &str = "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\ntext_index_max_bytes = 1\n";
+    const LEGACY_SOURCE: &str =
+        "pub fn session_route() { legacy_store(); }\n\npub fn legacy_store() {}\n";
+    const CURRENT_SOURCE: &str =
+        "pub fn session_route() { active_store(); }\n\npub fn active_store() {}\n";
+
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(repo.join(TESTS_DIR_NAME))?;
+    fs::create_dir_all(repo.join(SUBDIR_CONFIG_DIR))?;
+    fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
+    fs::write(repo.join(SRC_DIR_NAME).join("lib.rs"), LEGACY_SOURCE)?;
+    fs::write(
+        repo.join(TESTS_DIR_NAME).join(SESSION_TEST_FILE_NAME),
+        "#[test]\nfn legacy_session_test() {}\n",
+    )?;
+    fs::write(
+        repo.join(SUBDIR_CONFIG_DIR).join("runtime.toml"),
+        "mode = \"legacy\"\n",
+    )?;
+    fs::write(repo.join(".gitignore"), "local-cache/\n")?;
+    let config_path = repo.join(ATLAS_DIR_NAME).join("config.toml");
+    fs::write(&config_path, CONFIG)?;
+    if with_git_metadata {
+        let output = StdCommand::new("git")
+            .current_dir(repo)
+            .args(["init", "--quiet"])
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "git init failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+    }
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .arg("--db")
+        .arg(db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    let baseline_summary = json_summary_command(repo, db, "src/lib.rs")?;
+    let baseline_summary_text = serde_json::to_string(&baseline_summary)?;
+    if !baseline_summary_text.contains("legacy_store") {
+        return Err(io::Error::other(format!(
+            "baseline summary did not contain legacy symbol facts: {baseline_summary_text}"
+        ))
+        .into());
+    }
+    Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .arg("--db")
+        .arg(db)
+        .args(["symbols", "relations", "--file", "src/lib.rs"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("legacy_store"));
+
+    fs::write(&config_path, CONTRACT_CHANGED_CONFIG)?;
+    let refused_symbol_build = Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .args(["--format", "json"])
+        .arg("--db")
+        .arg(db)
+        .args(["symbols", "build", "."])
+        .output()?;
+    if refused_symbol_build.status.success()
+        || String::from_utf8_lossy(&refused_symbol_build.stdout).contains("legacy_store")
+    {
+        return Err(io::Error::other(format!(
+            "symbol-only build certified a changed full-index contract: stdout={} stderr={}",
+            String::from_utf8_lossy(&refused_symbol_build.stdout),
+            String::from_utf8_lossy(&refused_symbol_build.stderr)
+        ))
+        .into());
+    }
+    let refused_symbol_build_json: Value = serde_json::from_slice(&refused_symbol_build.stderr)?;
+    require_json_string(
+        &refused_symbol_build_json,
+        &["error", "kind"],
+        "verification_incomplete",
+    )?;
+    require_json_string(
+        &refused_symbol_build_json,
+        &["error", "verification_incomplete", "reason"],
+        "publication_contract_mismatch",
+    )?;
+
+    fs::write(&config_path, CONFIG)?;
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let mismatched_symbol_messages = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_symbols_build","arguments":{"text_index_max_bytes":1}}}"#.to_string(),
+    ];
+    let mismatched_symbol_stdout = run_mcp_stdio(
+        &executable,
+        repo,
+        &[
+            "--db".to_string(),
+            db.display().to_string(),
+            "mcp".to_string(),
+        ],
+        &mismatched_symbol_messages,
+    )?;
+    let mismatched_symbol_text = mcp_tool_text(&mismatched_symbol_stdout, 2)?;
+    if !mismatched_symbol_text.contains("kind: verification_incomplete")
+        || !mismatched_symbol_text.contains("reason: publication_contract_mismatch")
+        || mismatched_symbol_text.contains("legacy_store")
+    {
+        return Err(io::Error::other(format!(
+            "MCP symbol-only build laundered a changed full-index contract: {mismatched_symbol_text}"
+        ))
+        .into());
+    }
+    let restored_summary = json_summary_command(repo, db, "src/lib.rs")?;
+    require_json_contains(&restored_summary, &["content_summary"], "legacy_store")?;
+
+    fs::write(&config_path, "[scan\n")?;
+    let incomplete_cli = Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .args(["--format", "json"])
+        .arg("--db")
+        .arg(db)
+        .args(["summary", "src/lib.rs"])
+        .output()?;
+    if incomplete_cli.status.success()
+        || !String::from_utf8_lossy(&incomplete_cli.stderr).contains("verification_incomplete")
+        || String::from_utf8_lossy(&incomplete_cli.stdout).contains("legacy_store")
+    {
+        return Err(io::Error::other(format!(
+            "incomplete CLI verification did not fail closed: stdout={} stderr={}",
+            String::from_utf8_lossy(&incomplete_cli.stdout),
+            String::from_utf8_lossy(&incomplete_cli.stderr)
+        ))
+        .into());
+    }
+    let incomplete_cli_json: Value = serde_json::from_slice(&incomplete_cli.stderr)?;
+    require_json_string(
+        &incomplete_cli_json,
+        &["error", "kind"],
+        "verification_incomplete",
+    )?;
+    let incomplete_messages = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":"src/lib.rs"}}}"#.to_string(),
+    ];
+    let incomplete_stdout = run_mcp_stdio(
+        &executable,
+        repo,
+        &[
+            "--db".to_string(),
+            db.display().to_string(),
+            "mcp".to_string(),
+        ],
+        &incomplete_messages,
+    )?;
+    let incomplete_text = mcp_tool_text(&incomplete_stdout, 2)?;
+    if !incomplete_text.contains("kind: verification_incomplete")
+        || !incomplete_text.contains("status: verification_incomplete")
+        || incomplete_text.contains("legacy_store")
+    {
+        return Err(io::Error::other(format!(
+            "incomplete MCP verification did not return the typed fail-closed state: {incomplete_text}"
+        ))
+        .into());
+    }
+
+    fs::write(&config_path, CONFIG)?;
+    let source_path = repo.join(SRC_DIR_NAME).join("lib.rs");
+    let indexed_modified = fs::metadata(&source_path)?.modified()?;
+    fs::write(&source_path, CURRENT_SOURCE)?;
+    fs::File::options()
+        .write(true)
+        .open(&source_path)?
+        .set_times(fs::FileTimes::new().set_modified(indexed_modified))?;
+    let changed_metadata = fs::metadata(&source_path)?;
+    if changed_metadata.len() != u64::try_from(LEGACY_SOURCE.len())?
+        || changed_metadata.modified()? != indexed_modified
+    {
+        return Err(io::Error::other(
+            "freshness fixture did not preserve indexed size and modification time",
+        )
+        .into());
+    }
+
+    let stale_cli = Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .args(["--format", "json"])
+        .arg("--db")
+        .arg(db)
+        .args(["summary", "src/lib.rs"])
+        .output()?;
+    if stale_cli.status.success()
+        || !String::from_utf8_lossy(&stale_cli.stderr).contains("refresh_required")
+        || String::from_utf8_lossy(&stale_cli.stdout).contains("legacy_store")
+    {
+        return Err(io::Error::other(format!(
+            "stale CLI read did not fail closed: stdout={} stderr={}",
+            String::from_utf8_lossy(&stale_cli.stdout),
+            String::from_utf8_lossy(&stale_cli.stderr)
+        ))
+        .into());
+    }
+    let stale_cli_json: Value = serde_json::from_slice(&stale_cli.stderr)?;
+    require_json_string(&stale_cli_json, &["error", "kind"], "refresh_required")?;
+    require_json_string(
+        &stale_cli_json,
+        &["error", "refresh_required", "reason"],
+        "source_changed",
+    )?;
+    require_json_usize_at_least(
+        &stale_cli_json,
+        &["error", "refresh_required", "modified"],
+        1,
+    )?;
+    require_json_string(&stale_cli_json, &["error", "next", "command"], "watch")?;
+
+    fs::rename(
+        repo.join(TESTS_DIR_NAME).join(SESSION_TEST_FILE_NAME),
+        repo.join(TESTS_DIR_NAME).join("current_session.rs"),
+    )?;
+    fs::write(repo.join(".gitignore"), "config/\n")?;
+
+    let deleted_absolute_selector = repo
+        .join(TESTS_DIR_NAME)
+        .join(SESSION_TEST_FILE_NAME)
+        .to_string_lossy()
+        .to_string();
+    let stale_messages = vec![
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":"src/lib.rs"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_search","arguments":{"pattern":"legacy_store","file_pattern":"*.rs"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"file":"src/lib.rs"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"atlas_files","arguments":{"file_pattern":"tests/*.rs"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"atlas_slice","arguments":{"file":"src/lib.rs","symbol":"legacy_store"}}}"#.to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":deleted_absolute_selector}}}).to_string(),
+    ];
+    let stale_stdout = run_mcp_stdio(
+        &executable,
+        repo,
+        &[
+            "--db".to_string(),
+            db.display().to_string(),
+            "mcp".to_string(),
+        ],
+        &stale_messages,
+    )?;
+    for id in 2..=7 {
+        let tool_text = mcp_tool_text(&stale_stdout, id)?;
+        if !tool_text.contains("kind: refresh_required")
+            || !tool_text.contains("status: refresh_required")
+            || !tool_text.contains("tool: atlas_watch_once")
+            || !tool_text.contains("changed:")
+            || tool_text.contains("changed: 0")
+            || tool_text.contains("legacy_store")
+        {
+            return Err(io::Error::other(format!(
+                "stale MCP read {id} did not return the typed fail-closed state: {tool_text}"
+            ))
+            .into());
+        }
+    }
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .arg("--db")
+        .arg(db)
+        .args(["watch", ".", "--once"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("watch:"));
+
+    let current_summary = json_summary_command(repo, db, "src/lib.rs")?;
+    let current_summary_text = serde_json::to_string(&current_summary)?;
+    if !current_summary_text.contains("active_store")
+        || current_summary_text.contains("legacy_store")
+    {
+        return Err(io::Error::other(format!(
+            "refreshed summary did not reflect current local source: {current_summary_text}"
+        ))
+        .into());
+    }
+    Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .arg("--db")
+        .arg(db)
+        .args(["symbols", "relations", "--file", "src/lib.rs"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("active_store"))
+        .stdout(predicate::str::contains("legacy_store").not());
+    Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .arg("--db")
+        .arg(db)
+        .args(["files", "--file-pattern", "tests/*.rs"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("tests/current_session.rs"))
+        .stdout(predicate::str::contains("tests/session.rs").not());
+    let old_search = Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(db)
+        .args(["search", "legacy_store", "--file-pattern", "*.rs"])
+        .output()?;
+    if !old_search.status.success() {
+        return Err(io::Error::other("old-symbol search failed after refresh").into());
+    }
+    let old_search_json: Value = serde_json::from_slice(&old_search.stdout)?;
+    require_json_usize(&old_search_json, &["returned"], 0)?;
+
+    let fresh_messages = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":"src/lib.rs"}}}"#.to_string(),
+    ];
+    let fresh_stdout = run_mcp_stdio(
+        &executable,
+        repo,
+        &[
+            "--db".to_string(),
+            db.display().to_string(),
+            "mcp".to_string(),
+        ],
+        &fresh_messages,
+    )?;
+    let fresh_text = mcp_tool_text(&fresh_stdout, 2)?;
+    if !fresh_text.contains("active_store")
+        || fresh_text.contains("legacy_store")
+        || fresh_text.contains("refresh_required")
+    {
+        return Err(io::Error::other(format!(
+            "unchanged MCP read did not stay current after refresh: {fresh_text}"
+        ))
+        .into());
+    }
+
+    let mut interrupted_store = AtlasStore::open(db)?;
+    let publication_before = interrupted_store
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("complete publication metadata was missing"))?;
+    let contract_fingerprint = publication_before
+        .contract_fingerprint
+        .as_deref()
+        .ok_or_else(|| io::Error::other("complete publication fingerprint was missing"))?;
+    let node_before = interrupted_store
+        .load_node_by_path("src/lib.rs")?
+        .ok_or_else(|| io::Error::other("complete source node was missing"))?;
+    let text_before = interrupted_store
+        .load_file_text("src/lib.rs")?
+        .ok_or_else(|| io::Error::other("complete indexed text was missing"))?;
+    let symbols_before = interrupted_store.load_symbols(Some("src/lib.rs"), None, 100)?;
+    let relations_before =
+        interrupted_store.load_symbol_relations(Some("src/lib.rs"), None, 100)?;
+    let parse_metadata_before = interrupted_store
+        .load_source_parse_metadata("src/lib.rs")?
+        .ok_or_else(|| io::Error::other("complete source parse metadata was missing"))?;
+    let mut interrupted_publication =
+        interrupted_store.begin_index_publication(contract_fingerprint)?;
+    let mut staged_node = node_before.node.clone();
+    staged_node.content_hash = Some("staged-hash".to_string());
+    interrupted_publication.upsert_scan_nodes(&[staged_node])?;
+    interrupted_publication.replace_file_texts_for_paths(
+        &["src/lib.rs".to_string()],
+        &[IndexedFileText {
+            path: "src/lib.rs".to_string(),
+            content_hash: Some("staged-hash".to_string()),
+            byte_count: 15,
+            line_count: 1,
+            content: "staged content\n".to_string(),
+        }],
+    )?;
+    interrupted_publication.replace_symbol_graph(&SymbolGraph {
+        path: "src/lib.rs".to_string(),
+        language: Some("rust".to_string()),
+        parser: ParserKind::TreeSitter,
+        symbols: vec![CodeSymbol {
+            path: "src/lib.rs".to_string(),
+            language: Some("rust".to_string()),
+            name: "staged_symbol".to_string(),
+            kind: SymbolKind::Function,
+            signature: "fn staged_symbol()".to_string(),
+            exported: true,
+            documentation: None,
+            line_start: 1,
+            line_end: 1,
+            parent: None,
+            parser: ParserKind::TreeSitter,
+            detail: Some("function_item".to_string()),
+        }],
+        relations: vec![SymbolRelation {
+            path: "src/lib.rs".to_string(),
+            source_name: "staged_symbol".to_string(),
+            target_name: "staged_target".to_string(),
+            kind: RelationKind::Calls,
+            line: 1,
+            context: "staged_target();".to_string(),
+            parser: ParserKind::TreeSitter,
+        }],
+    })?;
+    interrupted_publication.set_node_summary("src/lib.rs", "staged summary")?;
+    let interrupted_read = Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .args(["--format", "json"])
+        .arg("--db")
+        .arg(db)
+        .args(["summary", "src/lib.rs"])
+        .output()?;
+    if !interrupted_read.status.success() {
+        return Err(io::Error::other(format!(
+            "reader could not use the prior complete generation during publication: {}",
+            String::from_utf8_lossy(&interrupted_read.stderr)
+        ))
+        .into());
+    }
+    let interrupted_json: Value = serde_json::from_slice(&interrupted_read.stdout)?;
+    let interrupted_text = serde_json::to_string(&interrupted_json)?;
+    if !interrupted_text.contains("active_store") || interrupted_text.contains("legacy_store") {
+        return Err(io::Error::other(format!(
+            "reader observed a mixed or staged generation: {interrupted_text}"
+        ))
+        .into());
+    }
+    drop(interrupted_publication);
+    if interrupted_store.index_publication()? != Some(publication_before)
+        || interrupted_store.load_node_by_path("src/lib.rs")? != Some(node_before)
+        || interrupted_store.load_file_text("src/lib.rs")? != Some(text_before)
+        || interrupted_store.load_symbols(Some("src/lib.rs"), None, 100)? != symbols_before
+        || interrupted_store.load_symbol_relations(Some("src/lib.rs"), None, 100)?
+            != relations_before
+        || interrupted_store.load_source_parse_metadata("src/lib.rs")?
+            != Some(parse_metadata_before)
+    {
+        return Err(io::Error::other(
+            "dropped publication did not roll back every staged mutation and generation change",
+        )
+        .into());
+    }
+    let repeated_summary = json_summary_command(repo, db, "src/lib.rs")?;
+    if repeated_summary != current_summary {
+        return Err(io::Error::other("unchanged repeated read drifted after refresh").into());
+    }
     Ok(())
 }
 
@@ -8943,22 +9427,34 @@ fn skipped_symbol_builds_invalidate_stale_symbols() -> Result<(), Box<dyn Error>
         .arg(&db)
         .args(["symbols", "build", ".", "--max-bytes", "1"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("too_large: 2"));
-
-    let cargo_summary = json_summary_command(&repo, &db, "Cargo.toml")?;
-    require_json_contains(&cargo_summary, &["content_summary"], "cargo manifest")?;
-    require_json_string(&cargo_summary, &["summary_status"], "ok")?;
+        .failure()
+        .stderr(predicate::str::contains("refresh_required"));
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
-        .args(["symbols", "list", "--file", "src/main.rs"])
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["symbols", "build", ".", "--max-bytes", "1"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("old_too_large_symbol").not())
-        .stdout(predicate::str::contains("new_too_large_symbol").not());
+        .stdout(predicate::str::contains("too_large: 2"));
+
+    let store = AtlasStore::open(&db)?;
+    let skipped_symbols = store.load_symbols(Some("src/main.rs"), None, 10)?;
+    if !skipped_symbols.is_empty() {
+        return Err(io::Error::other(
+            "oversized symbol rebuild retained a stale symbol projection",
+        )
+        .into());
+    }
 
     fs::write(&source, "pub fn old_timeout_symbol() {}\n")?;
     Command::cargo_bin("projectatlas")?
@@ -9256,6 +9752,26 @@ fn run_mcp_stdio(
         .into());
     }
     Ok(String::from_utf8(stdout)?)
+}
+
+/// Return the text payload for one MCP tool-call response id.
+fn mcp_tool_text(stdout: &str, id: i64) -> Result<String, Box<dyn Error>> {
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let response: Value = serde_json::from_str(line)?;
+        if response.get("id").and_then(Value::as_i64) != Some(id) {
+            continue;
+        }
+        return response
+            .get("result")
+            .and_then(|result| result.get("content"))
+            .and_then(Value::as_array)
+            .and_then(|content| content.first())
+            .and_then(|content| content.get("text"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| io::Error::other(format!("MCP tool response {id} has no text")).into());
+    }
+    Err(io::Error::other(format!("MCP tool response {id} is missing")).into())
 }
 
 /// Require that a real CLI summary reports a caller for a named function.
@@ -10025,7 +10541,11 @@ fn json_summary_command(repo: &Path, db: &Path, file: &str) -> Result<Value, Box
         .args(["summary", file, "--limit", "10"])
         .output()?;
     if !output.status.success() {
-        return Err(io::Error::other(format!("summary command failed for {file}")).into());
+        return Err(io::Error::other(format!(
+            "summary command failed for {file}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
     }
     serde_json::from_slice(&output.stdout).map_err(Into::into)
 }

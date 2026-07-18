@@ -147,6 +147,7 @@ const E2E_ALLOWED_REPEATED_PATH_JOIN_LITERALS: &[&str] = &[
 
 /// Reviewed diagnostic format templates that must stay inline for Rust format macros.
 const MCP_ALLOWED_INLINE_LITERALS: &[&str] = &[
+    "absolute path '{}' has no existing ancestor",
     "ProjectAtlas index '{}' is missing for selected project root '{}'; {MISSING_INDEX_GUIDANCE}",
     "project path '{}' is not a directory",
     "MCP path '{original}' resolves to '{resolved_display}', not the selected project root '{project_root_display}'; {SELECTED_ROOT_ASSERTION_GUIDANCE}",
