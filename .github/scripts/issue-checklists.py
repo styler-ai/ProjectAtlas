@@ -17,6 +17,18 @@ HEADING_RE = re.compile(r"(?m)^(#{1,6})\s+(.+?)\s*$")
 TASK_SECTION_HEADING_RE = re.compile(r"^(\d+(?:\.\d+)*)\.\s+")
 HTML_COMMENT_RE = re.compile(r"(?s)<!--.*?(?:-->|$)")
 FENCE_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
+MITIGATION_RE = re.compile(
+    r"(?mi)^[ ]{0,3}[-*]\s+\[([ xX])\]\s+(.+?)\s+"
+    r"\(OpenSpec tasks:\s*(\d+(?:\.\d+)*(?:\s*,\s*\d+(?:\.\d+)*)*)\)\s*$"
+)
+REQUIRED_OPEN_ISSUE_HEADINGS = (
+    "why",
+    "what changes",
+    "capabilities",
+    "release scope",
+    "non-goals",
+    "pre-mortem",
+)
 
 
 @dataclass(frozen=True)
@@ -274,6 +286,112 @@ def issue_checklist_tasks(issue: dict[str, object]) -> list[tuple[bool, str]]:
     return parse_section_tasks(visible_body, heading_matches_openspec_tasks)
 
 
+def heading_section(
+    text: str, headings: list[re.Match[str]], index: int
+) -> str:
+    """Return one heading's visible body through the next same-or-higher heading."""
+
+    heading = headings[index]
+    end = len(text)
+    for later in headings[index + 1 :]:
+        if len(later.group(1)) <= len(heading.group(1)):
+            end = later.start()
+            break
+    return text[heading.end() : end].strip()
+
+
+def issue_contract_failures(
+    issue: dict[str, object], expected_tasks: list[tuple[bool, str]]
+) -> list[str]:
+    """Validate the concise #305 issue shape for open mapped work."""
+
+    if issue.get("state") != "OPEN":
+        return []
+    body = issue.get("body", "")
+    if not isinstance(body, str):
+        return ["body is not text"]
+    visible_body = visible_markdown(body)
+    headings = list(HEADING_RE.finditer(visible_body))
+    normalized = [clean(heading.group(2)).lower() for heading in headings]
+    failures: list[str] = []
+    positions: list[int] = []
+    for required in REQUIRED_OPEN_ISSUE_HEADINGS:
+        matches = [index for index, value in enumerate(normalized) if value == required]
+        if len(matches) != 1:
+            failures.append(
+                f"must contain exactly one visible non-empty {required!r} section"
+            )
+            continue
+        index = matches[0]
+        positions.append(index)
+        if not heading_section(visible_body, headings, index):
+            failures.append(f"{required!r} section must not be empty")
+    task_positions = [
+        index
+        for index, heading in enumerate(headings)
+        if heading_matches_openspec_tasks(heading.group(2))
+    ]
+    if len(task_positions) == 1:
+        positions.append(task_positions[0])
+    if len(positions) == len(REQUIRED_OPEN_ISSUE_HEADINGS) + 1 and positions != sorted(
+        positions
+    ):
+        failures.append("required issue sections must follow the #305 order")
+
+    premortem_indexes = [
+        index for index, value in enumerate(normalized) if value == "pre-mortem"
+    ]
+    if len(premortem_indexes) != 1:
+        return failures
+    premortem = heading_section(visible_body, headings, premortem_indexes[0])
+    marker = re.search(r"(?mi)^Likely failure modes:\s*$", premortem)
+    mitigation_marker = re.search(r"(?mi)^Mitigations:\s*$", premortem)
+    if marker is None or mitigation_marker is None or marker.start() >= mitigation_marker.start():
+        failures.append(
+            "pre-mortem must contain ordered 'Likely failure modes:' and 'Mitigations:' blocks"
+        )
+        return failures
+    likely_failures = premortem[marker.end() : mitigation_marker.start()]
+    if re.search(r"(?m)^[ ]{0,3}[-*]\s+\S", likely_failures) is None:
+        failures.append("pre-mortem must list at least one likely failure mode")
+
+    mitigation_text = premortem[mitigation_marker.end() :]
+    mitigation_matches = list(MITIGATION_RE.finditer(mitigation_text))
+    mitigation_tasks = parse_tasks(mitigation_text)
+    if not mitigation_matches:
+        failures.append("pre-mortem must list at least one mitigation checkbox")
+        return failures
+    if len(mitigation_matches) != len(mitigation_tasks):
+        failures.append(
+            "every pre-mortem mitigation checkbox must end with "
+            "'(OpenSpec tasks: <task ids>)'"
+        )
+    expected_by_id = {task_id(task): task[0] for task in expected_tasks}
+    for match in mitigation_matches:
+        checked = match.group(1).lower() == "x"
+        references = [value.strip() for value in match.group(3).split(",")]
+        if len(references) != len(set(references)):
+            failures.append(
+                f"mitigation {clean(match.group(2))!r} repeats an OpenSpec task ID"
+            )
+            continue
+        unknown = [value for value in references if value not in expected_by_id]
+        if unknown:
+            failures.append(
+                f"mitigation {clean(match.group(2))!r} references unknown or foreign "
+                f"OpenSpec tasks: {', '.join(unknown)}"
+            )
+            continue
+        should_be_checked = all(expected_by_id[value] for value in references)
+        if checked != should_be_checked:
+            state = "checked" if should_be_checked else "unchecked"
+            failures.append(
+                f"mitigation {clean(match.group(2))!r} must be {state} because of "
+                f"OpenSpec tasks {', '.join(references)}"
+            )
+    return failures
+
+
 def local_tasks(root: Path, change: str) -> tuple[Path, list[tuple[bool, str]]]:
     path = root / "openspec" / "changes" / change / "tasks.md"
     if not path.exists():
@@ -342,6 +460,8 @@ def check_openspec_tasks(
                     f"#{owner.issue} does not exactly mirror {path}: "
                     f"{first_task_difference(expected, remote)}"
                 )
+            for failure in issue_contract_failures(issue, expected):
+                failures.append(f"#{owner.issue} issue contract {failure}")
             if issue.get("state") == "CLOSED" and any(
                 not checked for checked, _ in remote
             ):
@@ -503,6 +623,71 @@ def self_test() -> None:
         (False, "2.1 Same-level task subsection"),
     ]
     assert parse_section_tasks(issue_body, heading_matches_openspec_tasks) == expected
+    issue_contract = """
+## Why
+Explain the need.
+## What Changes
+Describe the change.
+## Capabilities
+Name the capability.
+## Release Scope
+Target the release.
+## Non-Goals
+State exclusions.
+## Pre-Mortem
+Likely failure modes:
+- The issue contract drifts.
+Mitigations:
+- [ ] Keep the contract synchronized. (OpenSpec tasks: 2.1)
+## OpenSpec Tasks
+## 1. Review
+- [x] 1.1 Anchored task
+## 2. Implementation
+- [ ] 2.1 Same-level task subsection
+"""
+    assert issue_contract_failures(
+        {"state": "OPEN", "body": issue_contract}, expected
+    ) == []
+    premature = issue_contract.replace(
+        "- [ ] Keep the contract synchronized.",
+        "- [x] Keep the contract synchronized.",
+    )
+    assert any(
+        "must be unchecked" in failure
+        for failure in issue_contract_failures(
+            {"state": "OPEN", "body": premature}, expected
+        )
+    )
+    completed_contract = issue_contract.replace(
+        "- [ ] Keep the contract synchronized.",
+        "- [x] Keep the contract synchronized.",
+    ).replace(
+        "- [ ] 2.1 Same-level task subsection",
+        "- [x] 2.1 Same-level task subsection",
+    )
+    assert issue_contract_failures(
+        {"state": "OPEN", "body": completed_contract},
+        [(True, "1.1 Anchored task"), (True, "2.1 Same-level task subsection")],
+    ) == []
+    missing_scope = issue_contract.replace("## Release Scope", "## Delivery")
+    assert any(
+        "'release scope'" in failure
+        for failure in issue_contract_failures(
+            {"state": "OPEN", "body": missing_scope}, expected
+        )
+    )
+    unknown_task = issue_contract.replace(
+        "(OpenSpec tasks: 2.1)", "(OpenSpec tasks: 9.9)"
+    )
+    assert any(
+        "unknown or foreign" in failure
+        for failure in issue_contract_failures(
+            {"state": "OPEN", "body": unknown_task}, expected
+        )
+    )
+    assert issue_contract_failures(
+        {"state": "CLOSED", "body": ""}, expected
+    ) == []
     hidden_issue = """
 ```md
 ## OpenSpec Tasks

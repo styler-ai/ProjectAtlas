@@ -17,10 +17,31 @@ The synchronizer SHALL parse only `OpenSpec Tasks` or `OpenSpec Task Checklist` 
 - **WHEN** a checkbox outside the authoritative task section is added or changed
 - **THEN** the OpenSpec task comparison is unaffected
 
+### Requirement: Active issues keep a readable pre-mortem contract
+Every open mapped issue SHALL contain the concise v0.3.26 planning structure used by #305: why, what changes, capabilities, release scope, non-goals, pre-mortem, and exactly one authoritative OpenSpec task section. The pre-mortem SHALL contain likely failure modes and one or more mitigation checkboxes. Each mitigation SHALL reference one or more task IDs owned by that issue, and its checked state SHALL equal whether all referenced tasks are checked.
+
+This issue-quality contract SHALL NOT require task receipts, SHA or commit-permalink evidence, generated comments, unique tests, or separate mitigation tasks when existing OpenSpec tasks already own the behavior. Closed historical issues MAY retain their shipped presentation; open mapped issues and future work SHALL satisfy the current contract.
+
+#### Scenario: API-created issue bypasses the form
+- **WHEN** an open mapped issue omits a required #305 planning section or leaves its pre-mortem empty
+- **THEN** IssueOps fails even if the authoritative OpenSpec checklist itself matches
+
+#### Scenario: Mitigation references real implementation tasks
+- **WHEN** a mitigation checkbox references owned OpenSpec task IDs
+- **THEN** IssueOps accepts it only when its checked state equals the combined checked state of those tasks
+
+#### Scenario: Mitigation references an unknown or foreign task
+- **WHEN** a mitigation names a task ID outside the issue's authoritative task slice
+- **THEN** IssueOps fails without treating the mitigation as task evidence
+
+#### Scenario: Historical closed issue predates the contract
+- **WHEN** a previously completed mapped issue lacks the newer body sections
+- **THEN** IssueOps continues to validate its authoritative checklist without requiring a body rewrite
+
 ### Requirement: Behavior-focused task completion
 A task MAY be checked after its implementation or artifact is complete and the smallest meaningful unit, integration, E2E, smoke, or validation check appropriate to the actual risk passes. Multiple related tasks MAY share one coherent test. Documentation and planning tasks SHALL NOT require artificial production tests.
 
-Task completion SHALL NOT require a unique test identifier, task-level verification plan, task-evidence ledger, tested-commit digest, source permalink, hosted run link, exact-head receipt, rendered evidence comment, task-level PR path declaration, issue snapshot, or post-merge issue sealing.
+Task completion SHALL NOT require a unique test identifier, task-level verification plan, task-evidence ledger, tested-commit digest, source permalink, hosted run link, exact-head receipt, OpenSpec commit-link block, rendered evidence comment, task-level PR path declaration, issue snapshot, or post-merge issue sealing.
 
 #### Scenario: Several tasks share one behavior test
 - **WHEN** one focused test covers a coherent behavior implemented by multiple checklist tasks

@@ -83,6 +83,8 @@ ProjectAtlas uses the implementation loop that produced v0.3.26:
 
 Task completion does not require unique test identifiers, task-level verification plans or ledgers, commit receipts, rendered evidence comments, hosted links per checkbox, or post-merge issue sealing. GitHub Actions already records the commit and outcome of the normal checks.
 
+Open mapped issues keep the concise v0.3.26 #305 planning shape: `Why`, `What Changes`, `Capabilities`, `Release Scope`, `Non-Goals`, `Pre-Mortem`, and one authoritative OpenSpec task section. The pre-mortem lists likely failures and visible mitigation checkboxes. Each mitigation ends with its owning task IDs, for example `(OpenSpec tasks: 2.1, 4.3)`, and is checked exactly when all referenced tasks are checked. This reuses the implementation checklist; it does not create mitigation-specific tests, receipts, or evidence artifacts.
+
 Ordinary pull requests require exact local/GitHub checklist synchronization but do not require the whole release milestone to be complete. Full milestone checklist completion is a release-only gate. SHA-pinned Actions, locked Cargo commands, least privilege, parser/package/signature/digest validation, release checksums, and other executable integrity controls remain independent of task bookkeeping.
 
 ## Issue hygiene
@@ -91,6 +93,7 @@ Ordinary pull requests require exact local/GitHub checklist synchronization but 
 - Use `status:backlog` for unscheduled work.
 - Any issue referenced by a PR must be assigned to the target release milestone (CI enforces this).
 - Keep public issues/PRs/release notes free of private or internal-only details (release notes are generated from PR text).
+- Keep issue completion free of commit/SHA permalink evidence and OpenSpec commit-link blocks; immutable Action pins and release checksums/signatures remain required integrity controls.
 
 ## Review expectations
 
