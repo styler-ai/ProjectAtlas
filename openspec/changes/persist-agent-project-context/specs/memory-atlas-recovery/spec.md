@@ -12,7 +12,7 @@ The existing `atlas_session_brief` SHALL accept an additive recovery request tha
 - **THEN** the response includes the highest-value project goal, scope, architecture, patterns, checkpoint, decisions, workflows, skills/plugins, blockers, and next calls within one bounded result
 
 ### Requirement: Recovery is a deterministic bird's-eye projection
-Recovery SHALL return one coherent read snapshot ordered as project identity/freshness/pressure, overarching project goal and scope, architecture/pattern digest, current checkpoint/blockers/next action, applicable decisions/workflows, task-ranked skill/plugin routes, and exact reusable selectors/next calls. It SHALL NOT return unbounded history, full skill bodies, transcripts, host memory, or arbitrary documents.
+Recovery SHALL return one coherent read snapshot ordered as project identity/freshness/pressure, overarching project goal and scope, architecture/pattern digest, current checkpoint/blockers/next action, applicable decisions/workflows, deduplicated project-goal and active-issue skill routes in deterministic required-read order, applicable plugin routes, and exact reusable selectors/next calls. It SHALL NOT return unbounded history, full skill bodies, transcripts, host memory, or arbitrary documents.
 
 #### Scenario: Long-running issue resumes
 - **WHEN** the selected project contains a durable project goal and an active issue checkpoint
@@ -27,7 +27,23 @@ Recovery SHALL return one coherent read snapshot ordered as project identity/fre
 - **THEN** normalized output is byte-identical and performs no write
 
 ### Requirement: Recovery references current skills, plugins, and source selectors
-Skill and plugin routes SHALL store logical identifiers, bounded applicability terms, host-resolvable selectors, capability summaries, and optional fingerprints rather than copied bodies, executable commands, installation directives, or machine-local paths. Recovery SHALL return stale/unavailable state and SHALL direct the harness to resolve and read the complete current owning skill or plugin instructions through its trusted registry and policy before implementation. Source references SHALL use exact reusable project-relative folder, file, optional symbol/span, issue, OpenSpec change/task, or public documentation selectors.
+Skill routes SHALL use closed `project_goal` or `active_issue` scopes and store logical identifiers, required/recommended status, deterministic read order, concise applicability rationale, portable host-resolvable selectors, current/stale/unavailable resolution state, and optional fingerprints or capability identities rather than copied bodies, executable commands, installation directives, or machine-local paths. Recovery SHALL deduplicate shared routes without losing either scope, preserve governing project-goal routes when issue routes change, and direct the harness to resolve and read the complete current owning instructions through its trusted registry and policy before implementation. Plugin routes use the same portable-reference boundary. Source references SHALL use exact reusable project-relative folder, file, optional symbol/span, issue, OpenSpec change/task, or public documentation selectors.
+
+#### Scenario: Project goal requires governing skills
+- **WHEN** recovery finds required skill routes scoped to the overarching project goal
+- **THEN** it returns them before issue-only routes with exact logical selectors, read order, rationale, requirement status, and resolution state
+
+#### Scenario: Active issue requires additional skills
+- **WHEN** the current checkpoint names an active issue with additional required or recommended skill routes
+- **THEN** recovery returns those routes after governing project-level requirements and before implementation-oriented next calls
+
+#### Scenario: Project and issue share a skill
+- **WHEN** the same logical skill applies to both the project goal and active issue
+- **THEN** recovery returns one deduplicated route with both scopes, the strongest requirement, and the earliest deterministic read order
+
+#### Scenario: Active issue changes
+- **WHEN** a reflection batch replaces the active checkpoint with a different issue
+- **THEN** obsolete issue-scoped routes are replaced or retired while project-goal routes remain visible
 
 #### Scenario: Rust architecture task resumes
 - **WHEN** the task query matches Rust architecture and OpenSpec routes
@@ -35,7 +51,7 @@ Skill and plugin routes SHALL store logical identifiers, bounded applicability t
 
 #### Scenario: Skill source changed or disappeared
 - **WHEN** a stored route fingerprint or selector no longer resolves
-- **THEN** recovery marks it stale or unavailable and does not return cached skill instructions as current truth
+- **THEN** recovery marks it stale or unavailable, preserves the logical route and required-read ordering, and does not return cached skill instructions as current truth
 
 #### Scenario: Memory record points into source
 - **WHEN** an architecture or checkpoint record references a file and symbol

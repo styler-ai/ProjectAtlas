@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Memory Atlas stores typed project-owned orientation
-ProjectAtlas SHALL persist reviewed project goal, scope, architecture, system pattern, decision, workflow, skill route, plugin route, and checkpoint records in the selected project's SQLite database using closed kinds, canonical stable keys, bounded fields, attribution, reviewed/current lifecycle state, and typed portable references. It SHALL NOT ingest host memory, transcripts, arbitrary source files, or network content implicitly.
+ProjectAtlas SHALL persist reviewed project goal, scope, architecture, system pattern, decision, workflow, skill route, plugin route, and checkpoint records in the selected project's SQLite database using closed kinds, canonical stable keys, bounded fields, attribution, reviewed/current lifecycle state, and typed portable references. Skill routes SHALL use closed project-goal or active-issue scope, required/recommended priority, deterministic read order, applicability rationale, logical host-resolvable selector, and resolution state fields. It SHALL NOT ingest host memory, transcripts, arbitrary source files, or network content implicitly.
 
 #### Scenario: Store a project architecture fact
 - **WHEN** an agent writes a valid architecture record against the selected project and current context revision
@@ -10,6 +10,10 @@ ProjectAtlas SHALL persist reviewed project goal, scope, architecture, system pa
 #### Scenario: Reject an unknown or oversized record
 - **WHEN** a caller supplies an unknown kind, noncanonical key, ambiguous operation, invalid selector, or oversized field
 - **THEN** ProjectAtlas rejects the complete batch before cleanup or persistence and does not log the rejected content
+
+#### Scenario: Skill route contains host-local or executable content
+- **WHEN** a route contains a copied skill body, installation command, executable path, machine-local path, unknown scope, or invalid ordering metadata
+- **THEN** ProjectAtlas rejects the complete batch and preserves the prior revision and rows
 
 ### Requirement: Stable facts replace instead of accumulating history
 Memory Atlas updates SHALL atomically replace records by `(kind, stable_key)`, remove exact obsolete identities named by the caller, and apply explicit supersession without creating an unbounded revision log. One opaque nonnegative context revision SHALL advance exactly once for each successful state-changing transaction and remain unchanged for read-only, failed, stale, or exact no-op requests.
@@ -25,6 +29,10 @@ Memory Atlas updates SHALL atomically replace records by `(kind, stable_key)`, r
 #### Scenario: Reflection batch retires obsolete context
 - **WHEN** one update batch replaces current facts and removes or supersedes obsolete stable identities
 - **THEN** all requested changes and deterministic cleanup commit atomically under one revision
+
+#### Scenario: Active issue transition replaces its routes
+- **WHEN** a reflection batch replaces an issue checkpoint and names the obsolete active-issue skill routes
+- **THEN** those issue routes retire atomically while unrelated project-goal routes remain unchanged
 
 ### Requirement: Every successful write remains within hard budgets
 ProjectAtlas SHALL enforce configured per-record, retained-byte, row, checkpoint, and recovery limits below compiled hard maxima. Every successful state-changing update SHALL reconcile lifecycle cleanup in the same transaction and end within all budgets. Automatic cleanup SHALL remove only expired, superseded, explicitly obsolete, or excess volatile records in deterministic order and SHALL NOT silently delete protected current project goal, scope, architecture, decisions, patterns, workflows, or active skill/plugin routes. Expiry SHALL be accepted only for explicitly volatile records; durable records require explicit removal or supersession.

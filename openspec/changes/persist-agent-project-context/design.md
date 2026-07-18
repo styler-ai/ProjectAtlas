@@ -50,13 +50,15 @@ Use a closed `MemoryAtlasKind` with responsibility-owned records:
 - `system_pattern`: durable patterns and critical paths;
 - `decision`: accepted decisions and supersession links;
 - `workflow`: operating and release workflows;
-- `skill_route`: logical skill identifiers and applicability;
+- `skill_route`: logical skill identifiers and applicability for the overarching project goal or active issue/checkpoint;
 - `plugin_route`: logical plugin/capability identifiers and applicability;
 - `checkpoint`: the current initiative/issue checkpoint, blockers, and next action.
 
 Each record has a stable key, short summary, optional bounded detail, lifecycle class, attribution, reviewed/current state, timestamps, and typed references/selectors. Stable facts replace by `(kind, stable_key)`. Volatile checkpoints use a stable initiative key and replace in place. Decisions may explicitly supersede earlier keys; old decisions are removed or marked superseded rather than retained as an unbounded narrative. Expiry is valid only for explicitly volatile records; durable goal, scope, architecture, pattern, decision, workflow, skill-route, and plugin-route records never expire automatically.
 
-Source selectors are portable and project-relative: folder, file, optional symbol identity/span, issue, OpenSpec change/task, or public documentation reference. Machine-specific absolute paths are rejected. Skill and plugin routes contain only logical identifiers, bounded task-match terms, host-resolvable selectors, capability summaries, and optional fingerprints; they cannot carry executable commands, automatic-install instructions, or copied instruction bodies.
+Source selectors are portable and project-relative: folder, file, optional symbol identity/span, issue, OpenSpec change/task, or public documentation reference. Machine-specific absolute paths are rejected. A skill route uses a closed `project_goal` or `active_issue` scope and records required versus recommended status, deterministic read order, a concise applicability rationale, a portable logical host-resolvable selector, current/stale/unavailable resolution state, and an optional fingerprint or capability identity. It stores no copied skill body, install command, executable path, or machine-local path. Plugin routes follow the same portable-reference boundary.
+
+Recovery deduplicates a skill required by both scopes while retaining both applicability reasons and the strongest requirement. Project-goal routes remain visible and ordered ahead of issue-only routes; issue-scoped routes cannot hide them. When the active checkpoint or issue changes, its routes are replaced or retired rather than accumulating, while project-goal routes remain until explicitly replaced or removed. Memory Atlas routing stays below system, developer, user, repository-instruction, and current-skill authority; the harness resolves every returned route through its trusted registry and reads the complete current instructions before implementation.
 
 This preserves the useful Cline responsibilities without copying its file hierarchy:
 
@@ -133,7 +135,7 @@ Recovery mode returns, in order:
 3. architecture and system-pattern digest;
 4. current initiative checkpoint, blockers, and next action;
 5. applicable decisions and workflows;
-6. task-ranked skills/plugins and required reads;
+6. deduplicated project-goal and active-issue skill routes in deterministic required-read order, followed by applicable plugin routes;
 7. reusable folder/file/symbol/tracker selectors and the best next atlas call.
 
 Rows are deterministically ranked and bounded. Repeated reads are byte-stable for the same database state, request, and effective lifecycle evaluation instant. The service captures one concrete evaluation instant per operation so expiry cannot change midway through a projection; tests inject a fixed value without introducing a clock trait or dependency. Truncation includes returned/omitted counts and a revision-bound cursor. The default view never dumps all memory.
@@ -154,7 +156,7 @@ The Memory Atlas does not decide which source is current. #308 freshness remains
 
 Host integration is capability-driven and truthful:
 
-- Codex: use `SessionStart` for `startup`, `resume`, `clear`, and `compact` plus `SubagentStart` when the plugin hook is trusted and enabled. The hook injects a fixed instruction to request read-only recovery; it does not write memory or goals. Stable native goals may carry the current execution target. Experimental memories remain host-owned and optional. `AGENTS.md`, skills, and plugins remain their own instruction/workflow surfaces.
+- Codex: use `SessionStart` for `startup`, `resume`, `clear`, and `compact` plus `SubagentStart` when the plugin hook is trusted and enabled. The hook injects a fixed instruction to request read-only recovery; it does not write memory or goals. Recovery directs the agent to resolve and completely read the required project-goal skills followed by active-issue skills before implementation. Stable native goals may carry the current execution target. Experimental memories remain host-owned and optional. `AGENTS.md`, skills, and plugins remain their own instruction/workflow surfaces.
 - Claude Code and OpenCode: use only documented skill/plugin/MCP/task lifecycle capabilities. Where automatic startup recovery is unavailable, packaged guidance makes the manual `atlas_session_brief` recovery explicit.
 - Generic MCP: use the two Memory Atlas tools and session brief without assuming any native memory or goal API.
 
