@@ -1,3 +1,5 @@
+# Purpose: Verify ProjectAtlas Rust quality gates and multi-OS installer/MCP smoke tests.
+
 name: 01-CI
 
 # /**
@@ -9,7 +11,16 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
   workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
 
 jobs:
   verify:
@@ -17,41 +28,102 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
         with:
-          python-version: "3.11"
-
-      - name: Install
-        run: python -m pip install -e .
+          tool: cargo-deny
 
       - name: Issue reference check
         if: github.event_name == 'pull_request'
         env:
-          PROJECTATLAS_REQUIRE_ISSUE_MILESTONE: "1"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python scripts/check_pr_issue_reference.py
-
-      - name: Lint atlas
-        run: projectatlas lint --strict-folders --report-untracked
-
-      - name: Docstring check
-        run: python scripts/check_docstrings.py
-
-      - name: API docs
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          python scripts/generate_api_docs.py
-          git diff --exit-code docs/api.md
+          PR_TITLE="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.title // ""')"
+          PR_BODY="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.body // ""')"
+          PR_MILESTONE="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.milestone.number // ""')"
+          text="$PR_TITLE $PR_BODY"
+          if ! [[ "$text" =~ (#[0-9]+|GH-[0-9]+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+) ]]; then
+            echo "Pull request title or body must reference a GitHub issue." >&2
+            exit 1
+          fi
+          if [[ -z "$PR_MILESTONE" ]]; then
+            echo "Pull request must be assigned to a milestone." >&2
+            exit 1
+          fi
 
-      - name: Unit tests
-        run: python -m unittest discover -s tests
-
-      - name: Build package
+      - name: Issue checklist check
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          python -m pip install build
-          python -m build --sdist --wheel
+          python3 .github/scripts/issue-checklists.py --self-test
+          PR_MILESTONE_TITLE="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.milestone.title // ""')"
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --milestone "$PR_MILESTONE_TITLE"
+
+      - name: Codex PR review thread gate
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 .github/scripts/codex-pr-review-gate.py --self-test
+          python3 .github/scripts/codex-pr-review-gate.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --pr "$PR_NUMBER"
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Check
+        run: cargo check --workspace --all-targets --all-features --locked
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: ProjectAtlas source lints
+        timeout-minutes: 2
+        run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
+
+      - name: Dependency policy
+        run: cargo deny check
+
+      - name: Tests
+        run: cargo test --workspace --all-features --locked
+
+      - name: ProjectAtlas purpose lint levels
+        run: cargo test --locked -p projectatlas-cli lint_purpose_levels_require_agent_review_at_configured_scope --test e2e
+
+      - name: ProjectAtlas purpose preservation
+        run: cargo test --locked -p projectatlas-cli watch_once_preserves_unchanged_deep_summary_and_text_index --test e2e
+
+      - name: Doc tests
+        run: cargo test --doc --all-features --locked
+
+      - name: Rustdoc
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+
+      - name: ProjectAtlas scan
+        run: cargo run --locked -p projectatlas-cli -- --format json scan .
+
+      - name: ProjectAtlas purpose review
+        run: cargo run --locked -p projectatlas-cli -- purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply
+
+      - name: ProjectAtlas parity
+        run: cargo run --locked -p projectatlas-cli -- parity report --profile repository-intelligence
+
+      - name: ProjectAtlas lint
+        run: cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level strict
 
   install-smoke:
     name: install-smoke
@@ -59,26 +131,94 @@ jobs:
     needs: verify
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Build package
+      - name: Setup Rust
         run: |
-          python -m pip install build
-          python -m build --sdist --wheel
+          rustup toolchain install stable --profile minimal
+          rustup default stable
 
-      - name: Install wheel
+      - name: Install binary
+        timeout-minutes: 5
         run: |
-          python -m pip install dist/*.whl
-          projectatlas --help
+          cargo install --path crates/projectatlas-cli --locked
+          expected="v$(awk -F'"' '
+            /^\[workspace.package\]/ { in_workspace_package = 1; next }
+            /^\[/ { if (in_workspace_package) exit }
+            in_workspace_package && /^version = / { print $2; exit }
+          ' Cargo.toml)"
+          PROJECTATLAS_NO_TELEMETRY=1 projectatlas --require-version "$expected" --format json runtime-info
+          PROJECTATLAS_NO_TELEMETRY=1 projectatlas config --print
+          PROJECTATLAS_NO_TELEMETRY=1 projectatlas ignore list
 
-      - name: Smoke map
+      - name: Smoke index
         run: |
           mkdir smoke
           cd smoke
-          projectatlas init --seed-purpose
-          projectatlas map --force
+          projectatlas init
+          projectatlas purpose set . "Smoke test repository root"
+          projectatlas lint --report-untracked
+
+  e2e-smoke:
+    name: e2e-smoke ${{ matrix.label }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux
+            os: ubuntu-latest
+          - label: windows
+            os: windows-latest
+          - label: macos-x64
+            os: macos-15-intel
+          - label: macos-arm64
+            os: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Setup Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Plugin installer E2E
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli plugin_installer_writes_real_harness_configs --test e2e
+
+      - name: Plugin update E2E
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp --test e2e
+
+      - name: Plugin update non-official marketplace E2E
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli plugin_update_skips_non_official_codex_marketplace --test e2e
+
+      - name: Plugin update already-current marketplace E2E
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli plugin_update_leaves_current_codex_marketplace_untouched --test e2e
+
+      - name: Plugin update stale source manifest E2E
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli plugin_update_repairs_current_codex_plugin_with_stale_source_manifest --test e2e
+
+      - name: Plugin update restore-on-failure E2E
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails --test e2e
+
+      - name: Windows locked runtime update E2E
+        if: matrix.label == 'windows'
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is_locked --test e2e
+
+      - name: Windows stale MCP registry update E2E
+        if: matrix.label == 'windows'
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_repairs_stale_mirror_without_registering_it --test e2e
+
+      - name: MCP project binding E2E
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli mcp_server_stays_bound_to_one_project_database --test e2e

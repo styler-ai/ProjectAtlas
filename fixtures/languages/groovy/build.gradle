@@ -1,0 +1,13 @@
+tasks.register('bootRunSmoke', BootRun) {
+    group = 'verification'
+}
+
+task cleanE2E(type: Delete) {}
+
+tasks {
+    create('copyGroovyReports') {
+        group = 'verification'
+    }
+}
+
+task('publishE2E') {}

@@ -2,83 +2,83 @@
 
 ## Goal
 
-Give Codex a fast, accurate structure map before deep indexing so it knows where to look and where to place new
-files. ProjectAtlas is the layer above code-index tools.
+Give Codex a fast repository atlas before broad search or full-file reads. Codex should use ProjectAtlas to choose
+the folder, choose the file, inspect compressed context, and only then open exact source.
 
-## When to use
+## When To Use
 
-- At the start of every session (before deep indexing).
-- After creating or moving folders.
-- After adding new source files.
-- When `projectatlas lint` reports missing Purpose headers or missing `.purpose` files.
-- Before large refactors or cleanup decisions.
+- At session start.
+- After creating, moving, or deleting folders.
+- After adding source files.
+- Before cleanup, refactor, or architecture work.
+- When `projectatlas lint` or `projectatlas health-check` reports drift.
+- When the user asks for ProjectAtlas token savings.
 
-## Definitions
+## First-Time Setup
 
-- Deep indexing = full-file or symbol-level analysis via tools like code-index MCP or language servers. This is
-  powerful but expensive in context budget if you run it blindly.
+1. Establish the project root first. ProjectAtlas stores one project-local index at `.projectatlas/projectatlas.db`.
+2. Install the ProjectAtlas plugin or run the plugin runtime installer from the target project root. Use `cargo install --path crates/projectatlas-cli --locked` only when developing ProjectAtlas from this source checkout. After ProjectAtlas plugin/runtime updates, verify `codex mcp get projectatlas` or `codex mcp list` when `codex` is available; a stale global `projectatlas` entry for another repo/version is a bug and should be repaired by rerunning the installer. Set `PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1` only for intentionally managed global registries.
+3. Initialize: `projectatlas init`.
+4. Run `projectatlas scan`.
+5. Add or import purpose records for important folders and files.
+6. Add non-source summaries to `.projectatlas/projectatlas-nonsource-files.toon` when needed.
+7. Use `projectatlas purpose review --from-file <json> --apply` for reviewed batches; never edit the SQLite database directly.
+8. Run `projectatlas lint --report-untracked --purpose-level low` and fix issues. Use `--purpose-level medium` for all source files and `--purpose-level strict` only when every indexed file and folder must be agent-reviewed.
+9. Run `projectatlas map --force` only when an explicit legacy TOON map export is needed.
 
-## Required files
+## Startup Workflow
 
-- `.projectatlas/projectatlas.toon` (the atlas snapshot).
-- `.projectatlas/config.toml` (scan rules).
-- `.projectatlas/projectatlas-nonsource-files.toon` (agent-maintained summaries for non-source files).
+0. If ProjectAtlas MCP tools are available, use `atlas_*` tools for normal scan, overview, folder, file, summary, search, slice, health, and purpose calls. Use the CLI for bootstrap/install/update/release/CI, MCP config generation, MCP startup debugging, human terminal workflows, or when MCP tools are unavailable.
+1. Run ProjectAtlas from the established project root.
+2. Run `projectatlas scan` when the SQLite index may be stale.
+3. Run `projectatlas overview`.
+4. Run `projectatlas folders <query>` to choose the right area.
+5. Run `projectatlas files <query> --folder <path>` to choose targets; use `projectatlas files --file-pattern <glob>` when the file/path pattern is already known.
+6. Run `projectatlas summary <file> --limit 25` before opening full source.
+7. Run `projectatlas outline <file>` if the structured summary is not enough.
+8. Run `projectatlas search <pattern> --file-pattern <glob>` for filtered text matches.
+9. Run `projectatlas slice <file> --start-line <n> --end-line <m>` for exact source.
+10. Run `projectatlas health-check` before cleanup/refactor decisions.
+11. Use deeper source reads only for selected targets.
+12. Run `projectatlas token` when token-savings reporting is requested; use `projectatlas token --view tui` only for a human terminal dashboard.
+13. Correct wrong, stale, vague, or generic purposes opportunistically with `atlas_purpose_set` or `projectatlas purpose set` after inspecting enough context. Purpose entries live in SQLite and are preserved across scans; changed approved files become stale instead of losing curated purpose text.
 
-## First-time setup (repo adoption)
+Token savings estimate avoided wrong-folder exploration, wrong-file opens, and unnecessary full-code reads caused by the atlas-first workflow. Agent and MCP surfaces should stay structured by default; the TUI dashboard is explicit terminal UI with "Without PA", "With PA", and "Saved" comparison bars.
 
-1. Install locally: `pip install -e .`
-2. Initialize: `projectatlas init --seed-purpose` (auto-detects repo languages for config; use `--no-detect-languages` to keep the static template)
-3. Fill each `.purpose` file with a one-line summary (ASCII, no commas).
-4. Add Purpose headers to every tracked source file (comment style per extension; see `purpose.styles_by_extension`).
-5. Add non-source files to `.projectatlas/projectatlas-nonsource-files.toon`.
-6. Run `projectatlas map` to generate `.projectatlas/projectatlas.toon`.
-7. Run `projectatlas lint --strict-folders --report-untracked` and fix issues.
-8. (Optional) Install git hooks: `python scripts/install_hooks.py` to enforce issue references in commits.
+Token reports are offline by default. The heuristic is `ceil(chars / 4)` for emitted ProjectAtlas text and `ceil(bytes / 4)` for file-size baselines, labeled as `heuristic_estimate`, not model billing tokens. Check bucket metadata before making claims: `full_file_compression` with `observed` confidence is stronger than modeled `navigation_avoidance` with `inferred` or `policy_estimate` confidence.
 
-## Startup workflow (every session)
+## MCP Config
 
-1. Run `projectatlas map` (unless `PROJECTATLAS_SKIP_UPDATE=1` is set).
-2. Read `.projectatlas/projectatlas.toon`.
-3. Scan `folder_tree[]` to pick the correct area of the repo.
-4. Check `folder_summary_duplicates[]` / `file_summary_duplicates[]` for drift.
-5. Use `folders[]` / `files[]` to pick targets.
-6. Only then use deep-index tools (code-index, LSPs) on those targets.
-7. If lint errors appear, fix them immediately (add Purpose headers or `.purpose` files) or remove the stale file.
+Prefer installer-generated project-local config:
 
-## How to interpret the map
-
-- `overview:` shows tracked counts so you can spot drift quickly. It now reports
-  `tracked_source_files`, `tracked_nonsource_files`, and `tracked_files_total`.
-- `folder_tree[]` provides a tree with summaries for fast navigation.
-- `folders[]` and `files[]` are the authoritative summaries for lookup.
-- `*_summary_duplicates[]` highlight likely overlap to clean up.
-
-## Why non-source files are tracked separately
-
-- Some files cannot safely carry inline `Purpose:` headers (JSON, lockfiles, images, generated outputs).
-- Those entries live in `.projectatlas/projectatlas-nonsource-files.toon` and are merged into the atlas.
-- Agents read only the generated atlas; the nonsource file is the durable input list.
-
-## AGENTS.md integration
-
-Add a startup snippet so the atlas is always read:
-
+```bash
+projectatlas --format json --db .projectatlas/projectatlas.db mcp-config
+projectatlas --format json --db .projectatlas/projectatlas.db mcp-config --harness claude-code
+projectatlas --format json --db .projectatlas/projectatlas.db mcp-config --harness opencode
 ```
+
+The ProjectAtlas installer writes `.projectatlas/projectatlas.mcp.json`, `.projectatlas/projectatlas.claude.mcp.json`, and `.projectatlas/projectatlas.opencode.json` after verifying `projectatlas --format json runtime-info`.
+
+## AGENTS.md Snippet
+
+```text
 ## Startup
-1. Run `projectatlas map`.
-2. Read `.projectatlas/projectatlas.toon`.
-3. Use the atlas to select files before deep indexing.
-4. Fix missing Purpose headers or `.purpose` files if lint fails.
+0. Use ProjectAtlas MCP `atlas_*` tools for normal agent calls when available; use CLI for bootstrap, update, CI, release, MCP debugging, or fallback.
+1. Run `projectatlas scan` when the SQLite index may be stale.
+2. Run `projectatlas overview`.
+3. Use `projectatlas folders <query>` and `projectatlas files <query> --folder <path>` before opening source; use `projectatlas files --file-pattern <glob>` for direct glob discovery.
+4. Run `projectatlas summary <file> --limit 25` for structured file facts.
+5. Run `projectatlas outline <file>` for compressed context if needed.
+6. Run `projectatlas search <pattern> --file-pattern <glob>` or `projectatlas slice <file> --start-line <n> --end-line <m>` before broad reads.
+7. Run `projectatlas lint --report-untracked --purpose-level low`.
+8. Run `projectatlas token` when asked for token savings; use `projectatlas token --view tui` only for a human dashboard.
+9. After plugin/runtime updates, verify `codex mcp get projectatlas` still points at this repo and the current ProjectAtlas version.
 ```
-
-## Companion tools
-
-- code-index (deep code summaries): https://github.com/johnhuang316/code-index-mcp
-- If you do not use deep indexing, rely on the atlas and open files directly as needed.
 
 ## References
 
 - ProjectAtlas repo: https://github.com/styler-ai/ProjectAtlas
+- `docs/projectatlas-3-architecture.md` for the target architecture.
 - `docs/agent-integration.md` for the AGENTS.md snippet.
 - `docs/format.md` for TOON schema.
 - `docs/workflow.md` for troubleshooting.

@@ -5,28 +5,32 @@ nonsource_files[]:
   # path,summary
   README.md,ProjectAtlas overview and usage guide
   LICENSE,ProjectAtlas MIT license
-  pyproject.toml,ProjectAtlas packaging and CLI metadata
   .gitignore,Ignored files for ProjectAtlas repository
+  .gitattributes,Line-ending policy for ProjectAtlas repository fixtures
   CONTRIBUTING.md,Contribution policy for ProjectAtlas
   SECURITY.md,Security contact information for ProjectAtlas
   CODE_OF_CONDUCT.md,Community conduct expectations for ProjectAtlas
+  docs/assets/projectatlas-mascot.png,ProjectAtlas README mascot image
+  docs/assets/agent-harness-funnel.svg,README diagram explaining the ProjectAtlas agent harness workflow from folder purpose to exact source slice
+  docs/assets/token-savings-bar.svg,README bar chart visualizing ProjectAtlas token savings benchmark results
+  docs/design/ani-mascot-reference.png,Ani mascot reference bitmap used by the token impact TUI image widget
+  docs/design/projectatlas-mascot-clean-transparent.svg,Ani mascot transparent SVG source/reference asset
+  docs/design/token-impact-tui-reference.png,Approved token impact TUI visual reference screenshot
+  docs/design/token-impact-tui-v0.3.26-qa.png,Rendered v0.3.26 token impact TUI QA screenshot captured from the rebuilt Ratatui dashboard
   .github/workflows/ci.yml,ProjectAtlas CI workflow
   .github/workflows/release.yml,ProjectAtlas release workflow
   .github/workflows/03-auto-release.yml,ProjectAtlas auto release workflow
   .github/workflows/04-docs.yml,ProjectAtlas docs site workflow
   .github/pull_request_template.md,Pull request checklist for ProjectAtlas
+  .agents/plugins/marketplace.json,Codex plugin marketplace catalog for ProjectAtlas
+  Cargo.toml,Rust workspace manifest for ProjectAtlas 3
+  Cargo.lock,Locked Rust dependency versions for ProjectAtlas 3
+  crates/projectatlas-core/Cargo.toml,Core Rust crate manifest for ProjectAtlas 3
+  crates/projectatlas-db/Cargo.toml,SQLite Rust crate manifest for ProjectAtlas 3
+  crates/projectatlas-fs/Cargo.toml,Filesystem scanner Rust crate manifest for ProjectAtlas 3
+  crates/projectatlas-cli/Cargo.toml,CLI Rust crate manifest for ProjectAtlas 3
   .githooks/commit-msg,Git hook to enforce issue references in commits
   .githooks/pre-push,Git hook to run full local checks before push
-  .codex/skills/ProjectAtlas.md,Codex skill instructions for ProjectAtlas
-  .codex/rules/memory/projectbrief.md,ProjectAtlas project brief
-  .codex/rules/memory/productContext.md,ProjectAtlas product context
-  .codex/rules/memory/activeContext.md,ProjectAtlas active context
-  .codex/rules/memory/systemPatterns.md,ProjectAtlas system patterns
-  .codex/rules/memory/techContext.md,ProjectAtlas tech context
-  .codex/rules/projectatlas/.purpose,ProjectAtlas rule folder purpose
-  .codex/rules/projectatlas/github-rules.md,ProjectAtlas GitHub workflow rules
-  .codex/rules/memory/progress.md,ProjectAtlas progress log
-  .codex/rules/memory/ruleIndex.md,ProjectAtlas memory bank index
   docs/agent-integration.md,Agent integration instructions for ProjectAtlas
   docs/adoption.md,Adoption checklist for ProjectAtlas
   docs/index.md,Documentation landing page for ProjectAtlas
@@ -34,13 +38,12 @@ nonsource_files[]:
   docs/configuration.md,Configuration reference for ProjectAtlas
   docs/format.md,ProjectAtlas TOON schema reference
   docs/workflow.md,ProjectAtlas workflow and troubleshooting guide
+  docs/projectatlas-3-architecture.md,ProjectAtlas 3 Rust architecture plan
+  docs/projectatlas-v0.3.23-premortem-spec.md,ProjectAtlas v0.3.23 pre-mortem and release specification for installer drift and token TUI fixes
   skills/codex/ProjectAtlas.md,Codex skill instructions for ProjectAtlas
+  skills/codex-coding-plugin/SKILL.md,Codex plugin engineering skill for stable plugin manifests installers MCP config and cache-drift checks
+  skills/codex-coding-plugin/agents/openai.yaml,Agent manifest exposing the codex-coding-plugin skill to OpenAI and Codex contexts
   skills/claude/ProjectAtlas.md,Claude skill instructions for ProjectAtlas
+  plugins/projectatlas/.codex-plugin/plugin.json,ProjectAtlas Codex plugin manifest
+  plugins/projectatlas/skills/projectatlas/SKILL.md,ProjectAtlas installable Codex skill
   templates/AGENTS.md,Agent startup snippet for ProjectAtlas
-  mkdocs.yml,MkDocs site configuration for ProjectAtlas
-  scripts/check_all.py,Run the full local ProjectAtlas verification suite
-  scripts/check_docstrings.py,Docstring enforcement for ProjectAtlas code
-  scripts/check_commit_issue.py,Commit message issue reference enforcement
-  scripts/generate_api_docs.py,Generate API documentation for ProjectAtlas
-  scripts/install_hooks.py,Install git hook configuration for ProjectAtlas
-  docs/api.md,Generated ProjectAtlas API documentation

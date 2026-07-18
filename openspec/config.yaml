@@ -1,0 +1,34 @@
+schema: spec-driven
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+# Example:
+#   context: |
+#     Tech stack: TypeScript, React, Node.js
+#     We use conventional commits
+#     Domain: e-commerce platform
+context: |
+  ProjectAtlas is a Rust-native, atlas-first repository intelligence system for agent harnesses.
+  Core surfaces are the Rust CLI, SQLite index, TOON output, MCP `atlas_*` tools, generated MCP configs, and Codex plugin packaging.
+  Keep MCP behavior project-root safe: explicit `project_path` is an isolation boundary, generated configs should use absolute runtime/DB/config paths, and route-affecting settings must be visible and tested.
+  Prefer typed Rust structs/enums for protocol and settings contracts, reuse existing services before adding abstractions, and preserve the agent workflow: overview -> folders -> files -> summary/outline/symbols -> slice.
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+rules:
+  proposal:
+    - Include non-goals for release-scope control.
+    - Call out whether the change is backlog/review-only or ready for implementation.
+  specs:
+    - Use stable MCP/CLI terminology from ProjectAtlas unless the change explicitly renames a contract.
+    - Include wrong-root, missing-index, and no-implicit-mutation scenarios for path-sensitive MCP behavior.
+  tasks:
+    - Include verification commands for Rust changes.

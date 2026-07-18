@@ -1,3 +1,5 @@
+# Purpose: Document ProjectAtlas configuration files scan policy and legacy import settings.
+
 # ProjectAtlas Configuration
 
 ProjectAtlas reads `projectatlas.toml` or `.projectatlas/config.toml`. All paths are relative to the config file.
@@ -5,17 +7,34 @@ ProjectAtlas reads `projectatlas.toml` or `.projectatlas/config.toml`. All paths
 ```toml
 [project]
 root = "."
+# Optional compatibility export path used only by `projectatlas map`.
 map_path = ".projectatlas/projectatlas.toon"
 nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
-purpose_filename = ".purpose"
 
 [scan]
-source_extensions = [".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".css", ".mjs", ".cjs", ".d.ts", ".java", ".kt", ".scala", ".cs", ".go", ".rs", ".rb", ".php", ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".swift", ".lua", ".sh", ".bash", ".zsh", ".ps1", ".psm1", ".psd1", ".sql"]
-exclude_dir_names = [".git", ".projectatlas", ".venv", "__pycache__", "node_modules", "dist", "build"]
+source_extensions = [
+  ".py", ".pyw", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".d.ts", ".java",
+  ".c", ".cpp", ".h", ".hpp", ".cxx", ".cc", ".hxx", ".hh", ".cs", ".go",
+  ".m", ".mm", ".rb", ".php", ".swift", ".kt", ".kts", ".rs", ".scala",
+  ".sh", ".bash", ".zsh", ".ps1", ".psm1", ".psd1", ".bat", ".cmd", ".r",
+  ".pl", ".pm", ".lua", ".dart", ".hs", ".ml", ".mli", ".fs", ".fsx",
+  ".clj", ".cljs", ".vim", ".zig", ".zon", ".html", ".htm", ".css", ".scss",
+  ".sass", ".less", ".stylus", ".styl", ".md", ".mdx", ".json", ".jsonc",
+  ".xml", ".yml", ".yaml", ".toml", ".toon", ".txt", ".ini", ".cfg", ".conf", ".vue",
+  ".svelte", ".astro", ".jsp", ".jspx", ".jspf", ".tag", ".tagx", ".gsp",
+  ".properties", ".gradle", ".groovy", ".proto", ".hbs", ".handlebars", ".ejs",
+  ".pug", ".ftl", ".mustache", ".liquid", ".erb", ".sql", ".ddl", ".dml",
+  ".mysql", ".postgresql", ".psql", ".sqlite", ".mssql", ".oracle", ".ora",
+  ".db2", ".proc", ".procedure", ".func", ".function", ".view", ".trigger",
+  ".index", ".migration", ".seed", ".fixture", ".schema", ".cql", ".cypher",
+  ".sparql", ".gql", ".liquibase", ".flyway"
+]
+exclude_dir_names = [".git", ".projectatlas", ".venv", "__pycache__", "node_modules", "dist", "build", "target"]
 exclude_dir_suffixes = [".egg-info"]
 exclude_path_prefixes = []
 non_source_path_prefixes = []
 max_scan_lines = 80
+text_index_max_bytes = 2000000
 
 [purpose]
 default_style = "javadoc"
@@ -28,15 +47,62 @@ no_commas = true
 max_length = 140
 
 [untracked]
-allowed_filenames = [".purpose"]
+allowed_filenames = []
 allowlist_dir_prefixes = []
 allowlist_files = []
 asset_allowed_prefixes = []
 asset_extensions = [".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".ico", ".pdf", ".ttf", ".woff", ".woff2"]
 ```
 
-`projectatlas init` auto-detects repo languages and writes the config with the detected extensions by default.
-Pass `--no-detect-languages` to keep the static template.
+`projectatlas init` writes the Rust configuration template. Adjust `scan.source_extensions` only when a project needs a narrower or broader compatibility-map surface.
+
+`project.purpose_filename` is intentionally omitted from new configs. ProjectAtlas still accepts the key as a
+legacy migration override and otherwise uses `.purpose` internally only while importing old folder-purpose files
+during `projectatlas scan`; new workflows should write purpose records to SQLite with `projectatlas purpose set`,
+`projectatlas purpose review`, or the matching MCP tools.
+
+ProjectAtlas inherits `.gitignore` dynamically on every scan/watch run through the Rust scanner. Do not copy
+`.gitignore` entries into ProjectAtlas config just to keep them in sync; update `.gitignore` and ProjectAtlas will
+honor the change the next time it scans. `scan.exclude_dir_names` and `scan.exclude_path_prefixes` are the stricter
+ProjectAtlas-only ignore layer applied after the inherited `.gitignore` baseline by `projectatlas scan`,
+`projectatlas map`, `projectatlas lint`, MCP `atlas_scan`, watcher refresh, and `strip-legacy-purpose`.
+Use directory-name excludes for broad
+generated/vendor/build folders such as `node_modules` or `target`; use path-prefix excludes for exact repository
+subtrees such as `docs/api` or `app/public/generated`. Search then operates over the indexed file set and can use
+literal, regex, or fuzzy matching. ProjectAtlas manual ignores add atlas-specific exclusions; they do not unignore
+paths already excluded by `.gitignore`.
+
+Keep private Memory Bank, cache, and harness state out of ProjectAtlas indexes and public Git history by listing
+that local workspace state in `.gitignore`. ProjectAtlas will inherit those rules without copying tool-specific
+folder names into source code or ProjectAtlas config.
+
+Manage the manual ProjectAtlas layer with:
+
+```powershell
+projectatlas ignore list
+projectatlas ignore init-gitignore
+projectatlas ignore add --kind dir-name generated
+projectatlas ignore add --kind path-prefix docs/api
+projectatlas ignore remove --kind path-prefix docs/api
+```
+
+`projectatlas ignore init-gitignore` creates a missing project-root `.gitignore` with ProjectAtlas runtime-state
+defaults. It is a no-op when the file already exists and does not require GitHub or a remote Git repository.
+Project-local or personal workspace state should stay in `.gitignore`. ProjectAtlas honors those ignore rules and
+does not need tool-specific folders copied into its own config. If a workflow note needs to be public, promote it
+to `AGENTS.md`, `docs/`, or plugin skill documentation instead of committing private workspace memory.
+
+During migration from legacy TOON maps, `projectatlas scan` imports purpose records only for paths still present in
+the freshly indexed file set. Stale or newly excluded map rows are counted as skipped stale imports instead of
+failing the first scan with a low-level SQLite no-row error.
+
+`scan.text_index_max_bytes` caps the size of each UTF-8 file stored in SQLite for indexed text search. Oversized
+files remain indexed as repository nodes, but their full text is skipped for search to keep large repositories fast
+and memory bounded. Use a higher value only when the repository needs indexed search inside large generated or data
+files.
+
+Path-like entries in scan and untracked configuration are repository-relative. Absolute paths, drive-prefixed
+paths, root paths, and `..` traversal are rejected before ProjectAtlas performs existence checks or lint probes.
 
 ### Purpose styles
 

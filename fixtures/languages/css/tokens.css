@@ -1,0 +1,3 @@
+:root { --brand: #fff; }
+.card, .panel { color: red; }
+@media (min-width: 40rem) { .card { display: grid; } }

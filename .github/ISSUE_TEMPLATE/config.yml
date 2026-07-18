@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: ProjectAtlas documentation
+    url: https://github.com/styler-ai/ProjectAtlas#readme
+    about: Read the current quickstart and workflow documentation.
