@@ -1781,8 +1781,16 @@
       "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 3a04be5."
     },
     {
+      "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-3e03ba1.json",
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 3e03ba1."
+    },
+    {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-697d7c8.json",
       "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint 697d7c8."
+    },
+    {
+      "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-a3df8d0.json",
+      "purpose": "Retain exact-commit ARRI task-verification results for implementation checkpoint a3df8d0."
     },
     {
       "path": "docs/benchmarks/results/phase-0-truth-and-baselines/task-verification-f3c6e3c-arri-4-23.json",
