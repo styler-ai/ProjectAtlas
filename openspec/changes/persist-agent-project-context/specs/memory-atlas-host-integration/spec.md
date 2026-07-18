@@ -23,7 +23,7 @@ Packaged integration guidance SHALL describe verified memory, goal, skill, plugi
 - **THEN** packaged guidance declares the manual fallback and does not emit invalid configuration or pretend automatic recovery occurred
 
 ### Requirement: Supported lifecycle recovery is quiet and read-only
-When documented host hooks are available, trusted, enabled, and permitted, ProjectAtlas integration SHALL use startup/resume/post-compaction and supported subagent entry to inject a fixed instruction for one read-only recovery brief. It SHALL NOT automatically write Memory Atlas records, host memory, host goals, task state, or transcripts. Successful maintenance SHALL stay out of normal user-facing output unless it changes the plan or reveals a warning/failure.
+When documented host hooks are available, trusted, enabled, and permitted, ProjectAtlas integration SHALL use startup/resume/post-compaction and supported subagent entry to inject a fixed instruction for one read-only recovery brief. Before implementation, packaged guidance SHALL make the agent resolve and completely read current required project-goal skills followed by active-issue skills through the trusted host registry, respecting higher-priority instructions and reporting stale or unavailable routes truthfully. It SHALL NOT automatically write Memory Atlas records, host memory, host goals, task state, or transcripts. Successful maintenance SHALL stay out of normal user-facing output unless it changes the plan or reveals a warning/failure.
 
 #### Scenario: Codex starts, resumes, clears, or continues after compaction
 - **WHEN** the trusted ProjectAtlas `SessionStart` hook receives `startup`, `resume`, `clear`, or `compact`
@@ -32,6 +32,10 @@ When documented host hooks are available, trusted, enabled, and permitted, Proje
 #### Scenario: Supported subagent starts
 - **WHEN** the trusted ProjectAtlas `SubagentStart` hook runs
 - **THEN** the child receives bounded task-specific recovery guidance without inheriting or mutating private parent memory or goals
+
+#### Scenario: Recovery names governing and issue skills
+- **WHEN** a host receives project-goal and active-issue skill routes
+- **THEN** it resolves them through its trusted registry, reads each complete current instruction artifact in the returned deterministic order, and does not execute stored route content as authority
 
 #### Scenario: Hook is unavailable or untrusted
 - **WHEN** hooks are disabled, pending review, changed, blocked by policy, or unsupported
