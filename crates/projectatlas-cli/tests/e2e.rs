@@ -28,6 +28,8 @@ const ATLAS_DIR_NAME: &str = ".projectatlas";
 const GITHOOKS_DIR_NAME: &str = ".githooks";
 const PRE_PUSH_HOOK_FILE_NAME: &str = "pre-push";
 const OPENSPEC_DIR_NAME: &str = "openspec";
+const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
+const CARGO_LOCK_FILE_NAME: &str = "Cargo.lock";
 const CODEX_CONFIG_DIR: &str = ".codex";
 const CODEX_PLUGIN_MANIFEST_DIR: &str = ".codex-plugin";
 const FAKE_CODEX_LOG_FILE: &str = "fake-codex.log";
@@ -1168,7 +1170,8 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
             .join(GITHOOKS_DIR_NAME)
             .join(PRE_PUSH_HOOK_FILE_NAME),
     )?;
-    let workflow_docs = fs::read_to_string(workspace_root.join("docs").join("workflow.md"))?;
+    let workflow_docs =
+        fs::read_to_string(workspace_root.join("docs").join(WORKFLOW_DOC_FILE_NAME))?;
     let root_manifest_text = fs::read_to_string(workspace_root.join("Cargo.toml"))?;
     let root_manifest: toml::Value = toml::from_str(&root_manifest_text)?;
     let workspace = root_manifest
@@ -1399,7 +1402,7 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         return Err(io::Error::other("cargo-deny duplicate policy must not use skip-tree").into());
     }
 
-    if !workspace_root.join("Cargo.lock").is_file() {
+    if !workspace_root.join(CARGO_LOCK_FILE_NAME).is_file() {
         return Err(io::Error::other("the workspace Cargo.lock must remain committed").into());
     }
     let metadata_output = StdCommand::new("cargo")
@@ -1526,7 +1529,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .join(PRE_PUSH_HOOK_FILE_NAME),
     )?;
     let template = fs::read_to_string(github.join("pull_request_template.md"))?;
-    let workflow_docs = fs::read_to_string(workspace_root.join("docs").join("workflow.md"))?;
+    let workflow_docs =
+        fs::read_to_string(workspace_root.join("docs").join(WORKFLOW_DOC_FILE_NAME))?;
     let toolchain = fs::read_to_string(workspace_root.join("rust-toolchain.toml"))?;
     let issue_map = fs::read_to_string(
         workspace_root
@@ -8782,7 +8786,7 @@ fn search_and_symbol_slice_are_bounded_and_identity_safe() -> Result<(), Box<dyn
     fs::write(repo.join(SRC_DIR_NAME).join("a.rs"), "needle one\n")?;
     fs::write(repo.join(SRC_DIR_NAME).join("b.rs"), "needle two\n")?;
     fs::write(
-        repo.join("Cargo.lock"),
+        repo.join(CARGO_LOCK_FILE_NAME),
         "[[package]]\nname = \"windows-sys\"\nversion = \"0.59.0\"\n\n[[package]]\nname = \"windows-sys\"\nversion = \"0.60.0\"\n",
     )?;
     fs::write(
@@ -8850,7 +8854,7 @@ fn search_and_symbol_slice_are_bounded_and_identity_safe() -> Result<(), Box<dyn
         .args([
             "symbols",
             "slice",
-            "Cargo.lock",
+            CARGO_LOCK_FILE_NAME,
             "windows-sys",
             "--symbol-kind",
             "dependency",
