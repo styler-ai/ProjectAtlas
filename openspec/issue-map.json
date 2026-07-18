@@ -17,6 +17,17 @@
     "enhance-projectatlas-init-first-run": 305,
     "fix-token-tui-reference-visual-regression": 304,
     "match-token-impact-reference-tui": 302,
+    "persist-agent-project-context": {
+      "contract": "checklist-v1",
+      "primary_issue": 314,
+      "owners": [
+        {
+          "issue": 314,
+          "first_task": "1.1",
+          "last_task": "7.4"
+        }
+      ]
+    },
     "publish-rustdoc-readme-links": 300,
     "simplify-token-tui-dashboard": 296
   }
