@@ -43,8 +43,7 @@ cargo deny --locked --all-features check -D warnings
 python3 .github/scripts/issue-checklists.py --self-test
 python3 .github/scripts/issue-checklists.py --repo "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" --root . --issue-map openspec/issue-map.json
 cargo run --locked -p projectatlas-cli -- --format json scan .
-cargo run --locked -p projectatlas-cli -- purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply
-cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level strict
+cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level low
 ```
 
 ## Rust dependency management
@@ -118,7 +117,7 @@ Ordinary pull requests require exact local/GitHub checklist synchronization but 
 
 ## CI behavior
 
-- CI uses `projectatlas init` for first-run smoke coverage, refreshes the main ProjectAtlas repo index with `projectatlas scan`, replays the reviewed purpose batch with `projectatlas purpose review`, and validates source metadata with strict `projectatlas lint`.
+- GitHub Actions runs Rust source, dependency, unit, E2E, documentation, and packaging checks. ProjectAtlas scan, purpose, parity, and lint maintenance run locally against the developer or agent's current source state, not against the hosted Actions checkout.
 - `projectatlas lint` checks purpose/header health, non-source declarations, and untracked files; it does not require or validate the optional compatibility TOON export.
 - `projectatlas lint --purpose-level low` is the default first-pass agent gate: stale, duplicate, and repeated temporary-folder findings fail, while missing/suggested/agent-review purpose curation for folders plus high-impact files remains advisory. Use `projectatlas purpose queue` for the actionable curation list, `--purpose-level medium` when all source files must be agent-reviewed, and `--purpose-level strict` only when every indexed file and folder must be agent-reviewed.
 - PRs must reference a GitHub issue and have a milestone.

@@ -984,7 +984,8 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
 }
 
 #[test]
-fn repository_guidance_keeps_legacy_toon_export_optional() -> Result<(), Box<dyn Error>> {
+fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
+-> Result<(), Box<dyn Error>> {
     let workspace_root = workspace_root()?;
     let ci_workflow = fs::read_to_string(
         workspace_root
@@ -1031,60 +1032,49 @@ fn repository_guidance_keeps_legacy_toon_export_optional() -> Result<(), Box<dyn
             ))
             .into());
         }
-        if !verify.contains("lint_purpose_levels_require_agent_review_at_configured_scope") {
-            return Err(io::Error::other(format!(
-                "{workflow_name} verify job must run the low/medium/strict purpose lint E2E"
-            ))
-            .into());
-        }
-        if !verify.contains("watch_once_preserves_unchanged_deep_summary_and_text_index") {
-            return Err(io::Error::other(format!(
-                "{workflow_name} verify job must test reviewed purpose preservation across deep refresh"
-            ))
-            .into());
-        }
         if !verify.contains("projectatlas-lints") || !verify.contains("strict-strings") {
             return Err(io::Error::other(format!(
                 "{workflow_name} verify job must run strict ProjectAtlas source string lints"
             ))
             .into());
         }
-        if !verify.contains(
-            "purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply",
-        ) {
-            return Err(io::Error::other(format!(
-                "{workflow_name} verify job must replay reviewed purposes through ProjectAtlas before strict lint"
-            ))
-            .into());
+        for run in workflow_job_runs(workflow, "verify")? {
+            if command_runs_projectatlas_maintenance(&run) {
+                return Err(io::Error::other(format!(
+                    "{workflow_name} verify job must keep ProjectAtlas init, scan, purpose, parity, and lint maintenance local"
+                ))
+                .into());
+            }
         }
-        if !verify.contains("lint --report-untracked --purpose-level strict") {
-            return Err(io::Error::other(format!(
-                "{workflow_name} verify job must enforce strict purpose lint after review replay"
-            ))
-            .into());
+    }
+    for maintenance in ["init", "scan", "purpose", "parity", "lint"] {
+        for command in [
+            format!("projectatlas {maintenance}"),
+            format!("cargo run --locked -p projectatlas-cli -- {maintenance}"),
+        ] {
+            if !command_runs_projectatlas_maintenance(&command) {
+                return Err(io::Error::other(format!(
+                    "workflow policy failed to recognize local-only ProjectAtlas maintenance command {command:?}"
+                ))
+                .into());
+            }
         }
-        let scan_offset = verify.find("ProjectAtlas scan").unwrap_or(usize::MAX);
-        let review_offset = verify
-            .find("ProjectAtlas purpose review")
-            .unwrap_or(usize::MAX);
-        let lint_offset = verify.find("ProjectAtlas lint").unwrap_or(usize::MAX);
-        if !(scan_offset < review_offset && review_offset < lint_offset) {
+    }
+    for command in [
+        "cargo test --locked -p projectatlas-cli --test e2e",
+        "cargo run --locked -p projectatlas-cli -- runtime-info",
+        "./projectatlas --format json runtime-info",
+    ] {
+        if command_runs_projectatlas_maintenance(command) {
             return Err(io::Error::other(format!(
-                "{workflow_name} verify job must run scan, purpose review, then strict lint in order"
+                "workflow policy rejected allowed ProjectAtlas verification command {command:?}"
             ))
             .into());
         }
     }
-    let ci_install_smoke = workflow_job_block(&ci_workflow, "install-smoke")?;
-    if ci_install_smoke.contains("map --force") {
+    if ci_workflow.contains("\n  install-smoke:") {
         return Err(io::Error::other(
-            "CI install smoke must not require the legacy TOON map export",
-        )
-        .into());
-    }
-    if ci_install_smoke.contains("--strict-folders") {
-        return Err(io::Error::other(
-            "CI install smoke must not require legacy folder .purpose linting",
+            "CI must not launch an installed ProjectAtlas runtime; installer behavior belongs to isolated Rust E2E tests",
         )
         .into());
     }
@@ -1139,6 +1129,47 @@ fn repository_guidance_keeps_legacy_toon_export_optional() -> Result<(), Box<dyn
         return Err(
             io::Error::other("legacy ProjectAtlas TOON map artifact must stay ignored").into(),
         );
+    }
+    if !gitignore
+        .lines()
+        .any(|line| line == ".projectatlas/projectatlas-purpose-review.json")
+    {
+        return Err(io::Error::other(
+            "local ProjectAtlas purpose-review batches must stay ignored",
+        )
+        .into());
+    }
+    let tracked_review_batch = StdCommand::new("git")
+        .current_dir(&workspace_root)
+        .args([
+            "ls-files",
+            "--error-unmatch",
+            "--",
+            ".projectatlas/projectatlas-purpose-review.json",
+        ])
+        .output()?;
+    if tracked_review_batch.status.success()
+        && workspace_root
+            .join(ATLAS_DIR_NAME)
+            .join("projectatlas-purpose-review.json")
+            .exists()
+    {
+        return Err(io::Error::other(
+            "the local ProjectAtlas purpose-review batch must not be tracked",
+        )
+        .into());
+    }
+    let workflow_guide = fs::read_to_string(workspace_root.join("docs").join("workflow.md"))?;
+    for required in [
+        "ProjectAtlas scan, purpose, parity, and lint maintenance run locally",
+        "lint --report-untracked --purpose-level low",
+    ] {
+        if !workflow_guide.contains(required) {
+            return Err(io::Error::other(format!(
+                "workflow guidance must preserve the local ProjectAtlas maintenance boundary; missing {required:?}"
+            ))
+            .into());
+        }
     }
     if pre_push.contains("map --force") || pre_push.contains("--strict-folders") {
         return Err(io::Error::other(
@@ -7019,6 +7050,7 @@ fn exercise_normal_read_freshness(
     db: &Path,
     with_git_metadata: bool,
 ) -> Result<(), Box<dyn Error>> {
+    const REQUEST_TEXT_INDEX_MAX_BYTES: &str = "65536";
     const CONFIG: &str = "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n";
     const CONTRACT_CHANGED_CONFIG: &str = "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\ntext_index_max_bytes = 1\n";
     const LEGACY_SOURCE: &str =
@@ -7060,7 +7092,12 @@ fn exercise_normal_read_freshness(
         .current_dir(repo)
         .arg("--db")
         .arg(db)
-        .args(["scan", "."])
+        .args([
+            "scan",
+            ".",
+            "--text-index-max-bytes",
+            REQUEST_TEXT_INDEX_MAX_BYTES,
+        ])
         .assert()
         .success();
 
@@ -7113,12 +7150,12 @@ fn exercise_normal_read_freshness(
 
     fs::write(&config_path, CONFIG)?;
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
-    let mismatched_symbol_messages = [
+    let capped_symbol_messages = [
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_symbols_build","arguments":{"text_index_max_bytes":1}}}"#.to_string(),
     ];
-    let mismatched_symbol_stdout = run_mcp_stdio(
+    let capped_symbol_stdout = run_mcp_stdio(
         &executable,
         repo,
         &[
@@ -7126,15 +7163,14 @@ fn exercise_normal_read_freshness(
             db.display().to_string(),
             "mcp".to_string(),
         ],
-        &mismatched_symbol_messages,
+        &capped_symbol_messages,
     )?;
-    let mismatched_symbol_text = mcp_tool_text(&mismatched_symbol_stdout, 2)?;
-    if !mismatched_symbol_text.contains("kind: verification_incomplete")
-        || !mismatched_symbol_text.contains("reason: publication_contract_mismatch")
-        || mismatched_symbol_text.contains("legacy_store")
+    let capped_symbol_text = mcp_tool_text(&capped_symbol_stdout, 2)?;
+    if capped_symbol_text.contains("kind: verification_incomplete")
+        || capped_symbol_text.contains("reason: publication_contract_mismatch")
     {
         return Err(io::Error::other(format!(
-            "MCP symbol-only build laundered a changed full-index contract: {mismatched_symbol_text}"
+            "MCP symbol-only request cap redefined the full publication contract: {capped_symbol_text}"
         ))
         .into());
     }
@@ -9880,6 +9916,90 @@ fn workflow_job_block(workflow: &str, job: &str) -> Result<String, Box<dyn Error
     } else {
         Err(io::Error::other(format!("workflow job {job:?} not found")).into())
     }
+}
+
+/// Return every shell command owned by one GitHub Actions job.
+fn workflow_job_runs(workflow: &str, job: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    let documents = YamlLoader::load_from_str(workflow)?;
+    let document = documents
+        .first()
+        .ok_or_else(|| io::Error::other("workflow document is empty"))?;
+    let steps = document["jobs"][job]["steps"]
+        .as_vec()
+        .ok_or_else(|| io::Error::other(format!("workflow job {job:?} has no steps")))?;
+    Ok(steps
+        .iter()
+        .filter_map(|step| step["run"].as_str())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Detect `ProjectAtlas` maintenance commands that belong only in local agent workflows.
+fn command_runs_projectatlas_maintenance(command: &str) -> bool {
+    const MAINTENANCE_COMMANDS: [&str; 5] = ["init", "scan", "purpose", "parity", "lint"];
+
+    let command = command.replace("\\\r\n", " ").replace("\\\n", " ");
+    command
+        .lines()
+        .flat_map(|line| line.split([';', '|', '&']))
+        .any(|segment| {
+            let tokens = segment
+                .split_whitespace()
+                .map(|token| {
+                    token.trim_matches(|character: char| {
+                        matches!(character, '\'' | '"' | '(' | ')' | '{' | '}')
+                    })
+                })
+                .filter(|token| !token.is_empty())
+                .collect::<Vec<_>>();
+
+            if let Some(executable) = tokens.iter().position(|token| {
+                let name = token
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(token)
+                    .to_ascii_lowercase();
+                matches!(name.as_str(), "projectatlas" | "projectatlas.exe")
+            }) {
+                return tokens[executable + 1..]
+                    .iter()
+                    .any(|token| MAINTENANCE_COMMANDS.contains(token));
+            }
+
+            let Some(cargo) = tokens.iter().position(|token| {
+                let name = token
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(token)
+                    .to_ascii_lowercase();
+                matches!(name.as_str(), "cargo" | "cargo.exe")
+            }) else {
+                return false;
+            };
+            let Some(run) = tokens[cargo + 1..]
+                .iter()
+                .position(|token| *token == "run")
+                .map(|index| cargo + 1 + index)
+            else {
+                return false;
+            };
+            let Some(arguments) = tokens[run + 1..]
+                .iter()
+                .rposition(|token| *token == "--")
+                .map(|index| run + 1 + index)
+            else {
+                return false;
+            };
+            let owns_projectatlas_cli = tokens[run + 1..arguments]
+                .windows(2)
+                .any(|pair| matches!(pair[0], "-p" | "--package") && pair[1] == "projectatlas-cli")
+                || tokens[run + 1..arguments].contains(&"--package=projectatlas-cli");
+
+            owns_projectatlas_cli
+                && tokens[arguments + 1..]
+                    .iter()
+                    .any(|token| MAINTENANCE_COMMANDS.contains(token))
+        })
 }
 
 /// Require every GitHub Actions `uses:` reference to pin an immutable 40-char SHA.

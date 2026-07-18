@@ -37,7 +37,11 @@ use std::time::Duration;
 use thiserror::Error;
 
 /// Current `SQLite` schema version supported by this crate.
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
+/// Metadata key for the durable schema version.
+const SCHEMA_VERSION_KEY: &str = "schema_version";
+/// Last schema whose derived-index publication metadata is not trustworthy.
+const UNTRUSTED_PUBLICATION_SCHEMA_VERSION: i64 = 8;
 /// Maximum persisted text for denormalized symbol-name search summaries.
 const MAX_SYMBOL_SEARCH_SUMMARY_CHARS: usize = 16_000;
 /// Metadata key for the current derived-index publication state.
@@ -527,14 +531,14 @@ impl AtlasStore {
     /// Validate that a non-mutating reader understands the durable schema.
     fn validate_current_schema_version(&self) -> DbResult<()> {
         let stored = self.connection.query_row(
-            "SELECT value FROM metadata WHERE key = 'schema_version'",
-            [],
+            "SELECT value FROM metadata WHERE key = ?1",
+            [SCHEMA_VERSION_KEY],
             |row| row.get::<_, String>(0),
         )?;
         let found = stored
             .parse::<i64>()
             .map_err(|source| DbError::InvalidInteger {
-                field: "schema_version",
+                field: SCHEMA_VERSION_KEY,
                 value: stored,
                 source,
             })?;
@@ -707,8 +711,8 @@ impl AtlasStore {
         let stored = self
             .connection
             .query_row(
-                "SELECT value FROM metadata WHERE key = 'schema_version'",
-                [],
+                "SELECT value FROM metadata WHERE key = ?1",
+                [SCHEMA_VERSION_KEY],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
@@ -717,15 +721,27 @@ impl AtlasStore {
                 let found = value
                     .parse::<i64>()
                     .map_err(|source| DbError::InvalidInteger {
-                        field: "schema_version",
+                        field: SCHEMA_VERSION_KEY,
                         value,
                         source,
                     })?;
                 if (1..SCHEMA_VERSION).contains(&found) {
-                    self.connection.execute(
-                        "UPDATE metadata SET value = ?1 WHERE key = 'schema_version'",
-                        [SCHEMA_VERSION.to_string()],
+                    let migration = self.connection.unchecked_transaction()?;
+                    if found == UNTRUSTED_PUBLICATION_SCHEMA_VERSION {
+                        migration.execute(
+                            "DELETE FROM metadata WHERE key IN (?1, ?2, ?3)",
+                            params![
+                                INDEX_PUBLICATION_STATE_KEY,
+                                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                                INDEX_PUBLICATION_GENERATION_KEY,
+                            ],
+                        )?;
+                    }
+                    migration.execute(
+                        "UPDATE metadata SET value = ?1 WHERE key = ?2",
+                        params![SCHEMA_VERSION.to_string(), SCHEMA_VERSION_KEY],
                     )?;
+                    migration.commit()?;
                 } else if found != SCHEMA_VERSION {
                     return Err(DbError::SchemaVersion {
                         found,
@@ -735,8 +751,8 @@ impl AtlasStore {
             }
             None => {
                 self.connection.execute(
-                    "INSERT INTO metadata(key, value) VALUES('schema_version', ?1)",
-                    [SCHEMA_VERSION.to_string()],
+                    "INSERT INTO metadata(key, value) VALUES(?1, ?2)",
+                    params![SCHEMA_VERSION_KEY, SCHEMA_VERSION.to_string()],
                 )?;
             }
         }
@@ -5203,6 +5219,227 @@ mod tests {
     }
 
     #[test]
+    fn schema_upgrade_preserves_local_state_and_restarts_publication() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("projectatlas.db");
+        let root = temp.path().join("repository");
+        write_schema_compatibility_fixture(
+            &db_path,
+            &root,
+            UNTRUSTED_PUBLICATION_SCHEMA_VERSION,
+            "legacy",
+        )?;
+        let database_before_read = fs::read(&db_path)?;
+
+        let Err(read_error) = AtlasStore::open_read_only(&db_path) else {
+            return Err(io::Error::other("schema-8 read-only open unexpectedly succeeded").into());
+        };
+        require_eq(
+            &matches!(
+                read_error,
+                DbError::SchemaVersion {
+                    found: UNTRUSTED_PUBLICATION_SCHEMA_VERSION,
+                    expected: SCHEMA_VERSION,
+                }
+            ),
+            &true,
+            "schema-8 read-only rejection",
+        )?;
+        require_eq(
+            &fs::read(&db_path)?,
+            &database_before_read,
+            "read-only rejection leaves database unchanged",
+        )?;
+
+        let mut store = AtlasStore::open(&db_path)?;
+        let stored_schema = store.connection.query_row(
+            "SELECT value FROM metadata WHERE key = ?1",
+            [SCHEMA_VERSION_KEY],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &stored_schema,
+            &SCHEMA_VERSION.to_string(),
+            "upgraded schema version",
+        )?;
+        require_eq(
+            &store.project_root()?,
+            &Some(normalize_native_path_display(&root)),
+            "upgraded project root",
+        )?;
+        let node = store
+            .load_node_by_path("src/lib.rs")?
+            .ok_or_else(|| io::Error::other("upgraded source node missing"))?;
+        require_eq(
+            &node.node.content_hash,
+            &Some("hash-legacy".to_string()),
+            "upgraded source row",
+        )?;
+        require_eq(
+            &node.purpose.purpose,
+            &Some("Schema compatibility source".to_string()),
+            "upgraded purpose text",
+        )?;
+        require_eq(
+            &node.purpose.source,
+            &PurposeSource::Agent,
+            "upgraded purpose source",
+        )?;
+        require_eq(
+            &node.purpose.status,
+            &PurposeStatus::Approved,
+            "upgraded purpose review state",
+        )?;
+        require_eq(
+            &store.resolved_health_ids()?,
+            &vec!["schema-review".to_string()],
+            "upgraded authored review",
+        )?;
+        let telemetry = store.token_overview(Some("schema-session"))?;
+        require_eq(&telemetry.calls, &1, "upgraded telemetry call count")?;
+        require_eq(
+            &telemetry.estimated_saved,
+            &80,
+            "upgraded telemetry savings",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &None,
+            "untrusted publication metadata invalidated",
+        )?;
+        let remaining_publication_keys = store.connection.query_row(
+            "SELECT COUNT(*) FROM metadata WHERE key IN (?1, ?2, ?3)",
+            params![
+                INDEX_PUBLICATION_STATE_KEY,
+                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                INDEX_PUBLICATION_GENERATION_KEY,
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &remaining_publication_keys,
+            &0,
+            "all untrusted publication keys removed",
+        )?;
+
+        {
+            let mut publication = store.begin_index_publication("schema-9-contract")?;
+            write_test_projection(&mut publication, "fresh")?;
+            publication.complete()?;
+        }
+        require_test_projection(&store, 1, "fresh")?;
+        require_eq(
+            &store
+                .index_publication()?
+                .and_then(|publication| publication.contract_fingerprint),
+            &Some("schema-9-contract".to_string()),
+            "fresh publication contract",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn future_schema_rejection_preserves_source_and_authored_rows() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("projectatlas.db");
+        let root = temp.path().join("repository");
+        let future_schema = SCHEMA_VERSION + 1;
+        write_schema_compatibility_fixture(&db_path, &root, future_schema, "future")?;
+
+        let Err(open_error) = AtlasStore::open(&db_path) else {
+            return Err(
+                io::Error::other("future schema writable open unexpectedly succeeded").into(),
+            );
+        };
+        require_eq(
+            &matches!(
+                open_error,
+                DbError::SchemaVersion {
+                    found,
+                    expected: SCHEMA_VERSION,
+                } if found == future_schema
+            ),
+            &true,
+            "future schema rejection",
+        )?;
+
+        let connection = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let stored_schema = connection.query_row(
+            "SELECT value FROM metadata WHERE key = ?1",
+            [SCHEMA_VERSION_KEY],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &stored_schema,
+            &future_schema.to_string(),
+            "future schema remains unchanged",
+        )?;
+        let stored_root = connection.query_row(
+            "SELECT value FROM metadata WHERE key = 'project_root'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &stored_root,
+            &normalize_native_path_display(&root),
+            "future project root remains unchanged",
+        )?;
+        let source_state = connection.query_row(
+            "
+            SELECT n.content_hash, p.purpose, p.source, p.status
+            FROM nodes AS n
+            JOIN purposes AS p ON p.node_id = n.id
+            WHERE n.path = 'src/lib.rs'
+            ",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )?;
+        require_eq(
+            &source_state,
+            &(
+                Some("hash-future".to_string()),
+                Some("Schema compatibility source".to_string()),
+                PurposeSource::Agent.to_string(),
+                PurposeStatus::Approved.as_str().to_string(),
+            ),
+            "future source and purpose rows remain unchanged",
+        )?;
+        let review_rationale = connection.query_row(
+            "SELECT rationale FROM health_resolutions WHERE finding_id = 'schema-review'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &review_rationale,
+            &"Reviewed schema fixture".to_string(),
+            "future authored review remains unchanged",
+        )?;
+        let telemetry_state = connection.query_row(
+            "
+            SELECT COUNT(*), SUM(estimated_tokens_saved)
+            FROM usage_events
+            WHERE session_id = 'schema-session'
+            ",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+        )?;
+        require_eq(
+            &telemetry_state,
+            &(1, Some(80)),
+            "future telemetry remains unchanged",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn projection_refresh_cannot_replace_publication_contract() -> Result<(), Box<dyn Error>> {
         let mut store = AtlasStore::in_memory()?;
         store.begin_index_publication("contract-a")?.complete()?;
@@ -7492,6 +7729,56 @@ mod tests {
             &true,
             "inactive finding rejected",
         )?;
+        Ok(())
+    }
+
+    /// Write representative source, authored, telemetry, and publication state at one schema.
+    fn write_schema_compatibility_fixture(
+        db_path: &Path,
+        root: &Path,
+        schema_version: i64,
+        label: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::open(db_path)?;
+        store.set_project_root(root)?;
+        {
+            let mut publication = store.begin_index_publication("untrusted-contract")?;
+            write_test_projection(&mut publication, label)?;
+            publication.complete()?;
+        }
+        store.set_purpose(
+            "src/lib.rs",
+            "Schema compatibility source",
+            PurposeSource::Agent,
+        )?;
+        store.connection.execute(
+            "
+            INSERT INTO health_resolutions(
+                finding_id,
+                category,
+                path,
+                rationale
+            )
+            VALUES('schema-review', ?1, 'src/lib.rs', 'Reviewed schema fixture')
+            ",
+            [CATEGORY_DUPLICATE_PURPOSE],
+        )?;
+        store.record_usage(&usage_from_estimates(
+            "schema-session",
+            "summary",
+            Some("src/lib.rs".to_string()),
+            None,
+            100,
+            20,
+        ))?;
+        set_metadata(
+            &store.connection,
+            SCHEMA_VERSION_KEY,
+            &schema_version.to_string(),
+        )?;
+        store
+            .connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
         Ok(())
     }
 

@@ -380,7 +380,7 @@ fn verify_index_project_root(store: &AtlasStore, selected_root: &Path) -> Result
 
 /// Reject mixed or runtime-incompatible derived projections before source reads.
 fn verify_index_publication(store: &AtlasStore, plan: &ScanRuntimePlan) -> Result<(), CliError> {
-    let expected_fingerprint = index_derivation_fingerprint(&plan.scan_options, plan.text_options);
+    let expected_fingerprint = plan.publication_contract_fingerprint();
     let Some(publication) = store.index_publication()? else {
         return Err(verification_incomplete(
             &plan.root,
@@ -494,9 +494,8 @@ fn revalidate_index_publication_inputs(
             &source,
         )
     })?;
-    let staged_fingerprint = index_derivation_fingerprint(&plan.scan_options, plan.text_options);
-    let current_fingerprint =
-        index_derivation_fingerprint(&current_plan.scan_options, current_plan.text_options);
+    let staged_fingerprint = plan.publication_contract_fingerprint();
+    let current_fingerprint = current_plan.publication_contract_fingerprint();
     if staged_fingerprint != current_fingerprint {
         return Err(verification_incomplete(
             &plan.root,
@@ -630,6 +629,15 @@ impl ScanRuntimePlan {
             &self.root,
             self.text_index_max_bytes_override,
         )
+    }
+
+    /// Hash the durable parser and configured source/index policy contract.
+    ///
+    /// Request-scoped text limits control one scan or watcher operation but do
+    /// not become project compatibility state that later reads must repeat.
+    fn publication_contract_fingerprint(&self) -> String {
+        let configured_text_options = text_index_options(self.config.as_ref(), None);
+        index_derivation_fingerprint(&self.scan_options, configured_text_options)
     }
 
     /// Capture every non-source input and normalized row used by purpose import.
@@ -1147,7 +1155,7 @@ pub(crate) fn run_scan_pipeline(
 ) -> Result<ScanReport, CliError> {
     let nodes = scan_repo(&plan.root, &plan.scan_options)?;
     let purpose_import_snapshot = plan.purpose_import_snapshot()?;
-    let contract_fingerprint = index_derivation_fingerprint(&plan.scan_options, plan.text_options);
+    let contract_fingerprint = plan.publication_contract_fingerprint();
     let mut publication = store.begin_index_publication(&contract_fingerprint)?;
     publication.set_project_root(&plan.root)?;
     publication.replace_scan(&nodes)?;
@@ -1211,7 +1219,7 @@ pub(crate) fn run_symbol_build_pipeline(
 ) -> Result<SymbolBuildReport, CliError> {
     verify_index_project_root(store, &plan.root)?;
     verify_index_publication(store, plan)?;
-    let contract_fingerprint = index_derivation_fingerprint(&plan.scan_options, plan.text_options);
+    let contract_fingerprint = plan.publication_contract_fingerprint();
     let mut publication = store.begin_index_projection_refresh(&contract_fingerprint)?;
     let report = build_symbols_for_index(
         &mut publication,
@@ -3643,7 +3651,7 @@ pub(crate) fn refresh_index(
     let root = &plan.root;
     let previous_hashes = indexed_file_hashes(store)?;
     let nodes = scan_repo(root, &plan.scan_options)?;
-    let contract_fingerprint = index_derivation_fingerprint(&plan.scan_options, plan.text_options);
+    let contract_fingerprint = plan.publication_contract_fingerprint();
     let mut publication = store.begin_index_publication(&contract_fingerprint)?;
     publication.set_project_root(root)?;
     publication.replace_scan(&nodes)?;
@@ -3742,7 +3750,7 @@ pub(crate) fn refresh_index_for_changes(
         .chain(absent_paths.iter().cloned())
         .collect::<HashSet<_>>();
     let previous_hashes = indexed_file_hashes_for_paths(store, &changed_paths)?;
-    let contract_fingerprint = index_derivation_fingerprint(&plan.scan_options, plan.text_options);
+    let contract_fingerprint = plan.publication_contract_fingerprint();
     let mut publication = store.begin_index_publication(&contract_fingerprint)?;
     publication.set_project_root(root)?;
     if !nodes.is_empty() {
@@ -4255,8 +4263,9 @@ mod tests {
         fs::write(&source_path, staged_source)?;
         let config_dir = temp.path().join(".projectatlas");
         fs::create_dir(&config_dir)?;
+        let config_path = config_dir.join("config.toml");
         fs::write(
-            config_dir.join("config.toml"),
+            &config_path,
             r#"[project]
 root = "."
 map_path = ".projectatlas/projectatlas.toon"
@@ -4288,6 +4297,48 @@ line_comment_prefixes = ["//"]
             "publication policy-change reason",
         )?;
 
+        let configured_plan = ScanRuntimePlan::for_path(None, temp.path(), None)?;
+        let request_limited_plan = ScanRuntimePlan::for_path(None, temp.path(), Some(1))?;
+        require_eq(
+            &configured_plan.text_options.max_bytes,
+            &7,
+            "configured text-index limit",
+        )?;
+        require_eq(
+            &request_limited_plan.text_options.max_bytes,
+            &1,
+            "request-scoped text-index limit",
+        )?;
+        require_eq(
+            &configured_plan.publication_contract_fingerprint(),
+            &request_limited_plan.publication_contract_fingerprint(),
+            "request limit excluded from publication contract",
+        )?;
+        let reloaded_request_plan = request_limited_plan.reload()?;
+        require_eq(
+            &reloaded_request_plan.text_options.max_bytes,
+            &1,
+            "request limit retained across operation reload",
+        )?;
+        require_eq(
+            &request_limited_plan.publication_contract_fingerprint(),
+            &reloaded_request_plan.publication_contract_fingerprint(),
+            "reloaded operation publication contract",
+        )?;
+
+        let changed_config = fs::read_to_string(&config_path)?
+            .replace("text_index_max_bytes = 7", "text_index_max_bytes = 8");
+        fs::write(&config_path, changed_config)?;
+        let configured_cap_changed_plan = ScanRuntimePlan::for_path(None, temp.path(), Some(1))?;
+        if configured_plan.publication_contract_fingerprint()
+            == configured_cap_changed_plan.publication_contract_fingerprint()
+        {
+            return Err(io::Error::other(
+                "configured text-index limit did not change the publication contract",
+            )
+            .into());
+        }
+
         let import_repo = temp.path().join("import-repo");
         let import_atlas_dir = import_repo.join(".projectatlas");
         fs::create_dir_all(&import_atlas_dir)?;
@@ -4307,10 +4358,20 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
 "#,
         )?;
         let import_plan =
-            ScanRuntimePlan::for_path(Some(&external_config_path), &import_repo, None)?;
+            ScanRuntimePlan::for_path(Some(&external_config_path), &import_repo, Some(1))?;
         let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
         let mut import_store = AtlasStore::in_memory()?;
         run_scan_pipeline(&mut import_store, &import_plan, &symbol_options)?;
+        verify_index_freshness(&import_store, &import_repo, Some(&external_config_path))?;
+        let normal_import_plan =
+            ScanRuntimePlan::for_path(Some(&external_config_path), &import_repo, None)?;
+        run_symbol_build_pipeline(
+            &mut import_store,
+            &normal_import_plan,
+            &symbol_options,
+            None,
+        )?;
+        verify_index_publication(&import_store, &normal_import_plan)?;
         let publication_before = import_store
             .index_publication()?
             .ok_or_else(|| io::Error::other("initial imported publication missing"))?;
@@ -4330,8 +4391,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             return Err(io::Error::other("legacy purpose fixture was not imported").into());
         }
         let staged_import_nodes = scan_repo(&import_plan.root, &import_plan.scan_options)?;
-        let contract_fingerprint =
-            index_derivation_fingerprint(&import_plan.scan_options, import_plan.text_options);
+        let contract_fingerprint = import_plan.publication_contract_fingerprint();
         let mut publication = import_store.begin_index_publication(&contract_fingerprint)?;
         publication.set_project_root(&import_plan.root)?;
         publication.replace_scan(&staged_import_nodes)?;
@@ -4376,10 +4436,12 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         let temp = tempfile::tempdir()?;
         let source_path = temp.path().join("lib.rs");
         fs::write(&source_path, "fn stable() {}\n")?;
-        let plan = ScanRuntimePlan::for_path(None, temp.path(), None)?;
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), Some(1))?;
         let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
         let mut store = AtlasStore::in_memory()?;
         refresh_index(&mut store, &plan, &symbol_options)?;
+        let normal_read_plan = ScanRuntimePlan::for_path(None, temp.path(), None)?;
+        verify_index_publication(&store, &normal_read_plan)?;
         let before = store
             .index_publication()?
             .ok_or_else(|| io::Error::other("initial publication missing"))?;

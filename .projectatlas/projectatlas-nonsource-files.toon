@@ -7,6 +7,8 @@ nonsource_files[]:
   LICENSE,ProjectAtlas MIT license
   .gitignore,Ignored files for ProjectAtlas repository
   .gitattributes,Line-ending policy for ProjectAtlas repository fixtures
+  openspec/changes/archive/.gitkeep,Keep the OpenSpec archive directory present before the first archived change
+  openspec/specs/.gitkeep,Keep the OpenSpec main specification directory present before the first synchronized specification
   CONTRIBUTING.md,Contribution policy for ProjectAtlas
   SECURITY.md,Security contact information for ProjectAtlas
   CODE_OF_CONDUCT.md,Community conduct expectations for ProjectAtlas

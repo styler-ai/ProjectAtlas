@@ -1,9 +1,9 @@
-# Purpose: Verify ProjectAtlas Rust quality gates and multi-OS installer/MCP smoke tests.
+# Purpose: Verify ProjectAtlas Rust quality gates and multi-OS behavior tests.
 
 name: 01-CI
 
 # /**
-#  * Purpose: Run ProjectAtlas linting, tests, and build checks.
+#  * Purpose: Run Rust source, test, and build checks.
 #  */
 
 on:
@@ -93,7 +93,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-      - name: ProjectAtlas source lints
+      - name: Rust source contract lints
         timeout-minutes: 2
         run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 
@@ -103,63 +103,11 @@ jobs:
       - name: Tests
         run: cargo test --workspace --all-features --locked
 
-      - name: ProjectAtlas purpose lint levels
-        run: cargo test --locked -p projectatlas-cli lint_purpose_levels_require_agent_review_at_configured_scope --test e2e
-
-      - name: ProjectAtlas purpose preservation
-        run: cargo test --locked -p projectatlas-cli watch_once_preserves_unchanged_deep_summary_and_text_index --test e2e
-
       - name: Doc tests
         run: cargo test --doc --workspace --all-features --locked
 
       - name: Rustdoc
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
-
-      - name: ProjectAtlas scan
-        run: cargo run --locked -p projectatlas-cli -- --format json scan .
-
-      - name: ProjectAtlas purpose review
-        run: cargo run --locked -p projectatlas-cli -- purpose review --from-file .projectatlas/projectatlas-purpose-review.json --apply
-
-      - name: ProjectAtlas parity
-        run: cargo run --locked -p projectatlas-cli -- parity report --profile repository-intelligence
-
-      - name: ProjectAtlas lint
-        run: cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level strict
-
-  install-smoke:
-    name: install-smoke
-    runs-on: ubuntu-latest
-    needs: verify
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-
-      - name: Setup Rust
-        run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
-          rustup default "$RUSTUP_TOOLCHAIN"
-
-      - name: Install binary
-        timeout-minutes: 5
-        run: |
-          cargo install --path crates/projectatlas-cli --locked
-          expected="v$(awk -F'"' '
-            /^\[workspace.package\]/ { in_workspace_package = 1; next }
-            /^\[/ { if (in_workspace_package) exit }
-            in_workspace_package && /^version = / { print $2; exit }
-          ' Cargo.toml)"
-          PROJECTATLAS_NO_TELEMETRY=1 projectatlas --require-version "$expected" --format json runtime-info
-          PROJECTATLAS_NO_TELEMETRY=1 projectatlas config --print
-          PROJECTATLAS_NO_TELEMETRY=1 projectatlas ignore list
-
-      - name: Smoke index
-        run: |
-          mkdir smoke
-          cd smoke
-          projectatlas init
-          projectatlas purpose set . "Smoke test repository root"
-          projectatlas lint --report-untracked
 
   e2e-smoke:
     name: e2e-smoke ${{ matrix.label }}
