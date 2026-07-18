@@ -807,10 +807,12 @@ fn load_db_purpose_records(config: &AtlasMapConfig) -> AtlasMapResult<BTreeMap<S
     if !config.db_path.exists() {
         return Ok(BTreeMap::new());
     }
-    let store = AtlasStore::open(&config.db_path).map_err(|source| AtlasMapError::Database {
-        path: config.db_path.clone(),
-        message: source.to_string(),
-    })?;
+    let store = AtlasStore::open_read_only_for_project(&config.db_path, &config.root).map_err(
+        |source| AtlasMapError::Database {
+            path: config.db_path.clone(),
+            message: source.to_string(),
+        },
+    )?;
     let nodes = store
         .load_nodes()
         .map_err(|source| AtlasMapError::Database {

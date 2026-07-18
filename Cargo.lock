@@ -1365,6 +1365,7 @@ dependencies = [
  "rayon",
  "regex",
  "rmcp",
+ "rusqlite",
  "scraper",
  "serde",
  "serde_json",

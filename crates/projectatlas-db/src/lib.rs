@@ -1,5 +1,7 @@
 //! Purpose: Persist `ProjectAtlas` 3 indexes in `SQLite`.
 
+mod schema;
+
 use projectatlas_core::health::{
     CATEGORY_DUPLICATE_PURPOSE, CATEGORY_MISSING_PURPOSE, CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
     CATEGORY_REPEATED_TEMPORARY_FOLDER, CATEGORY_STALE_PURPOSE, CATEGORY_SUGGESTED_PURPOSE_REVIEW,
@@ -36,22 +38,25 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
-/// Current `SQLite` schema version supported by this crate.
-const SCHEMA_VERSION: i64 = 9;
-/// Metadata key for the durable schema version.
-const SCHEMA_VERSION_KEY: &str = "schema_version";
-/// Last schema whose derived-index publication metadata is not trustworthy.
-const UNTRUSTED_PUBLICATION_SCHEMA_VERSION: i64 = 8;
+use schema::{
+    INDEX_PUBLICATION_FINGERPRINT_KEY, INDEX_PUBLICATION_GENERATION_KEY,
+    INDEX_PUBLICATION_STATE_KEY, PROJECT_ROOT_KEY, SchemaState,
+};
+#[cfg(test)]
+use schema::{PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION, SCHEMA_VERSION_KEY, sqlite_sidecar_path};
+
 /// Maximum persisted text for denormalized symbol-name search summaries.
 const MAX_SYMBOL_SEARCH_SUMMARY_CHARS: usize = 16_000;
-/// Metadata key for the current derived-index publication state.
-const INDEX_PUBLICATION_STATE_KEY: &str = "index_publication_state";
-/// Metadata key for the completed derived-index contract fingerprint.
-const INDEX_PUBLICATION_FINGERPRINT_KEY: &str = "index_publication_fingerprint";
-/// Metadata key for the monotonically increasing complete index generation.
-const INDEX_PUBLICATION_GENERATION_KEY: &str = "index_publication_generation";
 /// Maximum time a writer waits for another publication on the same database.
 const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Select create capability only for a path proven absent by preflight.
+fn writable_open_flags(state: SchemaState) -> OpenFlags {
+    match state {
+        SchemaState::Fresh => OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+        SchemaState::Current | SchemaState::UpgradeFrom8 => OpenFlags::SQLITE_OPEN_READ_WRITE,
+    }
+}
 
 /// Database-layer error type.
 #[derive(Debug, Error)]
@@ -66,6 +71,51 @@ pub enum DbError {
         found: i64,
         /// Expected version.
         expected: i64,
+    },
+    /// An existing database has no durable schema version.
+    #[error("existing database is missing schema_version metadata")]
+    SchemaVersionMissing,
+    /// A durable `SQLite` object does not match the supported schema contract.
+    #[error("incompatible schema object {object:?}: expected {expected}, found {found}")]
+    SchemaShape {
+        /// Table, index, or column whose shape is incompatible.
+        object: String,
+        /// Required `SQLite` object kind.
+        expected: String,
+        /// Observed `SQLite` object kind.
+        found: String,
+    },
+    /// `SQLite` integrity validation failed before migration.
+    #[error("database integrity check failed: {message}")]
+    IntegrityCheck {
+        /// Bounded `SQLite` integrity diagnostic.
+        message: String,
+    },
+    /// A migration did not reach the supported current schema.
+    #[error("schema migration did not reach expected version {expected}")]
+    SchemaPostcondition {
+        /// Version required after migration.
+        expected: i64,
+    },
+    /// A source-owned database has no durable project identity.
+    #[error("existing database is missing project_root metadata")]
+    ProjectRootMissing,
+    /// A source-owned database belongs to another project root.
+    #[error("database project root {found:?} does not match selected root {expected:?}")]
+    ProjectRootMismatch {
+        /// Canonical root selected by the caller.
+        expected: String,
+        /// Durable root recorded in `SQLite`.
+        found: String,
+    },
+    /// A transaction failed and the explicit rollback also failed.
+    #[error("{operation}; rollback also failed: {rollback}")]
+    TransactionRollback {
+        /// Primary operation failure that caused rollback.
+        #[source]
+        operation: Box<DbError>,
+        /// Secondary rollback failure retained for diagnosis.
+        rollback: rusqlite::Error,
     },
     /// Invalid enum value read from the database.
     #[error("invalid {field} value in database: {value}")]
@@ -203,6 +253,8 @@ pub struct AtlasStore {
     database_path: Option<PathBuf>,
     /// Whether this connection is restricted to non-mutating queries.
     read_only: bool,
+    /// Project root validated for this store, when the database records one.
+    validated_project_root: Option<String>,
 }
 
 impl Deref for IndexPublicationGuard<'_> {
@@ -478,17 +530,44 @@ impl AtlasStore {
     ///
     /// Returns an error if `SQLite` setup or schema validation fails.
     pub fn open(path: &Path) -> DbResult<Self> {
-        let connection = Connection::open(path)?;
+        Self::open_with_project_root(path, None)
+    }
+
+    /// Open or create an index store owned by one canonical project root.
+    ///
+    /// Existing databases bound to another root are rejected before writable
+    /// access. A genuinely fresh database records the supplied root in the
+    /// same transaction that creates its schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if read-only compatibility preflight, root validation,
+    /// transactional migration, or `SQLite` setup fails.
+    pub fn open_for_project(path: &Path, root: &Path) -> DbResult<Self> {
+        let expected_root = normalize_native_path_display(root);
+        Self::open_with_project_root(path, Some(&expected_root))
+    }
+
+    /// Open with an optional source-owned project identity.
+    fn open_with_project_root(path: &Path, expected_root: Option<&str>) -> DbResult<Self> {
+        let preflight = schema::preflight(path, expected_root)?;
+        let validated_project_root = expected_root.map(str::to_owned).or(preflight.project_root);
+        let connection = Connection::open_with_flags(path, writable_open_flags(preflight.state))?;
         connection.busy_timeout(SQLITE_WRITE_BUSY_TIMEOUT)?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.pragma_update(None, "synchronous", "NORMAL")?;
         let store = Self {
             connection,
             read_snapshot_active: Cell::new(false),
             database_path: Some(path.to_path_buf()),
             read_only: false,
+            validated_project_root,
         };
-        store.initialize_schema()?;
+        schema::initialize(&store.connection, expected_root)?;
+        store
+            .connection
+            .pragma_update(None, "journal_mode", "WAL")?;
+        store
+            .connection
+            .pragma_update(None, "synchronous", "NORMAL")?;
         Ok(store)
     }
 
@@ -499,17 +578,33 @@ impl AtlasStore {
     /// Returns an error if the database cannot be opened read-only or its
     /// schema version is not exactly supported by this runtime.
     pub fn open_read_only(path: &Path) -> DbResult<Self> {
-        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        connection.execute_batch("PRAGMA query_only = ON")?;
-        let store = Self {
+        Self::open_read_only_with_project_root(path, None)
+    }
+
+    /// Open one current read snapshot owned by a canonical project root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database is incompatible, belongs to another
+    /// root, or cannot be opened without database mutation.
+    pub fn open_read_only_for_project(path: &Path, root: &Path) -> DbResult<Self> {
+        let expected_root = normalize_native_path_display(root);
+        Self::open_read_only_with_project_root(path, Some(&expected_root))
+    }
+
+    /// Open a current read snapshot with optional project identity validation.
+    fn open_read_only_with_project_root(
+        path: &Path,
+        expected_root: Option<&str>,
+    ) -> DbResult<Self> {
+        let (connection, preflight) = schema::open_current_read_only(path, expected_root)?;
+        Ok(Self {
             connection,
-            read_snapshot_active: Cell::new(false),
+            read_snapshot_active: Cell::new(true),
             database_path: Some(path.to_path_buf()),
             read_only: true,
-        };
-        store.begin_index_read_snapshot()?;
-        store.validate_current_schema_version()?;
-        Ok(store)
+            validated_project_root: preflight.project_root,
+        })
     }
 
     /// Open an in-memory store for tests.
@@ -523,392 +618,19 @@ impl AtlasStore {
             read_snapshot_active: Cell::new(false),
             database_path: None,
             read_only: false,
+            validated_project_root: None,
         };
-        store.initialize_schema()?;
+        schema::initialize(&store.connection, None)?;
         Ok(store)
     }
 
-    /// Validate that a non-mutating reader understands the durable schema.
-    fn validate_current_schema_version(&self) -> DbResult<()> {
-        let stored = self.connection.query_row(
-            "SELECT value FROM metadata WHERE key = ?1",
-            [SCHEMA_VERSION_KEY],
-            |row| row.get::<_, String>(0),
-        )?;
-        let found = stored
-            .parse::<i64>()
-            .map_err(|source| DbError::InvalidInteger {
-                field: SCHEMA_VERSION_KEY,
-                value: stored,
-                source,
-            })?;
-        if found != SCHEMA_VERSION {
-            return Err(DbError::SchemaVersion {
-                found,
-                expected: SCHEMA_VERSION,
-            });
-        }
-        Ok(())
-    }
-
-    /// Initialize schema.
+    /// Validate, initialize, or migrate the schema through the storage owner.
     ///
     /// # Errors
     ///
-    /// Returns an error if schema creation or validation fails.
+    /// Returns an error when schema compatibility, integrity, or migration fails.
     pub fn initialize_schema(&self) -> DbResult<()> {
-        self.reset_legacy_summary_schema()?;
-        self.connection.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS metadata (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS nodes (
-                id INTEGER PRIMARY KEY,
-                path TEXT UNIQUE NOT NULL,
-                kind TEXT NOT NULL,
-                parent_path TEXT,
-                extension TEXT,
-                language TEXT,
-                size_bytes INTEGER,
-                mtime_ns INTEGER,
-                content_hash TEXT,
-                exists_now INTEGER NOT NULL DEFAULT 1,
-                first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                last_indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS purposes (
-                node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
-                purpose TEXT,
-                source TEXT NOT NULL,
-                status TEXT NOT NULL,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_by TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS summaries (
-                id INTEGER PRIMARY KEY,
-                node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
-                summary_level TEXT NOT NULL DEFAULT 'node',
-                subject TEXT NOT NULL DEFAULT '',
-                summary TEXT,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(node_id, summary_level, subject)
-            );
-
-            CREATE TABLE IF NOT EXISTS usage_events (
-                id INTEGER PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                command TEXT NOT NULL,
-                path TEXT,
-                query TEXT,
-                estimated_tokens_without_projectatlas INTEGER,
-                estimated_tokens_with_projectatlas INTEGER,
-                estimated_tokens_saved INTEGER,
-                token_savings_bucket TEXT NOT NULL DEFAULT 'navigation_avoidance',
-                provider TEXT NOT NULL DEFAULT 'heuristic',
-                model TEXT NOT NULL DEFAULT 'unknown',
-                tokenizer_backend TEXT NOT NULL DEFAULT 'chars_div_4',
-                accuracy TEXT NOT NULL DEFAULT 'heuristic_estimate',
-                baseline_kind TEXT NOT NULL DEFAULT 'selected_candidates',
-                confidence TEXT NOT NULL DEFAULT 'inferred',
-                calculation_trace TEXT NOT NULL DEFAULT 'heuristic=ceil(chars_or_bytes/4)',
-                accounting_layer TEXT NOT NULL DEFAULT 'modeled_avoidance',
-                estimate_method TEXT NOT NULL DEFAULT 'heuristic_chars_or_bytes_div_ceil_4',
-                denominator_kind TEXT NOT NULL DEFAULT 'selected_candidates',
-                baseline_identity TEXT NOT NULL DEFAULT '',
-                baseline_fingerprint TEXT NOT NULL DEFAULT '',
-                dedupe_scope TEXT NOT NULL DEFAULT 'session',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS symbols (
-                id INTEGER PRIMARY KEY,
-                path TEXT NOT NULL,
-                language TEXT,
-                name TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                signature TEXT NOT NULL,
-                exported INTEGER NOT NULL DEFAULT 0,
-                documentation TEXT,
-                line_start INTEGER NOT NULL,
-                line_end INTEGER NOT NULL,
-                parent TEXT,
-                parser TEXT NOT NULL,
-                detail TEXT,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS source_parse_metadata (
-                path TEXT PRIMARY KEY,
-                language TEXT,
-                parser TEXT NOT NULL,
-                symbol_count INTEGER NOT NULL,
-                relation_count INTEGER NOT NULL,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS symbol_relations (
-                id INTEGER PRIMARY KEY,
-                path TEXT NOT NULL,
-                source_name TEXT NOT NULL,
-                target_name TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                line INTEGER NOT NULL,
-                context TEXT NOT NULL,
-                parser TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS health_resolutions (
-                finding_id TEXT PRIMARY KEY,
-                category TEXT NOT NULL,
-                path TEXT NOT NULL,
-                related_path TEXT,
-                rationale TEXT NOT NULL,
-                resolved_by TEXT NOT NULL DEFAULT 'agent',
-                resolved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS file_texts (
-                path TEXT PRIMARY KEY,
-                content_hash TEXT,
-                byte_count INTEGER NOT NULL,
-                line_count INTEGER NOT NULL,
-                content TEXT NOT NULL,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
-            CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_path);
-            CREATE INDEX IF NOT EXISTS idx_purposes_status ON purposes(status);
-            CREATE INDEX IF NOT EXISTS idx_summaries_level ON summaries(summary_level);
-            CREATE INDEX IF NOT EXISTS idx_summaries_summary ON summaries(summary);
-            CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events(session_id);
-            CREATE INDEX IF NOT EXISTS idx_symbols_path ON symbols(path);
-            CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
-            CREATE INDEX IF NOT EXISTS idx_symbols_kind ON symbols(kind);
-            CREATE INDEX IF NOT EXISTS idx_source_parse_metadata_parser ON source_parse_metadata(parser);
-            CREATE INDEX IF NOT EXISTS idx_symbol_relations_path ON symbol_relations(path);
-            CREATE INDEX IF NOT EXISTS idx_symbol_relations_target ON symbol_relations(target_name);
-            CREATE INDEX IF NOT EXISTS idx_health_resolutions_category ON health_resolutions(category);
-            CREATE INDEX IF NOT EXISTS idx_file_texts_hash ON file_texts(content_hash);
-            ",
-        )?;
-        self.ensure_symbol_metadata_columns()?;
-        self.ensure_usage_event_metadata_columns()?;
-        self.connection.execute_batch(
-            "
-            CREATE INDEX IF NOT EXISTS idx_usage_created_at ON usage_events(created_at);
-            CREATE INDEX IF NOT EXISTS idx_usage_session_created_at ON usage_events(session_id, created_at);
-            ",
-        )?;
-        let stored = self
-            .connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key = ?1",
-                [SCHEMA_VERSION_KEY],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        match stored {
-            Some(value) => {
-                let found = value
-                    .parse::<i64>()
-                    .map_err(|source| DbError::InvalidInteger {
-                        field: SCHEMA_VERSION_KEY,
-                        value,
-                        source,
-                    })?;
-                if (1..SCHEMA_VERSION).contains(&found) {
-                    let migration = self.connection.unchecked_transaction()?;
-                    if found == UNTRUSTED_PUBLICATION_SCHEMA_VERSION {
-                        migration.execute(
-                            "DELETE FROM metadata WHERE key IN (?1, ?2, ?3)",
-                            params![
-                                INDEX_PUBLICATION_STATE_KEY,
-                                INDEX_PUBLICATION_FINGERPRINT_KEY,
-                                INDEX_PUBLICATION_GENERATION_KEY,
-                            ],
-                        )?;
-                    }
-                    migration.execute(
-                        "UPDATE metadata SET value = ?1 WHERE key = ?2",
-                        params![SCHEMA_VERSION.to_string(), SCHEMA_VERSION_KEY],
-                    )?;
-                    migration.commit()?;
-                } else if found != SCHEMA_VERSION {
-                    return Err(DbError::SchemaVersion {
-                        found,
-                        expected: SCHEMA_VERSION,
-                    });
-                }
-            }
-            None => {
-                self.connection.execute(
-                    "INSERT INTO metadata(key, value) VALUES(?1, ?2)",
-                    params![SCHEMA_VERSION_KEY, SCHEMA_VERSION.to_string()],
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Add usage telemetry metadata columns to older databases.
-    fn ensure_usage_event_metadata_columns(&self) -> DbResult<()> {
-        let mut statement = self.connection.prepare("PRAGMA table_info(usage_events)")?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
-        let mut columns = Vec::new();
-        for row in rows {
-            columns.push(row?);
-        }
-        self.ensure_usage_event_column(
-            &columns,
-            "token_savings_bucket",
-            "TEXT NOT NULL DEFAULT 'navigation_avoidance'",
-        )?;
-        self.ensure_usage_event_column(&columns, "provider", "TEXT NOT NULL DEFAULT 'heuristic'")?;
-        self.ensure_usage_event_column(&columns, "model", "TEXT NOT NULL DEFAULT 'unknown'")?;
-        self.ensure_usage_event_column(
-            &columns,
-            "tokenizer_backend",
-            "TEXT NOT NULL DEFAULT 'chars_div_4'",
-        )?;
-        self.ensure_usage_event_column(
-            &columns,
-            "accuracy",
-            "TEXT NOT NULL DEFAULT 'heuristic_estimate'",
-        )?;
-        self.ensure_usage_event_column(
-            &columns,
-            "baseline_kind",
-            "TEXT NOT NULL DEFAULT 'selected_candidates'",
-        )?;
-        self.ensure_usage_event_column(&columns, "confidence", "TEXT NOT NULL DEFAULT 'inferred'")?;
-        self.ensure_usage_event_column(
-            &columns,
-            "calculation_trace",
-            "TEXT NOT NULL DEFAULT 'heuristic=ceil(chars_or_bytes/4)'",
-        )?;
-        self.ensure_usage_event_column(
-            &columns,
-            "accounting_layer",
-            "TEXT NOT NULL DEFAULT 'modeled_avoidance'",
-        )?;
-        self.ensure_usage_event_column(
-            &columns,
-            "estimate_method",
-            "TEXT NOT NULL DEFAULT 'heuristic_chars_or_bytes_div_ceil_4'",
-        )?;
-        self.ensure_usage_event_column(
-            &columns,
-            "denominator_kind",
-            "TEXT NOT NULL DEFAULT 'selected_candidates'",
-        )?;
-        self.ensure_usage_event_column(&columns, "baseline_identity", "TEXT NOT NULL DEFAULT ''")?;
-        self.ensure_usage_event_column(
-            &columns,
-            "baseline_fingerprint",
-            "TEXT NOT NULL DEFAULT ''",
-        )?;
-        self.ensure_usage_event_column(
-            &columns,
-            "dedupe_scope",
-            "TEXT NOT NULL DEFAULT 'session'",
-        )?;
-        self.ensure_usage_event_column(&columns, "created_at", "TEXT")?;
-        self.connection.execute(
-            "
-            UPDATE usage_events
-            SET accounting_layer = 'observed_delta',
-                denominator_kind = 'full_file',
-                dedupe_scope = 'event'
-            WHERE token_savings_bucket = 'full_file_compression'
-              AND (
-                accounting_layer != 'observed_delta'
-                OR denominator_kind != 'full_file'
-                OR dedupe_scope != 'event'
-              )
-            ",
-            [],
-        )?;
-        self.connection.execute(
-            "UPDATE usage_events SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL OR created_at = ''",
-            [],
-        )?;
-        Ok(())
-    }
-
-    /// Add one usage event metadata column when it is absent.
-    fn ensure_usage_event_column(
-        &self,
-        columns: &[String],
-        name: &str,
-        definition: &str,
-    ) -> DbResult<()> {
-        if columns.iter().any(|column| column == name) {
-            return Ok(());
-        }
-        self.connection.execute(
-            &format!("ALTER TABLE usage_events ADD COLUMN {name} {definition}"),
-            [],
-        )?;
-        Ok(())
-    }
-
-    /// Add optional symbol metadata columns to older databases.
-    fn ensure_symbol_metadata_columns(&self) -> DbResult<()> {
-        let mut statement = self.connection.prepare("PRAGMA table_info(symbols)")?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
-        let mut columns = Vec::new();
-        for row in rows {
-            columns.push(row?);
-        }
-        if !columns.iter().any(|column| column == "exported") {
-            self.connection.execute(
-                "ALTER TABLE symbols ADD COLUMN exported INTEGER NOT NULL DEFAULT 0",
-                [],
-            )?;
-        }
-        if !columns.iter().any(|column| column == "documentation") {
-            self.connection
-                .execute("ALTER TABLE symbols ADD COLUMN documentation TEXT", [])?;
-        }
-        Ok(())
-    }
-
-    /// Drop an in-progress generated summary table that lacks multi-level keys.
-    fn reset_legacy_summary_schema(&self) -> DbResult<()> {
-        let exists = self
-            .connection
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'summaries'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .is_some();
-        if !exists {
-            return Ok(());
-        }
-        let mut statement = self.connection.prepare("PRAGMA table_info(summaries)")?;
-        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
-        let mut has_subject = false;
-        for column in columns {
-            if column? == "subject" {
-                has_subject = true;
-                break;
-            }
-        }
-        if !has_subject {
-            self.connection.execute("DROP TABLE summaries", [])?;
-        }
-        Ok(())
+        schema::initialize(&self.connection, None)
     }
 
     /// Upsert a full scan result and mark previously seen missing paths absent.
@@ -1163,15 +885,16 @@ impl AtlasStore {
     /// Returns an error if persistence fails.
     pub fn set_project_root(&self, root: &Path) -> DbResult<()> {
         let value = normalize_metadata_path(root);
-        self.connection.execute(
-            "
-            INSERT INTO metadata(key, value)
-            VALUES('project_root', ?1)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            ",
-            [value],
-        )?;
-        Ok(())
+        if let Some(found) = self.project_root()? {
+            if found == value {
+                return Ok(());
+            }
+            return Err(DbError::ProjectRootMismatch {
+                expected: value,
+                found,
+            });
+        }
+        set_metadata(&self.connection, PROJECT_ROOT_KEY, &value)
     }
 
     /// Load the canonical filesystem root for indexed repository files.
@@ -1182,8 +905,8 @@ impl AtlasStore {
     pub fn project_root(&self) -> DbResult<Option<String>> {
         self.connection
             .query_row(
-                "SELECT value FROM metadata WHERE key = 'project_root'",
-                [],
+                "SELECT value FROM metadata WHERE key = ?1",
+                [PROJECT_ROOT_KEY],
                 |row| row.get::<_, String>(0),
             )
             .optional()
@@ -3685,9 +3408,26 @@ impl AtlasStore {
             .database_path
             .as_ref()
             .ok_or(DbError::TelemetryPathUnavailable)?;
-        let connection = Connection::open(path)?;
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         connection.busy_timeout(SQLITE_WRITE_BUSY_TIMEOUT)?;
-        match record_usage_on_connection(&connection, event) {
+        schema::configure_writable(&connection)?;
+        let result = (|| {
+            connection.execute_batch("BEGIN IMMEDIATE")?;
+            let operation =
+                schema::validate_current(&connection, self.validated_project_root.as_deref())
+                    .and_then(|()| record_usage_on_connection(&connection, event));
+            match operation {
+                Ok(()) => connection.execute_batch("COMMIT").map_err(Into::into),
+                Err(operation) => match connection.execute_batch("ROLLBACK") {
+                    Ok(()) => Err(operation),
+                    Err(rollback) => Err(DbError::TransactionRollback {
+                        operation: Box::new(operation),
+                        rollback,
+                    }),
+                },
+            }
+        })();
+        match result {
             Err(DbError::Sqlite(error))
                 if matches!(
                     error.sqlite_error_code(),
@@ -4149,102 +3889,7 @@ impl AtlasStore {
 ///
 /// Returns an error if `SQLite` cannot open or query the database read-only.
 pub fn read_project_root_read_only(path: &Path) -> DbResult<Option<String>> {
-    let wal_path = sqlite_sidecar_path(path, "-wal");
-    if !wal_path.exists() {
-        let root = read_project_root_immutable(path)?;
-        if !wal_path.exists() {
-            return Ok(root);
-        }
-    }
-
-    read_project_root_from_snapshot(path)
-}
-
-/// Read root metadata from a WAL-aware read transaction.
-fn read_project_root_from_snapshot(path: &Path) -> DbResult<Option<String>> {
-    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    connection.execute_batch("PRAGMA query_only = ON; BEGIN DEFERRED")?;
-    let root = connection
-        .query_row(
-            "SELECT value FROM metadata WHERE key = 'project_root'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    connection.execute_batch("COMMIT")?;
-    Ok(root)
-}
-
-/// Read root metadata without creating `SQLite` sidecars when no WAL is present.
-fn read_project_root_immutable(path: &Path) -> DbResult<Option<String>> {
-    #[cfg(unix)]
-    let uri_path = sqlite_uri_path_bytes(path);
-    #[cfg(not(unix))]
-    let uri_path = sqlite_uri_path_bytes(path)?;
-    let uri = format!(
-        "file:{}?mode=ro&immutable=1",
-        sqlite_uri_escape_path(&uri_path)
-    );
-    let connection = Connection::open_with_flags(
-        uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    )?;
-    connection
-        .query_row(
-            "SELECT value FROM metadata WHERE key = 'project_root'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(Into::into)
-}
-
-/// Percent-escape a path while preserving `SQLite` URI path separators and drive colons.
-fn sqlite_uri_escape_path(path: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut escaped = String::with_capacity(path.len());
-    for &byte in path {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b':' | b'.' | b'-' | b'_' | b'~' => {
-                escaped.push(char::from(byte));
-            }
-            other => {
-                escaped.push('%');
-                escaped.push(char::from(HEX[usize::from(other >> 4)]));
-                escaped.push(char::from(HEX[usize::from(other & 0x0F)]));
-            }
-        }
-    }
-    escaped
-}
-
-/// Return native path bytes suitable for an `SQLite` URI on Unix.
-#[cfg(unix)]
-fn sqlite_uri_path_bytes(path: &Path) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-
-    path.as_os_str().as_bytes().to_vec()
-}
-
-/// Return validated UTF-8 path bytes suitable for an `SQLite` URI on non-Unix hosts.
-#[cfg(not(unix))]
-fn sqlite_uri_path_bytes(path: &Path) -> DbResult<Vec<u8>> {
-    path.to_str()
-        .ok_or_else(|| rusqlite::Error::InvalidPath(path.to_path_buf()))?;
-    let normalized = normalize_native_path_display(path);
-    let uri_path = if normalized.as_bytes().get(1) == Some(&b':') {
-        format!("/{normalized}")
-    } else {
-        normalized
-    };
-    Ok(uri_path.into_bytes())
-}
-
-/// Return a `SQLite` sidecar path for a database path.
-fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut sidecar = path.as_os_str().to_os_string();
-    sidecar.push(suffix);
-    PathBuf::from(sidecar)
+    schema::read_project_root(path)
 }
 
 /// Normalize a filesystem path stored in `SQLite` metadata.
@@ -5219,17 +4864,59 @@ mod tests {
     }
 
     #[test]
+    fn validated_existing_database_paths_are_never_recreated() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+
+        let current_path = temp.path().join("current.db");
+        drop(AtlasStore::open(&current_path)?);
+        let current = schema::preflight(&current_path, None)?;
+        require_eq(
+            &current.state,
+            &SchemaState::Current,
+            "current preflight state",
+        )?;
+        fs::remove_file(&current_path)?;
+        if Connection::open_with_flags(&current_path, writable_open_flags(current.state)).is_ok() {
+            return Err(io::Error::other("current database path was recreated").into());
+        }
+        require_eq(&current_path.exists(), &false, "current path stays absent")?;
+
+        let released_path = temp.path().join("released.db");
+        let released_root = temp.path().join("released-root");
+        write_released_schema_eight_compatibility_fixture(&released_path, &released_root)?;
+        let released = schema::preflight(&released_path, None)?;
+        require_eq(
+            &released.state,
+            &SchemaState::UpgradeFrom8,
+            "released preflight state",
+        )?;
+        fs::remove_file(&released_path)?;
+        if Connection::open_with_flags(&released_path, writable_open_flags(released.state)).is_ok()
+        {
+            return Err(io::Error::other("released database path was recreated").into());
+        }
+        require_eq(
+            &released_path.exists(),
+            &false,
+            "released path stays absent",
+        )?;
+
+        let fresh_path = temp.path().join("fresh.db");
+        let fresh = schema::preflight(&fresh_path, None)?;
+        require_eq(&fresh.state, &SchemaState::Fresh, "fresh preflight state")?;
+        drop(AtlasStore::open(&fresh_path)?);
+        require_eq(&fresh_path.is_file(), &true, "fresh path is created")?;
+        drop(AtlasStore::open_read_only(&fresh_path)?);
+        Ok(())
+    }
+
+    #[test]
     fn schema_upgrade_preserves_local_state_and_restarts_publication() -> Result<(), Box<dyn Error>>
     {
         let temp = tempfile::tempdir()?;
         let db_path = temp.path().join("projectatlas.db");
         let root = temp.path().join("repository");
-        write_schema_compatibility_fixture(
-            &db_path,
-            &root,
-            UNTRUSTED_PUBLICATION_SCHEMA_VERSION,
-            "legacy",
-        )?;
+        write_released_schema_eight_compatibility_fixture(&db_path, &root)?;
         let database_before_read = fs::read(&db_path)?;
 
         let Err(read_error) = AtlasStore::open_read_only(&db_path) else {
@@ -5239,7 +4926,7 @@ mod tests {
             &matches!(
                 read_error,
                 DbError::SchemaVersion {
-                    found: UNTRUSTED_PUBLICATION_SCHEMA_VERSION,
+                    found: PREVIOUS_SCHEMA_VERSION,
                     expected: SCHEMA_VERSION,
                 }
             ),
@@ -5296,6 +4983,16 @@ mod tests {
             &vec!["schema-review".to_string()],
             "upgraded authored review",
         )?;
+        let custom_setting = store.connection.query_row(
+            "SELECT value FROM metadata WHERE key = 'custom_setting'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &custom_setting,
+            &"preserved".to_string(),
+            "upgraded compatible metadata",
+        )?;
         let telemetry = store.token_overview(Some("schema-session"))?;
         require_eq(&telemetry.calls, &1, "upgraded telemetry call count")?;
         require_eq(
@@ -5346,7 +5043,7 @@ mod tests {
         let root = temp.path().join("repository");
         let future_schema = SCHEMA_VERSION + 1;
         write_schema_compatibility_fixture(&db_path, &root, future_schema, "future")?;
-
+        let database_before = fs::read(&db_path)?;
         let Err(open_error) = AtlasStore::open(&db_path) else {
             return Err(
                 io::Error::other("future schema writable open unexpectedly succeeded").into(),
@@ -5363,7 +5060,11 @@ mod tests {
             &true,
             "future schema rejection",
         )?;
-
+        require_eq(
+            &fs::read(&db_path)?,
+            &database_before,
+            "future schema bytes remain unchanged",
+        )?;
         let connection = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let stored_schema = connection.query_row(
             "SELECT value FROM metadata WHERE key = ?1",
@@ -5962,7 +5663,7 @@ mod tests {
     }
 
     #[test]
-    fn token_trends_backfill_created_at_for_upgraded_databases() -> Result<(), Box<dyn Error>> {
+    fn unsupported_legacy_schema_is_refused_without_mutation() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let db_path = temp.path().join("legacy.db");
         {
@@ -6001,36 +5702,25 @@ mod tests {
             )?;
         }
 
-        let store = AtlasStore::open(&db_path)?;
-        let null_created_at = store.connection.query_row(
-            "SELECT COUNT(*) FROM usage_events WHERE created_at IS NULL OR created_at = ''",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?;
-        require_eq(&null_created_at, &0, "legacy created_at values backfilled")?;
-        store.record_usage(&usage_from_estimates(
-            "legacy-session",
-            "new-call",
-            None,
-            None,
-            50,
-            10,
-        ))?;
-        let null_created_at = store.connection.query_row(
-            "SELECT COUNT(*) FROM usage_events WHERE created_at IS NULL OR created_at = ''",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?;
-        require_eq(&null_created_at, &0, "new created_at values populated")?;
-        let trends = store.token_trends(Some("legacy-session"), TokenTrendWindow::Month)?;
-        require_eq(&trends.periods.is_empty(), &false, "trend periods exist")?;
+        let database_before = fs::read(&db_path)?;
+        let Err(open_error) = AtlasStore::open(&db_path) else {
+            return Err(io::Error::other("unsupported schema unexpectedly opened").into());
+        };
         require_eq(
-            &trends
-                .periods
-                .iter()
-                .any(|period| period.period.starts_with("1970")),
-            &false,
-            "upgraded telemetry does not aggregate under 1970",
+            &matches!(
+                open_error,
+                DbError::SchemaVersion {
+                    found: 7,
+                    expected: SCHEMA_VERSION,
+                }
+            ),
+            &true,
+            "unsupported schema rejection",
+        )?;
+        require_eq(
+            &fs::read(&db_path)?,
+            &database_before,
+            "unsupported schema bytes remain unchanged",
         )?;
         Ok(())
     }
@@ -6050,9 +5740,20 @@ mod tests {
             &Some("C:/workspace/example".to_string()),
             "windows extended project root metadata",
         )?;
-        store.set_project_root(Path::new(r"\\?\UNC\server\share\repo"))?;
+        let Err(rebind_error) = store.set_project_root(Path::new(r"\\?\UNC\server\share\repo"))
+        else {
+            return Err(io::Error::other("project identity was rebound implicitly").into());
+        };
         require_eq(
-            &store.project_root()?,
+            &matches!(rebind_error, DbError::ProjectRootMismatch { .. }),
+            &true,
+            "project identity rebind rejection",
+        )?;
+
+        let unc_store = AtlasStore::in_memory()?;
+        unc_store.set_project_root(Path::new(r"\\?\UNC\server\share\repo"))?;
+        require_eq(
+            &unc_store.project_root()?,
             &Some("//server/share/repo".to_string()),
             "windows unc project root metadata",
         )?;
@@ -6060,7 +5761,7 @@ mod tests {
     }
 
     #[test]
-    fn read_project_root_read_only_does_not_create_wal_sidecars() -> Result<(), Box<dyn Error>> {
+    fn read_project_root_read_only_does_not_change_database_bytes() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("repo with spaces");
         let atlas_dir = root.join(".projectatlas");
@@ -6082,20 +5783,18 @@ mod tests {
                 Err(error) => return Err(error.into()),
             }
         }
-        let db_len_before = fs::metadata(&db_path)?.len();
+        let database_before = fs::read(&db_path)?;
 
         require_eq(
             &read_project_root_read_only(&db_path)?,
             &Some(normalize_native_path_display(&root)),
-            "immutable read-only project root",
+            "read-only project root",
         )?;
         require_eq(
-            &fs::metadata(&db_path)?.len(),
-            &db_len_before,
-            "immutable read-only DB length",
+            &fs::read(&db_path)?,
+            &database_before,
+            "read-only project-root database bytes",
         )?;
-        require_eq(&wal_path.exists(), &false, "read-only WAL sidecar")?;
-        require_eq(&shm_path.exists(), &false, "read-only SHM sidecar")?;
         Ok(())
     }
 
@@ -6121,6 +5820,82 @@ mod tests {
             &read_project_root_read_only(&db_path)?,
             &Some(normalize_native_path_display(&root)),
             "WAL-aware read-only project root",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_telemetry_revalidates_project_identity_before_write() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository-a");
+        let replacement_root = temp.path().join("repository-b");
+        fs::create_dir_all(&root)?;
+        fs::create_dir_all(&replacement_root)?;
+        let db_path = temp.path().join("projectatlas.db");
+        drop(AtlasStore::open_for_project(&db_path, &root)?);
+
+        let reader = AtlasStore::open_read_only_for_project(&db_path, &root)?;
+        reader.finish_index_read_snapshot()?;
+        let replacement = Connection::open(&db_path)?;
+        set_metadata(
+            &replacement,
+            PROJECT_ROOT_KEY,
+            &normalize_native_path_display(&replacement_root),
+        )?;
+        drop(replacement);
+
+        let event = usage_from_estimates(
+            "identity-race",
+            "summary",
+            Some("src/lib.rs".to_string()),
+            None,
+            100,
+            20,
+        );
+        let Err(error) = reader.record_usage(&event) else {
+            return Err(io::Error::other("telemetry wrote through replaced identity").into());
+        };
+        require_eq(
+            &matches!(error, DbError::ProjectRootMismatch { .. }),
+            &true,
+            "telemetry project identity recheck",
+        )?;
+        let count = Connection::open(&db_path)?.query_row(
+            "SELECT COUNT(*) FROM usage_events WHERE session_id = 'identity-race'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&count, &0, "telemetry refused after identity replacement")?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_telemetry_does_not_recreate_a_removed_database() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let db_path = temp.path().join("projectatlas.db");
+        drop(AtlasStore::open_for_project(&db_path, &root)?);
+
+        let reader = AtlasStore::open_read_only_for_project(&db_path, &root)?;
+        fs::remove_file(&db_path)?;
+        let event = usage_from_estimates(
+            "removed-database",
+            "summary",
+            Some("src/lib.rs".to_string()),
+            None,
+            100,
+            20,
+        );
+        if reader.record_usage(&event).is_ok() {
+            return Err(io::Error::other("telemetry reopened a removed database").into());
+        }
+        require_eq(
+            &db_path.exists(),
+            &false,
+            "telemetry must not recreate a removed database",
         )?;
         Ok(())
     }
@@ -7732,6 +7507,84 @@ mod tests {
         Ok(())
     }
 
+    /// Write released schema-8 source, authored, telemetry, and publication state.
+    fn write_released_schema_eight_compatibility_fixture(
+        db_path: &Path,
+        root: &Path,
+    ) -> Result<(), Box<dyn Error>> {
+        let connection = Connection::open(db_path)?;
+        schema::create_released_schema_eight(&connection)?;
+        schema::configure_writable(&connection)?;
+        connection.execute_batch("BEGIN IMMEDIATE")?;
+        let write_result = (|| -> DbResult<()> {
+            set_metadata(
+                &connection,
+                PROJECT_ROOT_KEY,
+                &normalize_native_path_display(root),
+            )?;
+            set_metadata(&connection, "custom_setting", "preserved")?;
+            set_metadata(&connection, INDEX_PUBLICATION_STATE_KEY, "complete")?;
+            set_metadata(
+                &connection,
+                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                "untrusted-contract",
+            )?;
+            set_metadata(&connection, INDEX_PUBLICATION_GENERATION_KEY, "7")?;
+            connection.execute_batch(
+                "
+                INSERT INTO nodes(
+                    id, path, kind, parent_path, extension, language,
+                    size_bytes, mtime_ns, content_hash
+                )
+                VALUES(1, 'src/lib.rs', 'file', 'src', '.rs', 'rust', 12, 10, 'hash-legacy');
+
+                INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+                VALUES(1, 'Schema compatibility source', 'agent', 'approved', 'agent');
+
+                INSERT INTO summaries(node_id, summary_level, subject, summary)
+                VALUES(1, 'node', '', 'released schema source');
+
+                INSERT INTO file_texts(path, content_hash, byte_count, line_count, content)
+                VALUES('src/lib.rs', 'hash-legacy', 6, 1, 'legacy');
+                ",
+            )?;
+            connection.execute(
+                "
+                INSERT INTO health_resolutions(
+                    finding_id, category, path, rationale
+                )
+                VALUES('schema-review', ?1, 'src/lib.rs', 'Reviewed schema fixture')
+                ",
+                [CATEGORY_DUPLICATE_PURPOSE],
+            )?;
+            record_usage_on_connection(
+                &connection,
+                &usage_from_estimates(
+                    "schema-session",
+                    "summary",
+                    Some("src/lib.rs".to_string()),
+                    None,
+                    100,
+                    20,
+                ),
+            )
+        })();
+        match write_result {
+            Ok(()) => connection.execute_batch("COMMIT")?,
+            Err(error) => {
+                if let Err(rollback) = connection.execute_batch("ROLLBACK") {
+                    return Err(DbError::TransactionRollback {
+                        operation: Box::new(error),
+                        rollback,
+                    }
+                    .into());
+                }
+                return Err(error.into());
+            }
+        }
+        Ok(())
+    }
+
     /// Write representative source, authored, telemetry, and publication state at one schema.
     fn write_schema_compatibility_fixture(
         db_path: &Path,
@@ -7771,6 +7624,7 @@ mod tests {
             100,
             20,
         ))?;
+        set_metadata(&store.connection, "custom_setting", "preserved")?;
         set_metadata(
             &store.connection,
             SCHEMA_VERSION_KEY,
