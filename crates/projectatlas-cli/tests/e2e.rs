@@ -3923,22 +3923,27 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         serde_json::to_string(&expected_root.to_string_lossy().to_string())?,
         serde_json::to_string(&rogue_repo.to_string_lossy())?
     );
-    let messages = [
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#.to_string(),
-        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+    let requests = [
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_scan","arguments":{}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_scan","arguments":{"path":"."}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_watch_once","arguments":{"path":"."}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"atlas_files","arguments":{"file_pattern":"*.rs","limit":1}}}"#.to_string(),
         outside_scan_message,
     ];
-    let message_refs = messages.iter().map(String::as_str).collect::<Vec<_>>();
-    let mcp_stdout = run_mcp_stdio(
-        std::path::Path::new(command),
-        &outside_cwd,
-        &launch_args,
-        &message_refs,
-    )?;
+    let initialize_message = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#;
+    let initialized_message =
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#;
+    let mut mcp_stdout = String::new();
+    // Keep this root-routing smoke sequential so it does not accidentally
+    // assert a concurrent same-project writer scheduling policy.
+    for request in &requests {
+        mcp_stdout.push_str(&run_mcp_stdio(
+            std::path::Path::new(command),
+            &outside_cwd,
+            &launch_args,
+            &[initialize_message, initialized_message, request],
+        )?);
+    }
     if !mcp_stdout.contains("scan:")
         || !mcp_stdout.contains("src/main.rs")
         || !mcp_stdout.contains("watch:")
