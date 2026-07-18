@@ -4,6 +4,7 @@
     "add-agent-session-brief": 292,
     "add-mcp-task-progress-model": 295,
     "add-nearest-project-routing": 276,
+    "centralize-cargo-dependency-management": 316,
     "close-mcp-cli-parity": 281,
     "converge-claude-code-installer": 278,
     "converge-opencode-installer": 279,
