@@ -30,6 +30,7 @@ const TESTS_DIR_NAME: &str = "tests";
 const INSTALLER_RS_FILE_NAME: &str = "installer.rs";
 const ATLAS_DIR_NAME: &str = ".projectatlas";
 const GITHOOKS_DIR_NAME: &str = ".githooks";
+const ISSUE_TEMPLATE_DIR_NAME: &str = "ISSUE_TEMPLATE";
 const PRE_PUSH_HOOK_FILE_NAME: &str = "pre-push";
 const OPENSPEC_DIR_NAME: &str = "openspec";
 const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
@@ -1606,10 +1607,13 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .join(PRE_PUSH_HOOK_FILE_NAME),
     )?;
     let template = fs::read_to_string(github.join("pull_request_template.md"))?;
-    let chore_issue_template = fs::read_to_string(github.join("ISSUE_TEMPLATE").join("chore.yml"))?;
+    let bug_issue_template =
+        fs::read_to_string(github.join(ISSUE_TEMPLATE_DIR_NAME).join("bug_report.yml"))?;
+    let chore_issue_template =
+        fs::read_to_string(github.join(ISSUE_TEMPLATE_DIR_NAME).join("chore.yml"))?;
     let improvement_issue_template = fs::read_to_string(
         github
-            .join("ISSUE_TEMPLATE")
+            .join(ISSUE_TEMPLATE_DIR_NAME)
             .join("improvement_request.yml"),
     )?;
     let agent_rules = fs::read_to_string(workspace_root.join("AGENTS.md"))?;
@@ -1661,13 +1665,17 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "label: Pre-Mortem",
         "OpenSpec tasks:",
     ] {
-        if !chore_issue_template.contains(required)
-            || !improvement_issue_template.contains(required)
-        {
-            return Err(io::Error::other(format!(
-                "planned issue forms are missing v0.3.26 issue contract field {required:?}"
-            ))
-            .into());
+        for (name, content) in [
+            ("bug", bug_issue_template.as_str()),
+            ("chore", chore_issue_template.as_str()),
+            ("improvement", improvement_issue_template.as_str()),
+        ] {
+            if !content.contains(required) {
+                return Err(io::Error::other(format!(
+                    "{name} issue form is missing v0.3.26 issue contract field {required:?}"
+                ))
+                .into());
+            }
         }
     }
     for required in [
