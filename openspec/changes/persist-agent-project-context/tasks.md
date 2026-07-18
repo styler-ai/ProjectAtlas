@@ -1,6 +1,6 @@
 ## 1. Contract and dependency order
 
-- [x] 1.1 Finalize the lean Memory Atlas proposal, design, capability specs, issue title/body, `checklist-v1` ownership mapping, synchronized OpenSpec/GitHub checklist, and shared issue-level verification plan.
+- [x] 1.1 Finalize the lean Memory Atlas proposal, design, capability specs, issue title/body, `checklist-v1` ownership mapping, synchronized OpenSpec/GitHub checklist, and shared behavior-focused test plan.
 - [ ] 1.2 Before runtime implementation, confirm #308 has stabilized the schema epoch, authored/derived publication boundary, freshness preflight, coherent read snapshot, selected-root behavior, `atlas_session_brief` extension point, and streamlined MCP inventory consumed by this change.
 - [ ] 1.3 Trace the existing core, database, service, CLI/MCP, settings, host-plugin, and migration callers; record the Rust pattern-fit decision and keep ownership within the existing seven crates unless a demonstrated durable boundary requires otherwise.
 

@@ -11,6 +11,7 @@ This is repository workflow policy, not product runtime behavior. The smallest d
 **Goals:**
 
 - Make local OpenSpec tasks and authoritative GitHub issue checklists match exactly.
+- Require active mapped issues to preserve the concise v0.3.26 #305 planning shape and bind each pre-mortem mitigation checkbox to real OpenSpec tasks.
 - Keep split issue ownership deterministic, gap-free, ordered, and non-overlapping.
 - Let one meaningful behavior test cover several coherent tasks.
 - Keep ordinary Rust/workspace checks and affected behavior tests blocking.
@@ -31,6 +32,10 @@ This is repository workflow policy, not product runtime behavior. The smallest d
 ### 1. Keep one authoritative checklist contract
 
 `openspec/changes/<change>/tasks.md` remains the local task definition. `openspec/issue-map.json` maps every active change to one primary GitHub issue and, only when needed, ordered owner ranges. `.github/scripts/issue-checklists.py` extracts only `OpenSpec Tasks` or `OpenSpec Task Checklist` sections and compares task text, order, ownership, and checked state exactly. Closed issues fail when their authoritative checklist still contains unchecked tasks.
+
+An open mapped issue also keeps the concise shape used by #305: `Why`, `What Changes`, `Capabilities`, `Release Scope`, `Non-Goals`, `Pre-Mortem`, and one authoritative OpenSpec task section. The pre-mortem contains likely failure modes and mitigation checkboxes. Each mitigation uses a small explicit `(OpenSpec tasks: 1.2, 3.4)` mapping. IssueOps validates that every referenced task belongs to that issue and that the mitigation is checked exactly when all referenced tasks are checked. The mapping reuses task state; it does not add a receipt, evidence row, generated comment, or one-test-per-mitigation rule.
+
+Closed historical issues are not rewritten to satisfy a later presentation contract. Open mapped work and future issues must satisfy it before integration.
 
 The script accepts the existing integer mapping and schema-2 owner mapping so the restoration does not require unrelated issue-map migration. It invokes authenticated `gh` through fixed argument vectors without a shell. Its self-test covers task parsing, section isolation, owner slicing, exact comparison, and paginated GitHub responses.
 
@@ -71,6 +76,8 @@ Alternative considered: run milestone completion on every PR. Rejected because u
 
 - [Removing the evidence subsystem could be mistaken for removing tests] -> Keep ordinary workspace and focused behavior tests explicit in CI, the hook, docs, OpenSpec, and E2E assertions.
 - [A small checklist parser could accept unrelated checkboxes] -> Parse only the authoritative heading and its numbered subsections; self-test section isolation.
+- [A mitigation could look complete while its implementation tasks remain open] -> Parse pre-mortem mitigation checkboxes separately and require their state to equal the referenced OpenSpec task states.
+- [Issue forms could be bypassed by API or manual edits] -> Validate the complete active issue body in the same IssueOps check instead of trusting form usage.
 - [Split ownership could hide gaps] -> Require the full local task sequence to be covered exactly once in order.
 - [Release could proceed with incomplete issues] -> Keep full milestone completion in the release-only invocation.
 - [Security checks could be removed with evidence checks] -> E2E policy assertions distinguish task receipts from SHA-pinned Actions and real integrity validation.
@@ -83,4 +90,4 @@ Alternative considered: run milestone completion on every PR. Rejected because u
 3. Remove task evidence plans, ledgers, renderers, receipt tests, quality/mutation policy code, and their CI jobs.
 4. Restore ordinary workspace tests and stable doctests to normal CI and align the hook, PR template, and workflow documentation.
 5. Run the IssueOps self-test, focused workflow-policy E2E tests, strict OpenSpec validation, and ordinary Rust/workspace gates.
-6. Synchronize GitHub #309, integrate the compiling commit into `dev`, and close #309. Leave `main` and release publication untouched.
+6. Backfill active #308, #309, and #314 issue contracts, remove issue-level commit-link evidence, synchronize GitHub #309, integrate the compiling commit into `dev`, and close #309. Leave `main` and release publication untouched.

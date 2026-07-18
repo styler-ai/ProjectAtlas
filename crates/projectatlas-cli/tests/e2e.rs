@@ -30,6 +30,7 @@ const TESTS_DIR_NAME: &str = "tests";
 const INSTALLER_RS_FILE_NAME: &str = "installer.rs";
 const ATLAS_DIR_NAME: &str = ".projectatlas";
 const GITHOOKS_DIR_NAME: &str = ".githooks";
+const ISSUE_TEMPLATE_DIR_NAME: &str = "ISSUE_TEMPLATE";
 const PRE_PUSH_HOOK_FILE_NAME: &str = "pre-push";
 const OPENSPEC_DIR_NAME: &str = "openspec";
 const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
@@ -1606,6 +1607,16 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .join(PRE_PUSH_HOOK_FILE_NAME),
     )?;
     let template = fs::read_to_string(github.join("pull_request_template.md"))?;
+    let bug_issue_template =
+        fs::read_to_string(github.join(ISSUE_TEMPLATE_DIR_NAME).join("bug_report.yml"))?;
+    let chore_issue_template =
+        fs::read_to_string(github.join(ISSUE_TEMPLATE_DIR_NAME).join("chore.yml"))?;
+    let improvement_issue_template = fs::read_to_string(
+        github
+            .join(ISSUE_TEMPLATE_DIR_NAME)
+            .join("improvement_request.yml"),
+    )?;
+    let agent_rules = fs::read_to_string(workspace_root.join("AGENTS.md"))?;
     let workflow_docs =
         fs::read_to_string(workspace_root.join("docs").join(WORKFLOW_DOC_FILE_NAME))?;
     let toolchain = fs::read_to_string(workspace_root.join("rust-toolchain.toml"))?;
@@ -1628,6 +1639,9 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "visible_markdown",
         "remote != expected",
         "milestone_mapping_failures",
+        "REQUIRED_OPEN_ISSUE_HEADINGS",
+        "MITIGATION_RE",
+        "issue_contract_failures",
     ] {
         if !issueops.contains(required) {
             return Err(io::Error::other(format!(
@@ -1640,6 +1654,41 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         || !issue_map.contains(r#""enforce-rust-test-quality-gates": 309"#)
     {
         return Err(io::Error::other("#309 must be mapped by the schema-2 issue map").into());
+    }
+    for required in [
+        "label: Why",
+        "label: What Changes",
+        "label: Capabilities",
+        "label: Release Scope",
+        "label: Acceptance criteria",
+        "label: Non-Goals",
+        "label: Pre-Mortem",
+        "OpenSpec tasks:",
+    ] {
+        for (name, content) in [
+            ("bug", bug_issue_template.as_str()),
+            ("chore", chore_issue_template.as_str()),
+            ("improvement", improvement_issue_template.as_str()),
+        ] {
+            if !content.contains(required) {
+                return Err(io::Error::other(format!(
+                    "{name} issue form is missing v0.3.26 issue contract field {required:?}"
+                ))
+                .into());
+            }
+        }
+    }
+    for required in [
+        "Pre-Mortem",
+        "OpenSpec tasks:",
+        "commit/SHA permalink evidence",
+    ] {
+        if !agent_rules.contains(required) || !workflow_docs.contains(required) {
+            return Err(io::Error::other(format!(
+                "agent and workflow guidance are missing lean issue contract {required:?}"
+            ))
+            .into());
+        }
     }
 
     for required in [
@@ -1737,6 +1786,24 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             "OpenSpec tasks must not assign one test identifier per task",
         )
         .into());
+    }
+    for rejected in [
+        "OpenSpec Commit Links",
+        "exact-commit OpenSpec links",
+        "required committed OpenSpec permalinks",
+    ] {
+        for (name, content) in [
+            ("AGENTS", agent_rules.as_str()),
+            ("workflow docs", workflow_docs.as_str()),
+            ("#309 tasks", tasks.as_str()),
+        ] {
+            if content.contains(rejected) {
+                return Err(io::Error::other(format!(
+                    "{name} retains issue-level commit evidence {rejected:?}"
+                ))
+                .into());
+            }
+        }
     }
     for removed in [
         ".cargo/mutants.toml",
