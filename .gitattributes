@@ -4,6 +4,7 @@
 *.css text eol=lf
 *.html text eol=lf
 *.json text eol=lf
+*.mjs text eol=lf
 *.lock text eol=lf
 *.md text eol=lf
 *.rs text eol=lf
@@ -14,4 +15,6 @@
 *.tsx text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
+fixtures/parser-packs/**/LICENSE text eol=lf
+*.wasm binary
 *.ps1 text eol=crlf
