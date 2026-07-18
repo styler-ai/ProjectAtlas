@@ -361,6 +361,10 @@
       "purpose": "Rust workspace manifest for ProjectAtlas crates, shared dependencies, lints, and release version."
     },
     {
+      "path": "rust-toolchain.toml",
+      "purpose": "Pin the Rust toolchain and components used by ProjectAtlas builds and generators."
+    },
+    {
       "path": "CODE_OF_CONDUCT.md",
       "purpose": "Community conduct expectations for ProjectAtlas"
     },
@@ -1207,6 +1211,38 @@
     {
       "path": "openspec/changes/archive/.gitkeep",
       "purpose": "Tracked placeholder that keeps the OpenSpec archive directory present in fresh checkouts."
+    },
+    {
+      "path": "openspec/changes/enforce-rust-test-quality-gates",
+      "purpose": "Specify and track restoration of lean Rust quality and IssueOps workflow gates."
+    },
+    {
+      "path": "openspec/changes/enforce-rust-test-quality-gates/specs",
+      "purpose": "Group capability delta specifications for the lean Rust quality and IssueOps workflow."
+    },
+    {
+      "path": "openspec/changes/enforce-rust-test-quality-gates/specs/rust-test-quality-gates",
+      "purpose": "Define the rust-test-quality-gates capability requirements and scenarios."
+    },
+    {
+      "path": "openspec/changes/enforce-rust-test-quality-gates/.openspec.yaml",
+      "purpose": "Declare the OpenSpec schema and creation metadata for the lean Rust quality-gates change."
+    },
+    {
+      "path": "openspec/changes/enforce-rust-test-quality-gates/design.md",
+      "purpose": "Record design decisions restoring checklist-only IssueOps and ordinary behavior-focused Rust gates."
+    },
+    {
+      "path": "openspec/changes/enforce-rust-test-quality-gates/proposal.md",
+      "purpose": "Propose restoring the lean behavior-test, Rust-gate, and checklist synchronization workflow."
+    },
+    {
+      "path": "openspec/changes/enforce-rust-test-quality-gates/specs/rust-test-quality-gates/spec.md",
+      "purpose": "Specify requirements and scenarios for lean IssueOps, behavior-focused tests, Rust gates, and dev/release boundaries."
+    },
+    {
+      "path": "openspec/changes/enforce-rust-test-quality-gates/tasks.md",
+      "purpose": "Track implementation tasks for lean IssueOps, ordinary Rust gates, and removal of per-task evidence ceremony."
     },
     {
       "path": "openspec/changes/enhance-projectatlas-init-first-run",
