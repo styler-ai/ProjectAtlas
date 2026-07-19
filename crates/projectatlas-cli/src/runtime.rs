@@ -4684,7 +4684,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
 
         require_eq(
             &changes.paths,
-            &BTreeSet::from([source]),
+            &HashSet::from([source]),
             "native Unix watcher paths",
         )?;
         Ok(())
