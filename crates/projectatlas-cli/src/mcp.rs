@@ -14,13 +14,14 @@ use crate::runtime::{
     default_mcp_project_root, estimated_source_tokens_for_indexed_files,
     estimated_source_tokens_for_paths, init_config_path, lint_database_if_present,
     next_step_report, next_step_report_payload, normalized_folder_filter,
-    open_atlas_store_for_project, open_atlas_store_read_only_for_project, purpose_curation_page,
-    ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
+    open_atlas_store_for_project, open_atlas_store_read_only_for_project,
+    open_fresh_atlas_store_for_project, purpose_curation_page, ranked_file_nodes_with_reasons,
+    ranked_folder_nodes_with_reasons, read_indexed_file_content,
     record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
     render_health_page, render_purpose_curation_page, render_purpose_review_report,
     reset_index_files, review_purposes, run_init_bootstrap, run_scan_pipeline,
     run_symbol_build_pipeline, run_watch_loop, strip_legacy_purpose, telemetry_disabled,
-    validated_indexed_file_key, verify_index_freshness, watcher_status_report,
+    validated_indexed_file_key, watcher_status_report,
 };
 use crate::token_tui::{
     TokenDashboardTheme, render_token_dashboard_plain_with_theme,
@@ -1555,9 +1556,14 @@ impl ProjectAtlasMcpServer {
 
     /// Open and verify the durable index before a normal MCP read.
     fn open_fresh_store(state: &McpProjectState) -> Result<AtlasStore, CliError> {
-        let store = Self::open_read_store(state)?;
-        verify_index_freshness(&store, &state.root, state.config_path.as_deref())?;
-        Ok(store)
+        if !state.db_path.is_file() {
+            return Self::open_read_store(state);
+        }
+        open_fresh_atlas_store_for_project(
+            &state.db_path,
+            &state.root,
+            state.config_path.as_deref(),
+        )
     }
 
     /// Open the durable index for mutation.
@@ -2136,8 +2142,12 @@ impl ProjectAtlasMcpServer {
             },
         )?;
         let purpose_level = Self::parse_purpose_lint_level(params.purpose_level.as_deref())?;
-        let (db_report, db_exit_code) =
-            lint_database_if_present(&state.db_path, &state.root, purpose_level)?;
+        let (db_report, db_exit_code) = lint_database_if_present(
+            &state.db_path,
+            &state.root,
+            state.config_path.as_deref(),
+            purpose_level,
+        )?;
         if !db_report.is_empty() {
             if !report.ends_with('\n') {
                 report.push('\n');

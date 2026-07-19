@@ -278,6 +278,21 @@ pub enum DbError {
     TelemetryPathUnavailable,
 }
 
+impl DbError {
+    /// Return whether a derived-index write could not proceed without implying
+    /// corruption, schema drift, or an identity-contract failure.
+    #[must_use]
+    pub fn is_write_unavailable(&self) -> bool {
+        match self {
+            Self::Sqlite(error) => matches!(
+                error.sqlite_error_code(),
+                Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked | ErrorCode::ReadOnly)
+            ),
+            _ => false,
+        }
+    }
+}
+
 /// Convenient result alias for database operations.
 pub type DbResult<T> = Result<T, DbError>;
 

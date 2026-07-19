@@ -115,6 +115,10 @@ struct PurposeImportSnapshot {
 
 /// Maximum changed paths included in a freshness failure payload.
 const INDEX_FRESHNESS_SAMPLE_LIMIT: usize = 8;
+/// Maximum affected paths a normal read may reconcile before answering.
+const NORMAL_READ_REFRESH_MAX_PATHS: usize = 64;
+/// Maximum current source bytes a normal read may reconcile before answering.
+const NORMAL_READ_REFRESH_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// Explicit version of the built-in derived-index projection contract.
 const INDEX_DERIVATION_CONTRACT_VERSION: &str = "1";
 
@@ -138,14 +142,26 @@ pub(crate) enum IndexRefreshReason {
     SourceChanged,
     /// Paths were added, removed, renamed, ignored, or unignored.
     PathsChanged,
+    /// Parser, source-selection, or indexing policy drifted.
+    PolicyDrift,
 }
 
 /// Scope required to recover a stale index safely.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum IndexRefreshScope {
+    /// A bounded affected-path publication can restore current results.
+    Incremental,
     /// Current publication safety requires a complete one-shot refresh.
     Full,
+}
+
+/// Current local-source delta detected before a normal indexed read.
+struct IndexFreshnessDelta {
+    /// Typed public report when the delta cannot be reconciled automatically.
+    report: IndexRefreshRequired,
+    /// Complete native path set used for a safe affected-path publication.
+    paths: HashSet<PathBuf>,
 }
 
 /// Closed reason why current local source could not be verified.
@@ -215,6 +231,11 @@ pub(crate) struct IndexProjectMismatch {
 
 impl fmt::Display for IndexRefreshRequired {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.reason == IndexRefreshReason::PolicyDrift {
+            return formatter.write_str(
+                "refresh_required: derived index policy differs from the current project configuration; run `projectatlas watch --once` or `atlas_watch_once` before retrying",
+            );
+        }
         write!(
             formatter,
             "refresh_required: {} indexed path(s) differ from current local source; run `projectatlas watch --once` or `atlas_watch_once` before retrying",
@@ -243,12 +264,9 @@ impl fmt::Display for IndexProjectMismatch {
     }
 }
 
-/// Verify that current saved local source still matches the durable index.
-///
-/// This correctness-first preflight is intentionally read-only. Automatic
-/// reconciliation remains behind explicit scan/watch until one transaction
-/// can publish nodes, text, symbols, relations, summaries, and purpose state.
-pub(crate) fn verify_index_freshness(
+/// Verify current saved local source against the durable index in focused tests.
+#[cfg(test)]
+fn verify_index_freshness(
     store: &AtlasStore,
     root: &Path,
     config_path: Option<&Path>,
@@ -256,8 +274,95 @@ pub(crate) fn verify_index_freshness(
     let plan = ScanRuntimePlan::for_path(config_path, root, None).map_err(|source| {
         verification_incomplete(root, IndexVerificationReason::PolicyUnavailable, &source)
     })?;
+    match detect_index_freshness(store, &plan)? {
+        Some(delta) => Err(CliError::RefreshRequired(Box::new(delta.report))),
+        None => Ok(()),
+    }
+}
+
+/// Open a current read snapshot, reconciling one safe bounded delta when possible.
+pub(crate) fn open_fresh_atlas_store_for_project(
+    db_path: &Path,
+    root: &Path,
+    config_path: Option<&Path>,
+) -> Result<AtlasStore, CliError> {
+    let store = open_atlas_store_read_only_for_project(db_path, root)?;
+    let plan = ScanRuntimePlan::for_path(config_path, root, None).map_err(|source| {
+        verification_incomplete(root, IndexVerificationReason::PolicyUnavailable, &source)
+    })?;
+    let delta = match detect_index_freshness(&store, &plan) {
+        Ok(delta) => delta,
+        Err(CliError::VerificationIncomplete(report))
+            if report.reason == IndexVerificationReason::PublicationContractMismatch =>
+        {
+            return Err(CliError::RefreshRequired(Box::new(
+                index_policy_refresh_required(&plan.root),
+            )));
+        }
+        Err(error) => return Err(error),
+    };
+    let Some(delta) = delta else {
+        return Ok(store);
+    };
+    if delta.report.scope != IndexRefreshScope::Incremental {
+        return Err(CliError::RefreshRequired(Box::new(delta.report)));
+    }
+
+    let refresh_required = delta.report.clone();
+    drop(store);
+    let repair = (|| {
+        let mut writer = open_atlas_store_for_project(db_path, &plan.root)?;
+        let changes = WatchChangeSet {
+            requires_full_scan: false,
+            paths: delta.paths,
+        };
+        refresh_index_for_changes(
+            &mut writer,
+            &plan,
+            &changes,
+            &SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None),
+        )
+    })();
+    if let Err(error) = repair {
+        if automatic_refresh_write_is_unavailable(&error) {
+            return Err(CliError::RefreshRequired(Box::new(refresh_required)));
+        }
+        return Err(error);
+    }
+
+    let store = open_atlas_store_read_only_for_project(db_path, &plan.root)?;
+    verify_index_project_root(&store, &plan.root)?;
+    verify_index_publication(&store, &plan)?;
+    Ok(store)
+}
+
+/// Distinguish optional repair contention from database-integrity failures.
+fn automatic_refresh_write_is_unavailable(error: &CliError) -> bool {
+    matches!(error, CliError::Db(source) if source.is_write_unavailable())
+}
+
+/// Return the typed full-refresh state for a changed derivation contract.
+fn index_policy_refresh_required(root: &Path) -> IndexRefreshRequired {
+    IndexRefreshRequired {
+        project_root: normalize_native_path_display(root),
+        status: IndexReadStatus::RefreshRequired,
+        reason: IndexRefreshReason::PolicyDrift,
+        scope: IndexRefreshScope::Full,
+        changed: 0,
+        added: 0,
+        removed: 0,
+        modified: 0,
+        sample_paths: Vec::new(),
+    }
+}
+
+/// Detect the complete current local-source delta for one selected index.
+fn detect_index_freshness(
+    store: &AtlasStore,
+    plan: &ScanRuntimePlan,
+) -> Result<Option<IndexFreshnessDelta>, CliError> {
     verify_index_project_root(store, &plan.root)?;
-    verify_index_publication(store, &plan)?;
+    verify_index_publication(store, plan)?;
     let current_nodes = scan_repo(&plan.root, &plan.scan_options).map_err(|source| {
         CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
             project_root: normalize_native_path_display(&plan.root),
@@ -272,7 +377,11 @@ pub(crate) fn verify_index_freshness(
         .into_iter()
         .map(|indexed| indexed.node)
         .collect::<Vec<_>>();
-    verify_source_nodes_match(&plan.root, &current_nodes, &indexed_nodes)
+    Ok(source_node_delta(
+        &plan.root,
+        &current_nodes,
+        &indexed_nodes,
+    ))
 }
 
 /// Compare a current exact scan with the source-derived nodes being validated.
@@ -281,6 +390,18 @@ fn verify_source_nodes_match(
     current_nodes: &[Node],
     indexed_nodes: &[Node],
 ) -> Result<(), CliError> {
+    match source_node_delta(root, current_nodes, indexed_nodes) {
+        Some(delta) => Err(CliError::RefreshRequired(Box::new(delta.report))),
+        None => Ok(()),
+    }
+}
+
+/// Build one deterministic affected-path plan from current and indexed nodes.
+fn source_node_delta(
+    root: &Path,
+    current_nodes: &[Node],
+    indexed_nodes: &[Node],
+) -> Option<IndexFreshnessDelta> {
     let current_by_path = current_nodes
         .iter()
         .map(|node| (node.path.as_str(), node))
@@ -314,34 +435,57 @@ fn verify_source_nodes_match(
         .saturating_add(removed_paths.len())
         .saturating_add(modified_paths.len());
     if changed == 0 {
-        return Ok(());
+        return None;
     }
 
-    let sample_paths = added_paths
+    let changed_paths = added_paths
         .iter()
         .chain(&removed_paths)
         .chain(&modified_paths)
         .copied()
         .collect::<BTreeSet<_>>()
         .into_iter()
+        .collect::<Vec<_>>();
+    let changed_bytes = added_paths
+        .iter()
+        .chain(&modified_paths)
+        .filter_map(|path| current_by_path.get(path).and_then(|node| node.size_bytes))
+        .fold(0_u64, u64::saturating_add);
+    let requires_full_scan = changed > NORMAL_READ_REFRESH_MAX_PATHS
+        || changed_bytes > NORMAL_READ_REFRESH_MAX_BYTES
+        || changed_paths
+            .iter()
+            .any(|path| watch_path_requires_full_scan(root, &root.join(repo_path_to_native(path))));
+    let sample_paths = changed_paths
+        .iter()
         .take(INDEX_FRESHNESS_SAMPLE_LIMIT)
-        .map(ToOwned::to_owned)
+        .map(|path| (*path).to_string())
         .collect();
-    Err(CliError::RefreshRequired(Box::new(IndexRefreshRequired {
-        project_root: normalize_native_path_display(root),
-        status: IndexReadStatus::RefreshRequired,
-        reason: if added_paths.is_empty() && removed_paths.is_empty() {
-            IndexRefreshReason::SourceChanged
-        } else {
-            IndexRefreshReason::PathsChanged
+    Some(IndexFreshnessDelta {
+        report: IndexRefreshRequired {
+            project_root: normalize_native_path_display(root),
+            status: IndexReadStatus::RefreshRequired,
+            reason: if added_paths.is_empty() && removed_paths.is_empty() {
+                IndexRefreshReason::SourceChanged
+            } else {
+                IndexRefreshReason::PathsChanged
+            },
+            scope: if requires_full_scan {
+                IndexRefreshScope::Full
+            } else {
+                IndexRefreshScope::Incremental
+            },
+            changed,
+            added: added_paths.len(),
+            removed: removed_paths.len(),
+            modified: modified_paths.len(),
+            sample_paths,
         },
-        scope: IndexRefreshScope::Full,
-        changed,
-        added: added_paths.len(),
-        removed: removed_paths.len(),
-        modified: modified_paths.len(),
-        sample_paths,
-    })))
+        paths: changed_paths
+            .into_iter()
+            .map(|path| root.join(repo_path_to_native(path)))
+            .collect(),
+    })
 }
 
 /// Verify that the opened database belongs to the selected canonical root.
@@ -2433,12 +2577,20 @@ pub(crate) fn watcher_status_report(active: bool) -> WatchStatusReport {
 pub(crate) fn lint_database_if_present(
     db: &Path,
     root: &Path,
+    config_path: Option<&Path>,
     purpose_level: PurposeLintLevel,
 ) -> Result<(String, i32), CliError> {
-    if !db.exists() {
-        return Ok((String::new(), 0));
+    match db.try_exists() {
+        Ok(false) => return Ok((String::new(), 0)),
+        Ok(true) => {}
+        Err(source) => {
+            return Err(CliError::Io {
+                path: db.to_path_buf(),
+                source,
+            });
+        }
     }
-    let store = AtlasStore::open_read_only_for_project(db, root)?;
+    let store = open_fresh_atlas_store_for_project(db, root, config_path)?;
     let query = purpose_level.health_query();
     let page = store.unresolved_health_findings_page(&store.resolved_health_ids()?, &query)?;
     let blocking = page
@@ -4255,6 +4407,139 @@ mod tests {
     use super::*;
     use std::error::Error;
     use std::fmt::Debug;
+
+    #[test]
+    fn normal_read_refresh_delta_enforces_path_and_byte_budgets() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let node = |path: String, size_bytes: u64| Node {
+            path,
+            kind: NodeKind::File,
+            parent_path: None,
+            extension: Some(".rs".to_string()),
+            language: Some("rust".to_string()),
+            size_bytes: Some(size_bytes),
+            mtime_ns: Some(1),
+            content_hash: Some("current-content".to_string()),
+        };
+        let path_bounded_nodes = (0..=NORMAL_READ_REFRESH_MAX_PATHS)
+            .map(|index| node(format!("src/file_{index}.rs"), 1))
+            .collect::<Vec<_>>();
+        let path_delta = source_node_delta(temp.path(), &path_bounded_nodes, &[])
+            .ok_or_else(|| io::Error::other("path-bounded freshness delta was missing"))?;
+        require_eq(
+            &path_delta.report.scope,
+            &IndexRefreshScope::Full,
+            "path-bounded refresh scope",
+        )?;
+        require_eq(
+            &path_delta.report.changed,
+            &(NORMAL_READ_REFRESH_MAX_PATHS + 1),
+            "path-bounded change count",
+        )?;
+        require_eq(
+            &path_delta.report.sample_paths.len(),
+            &INDEX_FRESHNESS_SAMPLE_LIMIT,
+            "bounded freshness sample",
+        )?;
+
+        let byte_bounded_nodes = vec![node(
+            "src/large.rs".to_string(),
+            NORMAL_READ_REFRESH_MAX_BYTES + 1,
+        )];
+        let byte_delta = source_node_delta(temp.path(), &byte_bounded_nodes, &[])
+            .ok_or_else(|| io::Error::other("byte-bounded freshness delta was missing"))?;
+        require_eq(
+            &byte_delta.report.scope,
+            &IndexRefreshScope::Full,
+            "byte-bounded refresh scope",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_read_refresh_returns_typed_state_when_writer_is_unavailable()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let source_path = root.join("lib.rs");
+        let indexed_source = "pub fn indexed() {}\n";
+        let current_source = "pub fn current() {}\n";
+        fs::write(&source_path, indexed_source)?;
+        let db_path = root.join(".projectatlas").join("projectatlas.db");
+        let plan = ScanRuntimePlan::for_path(None, &root, None)?;
+        let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let mut initial_store = open_atlas_store_for_project(&db_path, &plan.root)?;
+        run_scan_pipeline(&mut initial_store, &plan, &symbol_options)?;
+        let initial_generation = initial_store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("initial publication missing"))?
+            .generation;
+        drop(initial_store);
+
+        fs::write(&source_path, current_source)?;
+        let mut blocking_writer = open_atlas_store_for_project(&db_path, &plan.root)?;
+        let publication =
+            blocking_writer.begin_index_publication(&plan.publication_contract_fingerprint())?;
+        let refresh = open_fresh_atlas_store_for_project(&db_path, &plan.root, None);
+        let Err(CliError::RefreshRequired(report)) = refresh else {
+            return Err(io::Error::other(
+                "contended automatic refresh did not return typed refresh_required",
+            )
+            .into());
+        };
+        require_eq(
+            &report.scope,
+            &IndexRefreshScope::Incremental,
+            "contended automatic refresh scope",
+        )?;
+        require_eq(
+            &report.reason,
+            &IndexRefreshReason::SourceChanged,
+            "contended automatic refresh reason",
+        )?;
+
+        let last_valid = open_atlas_store_read_only_for_project(&db_path, &plan.root)?;
+        require_eq(
+            &last_valid
+                .index_publication()?
+                .ok_or_else(|| io::Error::other("last-valid publication missing"))?
+                .generation,
+            &initial_generation,
+            "last-valid generation during contention",
+        )?;
+        require_eq(
+            &last_valid
+                .load_file_text("lib.rs")?
+                .ok_or_else(|| io::Error::other("last-valid source text missing"))?
+                .content,
+            &indexed_source.to_string(),
+            "last-valid source during contention",
+        )?;
+        drop(last_valid);
+        drop(publication);
+
+        let repaired = open_fresh_atlas_store_for_project(&db_path, &plan.root, None)?;
+        require_eq(
+            &repaired
+                .index_publication()?
+                .ok_or_else(|| io::Error::other("repaired publication missing"))?
+                .generation,
+            &initial_generation
+                .checked_next()
+                .ok_or_else(|| io::Error::other("test generation overflow"))?,
+            "repaired generation after contention",
+        )?;
+        require_eq(
+            &repaired
+                .load_file_text("lib.rs")?
+                .ok_or_else(|| io::Error::other("repaired source text missing"))?
+                .content,
+            &current_source.to_string(),
+            "current source after contention",
+        )?;
+        Ok(())
+    }
 
     #[test]
     fn derived_source_readers_reject_bytes_outside_staged_hash() -> Result<(), Box<dyn Error>> {

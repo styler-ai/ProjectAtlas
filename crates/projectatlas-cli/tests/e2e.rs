@@ -7544,6 +7544,35 @@ fn exercise_normal_read_freshness(
         .stdout(predicate::str::contains("legacy_store"));
 
     fs::write(&config_path, CONTRACT_CHANGED_CONFIG)?;
+    let policy_changed_read = Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .args(["--format", "json"])
+        .arg("--db")
+        .arg(db)
+        .args(["summary", "src/lib.rs"])
+        .output()?;
+    if policy_changed_read.status.success()
+        || String::from_utf8_lossy(&policy_changed_read.stdout).contains("legacy_store")
+    {
+        return Err(io::Error::other(format!(
+            "normal read did not reject a changed index policy: stdout={} stderr={}",
+            String::from_utf8_lossy(&policy_changed_read.stdout),
+            String::from_utf8_lossy(&policy_changed_read.stderr)
+        ))
+        .into());
+    }
+    let policy_changed_json: Value = serde_json::from_slice(&policy_changed_read.stderr)?;
+    require_json_string(&policy_changed_json, &["error", "kind"], "refresh_required")?;
+    require_json_string(
+        &policy_changed_json,
+        &["error", "refresh_required", "reason"],
+        "policy_drift",
+    )?;
+    require_json_string(
+        &policy_changed_json,
+        &["error", "refresh_required", "scope"],
+        "full",
+    )?;
     let refused_symbol_build = Command::cargo_bin("projectatlas")?
         .current_dir(repo)
         .args(["--format", "json"])
@@ -7671,42 +7700,105 @@ fn exercise_normal_read_freshness(
         .into());
     }
 
-    let stale_cli = Command::cargo_bin("projectatlas")?
-        .current_dir(repo)
-        .args(["--format", "json"])
-        .arg("--db")
-        .arg(db)
-        .args(["summary", "src/lib.rs"])
-        .output()?;
-    if stale_cli.status.success()
-        || !String::from_utf8_lossy(&stale_cli.stderr).contains("refresh_required")
-        || String::from_utf8_lossy(&stale_cli.stdout).contains("legacy_store")
+    let publication_before_automatic_refresh = AtlasStore::open(db)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("publication missing before automatic refresh"))?;
+    let automatically_refreshed_text = if with_git_metadata {
+        let messages = [
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#.to_string(),
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":"src/lib.rs"}}}"#.to_string(),
+        ];
+        let stdout = run_mcp_stdio(
+            &executable,
+            repo,
+            &[
+                "--db".to_string(),
+                db.display().to_string(),
+                "mcp".to_string(),
+            ],
+            &messages,
+        )?;
+        mcp_tool_text(&stdout, 2)?
+    } else {
+        let output = Command::cargo_bin("projectatlas")?
+            .current_dir(repo)
+            .args(["--format", "json"])
+            .arg("--db")
+            .arg(db)
+            .args(["summary", "src/lib.rs"])
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "safe stale CLI read did not reconcile automatically: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        String::from_utf8(output.stdout)?
+    };
+    if !automatically_refreshed_text.contains("active_store")
+        || automatically_refreshed_text.contains("legacy_store")
+        || automatically_refreshed_text.contains("refresh_required")
     {
         return Err(io::Error::other(format!(
-            "stale CLI read did not fail closed: stdout={} stderr={}",
-            String::from_utf8_lossy(&stale_cli.stdout),
-            String::from_utf8_lossy(&stale_cli.stderr)
+            "safe normal read did not return current local source after reconciliation: {automatically_refreshed_text}"
         ))
         .into());
     }
-    let stale_cli_json: Value = serde_json::from_slice(&stale_cli.stderr)?;
-    require_json_string(&stale_cli_json, &["error", "kind"], "refresh_required")?;
-    require_json_string(
-        &stale_cli_json,
-        &["error", "refresh_required", "reason"],
-        "source_changed",
-    )?;
-    require_json_usize_at_least(
-        &stale_cli_json,
-        &["error", "refresh_required", "modified"],
-        1,
-    )?;
-    require_json_string(&stale_cli_json, &["error", "next", "command"], "watch")?;
+    let publication_after_automatic_refresh = AtlasStore::open(db)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("publication missing after automatic refresh"))?;
+    if publication_after_automatic_refresh.generation
+        != publication_before_automatic_refresh
+            .generation
+            .checked_next()
+            .ok_or_else(|| io::Error::other("publication generation overflow"))?
+    {
+        return Err(io::Error::other(
+            "safe automatic refresh did not publish exactly one generation",
+        )
+        .into());
+    }
 
+    let publication_before_automatic_rename = AtlasStore::open(db)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("publication missing before automatic rename refresh"))?;
     fs::rename(
         repo.join(TESTS_DIR_NAME).join(SESSION_TEST_FILE_NAME),
         repo.join(TESTS_DIR_NAME).join("current_session.rs"),
     )?;
+    let renamed_files = Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .arg("--db")
+        .arg(db)
+        .args(["files", "--file-pattern", "tests/*.rs"])
+        .output()?;
+    let renamed_files_text = String::from_utf8(renamed_files.stdout)?;
+    if !renamed_files.status.success()
+        || !renamed_files_text.contains("tests/current_session.rs")
+        || renamed_files_text.contains("tests/session.rs")
+        || renamed_files_text.contains("refresh_required")
+    {
+        return Err(io::Error::other(format!(
+            "safe rename did not reconcile automatically: {renamed_files_text}"
+        ))
+        .into());
+    }
+    let publication_after_automatic_rename = AtlasStore::open(db)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("publication missing after automatic rename refresh"))?;
+    if publication_after_automatic_rename.generation
+        != publication_before_automatic_rename
+            .generation
+            .checked_next()
+            .ok_or_else(|| io::Error::other("publication generation overflow"))?
+    {
+        return Err(io::Error::other(
+            "safe automatic rename refresh did not publish exactly one generation",
+        )
+        .into());
+    }
     fs::write(repo.join(".gitignore"), "config/\n")?;
 
     let deleted_absolute_selector = repo
@@ -7928,9 +8020,23 @@ fn exercise_normal_read_freshness(
         )
         .into());
     }
+    let generation_before_repeated_read = AtlasStore::open(db)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("publication missing before repeated read"))?
+        .generation;
     let repeated_summary = json_summary_command(repo, db, "src/lib.rs")?;
     if repeated_summary != current_summary {
         return Err(io::Error::other("unchanged repeated read drifted after refresh").into());
+    }
+    let generation_after_repeated_read = AtlasStore::open(db)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("publication missing after repeated read"))?
+        .generation;
+    if generation_after_repeated_read != generation_before_repeated_read {
+        return Err(io::Error::other(
+            "unchanged repeated read advanced the publication generation",
+        )
+        .into());
     }
     Ok(())
 }
@@ -9727,15 +9833,6 @@ fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), 
         repo.join(SRC_DIR_NAME).join("detail.rs"),
         "// Purpose: Rust implementation detail for purpose lint strictness tests.\npub fn detail_changed() {}\n",
     )?;
-    Command::cargo_bin("projectatlas")?
-        .current_dir(&repo)
-        .arg("--config")
-        .arg(&config)
-        .arg("--db")
-        .arg(&db)
-        .args(["scan", "."])
-        .assert()
-        .success();
     let stale_low = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .arg("--config")
@@ -9745,7 +9842,9 @@ fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), 
         .args(["lint", "--purpose-level", "low"])
         .output()?;
     if stale_low.status.success() {
-        return Err(io::Error::other("low purpose lint missed stale high-impact file").into());
+        return Err(
+            io::Error::other("low purpose lint missed an offline stale high-impact file").into(),
+        );
     }
     let stale_low_stderr = String::from_utf8(stale_low.stderr)?;
     if !stale_low_stderr.contains("[stale-purpose] Cargo.toml:") {

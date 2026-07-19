@@ -44,13 +44,13 @@ use runtime::{
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths, init_config_path,
     init_path_status, lint_database_if_present, next_step_report, next_step_report_payload,
     normalized_folder_filter, open_atlas_store_for_project, open_atlas_store_read_only_for_project,
-    purpose_curation_page, ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons,
-    read_indexed_file_content, record_directory_walk_usage_estimate, record_usage_estimate,
-    record_usage_text, render_health_page, render_purpose_curation_page,
-    render_purpose_review_report, reset_index_files, resolved_mcp_config_path, review_purposes,
-    run_init_bootstrap, run_scan_pipeline, run_symbol_build_pipeline, run_watch_loop,
-    strip_legacy_purpose, validated_indexed_file_key, verify_index_freshness,
-    watcher_status_report,
+    open_fresh_atlas_store_for_project, purpose_curation_page, ranked_file_nodes_with_reasons,
+    ranked_folder_nodes_with_reasons, read_indexed_file_content,
+    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
+    render_health_page, render_purpose_curation_page, render_purpose_review_report,
+    reset_index_files, resolved_mcp_config_path, review_purposes, run_init_bootstrap,
+    run_scan_pipeline, run_symbol_build_pipeline, run_watch_loop, strip_legacy_purpose,
+    validated_indexed_file_key, watcher_status_report,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1495,8 +1495,12 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     strict_untracked: *strict_untracked,
                 },
             )?;
-            let (db_report, db_exit_code) =
-                lint_database_if_present(&cli.db, &config.root, (*purpose_level).into())?;
+            let (db_report, db_exit_code) = lint_database_if_present(
+                &cli.db,
+                &config.root,
+                cli.config.as_deref(),
+                (*purpose_level).into(),
+            )?;
             if !db_report.is_empty() {
                 if !report.ends_with('\n') {
                     report.push('\n');
@@ -1743,10 +1747,14 @@ fn open_index_for_current_read(cli: &Cli) -> Result<AtlasStore, CliError> {
 
 /// Open and verify the durable index before a normal CLI read.
 fn open_index_for_read(cli: &Cli) -> Result<AtlasStore, CliError> {
-    let store = open_index_for_current_read(cli)?;
+    if !cli.db.is_file() {
+        return Err(CliError::InvalidInput(format!(
+            "ProjectAtlas index '{}' is missing; run `projectatlas scan <project-root>` first",
+            cli.db.display()
+        )));
+    }
     let root = default_mcp_project_root(&cli.db, cli.config.as_deref())?;
-    verify_index_freshness(&store, &root, cli.config.as_deref())?;
-    Ok(store)
+    open_fresh_atlas_store_for_project(&cli.db, &root, cli.config.as_deref())
 }
 
 /// Open a selected project database for purpose or health mutation.
