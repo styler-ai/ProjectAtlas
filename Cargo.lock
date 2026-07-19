@@ -1384,6 +1384,7 @@ dependencies = [
 name = "projectatlas-core"
 version = "0.3.26"
 dependencies = [
+ "blake3",
  "regex",
  "serde",
  "serde_json",
