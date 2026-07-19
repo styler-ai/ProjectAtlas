@@ -8,10 +8,11 @@ use projectatlas_core::outline::estimate_tokens;
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SourceParseMetadata, SymbolKind, SymbolRelation,
 };
+use projectatlas_core::telemetry::{TokenOverview, TokenTrendReport, TokenTrendWindow};
 use projectatlas_core::{
     IndexedNode, NodeKind, RankedNode, repo_path_to_native, validated_repo_file_key,
 };
-use projectatlas_db::{AtlasStore, DbError, IndexedFileText};
+use projectatlas_db::{AtlasStore, CapturedProjectBinding, DbError, IndexedFileText};
 use regex::RegexBuilder;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -57,10 +58,91 @@ pub enum ServiceError {
     /// Serialization failed while building a telemetry baseline.
     #[error("serialization error: {0}")]
     Serialize(#[from] serde_json::Error),
+    /// The selected database has no complete project binding.
+    #[error("selected project binding is unavailable")]
+    SelectedProjectUnavailable,
+    /// The selected project binding changed while the report was being read.
+    #[error("selected project binding changed while loading the token report")]
+    SelectedProjectChanged,
 }
 
 /// Convenient result alias for service operations.
 pub type ServiceResult<T> = Result<T, ServiceError>;
+
+/// Closed token-report request selected by CLI and MCP adapters.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TokenReportRequest<'a> {
+    /// Load the all-time token overview for an optional caller label.
+    Overview {
+        /// Optional caller-visible label filter.
+        caller_label: Option<&'a str>,
+    },
+    /// Load retained token trends for an optional caller label and window.
+    Trends {
+        /// Optional caller-visible label filter.
+        caller_label: Option<&'a str>,
+        /// Calendar grouping requested by the adapter.
+        window: TokenTrendWindow,
+    },
+}
+
+/// Typed token-report result returned without transport rendering.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TokenReport {
+    /// All-time token overview.
+    Overview(Box<TokenOverview>),
+    /// Retained token trend periods.
+    Trends(TokenTrendReport),
+}
+
+/// Capture the root and identity validated when the selected store opened.
+fn selected_project_binding(store: &AtlasStore) -> ServiceResult<CapturedProjectBinding> {
+    match store.captured_project_binding() {
+        Ok(binding) => Ok(binding),
+        Err(DbError::ProjectRootMissing | DbError::ProjectInstanceIdentityMissing) => {
+            Err(ServiceError::SelectedProjectUnavailable)
+        }
+        Err(error) => Err(ServiceError::Db(error)),
+    }
+}
+
+/// Revalidate the selected binding on a fresh snapshot after the report read.
+fn revalidate_selected_project_binding(store: &AtlasStore) -> ServiceResult<()> {
+    match store.revalidate_captured_project_binding() {
+        Ok(()) => Ok(()),
+        Err(
+            DbError::ProjectRootMissing
+            | DbError::ProjectInstanceIdentityMissing
+            | DbError::ProjectRootMismatch { .. }
+            | DbError::ProjectRootTransitionChanged { .. },
+        ) => Err(ServiceError::SelectedProjectChanged),
+        Err(error) => Err(ServiceError::Db(error)),
+    }
+}
+
+/// Load one token report through the selected-project service boundary.
+///
+/// # Errors
+///
+/// Returns an error when the selected project is unavailable or changes during
+/// the bounded database read, or when the report query fails.
+pub fn load_token_report(
+    store: &AtlasStore,
+    request: TokenReportRequest<'_>,
+) -> ServiceResult<TokenReport> {
+    let _selected_project = selected_project_binding(store)?;
+    let report = match request {
+        TokenReportRequest::Overview { caller_label } => {
+            TokenReport::Overview(Box::new(store.token_overview(caller_label)?))
+        }
+        TokenReportRequest::Trends {
+            caller_label,
+            window,
+        } => TokenReport::Trends(store.token_trends(caller_label, window)?),
+    };
+    revalidate_selected_project_binding(store)?;
+    Ok(report)
+}
 
 /// Structured deterministic intelligence for one indexed file.
 #[derive(Debug, Serialize)]
@@ -2055,9 +2137,69 @@ fn exported_symbol_names(symbols: &[CodeSymbol]) -> Vec<String> {
 mod tests {
     use super::*;
     use projectatlas_core::symbols::{ParserKind, SymbolGraph};
+    use projectatlas_core::telemetry::UsageDetailAvailability;
     use projectatlas_core::{Node, Purpose, PurposeSource, PurposeStatus, normalized_parent};
     use std::error::Error;
     use std::io;
+
+    #[test]
+    fn token_report_service_selects_typed_reports_and_requires_a_project_binding()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let atlas_dir = root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let store = AtlasStore::open_for_project(&atlas_dir.join("projectatlas.db"), &root)?;
+
+        let overview =
+            load_token_report(&store, TokenReportRequest::Overview { caller_label: None })?;
+        match overview {
+            TokenReport::Overview(overview) => {
+                require_eq(&overview.calls, &0, "empty overview calls")?;
+                require_eq(
+                    &overview.detail_availability,
+                    &UsageDetailAvailability::Retained,
+                    "empty overview detail availability",
+                )?;
+            }
+            TokenReport::Trends(_) => {
+                return Err(io::Error::other("overview request returned token trends").into());
+            }
+        }
+
+        let trends = load_token_report(
+            &store,
+            TokenReportRequest::Trends {
+                caller_label: None,
+                window: TokenTrendWindow::Month,
+            },
+        )?;
+        match trends {
+            TokenReport::Trends(report) => {
+                require_eq(&report.window, &TokenTrendWindow::Month, "trend window")?;
+                require_eq(
+                    &report.detail_availability,
+                    &UsageDetailAvailability::Retained,
+                    "empty trend detail availability",
+                )?;
+            }
+            TokenReport::Overview(_) => {
+                return Err(io::Error::other("trend request returned token overview").into());
+            }
+        }
+
+        let unbound = AtlasStore::in_memory()?;
+        if !matches!(
+            load_token_report(
+                &unbound,
+                TokenReportRequest::Overview { caller_label: None }
+            ),
+            Err(ServiceError::SelectedProjectUnavailable)
+        ) {
+            return Err(io::Error::other("unbound token report did not fail closed").into());
+        }
+        Ok(())
+    }
 
     #[test]
     fn metadata_helpers_are_stable() -> Result<(), Box<dyn Error>> {

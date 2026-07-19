@@ -1410,6 +1410,7 @@ dependencies = [
  "blake3",
  "clap",
  "cssparser",
+ "getrandom",
  "jsonc-parser",
  "notify",
  "predicates",
@@ -1454,6 +1455,8 @@ dependencies = [
 name = "projectatlas-db"
 version = "0.3.26"
 dependencies = [
+ "blake3",
+ "getrandom",
  "projectatlas-core",
  "rusqlite",
  "serde",

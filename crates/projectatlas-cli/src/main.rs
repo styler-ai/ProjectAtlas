@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
 use projectatlas_core::telemetry::{
-    TokenCalibrationOverview, TokenTrendWindow as CoreTokenTrendWindow,
+    TokenCalibrationOverview, TokenTrendWindow as CoreTokenTrendWindow, UsageInstanceOwner,
 };
 use projectatlas_core::toon::{
     encode_agent_payload, render_outline, render_overview, render_ranked_node_rows,
@@ -30,16 +30,16 @@ use projectatlas_db::{
     ProjectRootTransitionResult, verify_project_database,
 };
 use projectatlas_service::{
-    CodeSlice, FileSummaryReport, SearchReport, SymbolSliceSelector,
-    build_file_summary_from_source, read_indexed_code_slice_from_source,
-    read_symbol_slice_from_source, search_indexed_files,
+    CodeSlice, FileSummaryReport, SearchReport, SymbolSliceSelector, TokenReport,
+    TokenReportRequest, build_file_summary_from_source, load_token_report,
+    read_indexed_code_slice_from_source, read_symbol_slice_from_source, search_indexed_files,
 };
 use rmcp::schemars;
 use runtime::{
     DEFAULT_HEALTH_LIMIT, InitBootstrapOptions, InitHostConfigStatus, InitSetupReport,
     MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel, PurposeReviewRequest,
-    ScanRuntimePlan, SettingsReport, SymbolBuildOptions, WatchStatusReport, absolute_path,
-    build_settings_report, byte_count_to_tokens, canonical_project_root,
+    ScanRuntimePlan, SettingsReport, SymbolBuildOptions, UsageRuntimeInstance, WatchStatusReport,
+    absolute_path, build_settings_report, byte_count_to_tokens, canonical_project_root,
     config_root_mismatch_error, default_mcp_project_root, defaultable_cli_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     index_work_control, init_config_path, init_path_status, lint_database_if_present,
@@ -71,8 +71,8 @@ use token_tui::{
 const DEFAULT_DB_PATH: &str = ".projectatlas/projectatlas.db";
 /// `ProjectAtlas` major architecture version.
 const PROJECTATLAS_MAJOR_VERSION: u8 = 3;
-/// Default session identifier for token telemetry.
-const DEFAULT_SESSION_ID: &str = "default";
+/// Default caller-visible compatibility label for token telemetry.
+const DEFAULT_CALLER_LABEL: &str = "default";
 /// Default maximum rows returned per structured file-summary section.
 const DEFAULT_FILE_SUMMARY_LIMIT: usize = 25;
 /// One-shot watcher refresh mode.
@@ -444,8 +444,8 @@ struct Cli {
     /// Response format to emit.
     #[arg(long, value_enum, default_value_t = OutputFormat::Toon)]
     format: OutputFormat,
-    /// Session id used when recording token telemetry.
-    #[arg(long, default_value = DEFAULT_SESSION_ID)]
+    /// Caller-visible compatibility label recorded with token telemetry.
+    #[arg(long, default_value = DEFAULT_CALLER_LABEL)]
     session: String,
     /// Path to `ProjectAtlas` config.toml for map/lint/init workflows.
     #[arg(long)]
@@ -690,7 +690,7 @@ enum Command {
     },
     /// Print estimated token savings for recorded funnel usage.
     Token {
-        /// Optional session id filter.
+        /// Optional caller-visible compatibility-label filter.
         #[arg(long)]
         session: Option<String>,
         /// Presentation mode for the token report.
@@ -972,6 +972,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     if let Some(required_version) = cli.require_version.as_deref() {
         validate_required_runtime_version(required_version)?;
     }
+    let usage_instance = UsageRuntimeInstance::new(UsageInstanceOwner::CliInvocation);
     match &cli.command {
         Command::Init {
             no_scan,
@@ -1049,11 +1050,12 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             print_tracked_directory_output_estimate(
                 cli.format,
                 &store,
+                usage_instance,
                 &cli.session,
                 "overview",
                 None,
                 None,
-                estimated_source_tokens_for_indexed_files(&store, None, None)?,
+                || estimated_source_tokens_for_indexed_files(&store, None, None),
                 &toon,
                 &overview,
             )?;
@@ -1066,11 +1068,12 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             print_tracked_directory_output_estimate(
                 cli.format,
                 &store,
+                usage_instance,
                 &cli.session,
                 "folders",
                 None,
                 Some(query.clone()),
-                estimated_source_tokens_for_indexed_files(&store, None, None)?,
+                || estimated_source_tokens_for_indexed_files(&store, None, None),
                 &toon,
                 &payload,
             )?;
@@ -1088,11 +1091,6 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 .as_deref()
                 .map(normalized_folder_filter)
                 .transpose()?;
-            let baseline_tokens = estimated_source_tokens_for_indexed_files(
-                &store,
-                folder_filter.as_deref(),
-                file_pattern.as_deref(),
-            )?;
             let selected = ranked_file_nodes_with_reasons(
                 &store,
                 query_text,
@@ -1106,11 +1104,18 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             print_tracked_output_estimate(
                 cli.format,
                 &store,
+                usage_instance,
                 &cli.session,
                 "files",
-                file_pattern.clone().or(folder_filter),
+                file_pattern.clone().or_else(|| folder_filter.clone()),
                 query.clone(),
-                baseline_tokens,
+                || {
+                    estimated_source_tokens_for_indexed_files(
+                        &store,
+                        folder_filter.as_deref(),
+                        file_pattern.as_deref(),
+                    )
+                },
                 &toon,
                 &payload,
             )?;
@@ -1123,11 +1128,12 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             print_tracked_directory_output_estimate(
                 cli.format,
                 &store,
+                usage_instance,
                 &cli.session,
                 "next",
                 None,
                 Some(query.clone()),
-                estimated_source_tokens_for_indexed_files(&store, None, None)?,
+                || estimated_source_tokens_for_indexed_files(&store, None, None),
                 &toon,
                 &payload,
             )?;
@@ -1144,6 +1150,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             print_tracked_output_text(
                 cli.format,
                 &store,
+                usage_instance,
                 &cli.session,
                 "outline",
                 Some(file_key),
@@ -1163,6 +1170,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             print_tracked_output_text(
                 cli.format,
                 &store,
+                usage_instance,
                 &cli.session,
                 "summary",
                 Some(report.file_path.clone()),
@@ -1198,11 +1206,12 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             print_tracked_output_estimate(
                 cli.format,
                 &store,
+                usage_instance,
                 &cli.session,
                 "search",
                 file_pattern.clone(),
                 Some(pattern.clone()),
-                byte_count_to_tokens(report.searched_bytes),
+                || Ok(byte_count_to_tokens(report.searched_bytes)),
                 &toon,
                 &report,
             )?;
@@ -1254,6 +1263,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             print_tracked_output_text(
                 cli.format,
                 &store,
+                usage_instance,
                 &cli.session,
                 "slice",
                 Some(report.path.clone()),
@@ -1293,18 +1303,20 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 let store = open_index_for_read(cli)?;
                 let symbols = store.load_symbols(file.as_deref(), query.as_deref(), *limit)?;
                 let toon = render_symbols(&symbols);
-                let baseline_tokens = estimated_source_tokens_for_paths(
-                    &store,
-                    symbols.iter().map(|symbol| symbol.path.as_str()),
-                )?;
                 print_tracked_output_estimate(
                     cli.format,
                     &store,
+                    usage_instance,
                     &cli.session,
                     "symbols",
                     file.clone(),
                     query.clone(),
-                    baseline_tokens,
+                    || {
+                        estimated_source_tokens_for_paths(
+                            &store,
+                            symbols.iter().map(|symbol| symbol.path.as_str()),
+                        )
+                    },
                     &toon,
                     &symbols,
                 )?;
@@ -1314,18 +1326,20 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 let relations =
                     store.load_symbol_relations(file.as_deref(), query.as_deref(), *limit)?;
                 let toon = render_symbol_relations(&relations);
-                let baseline_tokens = estimated_source_tokens_for_paths(
-                    &store,
-                    relations.iter().map(|relation| relation.path.as_str()),
-                )?;
                 print_tracked_output_estimate(
                     cli.format,
                     &store,
+                    usage_instance,
                     &cli.session,
                     "symbol-relations",
                     file.clone(),
                     query.clone(),
-                    baseline_tokens,
+                    || {
+                        estimated_source_tokens_for_paths(
+                            &store,
+                            relations.iter().map(|relation| relation.path.as_str()),
+                        )
+                    },
                     &toon,
                     &relations,
                 )?;
@@ -1355,6 +1369,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 print_tracked_output_text(
                     cli.format,
                     &store,
+                    usage_instance,
                     &cli.session,
                     "symbol-slice",
                     Some(report.path.clone()),
@@ -1523,11 +1538,12 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             print_tracked_directory_output_estimate(
                 cli.format,
                 &store,
+                usage_instance,
                 &cli.session,
                 "health-check",
                 None,
                 None,
-                estimated_source_tokens_for_indexed_files(&store, None, None)?,
+                || estimated_source_tokens_for_indexed_files(&store, None, None),
                 &toon,
                 &page,
             )?;
@@ -1603,7 +1619,20 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         "--tokenizer is only supported for token overview reports".to_string(),
                     ));
                 }
-                let report = store.token_trends(session.as_deref(), (*window).into())?;
+                let report = match load_token_report(
+                    &store,
+                    TokenReportRequest::Trends {
+                        caller_label: session.as_deref(),
+                        window: (*window).into(),
+                    },
+                )? {
+                    TokenReport::Trends(report) => report,
+                    TokenReport::Overview(_) => {
+                        return Err(CliError::InvalidInput(
+                            "token trend request returned an overview".to_string(),
+                        ));
+                    }
+                };
                 match view {
                     TokenView::Agent => {
                         print_output(cli.format, &render_token_trends(&report), &report)?;
@@ -1616,7 +1645,19 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     }
                 }
             } else {
-                let mut overview = store.token_overview(session.as_deref())?;
+                let mut overview = match load_token_report(
+                    &store,
+                    TokenReportRequest::Overview {
+                        caller_label: session.as_deref(),
+                    },
+                )? {
+                    TokenReport::Overview(overview) => overview,
+                    TokenReport::Trends(_) => {
+                        return Err(CliError::InvalidInput(
+                            "token overview request returned trends".to_string(),
+                        ));
+                    }
+                };
                 if let Some(tokenizer) = tokenizer.as_deref() {
                     overview.set_calibration(build_token_calibration(&store, tokenizer)?);
                 }
@@ -2345,59 +2386,86 @@ fn trimmed_cli_filter(value: Option<&str>) -> Option<String> {
 }
 
 /// Record estimated-token telemetry for the exact emitted CLI payload.
-fn print_tracked_directory_output_estimate<T: serde::Serialize>(
+fn print_tracked_directory_output_estimate<T, F>(
     format: OutputFormat,
     store: &AtlasStore,
+    usage_instance: Option<UsageRuntimeInstance>,
     session: &str,
     command: &str,
     path: Option<String>,
     query: Option<String>,
-    estimated_without_projectatlas: usize,
+    estimate_without_projectatlas: F,
     toon: &str,
     payload: &T,
-) -> Result<(), CliError> {
+) -> Result<(), CliError>
+where
+    T: serde::Serialize,
+    F: FnOnce() -> Result<usize, CliError>,
+{
     let output = serialized_output(format, toon, payload)?;
-    record_directory_walk_usage_estimate(
+    write_stdout(&output)?;
+    if usage_instance.is_none() || runtime::telemetry_disabled() {
+        return Ok(());
+    }
+    let Ok(estimated_without_projectatlas) = estimate_without_projectatlas() else {
+        return Ok(());
+    };
+    drop(record_directory_walk_usage_estimate(
         store,
+        usage_instance,
         session,
         command,
         path,
         query,
         estimated_without_projectatlas,
         &output,
-    )?;
-    write_stdout(&output)
+    ));
+    Ok(())
 }
 
 /// Record candidate-set telemetry for the exact emitted CLI payload.
-fn print_tracked_output_estimate<T: serde::Serialize>(
+fn print_tracked_output_estimate<T, F>(
     format: OutputFormat,
     store: &AtlasStore,
+    usage_instance: Option<UsageRuntimeInstance>,
     session: &str,
     command: &str,
     path: Option<String>,
     query: Option<String>,
-    estimated_without_projectatlas: usize,
+    estimate_without_projectatlas: F,
     toon: &str,
     payload: &T,
-) -> Result<(), CliError> {
+) -> Result<(), CliError>
+where
+    T: serde::Serialize,
+    F: FnOnce() -> Result<usize, CliError>,
+{
     let output = serialized_output(format, toon, payload)?;
-    record_usage_estimate(
+    write_stdout(&output)?;
+    if usage_instance.is_none() || runtime::telemetry_disabled() {
+        return Ok(());
+    }
+    let Ok(estimated_without_projectatlas) = estimate_without_projectatlas() else {
+        return Ok(());
+    };
+    drop(record_usage_estimate(
         store,
+        usage_instance,
         session,
         command,
         path,
         query,
         estimated_without_projectatlas,
         &output,
-    )?;
-    write_stdout(&output)
+    ));
+    Ok(())
 }
 
 /// Record baseline-text telemetry for the exact emitted CLI payload.
 fn print_tracked_output_text<T: serde::Serialize>(
     format: OutputFormat,
     store: &AtlasStore,
+    usage_instance: Option<UsageRuntimeInstance>,
     session: &str,
     command: &str,
     path: Option<String>,
@@ -2407,8 +2475,18 @@ fn print_tracked_output_text<T: serde::Serialize>(
     payload: &T,
 ) -> Result<(), CliError> {
     let output = serialized_output(format, toon, payload)?;
-    record_usage_text(store, session, command, path, query, baseline_text, &output)?;
-    write_stdout(&output)
+    write_stdout(&output)?;
+    drop(record_usage_text(
+        store,
+        usage_instance,
+        session,
+        command,
+        path,
+        query,
+        baseline_text,
+        &output,
+    ));
+    Ok(())
 }
 
 /// Agent-facing payload for a CLI purpose update.

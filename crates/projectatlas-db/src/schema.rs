@@ -16,11 +16,13 @@ use projectatlas_core::normalize_native_path_display;
 use std::path::PathBuf;
 
 /// Current `SQLite` schema version supported by this crate.
-pub(crate) const SCHEMA_VERSION: i64 = 10;
+pub(crate) const SCHEMA_VERSION: i64 = 11;
 /// Released 0.3.26 schema accepted by the migration inventory.
 pub(crate) const PREVIOUS_SCHEMA_VERSION: i64 = 8;
 /// First internal schema with explicit publication invalidation.
 const PUBLICATION_SCHEMA_VERSION: i64 = 9;
+/// First schema with normalized repository-graph storage.
+const GRAPH_SCHEMA_VERSION: i64 = 10;
 /// Metadata key for the durable schema version.
 pub(crate) const SCHEMA_VERSION_KEY: &str = "schema_version";
 /// Metadata key for the owning project root.
@@ -71,8 +73,13 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         from: PUBLICATION_SCHEMA_VERSION,
-        to: SCHEMA_VERSION,
+        to: GRAPH_SCHEMA_VERSION,
         apply: migrate_9_to_10,
+    },
+    Migration {
+        from: GRAPH_SCHEMA_VERSION,
+        to: SCHEMA_VERSION,
+        apply: migrate_10_to_11,
     },
 ];
 
@@ -178,6 +185,8 @@ struct ForeignKeyContract {
 static SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
 /// Process-local immutable predecessor contract derived from base DDL.
 static PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
+/// Process-local immutable schema-10 contract derived from graph DDL.
+static GRAPH_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
 
 /// Immutable physical schema emitted by the released 0.3.26 runtime.
 #[cfg(test)]
@@ -234,32 +243,6 @@ const BASE_SCHEMA_SQL: &str = "
         summary TEXT,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(node_id, summary_level, subject)
-    );
-
-    CREATE TABLE usage_events (
-        id INTEGER PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        command TEXT NOT NULL,
-        path TEXT,
-        query TEXT,
-        estimated_tokens_without_projectatlas INTEGER,
-        estimated_tokens_with_projectatlas INTEGER,
-        estimated_tokens_saved INTEGER,
-        token_savings_bucket TEXT NOT NULL DEFAULT 'navigation_avoidance',
-        provider TEXT NOT NULL DEFAULT 'heuristic',
-        model TEXT NOT NULL DEFAULT 'unknown',
-        tokenizer_backend TEXT NOT NULL DEFAULT 'chars_div_4',
-        accuracy TEXT NOT NULL DEFAULT 'heuristic_estimate',
-        baseline_kind TEXT NOT NULL DEFAULT 'selected_candidates',
-        confidence TEXT NOT NULL DEFAULT 'inferred',
-        calculation_trace TEXT NOT NULL DEFAULT 'heuristic=ceil(chars_or_bytes/4)',
-        accounting_layer TEXT NOT NULL DEFAULT 'modeled_avoidance',
-        estimate_method TEXT NOT NULL DEFAULT 'heuristic_chars_or_bytes_div_ceil_4',
-        denominator_kind TEXT NOT NULL DEFAULT 'selected_candidates',
-        baseline_identity TEXT NOT NULL DEFAULT '',
-        baseline_fingerprint TEXT NOT NULL DEFAULT '',
-        dedupe_scope TEXT NOT NULL DEFAULT 'session',
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
     CREATE TABLE symbols (
@@ -325,7 +308,6 @@ const BASE_SCHEMA_SQL: &str = "
     CREATE INDEX idx_purposes_status ON purposes(status);
     CREATE INDEX idx_summaries_level ON summaries(summary_level);
     CREATE INDEX idx_summaries_summary ON summaries(summary);
-    CREATE INDEX idx_usage_session ON usage_events(session_id);
     CREATE INDEX idx_symbols_path ON symbols(path);
     CREATE INDEX idx_symbols_name ON symbols(name);
     CREATE INDEX idx_symbols_kind ON symbols(kind);
@@ -334,6 +316,36 @@ const BASE_SCHEMA_SQL: &str = "
     CREATE INDEX idx_symbol_relations_target ON symbol_relations(target_name);
     CREATE INDEX idx_health_resolutions_category ON health_resolutions(category);
     CREATE INDEX idx_file_texts_hash ON file_texts(content_hash);
+";
+
+/// Usage-event layout owned by released schemas 8 through 10.
+const LEGACY_USAGE_SCHEMA_SQL: &str = "
+    CREATE TABLE usage_events (
+        id INTEGER PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        command TEXT NOT NULL,
+        path TEXT,
+        query TEXT,
+        estimated_tokens_without_projectatlas INTEGER,
+        estimated_tokens_with_projectatlas INTEGER,
+        estimated_tokens_saved INTEGER,
+        token_savings_bucket TEXT NOT NULL DEFAULT 'navigation_avoidance',
+        provider TEXT NOT NULL DEFAULT 'heuristic',
+        model TEXT NOT NULL DEFAULT 'unknown',
+        tokenizer_backend TEXT NOT NULL DEFAULT 'chars_div_4',
+        accuracy TEXT NOT NULL DEFAULT 'heuristic_estimate',
+        baseline_kind TEXT NOT NULL DEFAULT 'selected_candidates',
+        confidence TEXT NOT NULL DEFAULT 'inferred',
+        calculation_trace TEXT NOT NULL DEFAULT 'heuristic=ceil(chars_or_bytes/4)',
+        accounting_layer TEXT NOT NULL DEFAULT 'modeled_avoidance',
+        estimate_method TEXT NOT NULL DEFAULT 'heuristic_chars_or_bytes_div_ceil_4',
+        denominator_kind TEXT NOT NULL DEFAULT 'selected_candidates',
+        baseline_identity TEXT NOT NULL DEFAULT '',
+        baseline_fingerprint TEXT NOT NULL DEFAULT '',
+        dedupe_scope TEXT NOT NULL DEFAULT 'session',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX idx_usage_session ON usage_events(session_id);
     CREATE INDEX idx_usage_created_at ON usage_events(created_at);
     CREATE INDEX idx_usage_session_created_at ON usage_events(session_id, created_at);
 ";
@@ -559,6 +571,307 @@ const GRAPH_SCHEMA_SQL: &str = "
         ON graph_coverage(scope_path, id);
     CREATE INDEX idx_graph_coverage_relation_state
         ON graph_coverage(relation_scope, relation_kind, state, id);
+";
+
+/// Bounded telemetry state shared by fresh databases and the 10-to-11 migration.
+const TELEMETRY_STORAGE_SCHEMA_SQL: &str = "
+    CREATE TABLE usage_instances (
+        instance_row_id INTEGER PRIMARY KEY,
+        project_instance_id BLOB NOT NULL CHECK(length(project_instance_id) = 16),
+        runtime_instance_id BLOB NOT NULL
+            CHECK(
+                length(runtime_instance_id) = 16
+                AND runtime_instance_id <> X'00000000000000000000000000000000'
+            ),
+        owner TEXT NOT NULL
+            CHECK(owner IN ('cli_invocation', 'mcp_process', 'library_handle', 'migrated_legacy')),
+        caller_label TEXT
+            CHECK(caller_label IS NULL OR (typeof(caller_label) = 'text' AND length(caller_label) > 0)),
+        state TEXT NOT NULL DEFAULT 'active'
+            CHECK(state IN ('active', 'sealed', 'expired')),
+        started_at_epoch INTEGER NOT NULL
+            CHECK(typeof(started_at_epoch) = 'integer' AND started_at_epoch >= 0),
+        last_seen_at_epoch INTEGER NOT NULL
+            CHECK(typeof(last_seen_at_epoch) = 'integer' AND last_seen_at_epoch >= started_at_epoch),
+        sealed_at_epoch INTEGER
+            CHECK(sealed_at_epoch IS NULL OR (typeof(sealed_at_epoch) = 'integer' AND sealed_at_epoch >= started_at_epoch)),
+        raw_detail_complete INTEGER NOT NULL DEFAULT 1
+            CHECK(raw_detail_complete IN (0, 1)),
+        clock_anomaly INTEGER NOT NULL DEFAULT 0
+            CHECK(clock_anomaly IN (0, 1)),
+        CHECK(
+            (state = 'active' AND sealed_at_epoch IS NULL)
+            OR (state IN ('sealed', 'expired') AND sealed_at_epoch IS NOT NULL)
+        ),
+        UNIQUE(project_instance_id, runtime_instance_id)
+    ) STRICT;
+
+    CREATE TABLE usage_bucket_dimensions (
+        dimension_id INTEGER PRIMARY KEY,
+        token_savings_bucket TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        tokenizer_backend TEXT NOT NULL,
+        accuracy TEXT NOT NULL,
+        baseline_kind TEXT NOT NULL,
+        confidence TEXT NOT NULL,
+        accounting_layer TEXT NOT NULL,
+        estimate_method TEXT NOT NULL,
+        denominator_kind TEXT NOT NULL,
+        dedupe_scope TEXT NOT NULL,
+        overflow INTEGER NOT NULL DEFAULT 0 CHECK(overflow IN (0, 1)),
+        UNIQUE(
+            token_savings_bucket,
+            provider,
+            model,
+            tokenizer_backend,
+            accuracy,
+            baseline_kind,
+            confidence,
+            accounting_layer,
+            estimate_method,
+            denominator_kind,
+            dedupe_scope,
+            overflow
+        )
+    ) STRICT;
+
+    CREATE TABLE usage_instance_baselines (
+        instance_row_id INTEGER NOT NULL
+            REFERENCES usage_instances(instance_row_id) ON DELETE CASCADE,
+        baseline_key BLOB NOT NULL
+            CHECK(length(baseline_key) = 32),
+        baseline_identity TEXT NOT NULL,
+        baseline_fingerprint TEXT NOT NULL,
+        denominator_kind TEXT NOT NULL,
+        maximum_without INTEGER NOT NULL
+            CHECK(typeof(maximum_without) = 'integer' AND maximum_without >= 0),
+        emitted_with INTEGER NOT NULL
+            CHECK(typeof(emitted_with) = 'integer' AND emitted_with >= 0),
+        calls INTEGER NOT NULL
+            CHECK(typeof(calls) = 'integer' AND calls > 0),
+        witness_logical_bytes INTEGER NOT NULL
+            CHECK(typeof(witness_logical_bytes) = 'integer' AND witness_logical_bytes >= 0),
+        PRIMARY KEY(instance_row_id, baseline_key)
+    ) STRICT, WITHOUT ROWID;
+
+    CREATE TABLE usage_labels (
+        project_instance_id BLOB NOT NULL CHECK(length(project_instance_id) = 16),
+        caller_label TEXT NOT NULL CHECK(length(caller_label) > 0),
+        last_seen_at_epoch INTEGER NOT NULL CHECK(last_seen_at_epoch >= 0),
+        detail_complete INTEGER NOT NULL DEFAULT 1 CHECK(detail_complete IN (0, 1)),
+        PRIMARY KEY(project_instance_id, caller_label)
+    ) STRICT, WITHOUT ROWID;
+
+    CREATE TABLE usage_global_aggregates (
+        project_instance_id BLOB NOT NULL CHECK(length(project_instance_id) = 16),
+        dimension_id INTEGER NOT NULL
+            REFERENCES usage_bucket_dimensions(dimension_id) ON DELETE RESTRICT,
+        calls INTEGER NOT NULL DEFAULT 0
+            CHECK(typeof(calls) = 'integer' AND calls >= 0),
+        estimated_without INTEGER NOT NULL DEFAULT 0
+            CHECK(typeof(estimated_without) = 'integer' AND estimated_without >= 0),
+        estimated_with INTEGER NOT NULL DEFAULT 0
+            CHECK(typeof(estimated_with) = 'integer' AND estimated_with >= 0),
+        observed_without INTEGER NOT NULL DEFAULT 0
+            CHECK(typeof(observed_without) = 'integer' AND observed_without >= 0),
+        observed_with INTEGER NOT NULL DEFAULT 0
+            CHECK(typeof(observed_with) = 'integer' AND observed_with >= 0),
+        modeled_without INTEGER NOT NULL DEFAULT 0
+            CHECK(typeof(modeled_without) = 'integer' AND modeled_without >= 0),
+        modeled_with INTEGER NOT NULL DEFAULT 0
+            CHECK(typeof(modeled_with) = 'integer' AND modeled_with >= 0),
+        deduped_modeled_without INTEGER NOT NULL DEFAULT 0
+            CHECK(typeof(deduped_modeled_without) = 'integer' AND deduped_modeled_without >= 0),
+        deduped_modeled_with INTEGER NOT NULL DEFAULT 0
+            CHECK(typeof(deduped_modeled_with) = 'integer' AND deduped_modeled_with >= 0),
+        repeated_baselines INTEGER NOT NULL DEFAULT 0
+            CHECK(typeof(repeated_baselines) = 'integer' AND repeated_baselines >= 0),
+        observed_file_read_replacements INTEGER NOT NULL DEFAULT 0
+            CHECK(typeof(observed_file_read_replacements) = 'integer' AND observed_file_read_replacements >= 0),
+        modeled_file_reads_avoided INTEGER NOT NULL DEFAULT 0
+            CHECK(typeof(modeled_file_reads_avoided) = 'integer' AND modeled_file_reads_avoided >= 0),
+        PRIMARY KEY(project_instance_id, dimension_id)
+    ) STRICT, WITHOUT ROWID;
+
+    CREATE TABLE usage_instance_aggregates (
+        instance_row_id INTEGER NOT NULL
+            REFERENCES usage_instances(instance_row_id) ON DELETE CASCADE,
+        dimension_id INTEGER NOT NULL
+            REFERENCES usage_bucket_dimensions(dimension_id) ON DELETE RESTRICT,
+        calls INTEGER NOT NULL DEFAULT 0 CHECK(calls >= 0),
+        estimated_without INTEGER NOT NULL DEFAULT 0 CHECK(estimated_without >= 0),
+        estimated_with INTEGER NOT NULL DEFAULT 0 CHECK(estimated_with >= 0),
+        observed_without INTEGER NOT NULL DEFAULT 0 CHECK(observed_without >= 0),
+        observed_with INTEGER NOT NULL DEFAULT 0 CHECK(observed_with >= 0),
+        modeled_without INTEGER NOT NULL DEFAULT 0 CHECK(modeled_without >= 0),
+        modeled_with INTEGER NOT NULL DEFAULT 0 CHECK(modeled_with >= 0),
+        deduped_modeled_without INTEGER NOT NULL DEFAULT 0 CHECK(deduped_modeled_without >= 0),
+        deduped_modeled_with INTEGER NOT NULL DEFAULT 0 CHECK(deduped_modeled_with >= 0),
+        repeated_baselines INTEGER NOT NULL DEFAULT 0 CHECK(repeated_baselines >= 0),
+        observed_file_read_replacements INTEGER NOT NULL DEFAULT 0
+            CHECK(observed_file_read_replacements >= 0),
+        modeled_file_reads_avoided INTEGER NOT NULL DEFAULT 0
+            CHECK(modeled_file_reads_avoided >= 0),
+        PRIMARY KEY(instance_row_id, dimension_id)
+    ) STRICT, WITHOUT ROWID;
+
+    CREATE TABLE usage_daily_aggregates (
+        project_instance_id BLOB NOT NULL CHECK(length(project_instance_id) = 16),
+        day_epoch INTEGER NOT NULL CHECK(day_epoch >= 0),
+        dimension_id INTEGER NOT NULL
+            REFERENCES usage_bucket_dimensions(dimension_id) ON DELETE RESTRICT,
+        calls INTEGER NOT NULL DEFAULT 0 CHECK(calls >= 0),
+        estimated_without INTEGER NOT NULL DEFAULT 0 CHECK(estimated_without >= 0),
+        estimated_with INTEGER NOT NULL DEFAULT 0 CHECK(estimated_with >= 0),
+        observed_without INTEGER NOT NULL DEFAULT 0 CHECK(observed_without >= 0),
+        observed_with INTEGER NOT NULL DEFAULT 0 CHECK(observed_with >= 0),
+        modeled_without INTEGER NOT NULL DEFAULT 0 CHECK(modeled_without >= 0),
+        modeled_with INTEGER NOT NULL DEFAULT 0 CHECK(modeled_with >= 0),
+        deduped_modeled_without INTEGER NOT NULL DEFAULT 0 CHECK(deduped_modeled_without >= 0),
+        deduped_modeled_with INTEGER NOT NULL DEFAULT 0 CHECK(deduped_modeled_with >= 0),
+        repeated_baselines INTEGER NOT NULL DEFAULT 0 CHECK(repeated_baselines >= 0),
+        observed_file_read_replacements INTEGER NOT NULL DEFAULT 0
+            CHECK(observed_file_read_replacements >= 0),
+        modeled_file_reads_avoided INTEGER NOT NULL DEFAULT 0
+            CHECK(modeled_file_reads_avoided >= 0),
+        PRIMARY KEY(project_instance_id, day_epoch, dimension_id)
+    ) STRICT, WITHOUT ROWID;
+
+    CREATE TABLE usage_instance_daily_aggregates (
+        instance_row_id INTEGER NOT NULL
+            REFERENCES usage_instances(instance_row_id) ON DELETE CASCADE,
+        day_epoch INTEGER NOT NULL CHECK(day_epoch >= 0),
+        dimension_id INTEGER NOT NULL
+            REFERENCES usage_bucket_dimensions(dimension_id) ON DELETE RESTRICT,
+        calls INTEGER NOT NULL DEFAULT 0 CHECK(calls >= 0),
+        estimated_without INTEGER NOT NULL DEFAULT 0 CHECK(estimated_without >= 0),
+        estimated_with INTEGER NOT NULL DEFAULT 0 CHECK(estimated_with >= 0),
+        observed_without INTEGER NOT NULL DEFAULT 0 CHECK(observed_without >= 0),
+        observed_with INTEGER NOT NULL DEFAULT 0 CHECK(observed_with >= 0),
+        modeled_without INTEGER NOT NULL DEFAULT 0 CHECK(modeled_without >= 0),
+        modeled_with INTEGER NOT NULL DEFAULT 0 CHECK(modeled_with >= 0),
+        deduped_modeled_without INTEGER NOT NULL DEFAULT 0 CHECK(deduped_modeled_without >= 0),
+        deduped_modeled_with INTEGER NOT NULL DEFAULT 0 CHECK(deduped_modeled_with >= 0),
+        repeated_baselines INTEGER NOT NULL DEFAULT 0 CHECK(repeated_baselines >= 0),
+        observed_file_read_replacements INTEGER NOT NULL DEFAULT 0
+            CHECK(observed_file_read_replacements >= 0),
+        modeled_file_reads_avoided INTEGER NOT NULL DEFAULT 0
+            CHECK(modeled_file_reads_avoided >= 0),
+        PRIMARY KEY(instance_row_id, day_epoch, dimension_id)
+    ) STRICT, WITHOUT ROWID;
+
+    CREATE TABLE usage_retention_state (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        policy_version INTEGER NOT NULL CHECK(policy_version > 0),
+        logical_byte_version INTEGER NOT NULL CHECK(logical_byte_version > 0),
+        raw_rows INTEGER NOT NULL DEFAULT 0 CHECK(raw_rows >= 0),
+        raw_logical_bytes INTEGER NOT NULL DEFAULT 0 CHECK(raw_logical_bytes >= 0),
+        baseline_rows INTEGER NOT NULL DEFAULT 0 CHECK(baseline_rows >= 0),
+        baseline_logical_bytes INTEGER NOT NULL DEFAULT 0 CHECK(baseline_logical_bytes >= 0),
+        dimension_rows INTEGER NOT NULL DEFAULT 0 CHECK(dimension_rows >= 0),
+        instance_rows INTEGER NOT NULL DEFAULT 0 CHECK(instance_rows >= 0),
+        label_rows INTEGER NOT NULL DEFAULT 0 CHECK(label_rows >= 0),
+        daily_rows INTEGER NOT NULL DEFAULT 0 CHECK(daily_rows >= 0),
+        label_tombstone_rows INTEGER NOT NULL DEFAULT 0 CHECK(label_tombstone_rows >= 0),
+        instance_tombstone_rows INTEGER NOT NULL DEFAULT 0 CHECK(instance_tombstone_rows >= 0),
+        pruned_raw_rows INTEGER NOT NULL DEFAULT 0 CHECK(pruned_raw_rows >= 0),
+        pruned_instance_rows INTEGER NOT NULL DEFAULT 0 CHECK(pruned_instance_rows >= 0),
+        evicted_tombstones INTEGER NOT NULL DEFAULT 0 CHECK(evicted_tombstones >= 0),
+        writes_since_checkpoint INTEGER NOT NULL DEFAULT 0 CHECK(writes_since_checkpoint >= 0),
+        last_maintenance_epoch INTEGER NOT NULL DEFAULT 0 CHECK(last_maintenance_epoch >= 0),
+        last_checkpoint_epoch INTEGER NOT NULL DEFAULT 0 CHECK(last_checkpoint_epoch >= 0),
+        oldest_retained_epoch INTEGER,
+        raw_detail_complete INTEGER NOT NULL DEFAULT 1 CHECK(raw_detail_complete IN (0, 1)),
+        dimension_detail_complete INTEGER NOT NULL DEFAULT 1
+            CHECK(dimension_detail_complete IN (0, 1)),
+        label_history_complete INTEGER NOT NULL DEFAULT 1
+            CHECK(label_history_complete IN (0, 1)),
+        maintenance_pending INTEGER NOT NULL DEFAULT 0 CHECK(maintenance_pending IN (0, 1)),
+        clock_anomaly INTEGER NOT NULL DEFAULT 0 CHECK(clock_anomaly IN (0, 1)),
+        spill_state TEXT NOT NULL DEFAULT 'not_applicable'
+            CHECK(spill_state = 'not_applicable'),
+        checkpoint_state TEXT NOT NULL DEFAULT 'not_due'
+            CHECK(checkpoint_state IN ('not_due', 'completed', 'busy', 'error'))
+    ) STRICT;
+
+    CREATE TABLE usage_label_tombstones (
+        project_instance_id BLOB NOT NULL CHECK(length(project_instance_id) = 16),
+        caller_label TEXT NOT NULL,
+        expired_at_epoch INTEGER NOT NULL CHECK(expired_at_epoch >= 0),
+        last_instance_id BLOB
+            CHECK(last_instance_id IS NULL OR length(last_instance_id) = 16),
+        PRIMARY KEY(project_instance_id, caller_label)
+    ) STRICT, WITHOUT ROWID;
+
+    CREATE TABLE usage_instance_tombstones (
+        project_instance_id BLOB NOT NULL CHECK(length(project_instance_id) = 16),
+        runtime_instance_id BLOB NOT NULL CHECK(length(runtime_instance_id) = 16),
+        retired_at_epoch INTEGER NOT NULL CHECK(retired_at_epoch >= 0),
+        PRIMARY KEY(project_instance_id, runtime_instance_id)
+    ) STRICT, WITHOUT ROWID;
+
+    CREATE INDEX idx_usage_instances_label_state
+        ON usage_instances(project_instance_id, caller_label, state, started_at_epoch, instance_row_id);
+    CREATE INDEX idx_usage_instances_state_seen
+        ON usage_instances(project_instance_id, state, last_seen_at_epoch, instance_row_id);
+    CREATE INDEX idx_usage_instances_retention
+        ON usage_instances(state, last_seen_at_epoch, instance_row_id);
+    CREATE INDEX idx_usage_labels_seen
+        ON usage_labels(project_instance_id, last_seen_at_epoch, caller_label);
+    CREATE INDEX idx_usage_labels_retention
+        ON usage_labels(last_seen_at_epoch, project_instance_id, caller_label);
+    CREATE INDEX idx_usage_daily_retention
+        ON usage_daily_aggregates(day_epoch, project_instance_id, dimension_id);
+    CREATE INDEX idx_usage_instance_daily_retention
+        ON usage_instance_daily_aggregates(day_epoch, instance_row_id, dimension_id);
+    CREATE INDEX idx_usage_label_tombstones_expiry
+        ON usage_label_tombstones(project_instance_id, expired_at_epoch, caller_label);
+    CREATE INDEX idx_usage_instance_tombstones_expiry
+        ON usage_instance_tombstones(project_instance_id, retired_at_epoch, runtime_instance_id);
+    CREATE INDEX idx_usage_label_tombstones_retention
+        ON usage_label_tombstones(expired_at_epoch, project_instance_id, caller_label);
+    CREATE INDEX idx_usage_instance_tombstones_retention
+        ON usage_instance_tombstones(retired_at_epoch, project_instance_id, runtime_instance_id);
+
+    INSERT INTO usage_retention_state(
+        singleton,
+        policy_version,
+        logical_byte_version
+    ) VALUES(1, 1, 1);
+";
+
+/// Final schema-11 raw event table, created directly for fresh databases.
+const CURRENT_USAGE_SCHEMA_SQL: &str = "
+    CREATE TABLE usage_events (
+        id INTEGER PRIMARY KEY,
+        instance_row_id INTEGER NOT NULL
+            REFERENCES usage_instances(instance_row_id) ON DELETE CASCADE,
+        dimension_id INTEGER NOT NULL
+            REFERENCES usage_bucket_dimensions(dimension_id) ON DELETE RESTRICT,
+        command TEXT NOT NULL,
+        path TEXT,
+        query TEXT,
+        estimated_tokens_without_projectatlas INTEGER,
+        estimated_tokens_with_projectatlas INTEGER,
+        estimated_tokens_saved INTEGER,
+        calculation_trace TEXT NOT NULL,
+        baseline_identity TEXT NOT NULL,
+        baseline_fingerprint TEXT NOT NULL,
+        created_at_epoch INTEGER NOT NULL CHECK(created_at_epoch >= 0),
+        logical_bytes INTEGER NOT NULL CHECK(logical_bytes >= 0)
+    ) STRICT;
+    CREATE INDEX idx_usage_created_at
+        ON usage_events(created_at_epoch, id);
+    CREATE INDEX idx_usage_instance_created
+        ON usage_events(instance_row_id, created_at_epoch, id);
+";
+
+/// Rename schema-10 raw events before rebuilding them into the strict current shape.
+const PREPARE_TELEMETRY_MIGRATION_SQL: &str = "
+    DROP INDEX idx_usage_created_at;
+    DROP INDEX idx_usage_session_created_at;
+    ALTER TABLE usage_events RENAME TO usage_events_legacy;
 ";
 
 /// Inspect an existing database without creating, migrating, or repairing it.
@@ -872,7 +1185,9 @@ fn schema_state(connection: &Connection) -> DbResult<SchemaState> {
     let found = stored_schema_version(connection)?;
     match found {
         SCHEMA_VERSION => Ok(SchemaState::Current),
-        PREVIOUS_SCHEMA_VERSION | PUBLICATION_SCHEMA_VERSION => Ok(SchemaState::UpgradeRequired),
+        PREVIOUS_SCHEMA_VERSION | PUBLICATION_SCHEMA_VERSION | GRAPH_SCHEMA_VERSION => {
+            Ok(SchemaState::UpgradeRequired)
+        }
         _ => Err(DbError::SchemaVersion {
             found,
             expected: SCHEMA_VERSION,
@@ -884,6 +1199,9 @@ fn schema_state(connection: &Connection) -> DbResult<SchemaState> {
 fn create_fresh(connection: &Connection, expected_root: Option<&str>) -> DbResult<()> {
     connection.execute_batch(BASE_SCHEMA_SQL)?;
     connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
+    connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
+    crate::telemetry::initialize_empty_storage(connection)?;
     if let Some(root) = expected_root {
         set_metadata(connection, PROJECT_ROOT_KEY, root)?;
     }
@@ -925,6 +1243,16 @@ fn migrate_9_to_10(connection: &Connection) -> DbResult<()> {
     invalidate_derived_publication(connection)
 }
 
+/// Add bounded telemetry instances, dimensions, aggregates, and retention state.
+fn migrate_10_to_11(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(PREPARE_TELEMETRY_MIGRATION_SQL)?;
+    connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
+    connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
+    crate::telemetry::migrate_legacy_usage(connection)?;
+    connection.execute_batch("DROP TABLE usage_events_legacy")?;
+    Ok(())
+}
+
 /// Invalidate derived rows without deleting authored local state.
 pub(crate) fn invalidate_derived_publication(connection: &Connection) -> DbResult<()> {
     connection.execute(
@@ -960,7 +1288,16 @@ fn validate_integrity(connection: &Connection) -> DbResult<()> {
 fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResult<()> {
     let expected = match state {
         SchemaState::Current => schema_contract()?,
-        SchemaState::UpgradeRequired => predecessor_schema_contract()?,
+        SchemaState::UpgradeRequired => match stored_schema_version(connection)? {
+            PREVIOUS_SCHEMA_VERSION | PUBLICATION_SCHEMA_VERSION => predecessor_schema_contract()?,
+            GRAPH_SCHEMA_VERSION => graph_predecessor_schema_contract()?,
+            found => {
+                return Err(DbError::SchemaVersion {
+                    found,
+                    expected: SCHEMA_VERSION,
+                });
+            }
+        },
         SchemaState::Fresh => {
             return Err(DbError::SchemaPostcondition {
                 expected: SCHEMA_VERSION,
@@ -1036,8 +1373,23 @@ fn schema_contract() -> DbResult<&'static SchemaContract> {
     let connection = Connection::open_in_memory()?;
     connection.execute_batch(BASE_SCHEMA_SQL)?;
     connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
+    connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
     Ok(SCHEMA_CONTRACT.get_or_init(|| contract))
+}
+
+/// Build the immutable schema-10 contract from base plus graph DDL.
+fn graph_predecessor_schema_contract() -> DbResult<&'static SchemaContract> {
+    if let Some(contract) = GRAPH_PREDECESSOR_SCHEMA_CONTRACT.get() {
+        return Ok(contract);
+    }
+    let connection = Connection::open_in_memory()?;
+    connection.execute_batch(BASE_SCHEMA_SQL)?;
+    connection.execute_batch(LEGACY_USAGE_SCHEMA_SQL)?;
+    connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    let contract = read_schema_contract(&connection)?;
+    Ok(GRAPH_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
 }
 
 /// Build the immutable schema-8/9 contract from the unchanged base DDL.
@@ -1047,6 +1399,7 @@ fn predecessor_schema_contract() -> DbResult<&'static SchemaContract> {
     }
     let connection = Connection::open_in_memory()?;
     connection.execute_batch(BASE_SCHEMA_SQL)?;
+    connection.execute_batch(LEGACY_USAGE_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
     Ok(PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
 }
@@ -1756,6 +2109,68 @@ mod tests {
                     .into());
                 }
             }
+            let migrated_usage = store.connection.query_row(
+                "SELECT i.caller_label, i.owner, i.state, e.command
+                 FROM usage_events AS e
+                 JOIN usage_instances AS i USING(instance_row_id)",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )?;
+            if migrated_usage
+                != (
+                    Some("session".to_string()),
+                    "migrated_legacy".to_string(),
+                    "sealed".to_string(),
+                    "files".to_string(),
+                )
+            {
+                return Err(io::Error::other(format!(
+                    "schema {version} upgrade changed migrated telemetry identity or content"
+                ))
+                .into());
+            }
+            let retention = store.connection.query_row(
+                "SELECT raw_rows, instance_rows, label_rows, dimension_rows,
+                        baseline_rows, daily_rows
+                 FROM usage_retention_state WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )?;
+            if retention != (1, 1, 1, 2, 0, 0) {
+                let mut statement = store.connection.prepare(
+                    "SELECT token_savings_bucket, provider, overflow
+                     FROM usage_bucket_dimensions ORDER BY dimension_id",
+                )?;
+                let dimensions = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Err(io::Error::other(format!(
+                    "schema {version} upgrade reconciled incorrect telemetry counters: {retention:?}; dimensions={dimensions:?}"
+                ))
+                .into());
+            }
             let identity = store.connection.query_row(
                 "SELECT length(project_instance_id), active_generation FROM project_identity
                   WHERE singleton = 1",
@@ -2263,7 +2678,7 @@ mod tests {
             INSERT INTO usage_events(session_id, command) VALUES('session', 'files');
             CREATE TEMP TRIGGER abort_final_schema_version
             BEFORE UPDATE OF value ON metadata
-            WHEN OLD.key = 'schema_version' AND NEW.value = '10'
+            WHEN OLD.key = 'schema_version' AND NEW.value = '11'
             BEGIN
                 SELECT RAISE(ABORT, 'forced final schema-version failure');
             END;
@@ -2280,17 +2695,26 @@ mod tests {
         if version != Some(PUBLICATION_SCHEMA_VERSION.to_string()) {
             return Err(io::Error::other("failed migration changed schema version").into());
         }
-        let graph_tables = connection.query_row(
+        let migrated_tables = connection.query_row(
             "SELECT COUNT(*) FROM sqlite_schema
              WHERE type = 'table' AND name IN (
                 'project_identity', 'graph_entities', 'graph_relations',
-                'graph_relation_occurrences', 'graph_coverage'
+                'graph_relation_occurrences', 'graph_coverage',
+                'usage_instances', 'usage_bucket_dimensions',
+                'usage_instance_baselines', 'usage_labels',
+                'usage_global_aggregates', 'usage_instance_aggregates',
+                'usage_daily_aggregates', 'usage_instance_daily_aggregates',
+                'usage_retention_state', 'usage_label_tombstones',
+                'usage_instance_tombstones'
              )",
             [],
             |row| row.get::<_, i64>(0),
         )?;
-        if graph_tables != 0 {
-            return Err(io::Error::other("failed migration retained graph schema objects").into());
+        if migrated_tables != 0 {
+            return Err(io::Error::other(
+                "failed migration retained graph or telemetry schema objects",
+            )
+            .into());
         }
         let publication_keys = connection.query_row(
             "SELECT COUNT(*) FROM metadata WHERE key IN (?1, ?2, ?3)",
@@ -2323,7 +2747,538 @@ mod tests {
         {
             return Err(io::Error::other("failed migration changed project root identity").into());
         }
+        connection.execute_batch("DROP TRIGGER abort_final_schema_version")?;
+        initialize(&connection, Some(&normalize_native_path_display(&root)))?;
+        if read_metadata(&connection, SCHEMA_VERSION_KEY)? != Some(SCHEMA_VERSION.to_string()) {
+            return Err(io::Error::other("retry did not advance the final schema version").into());
+        }
+        let migrated = connection.query_row(
+            "SELECT
+                 (SELECT COUNT(*) FROM usage_events),
+                 (SELECT COUNT(*) FROM usage_instances),
+                 (SELECT raw_rows FROM usage_retention_state WHERE singleton = 1)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        if migrated != (1, 1, 1) {
+            return Err(io::Error::other("retry did not migrate legacy telemetry exactly").into());
+        }
         Ok(())
+    }
+
+    #[test]
+    fn schema_ten_telemetry_migration_rolls_back_malformed_rows_and_retries()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root)?;
+        let db_path = temp.path().join("projectatlas.db");
+        let connection = Connection::open(&db_path)?;
+        configure_writable(&connection)?;
+        create_released_schema_eight(&connection)?;
+        set_metadata(
+            &connection,
+            PROJECT_ROOT_KEY,
+            &normalize_native_path_display(&root),
+        )?;
+        migrate_8_to_9(&connection)?;
+        set_metadata(
+            &connection,
+            SCHEMA_VERSION_KEY,
+            &PUBLICATION_SCHEMA_VERSION.to_string(),
+        )?;
+        migrate_9_to_10(&connection)?;
+        set_metadata(
+            &connection,
+            SCHEMA_VERSION_KEY,
+            &GRAPH_SCHEMA_VERSION.to_string(),
+        )?;
+        connection.execute(
+            "INSERT INTO usage_events(
+                 session_id, command,
+                 estimated_tokens_without_projectatlas,
+                 estimated_tokens_with_projectatlas,
+                 estimated_tokens_saved,
+                 created_at
+             ) VALUES('legacy', 'summary', 100, 10, 90, 'not-a-timestamp')",
+            [],
+        )?;
+        let identity_before = connection.query_row(
+            "SELECT project_instance_id FROM project_identity WHERE singleton = 1",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?;
+
+        let Err(error) = initialize(&connection, Some(&normalize_native_path_display(&root)))
+        else {
+            return Err(io::Error::other("malformed telemetry unexpectedly migrated").into());
+        };
+        if !matches!(error, DbError::InvalidEnum { .. }) {
+            return Err(io::Error::other(format!(
+                "malformed telemetry returned the wrong error: {error}"
+            ))
+            .into());
+        }
+        if read_metadata(&connection, SCHEMA_VERSION_KEY)? != Some(GRAPH_SCHEMA_VERSION.to_string())
+        {
+            return Err(io::Error::other("failed telemetry migration advanced schema").into());
+        }
+        let legacy_shape = connection.query_row(
+            "SELECT
+                 (SELECT COUNT(*) FROM usage_events),
+                 EXISTS(
+                     SELECT 1 FROM pragma_table_info('usage_events')
+                     WHERE name = 'created_at'
+                 ),
+                 EXISTS(
+                     SELECT 1 FROM sqlite_schema
+                     WHERE type = 'table' AND name = 'usage_instances'
+                 )",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        if legacy_shape != (1, 1, 0) {
+            return Err(io::Error::other("failed telemetry migration changed legacy rows").into());
+        }
+        let identity_after = connection.query_row(
+            "SELECT project_instance_id FROM project_identity WHERE singleton = 1",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?;
+        if identity_after != identity_before {
+            return Err(io::Error::other("failed telemetry migration changed identity").into());
+        }
+
+        let policy = crate::telemetry::TelemetryRetentionPolicy::default();
+        let oversized_label = "λ".repeat(policy.max_label_bytes + 1);
+        let oversized_path = "道".repeat(policy.max_path_bytes + 1);
+        let oversized_query = "ß".repeat(policy.max_query_bytes + 1);
+        let oversized_identity = "界".repeat(policy.max_baseline_witness_bytes + 1);
+        let oversized_fingerprint = "ø".repeat(256.min(policy.max_baseline_witness_bytes) + 1);
+        connection.execute(
+            "UPDATE usage_events
+             SET created_at = CURRENT_TIMESTAMP,
+                 session_id = ?1,
+                 command = '',
+                 path = ?2,
+                 query = ?3,
+                 token_savings_bucket = '',
+                 calculation_trace = '',
+                 baseline_identity = ?4,
+                 baseline_fingerprint = ?5",
+            params![
+                oversized_label,
+                oversized_path,
+                oversized_query,
+                oversized_identity,
+                oversized_fingerprint,
+            ],
+        )?;
+        connection.execute(
+            "INSERT INTO usage_events(
+                 session_id, command,
+                 estimated_tokens_without_projectatlas,
+                 estimated_tokens_with_projectatlas,
+                 estimated_tokens_saved,
+                 created_at
+             ) VALUES('', 'files', 200, 20, 180, CURRENT_TIMESTAMP)",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO usage_events(
+                 session_id, command, path, query,
+                 estimated_tokens_without_projectatlas,
+                 estimated_tokens_with_projectatlas,
+                 estimated_tokens_saved,
+                 calculation_trace, baseline_identity, baseline_fingerprint,
+                 created_at
+             ) VALUES(
+                 'valid-label', 'slice', 'src/lib.rs', 'needle',
+                 300, 30, 270,
+                 'trace=valid', 'valid-baseline', 'valid-fingerprint',
+                 CURRENT_TIMESTAMP
+             )",
+            [],
+        )?;
+        initialize(&connection, Some(&normalize_native_path_display(&root)))?;
+        let migrated = connection.query_row(
+            "SELECT
+                 (SELECT COUNT(*) FROM usage_events),
+                 (SELECT COUNT(*) FROM usage_instances),
+                 (SELECT SUM(calls) FROM usage_global_aggregates),
+                 (SELECT SUM(deduped_modeled_without - deduped_modeled_with)
+                    FROM usage_global_aggregates),
+                 (SELECT raw_rows FROM usage_retention_state WHERE singleton = 1),
+                 (SELECT daily_rows FROM usage_retention_state WHERE singleton = 1)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )?;
+        if migrated != (3, 3, 3, 540, 3, 5) {
+            return Err(io::Error::other(format!(
+                "schema-ten telemetry retry produced incorrect state: {migrated:?}"
+            ))
+            .into());
+        }
+        let bounded = connection.query_row(
+            "SELECT
+                 length(CAST(i.caller_label AS BLOB)), i.raw_detail_complete,
+                 length(CAST(e.command AS BLOB)),
+                 length(CAST(e.path AS BLOB)),
+                 length(CAST(e.query AS BLOB)),
+                 length(CAST(e.calculation_trace AS BLOB)),
+                 length(CAST(e.baseline_identity AS BLOB)),
+                 length(CAST(e.baseline_fingerprint AS BLOB)), d.overflow,
+                 s.raw_detail_complete, s.dimension_detail_complete,
+                 s.label_history_complete
+             FROM usage_events AS e
+             JOIN usage_instances AS i USING(instance_row_id)
+             JOIN usage_bucket_dimensions AS d USING(dimension_id)
+             CROSS JOIN usage_retention_state AS s
+             WHERE d.overflow = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
+                ))
+            },
+        )?;
+        if bounded.0 == 0
+            || bounded.0 > policy.max_label_bytes as i64
+            || bounded.2 == 0
+            || bounded.2 > policy.max_command_bytes as i64
+            || bounded.3 > policy.max_path_bytes as i64
+            || bounded.4 > policy.max_query_bytes as i64
+            || bounded.5 == 0
+            || bounded.5 > 256.min(policy.max_baseline_witness_bytes) as i64
+            || bounded.6 == 0
+            || bounded.6 > policy.max_baseline_witness_bytes as i64
+            || bounded.7 == 0
+            || bounded.7 > 256.min(policy.max_baseline_witness_bytes) as i64
+            || bounded.8 != 1
+            || (bounded.1, bounded.9, bounded.10, bounded.11) != (0, 0, 0, 0)
+        {
+            return Err(io::Error::other(format!(
+                "schema-ten telemetry retry retained unbounded or falsely complete detail: {bounded:?}"
+            ))
+            .into());
+        }
+        let valid = connection.query_row(
+            "SELECT i.caller_label, e.command, e.path, e.query,
+                    e.calculation_trace, e.baseline_identity,
+                    e.baseline_fingerprint, d.overflow
+             FROM usage_events AS e
+             JOIN usage_instances AS i USING(instance_row_id)
+             JOIN usage_bucket_dimensions AS d USING(dimension_id)
+             WHERE e.command = 'slice'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            },
+        )?;
+        if valid
+            != (
+                Some("valid-label".to_string()),
+                "slice".to_string(),
+                Some("src/lib.rs".to_string()),
+                Some("needle".to_string()),
+                "trace=valid".to_string(),
+                "valid-baseline".to_string(),
+                "valid-fingerprint".to_string(),
+                0,
+            )
+        {
+            return Err(io::Error::other(format!(
+                "schema-ten telemetry migration changed valid detail: {valid:?}"
+            ))
+            .into());
+        }
+        let valid_dimension = connection.query_row(
+            "SELECT d.token_savings_bucket, d.provider, d.model,
+                    d.tokenizer_backend, d.accuracy, d.baseline_kind,
+                    d.confidence, d.accounting_layer, d.estimate_method,
+                    d.denominator_kind, d.dedupe_scope, d.overflow
+             FROM usage_events AS e
+             JOIN usage_bucket_dimensions AS d USING(dimension_id)
+             WHERE e.command = 'slice'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, i64>(11)?,
+                ))
+            },
+        )?;
+        if valid_dimension
+            != (
+                "navigation_avoidance".to_string(),
+                "heuristic".to_string(),
+                "unknown".to_string(),
+                "chars_div_4".to_string(),
+                "heuristic_estimate".to_string(),
+                "selected_candidates".to_string(),
+                "inferred".to_string(),
+                "modeled_avoidance".to_string(),
+                "heuristic_chars_or_bytes_div_ceil_4".to_string(),
+                "selected_candidates".to_string(),
+                "session".to_string(),
+                0,
+            )
+        {
+            return Err(io::Error::other(format!(
+                "schema-ten telemetry migration changed valid dimensions: {valid_dimension:?}"
+            ))
+            .into());
+        }
+        let empty_labels = connection.query_row(
+            "SELECT COUNT(*) FROM usage_instances WHERE caller_label IS NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if empty_labels != 1 {
+            return Err(
+                io::Error::other("empty predecessor label was not migrated as absent").into(),
+            );
+        }
+        drop(connection);
+        let reopened = Connection::open(&db_path)?;
+        configure_writable(&reopened)?;
+        initialize(&reopened, Some(&normalize_native_path_display(&root)))?;
+        let reopened_totals = reopened.query_row(
+            "SELECT
+                 (SELECT COUNT(*) FROM usage_events),
+                 (SELECT COUNT(*) FROM usage_instances),
+                 (SELECT SUM(calls) FROM usage_global_aggregates),
+                 (SELECT SUM(deduped_modeled_without - deduped_modeled_with)
+                    FROM usage_global_aggregates)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        if reopened_totals != (3, 3, 3, 540) {
+            return Err(io::Error::other(format!(
+                "reopened telemetry migration changed totals: {reopened_totals:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_ten_migration_preserves_exact_totals_above_runtime_baseline_capacity() {
+        let result = (|| -> Result<(), Box<dyn Error>> {
+            const LEGACY_BASELINES: i64 = 1_025;
+            const OVERSIZED_BASELINE_EVENTS: i64 = 3;
+
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("repo");
+            fs::create_dir_all(&root)?;
+            let connection = Connection::open(temp.path().join("projectatlas.db"))?;
+            configure_writable(&connection)?;
+            create_released_schema_eight(&connection)?;
+            set_metadata(
+                &connection,
+                PROJECT_ROOT_KEY,
+                &normalize_native_path_display(&root),
+            )?;
+            migrate_8_to_9(&connection)?;
+            set_metadata(
+                &connection,
+                SCHEMA_VERSION_KEY,
+                &PUBLICATION_SCHEMA_VERSION.to_string(),
+            )?;
+            migrate_9_to_10(&connection)?;
+            set_metadata(
+                &connection,
+                SCHEMA_VERSION_KEY,
+                &GRAPH_SCHEMA_VERSION.to_string(),
+            )?;
+            let mut insert = connection.prepare_cached(
+                "INSERT INTO usage_events(
+                 session_id, command,
+                 estimated_tokens_without_projectatlas,
+                 estimated_tokens_with_projectatlas,
+                 estimated_tokens_saved,
+                 baseline_identity,
+                 baseline_fingerprint
+             ) VALUES('large-legacy-session', 'summary', 10, 1, 9, ?1, ?2)",
+            )?;
+            for index in 0..LEGACY_BASELINES {
+                insert.execute(params![
+                    format!("source:src/file-{index}.rs"),
+                    format!("source:src/file-{index}.rs:v1"),
+                ])?;
+            }
+            let policy = crate::telemetry::TelemetryRetentionPolicy::default();
+            let shared_identity = "a".repeat(policy.max_baseline_witness_bytes + 1);
+            let shared_fingerprint = "b".repeat(256.min(policy.max_baseline_witness_bytes) + 1);
+            let repeated_identity = format!("{shared_identity}:repeated");
+            let repeated_fingerprint = format!("{shared_fingerprint}:repeated");
+            let distinct_identity = format!("{shared_identity}:distinct");
+            let distinct_fingerprint = format!("{shared_fingerprint}:distinct");
+            insert.execute(params![repeated_identity, repeated_fingerprint])?;
+            insert.execute(params![repeated_identity, repeated_fingerprint])?;
+            insert.execute(params![distinct_identity, distinct_fingerprint])?;
+            drop(insert);
+
+            initialize(&connection, Some(&normalize_native_path_display(&root)))?;
+            let migrated = connection.query_row(
+                "SELECT
+                 (SELECT COUNT(*) FROM usage_events),
+                 (SELECT COUNT(*) FROM usage_instances),
+                 (SELECT COUNT(*) FROM usage_instance_baselines),
+                 (SELECT state FROM usage_instances),
+                 (SELECT calls FROM usage_global_aggregates),
+                 (SELECT deduped_modeled_without - deduped_modeled_with
+                    FROM usage_global_aggregates),
+                 (SELECT repeated_baselines FROM usage_global_aggregates),
+                 raw_rows,
+                 baseline_rows,
+                 raw_detail_complete,
+                 dimension_detail_complete,
+                 label_history_complete,
+                 (SELECT COUNT(DISTINCT baseline_identity) FROM usage_events),
+                 (SELECT MAX(length(CAST(baseline_identity AS BLOB))) FROM usage_events),
+                 (SELECT MAX(length(CAST(baseline_fingerprint AS BLOB))) FROM usage_events)
+             FROM usage_retention_state WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, i64>(9)?,
+                        row.get::<_, i64>(10)?,
+                        row.get::<_, i64>(11)?,
+                        row.get::<_, i64>(12)?,
+                        row.get::<_, i64>(13)?,
+                        row.get::<_, i64>(14)?,
+                    ))
+                },
+            )?;
+            let (
+                raw_events,
+                instances,
+                baselines,
+                instance_state,
+                calls,
+                deduped_saved,
+                repeated_baseline_count,
+                raw_rows,
+                baseline_rows,
+                raw_detail_complete,
+                dimension_detail_complete,
+                label_history_complete,
+                distinct_baseline_identities,
+                maximum_identity_bytes,
+                maximum_fingerprint_bytes,
+            ) = migrated;
+            assert_eq!(
+                (
+                    raw_events,
+                    instances,
+                    baselines,
+                    instance_state,
+                    calls,
+                    deduped_saved,
+                    repeated_baseline_count,
+                    raw_rows,
+                ),
+                (
+                    LEGACY_BASELINES + OVERSIZED_BASELINE_EVENTS,
+                    1,
+                    0,
+                    "sealed".to_string(),
+                    LEGACY_BASELINES + OVERSIZED_BASELINE_EVENTS,
+                    LEGACY_BASELINES * 9 + 17,
+                    1,
+                    LEGACY_BASELINES + OVERSIZED_BASELINE_EVENTS,
+                )
+            );
+            assert_eq!(
+                (
+                    baseline_rows,
+                    raw_detail_complete,
+                    dimension_detail_complete,
+                    label_history_complete,
+                    distinct_baseline_identities,
+                ),
+                (0, 0, 1, 1, LEGACY_BASELINES + 2,)
+            );
+            assert!(maximum_identity_bytes <= policy.max_baseline_witness_bytes as i64);
+            assert!(maximum_fingerprint_bytes <= 256.min(policy.max_baseline_witness_bytes) as i64);
+            assert_eq!(
+                read_metadata(&connection, SCHEMA_VERSION_KEY)?,
+                Some(SCHEMA_VERSION.to_string())
+            );
+            Ok(())
+        })();
+        assert!(
+            result.is_ok(),
+            "over-budget telemetry migration test failed: {result:?}"
+        );
     }
 
     #[test]

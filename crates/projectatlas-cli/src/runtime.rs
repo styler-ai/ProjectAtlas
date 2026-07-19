@@ -26,7 +26,7 @@ use projectatlas_core::symbols::{RelationKind, SymbolGraph, SymbolKind};
 use projectatlas_core::telemetry::{
     TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_BASELINE_SELECTED_CANDIDATES,
     TOKEN_BUCKET_NAVIGATION_AVOIDANCE, TOKEN_CONFIDENCE_INFERRED, TOKEN_CONFIDENCE_POLICY_ESTIMATE,
-    usage_from_estimates_with_context, usage_from_text,
+    UsageInstanceId, UsageInstanceOwner, usage_from_estimates_with_context, usage_from_text,
 };
 use projectatlas_core::toon::{encode_agent_payload, render_ranked_node_rows};
 use projectatlas_core::{
@@ -37,7 +37,7 @@ use projectatlas_core::{
 };
 use projectatlas_db::{
     AtlasStore, HealthFindingsPage, HealthQuery, HealthScope, IndexPublicationGuard,
-    IndexPublicationState, IndexedFileText, read_project_root_read_only,
+    IndexPublicationState, IndexedFileText, TelemetryRetentionState, read_project_root_read_only,
     validate_database_location,
 };
 use projectatlas_fs::{
@@ -2193,9 +2193,52 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
     Ok(staged.report)
 }
 
+/// One optional telemetry identity owned by a CLI invocation or MCP process.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct UsageRuntimeInstance {
+    /// Opaque runtime-owned identity persisted with usage events.
+    id: UsageInstanceId,
+    /// Adapter lifecycle that owns sealing this identity.
+    owner: UsageInstanceOwner,
+}
+
+impl UsageRuntimeInstance {
+    /// Create an opaque runtime identity when operating-system entropy is available.
+    #[must_use]
+    pub(crate) fn new(owner: UsageInstanceOwner) -> Option<Self> {
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).ok()?;
+        UsageInstanceId::from_bytes(bytes)
+            .ok()
+            .map(|id| Self { id, owner })
+    }
+
+    /// Record one event using the lifecycle implied by this runtime owner.
+    fn record(
+        self,
+        store: &AtlasStore,
+        event: &projectatlas_core::telemetry::UsageEvent,
+    ) -> Result<(), CliError> {
+        store.record_usage_for_instance(
+            self.id,
+            self.owner,
+            event,
+            matches!(self.owner, UsageInstanceOwner::CliInvocation),
+        )?;
+        Ok(())
+    }
+
+    /// Seal this runtime instance in one selected project database.
+    pub(crate) fn seal(self, store: &AtlasStore) -> Result<(), CliError> {
+        store.seal_usage_instance(self.id)?;
+        Ok(())
+    }
+}
+
 /// Record a usage event from a fast baseline estimate and actual atlas payload.
 pub(crate) fn record_usage_estimate(
     store: &AtlasStore,
+    usage_instance: Option<UsageRuntimeInstance>,
     session: &str,
     command: &str,
     path: Option<String>,
@@ -2205,6 +2248,7 @@ pub(crate) fn record_usage_estimate(
 ) -> Result<(), CliError> {
     record_usage_estimate_with_context(
         store,
+        usage_instance,
         session,
         command,
         path,
@@ -2221,6 +2265,7 @@ pub(crate) fn record_usage_estimate(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_usage_estimate_with_context(
     store: &AtlasStore,
+    usage_instance: Option<UsageRuntimeInstance>,
     session: &str,
     command: &str,
     path: Option<String>,
@@ -2231,27 +2276,31 @@ pub(crate) fn record_usage_estimate_with_context(
     baseline_kind: &str,
     confidence: &str,
 ) -> Result<(), CliError> {
-    store.finish_index_read_snapshot()?;
-    if telemetry_disabled() {
+    let Some(usage_instance) = usage_instance.filter(|_| !telemetry_disabled()) else {
         return Ok(());
-    }
-    store.record_usage(&usage_from_estimates_with_context(
-        session,
-        command,
-        path,
-        query,
-        estimated_without_projectatlas,
-        estimate_tokens(projectatlas_text),
-        token_savings_bucket,
-        baseline_kind,
-        confidence,
-    ))?;
+    };
+    store.finish_index_read_snapshot()?;
+    usage_instance.record(
+        store,
+        &usage_from_estimates_with_context(
+            session,
+            command,
+            path,
+            query,
+            estimated_without_projectatlas,
+            estimate_tokens(projectatlas_text),
+            token_savings_bucket,
+            baseline_kind,
+            confidence,
+        ),
+    )?;
     Ok(())
 }
 
 /// Record a broad directory-walk avoidance estimate.
 pub(crate) fn record_directory_walk_usage_estimate(
     store: &AtlasStore,
+    usage_instance: Option<UsageRuntimeInstance>,
     session: &str,
     command: &str,
     path: Option<String>,
@@ -2261,6 +2310,7 @@ pub(crate) fn record_directory_walk_usage_estimate(
 ) -> Result<(), CliError> {
     record_usage_estimate_with_context(
         store,
+        usage_instance,
         session,
         command,
         path,
@@ -2276,6 +2326,7 @@ pub(crate) fn record_directory_walk_usage_estimate(
 /// Record a usage event from baseline and emitted text unless telemetry is disabled.
 pub(crate) fn record_usage_text(
     store: &AtlasStore,
+    usage_instance: Option<UsageRuntimeInstance>,
     session: &str,
     command: &str,
     path: Option<String>,
@@ -2283,18 +2334,21 @@ pub(crate) fn record_usage_text(
     baseline_text: &str,
     projectatlas_text: &str,
 ) -> Result<(), CliError> {
-    store.finish_index_read_snapshot()?;
-    if telemetry_disabled() {
+    let Some(usage_instance) = usage_instance.filter(|_| !telemetry_disabled()) else {
         return Ok(());
-    }
-    store.record_usage(&usage_from_text(
-        session,
-        command,
-        path,
-        query,
-        baseline_text,
-        projectatlas_text,
-    ))?;
+    };
+    store.finish_index_read_snapshot()?;
+    usage_instance.record(
+        store,
+        &usage_from_text(
+            session,
+            command,
+            path,
+            query,
+            baseline_text,
+            projectatlas_text,
+        ),
+    )?;
     Ok(())
 }
 
@@ -3173,6 +3227,8 @@ pub(crate) struct SettingsReport {
     pub(crate) watcher: WatchStatusReport,
     /// Current index statistics, if the index exists.
     pub(crate) index: Option<SettingsIndexStats>,
+    /// Content-free telemetry retention and maintenance state, when the index exists.
+    pub(crate) telemetry: Option<TelemetryRetentionState>,
 }
 
 /// Filesystem status for a diagnostic path.
@@ -3260,11 +3316,14 @@ pub(crate) fn build_settings_report(
     let cache_dir = absolute_db
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let index = if absolute_db.exists() {
+    let (index, telemetry) = if absolute_db.exists() {
         let store = AtlasStore::open_read_only(&absolute_db)?;
-        Some(settings_index_stats(&store)?)
+        (
+            Some(settings_index_stats(&store)?),
+            Some(store.telemetry_retention_state()?),
+        )
     } else {
-        None
+        (None, None)
     };
     let repo_root = normalize_display_path(&config.root);
     let db_project_root = index
@@ -3307,6 +3366,7 @@ pub(crate) fn build_settings_report(
         text_index_max_bytes: config.text_index_max_bytes(),
         watcher: watcher_status_report(false),
         index,
+        telemetry,
     })
 }
 

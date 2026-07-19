@@ -10,7 +10,10 @@ use projectatlas_core::symbols::{
 use projectatlas_core::telemetry::{
     READ_AVOIDANCE_CONFIDENCE_MODELED, READ_AVOIDANCE_SCOPE, usage_from_estimates,
 };
-use projectatlas_db::{AtlasStore, HealthResolution, IndexedFileText};
+use projectatlas_db::{
+    AtlasStore, HealthResolution, IndexedFileText, PlannerStatisticsPolicy, PlannerStatisticsState,
+    TelemetryCheckpointState,
+};
 use rusqlite::Connection;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -108,6 +111,396 @@ fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn E
         .stderr(predicate::str::contains(
             "does not satisfy required version",
         ));
+    Ok(())
+}
+
+#[test]
+fn cli_navigation_output_survives_telemetry_write_failure() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn owner() {}\n",
+    )?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("init")
+        .assert()
+        .success();
+
+    let db_path = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let connection = Connection::open(db_path)?;
+    connection.execute_batch("BEGIN IMMEDIATE")?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env_remove("PROJECTATLAS_NO_TELEMETRY")
+        .arg("overview")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("overview:"))
+        .stdout(predicate::str::contains("files:"));
+    connection.execute_batch("ROLLBACK")?;
+    Ok(())
+}
+
+#[test]
+fn cli_invocations_with_one_label_use_distinct_sealed_instances() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn owner() {}\n",
+    )?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("init")
+        .assert()
+        .success();
+    for _ in 0..2 {
+        Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .env_remove("PROJECTATLAS_NO_TELEMETRY")
+            .arg("overview")
+            .assert()
+            .success();
+    }
+
+    let connection = Connection::open(repo.join(ATLAS_DIR_NAME).join("projectatlas.db"))?;
+    let instances: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM usage_instances WHERE owner = 'cli_invocation' AND caller_label = 'default' AND state = 'sealed'",
+        [],
+        |row| row.get(0),
+    )?;
+    if instances != 2 {
+        return Err(io::Error::other(format!(
+            "expected two sealed CLI invocation identities, found {instances}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn settings_reports_content_free_telemetry_without_recording() -> Result<(), Box<dyn Error>> {
+    const SESSION_SENTINEL: &str = "private-session-sentinel";
+    const QUERY_SENTINEL: &str = "private-query-sentinel";
+    const SOURCE_SENTINEL: &str = "private_source_sentinel";
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        format!("pub fn {SOURCE_SENTINEL}() {{}}\n"),
+    )?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("init")
+        .assert()
+        .success();
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env_remove("PROJECTATLAS_NO_TELEMETRY")
+        .args([
+            "--session",
+            SESSION_SENTINEL,
+            "files",
+            QUERY_SENTINEL,
+            "--folder",
+            SRC_DIR_NAME,
+        ])
+        .assert()
+        .success();
+
+    let db_path = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let connection = Connection::open(&db_path)?;
+    let instances_before: i64 =
+        connection.query_row("SELECT COUNT(*) FROM usage_instances", [], |row| row.get(0))?;
+    drop(connection);
+
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env_remove("PROJECTATLAS_NO_TELEMETRY")
+        .args(["--format", "json", "settings"])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "settings failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let settings: Value = serde_json::from_slice(&output.stdout)?;
+    let telemetry = settings
+        .get("telemetry")
+        .ok_or_else(|| io::Error::other("settings omitted telemetry retention state"))?;
+    let telemetry_object = telemetry
+        .as_object()
+        .ok_or_else(|| io::Error::other("settings telemetry state was not an object"))?;
+    for field in [
+        "policy_version",
+        "logical_byte_version",
+        "raw_rows",
+        "max_raw_rows",
+        "max_raw_age_seconds",
+        "raw_logical_bytes",
+        "max_raw_logical_bytes",
+        "baseline_rows",
+        "max_baselines_per_instance",
+        "max_active_baseline_rows",
+        "baseline_logical_bytes",
+        "max_baseline_logical_bytes",
+        "dimension_rows",
+        "max_dimensions",
+        "instance_rows",
+        "active_instance_rows",
+        "max_active_instances",
+        "max_retained_instances",
+        "retained_label_rows",
+        "max_retained_labels",
+        "daily_rows",
+        "max_daily_rows",
+        "retained_trend_days",
+        "label_tombstone_rows",
+        "max_label_tombstones",
+        "instance_tombstone_rows",
+        "max_instance_tombstones",
+        "pruned_raw_rows",
+        "pruned_instance_rows",
+        "evicted_tombstones",
+        "prune_batch_rows",
+        "writes_since_checkpoint",
+        "checkpoint_write_interval",
+        "last_checkpoint_epoch",
+        "wal_autocheckpoint_pages",
+        "freelist_pages",
+        "page_count",
+        "page_size",
+        "connection_busy_timeout_ms",
+        "normal_busy_timeout_ms",
+        "telemetry_busy_timeout_ms",
+    ] {
+        if telemetry_object
+            .get(field)
+            .and_then(Value::as_u64)
+            .is_none()
+        {
+            return Err(io::Error::other(format!(
+                "settings telemetry state omitted numeric lifecycle field {field:?}"
+            ))
+            .into());
+        }
+    }
+    let checkpoint_state = telemetry_object
+        .get("checkpoint_state")
+        .ok_or_else(|| io::Error::other("settings omitted typed checkpoint state"))?;
+    let checkpoint_states = [
+        TelemetryCheckpointState::NotDue,
+        TelemetryCheckpointState::Completed,
+        TelemetryCheckpointState::Busy,
+        TelemetryCheckpointState::Error,
+    ]
+    .map(serde_json::to_value)
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()?;
+    if !checkpoint_states.contains(checkpoint_state) {
+        return Err(io::Error::other("settings emitted an unknown checkpoint state").into());
+    }
+    if telemetry_object.get("statistics_policy")
+        != Some(&serde_json::to_value(
+            PlannerStatisticsPolicy::NotConfigured,
+        )?)
+    {
+        return Err(io::Error::other("settings overstated planner maintenance policy").into());
+    }
+    let statistics_state = telemetry_object
+        .get("statistics_state")
+        .ok_or_else(|| io::Error::other("settings omitted typed statistics state"))?;
+    let statistics_states = [
+        PlannerStatisticsState::NotInitialized,
+        PlannerStatisticsState::Available,
+    ]
+    .map(serde_json::to_value)
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()?;
+    if !statistics_states.contains(statistics_state) {
+        return Err(io::Error::other("settings emitted an unknown statistics state").into());
+    }
+    let connection_busy_timeout = telemetry_object["connection_busy_timeout_ms"]
+        .as_u64()
+        .ok_or_else(|| io::Error::other("connection busy timeout was not numeric"))?;
+    let normal_busy_timeout = telemetry_object["normal_busy_timeout_ms"]
+        .as_u64()
+        .ok_or_else(|| io::Error::other("normal busy timeout was not numeric"))?;
+    let telemetry_busy_timeout = telemetry_object["telemetry_busy_timeout_ms"]
+        .as_u64()
+        .ok_or_else(|| io::Error::other("telemetry busy timeout was not numeric"))?;
+    if connection_busy_timeout != normal_busy_timeout
+        || telemetry_busy_timeout == 0
+        || telemetry_busy_timeout >= normal_busy_timeout
+    {
+        return Err(io::Error::other(
+            "settings did not distinguish bounded telemetry and normal busy policies",
+        )
+        .into());
+    }
+    for field in ["maintenance_pending", "clock_anomaly"] {
+        if telemetry_object
+            .get(field)
+            .and_then(Value::as_bool)
+            .is_none()
+        {
+            return Err(io::Error::other(format!(
+                "settings telemetry state omitted boolean lifecycle field {field:?}"
+            ))
+            .into());
+        }
+    }
+    for field in [
+        "checkpoint_state",
+        "journal_mode",
+        "synchronous_mode",
+        "statistics_policy",
+        "statistics_state",
+    ] {
+        if telemetry_object
+            .get(field)
+            .and_then(Value::as_str)
+            .is_none()
+        {
+            return Err(io::Error::other(format!(
+                "settings telemetry state omitted storage truth field {field:?}"
+            ))
+            .into());
+        }
+    }
+    if telemetry_object
+        .get("spill_cleanup")
+        .and_then(Value::as_str)
+        != Some("not_applicable")
+    {
+        return Err(io::Error::other(
+            "settings telemetry state did not report spill cleanup as not applicable",
+        )
+        .into());
+    }
+    if !telemetry_object.contains_key("oldest_retained_epoch") {
+        return Err(
+            io::Error::other("settings telemetry state omitted retained-detail age truth").into(),
+        );
+    }
+    let telemetry_text = serde_json::to_string(telemetry)?;
+    for forbidden in [
+        "caller_label",
+        "runtime_instance",
+        "project_instance_id",
+        "baseline_identity",
+        "query",
+        "path",
+        "source_content",
+    ] {
+        if telemetry_text.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "settings telemetry state exposed forbidden field {forbidden:?}"
+            ))
+            .into());
+        }
+    }
+    let repo_sentinel = repo.to_string_lossy().into_owned();
+    for forbidden_value in [
+        SESSION_SENTINEL,
+        QUERY_SENTINEL,
+        SOURCE_SENTINEL,
+        repo_sentinel.as_str(),
+    ] {
+        if telemetry_text.contains(forbidden_value) {
+            return Err(io::Error::other(format!(
+                "settings telemetry state exposed private value {forbidden_value:?}"
+            ))
+            .into());
+        }
+    }
+
+    let connection = Connection::open(db_path)?;
+    let instances_after: i64 =
+        connection.query_row("SELECT COUNT(*) FROM usage_instances", [], |row| row.get(0))?;
+    if instances_after != instances_before {
+        return Err(io::Error::other("settings recorded telemetry for its own read").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn mcp_clean_shutdown_seals_runtime_instances_across_restarts() -> Result<(), Box<dyn Error>> {
+    const RESTART_COUNT: usize = 2;
+    if std::env::var_os("PROJECTATLAS_NO_TELEMETRY").is_some() {
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn owner() {}\n",
+    )?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("init")
+        .assert()
+        .success();
+
+    let db_path = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let config = mcp_config_for_harness(&repo, &db_path, "mcp-json")?;
+    let (command, args) = mcp_command_and_args(&config)?;
+    let initial_calls = AtlasStore::open_for_project(&db_path, &repo)?
+        .token_overview(None)?
+        .calls;
+    let messages = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-telemetry-restart-e2e","version":"0.1.0"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_overview","arguments":{}}}"#,
+    ];
+    for _ in 0..RESTART_COUNT {
+        let stdout = run_mcp_stdio(&command, &repo, &args, &messages)?;
+        if !mcp_tool_text(&stdout, 2)?.contains("overview:") {
+            return Err(io::Error::other("restarted MCP overview did not succeed").into());
+        }
+    }
+
+    let store = AtlasStore::open_for_project(&db_path, &repo)?;
+    let final_calls = store.token_overview(None)?.calls;
+    if final_calls != initial_calls + RESTART_COUNT {
+        return Err(io::Error::other(format!(
+            "MCP restart telemetry was not exact: expected {}, found {final_calls}",
+            initial_calls + RESTART_COUNT
+        ))
+        .into());
+    }
+    let retention = store.telemetry_retention_state()?;
+    if retention.active_instance_rows != 0 {
+        return Err(io::Error::other(format!(
+            "clean MCP shutdown left {} active runtime instances",
+            retention.active_instance_rows
+        ))
+        .into());
+    }
+    let connection = Connection::open(db_path)?;
+    let sealed_instances: usize = connection.query_row(
+        "SELECT COUNT(*) FROM usage_instances WHERE owner = 'mcp_process' AND state = 'sealed'",
+        [],
+        |row| row.get(0),
+    )?;
+    if sealed_instances != RESTART_COUNT {
+        return Err(io::Error::other(format!(
+            "expected {RESTART_COUNT} persisted sealed MCP instances, found {sealed_instances}"
+        ))
+        .into());
+    }
     Ok(())
 }
 
@@ -4054,6 +4447,7 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         .assert()
         .success()
         .stdout(predicate::str::contains("token_savings:"))
+        .stdout(predicate::str::contains("detail_availability: retained"))
         .stdout(predicate::str::contains("read_avoidance:"))
         .stdout(predicate::str::contains("likely_file_reads_avoided"));
     let raw_token = Command::cargo_bin("projectatlas")?
@@ -4074,6 +4468,7 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
         &["estimate_scope"],
         "workflow_payload_estimate_not_model_billing_tokens",
     )?;
+    require_json_string(&token_json, &["detail_availability"], "retained")?;
     require_json_usize_at_least(&token_json, &["calls"], 7)?;
     require_json_usize_greater_than(&token_json, &["estimated_without_projectatlas"], 0)?;
     require_json_usize_greater_than(&token_json, &["estimated_with_projectatlas"], 0)?;
@@ -4371,6 +4766,7 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
     }
     let trends_json: Value = serde_json::from_slice(&raw_trends.stdout)?;
     require_json_string(&trends_json, &["window"], "month")?;
+    require_json_string(&trends_json, &["detail_availability"], "retained")?;
     let periods = trends_json["periods"]
         .as_array()
         .ok_or_else(|| io::Error::other("trend periods missing"))?;
@@ -4898,6 +5294,7 @@ fn mcp_server_stays_bound_to_one_project_database() -> Result<(), Box<dyn Error>
     }
     if !output_a.contains("token_savings:")
         || !output_a.contains("estimate_kind: heuristic")
+        || !output_a.contains("detail_availability: retained")
         || !output_a.contains("read_avoidance:")
         || !output_a.contains("likely_file_reads_avoided")
     {
