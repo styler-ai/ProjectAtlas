@@ -447,6 +447,14 @@ impl StableKey {
         }
         Ok(true)
     }
+
+    /// Decode the validated digest into its compact binary representation.
+    fn digest_bytes(&self) -> Result<[u8; 32], GraphContractError> {
+        let Ok(digest) = blake3::Hash::from_hex(&self.digest) else {
+            return Err(GraphContractError::InvalidStableKeyDigest);
+        };
+        Ok(*digest.as_bytes())
+    }
 }
 
 /// Serializable stable-key representation with validation on input.
@@ -506,6 +514,16 @@ impl GraphEntityKey {
     #[must_use]
     pub fn digest(&self) -> &str {
         &self.stable.digest
+    }
+
+    /// Return the compact binary digest used by normalized persistence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphContractError::InvalidStableKeyDigest`] if the private key
+    /// invariant was violated by incompatible persisted input.
+    pub fn digest_bytes(&self) -> Result<[u8; 32], GraphContractError> {
+        self.stable.digest_bytes()
     }
 
     /// Borrow the canonical identity retained for collision detection.
@@ -1042,6 +1060,16 @@ impl LogicalRelationKey {
     #[must_use]
     pub fn digest(&self) -> &str {
         &self.stable.digest
+    }
+
+    /// Return the compact binary digest used by normalized persistence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphContractError::InvalidStableKeyDigest`] if the private key
+    /// invariant was violated by incompatible persisted input.
+    pub fn digest_bytes(&self) -> Result<[u8; 32], GraphContractError> {
+        self.stable.digest_bytes()
     }
 
     /// Borrow the canonical identity retained for collision detection.
@@ -1777,6 +1805,11 @@ mod tests {
         require(
             first.key().digest() == rescanned.key().digest(),
             "unchanged selector changed its compact key",
+        )?;
+        require(
+            first.key().digest_bytes()?
+                == *blake3::hash(first.key().canonical_identity().as_bytes()).as_bytes(),
+            "binary persistence key did not match the validated digest",
         )?;
 
         let other_project = ProjectInstanceId::try_from("10112233445566778899aabbccddeeff")?;

@@ -11,9 +11,11 @@ use projectatlas_core::normalize_native_path_display;
 use std::path::PathBuf;
 
 /// Current `SQLite` schema version supported by this crate.
-pub(crate) const SCHEMA_VERSION: i64 = 9;
+pub(crate) const SCHEMA_VERSION: i64 = 10;
 /// Released 0.3.26 schema accepted by the migration inventory.
 pub(crate) const PREVIOUS_SCHEMA_VERSION: i64 = 8;
+/// First internal schema with explicit publication invalidation.
+const PUBLICATION_SCHEMA_VERSION: i64 = 9;
 /// Metadata key for the durable schema version.
 pub(crate) const SCHEMA_VERSION_KEY: &str = "schema_version";
 /// Metadata key for the owning project root.
@@ -32,8 +34,8 @@ pub(crate) enum SchemaState {
     Fresh,
     /// The database already matches this runtime.
     Current,
-    /// The released 0.3.26 schema can be upgraded transactionally.
-    UpgradeFrom8,
+    /// A supported predecessor can be upgraded transactionally.
+    UpgradeRequired,
 }
 
 /// Result of a non-mutating compatibility inspection.
@@ -56,11 +58,18 @@ struct Migration {
 }
 
 /// Closed migration inventory. New transitions append to this list.
-const MIGRATIONS: &[Migration] = &[Migration {
-    from: PREVIOUS_SCHEMA_VERSION,
-    to: 9,
-    apply: migrate_8_to_9,
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        from: PREVIOUS_SCHEMA_VERSION,
+        to: PUBLICATION_SCHEMA_VERSION,
+        apply: migrate_8_to_9,
+    },
+    Migration {
+        from: PUBLICATION_SCHEMA_VERSION,
+        to: SCHEMA_VERSION,
+        apply: migrate_9_to_10,
+    },
+];
 
 /// Behavior-relevant schema contract derived from the authoritative DDL.
 #[derive(Debug, Eq, PartialEq)]
@@ -160,8 +169,10 @@ struct ForeignKeyContract {
     match_policy: String,
 }
 
-/// Process-local immutable contract derived once from `CREATE_SCHEMA_SQL`.
+/// Process-local immutable current contract derived from authoritative DDL.
 static SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
+/// Process-local immutable predecessor contract derived from base DDL.
+static PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
 
 /// Immutable physical schema emitted by the released 0.3.26 runtime.
 #[cfg(test)]
@@ -178,8 +189,8 @@ pub(crate) fn create_released_schema_eight(connection: &Connection) -> DbResult<
     )
 }
 
-/// Current schema DDL for a genuinely fresh database only.
-const CREATE_SCHEMA_SQL: &str = "
+/// Base schema shared by supported predecessors and fresh databases.
+const BASE_SCHEMA_SQL: &str = "
     CREATE TABLE metadata (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -322,6 +333,229 @@ const CREATE_SCHEMA_SQL: &str = "
     CREATE INDEX idx_usage_session_created_at ON usage_events(session_id, created_at);
 ";
 
+/// Normalized repository graph schema introduced after publication schema 9.
+const GRAPH_SCHEMA_SQL: &str = "
+    CREATE TABLE project_identity (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        project_instance_id BLOB NOT NULL UNIQUE
+            CHECK(
+                typeof(project_instance_id) = 'blob'
+                AND length(project_instance_id) = 16
+                AND project_instance_id <> X'00000000000000000000000000000000'
+            ),
+        active_generation INTEGER NOT NULL DEFAULT 0
+            CHECK(typeof(active_generation) = 'integer' AND active_generation >= 0)
+    );
+
+    CREATE TABLE graph_entities (
+        entity_key BLOB PRIMARY KEY NOT NULL
+            CHECK(typeof(entity_key) = 'blob' AND length(entity_key) = 32),
+        project_instance_id BLOB NOT NULL
+            CHECK(typeof(project_instance_id) = 'blob' AND length(project_instance_id) = 16),
+        canonical_identity TEXT NOT NULL UNIQUE
+            CHECK(typeof(canonical_identity) = 'text' AND length(canonical_identity) > 0),
+        entity_kind TEXT NOT NULL
+            CHECK(entity_kind IN ('project', 'folder', 'file', 'package', 'symbol', 'external')),
+        repository_path TEXT,
+        package_manager TEXT,
+        package_name TEXT,
+        manifest_path TEXT,
+        symbol_name TEXT,
+        symbol_kind TEXT,
+        symbol_parent TEXT,
+        symbol_signature TEXT,
+        external_system TEXT,
+        external_identity TEXT,
+        UNIQUE(project_instance_id, entity_key),
+        FOREIGN KEY(project_instance_id)
+            REFERENCES project_identity(project_instance_id) ON DELETE RESTRICT,
+        FOREIGN KEY(repository_path) REFERENCES nodes(path) ON DELETE CASCADE,
+        FOREIGN KEY(manifest_path) REFERENCES nodes(path) ON DELETE CASCADE,
+        CHECK(repository_path IS NULL OR (typeof(repository_path) = 'text' AND length(repository_path) > 0)),
+        CHECK(package_manager IS NULL OR (typeof(package_manager) = 'text' AND length(package_manager) > 0)),
+        CHECK(package_name IS NULL OR (typeof(package_name) = 'text' AND length(package_name) > 0)),
+        CHECK(manifest_path IS NULL OR (typeof(manifest_path) = 'text' AND length(manifest_path) > 0)),
+        CHECK(symbol_name IS NULL OR (typeof(symbol_name) = 'text' AND length(symbol_name) > 0)),
+        CHECK(symbol_kind IS NULL OR symbol_kind IN (
+            'function', 'method', 'class', 'struct', 'enum', 'trait', 'interface',
+            'module', 'type', 'value', 'import', 'package', 'workspace', 'dependency', 'unknown'
+        )),
+        CHECK(symbol_parent IS NULL OR (typeof(symbol_parent) = 'text' AND length(symbol_parent) > 0)),
+        CHECK(symbol_signature IS NULL OR (typeof(symbol_signature) = 'text' AND length(symbol_signature) > 0)),
+        CHECK(external_system IS NULL OR (typeof(external_system) = 'text' AND length(external_system) > 0)),
+        CHECK(external_identity IS NULL OR (typeof(external_identity) = 'text' AND length(external_identity) > 0)),
+        CHECK(
+            (entity_kind = 'project'
+                AND repository_path IS NULL
+                AND package_manager IS NULL AND package_name IS NULL AND manifest_path IS NULL
+                AND symbol_name IS NULL AND symbol_kind IS NULL AND symbol_parent IS NULL
+                AND symbol_signature IS NULL AND external_system IS NULL AND external_identity IS NULL)
+            OR (entity_kind IN ('folder', 'file')
+                AND repository_path IS NOT NULL
+                AND package_manager IS NULL AND package_name IS NULL AND manifest_path IS NULL
+                AND symbol_name IS NULL AND symbol_kind IS NULL AND symbol_parent IS NULL
+                AND symbol_signature IS NULL AND external_system IS NULL AND external_identity IS NULL)
+            OR (entity_kind = 'package'
+                AND repository_path IS NULL
+                AND package_manager IS NOT NULL AND package_name IS NOT NULL AND manifest_path IS NOT NULL
+                AND symbol_name IS NULL AND symbol_kind IS NULL AND symbol_parent IS NULL
+                AND symbol_signature IS NULL AND external_system IS NULL AND external_identity IS NULL)
+            OR (entity_kind = 'symbol'
+                AND repository_path IS NOT NULL
+                AND package_manager IS NULL AND package_name IS NULL AND manifest_path IS NULL
+                AND symbol_name IS NOT NULL AND symbol_kind IS NOT NULL AND symbol_signature IS NOT NULL
+                AND external_system IS NULL AND external_identity IS NULL)
+            OR (entity_kind = 'external'
+                AND repository_path IS NULL
+                AND package_manager IS NULL AND package_name IS NULL AND manifest_path IS NULL
+                AND symbol_name IS NULL AND symbol_kind IS NULL AND symbol_parent IS NULL
+                AND symbol_signature IS NULL AND external_system IS NOT NULL AND external_identity IS NOT NULL)
+        )
+    );
+
+    CREATE TABLE graph_relations (
+        relation_key BLOB PRIMARY KEY NOT NULL
+            CHECK(typeof(relation_key) = 'blob' AND length(relation_key) = 32),
+        project_instance_id BLOB NOT NULL
+            CHECK(typeof(project_instance_id) = 'blob' AND length(project_instance_id) = 16),
+        canonical_identity TEXT NOT NULL UNIQUE
+            CHECK(typeof(canonical_identity) = 'text' AND length(canonical_identity) > 0),
+        source_entity_key BLOB NOT NULL
+            CHECK(typeof(source_entity_key) = 'blob' AND length(source_entity_key) = 32),
+        relation_scope TEXT NOT NULL CHECK(relation_scope IN ('legacy', 'extended')),
+        relation_kind TEXT NOT NULL,
+        resolution_status TEXT NOT NULL
+            CHECK(resolution_status IN ('resolved', 'ambiguous', 'unresolved', 'external')),
+        target_entity_key BLOB
+            CHECK(target_entity_key IS NULL OR (typeof(target_entity_key) = 'blob' AND length(target_entity_key) = 32)),
+        reference_text TEXT
+            CHECK(reference_text IS NULL OR (typeof(reference_text) = 'text' AND length(reference_text) > 0)),
+        candidate_count INTEGER
+            CHECK(candidate_count IS NULL OR (typeof(candidate_count) = 'integer' AND candidate_count > 0)),
+        confidence TEXT NOT NULL CHECK(confidence IN ('exact', 'high', 'medium', 'low')),
+        completeness TEXT NOT NULL CHECK(completeness IN ('complete', 'partial')),
+        FOREIGN KEY(project_instance_id)
+            REFERENCES project_identity(project_instance_id) ON DELETE RESTRICT,
+        FOREIGN KEY(project_instance_id, source_entity_key)
+            REFERENCES graph_entities(project_instance_id, entity_key) ON DELETE CASCADE,
+        FOREIGN KEY(project_instance_id, target_entity_key)
+            REFERENCES graph_entities(project_instance_id, entity_key) ON DELETE CASCADE,
+        CHECK(
+            (relation_scope = 'legacy'
+                AND relation_kind IN ('contains', 'imports', 'calls', 'depends-on'))
+            OR (relation_scope = 'extended'
+                AND relation_kind IN ('references', 'tests', 'routes-to', 'configures', 'reads', 'writes'))
+        ),
+        CHECK(
+            (resolution_status IN ('resolved', 'external')
+                AND target_entity_key IS NOT NULL
+                AND reference_text IS NULL AND candidate_count IS NULL)
+            OR (resolution_status = 'ambiguous'
+                AND target_entity_key IS NULL
+                AND reference_text IS NOT NULL AND candidate_count IS NOT NULL)
+            OR (resolution_status = 'unresolved'
+                AND target_entity_key IS NULL
+                AND reference_text IS NOT NULL AND candidate_count IS NULL)
+        )
+    );
+
+    CREATE TABLE graph_relation_occurrences (
+        id INTEGER PRIMARY KEY,
+        relation_key BLOB NOT NULL
+            CHECK(typeof(relation_key) = 'blob' AND length(relation_key) = 32),
+        file_path TEXT NOT NULL
+            CHECK(typeof(file_path) = 'text' AND length(file_path) > 0),
+        start_line INTEGER NOT NULL
+            CHECK(typeof(start_line) = 'integer' AND start_line > 0),
+        start_column INTEGER NOT NULL
+            CHECK(typeof(start_column) = 'integer' AND start_column >= 0),
+        end_line INTEGER NOT NULL
+            CHECK(typeof(end_line) = 'integer' AND end_line > 0),
+        end_column INTEGER NOT NULL
+            CHECK(typeof(end_column) = 'integer' AND end_column >= 0),
+        FOREIGN KEY(relation_key) REFERENCES graph_relations(relation_key) ON DELETE CASCADE,
+        FOREIGN KEY(file_path) REFERENCES nodes(path) ON DELETE CASCADE,
+        UNIQUE(relation_key, file_path, start_line, start_column, end_line, end_column),
+        CHECK(end_line > start_line OR (end_line = start_line AND end_column >= start_column))
+    );
+
+    CREATE TABLE graph_coverage (
+        id INTEGER PRIMARY KEY,
+        project_instance_id BLOB NOT NULL
+            CHECK(typeof(project_instance_id) = 'blob' AND length(project_instance_id) = 16),
+        scope_kind TEXT NOT NULL CHECK(scope_kind IN ('project', 'path')),
+        scope_path TEXT
+            CHECK(scope_path IS NULL OR (typeof(scope_path) = 'text' AND length(scope_path) > 0)),
+        relation_scope TEXT CHECK(relation_scope IS NULL OR relation_scope IN ('legacy', 'extended')),
+        relation_kind TEXT,
+        state TEXT NOT NULL
+            CHECK(state IN ('complete', 'partial', 'failed', 'ignored', 'oversized', 'quarantined', 'stale')),
+        total INTEGER NOT NULL CHECK(typeof(total) = 'integer' AND total >= 0),
+        covered INTEGER NOT NULL CHECK(typeof(covered) = 'integer' AND covered >= 0),
+        omitted INTEGER NOT NULL CHECK(typeof(omitted) = 'integer' AND omitted >= 0),
+        reason TEXT CHECK(reason IS NULL OR (typeof(reason) = 'text' AND length(reason) > 0)),
+        reached_limit TEXT
+            CHECK(reached_limit IS NULL OR reached_limit IN ('rows', 'occurrences', 'depth', 'output_bytes')),
+        FOREIGN KEY(project_instance_id)
+            REFERENCES project_identity(project_instance_id) ON DELETE RESTRICT,
+        CHECK(
+            (scope_kind = 'project' AND scope_path IS NULL)
+            OR (scope_kind = 'path' AND scope_path IS NOT NULL)
+        ),
+        CHECK(
+            (relation_scope IS NULL AND relation_kind IS NULL)
+            OR (relation_scope = 'legacy'
+                AND relation_kind IN ('contains', 'imports', 'calls', 'depends-on'))
+            OR (relation_scope = 'extended'
+                AND relation_kind IN ('references', 'tests', 'routes-to', 'configures', 'reads', 'writes'))
+        ),
+        CHECK(total = covered + omitted),
+        CHECK(
+            (state = 'complete' AND omitted = 0 AND reason IS NULL AND reached_limit IS NULL)
+            OR (state = 'partial' AND covered > 0 AND omitted > 0 AND reason IS NOT NULL)
+            OR (state IN ('failed', 'ignored', 'oversized', 'quarantined', 'stale')
+                AND covered = 0 AND omitted > 0 AND reason IS NOT NULL)
+        )
+    );
+
+    CREATE INDEX idx_graph_entities_path
+        ON graph_entities(repository_path, entity_kind, canonical_identity, entity_key);
+    CREATE INDEX idx_graph_entities_package
+        ON graph_entities(package_manager, package_name, manifest_path, entity_key);
+    CREATE INDEX idx_graph_entities_manifest_path
+        ON graph_entities(manifest_path, entity_key);
+    CREATE INDEX idx_graph_entities_symbol
+        ON graph_entities(repository_path, symbol_name, symbol_kind, symbol_parent, symbol_signature, entity_key);
+    CREATE INDEX idx_graph_entities_external
+        ON graph_entities(external_system, external_identity, entity_key);
+    CREATE INDEX idx_graph_relations_source_kind
+        ON graph_relations(source_entity_key, relation_scope, relation_kind, canonical_identity, relation_key);
+    CREATE INDEX idx_graph_relations_target_kind
+        ON graph_relations(target_entity_key, relation_scope, relation_kind, canonical_identity, relation_key);
+    CREATE INDEX idx_graph_relations_kind_order
+        ON graph_relations(relation_scope, relation_kind, canonical_identity, relation_key);
+    CREATE INDEX idx_graph_relations_kind_resolution
+        ON graph_relations(relation_scope, relation_kind, resolution_status, relation_key);
+    CREATE INDEX idx_graph_occurrences_file_span
+        ON graph_relation_occurrences(file_path, start_line, start_column, relation_key);
+    CREATE UNIQUE INDEX idx_graph_coverage_identity
+        ON graph_coverage(
+            project_instance_id,
+            scope_kind,
+            ifnull(scope_path, ''),
+            ifnull(relation_scope, ''),
+            ifnull(relation_kind, '')
+        );
+    CREATE INDEX idx_graph_coverage_scope_state
+        ON graph_coverage(scope_kind, scope_path, state, id);
+    CREATE INDEX idx_graph_coverage_scope_order
+        ON graph_coverage(scope_kind, scope_path, relation_scope, relation_kind, state, id);
+    CREATE INDEX idx_graph_coverage_path
+        ON graph_coverage(scope_path, id);
+    CREATE INDEX idx_graph_coverage_relation_state
+        ON graph_coverage(relation_scope, relation_kind, state, id);
+";
+
 /// Inspect an existing database without creating, migrating, or repairing it.
 pub(crate) fn preflight(path: &Path, expected_root: Option<&str>) -> DbResult<SchemaPreflight> {
     preflight_with_integrity(path, expected_root, true)
@@ -360,9 +594,9 @@ pub(crate) fn initialize(connection: &Connection, expected_root: Option<&str>) -
         match preflight.state {
             SchemaState::Fresh => create_fresh(connection, expected_root)?,
             SchemaState::Current => {}
-            SchemaState::UpgradeFrom8 => {
+            SchemaState::UpgradeRequired => {
                 validate_integrity(connection)?;
-                apply_migrations(connection, PREVIOUS_SCHEMA_VERSION)?;
+                apply_migrations(connection, stored_schema_version(connection)?)?;
             }
         }
         let current = inspect_connection(connection, expected_root, false)?;
@@ -414,7 +648,7 @@ fn inspect_current(
     let preflight = inspect_connection(connection, expected_root, false)?;
     if preflight.state != SchemaState::Current {
         return Err(DbError::SchemaVersion {
-            found: schema_state_version(preflight.state),
+            found: stored_schema_version(connection)?,
             expected: SCHEMA_VERSION,
         });
     }
@@ -459,8 +693,8 @@ fn inspect_connection(
         validate_integrity(connection)?;
     }
     let state = schema_state(connection)?;
-    if matches!(state, SchemaState::Current | SchemaState::UpgradeFrom8) {
-        validate_schema_shape(connection)?;
+    if matches!(state, SchemaState::Current | SchemaState::UpgradeRequired) {
+        validate_schema_shape(connection, state)?;
     }
     let project_root = if state == SchemaState::Fresh {
         None
@@ -514,18 +748,10 @@ fn schema_state(connection: &Connection) -> DbResult<SchemaState> {
             });
         }
     }
-    let stored =
-        read_metadata(connection, SCHEMA_VERSION_KEY)?.ok_or(DbError::SchemaVersionMissing)?;
-    let found = stored
-        .parse::<i64>()
-        .map_err(|source| DbError::InvalidInteger {
-            field: SCHEMA_VERSION_KEY,
-            value: stored,
-            source,
-        })?;
+    let found = stored_schema_version(connection)?;
     match found {
         SCHEMA_VERSION => Ok(SchemaState::Current),
-        PREVIOUS_SCHEMA_VERSION => Ok(SchemaState::UpgradeFrom8),
+        PREVIOUS_SCHEMA_VERSION | PUBLICATION_SCHEMA_VERSION => Ok(SchemaState::UpgradeRequired),
         _ => Err(DbError::SchemaVersion {
             found,
             expected: SCHEMA_VERSION,
@@ -535,7 +761,8 @@ fn schema_state(connection: &Connection) -> DbResult<SchemaState> {
 
 /// Create a new schema and stamp identity/version only after all DDL succeeds.
 fn create_fresh(connection: &Connection, expected_root: Option<&str>) -> DbResult<()> {
-    connection.execute_batch(CREATE_SCHEMA_SQL)?;
+    connection.execute_batch(BASE_SCHEMA_SQL)?;
+    connection.execute_batch(GRAPH_SCHEMA_SQL)?;
     if let Some(root) = expected_root {
         set_metadata(connection, PROJECT_ROOT_KEY, root)?;
     }
@@ -565,6 +792,17 @@ fn apply_migrations(connection: &Connection, mut version: i64) -> DbResult<()> {
 
 /// Invalidate schema-8 derived publication trust while preserving authored state.
 fn migrate_8_to_9(connection: &Connection) -> DbResult<()> {
+    invalidate_derived_publication(connection)
+}
+
+/// Add normalized graph storage and invalidate predecessor publication trust.
+fn migrate_9_to_10(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    invalidate_derived_publication(connection)
+}
+
+/// Invalidate derived rows without deleting authored local state.
+fn invalidate_derived_publication(connection: &Connection) -> DbResult<()> {
     connection.execute(
         "DELETE FROM metadata WHERE key IN (?1, ?2, ?3)",
         params![
@@ -595,8 +833,16 @@ fn validate_integrity(connection: &Connection) -> DbResult<()> {
 }
 
 /// Validate the exact tables, columns, constraints, and required indexes without repair DDL.
-fn validate_schema_shape(connection: &Connection) -> DbResult<()> {
-    let expected = schema_contract()?;
+fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResult<()> {
+    let expected = match state {
+        SchemaState::Current => schema_contract()?,
+        SchemaState::UpgradeRequired => predecessor_schema_contract()?,
+        SchemaState::Fresh => {
+            return Err(DbError::SchemaPostcondition {
+                expected: SCHEMA_VERSION,
+            });
+        }
+    };
     let found = read_schema_contract(connection)?;
     if expected.tables != found.tables {
         return Err(schema_shape_error(
@@ -664,9 +910,21 @@ fn schema_contract() -> DbResult<&'static SchemaContract> {
         return Ok(contract);
     }
     let connection = Connection::open_in_memory()?;
-    connection.execute_batch(CREATE_SCHEMA_SQL)?;
+    connection.execute_batch(BASE_SCHEMA_SQL)?;
+    connection.execute_batch(GRAPH_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
     Ok(SCHEMA_CONTRACT.get_or_init(|| contract))
+}
+
+/// Build the immutable schema-8/9 contract from the unchanged base DDL.
+fn predecessor_schema_contract() -> DbResult<&'static SchemaContract> {
+    if let Some(contract) = PREDECESSOR_SCHEMA_CONTRACT.get() {
+        return Ok(contract);
+    }
+    let connection = Connection::open_in_memory()?;
+    connection.execute_batch(BASE_SCHEMA_SQL)?;
+    let contract = read_schema_contract(&connection)?;
+    Ok(PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
 }
 
 /// Read all behavior-relevant schema state through `SQLite` introspection.
@@ -851,6 +1109,19 @@ fn read_metadata(connection: &Connection, key: &str) -> DbResult<Option<String>>
         .map_err(Into::into)
 }
 
+/// Parse the durable schema version from validated metadata.
+fn stored_schema_version(connection: &Connection) -> DbResult<i64> {
+    let stored =
+        read_metadata(connection, SCHEMA_VERSION_KEY)?.ok_or(DbError::SchemaVersionMissing)?;
+    stored
+        .parse::<i64>()
+        .map_err(|source| DbError::InvalidInteger {
+            field: SCHEMA_VERSION_KEY,
+            value: stored,
+            source,
+        })
+}
+
 /// Upsert one metadata value inside the caller-owned transaction.
 fn set_metadata(connection: &Connection, key: &str, value: &str) -> DbResult<()> {
     connection.execute(
@@ -885,15 +1156,6 @@ fn object_kind(connection: &Connection, name: &str) -> DbResult<Option<String>> 
         )
         .optional()
         .map_err(Into::into)
-}
-
-/// Map a closed state back to its durable version for compatibility errors.
-fn schema_state_version(state: SchemaState) -> i64 {
-    match state {
-        SchemaState::Fresh => 0,
-        SchemaState::Current => SCHEMA_VERSION,
-        SchemaState::UpgradeFrom8 => 8,
-    }
 }
 
 /// Return a `SQLite` sidecar path for a database path.
@@ -1181,6 +1443,374 @@ mod tests {
     }
 
     #[test]
+    fn supported_schema_upgrades_preserve_authored_state_and_invalidate_publication()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+
+        for version in [PREVIOUS_SCHEMA_VERSION, PUBLICATION_SCHEMA_VERSION] {
+            let db_path = temp.path().join(format!("schema-{version}.db"));
+            let connection = Connection::open(&db_path)?;
+            configure_writable(&connection)?;
+            create_released_schema_eight(&connection)?;
+            set_metadata(&connection, SCHEMA_VERSION_KEY, &version.to_string())?;
+            set_metadata(
+                &connection,
+                PROJECT_ROOT_KEY,
+                &normalize_native_path_display(&root),
+            )?;
+            set_metadata(&connection, "agent_setting", "kept")?;
+            set_metadata(&connection, INDEX_PUBLICATION_STATE_KEY, "complete")?;
+            set_metadata(
+                &connection,
+                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                "predecessor-publication",
+            )?;
+            set_metadata(&connection, INDEX_PUBLICATION_GENERATION_KEY, "23")?;
+            connection.execute_batch(
+                "
+                INSERT INTO nodes(id, path, kind) VALUES(1, 'src/lib.rs', 'file');
+                INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+                    VALUES(1, 'Own the library.', 'agent', 'approved', 'agent');
+                INSERT INTO summaries(node_id, summary) VALUES(1, 'derived summary');
+                INSERT INTO usage_events(session_id, command) VALUES('session', 'files');
+                INSERT INTO health_resolutions(finding_id, category, path, rationale)
+                    VALUES('finding', 'purpose', 'src/lib.rs', 'reviewed');
+                INSERT INTO symbols(
+                    path, name, kind, signature, line_start, line_end, parser
+                ) VALUES('src/lib.rs', 'run', 'function', 'run()', 1, 1, 'rust');
+                INSERT INTO file_texts(path, byte_count, line_count, content)
+                    VALUES('src/lib.rs', 2, 1, 'fn');
+                ",
+            )?;
+            drop(connection);
+
+            let store = AtlasStore::open_for_project(&db_path, &root)?;
+            if read_metadata(&store.connection, SCHEMA_VERSION_KEY)?
+                != Some(SCHEMA_VERSION.to_string())
+                || read_metadata(&store.connection, PROJECT_ROOT_KEY)?
+                    != Some(normalize_native_path_display(&root))
+                || read_metadata(&store.connection, "agent_setting")? != Some("kept".to_string())
+            {
+                return Err(io::Error::other(format!(
+                    "schema {version} upgrade changed durable metadata"
+                ))
+                .into());
+            }
+            let publication_keys = store.connection.query_row(
+                "SELECT COUNT(*) FROM metadata WHERE key IN (?1, ?2, ?3)",
+                params![
+                    INDEX_PUBLICATION_STATE_KEY,
+                    INDEX_PUBLICATION_FINGERPRINT_KEY,
+                    INDEX_PUBLICATION_GENERATION_KEY,
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+            if publication_keys != 0 {
+                return Err(io::Error::other(format!(
+                    "schema {version} upgrade retained derived publication trust"
+                ))
+                .into());
+            }
+            for table in [
+                "nodes",
+                "purposes",
+                "summaries",
+                "usage_events",
+                "health_resolutions",
+                "symbols",
+                "file_texts",
+            ] {
+                let rows = store.connection.query_row(
+                    &format!("SELECT COUNT(*) FROM {table}"),
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                if rows != 1 {
+                    return Err(io::Error::other(format!(
+                        "schema {version} upgrade changed {table} rows"
+                    ))
+                    .into());
+                }
+            }
+            for table in [
+                "project_identity",
+                "graph_entities",
+                "graph_relations",
+                "graph_relation_occurrences",
+                "graph_coverage",
+            ] {
+                let rows = store.connection.query_row(
+                    &format!("SELECT COUNT(*) FROM {table}"),
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                if rows != 0 {
+                    return Err(io::Error::other(format!(
+                        "schema {version} upgrade synthesized {table} rows"
+                    ))
+                    .into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn graph_schema_constraints_reject_inconsistent_typed_rows() -> Result<(), Box<dyn Error>> {
+        let store = AtlasStore::in_memory()?;
+        let project = vec![1_u8; 16];
+        let other_project = vec![2_u8; 16];
+        let source_key = vec![3_u8; 32];
+        let target_key = vec![4_u8; 32];
+        let relation_key = vec![5_u8; 32];
+        let package_key = vec![6_u8; 32];
+
+        store.connection.execute(
+            "INSERT INTO project_identity(singleton, project_instance_id) VALUES(1, ?1)",
+            [&project],
+        )?;
+        if store
+            .connection
+            .execute(
+                "INSERT INTO project_identity(singleton, project_instance_id) VALUES(2, ?1)",
+                [&other_project],
+            )
+            .is_ok()
+        {
+            return Err(
+                io::Error::other("project identity singleton accepted a second row").into(),
+            );
+        }
+        store.connection.execute_batch(
+            "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file');
+             INSERT INTO nodes(path, kind) VALUES('src/target.rs', 'file');",
+        )?;
+        if store
+            .connection
+            .execute(
+                "INSERT INTO graph_entities(
+                    entity_key, project_instance_id, canonical_identity, entity_kind, repository_path
+                 ) VALUES(zeroblob(31), ?1, 'bad-key', 'file', 'src/lib.rs')",
+                [&project],
+            )
+            .is_ok()
+        {
+            return Err(io::Error::other("short entity key bypassed the schema contract").into());
+        }
+        if store
+            .connection
+            .execute(
+                "INSERT INTO graph_entities(
+                    entity_key, project_instance_id, canonical_identity, entity_kind, repository_path
+                 ) VALUES(?1, ?2, 'wrong-project', 'file', 'src/lib.rs')",
+                params![&source_key, &other_project],
+            )
+            .is_ok()
+        {
+            return Err(io::Error::other("entity bypassed project identity ownership").into());
+        }
+        if store
+            .connection
+            .execute(
+                "INSERT INTO graph_entities(
+                    entity_key, project_instance_id, canonical_identity, entity_kind, repository_path
+                 ) VALUES(?1, ?2, 'invalid-symbol', 'symbol', 'src/lib.rs')",
+                params![&source_key, &project],
+            )
+            .is_ok()
+        {
+            return Err(io::Error::other("incomplete symbol selector was accepted").into());
+        }
+        if store
+            .connection
+            .execute(
+                "INSERT INTO graph_entities(
+                    entity_key, project_instance_id, canonical_identity, entity_kind,
+                    package_manager, package_name, manifest_path
+                 ) VALUES(?1, ?2, 'missing-manifest', 'package',
+                    'cargo', 'missing', 'missing/Cargo.toml')",
+                params![&package_key, &project],
+            )
+            .is_ok()
+        {
+            return Err(io::Error::other("package accepted a missing manifest node").into());
+        }
+
+        store.connection.execute(
+            "INSERT INTO graph_entities(
+                entity_key, project_instance_id, canonical_identity, entity_kind, repository_path
+             ) VALUES(?1, ?2, 'source-file', 'file', 'src/lib.rs')",
+            params![&source_key, &project],
+        )?;
+        store.connection.execute(
+            "INSERT INTO graph_entities(
+                entity_key, project_instance_id, canonical_identity, entity_kind, repository_path,
+                symbol_name, symbol_kind, symbol_signature
+             ) VALUES(?1, ?2, 'target-symbol', 'symbol', 'src/target.rs',
+                'target', 'function', 'target()')",
+            params![&target_key, &project],
+        )?;
+
+        if store
+            .connection
+            .execute(
+                "INSERT INTO graph_relations(
+                    relation_key, project_instance_id, canonical_identity, source_entity_key,
+                    relation_scope, relation_kind, resolution_status, target_entity_key,
+                    confidence, completeness
+                 ) VALUES(?1, ?2, 'invalid-kind', ?3, 'extended', 'calls', 'resolved', ?4,
+                    'exact', 'complete')",
+                params![&relation_key, &project, &source_key, &target_key],
+            )
+            .is_ok()
+        {
+            return Err(io::Error::other("relation scope accepted a foreign family").into());
+        }
+        if store
+            .connection
+            .execute(
+                "INSERT INTO graph_relations(
+                    relation_key, project_instance_id, canonical_identity, source_entity_key,
+                    relation_scope, relation_kind, resolution_status, confidence, completeness
+                 ) VALUES(?1, ?2, 'missing-target', ?3, 'legacy', 'calls', 'resolved',
+                    'exact', 'complete')",
+                params![&relation_key, &project, &source_key],
+            )
+            .is_ok()
+        {
+            return Err(io::Error::other("resolved relation without a target was accepted").into());
+        }
+
+        store.connection.execute(
+            "INSERT INTO graph_relations(
+                relation_key, project_instance_id, canonical_identity, source_entity_key,
+                relation_scope, relation_kind, resolution_status, target_entity_key,
+                confidence, completeness
+             ) VALUES(?1, ?2, 'source-calls-target', ?3, 'legacy', 'calls', 'resolved', ?4,
+                'exact', 'complete')",
+            params![&relation_key, &project, &source_key, &target_key],
+        )?;
+        if store
+            .connection
+            .execute(
+                "INSERT INTO graph_relation_occurrences(
+                    relation_key, file_path, start_line, start_column, end_line, end_column
+                 ) VALUES(?1, 'missing.rs', 1, 0, 1, 1)",
+                [&relation_key],
+            )
+            .is_ok()
+        {
+            return Err(io::Error::other("source occurrence accepted a missing file node").into());
+        }
+        if store
+            .connection
+            .execute(
+                "INSERT INTO graph_relation_occurrences(
+                    relation_key, file_path, start_line, start_column, end_line, end_column
+                 ) VALUES(?1, 'src/lib.rs', 9, 4, 8, 4)",
+                [&relation_key],
+            )
+            .is_ok()
+        {
+            return Err(io::Error::other("reversed source occurrence was accepted").into());
+        }
+        store.connection.execute(
+            "INSERT INTO graph_relation_occurrences(
+                relation_key, file_path, start_line, start_column, end_line, end_column
+             ) VALUES(?1, 'src/lib.rs', 9, 4, 9, 10)",
+            [&relation_key],
+        )?;
+
+        if store
+            .connection
+            .execute(
+                "INSERT INTO graph_coverage(
+                    project_instance_id, scope_kind, state, total, covered, omitted, reason
+                 ) VALUES(?1, 'project', 'partial', 1, 1, 0, 'truncated')",
+                [&project],
+            )
+            .is_ok()
+        {
+            return Err(io::Error::other("contradictory coverage counts were accepted").into());
+        }
+        store.connection.execute(
+            "INSERT INTO graph_coverage(
+                project_instance_id, scope_kind, state, total, covered, omitted
+             ) VALUES(?1, 'project', 'complete', 1, 1, 0)",
+            [&project],
+        )?;
+        if store
+            .connection
+            .execute(
+                "INSERT INTO graph_coverage(
+                    project_instance_id, scope_kind, state, total, covered, omitted
+                 ) VALUES(?1, 'project', 'complete', 1, 1, 0)",
+                [&project],
+            )
+            .is_ok()
+        {
+            return Err(io::Error::other("duplicate coverage scope was accepted").into());
+        }
+
+        store
+            .connection
+            .execute("DELETE FROM nodes WHERE path = 'src/target.rs'", [])?;
+        let target_rows = store.connection.query_row(
+            "SELECT COUNT(*) FROM graph_entities WHERE entity_key = ?1",
+            [&target_key],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let relation_rows =
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM graph_relations", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        let occurrence_rows = store.connection.query_row(
+            "SELECT COUNT(*) FROM graph_relation_occurrences",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if target_rows != 0 || relation_rows != 0 || occurrence_rows != 0 {
+            return Err(io::Error::other(
+                "node deletion did not remove its dependent graph closure",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn required_graph_index_drift_is_refused_without_mutation() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let db_path = temp.path().join("projectatlas.db");
+        drop(AtlasStore::open_for_project(&db_path, &root)?);
+        {
+            let connection = Connection::open(&db_path)?;
+            connection.execute_batch(
+                "DROP INDEX idx_graph_relations_target_kind;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )?;
+        }
+        let database_before = fs::read(&db_path)?;
+        let inventory_before = directory_entry_names(temp.path())?;
+        let Err(error) = AtlasStore::open_for_project(&db_path, &root) else {
+            return Err(
+                io::Error::other("missing graph index unexpectedly passed preflight").into(),
+            );
+        };
+        if !matches!(error, DbError::SchemaShape { .. }) {
+            return Err(io::Error::other("missing graph index returned the wrong error").into());
+        }
+        require_unchanged(temp.path(), &db_path, &database_before, &inventory_before)?;
+        Ok(())
+    }
+
+    #[test]
     fn root_bound_open_rejects_rebind_without_mutation() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("root-a");
@@ -1290,22 +1920,25 @@ mod tests {
         let root = temp.path().join("repository");
         fs::create_dir_all(&root)?;
         let db_path = temp.path().join("projectatlas.db");
-        let store = AtlasStore::open_for_project(&db_path, &root)?;
-        store
-            .connection
-            .execute_batch("PRAGMA wal_autocheckpoint = 0")?;
-        set_metadata(&store.connection, INDEX_PUBLICATION_STATE_KEY, "complete")?;
+        let connection = Connection::open(&db_path)?;
+        configure_writable(&connection)?;
+        connection.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA wal_autocheckpoint = 0;",
+        )?;
+        create_released_schema_eight(&connection)?;
         set_metadata(
-            &store.connection,
+            &connection,
+            PROJECT_ROOT_KEY,
+            &normalize_native_path_display(&root),
+        )?;
+        set_metadata(&connection, INDEX_PUBLICATION_STATE_KEY, "complete")?;
+        set_metadata(
+            &connection,
             INDEX_PUBLICATION_FINGERPRINT_KEY,
             "active-wal-contract",
         )?;
-        set_metadata(&store.connection, INDEX_PUBLICATION_GENERATION_KEY, "17")?;
-        set_metadata(
-            &store.connection,
-            SCHEMA_VERSION_KEY,
-            &PREVIOUS_SCHEMA_VERSION.to_string(),
-        )?;
+        set_metadata(&connection, INDEX_PUBLICATION_GENERATION_KEY, "17")?;
         let wal_path = sqlite_sidecar_path(&db_path, "-wal");
         if !wal_path.exists() {
             return Err(io::Error::other("schema-8 fixture did not retain an active WAL").into());
@@ -1328,7 +1961,7 @@ mod tests {
         if fs::read(&db_path)? != database_before || fs::read(&wal_path)? != wal_before {
             return Err(io::Error::other("read-only refusal changed main or WAL bytes").into());
         }
-        if read_metadata(&store.connection, SCHEMA_VERSION_KEY)?
+        if read_metadata(&connection, SCHEMA_VERSION_KEY)?
             != Some(PREVIOUS_SCHEMA_VERSION.to_string())
         {
             return Err(io::Error::other("read-only refusal migrated schema metadata").into());
@@ -1337,24 +1970,56 @@ mod tests {
     }
 
     #[test]
-    fn late_migration_failure_rolls_back_publication_and_version() -> Result<(), Box<dyn Error>> {
+    fn late_migration_failure_rolls_back_graph_schema_and_authored_state()
+    -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("repo");
         fs::create_dir_all(&root)?;
         let db_path = temp.path().join("projectatlas.db");
         write_schema_eight_fixture(&db_path, &root)?;
         let connection = Connection::open(&db_path)?;
-        connection.execute_batch("PRAGMA query_only = ON")?;
+        configure_writable(&connection)?;
+        set_metadata(
+            &connection,
+            SCHEMA_VERSION_KEY,
+            &PUBLICATION_SCHEMA_VERSION.to_string(),
+        )?;
+        connection.execute_batch(
+            "
+            INSERT INTO nodes(id, path, kind) VALUES(1, 'src/lib.rs', 'file');
+            INSERT INTO purposes(node_id, purpose, source, status)
+                VALUES(1, 'Own the library.', 'agent', 'approved');
+            INSERT INTO usage_events(session_id, command) VALUES('session', 'files');
+            CREATE TEMP TRIGGER abort_final_schema_version
+            BEFORE UPDATE OF value ON metadata
+            WHEN OLD.key = 'schema_version' AND NEW.value = '10'
+            BEGIN
+                SELECT RAISE(ABORT, 'forced final schema-version failure');
+            END;
+            ",
+        )?;
         let Err(error) = initialize(&connection, Some(&normalize_native_path_display(&root)))
         else {
-            return Err(io::Error::other("blocked migration unexpectedly committed").into());
+            return Err(io::Error::other("late migration failure unexpectedly committed").into());
         };
         if !matches!(error, DbError::Sqlite(_)) {
-            return Err(io::Error::other("read-only migration returned the wrong error").into());
+            return Err(io::Error::other("late migration failure returned the wrong error").into());
         }
         let version = read_metadata(&connection, SCHEMA_VERSION_KEY)?;
-        if version != Some(PREVIOUS_SCHEMA_VERSION.to_string()) {
+        if version != Some(PUBLICATION_SCHEMA_VERSION.to_string()) {
             return Err(io::Error::other("failed migration changed schema version").into());
+        }
+        let graph_tables = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'table' AND name IN (
+                'project_identity', 'graph_entities', 'graph_relations',
+                'graph_relation_occurrences', 'graph_coverage'
+             )",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if graph_tables != 0 {
+            return Err(io::Error::other("failed migration retained graph schema objects").into());
         }
         let publication_keys = connection.query_row(
             "SELECT COUNT(*) FROM metadata WHERE key IN (?1, ?2, ?3)",
@@ -1369,6 +2034,23 @@ mod tests {
             return Err(
                 io::Error::other("failed migration exposed partial metadata deletion").into(),
             );
+        }
+        for table in ["nodes", "purposes", "usage_events"] {
+            let rows =
+                connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+            if rows != 1 {
+                return Err(io::Error::other(format!(
+                    "failed migration changed authored {table} rows"
+                ))
+                .into());
+            }
+        }
+        if read_metadata(&connection, PROJECT_ROOT_KEY)?
+            != Some(normalize_native_path_display(&root))
+        {
+            return Err(io::Error::other("failed migration changed project root identity").into());
         }
         Ok(())
     }
@@ -1455,8 +2137,8 @@ mod tests {
         needle: &str,
         replacement: &str,
     ) -> Result<(), Box<dyn Error>> {
-        let ddl = CREATE_SCHEMA_SQL.replacen(needle, replacement, 1);
-        if ddl == CREATE_SCHEMA_SQL {
+        let ddl = BASE_SCHEMA_SQL.replacen(needle, replacement, 1);
+        if ddl == BASE_SCHEMA_SQL {
             return Err(io::Error::other("schema lookalike replacement did not match").into());
         }
         let connection = Connection::open(db_path)?;

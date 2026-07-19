@@ -4781,6 +4781,8 @@ fn no_telemetry_readonly_cli_smoke() -> Result<(), Box<dyn Error>> {
     let mcp_config = mcp_config_for_harness(&repo, &db, "mcp-json")?;
     let (mcp_command, mcp_args) = mcp_command_and_args(&mcp_config)?;
     let connection = Connection::open(&db)?;
+    // Stamp the current layout as a predecessor to prove every read-only adapter
+    // rejects schema lookalikes without migrating or repairing them.
     connection.execute(
         "UPDATE metadata SET value = '8' WHERE key = 'schema_version'",
         [],
@@ -4788,10 +4790,10 @@ fn no_telemetry_readonly_cli_smoke() -> Result<(), Box<dyn Error>> {
     connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
     connection.pragma_update(None, "journal_mode", "DELETE")?;
     drop(connection);
-    let released_schema_bytes = fs::read(&db)?;
+    let incompatible_schema_bytes = fs::read(&db)?;
     for suffix in ["-wal", "-shm", "-journal"] {
         if sqlite_sidecar_path(&db, suffix).exists() {
-            return Err(io::Error::other("released-schema fixture retained a sidecar").into());
+            return Err(io::Error::other("schema-lookalike fixture retained a sidecar").into());
         }
     }
 
@@ -4809,7 +4811,7 @@ fn no_telemetry_readonly_cli_smoke() -> Result<(), Box<dyn Error>> {
             .args(args)
             .assert()
             .failure()
-            .stderr(predicate::str::contains("unsupported schema version 8"));
+            .stderr(predicate::str::contains("incompatible schema object"));
     }
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -4820,7 +4822,7 @@ fn no_telemetry_readonly_cli_smoke() -> Result<(), Box<dyn Error>> {
         .arg(&purpose_review)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unsupported schema version 8"));
+        .stderr(predicate::str::contains("incompatible schema object"));
 
     let mcp_messages = [
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#,
@@ -4830,14 +4832,14 @@ fn no_telemetry_readonly_cli_smoke() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_purpose_review","arguments":{"items":[{"path":"src/main.rs","purpose":"Rust source file for no-telemetry CLI smoke."}]}}}"#,
     ];
     let mcp_output = run_mcp_stdio(&mcp_command, &repo, &mcp_args, &mcp_messages)?;
-    if mcp_output.matches("unsupported schema version 8").count() < 3 {
+    if mcp_output.matches("incompatible schema object").count() < 3 {
         return Err(io::Error::other(format!(
-            "MCP pure reports did not refuse released schema without migration: {mcp_output}"
+            "MCP pure reports did not refuse a schema lookalike: {mcp_output}"
         ))
         .into());
     }
-    if fs::read(&db)? != released_schema_bytes {
-        return Err(io::Error::other("pure reports migrated or rewrote released schema").into());
+    if fs::read(&db)? != incompatible_schema_bytes {
+        return Err(io::Error::other("pure reports migrated or rewrote a schema lookalike").into());
     }
     for suffix in ["-wal", "-shm", "-journal"] {
         if sqlite_sidecar_path(&db, suffix).exists() {
