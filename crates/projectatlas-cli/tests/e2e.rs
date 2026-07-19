@@ -11339,6 +11339,10 @@ fn init_map_and_lint_flow_uses_rust_implementation() -> Result<(), Box<dyn Error
             "src/main.rs",
             "Provide a tiny Rust entry point for ProjectAtlas tests",
         ),
+        (
+            ".projectatlas/projectatlas-nonsource-files.toon",
+            "Declare non-source file purposes for ProjectAtlas CLI integration tests",
+        ),
     ] {
         Command::cargo_bin("projectatlas")?
             .current_dir(&repo)

@@ -30,10 +30,10 @@ use projectatlas_core::telemetry::{
 };
 use projectatlas_core::toon::{encode_agent_payload, render_ranked_node_rows};
 use projectatlas_core::{
-    IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkResource, IndexWorkStage, Node,
-    NodeKind, Overview, PurposeSource, PurposeStatus, normalize_native_path_display,
-    normalize_native_path_display_str, normalize_repo_path, purpose_review_signal,
-    repo_path_to_native, validated_repo_file_key, validated_repo_node_key,
+    IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkResource,
+    IndexWorkStage, Node, NodeKind, Overview, PurposeSource, PurposeStatus,
+    normalize_native_path_display, normalize_native_path_display_str, normalize_repo_path,
+    purpose_review_signal, repo_path_to_native, validated_repo_file_key, validated_repo_node_key,
 };
 use projectatlas_db::{
     AtlasStore, HealthFindingsPage, HealthQuery, HealthScope, IndexPublicationGuard,
@@ -73,6 +73,14 @@ pub(crate) const MAX_HEALTH_LIMIT: usize = 200;
 const DEFAULT_INDEX_WORK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Maximum UTF-8 source bytes retained while one publication is staged.
 const MAX_STAGED_TEXT_BYTES: u64 = 512 * 1024 * 1024;
+/// Maximum aggregate retained string bytes across one in-memory publication batch.
+const MAX_PUBLICATION_STAGING_BYTES: u64 = 512 * 1024 * 1024;
+/// Maximum scan-node mutations applied between publication cancellation checks.
+const PUBLICATION_NODE_BATCH_SIZE: usize = 1_024;
+/// Maximum deleted repository paths applied between publication cancellation checks.
+const PUBLICATION_PATH_BATCH_SIZE: usize = 128;
+/// Maximum persisted source texts applied between publication cancellation checks.
+const PUBLICATION_TEXT_BATCH_SIZE: usize = 32;
 /// Maximum symbol parse results retained before sequential persistence.
 const SYMBOL_PARSE_BATCH_SIZE: usize = 64;
 /// Maximum symbol candidates accepted by one publication.
@@ -699,50 +707,6 @@ fn index_derivation_fingerprint(
 
 /// Recheck current policy and source before making staged rows visible.
 #[cfg(test)]
-fn revalidate_index_publication(
-    store: &AtlasStore,
-    plan: &ScanRuntimePlan,
-) -> Result<(), CliError> {
-    let control = standalone_index_work_control();
-    revalidate_index_publication_controlled(store, plan, &control)
-}
-
-/// Recheck current policy and source under one operation-scoped work boundary.
-fn revalidate_index_publication_controlled(
-    store: &AtlasStore,
-    plan: &ScanRuntimePlan,
-    control: &IndexWorkControl,
-) -> Result<(), CliError> {
-    revalidate_index_publication_inputs_controlled(store, plan, None, control)
-}
-
-/// Recheck every source and legacy-purpose input consumed by a full scan.
-#[cfg(test)]
-fn revalidate_full_scan_publication(
-    store: &AtlasStore,
-    plan: &ScanRuntimePlan,
-    staged_purpose_import: &PurposeImportSnapshot,
-) -> Result<(), CliError> {
-    let control = standalone_index_work_control();
-    revalidate_full_scan_publication_controlled(store, plan, staged_purpose_import, &control)
-}
-
-/// Recheck every full-scan input under one operation-scoped work boundary.
-fn revalidate_full_scan_publication_controlled(
-    store: &AtlasStore,
-    plan: &ScanRuntimePlan,
-    staged_purpose_import: &PurposeImportSnapshot,
-    control: &IndexWorkControl,
-) -> Result<(), CliError> {
-    revalidate_index_publication_inputs_controlled(
-        store,
-        plan,
-        Some(&staged_purpose_import.fingerprint),
-        control,
-    )
-}
-
-/// Recheck current policy and source before making staged rows visible.
 fn revalidate_index_publication_inputs_controlled(
     store: &AtlasStore,
     plan: &ScanRuntimePlan,
@@ -759,9 +723,48 @@ fn revalidate_index_publication_inputs_controlled(
 }
 
 /// Recheck publication inputs under explicit purpose limits used by focused tests.
+#[cfg(test)]
 fn revalidate_index_publication_inputs_controlled_with_limits(
     store: &AtlasStore,
     plan: &ScanRuntimePlan,
+    expected_purpose_import_fingerprint: Option<&str>,
+    control: &IndexWorkControl,
+    purpose_limits: PurposeImportLimits,
+) -> Result<(), CliError> {
+    let staged_nodes = store
+        .load_nodes()?
+        .into_iter()
+        .map(|indexed| indexed.node)
+        .collect::<Vec<_>>();
+    revalidate_staged_publication_inputs_controlled_with_limits(
+        plan,
+        &staged_nodes,
+        expected_purpose_import_fingerprint,
+        control,
+        purpose_limits,
+    )
+}
+
+/// Recheck policy and exact source against one off-writer publication batch.
+fn revalidate_staged_publication_inputs_controlled(
+    plan: &ScanRuntimePlan,
+    staged_nodes: &[Node],
+    expected_purpose_import_fingerprint: Option<&str>,
+    control: &IndexWorkControl,
+) -> Result<(), CliError> {
+    revalidate_staged_publication_inputs_controlled_with_limits(
+        plan,
+        staged_nodes,
+        expected_purpose_import_fingerprint,
+        control,
+        PurposeImportLimits::default(),
+    )
+}
+
+/// Recheck a staged batch under explicit purpose-input limits used by tests.
+fn revalidate_staged_publication_inputs_controlled_with_limits(
+    plan: &ScanRuntimePlan,
+    staged_nodes: &[Node],
     expected_purpose_import_fingerprint: Option<&str>,
     control: &IndexWorkControl,
     purpose_limits: PurposeImportLimits,
@@ -805,12 +808,7 @@ fn revalidate_index_publication_inputs_controlled_with_limits(
             ));
         }
     }
-    let staged_nodes = store
-        .load_nodes()?
-        .into_iter()
-        .map(|indexed| indexed.node)
-        .collect::<Vec<_>>();
-    verify_source_nodes_match(&current_plan.root, &current_nodes, &staged_nodes)?;
+    verify_source_nodes_match(&current_plan.root, &current_nodes, staged_nodes)?;
     control.check(IndexWorkStage::Publication)?;
     Ok(())
 }
@@ -1743,6 +1741,344 @@ pub(crate) fn text_index_options(
     TextIndexOptions::new(max_bytes)
 }
 
+/// Capture the last complete generation used as a publication compare-and-swap anchor.
+fn publication_base_generation(store: &AtlasStore) -> Result<IndexGeneration, CliError> {
+    Ok(store
+        .index_publication()?
+        .map_or(IndexGeneration::ZERO, |publication| publication.generation))
+}
+
+/// Prepare a complete source/index batch without acquiring the `SQLite` writer.
+fn stage_full_index_publication(
+    store: &AtlasStore,
+    plan: &ScanRuntimePlan,
+    symbol_options: &SymbolBuildOptions,
+    reuse_unchanged_symbols: bool,
+    import_legacy_purposes: bool,
+    control: &IndexWorkControl,
+) -> Result<IndexPublicationBatch, CliError> {
+    let base_generation = publication_base_generation(store)?;
+    let contract_fingerprint = plan.publication_contract_fingerprint();
+    let previous_hashes = reuse_unchanged_symbols
+        .then(|| indexed_file_hashes(store))
+        .transpose()?;
+    let nodes = scan_repo_controlled(
+        &plan.root,
+        &plan.scan_options,
+        ScanLimits::default(),
+        control,
+    )?;
+    control.check(IndexWorkStage::Publication)?;
+    let purpose_import = import_legacy_purposes
+        .then(|| plan.purpose_import_snapshot_controlled(&nodes, control))
+        .transpose()?;
+    let protected_purpose_paths = protected_purpose_paths(&nodes, purpose_import.as_ref());
+    let text_paths = nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::File)
+        .map(|node| node.path.clone())
+        .collect::<Vec<_>>();
+    let text = stage_text_index_for_changed_paths_controlled(
+        &plan.root,
+        &nodes,
+        plan.text_options,
+        control,
+    )?;
+    let retained_before_symbols =
+        staged_publication_identity_bytes(&plan.root, &contract_fingerprint)
+            .saturating_add(staged_string_bytes(&text_paths))
+            .saturating_add(staged_node_bytes(&nodes))
+            .saturating_add(staged_text_bytes(&text))
+            .saturating_add(staged_purpose_bytes(purpose_import.as_ref()));
+    let symbol_limits = symbol_limits_with_remaining_staging_bytes(retained_before_symbols)?;
+    let symbols = stage_symbols_for_nodes_with_limits(
+        store,
+        &plan.root,
+        &nodes,
+        symbol_options,
+        previous_hashes.as_ref(),
+        None,
+        &protected_purpose_paths,
+        control,
+        symbol_limits,
+    )?;
+    let structural_summaries = stage_structural_summaries_for_nodes_controlled(
+        store,
+        &nodes,
+        &text.rows,
+        Some(&symbols),
+        &protected_purpose_paths,
+        control,
+    )?;
+    enforce_publication_staging_budget(
+        retained_before_symbols
+            .saturating_add(symbols.retained_bytes)
+            .saturating_add(structural_summaries.retained_bytes),
+    )?;
+    Ok(IndexPublicationBatch {
+        base_generation,
+        contract_fingerprint,
+        root: plan.root.clone(),
+        nodes: NodePublicationBatch::Full { nodes },
+        purpose_import,
+        text_paths,
+        text,
+        symbols,
+        structural_summaries,
+    })
+}
+
+/// Return paths whose reviewed or built-in purpose must suppress generated suggestions.
+fn protected_purpose_paths(
+    nodes: &[Node],
+    purpose_import: Option<&PurposeImportSnapshot>,
+) -> HashSet<String> {
+    let indexed_paths = nodes
+        .iter()
+        .map(|node| node.path.as_str())
+        .collect::<HashSet<_>>();
+    let mut protected = BUILTIN_PROJECTATLAS_PURPOSES
+        .iter()
+        .filter(|(path, _purpose)| indexed_paths.contains(*path))
+        .map(|(path, _purpose)| (*path).to_string())
+        .collect::<HashSet<_>>();
+    if let Some(snapshot) = purpose_import {
+        protected.extend(
+            snapshot
+                .records
+                .iter()
+                .filter(|record| indexed_paths.contains(record.path.as_str()))
+                .map(|record| record.path.clone()),
+        );
+    }
+    protected
+}
+
+/// Count retained node string bytes for one bounded in-memory publication batch.
+fn staged_node_bytes(nodes: &[Node]) -> u64 {
+    nodes.iter().fold(0_u64, |bytes, node| {
+        bytes
+            .saturating_add(node.path.len() as u64)
+            .saturating_add(
+                node.parent_path
+                    .as_ref()
+                    .map_or(0, |value| value.len() as u64),
+            )
+            .saturating_add(
+                node.extension
+                    .as_ref()
+                    .map_or(0, |value| value.len() as u64),
+            )
+            .saturating_add(node.language.as_ref().map_or(0, |value| value.len() as u64))
+            .saturating_add(
+                node.content_hash
+                    .as_ref()
+                    .map_or(0, |value| value.len() as u64),
+            )
+    })
+}
+
+/// Count retained persisted-text strings for one staged batch.
+fn staged_text_bytes(text: &TextIndexRefresh) -> u64 {
+    text.rows.iter().fold(0_u64, |bytes, row| {
+        let bytes = bytes.saturating_add(row.path.len() as u64);
+        row.text.as_ref().map_or(bytes, |text| {
+            bytes
+                .saturating_add(text.path.len() as u64)
+                .saturating_add(
+                    text.content_hash
+                        .as_ref()
+                        .map_or(0, |value| value.len() as u64),
+                )
+                .saturating_add(text.content.len() as u64)
+        })
+    })
+}
+
+/// Count retained legacy-purpose strings for one staged batch.
+fn staged_purpose_bytes(purpose_import: Option<&PurposeImportSnapshot>) -> u64 {
+    purpose_import.map_or(0, |snapshot| {
+        snapshot
+            .records
+            .iter()
+            .fold(snapshot.fingerprint.len() as u64, |bytes, record| {
+                bytes
+                    .saturating_add(record.path.len() as u64)
+                    .saturating_add(record.summary.len() as u64)
+            })
+    })
+}
+
+/// Count retained strings duplicated into one publication batch.
+fn staged_string_bytes(values: &[String]) -> u64 {
+    values.iter().fold(0_u64, |bytes, value| {
+        bytes.saturating_add(value.len() as u64)
+    })
+}
+
+/// Count the selected root and derivation identity retained by one batch.
+fn staged_publication_identity_bytes(root: &Path, contract_fingerprint: &str) -> u64 {
+    (normalize_native_path_display(root).len() as u64)
+        .saturating_add(contract_fingerprint.len() as u64)
+}
+
+/// Restrict parser output to the remaining aggregate publication-staging budget.
+fn symbol_limits_with_remaining_staging_bytes(
+    retained_bytes: u64,
+) -> Result<SymbolPublicationLimits, CliError> {
+    enforce_publication_staging_budget(retained_bytes)?;
+    Ok(SymbolPublicationLimits {
+        output_bytes: SymbolPublicationLimits::STANDARD
+            .output_bytes
+            .min(MAX_PUBLICATION_STAGING_BYTES.saturating_sub(retained_bytes)),
+        ..SymbolPublicationLimits::STANDARD
+    })
+}
+
+/// Fail before writer acquisition when retained publication state exceeds its budget.
+fn enforce_publication_staging_budget(retained_bytes: u64) -> Result<(), CliError> {
+    if retained_bytes > MAX_PUBLICATION_STAGING_BYTES {
+        return Err(IndexWorkFailure::resource_limit(
+            IndexWorkStage::Publication,
+            IndexWorkResource::OutputBytes,
+            MAX_PUBLICATION_STAGING_BYTES,
+            retained_bytes,
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Build the complete expected source state after one normalized incremental delta.
+fn expected_nodes_after_incremental(
+    baseline_nodes: Vec<Node>,
+    changed_nodes: &[Node],
+    absent_paths: &[String],
+) -> Vec<Node> {
+    let absent_paths = absent_paths
+        .iter()
+        .map(String::as_str)
+        .filter(|path| !matches!(*path, "" | "."))
+        .collect::<HashSet<_>>();
+    let mut expected = baseline_nodes
+        .into_iter()
+        .filter(|node| !repository_path_is_absent(&node.path, &absent_paths))
+        .map(|node| (node.path.clone(), node))
+        .collect::<BTreeMap<_, _>>();
+    for node in changed_nodes {
+        expected.insert(node.path.clone(), node.clone());
+    }
+    expected.into_values().collect()
+}
+
+/// Match an exact absent repository key or one of its slash-delimited ancestors.
+fn repository_path_is_absent(path: &str, absent_paths: &HashSet<&str>) -> bool {
+    absent_paths.contains(path)
+        || path
+            .match_indices('/')
+            .any(|(separator, _)| absent_paths.contains(&path[..separator]))
+}
+
+/// Apply one fully prepared index batch in a short generation-checked transaction.
+fn publish_index_batch(
+    store: &mut AtlasStore,
+    batch: IndexPublicationBatch,
+    control: &IndexWorkControl,
+) -> Result<IndexPublicationOutcome, CliError> {
+    control.check(IndexWorkStage::Publication)?;
+    let IndexPublicationBatch {
+        base_generation,
+        contract_fingerprint,
+        root,
+        nodes,
+        purpose_import,
+        text_paths,
+        text,
+        symbols,
+        structural_summaries,
+    } = batch;
+    let mut publication =
+        store.begin_index_publication_from(&contract_fingerprint, base_generation)?;
+    publication.set_project_root(&root)?;
+    let indexed_nodes = match nodes {
+        NodePublicationBatch::Full { nodes } => {
+            publication.begin_scan_replacement()?;
+            for batch in nodes.chunks(PUBLICATION_NODE_BATCH_SIZE) {
+                control.check(IndexWorkStage::Publication)?;
+                publication.upsert_scan_node_batch(batch)?;
+            }
+            control.check(IndexWorkStage::Publication)?;
+            publication.finish_scan_replacement()?;
+            nodes
+        }
+        NodePublicationBatch::Incremental {
+            nodes,
+            absent_paths,
+            expected_nodes: _,
+        } => {
+            for batch in nodes.chunks(PUBLICATION_NODE_BATCH_SIZE) {
+                control.check(IndexWorkStage::Publication)?;
+                publication.upsert_scan_node_batch(batch)?;
+            }
+            for batch in absent_paths.chunks(PUBLICATION_PATH_BATCH_SIZE) {
+                control.check(IndexWorkStage::Publication)?;
+                publication.mark_paths_absent(batch)?;
+            }
+            nodes
+        }
+    };
+    seed_builtin_projectatlas_purposes(&publication, &indexed_nodes)?;
+    apply_text_index_stage(&mut publication, &text_paths, &text, control)?;
+    let purpose_import = purpose_import.map_or_else(
+        || Ok(PurposeImportReport::default()),
+        |snapshot| apply_purpose_import_snapshot(&publication, &indexed_nodes, &snapshot, control),
+    )?;
+    apply_symbol_build_stage(&mut publication, &symbols, control)?;
+    apply_structural_summary_stage(&mut publication, &structural_summaries, control)?;
+    complete_index_publication(publication, control)?;
+    Ok(IndexPublicationOutcome {
+        purpose_import,
+        text_index: text.report,
+        structural_summaries: structural_summaries.report,
+        symbols: symbols.report,
+    })
+}
+
+/// Apply staged legacy-purpose rows without overwriting current reviewed intent.
+fn apply_purpose_import_snapshot(
+    store: &AtlasStore,
+    nodes: &[Node],
+    snapshot: &PurposeImportSnapshot,
+    control: &IndexWorkControl,
+) -> Result<PurposeImportReport, CliError> {
+    let indexed_paths = nodes
+        .iter()
+        .map(|node| node.path.as_str())
+        .collect::<HashSet<_>>();
+    let mut report = PurposeImportReport::default();
+    for record in &snapshot.records {
+        control.check(IndexWorkStage::Publication)?;
+        if !indexed_paths.contains(record.path.as_str()) {
+            report.skipped_stale += 1;
+            continue;
+        }
+        let Some(indexed) = store.load_node_by_path(&record.path)? else {
+            report.skipped_stale += 1;
+            continue;
+        };
+        if matches!(
+            indexed.purpose.status,
+            PurposeStatus::Approved | PurposeStatus::Stale
+        ) {
+            report.skipped_existing += 1;
+            continue;
+        }
+        store.set_purpose(&record.path, &record.summary, PurposeSource::Imported)?;
+        report.imported += 1;
+    }
+    Ok(report)
+}
+
 /// Execute the full scan/index/symbol pipeline for a resolved project plan.
 #[cfg(test)]
 pub(crate) fn run_scan_pipeline(
@@ -1763,83 +2099,24 @@ pub(crate) fn run_scan_pipeline_controlled(
 ) -> Result<ScanReport, CliError> {
     let bounded_control = bounded_index_work_control(control);
     let control = &bounded_control;
-    let nodes = scan_repo_controlled(
-        &plan.root,
-        &plan.scan_options,
-        ScanLimits::default(),
-        control,
-    )?;
-    control.check(IndexWorkStage::Publication)?;
-    let purpose_import_snapshot = plan.purpose_import_snapshot_controlled(&nodes, control)?;
-    let contract_fingerprint = plan.publication_contract_fingerprint();
-    let mut publication = store.begin_index_publication(&contract_fingerprint)?;
-    publication.set_project_root(&plan.root)?;
-    publication.replace_scan(&nodes)?;
-    seed_builtin_projectatlas_purposes(&publication, &nodes)?;
-    let text_refresh = refresh_text_index_for_nodes_with_rows_controlled(
-        &mut publication,
-        &plan.root,
-        &nodes,
-        plan.text_options,
-        control,
-    )?;
-    let text_index = text_refresh.report.clone();
-    let indexed_paths = nodes
-        .iter()
-        .map(|node| node.path.as_str())
-        .collect::<HashSet<_>>();
-    let existing_purpose_paths = publication
-        .load_nodes()?
-        .into_iter()
-        .filter(|node| {
-            matches!(
-                node.purpose.status,
-                PurposeStatus::Approved | PurposeStatus::Stale
-            )
-        })
-        .map(|node| node.node.path)
-        .collect::<HashSet<_>>();
-    let mut purpose_import = PurposeImportReport::default();
-    for record in &purpose_import_snapshot.records {
-        control.check(IndexWorkStage::Publication)?;
-        if !indexed_paths.contains(record.path.as_str()) {
-            purpose_import.skipped_stale += 1;
-            continue;
-        }
-        if existing_purpose_paths.contains(record.path.as_str()) {
-            purpose_import.skipped_existing += 1;
-            continue;
-        }
-        publication.set_purpose(&record.path, &record.summary, PurposeSource::Imported)?;
-        purpose_import.imported += 1;
-    }
-    let symbols = build_symbols_for_index_controlled(
-        &mut publication,
-        &plan.root,
-        symbol_options,
-        None,
-        control,
-    )?;
-    let structural_summaries = refresh_structural_summaries_for_nodes_controlled(
-        &mut publication,
-        &nodes,
-        &text_refresh.rows,
-        control,
-    )?;
-    revalidate_full_scan_publication_controlled(
-        &publication,
+    let batch = stage_full_index_publication(store, plan, symbol_options, false, true, control)?;
+    revalidate_staged_publication_inputs_controlled(
         plan,
-        &purpose_import_snapshot,
+        batch.nodes.expected_nodes(),
+        batch
+            .purpose_import
+            .as_ref()
+            .map(|snapshot| snapshot.fingerprint.as_str()),
         control,
     )?;
-    complete_index_publication(publication, control)?;
+    let outcome = publish_index_batch(store, batch, control)?;
     let overview = store.overview()?;
     Ok(ScanReport {
         overview,
-        purpose_import,
-        text_index,
-        structural_summaries,
-        symbols,
+        purpose_import: outcome.purpose_import,
+        text_index: outcome.text_index,
+        structural_summaries: outcome.structural_summaries,
+        symbols: outcome.symbols,
     })
 }
 
@@ -1868,18 +2145,38 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
     control.check(IndexWorkStage::SymbolParsing)?;
     verify_index_project_root(store, &plan.root)?;
     verify_index_publication(store, plan)?;
+    let base_generation = publication_base_generation(store)?;
+    let nodes = store
+        .load_nodes()?
+        .into_iter()
+        .map(|indexed| indexed.node)
+        .collect::<Vec<_>>();
     let contract_fingerprint = plan.publication_contract_fingerprint();
-    let mut publication = store.begin_index_projection_refresh(&contract_fingerprint)?;
-    let report = build_symbols_for_index_controlled(
-        &mut publication,
+    let retained_before_symbols =
+        staged_publication_identity_bytes(&plan.root, &contract_fingerprint)
+            .saturating_add(staged_node_bytes(&nodes));
+    let symbol_limits = symbol_limits_with_remaining_staging_bytes(retained_before_symbols)?;
+    let staged = stage_symbols_for_nodes_with_limits(
+        store,
         &plan.root,
+        &nodes,
         symbol_options,
         previous_hashes,
+        None,
+        &HashSet::new(),
         control,
+        symbol_limits,
     )?;
-    revalidate_index_publication_controlled(&publication, plan, control)?;
+    enforce_publication_staging_budget(
+        retained_before_symbols.saturating_add(staged.retained_bytes),
+    )?;
+    revalidate_staged_publication_inputs_controlled(plan, &nodes, None, control)?;
+    control.check(IndexWorkStage::Publication)?;
+    let mut publication =
+        store.begin_index_projection_refresh_from(&contract_fingerprint, base_generation)?;
+    apply_symbol_build_stage(&mut publication, &staged, control)?;
     complete_index_publication(publication, control)?;
-    Ok(report)
+    Ok(staged.report)
 }
 
 /// Record a usage event from a fast baseline estimate and actual atlas payload.
@@ -2651,6 +2948,119 @@ pub(crate) struct SymbolBuildReport {
     pub(crate) purpose_suggestions: usize,
 }
 
+/// Filesystem and derived facts prepared before acquiring the `SQLite` writer.
+struct IndexPublicationBatch {
+    /// Complete publication generation observed before source preparation.
+    base_generation: IndexGeneration,
+    /// Derivation contract bound to every staged projection.
+    contract_fingerprint: String,
+    /// Canonical selected source root.
+    root: PathBuf,
+    /// Full or affected-path node mutation plus the final expected source state.
+    nodes: NodePublicationBatch,
+    /// Optional legacy-purpose inputs consumed by a full scan.
+    purpose_import: Option<PurposeImportSnapshot>,
+    /// Repository paths whose persisted source text must be replaced.
+    text_paths: Vec<String>,
+    /// Prepared persisted source-text rows and report.
+    text: TextIndexRefresh,
+    /// Prepared symbol graph, summary, and suggestion mutations.
+    symbols: SymbolBuildStage,
+    /// Prepared structural-summary and suggestion mutations.
+    structural_summaries: StructuralSummaryStage,
+}
+
+/// Node mutations owned by one full or incremental publication.
+enum NodePublicationBatch {
+    /// Replace the complete observed source tree.
+    Full {
+        /// Complete staged node set.
+        nodes: Vec<Node>,
+    },
+    /// Apply a bounded changed-path delta.
+    Incremental {
+        /// Added or modified nodes.
+        nodes: Vec<Node>,
+        /// Deleted paths and descendants to mark absent.
+        absent_paths: Vec<String>,
+        /// Complete expected source state used only for pre-publication revalidation.
+        expected_nodes: Vec<Node>,
+    },
+}
+
+impl NodePublicationBatch {
+    /// Return the complete source state that must still exist before publication.
+    fn expected_nodes(&self) -> &[Node] {
+        match self {
+            Self::Full { nodes } => nodes,
+            Self::Incremental { expected_nodes, .. } => expected_nodes,
+        }
+    }
+}
+
+/// Reports produced after a staged batch commits successfully.
+struct IndexPublicationOutcome {
+    /// Legacy-purpose import decisions made against current authored state.
+    purpose_import: PurposeImportReport,
+    /// Persisted source-text report.
+    text_index: TextIndexReport,
+    /// Deterministic structural-summary report.
+    structural_summaries: StructuralSummaryReport,
+    /// Deep symbol graph report.
+    symbols: SymbolBuildReport,
+}
+
+/// Symbol mutations retained outside the `SQLite` writer transaction.
+struct SymbolBuildStage {
+    /// Aggregate symbol build report.
+    report: SymbolBuildReport,
+    /// Deterministically ordered projection changes.
+    changes: Vec<SymbolProjectionChange>,
+    /// Retained parser-output string bytes admitted by the resource boundary.
+    retained_bytes: u64,
+}
+
+/// One closed symbol projection mutation.
+enum SymbolProjectionChange {
+    /// Persist one successfully parsed graph and its derived metadata.
+    Parsed(SymbolParseSuccess),
+    /// Clear stale symbol output for a skipped source file.
+    Clear {
+        /// Repository-relative path.
+        path: String,
+        /// Detected language used to preserve structural summaries where applicable.
+        language: Option<String>,
+    },
+}
+
+/// Structural summary mutations retained outside the `SQLite` writer transaction.
+struct StructuralSummaryStage {
+    /// Aggregate structural-summary report.
+    report: StructuralSummaryReport,
+    /// Deterministically ordered summary changes.
+    changes: Vec<StructuralSummaryChange>,
+    /// Retained summary and suggestion string bytes.
+    retained_bytes: u64,
+}
+
+/// One closed structural-summary projection mutation.
+enum StructuralSummaryChange {
+    /// Replace one observed summary and optional unreviewed purpose suggestion.
+    Set {
+        /// Repository-relative path.
+        path: String,
+        /// Deterministic observed summary.
+        summary: String,
+        /// Optional generated purpose suggestion.
+        purpose_suggestion: Option<String>,
+    },
+    /// Clear a stale observed summary.
+    Clear {
+        /// Repository-relative path.
+        path: String,
+    },
+}
+
 /// Watch command report.
 #[derive(Debug, Serialize)]
 pub(crate) struct WatchReport {
@@ -3363,38 +3773,8 @@ fn read_source_bytes_controlled(
     Ok(bytes)
 }
 
-/// Build every symbol graph under one operation-scoped work boundary.
-pub(crate) fn build_symbols_for_index_controlled(
-    store: &mut AtlasStore,
-    root: &Path,
-    options: &SymbolBuildOptions,
-    previous_hashes: Option<&HashMap<String, String>>,
-    control: &IndexWorkControl,
-) -> Result<SymbolBuildReport, CliError> {
-    build_symbols_for_paths_controlled(store, root, options, previous_hashes, None, control)
-}
-
-/// Build selected symbol graphs under one operation-scoped work boundary.
-pub(crate) fn build_symbols_for_paths_controlled(
-    store: &mut AtlasStore,
-    root: &Path,
-    options: &SymbolBuildOptions,
-    previous_hashes: Option<&HashMap<String, String>>,
-    target_paths: Option<&HashSet<String>>,
-    control: &IndexWorkControl,
-) -> Result<SymbolBuildReport, CliError> {
-    build_symbols_for_paths_with_limits(
-        store,
-        root,
-        options,
-        previous_hashes,
-        target_paths,
-        control,
-        SymbolPublicationLimits::STANDARD,
-    )
-}
-
 /// Build selected symbol graphs under explicit aggregate publication limits.
+#[cfg(test)]
 fn build_symbols_for_paths_with_limits(
     store: &mut AtlasStore,
     root: &Path,
@@ -3404,18 +3784,68 @@ fn build_symbols_for_paths_with_limits(
     control: &IndexWorkControl,
     limits: SymbolPublicationLimits,
 ) -> Result<SymbolBuildReport, CliError> {
+    let nodes = if let Some(paths) = target_paths {
+        let mut sorted_paths = paths.iter().cloned().collect::<Vec<_>>();
+        sorted_paths.sort();
+        store
+            .load_nodes_by_paths(&sorted_paths)?
+            .into_iter()
+            .map(|indexed| indexed.node)
+            .collect::<Vec<_>>()
+    } else {
+        store
+            .load_nodes()?
+            .into_iter()
+            .map(|indexed| indexed.node)
+            .collect::<Vec<_>>()
+    };
+    let staged = stage_symbols_for_nodes_with_limits(
+        store,
+        root,
+        &nodes,
+        options,
+        previous_hashes,
+        target_paths,
+        &HashSet::new(),
+        control,
+        limits,
+    )?;
+    apply_symbol_build_stage(store, &staged, control)?;
+    Ok(staged.report)
+}
+
+/// Build selected symbol mutations without acquiring the `SQLite` writer.
+#[allow(clippy::too_many_arguments)]
+fn stage_symbols_for_nodes_with_limits(
+    store: &AtlasStore,
+    root: &Path,
+    nodes: &[Node],
+    options: &SymbolBuildOptions,
+    previous_hashes: Option<&HashMap<String, String>>,
+    target_paths: Option<&HashSet<String>>,
+    protected_purpose_paths: &HashSet<String>,
+    control: &IndexWorkControl,
+    limits: SymbolPublicationLimits,
+) -> Result<SymbolBuildStage, CliError> {
     control.check(IndexWorkStage::SymbolParsing)?;
     let root = root.canonicalize().map_err(|source| CliError::Io {
         path: root.to_path_buf(),
         source,
     })?;
-    let nodes = if let Some(paths) = target_paths {
-        let mut sorted_paths = paths.iter().cloned().collect::<Vec<_>>();
-        sorted_paths.sort();
-        store.load_nodes_by_paths(&sorted_paths)?
-    } else {
-        store.load_nodes()?
-    };
+    let mut candidate_paths = nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::File)
+        .filter(|node| target_paths.is_none_or(|paths| paths.contains(&node.path)))
+        .filter(|node| is_symbol_candidate(&node.path, node.language.as_deref()))
+        .map(|node| node.path.clone())
+        .collect::<Vec<_>>();
+    candidate_paths.sort();
+    let existing_nodes = store
+        .load_nodes_by_paths(&candidate_paths)?
+        .into_iter()
+        .map(|indexed| (indexed.node.path.clone(), indexed))
+        .collect::<HashMap<_, _>>();
+    let symbol_counts = store.symbol_counts_for_paths(&candidate_paths)?;
     let mut report = SymbolBuildReport {
         candidates: 0,
         parsed: 0,
@@ -3431,47 +3861,58 @@ fn build_symbols_for_paths_with_limits(
         purpose_suggestions: 0,
     };
     let mut jobs = Vec::new();
+    let mut changes = Vec::new();
+    let mut output_bytes = 0_u64;
     for node in nodes
         .iter()
-        .filter(|node| node.node.kind == NodeKind::File)
-        .filter(|node| is_symbol_candidate(&node.node.path, node.node.language.as_deref()))
+        .filter(|node| node.kind == NodeKind::File)
+        .filter(|node| target_paths.is_none_or(|paths| paths.contains(&node.path)))
+        .filter(|node| is_symbol_candidate(&node.path, node.language.as_deref()))
     {
         control.check(IndexWorkStage::SymbolParsing)?;
         report.candidates += 1;
-        if node
-            .node
-            .size_bytes
-            .is_some_and(|size| size > options.max_bytes)
-        {
-            clear_skipped_symbol_index(store, &node.node.path, node.node.language.as_deref())?;
+        if node.size_bytes.is_some_and(|size| size > options.max_bytes) {
+            output_bytes = checked_symbol_publication_usage(
+                output_bytes,
+                node.path.len() as u64 + node.language.as_ref().map_or(0, String::len) as u64,
+                limits.output_bytes,
+                IndexWorkResource::OutputBytes,
+            )?;
+            changes.push(SymbolProjectionChange::Clear {
+                path: node.path.clone(),
+                language: node.language.clone(),
+            });
             report.too_large += 1;
             continue;
         }
-        let symbol_count = store.symbol_count_for_path(&node.node.path)?;
-        if node.node.content_hash.as_ref().is_some_and(|hash| {
-            previous_hashes.and_then(|hashes| hashes.get(&node.node.path)) == Some(hash)
+        let symbol_count = symbol_counts.get(&node.path).copied().unwrap_or_default();
+        if node.content_hash.as_ref().is_some_and(|hash| {
+            previous_hashes.and_then(|hashes| hashes.get(&node.path)) == Some(hash)
         }) {
             let has_source_index =
-                symbol_count > 0 || store.load_source_parse_metadata(&node.node.path)?.is_some();
+                symbol_count > 0 || store.load_source_parse_metadata(&node.path)?.is_some();
             if has_source_index {
                 report.unchanged += 1;
                 continue;
             }
         }
+        let existing = existing_nodes.get(&node.path);
         jobs.push(SymbolParseJob {
-            path: node.node.path.clone(),
-            native_path: root.join(repo_path_to_native(&node.node.path)),
+            path: node.path.clone(),
+            native_path: root.join(repo_path_to_native(&node.path)),
             expected_content_hash: node
-                .node
                 .content_hash
                 .clone()
-                .ok_or_else(|| source_changed_during_derivation(&root, &node.node.path))?,
-            language: node.node.language.clone(),
-            fallback_summary: node.summary.clone(),
-            purpose_needs_suggestion: matches!(
-                node.purpose.status,
-                PurposeStatus::Missing | PurposeStatus::Suggested
-            ),
+                .ok_or_else(|| source_changed_during_derivation(&root, &node.path))?,
+            language: node.language.clone(),
+            fallback_summary: existing.and_then(|indexed| indexed.summary.clone()),
+            purpose_needs_suggestion: !protected_purpose_paths.contains(&node.path)
+                && existing.is_none_or(|indexed| {
+                    matches!(
+                        indexed.purpose.status,
+                        PurposeStatus::Missing | PurposeStatus::Suggested
+                    )
+                }),
         });
         if jobs.len() > MAX_SYMBOL_PARSE_JOBS {
             return Err(IndexWorkFailure::resource_limit(
@@ -3483,7 +3924,6 @@ fn build_symbols_for_paths_with_limits(
             .into());
         }
     }
-    let mut output_bytes = 0_u64;
     if !jobs.is_empty() {
         let pool = ThreadPoolBuilder::new()
             .num_threads(options.effective_workers())
@@ -3514,20 +3954,28 @@ fn build_symbols_for_paths_with_limits(
                             limits.output_bytes,
                             IndexWorkResource::OutputBytes,
                         )?;
-                        store.set_node_summary(&parsed.path, &parsed.summary)?;
                         report.summaries += 1;
-                        if let Some(suggestion) = parsed.purpose_suggestion.as_deref() {
-                            store.set_suggested_purpose(&parsed.path, suggestion)?;
+                        if parsed.purpose_suggestion.is_some() {
                             report.purpose_suggestions += 1;
                         }
-                        store.replace_symbol_graph(&parsed.graph)?;
                         report.parsed += 1;
                         report.symbols = next_symbols as usize;
                         report.relations = next_relations as usize;
                         output_bytes = next_output_bytes;
+                        changes.push(SymbolProjectionChange::Parsed(parsed));
                     }
                     SymbolParseOutcome::BinaryOrNonUtf8 { path } => {
-                        clear_skipped_symbol_index_for_path(store, &path)?;
+                        let language = nodes
+                            .iter()
+                            .find(|node| node.path == path)
+                            .and_then(|node| node.language.clone());
+                        output_bytes = checked_symbol_publication_usage(
+                            output_bytes,
+                            path.len() as u64 + language.as_ref().map_or(0, String::len) as u64,
+                            limits.output_bytes,
+                            IndexWorkResource::OutputBytes,
+                        )?;
+                        changes.push(SymbolProjectionChange::Clear { path, language });
                         report.binary_or_non_utf8 += 1;
                     }
                     SymbolParseOutcome::SourceChanged { path } => {
@@ -3542,7 +3990,36 @@ fn build_symbols_for_paths_with_limits(
         }
     }
     control.check(IndexWorkStage::SymbolParsing)?;
-    Ok(report)
+    Ok(SymbolBuildStage {
+        report,
+        changes,
+        retained_bytes: output_bytes,
+    })
+}
+
+/// Apply prepared symbol mutations inside the parent publication transaction.
+fn apply_symbol_build_stage(
+    store: &mut AtlasStore,
+    staged: &SymbolBuildStage,
+    control: &IndexWorkControl,
+) -> Result<(), CliError> {
+    for change in &staged.changes {
+        control.check(IndexWorkStage::Publication)?;
+        match change {
+            SymbolProjectionChange::Parsed(parsed) => {
+                store.set_node_summary(&parsed.path, &parsed.summary)?;
+                if let Some(suggestion) = parsed.purpose_suggestion.as_deref() {
+                    store.set_suggested_purpose(&parsed.path, suggestion)?;
+                }
+                store.replace_symbol_graph(&parsed.graph)?;
+            }
+            SymbolProjectionChange::Clear { path, language } => {
+                clear_skipped_symbol_index(store, path, language.as_deref())?;
+            }
+        }
+    }
+    control.check(IndexWorkStage::Publication)?;
+    Ok(())
 }
 
 /// Parse one bounded symbol batch under the shared work boundary.
@@ -4163,14 +4640,6 @@ fn clear_skipped_symbol_index(
     Ok(())
 }
 
-/// Clear stale symbol output for a skipped path loaded from the index.
-fn clear_skipped_symbol_index_for_path(store: &AtlasStore, path: &str) -> Result<(), CliError> {
-    let language = store
-        .load_node_by_path(path)?
-        .and_then(|indexed| indexed.node.language);
-    clear_skipped_symbol_index(store, path, language.as_deref())
-}
-
 /// Normalize and validate a user-supplied path as a repository-relative file key.
 pub(crate) fn validated_file_key(file: &Path) -> Result<String, CliError> {
     validated_repo_file_key(file).map_err(|source| CliError::InvalidInput(source.to_string()))
@@ -4662,42 +5131,18 @@ pub(crate) fn refresh_index_controlled(
 ) -> Result<IndexRefreshReport, CliError> {
     let bounded_control = bounded_index_work_control(control);
     let control = &bounded_control;
-    let root = &plan.root;
-    let previous_hashes = indexed_file_hashes(store)?;
-    let nodes = scan_repo_controlled(root, &plan.scan_options, ScanLimits::default(), control)?;
-    control.check(IndexWorkStage::Publication)?;
-    let contract_fingerprint = plan.publication_contract_fingerprint();
-    let mut publication = store.begin_index_publication(&contract_fingerprint)?;
-    publication.set_project_root(root)?;
-    publication.replace_scan(&nodes)?;
-    seed_builtin_projectatlas_purposes(&publication, &nodes)?;
-    let text_refresh = refresh_text_index_for_nodes_with_rows_controlled(
-        &mut publication,
-        root,
-        &nodes,
-        plan.text_options,
+    let batch = stage_full_index_publication(store, plan, symbol_options, true, false, control)?;
+    revalidate_staged_publication_inputs_controlled(
+        plan,
+        batch.nodes.expected_nodes(),
+        None,
         control,
     )?;
-    let text_index = text_refresh.report.clone();
-    let symbols = build_symbols_for_index_controlled(
-        &mut publication,
-        root,
-        symbol_options,
-        Some(&previous_hashes),
-        control,
-    )?;
-    let structural_summaries = refresh_structural_summaries_for_nodes_controlled(
-        &mut publication,
-        &nodes,
-        &text_refresh.rows,
-        control,
-    )?;
-    revalidate_index_publication_controlled(&publication, plan, control)?;
-    complete_index_publication(publication, control)?;
+    let outcome = publish_index_batch(store, batch, control)?;
     Ok(IndexRefreshReport {
-        text_index,
-        structural_summaries,
-        symbols,
+        text_index: outcome.text_index,
+        structural_summaries: outcome.structural_summaries,
+        symbols: outcome.symbols,
     })
 }
 
@@ -4736,6 +5181,16 @@ pub(crate) fn refresh_index_for_changes_controlled(
         .into());
     }
     let root = &plan.root;
+    let base_generation = publication_base_generation(store)?;
+    let baseline_nodes = store
+        .load_nodes()?
+        .into_iter()
+        .map(|indexed| indexed.node)
+        .collect::<Vec<_>>();
+    let baseline_by_path = baseline_nodes
+        .iter()
+        .map(|node| (node.path.clone(), node))
+        .collect::<HashMap<_, _>>();
     let mut nodes = Vec::new();
     let mut absent_paths = Vec::new();
     let mut source_bytes = 0_u64;
@@ -4803,10 +5258,13 @@ pub(crate) fn refresh_index_for_changes_controlled(
         .collect::<HashSet<_>>();
     let mut sorted_candidate_paths = candidate_paths.into_iter().collect::<Vec<_>>();
     sorted_candidate_paths.sort();
-    let existing_nodes = store
-        .load_nodes_by_paths(&sorted_candidate_paths)?
-        .into_iter()
-        .map(|indexed| (indexed.node.path.clone(), indexed.node))
+    let existing_nodes = sorted_candidate_paths
+        .iter()
+        .filter_map(|path| {
+            baseline_by_path
+                .get(path)
+                .map(|node| (path.clone(), (*node).clone()))
+        })
         .collect::<HashMap<_, _>>();
     nodes.retain(|node| {
         existing_nodes
@@ -4815,78 +5273,90 @@ pub(crate) fn refresh_index_for_changes_controlled(
     });
     absent_paths.retain(|path| existing_nodes.contains_key(path));
     if nodes.is_empty() && absent_paths.is_empty() {
-        revalidate_index_publication_controlled(store, plan, control)?;
+        revalidate_staged_publication_inputs_controlled(plan, &baseline_nodes, None, control)?;
         return Ok(IndexRefreshReport {
             text_index: empty_text_index_report(plan.text_options),
             structural_summaries: StructuralSummaryReport::default(),
             symbols: empty_symbol_build_report(),
         });
     }
+    drop(existing_nodes);
+    drop(baseline_by_path);
     let changed_paths = nodes
         .iter()
         .map(|node| node.path.clone())
         .chain(absent_paths.iter().cloned())
         .collect::<HashSet<_>>();
     let previous_hashes = indexed_file_hashes_for_paths(store, &changed_paths)?;
-    let contract_fingerprint = plan.publication_contract_fingerprint();
-    let mut publication = store.begin_index_publication(&contract_fingerprint)?;
-    publication.set_project_root(root)?;
-    if !nodes.is_empty() {
-        publication.upsert_scan_nodes(&nodes)?;
-        seed_builtin_projectatlas_purposes(&publication, &nodes)?;
-    }
-    if !absent_paths.is_empty() {
-        publication.mark_paths_absent(&absent_paths)?;
-    }
-    let text_refresh = refresh_text_index_for_changed_paths_with_rows_controlled(
-        &mut publication,
-        root,
-        &changed_paths,
-        &nodes,
-        plan.text_options,
-        control,
-    )?;
-    let text_index = text_refresh.report.clone();
+    let mut text_paths = changed_paths.iter().cloned().collect::<Vec<_>>();
+    text_paths.sort();
+    let text =
+        stage_text_index_for_changed_paths_controlled(root, &nodes, plan.text_options, control)?;
+    let protected_purpose_paths = protected_purpose_paths(&nodes, None);
     let target_paths = nodes
         .iter()
         .filter(|node| node.kind == NodeKind::File)
         .map(|node| node.path.clone())
         .collect::<HashSet<_>>();
-    if target_paths.is_empty() {
-        let structural_summaries = refresh_structural_summaries_for_nodes_controlled(
-            &mut publication,
-            &nodes,
-            &text_refresh.rows,
-            control,
-        )?;
-        revalidate_index_publication_controlled(&publication, plan, control)?;
-        complete_index_publication(publication, control)?;
-        return Ok(IndexRefreshReport {
-            text_index,
-            structural_summaries,
-            symbols: empty_symbol_build_report(),
-        });
-    }
-    let symbols = build_symbols_for_paths_controlled(
-        &mut publication,
+    let expected_nodes = expected_nodes_after_incremental(baseline_nodes, &nodes, &absent_paths);
+    let contract_fingerprint = plan.publication_contract_fingerprint();
+    let retained_before_symbols = staged_publication_identity_bytes(root, &contract_fingerprint)
+        .saturating_add(staged_string_bytes(&text_paths))
+        .saturating_add(staged_string_bytes(&absent_paths))
+        .saturating_add(staged_node_bytes(&expected_nodes))
+        .saturating_add(staged_node_bytes(&nodes))
+        .saturating_add(staged_text_bytes(&text));
+    let symbol_limits = symbol_limits_with_remaining_staging_bytes(retained_before_symbols)?;
+    let symbols = stage_symbols_for_nodes_with_limits(
+        store,
         root,
+        &nodes,
         symbol_options,
         Some(&previous_hashes),
         Some(&target_paths),
+        &protected_purpose_paths,
         control,
+        symbol_limits,
     )?;
-    let structural_summaries = refresh_structural_summaries_for_nodes_controlled(
-        &mut publication,
+    let structural_summaries = stage_structural_summaries_for_nodes_controlled(
+        store,
         &nodes,
-        &text_refresh.rows,
+        &text.rows,
+        Some(&symbols),
+        &protected_purpose_paths,
         control,
     )?;
-    revalidate_index_publication_controlled(&publication, plan, control)?;
-    complete_index_publication(publication, control)?;
-    Ok(IndexRefreshReport {
-        text_index,
-        structural_summaries,
+    enforce_publication_staging_budget(
+        retained_before_symbols
+            .saturating_add(symbols.retained_bytes)
+            .saturating_add(structural_summaries.retained_bytes),
+    )?;
+    let batch = IndexPublicationBatch {
+        base_generation,
+        contract_fingerprint,
+        root: root.clone(),
+        nodes: NodePublicationBatch::Incremental {
+            nodes,
+            absent_paths,
+            expected_nodes,
+        },
+        purpose_import: None,
+        text_paths,
+        text,
         symbols,
+        structural_summaries,
+    };
+    revalidate_staged_publication_inputs_controlled(
+        plan,
+        batch.nodes.expected_nodes(),
+        None,
+        control,
+    )?;
+    let outcome = publish_index_batch(store, batch, control)?;
+    Ok(IndexRefreshReport {
+        text_index: outcome.text_index,
+        structural_summaries: outcome.structural_summaries,
+        symbols: outcome.symbols,
     })
 }
 
@@ -4906,7 +5376,10 @@ pub(crate) fn seed_builtin_projectatlas_purposes(
         let Some(indexed) = store.load_node_by_path(path)? else {
             continue;
         };
-        if indexed.purpose.status != PurposeStatus::Approved {
+        if !matches!(
+            indexed.purpose.status,
+            PurposeStatus::Approved | PurposeStatus::Stale
+        ) {
             store.set_purpose(path, purpose, PurposeSource::Imported)?;
         }
     }
@@ -4925,12 +5398,34 @@ pub(crate) fn refresh_structural_summaries_for_nodes(
 }
 
 /// Refresh structural summaries while observing the operation work boundary.
+#[cfg(test)]
 fn refresh_structural_summaries_for_nodes_controlled(
     store: &mut AtlasStore,
     nodes: &[Node],
     text_rows: &[TextIndexRow],
     control: &IndexWorkControl,
 ) -> Result<StructuralSummaryReport, CliError> {
+    let staged = stage_structural_summaries_for_nodes_controlled(
+        store,
+        nodes,
+        text_rows,
+        None,
+        &HashSet::new(),
+        control,
+    )?;
+    apply_structural_summary_stage(store, &staged, control)?;
+    Ok(staged.report)
+}
+
+/// Derive structural summary mutations without acquiring the `SQLite` writer.
+fn stage_structural_summaries_for_nodes_controlled(
+    store: &AtlasStore,
+    nodes: &[Node],
+    text_rows: &[TextIndexRow],
+    symbols: Option<&SymbolBuildStage>,
+    protected_purpose_paths: &HashSet<String>,
+    control: &IndexWorkControl,
+) -> Result<StructuralSummaryStage, CliError> {
     control.check(IndexWorkStage::TextIndex)?;
     let paths = nodes
         .iter()
@@ -4939,9 +5434,17 @@ fn refresh_structural_summaries_for_nodes_controlled(
         .map(|node| node.path.clone())
         .collect::<Vec<_>>();
     if paths.is_empty() {
-        return Ok(StructuralSummaryReport::default());
+        return Ok(StructuralSummaryStage {
+            report: StructuralSummaryReport::default(),
+            changes: Vec::new(),
+            retained_bytes: 0,
+        });
     }
-    let indexed_nodes = store.load_nodes_by_paths(&paths)?;
+    let indexed_nodes = store
+        .load_nodes_by_paths(&paths)?
+        .into_iter()
+        .map(|indexed| (indexed.node.path.clone(), indexed))
+        .collect::<HashMap<_, _>>();
     let symbol_counts = store.symbol_counts_for_paths(&paths)?;
     let text_by_path = text_rows
         .iter()
@@ -4951,65 +5454,143 @@ fn refresh_structural_summaries_for_nodes_controlled(
         .iter()
         .map(|row| (row.path.as_str(), row.reason))
         .collect::<HashMap<_, _>>();
+    let mut staged_symbol_counts = HashMap::new();
+    let mut staged_symbol_summaries = HashMap::new();
+    if let Some(symbols) = symbols {
+        for change in &symbols.changes {
+            match change {
+                SymbolProjectionChange::Parsed(parsed) => {
+                    staged_symbol_counts.insert(parsed.path.as_str(), parsed.graph.symbols.len());
+                    staged_symbol_summaries.insert(parsed.path.as_str(), parsed.summary.as_str());
+                }
+                SymbolProjectionChange::Clear { path, .. } => {
+                    staged_symbol_counts.insert(path.as_str(), 0);
+                }
+            }
+        }
+    }
     let mut report = StructuralSummaryReport {
-        candidates: indexed_nodes.len(),
+        candidates: paths.len(),
         ..StructuralSummaryReport::default()
     };
-    for indexed in indexed_nodes {
+    let mut changes = Vec::new();
+    let mut retained_bytes = 0_u64;
+    for node in nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::File)
+        .filter(|node| is_structural_summary_candidate(&node.path, node.language.as_deref()))
+    {
         control.check(IndexWorkStage::TextIndex)?;
-        if reason_by_path.get(indexed.node.path.as_str()) == Some(&TextIndexSkipReason::TooLarge)
-            || indexed
-                .node
+        let existing = indexed_nodes.get(&node.path);
+        if reason_by_path.get(node.path.as_str()) == Some(&TextIndexSkipReason::TooLarge)
+            || node
                 .size_bytes
                 .is_some_and(|size_bytes| size_bytes > MAX_SYMBOL_FILE_BYTES)
         {
-            store.clear_node_summary(&indexed.node.path)?;
+            retained_bytes = retained_bytes.saturating_add(node.path.len() as u64);
+            changes.push(StructuralSummaryChange::Clear {
+                path: node.path.clone(),
+            });
             report.cleared += 1;
             report.too_large += 1;
             continue;
         }
-        let Some(text) = text_by_path.get(indexed.node.path.as_str()) else {
-            store.clear_node_summary(&indexed.node.path)?;
+        let Some(text) = text_by_path.get(node.path.as_str()) else {
+            retained_bytes = retained_bytes.saturating_add(node.path.len() as u64);
+            changes.push(StructuralSummaryChange::Clear {
+                path: node.path.clone(),
+            });
             report.cleared += 1;
-            if reason_by_path.get(indexed.node.path.as_str())
-                == Some(&TextIndexSkipReason::BinaryOrNonUtf8)
+            if reason_by_path.get(node.path.as_str()) == Some(&TextIndexSkipReason::BinaryOrNonUtf8)
             {
                 report.binary_or_non_utf8 += 1;
             }
             continue;
         };
-        if symbol_counts
-            .get(indexed.node.path.as_str())
-            .is_some_and(|count| *count > 0)
-            && indexed.summary.as_deref().is_some_and(|summary| {
+        let symbol_count = staged_symbol_counts
+            .get(node.path.as_str())
+            .copied()
+            .or_else(|| symbol_counts.get(node.path.as_str()).copied())
+            .unwrap_or_default();
+        let effective_summary = staged_symbol_summaries
+            .get(node.path.as_str())
+            .copied()
+            .or_else(|| existing.and_then(|indexed| indexed.summary.as_deref()));
+        if symbol_count > 0
+            && effective_summary.is_some_and(|summary| {
                 !summary.trim().is_empty() && !is_scanner_fallback_summary(summary)
             })
         {
             continue;
         }
-        let Some(summary) = structural_summary_for_path(
-            &indexed.node.path,
-            indexed.node.language.as_deref(),
-            &text.content,
-        ) else {
-            store.clear_node_summary(&indexed.node.path)?;
+        let Some(summary) =
+            structural_summary_for_path(&node.path, node.language.as_deref(), &text.content)
+        else {
+            retained_bytes = retained_bytes.saturating_add(node.path.len() as u64);
+            changes.push(StructuralSummaryChange::Clear {
+                path: node.path.clone(),
+            });
             report.cleared += 1;
             continue;
         };
-        store.set_node_summary(&indexed.node.path, &summary)?;
         report.summarized += 1;
-        if matches!(
-            indexed.purpose.status,
-            PurposeStatus::Missing | PurposeStatus::Suggested
-        ) {
-            store.set_suggested_purpose(
-                &indexed.node.path,
-                &suggest_file_purpose(&indexed.node.path, &summary),
-            )?;
+        let purpose_needs_suggestion = !protected_purpose_paths.contains(&node.path)
+            && existing.is_none_or(|indexed| {
+                matches!(
+                    indexed.purpose.status,
+                    PurposeStatus::Missing | PurposeStatus::Suggested
+                )
+            });
+        let purpose_suggestion =
+            purpose_needs_suggestion.then(|| suggest_file_purpose(&node.path, &summary));
+        if purpose_suggestion.is_some() {
             report.purpose_suggestions += 1;
         }
+        retained_bytes = retained_bytes
+            .saturating_add(node.path.len() as u64)
+            .saturating_add(summary.len() as u64)
+            .saturating_add(
+                purpose_suggestion
+                    .as_ref()
+                    .map_or(0, |suggestion| suggestion.len() as u64),
+            );
+        changes.push(StructuralSummaryChange::Set {
+            path: node.path.clone(),
+            summary,
+            purpose_suggestion,
+        });
     }
-    Ok(report)
+    Ok(StructuralSummaryStage {
+        report,
+        changes,
+        retained_bytes,
+    })
+}
+
+/// Apply prepared structural summaries inside the parent publication transaction.
+fn apply_structural_summary_stage(
+    store: &mut AtlasStore,
+    staged: &StructuralSummaryStage,
+    control: &IndexWorkControl,
+) -> Result<(), CliError> {
+    for change in &staged.changes {
+        control.check(IndexWorkStage::Publication)?;
+        match change {
+            StructuralSummaryChange::Set {
+                path,
+                summary,
+                purpose_suggestion,
+            } => {
+                store.set_node_summary(path, summary)?;
+                if let Some(suggestion) = purpose_suggestion.as_deref() {
+                    store.set_suggested_purpose(path, suggestion)?;
+                }
+            }
+            StructuralSummaryChange::Clear { path } => store.clear_node_summary(path)?,
+        }
+    }
+    control.check(IndexWorkStage::Publication)?;
+    Ok(())
 }
 
 /// Refresh the persisted text index for every scanned file node.
@@ -5040,6 +5621,7 @@ pub(crate) fn refresh_text_index_for_nodes_with_rows(
 }
 
 /// Refresh all text rows under one cancellation and staging-byte boundary.
+#[cfg(test)]
 fn refresh_text_index_for_nodes_with_rows_controlled(
     store: &mut AtlasStore,
     root: &Path,
@@ -5055,7 +5637,7 @@ fn refresh_text_index_for_nodes_with_rows_controlled(
     refresh_text_index_for_changed_paths_with_rows_controlled(
         store,
         root,
-        &file_paths.iter().cloned().collect::<HashSet<_>>(),
+        &file_paths,
         nodes,
         options,
         control,
@@ -5063,17 +5645,28 @@ fn refresh_text_index_for_nodes_with_rows_controlled(
 }
 
 /// Refresh selected text rows under one cancellation and staging-byte boundary.
+#[cfg(test)]
 fn refresh_text_index_for_changed_paths_with_rows_controlled(
     store: &mut AtlasStore,
     root: &Path,
-    changed_paths: &HashSet<String>,
+    considered_paths: &[String],
+    nodes: &[Node],
+    options: TextIndexOptions,
+    control: &IndexWorkControl,
+) -> Result<TextIndexRefresh, CliError> {
+    let staged = stage_text_index_for_changed_paths_controlled(root, nodes, options, control)?;
+    apply_text_index_stage(store, considered_paths, &staged, control)?;
+    Ok(staged)
+}
+
+/// Build selected persisted-text rows without acquiring the `SQLite` writer.
+fn stage_text_index_for_changed_paths_controlled(
+    root: &Path,
     nodes: &[Node],
     options: TextIndexOptions,
     control: &IndexWorkControl,
 ) -> Result<TextIndexRefresh, CliError> {
     control.check(IndexWorkStage::TextIndex)?;
-    let mut considered_paths = changed_paths.iter().cloned().collect::<Vec<_>>();
-    considered_paths.sort();
     let text_rows = indexed_file_texts_for_nodes_controlled(root, nodes, options, control)?;
     let indexed = text_rows.iter().filter(|row| row.text.is_some()).count();
     let indexed_bytes = text_rows
@@ -5102,15 +5695,36 @@ fn refresh_text_index_for_changed_paths_with_rows_controlled(
         max_bytes: options.max_bytes,
         bytes: indexed_bytes,
     };
-    store.replace_file_texts_for_paths(
-        &considered_paths,
-        text_rows.iter().filter_map(|row| row.text.as_ref()),
-    )?;
     control.check(IndexWorkStage::TextIndex)?;
     Ok(TextIndexRefresh {
         report,
         rows: text_rows,
     })
+}
+
+/// Apply prepared persisted-text rows inside the parent publication transaction.
+fn apply_text_index_stage(
+    store: &mut AtlasStore,
+    considered_paths: &[String],
+    staged: &TextIndexRefresh,
+    control: &IndexWorkControl,
+) -> Result<(), CliError> {
+    let text_by_path = staged
+        .rows
+        .iter()
+        .filter_map(|row| row.text.as_ref().map(|text| (text.path.as_str(), text)))
+        .collect::<HashMap<_, _>>();
+    for paths in considered_paths.chunks(PUBLICATION_TEXT_BATCH_SIZE) {
+        control.check(IndexWorkStage::Publication)?;
+        store.replace_file_texts_for_paths(
+            paths,
+            paths
+                .iter()
+                .filter_map(|path| text_by_path.get(path.as_str()).copied()),
+        )?;
+    }
+    control.check(IndexWorkStage::Publication)?;
+    Ok(())
 }
 
 /// Build indexed text rows for UTF-8 scanned files with size caps.
@@ -5764,6 +6378,73 @@ mod tests {
             )?;
         }
 
+        let mut oversized_node = nodes
+            .iter()
+            .find(|node| node.path == "lib.rs")
+            .cloned()
+            .ok_or_else(|| io::Error::other("oversized symbol fixture node missing"))?;
+        oversized_node.size_bytes = Some(4);
+        let clear_bytes = oversized_node.path.len() as u64
+            + oversized_node.language.as_ref().map_or(0, String::len) as u64;
+        let clear_options = SymbolBuildOptions::new(3, Some(1), None);
+        let clear_limits = SymbolPublicationLimits {
+            symbol_rows: u64::MAX,
+            relation_rows: u64::MAX,
+            output_bytes: clear_bytes.saturating_sub(1),
+        };
+        let clear_result = stage_symbols_for_nodes_with_limits(
+            &store,
+            temp.path(),
+            std::slice::from_ref(&oversized_node),
+            &clear_options,
+            None,
+            None,
+            &HashSet::new(),
+            &control,
+            clear_limits,
+        );
+        if !matches!(
+            clear_result,
+            Err(CliError::IndexWork(IndexWorkFailure::ResourceLimitExceeded {
+                stage: IndexWorkStage::SymbolParsing,
+                resource: IndexWorkResource::OutputBytes,
+                limit,
+                observed,
+            })) if limit == clear_bytes.saturating_sub(1) && observed == clear_bytes
+        ) {
+            return Err(
+                io::Error::other("symbol clear output bypassed its retained-byte limit").into(),
+            );
+        }
+        let clear_stage = stage_symbols_for_nodes_with_limits(
+            &store,
+            temp.path(),
+            std::slice::from_ref(&oversized_node),
+            &clear_options,
+            None,
+            None,
+            &HashSet::new(),
+            &control,
+            SymbolPublicationLimits {
+                output_bytes: clear_bytes,
+                ..SymbolPublicationLimits::STANDARD
+            },
+        )?;
+        require_eq(
+            &clear_stage.retained_bytes,
+            &clear_bytes,
+            "retained symbol clear bytes",
+        )?;
+        if !matches!(
+            clear_stage.changes.as_slice(),
+            [SymbolProjectionChange::Clear { path, language }]
+                if path == "lib.rs" && language.as_deref() == Some("rust")
+        ) {
+            return Err(
+                io::Error::other("oversized symbol output did not retain one clear").into(),
+            );
+        }
+
         let report = build_symbols_for_paths_with_limits(
             &mut store,
             temp.path(),
@@ -6119,16 +6800,77 @@ mod tests {
     fn publication_revalidation_rejects_source_policy_and_import_drift()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
+        let config_dir = temp.path().join(".projectatlas");
+        fs::create_dir_all(&config_dir)?;
         let source_path = temp.path().join("lib.rs");
         let staged_source = "fn first() {}\n";
         fs::write(&source_path, staged_source)?;
         let plan = ScanRuntimePlan::for_path(None, temp.path(), None)?;
-        let staged_nodes = scan_repo(&plan.root, &plan.scan_options)?;
-        let mut store = AtlasStore::in_memory()?;
-        store.replace_scan(&staged_nodes)?;
+        let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let db_path = config_dir.join("projectatlas.db");
+        let mut store = AtlasStore::open(&db_path)?;
+        run_scan_pipeline(&mut store, &plan, &symbol_options)?;
+        let control = standalone_index_work_control();
+        let initial_generation = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("initial publication missing"))?
+            .generation;
+        let contract_fingerprint = plan.publication_contract_fingerprint();
+        let mut competing_store = AtlasStore::open(&db_path)?;
+        let competing_publication = competing_store
+            .begin_index_projection_refresh_from(&contract_fingerprint, initial_generation)?;
+        competing_publication.set_node_summary("lib.rs", "winning projection")?;
+        let generation_conflict_batch =
+            stage_full_index_publication(&store, &plan, &symbol_options, true, false, &control)?;
+        competing_publication.complete()?;
+        let winning_generation = initial_generation
+            .checked_next()
+            .ok_or_else(|| io::Error::other("test generation overflowed"))?;
+        let conflict = publish_index_batch(&mut store, generation_conflict_batch, &control);
+        if !matches!(
+            conflict,
+            Err(CliError::Db(
+                projectatlas_db::DbError::PublicationBaseGenerationChanged {
+                    expected,
+                    found,
+                }
+            )) if expected == initial_generation && found == winning_generation
+        ) {
+            return Err(io::Error::other(
+                "runtime publication did not reject a generation changed after preparation",
+            )
+            .into());
+        }
+        let winning_publication = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("winning publication missing"))?;
+        require_eq(
+            &winning_publication.generation,
+            &winning_generation,
+            "winning publication generation",
+        )?;
+        require_eq(
+            &winning_publication.state,
+            &projectatlas_db::IndexPublicationState::Complete,
+            "winning publication state",
+        )?;
+        require_eq(
+            &store
+                .load_node_by_path("lib.rs")?
+                .and_then(|node| node.summary),
+            &Some("winning projection".to_string()),
+            "winning publication summary",
+        )?;
+        let staged_source_batch =
+            stage_full_index_publication(&store, &plan, &symbol_options, true, false, &control)?;
 
         fs::write(&source_path, "fn other() {}\n")?;
-        let source_result = revalidate_index_publication(&store, &plan);
+        let source_result = revalidate_staged_publication_inputs_controlled(
+            &plan,
+            staged_source_batch.nodes.expected_nodes(),
+            None,
+            &control,
+        );
         let Err(CliError::RefreshRequired(details)) = source_result else {
             return Err(io::Error::other("publication accepted changed source state").into());
         };
@@ -6144,8 +6886,8 @@ mod tests {
         )?;
 
         fs::write(&source_path, staged_source)?;
-        let config_dir = temp.path().join(".projectatlas");
-        fs::create_dir(&config_dir)?;
+        let staged_policy_batch =
+            stage_full_index_publication(&store, &plan, &symbol_options, true, false, &control)?;
         let config_path = config_dir.join("config.toml");
         fs::write(
             &config_path,
@@ -6170,7 +6912,12 @@ line_comment_prefixes = ["//"]
 ".rs" = "line-comment"
 "#,
         )?;
-        let policy_result = revalidate_index_publication(&store, &plan);
+        let policy_result = revalidate_staged_publication_inputs_controlled(
+            &plan,
+            staged_policy_batch.nodes.expected_nodes(),
+            None,
+            &control,
+        );
         let Err(CliError::VerificationIncomplete(details)) = policy_result else {
             return Err(io::Error::other("publication accepted changed effective policy").into());
         };
@@ -6242,8 +6989,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         )?;
         let import_plan =
             ScanRuntimePlan::for_path(Some(&external_config_path), &import_repo, Some(1))?;
-        let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
-        let mut import_store = AtlasStore::in_memory()?;
+        let mut import_store = AtlasStore::open(&import_atlas_dir.join("projectatlas.db"))?;
         run_scan_pipeline(&mut import_store, &import_plan, &symbol_options)?;
         verify_index_freshness(&import_store, &import_repo, Some(&external_config_path))?;
         let normal_import_plan =
@@ -6265,10 +7011,19 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             return Err(io::Error::other("legacy purpose fixture was not imported").into());
         }
 
-        let staged_import_nodes = scan_repo(&import_plan.root, &import_plan.scan_options)?;
         let import_control = standalone_index_work_control();
-        let staged_purpose_import = import_plan
-            .purpose_import_snapshot_controlled(&staged_import_nodes, &import_control)?;
+        let staged_import_batch = stage_full_index_publication(
+            &import_store,
+            &import_plan,
+            &symbol_options,
+            true,
+            true,
+            &import_control,
+        )?;
+        let staged_purpose_import = staged_import_batch
+            .purpose_import
+            .as_ref()
+            .ok_or_else(|| io::Error::other("staged purpose import missing"))?;
         if !staged_purpose_import
             .records
             .iter()
@@ -6276,21 +7031,16 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         {
             return Err(io::Error::other("legacy purpose fixture was not imported").into());
         }
-        let contract_fingerprint = import_plan.publication_contract_fingerprint();
-        let mut publication = import_store.begin_index_publication(&contract_fingerprint)?;
-        publication.set_project_root(&import_plan.root)?;
-        publication.replace_scan(&staged_import_nodes)?;
-        publication.set_purpose(
-            ".",
-            "Uncommitted imported repository purpose",
-            PurposeSource::Imported,
-        )?;
         fs::write(
             &import_map_path,
             "folders[1]:\n  .,Changed imported repository purpose\n",
         )?;
-        let import_result =
-            revalidate_full_scan_publication(&publication, &import_plan, &staged_purpose_import);
+        let import_result = revalidate_staged_publication_inputs_controlled(
+            &import_plan,
+            staged_import_batch.nodes.expected_nodes(),
+            Some(&staged_purpose_import.fingerprint),
+            &import_control,
+        );
         let Err(CliError::VerificationIncomplete(details)) = import_result else {
             return Err(io::Error::other(
                 "publication accepted changed legacy purpose import inputs",
@@ -6302,7 +7052,6 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             &IndexVerificationReason::PublicationContractMismatch,
             "publication import-change reason",
         )?;
-        drop(publication);
         require_eq(
             &import_store.index_publication()?,
             &Some(publication_before),
@@ -6319,11 +7068,13 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
     #[test]
     fn unchanged_events_do_not_advance_publication_generation() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
+        let atlas_dir = temp.path().join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
         let source_path = temp.path().join("lib.rs");
         fs::write(&source_path, "fn stable() {}\n")?;
-        let plan = ScanRuntimePlan::for_path(None, temp.path(), Some(1))?;
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), Some(1_024))?;
         let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
-        let mut store = AtlasStore::in_memory()?;
+        let mut store = AtlasStore::open(&atlas_dir.join("projectatlas.db"))?;
         refresh_index(&mut store, &plan, &symbol_options)?;
         let normal_read_plan = ScanRuntimePlan::for_path(None, temp.path(), None)?;
         verify_index_publication(&store, &normal_read_plan)?;
@@ -6357,13 +7108,22 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
     fn canceled_watcher_batch_preserves_last_valid_and_retries_one_generation()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
+        let atlas_dir = temp.path().join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let reserved_purpose_path = atlas_dir.join("projectatlas-nonsource-files.toon");
+        fs::write(&reserved_purpose_path, "nonsource_files[]:\n")?;
         let changed_path = temp.path().join("changed.rs");
         let deleted_path = temp.path().join("deleted.rs");
+        let deleted_dir = temp.path().join("deleted");
+        let deleted_descendant = deleted_dir.join("descendant.rs");
+        fs::create_dir(&deleted_dir)?;
         fs::write(&changed_path, "pub fn before() {}\n")?;
         fs::write(&deleted_path, "pub fn removed() {}\n")?;
-        let plan = ScanRuntimePlan::for_path(None, temp.path(), Some(1))?;
+        fs::write(&deleted_descendant, "pub fn descendant() {}\n")?;
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), Some(1_024))?;
         let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
-        let mut store = AtlasStore::in_memory()?;
+        let db_path = atlas_dir.join("projectatlas.db");
+        let mut store = AtlasStore::open(&db_path)?;
         refresh_index(&mut store, &plan, &symbol_options)?;
         let before = store
             .index_publication()?
@@ -6371,12 +7131,69 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         let before_node = store
             .load_node_by_path("changed.rs")?
             .ok_or_else(|| io::Error::other("initial changed node missing"))?;
+        let reviewed_reserved_purpose = "Describe reviewed non-source atlas responsibilities.";
+        store.set_purpose(
+            ".projectatlas/projectatlas-nonsource-files.toon",
+            reviewed_reserved_purpose,
+            PurposeSource::Agent,
+        )?;
+        let old_reader = AtlasStore::open_read_only(&db_path)?;
+        require_eq(
+            &old_reader
+                .index_publication()?
+                .as_ref()
+                .map(|state| state.generation),
+            &Some(before.generation),
+            "old reader generation before staged publication",
+        )?;
+        let old_text = old_reader
+            .load_file_text("changed.rs")?
+            .ok_or_else(|| io::Error::other("old reader text missing"))?;
 
-        let staged = store.begin_index_publication(&plan.publication_contract_fingerprint())?;
-        staged.set_node_summary("changed.rs", "uncommitted summary")?;
+        fs::write(&changed_path, "pub fn after() {}\n")?;
+        fs::remove_file(&deleted_path)?;
+        fs::remove_dir_all(&deleted_dir)?;
+        fs::write(&reserved_purpose_path, "nonsource_files[]:\n\n")?;
+        let preparation_control = standalone_index_work_control();
+        let staged_batch = stage_full_index_publication(
+            &store,
+            &plan,
+            &symbol_options,
+            true,
+            false,
+            &preparation_control,
+        )?;
+        revalidate_staged_publication_inputs_controlled(
+            &plan,
+            staged_batch.nodes.expected_nodes(),
+            None,
+            &preparation_control,
+        )?;
+        let IndexPublicationBatch {
+            base_generation,
+            contract_fingerprint,
+            root,
+            nodes,
+            purpose_import: _,
+            text_paths,
+            text,
+            symbols: _,
+            structural_summaries: _,
+        } = staged_batch;
+        let mut staged =
+            store.begin_index_publication_from(&contract_fingerprint, base_generation)?;
+        staged.set_project_root(&root)?;
+        let NodePublicationBatch::Full { nodes } = nodes else {
+            return Err(io::Error::other("full staging returned an incremental batch").into());
+        };
+        staged.begin_scan_replacement()?;
+        for batch in nodes.chunks(PUBLICATION_NODE_BATCH_SIZE) {
+            staged.upsert_scan_node_batch(batch)?;
+        }
+        staged.finish_scan_replacement()?;
         let late_cancel = IndexWorkControl::new(IndexCancellation::new(), None);
         late_cancel.cancel();
-        let late_result = complete_index_publication(staged, &late_cancel);
+        let late_result = apply_text_index_stage(&mut staged, &text_paths, &text, &late_cancel);
         if !matches!(
             late_result,
             Err(CliError::IndexWork(IndexWorkFailure::Cancelled {
@@ -6385,6 +7202,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         ) {
             return Err(io::Error::other("late cancellation did not stop publication").into());
         }
+        drop(staged);
         require_eq(
             &store
                 .index_publication()?
@@ -6398,12 +7216,12 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             &Some(before_node),
             "last-valid node after canceled publication",
         )?;
-
-        fs::write(&changed_path, "pub fn after() {}\n")?;
-        fs::remove_file(&deleted_path)?;
         let mut changes = WatchChangeSet::default();
         changes.paths.insert(changed_path);
         changes.paths.insert(deleted_path);
+        changes.paths.insert(deleted_dir);
+        changes.paths.insert(deleted_descendant);
+        changes.paths.insert(reserved_purpose_path);
         let fallback_report =
             run_watch_with_polling_fallback(&mut store, &plan, 0, 1, &symbol_options, |store| {
                 let canceled = IndexWorkControl::new(IndexCancellation::new(), None);
@@ -6467,6 +7285,18 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             "deleted symbols are invalidated",
         )?;
         require_eq(
+            &store.load_node_by_path("deleted/descendant.rs")?.is_none(),
+            &true,
+            "deleted descendant path is absent",
+        )?;
+        require_eq(
+            &store
+                .load_symbols(Some("deleted/descendant.rs"), Some("descendant"), 10)?
+                .is_empty(),
+            &true,
+            "deleted descendant symbols are invalidated",
+        )?;
+        require_eq(
             &store
                 .load_symbols(Some("changed.rs"), Some("after"), 10)?
                 .len(),
@@ -6480,6 +7310,52 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             &true,
             "replaced symbols are invalidated",
         )?;
+        let reserved = store
+            .load_node_by_path(".projectatlas/projectatlas-nonsource-files.toon")?
+            .ok_or_else(|| io::Error::other("reserved metadata node missing"))?;
+        require_eq(
+            &reserved.purpose.purpose.as_deref(),
+            &Some(reviewed_reserved_purpose),
+            "stale reviewed built-in purpose text",
+        )?;
+        require_eq(
+            &reserved.purpose.status,
+            &PurposeStatus::Stale,
+            "stale reviewed built-in purpose state",
+        )?;
+        require_eq(
+            &old_reader
+                .index_publication()?
+                .as_ref()
+                .map(|state| state.generation),
+            &Some(before.generation),
+            "old reader remains on the complete prior generation",
+        )?;
+        require_eq(
+            &old_reader
+                .load_file_text("changed.rs")?
+                .map(|text| text.content),
+            &Some(old_text.content),
+            "old reader remains on prior source text",
+        )?;
+        let new_reader = AtlasStore::open_read_only(&db_path)?;
+        require_eq(
+            &new_reader
+                .index_publication()?
+                .as_ref()
+                .map(|state| state.generation),
+            &Some(after.generation),
+            "new reader sees the complete replacement generation",
+        )?;
+        require_eq(
+            &new_reader
+                .load_file_text("changed.rs")?
+                .map(|text| text.content),
+            &Some("pub fn after() {}\n".to_string()),
+            "new reader sees replacement source text",
+        )?;
+        new_reader.finish_index_read_snapshot()?;
+        old_reader.finish_index_read_snapshot()?;
         Ok(())
     }
 

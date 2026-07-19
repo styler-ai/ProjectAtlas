@@ -267,9 +267,20 @@ pub enum DbError {
     /// A projection-only refresh no longer matches the established index contract.
     #[error("index publication contract changed during projection refresh")]
     PublicationContractChanged,
+    /// Prepared publication work was based on a generation that is no longer current.
+    #[error("index publication base generation changed: expected {expected}, found {found}")]
+    PublicationBaseGenerationChanged {
+        /// Complete generation used to prepare the publication batch.
+        expected: IndexGeneration,
+        /// Complete generation observed after reserving the writer transaction.
+        found: IndexGeneration,
+    },
     /// A complete index generation cannot advance any further.
     #[error("index publication generation overflowed")]
     PublicationGenerationOverflow,
+    /// A full scan replacement has not removed its remaining absent projections.
+    #[error("index publication cannot complete before scan replacement finishes")]
+    ScanReplacementIncomplete,
     /// The store already has an active read snapshot.
     #[error("index read snapshot is already active on this store")]
     IndexReadSnapshotActive,
@@ -355,6 +366,8 @@ pub struct IndexPublicationGuard<'store> {
     contract: PublicationContract,
     /// Generation visible before this publication began.
     previous_generation: IndexGeneration,
+    /// Whether a full scan replacement still needs absent-projection cleanup.
+    scan_replacement_pending: bool,
     /// Whether drop must roll the transaction back.
     active: bool,
 }
@@ -388,6 +401,41 @@ impl DerefMut for IndexPublicationGuard<'_> {
 }
 
 impl IndexPublicationGuard<'_> {
+    /// Mark the current scan projection absent before bounded replacement batches.
+    ///
+    /// The caller must finish with [`Self::finish_scan_replacement`] before
+    /// completing this publication. Dropping the guard rolls every partial
+    /// replacement batch back with the parent transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the scan projection cannot be updated.
+    pub fn begin_scan_replacement(&mut self) -> DbResult<()> {
+        mark_all_scan_nodes_absent(&self.store.connection)?;
+        self.scan_replacement_pending = true;
+        Ok(())
+    }
+
+    /// Upsert one bounded scan-node batch inside the parent publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any node in the batch cannot be persisted.
+    pub fn upsert_scan_node_batch(&mut self, nodes: &[Node]) -> DbResult<()> {
+        upsert_nodes(&self.store.connection, nodes)
+    }
+
+    /// Remove derived projections for nodes left absent after replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if stale projections cannot be removed.
+    pub fn finish_scan_replacement(&mut self) -> DbResult<()> {
+        delete_absent_scan_projections(&self.store.connection)?;
+        self.scan_replacement_pending = false;
+        Ok(())
+    }
+
     /// Commit every derived projection and advance the complete generation
     /// exactly once.
     ///
@@ -396,6 +444,9 @@ impl IndexPublicationGuard<'_> {
     /// Returns an error if generation metadata is invalid, a projection-only
     /// refresh no longer matches its established contract, or commit fails.
     pub fn complete(mut self) -> DbResult<()> {
+        if self.scan_replacement_pending {
+            return Err(DbError::ScanReplacementIncomplete);
+        }
         let next_generation = self
             .previous_generation
             .checked_next()
@@ -756,26 +807,9 @@ impl AtlasStore {
     /// Returns an error if persistence fails.
     pub fn replace_scan(&mut self, nodes: &[Node]) -> DbResult<()> {
         let savepoint = self.connection.savepoint()?;
-        savepoint.execute("UPDATE nodes SET exists_now = 0", [])?;
-        for node in nodes {
-            upsert_node(&savepoint, node)?;
-        }
-        savepoint.execute(
-            "DELETE FROM symbol_relations WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
-            [],
-        )?;
-        savepoint.execute(
-            "DELETE FROM symbols WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
-            [],
-        )?;
-        savepoint.execute(
-            "DELETE FROM source_parse_metadata WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
-            [],
-        )?;
-        savepoint.execute(
-            "DELETE FROM file_texts WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
-            [],
-        )?;
+        mark_all_scan_nodes_absent(&savepoint)?;
+        upsert_nodes(&savepoint, nodes)?;
+        delete_absent_scan_projections(&savepoint)?;
         savepoint.commit()?;
         Ok(())
     }
@@ -787,9 +821,7 @@ impl AtlasStore {
     /// Returns an error if persistence fails.
     pub fn upsert_scan_nodes(&mut self, nodes: &[Node]) -> DbResult<()> {
         let savepoint = self.connection.savepoint()?;
-        for node in nodes {
-            upsert_node(&savepoint, node)?;
-        }
+        upsert_nodes(&savepoint, nodes)?;
         savepoint.commit()?;
         Ok(())
     }
@@ -801,31 +833,33 @@ impl AtlasStore {
     /// Returns an error if persistence fails.
     pub fn mark_paths_absent(&mut self, paths: &[String]) -> DbResult<()> {
         let savepoint = self.connection.savepoint()?;
-        for path in paths {
-            if path == "." || path.is_empty() {
-                continue;
-            }
-            let descendant_pattern = sqlite_descendant_pattern(path);
-            savepoint.execute(
+        {
+            let mut mark_nodes = savepoint.prepare_cached(
                 "UPDATE nodes SET exists_now = 0 WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-                params![path, descendant_pattern],
             )?;
-            savepoint.execute(
+            let mut delete_relations = savepoint.prepare_cached(
                 "DELETE FROM symbol_relations WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-                params![path, descendant_pattern],
             )?;
-            savepoint.execute(
+            let mut delete_symbols = savepoint.prepare_cached(
                 "DELETE FROM symbols WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-                params![path, descendant_pattern],
             )?;
-            savepoint.execute(
+            let mut delete_parse_metadata = savepoint.prepare_cached(
                 "DELETE FROM source_parse_metadata WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-                params![path, descendant_pattern],
             )?;
-            savepoint.execute(
+            let mut delete_text = savepoint.prepare_cached(
                 "DELETE FROM file_texts WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-                params![path, descendant_pattern],
             )?;
+            for path in paths {
+                if path == "." || path.is_empty() {
+                    continue;
+                }
+                let descendant_pattern = sqlite_descendant_pattern(path);
+                mark_nodes.execute(params![path, descendant_pattern])?;
+                delete_relations.execute(params![path, descendant_pattern])?;
+                delete_symbols.execute(params![path, descendant_pattern])?;
+                delete_parse_metadata.execute(params![path, descendant_pattern])?;
+                delete_text.execute(params![path, descendant_pattern])?;
+            }
         }
         savepoint.commit()?;
         Ok(())
@@ -846,11 +880,34 @@ impl AtlasStore {
         texts: impl IntoIterator<Item = &'text IndexedFileText>,
     ) -> DbResult<()> {
         let savepoint = self.connection.savepoint()?;
-        for path in paths {
-            savepoint.execute("DELETE FROM file_texts WHERE path = ?1", [path])?;
+        {
+            let mut delete = savepoint.prepare_cached("DELETE FROM file_texts WHERE path = ?1")?;
+            for path in paths {
+                delete.execute([path])?;
+            }
         }
-        for text in texts {
-            upsert_file_text(&savepoint, text)?;
+        {
+            let mut upsert = savepoint.prepare_cached(
+                "
+                INSERT INTO file_texts(path, content_hash, byte_count, line_count, content, updated_at)
+                VALUES(?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
+                ON CONFLICT(path) DO UPDATE SET
+                    content_hash = excluded.content_hash,
+                    byte_count = excluded.byte_count,
+                    line_count = excluded.line_count,
+                    content = excluded.content,
+                    updated_at = CURRENT_TIMESTAMP
+                ",
+            )?;
+            for text in texts {
+                upsert.execute(params![
+                    text.path,
+                    text.content_hash.as_deref(),
+                    usize_to_i64(text.byte_count),
+                    usize_to_i64(text.line_count),
+                    text.content
+                ])?;
+            }
         }
         savepoint.commit()?;
         Ok(())
@@ -1057,7 +1114,32 @@ impl AtlasStore {
         &mut self,
         contract_fingerprint: &str,
     ) -> DbResult<IndexPublicationGuard<'_>> {
-        self.begin_publication(PublicationContract::Full(contract_fingerprint.to_string()))
+        let base_generation = self
+            .index_publication()?
+            .map_or(IndexGeneration::ZERO, |publication| publication.generation);
+        self.begin_index_publication_from(contract_fingerprint, base_generation)
+    }
+
+    /// Begin one exclusive full derived-index publication only when its
+    /// prepared base generation is still current.
+    ///
+    /// [`IndexGeneration::ZERO`] matches only an uninitialized store. The
+    /// generation comparison occurs after `BEGIN IMMEDIATE` and before any
+    /// publication metadata or projection row is changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the exclusive write transaction cannot begin or
+    /// another publisher completed a newer generation after work was prepared.
+    pub fn begin_index_publication_from(
+        &mut self,
+        contract_fingerprint: &str,
+        expected_base_generation: IndexGeneration,
+    ) -> DbResult<IndexPublicationGuard<'_>> {
+        self.begin_publication(
+            PublicationContract::Full(contract_fingerprint.to_string()),
+            Some(expected_base_generation),
+        )
     }
 
     /// Begin one exclusive symbol/projection refresh without replacing the
@@ -1071,19 +1153,58 @@ impl AtlasStore {
         &mut self,
         contract_fingerprint: &str,
     ) -> DbResult<IndexPublicationGuard<'_>> {
-        self.begin_publication(PublicationContract::Projection(
-            contract_fingerprint.to_string(),
-        ))
+        let base_generation = self
+            .index_publication()?
+            .map_or(IndexGeneration::ZERO, |publication| publication.generation);
+        self.begin_index_projection_refresh_from(contract_fingerprint, base_generation)
+    }
+
+    /// Begin one exclusive symbol/projection refresh only when its prepared
+    /// base generation is still current.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the index is incomplete, the established contract
+    /// differs, the base generation changed, or the exclusive write
+    /// transaction cannot begin.
+    pub fn begin_index_projection_refresh_from(
+        &mut self,
+        contract_fingerprint: &str,
+        expected_base_generation: IndexGeneration,
+    ) -> DbResult<IndexPublicationGuard<'_>> {
+        self.begin_publication(
+            PublicationContract::Projection(contract_fingerprint.to_string()),
+            Some(expected_base_generation),
+        )
     }
 
     /// Begin one parent-owned atomic publication transaction.
     fn begin_publication(
         &mut self,
         contract: PublicationContract,
+        expected_base_generation: Option<IndexGeneration>,
     ) -> DbResult<IndexPublicationGuard<'_>> {
         self.connection.execute_batch("BEGIN IMMEDIATE")?;
         let setup = (|| {
             let previous = load_index_publication(&self.connection)?;
+            if let Some(expected) = expected_base_generation {
+                let base_matches = match previous.as_ref() {
+                    None => expected == IndexGeneration::ZERO,
+                    Some(publication) => {
+                        publication.state == IndexPublicationState::Complete
+                            && publication.generation != IndexGeneration::ZERO
+                            && publication.generation == expected
+                    }
+                };
+                if !base_matches {
+                    return Err(DbError::PublicationBaseGenerationChanged {
+                        expected,
+                        found: previous
+                            .as_ref()
+                            .map_or(IndexGeneration::ZERO, |publication| publication.generation),
+                    });
+                }
+            }
             if let PublicationContract::Projection(expected) = &contract {
                 let matches = previous.as_ref().is_some_and(|publication| {
                     publication.state == IndexPublicationState::Complete
@@ -1111,6 +1232,7 @@ impl AtlasStore {
             store: self,
             contract,
             previous_generation,
+            scan_replacement_pending: false,
             active: true,
         })
     }
@@ -1167,46 +1289,47 @@ impl AtlasStore {
     pub fn replace_symbol_graph(&mut self, graph: &SymbolGraph) -> DbResult<()> {
         let metadata = SourceParseMetadata::from_graph(graph);
         let savepoint = self.connection.savepoint()?;
-        savepoint.execute("DELETE FROM symbols WHERE path = ?1", [&graph.path])?;
-        savepoint.execute(
-            "DELETE FROM symbol_relations WHERE path = ?1",
-            [&graph.path],
-        )?;
-        savepoint.execute(
-            "
-            INSERT INTO source_parse_metadata(
-                path,
-                language,
-                parser,
-                symbol_count,
-                relation_count,
-                updated_at
-            )
-            VALUES(?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
-            ON CONFLICT(path) DO UPDATE SET
-                language = excluded.language,
-                parser = excluded.parser,
-                symbol_count = excluded.symbol_count,
-                relation_count = excluded.relation_count,
-                updated_at = CURRENT_TIMESTAMP
-            ",
-            params![
+        let node_id = {
+            let mut delete_symbols =
+                savepoint.prepare_cached("DELETE FROM symbols WHERE path = ?1")?;
+            let mut delete_relations =
+                savepoint.prepare_cached("DELETE FROM symbol_relations WHERE path = ?1")?;
+            delete_symbols.execute([&graph.path])?;
+            delete_relations.execute([&graph.path])?;
+
+            let mut upsert_metadata = savepoint.prepare_cached(
+                "
+                INSERT INTO source_parse_metadata(
+                    path,
+                    language,
+                    parser,
+                    symbol_count,
+                    relation_count,
+                    updated_at
+                )
+                VALUES(?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
+                ON CONFLICT(path) DO UPDATE SET
+                    language = excluded.language,
+                    parser = excluded.parser,
+                    symbol_count = excluded.symbol_count,
+                    relation_count = excluded.relation_count,
+                    updated_at = CURRENT_TIMESTAMP
+                ",
+            )?;
+            upsert_metadata.execute(params![
                 metadata.path,
                 metadata.language.as_deref(),
                 metadata.parser.to_string(),
                 usize_to_i64(metadata.symbol_count),
                 usize_to_i64(metadata.relation_count),
-            ],
-        )?;
-        let node_id = savepoint
-            .query_row(
-                "SELECT id FROM nodes WHERE path = ?1 AND exists_now = 1",
-                [&graph.path],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        for symbol in &graph.symbols {
-            savepoint.execute(
+            ])?;
+            let mut select_node = savepoint
+                .prepare_cached("SELECT id FROM nodes WHERE path = ?1 AND exists_now = 1")?;
+            let node_id = select_node
+                .query_row([&graph.path], |row| row.get::<_, i64>(0))
+                .optional()?;
+
+            let mut insert_symbol = savepoint.prepare_cached(
                 "
                 INSERT INTO symbols(
                     path,
@@ -1224,7 +1347,9 @@ impl AtlasStore {
                 )
                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                 ",
-                params![
+            )?;
+            for symbol in &graph.symbols {
+                insert_symbol.execute(params![
                     symbol.path,
                     symbol.language.as_deref(),
                     symbol.name,
@@ -1237,11 +1362,10 @@ impl AtlasStore {
                     symbol.parent.as_deref(),
                     symbol.parser.to_string(),
                     symbol.detail.as_deref(),
-                ],
-            )?;
-        }
-        for relation in &graph.relations {
-            savepoint.execute(
+                ])?;
+            }
+
+            let mut insert_relation = savepoint.prepare_cached(
                 "
                 INSERT INTO symbol_relations(
                     path,
@@ -1254,7 +1378,9 @@ impl AtlasStore {
                 )
                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
                 ",
-                params![
+            )?;
+            for relation in &graph.relations {
+                insert_relation.execute(params![
                     relation.path,
                     relation.source_name,
                     relation.target_name,
@@ -1262,9 +1388,10 @@ impl AtlasStore {
                     usize_to_i64(relation.line),
                     relation.context,
                     relation.parser.to_string(),
-                ],
-            )?;
-        }
+                ])?;
+            }
+            node_id
+        };
         if let Some(node_id) = node_id {
             replace_symbol_search_summary(
                 &savepoint,
@@ -1287,13 +1414,17 @@ impl AtlasStore {
     pub fn clear_source_index_for_path(&self, path: &str) -> DbResult<()> {
         let node_id = self.node_id_for_path(path)?;
         self.connection
-            .execute("DELETE FROM symbols WHERE path = ?1", [path])?;
+            .prepare_cached("DELETE FROM symbols WHERE path = ?1")?
+            .execute([path])?;
         self.connection
-            .execute("DELETE FROM symbol_relations WHERE path = ?1", [path])?;
+            .prepare_cached("DELETE FROM symbol_relations WHERE path = ?1")?
+            .execute([path])?;
         self.connection
-            .execute("DELETE FROM source_parse_metadata WHERE path = ?1", [path])?;
-        self.connection.execute(
-            "
+            .prepare_cached("DELETE FROM source_parse_metadata WHERE path = ?1")?
+            .execute([path])?;
+        self.connection
+            .prepare_cached(
+                "
             DELETE FROM summaries
             WHERE node_id = ?1
               AND (
@@ -1301,8 +1432,8 @@ impl AtlasStore {
                     OR (summary_level = 'search' AND subject = 'symbols')
                   )
             ",
-            [node_id],
-        )?;
+            )?
+            .execute([node_id])?;
         Ok(())
     }
 
@@ -1314,20 +1445,24 @@ impl AtlasStore {
     pub fn clear_symbol_graph_for_path(&self, path: &str) -> DbResult<()> {
         let node_id = self.node_id_for_path(path)?;
         self.connection
-            .execute("DELETE FROM symbols WHERE path = ?1", [path])?;
+            .prepare_cached("DELETE FROM symbols WHERE path = ?1")?
+            .execute([path])?;
         self.connection
-            .execute("DELETE FROM symbol_relations WHERE path = ?1", [path])?;
+            .prepare_cached("DELETE FROM symbol_relations WHERE path = ?1")?
+            .execute([path])?;
         self.connection
-            .execute("DELETE FROM source_parse_metadata WHERE path = ?1", [path])?;
-        self.connection.execute(
-            "
+            .prepare_cached("DELETE FROM source_parse_metadata WHERE path = ?1")?
+            .execute([path])?;
+        self.connection
+            .prepare_cached(
+                "
             DELETE FROM summaries
             WHERE node_id = ?1
               AND summary_level = 'search'
               AND subject = 'symbols'
             ",
-            [node_id],
-        )?;
+            )?
+            .execute([node_id])?;
         Ok(())
     }
 
@@ -1338,8 +1473,9 @@ impl AtlasStore {
     /// Returns an error if the path does not exist or persistence fails.
     pub fn set_node_summary(&self, path: &str, summary: &str) -> DbResult<()> {
         let node_id = self.node_id_for_path(path)?;
-        self.connection.execute(
-            "
+        self.connection
+            .prepare_cached(
+                "
             INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
             VALUES(?1, 'node', '', ?2, CURRENT_TIMESTAMP)
             ON CONFLICT(node_id, summary_level, subject) DO UPDATE SET
@@ -1348,8 +1484,8 @@ impl AtlasStore {
                 summary = excluded.summary,
                 updated_at = CURRENT_TIMESTAMP
             ",
-            params![node_id, summary],
-        )?;
+            )?
+            .execute(params![node_id, summary])?;
         Ok(())
     }
 
@@ -1360,15 +1496,16 @@ impl AtlasStore {
     /// Returns an error if the path does not exist or persistence fails.
     pub fn clear_node_summary(&self, path: &str) -> DbResult<()> {
         let node_id = self.node_id_for_path(path)?;
-        self.connection.execute(
-            "
+        self.connection
+            .prepare_cached(
+                "
             DELETE FROM summaries
             WHERE node_id = ?1
               AND summary_level = 'node'
               AND subject = ''
             ",
-            [node_id],
-        )?;
+            )?
+            .execute([node_id])?;
         Ok(())
     }
 
@@ -2137,8 +2274,9 @@ impl AtlasStore {
     /// Returns an error if the path does not exist or persistence fails.
     pub fn set_purpose(&self, path: &str, purpose: &str, source: PurposeSource) -> DbResult<()> {
         let node_id = self.node_id_for_path(path)?;
-        self.connection.execute(
-            "
+        self.connection
+            .prepare_cached(
+                "
             INSERT INTO purposes(node_id, purpose, source, status, updated_at)
             VALUES(?1, ?2, ?3, 'approved', CURRENT_TIMESTAMP)
             ON CONFLICT(node_id) DO UPDATE SET
@@ -2147,8 +2285,8 @@ impl AtlasStore {
                 status = 'approved',
                 updated_at = CURRENT_TIMESTAMP
             ",
-            params![node_id, purpose, source.to_string()],
-        )?;
+            )?
+            .execute(params![node_id, purpose, source.to_string()])?;
         Ok(())
     }
 
@@ -2159,29 +2297,35 @@ impl AtlasStore {
     /// Returns an error if the path does not exist or persistence fails.
     pub fn set_suggested_purpose(&self, path: &str, purpose: &str) -> DbResult<()> {
         let node_id = self.node_id_for_path(path)?;
-        self.connection.execute(
-            "
+        self.connection
+            .prepare_cached(
+                "
             INSERT INTO purposes(node_id, purpose, source, status, updated_at)
-            VALUES(?1, ?2, 'generated', 'suggested', CURRENT_TIMESTAMP)
+            VALUES(?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
             ON CONFLICT(node_id) DO UPDATE SET
                 purpose = excluded.purpose,
-                source = 'generated',
-                status = 'suggested',
+                source = excluded.source,
+                status = excluded.status,
                 updated_at = CURRENT_TIMESTAMP
+            WHERE purposes.status IN (?5, ?6)
             ",
-            params![node_id, purpose],
-        )?;
+            )?
+            .execute(params![
+                node_id,
+                purpose,
+                PurposeSource::Generated.to_string(),
+                PurposeStatus::Suggested.as_str(),
+                PurposeStatus::Missing.as_str(),
+                PurposeStatus::Suggested.as_str(),
+            ])?;
         Ok(())
     }
 
     /// Load a node id for a repository path.
     fn node_id_for_path(&self, path: &str) -> DbResult<i64> {
         self.connection
-            .query_row(
-                "SELECT id FROM nodes WHERE path = ?1 AND exists_now = 1",
-                [path],
-                |row| row.get::<_, i64>(0),
-            )
+            .prepare_cached("SELECT id FROM nodes WHERE path = ?1 AND exists_now = 1")?
+            .query_row([path], |row| row.get::<_, i64>(0))
             .optional()?
             .ok_or_else(|| DbError::PathNotIndexed {
                 path: path.to_string(),
@@ -4143,35 +4287,44 @@ fn load_index_publication(connection: &Connection) -> DbResult<Option<IndexPubli
     }))
 }
 
-/// Upsert one scanned node into an existing transaction.
-fn upsert_node(connection: &Connection, node: &Node) -> DbResult<()> {
-    let existing = connection
-        .query_row(
-            "
-            SELECT n.content_hash, p.status
-            FROM nodes n
-            LEFT JOIN purposes p ON p.node_id = n.id
-            WHERE n.path = ?1
-            ",
-            [&node.path],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                ))
-            },
-        )
-        .optional()?;
-    let content_changed = existing.as_ref().is_some_and(|(old_hash, _)| {
-        node.kind == NodeKind::File
-            && old_hash.is_some()
-            && node.content_hash.is_some()
-            && old_hash != &node.content_hash
-    });
-    let should_mark_stale = content_changed
-        && existing.as_ref().and_then(|(_, status)| status.as_deref())
-            == Some(PurposeStatus::Approved.as_str());
+/// Mark every indexed node absent before a complete scan replacement.
+fn mark_all_scan_nodes_absent(connection: &Connection) -> DbResult<()> {
+    connection.execute("UPDATE nodes SET exists_now = 0", [])?;
+    Ok(())
+}
+
+/// Delete derived rows whose owning scan node remained absent.
+fn delete_absent_scan_projections(connection: &Connection) -> DbResult<()> {
     connection.execute(
+        "DELETE FROM symbol_relations WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
+        [],
+    )?;
+    connection.execute(
+        "DELETE FROM symbols WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
+        [],
+    )?;
+    connection.execute(
+        "DELETE FROM source_parse_metadata WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
+        [],
+    )?;
+    connection.execute(
+        "DELETE FROM file_texts WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Upsert scanned nodes through transaction-owned prepared statements.
+fn upsert_nodes(connection: &Connection, nodes: &[Node]) -> DbResult<()> {
+    let mut select_existing = connection.prepare_cached(
+        "
+        SELECT n.content_hash, p.status
+        FROM nodes n
+        LEFT JOIN purposes p ON p.node_id = n.id
+        WHERE n.path = ?1
+        ",
+    )?;
+    let mut upsert_node = connection.prepare_cached(
         "
         INSERT INTO nodes(path, kind, parent_path, extension, language, size_bytes, mtime_ns, content_hash, exists_now)
         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
@@ -4187,7 +4340,52 @@ fn upsert_node(connection: &Connection, node: &Node) -> DbResult<()> {
             last_seen_at = CURRENT_TIMESTAMP,
             last_indexed_at = CURRENT_TIMESTAMP
         ",
-        params![
+    )?;
+    let mut select_node_id = connection.prepare_cached("SELECT id FROM nodes WHERE path = ?1")?;
+    let mut ensure_purpose = connection.prepare_cached(
+        "
+        INSERT INTO purposes(node_id, purpose, source, status)
+        VALUES(?1, NULL, 'missing', 'missing')
+        ON CONFLICT(node_id) DO NOTHING
+        ",
+    )?;
+    let mut upsert_summary = connection.prepare_cached(
+        "
+        INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
+        VALUES(?1, 'node', '', ?2, CURRENT_TIMESTAMP)
+        ON CONFLICT(node_id, summary_level, subject) DO UPDATE SET
+            summary = CASE WHEN ?3 THEN excluded.summary ELSE summaries.summary END,
+            updated_at = CURRENT_TIMESTAMP
+        ",
+    )?;
+    let mut mark_purpose_stale = connection.prepare_cached(
+        "
+        UPDATE purposes
+        SET status = 'stale',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE node_id = ?1
+        ",
+    )?;
+
+    for node in nodes {
+        let existing = select_existing
+            .query_row([&node.path], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            })
+            .optional()?;
+        let content_changed = existing.as_ref().is_some_and(|(old_hash, _)| {
+            node.kind == NodeKind::File
+                && old_hash.is_some()
+                && node.content_hash.is_some()
+                && old_hash != &node.content_hash
+        });
+        let should_mark_stale = content_changed
+            && existing.as_ref().and_then(|(_, status)| status.as_deref())
+                == Some(PurposeStatus::Approved.as_str());
+        upsert_node.execute(params![
             node.path,
             node.kind.to_string(),
             node.parent_path,
@@ -4196,67 +4394,18 @@ fn upsert_node(connection: &Connection, node: &Node) -> DbResult<()> {
             node.size_bytes,
             node.mtime_ns,
             node.content_hash
-        ],
-    )?;
-    let node_id = connection.query_row(
-        "SELECT id FROM nodes WHERE path = ?1",
-        [&node.path],
-        |row| row.get::<_, i64>(0),
-    )?;
-    connection.execute(
-        "
-        INSERT INTO purposes(node_id, purpose, source, status)
-        VALUES(?1, NULL, 'missing', 'missing')
-        ON CONFLICT(node_id) DO NOTHING
-        ",
-        [node_id],
-    )?;
-    let summary = generate_node_summary(node);
-    connection.execute(
-        "
-        INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
-        VALUES(?1, 'node', '', ?2, CURRENT_TIMESTAMP)
-        ON CONFLICT(node_id, summary_level, subject) DO UPDATE SET
-            summary = CASE WHEN ?3 THEN excluded.summary ELSE summaries.summary END,
-            updated_at = CURRENT_TIMESTAMP
-        ",
-        params![node_id, summary, content_changed],
-    )?;
-    if should_mark_stale {
-        connection.execute(
-            "
-            UPDATE purposes
-            SET status = 'stale',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE node_id = ?1
-            ",
-            [node_id],
-        )?;
+        ])?;
+        let node_id = select_node_id.query_row([&node.path], |row| row.get::<_, i64>(0))?;
+        ensure_purpose.execute([node_id])?;
+        upsert_summary.execute(params![
+            node_id,
+            generate_node_summary(node),
+            content_changed
+        ])?;
+        if should_mark_stale {
+            mark_purpose_stale.execute([node_id])?;
+        }
     }
-    Ok(())
-}
-
-/// Upsert one persisted UTF-8 source-text row for indexed search.
-fn upsert_file_text(connection: &Connection, text: &IndexedFileText) -> DbResult<()> {
-    connection.execute(
-        "
-        INSERT INTO file_texts(path, content_hash, byte_count, line_count, content, updated_at)
-        VALUES(?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
-        ON CONFLICT(path) DO UPDATE SET
-            content_hash = excluded.content_hash,
-            byte_count = excluded.byte_count,
-            line_count = excluded.line_count,
-            content = excluded.content,
-            updated_at = CURRENT_TIMESTAMP
-        ",
-        params![
-            text.path,
-            text.content_hash.as_deref(),
-            usize_to_i64(text.byte_count),
-            usize_to_i64(text.line_count),
-            text.content
-        ],
-    )?;
     Ok(())
 }
 
@@ -4406,26 +4555,28 @@ fn replace_symbol_search_summary(
     summary: Option<&str>,
 ) -> DbResult<()> {
     if let Some(summary) = summary {
-        connection.execute(
-            "
-            INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
-            VALUES(?1, 'search', 'symbols', ?2, CURRENT_TIMESTAMP)
-            ON CONFLICT(node_id, summary_level, subject) DO UPDATE SET
-                summary = excluded.summary,
-                updated_at = CURRENT_TIMESTAMP
-            ",
-            params![node_id, summary],
-        )?;
+        connection
+            .prepare_cached(
+                "
+                INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
+                VALUES(?1, 'search', 'symbols', ?2, CURRENT_TIMESTAMP)
+                ON CONFLICT(node_id, summary_level, subject) DO UPDATE SET
+                    summary = excluded.summary,
+                    updated_at = CURRENT_TIMESTAMP
+                ",
+            )?
+            .execute(params![node_id, summary])?;
     } else {
-        connection.execute(
-            "
-            DELETE FROM summaries
-            WHERE node_id = ?1
-              AND summary_level = 'search'
-              AND subject = 'symbols'
-            ",
-            [node_id],
-        )?;
+        connection
+            .prepare_cached(
+                "
+                DELETE FROM summaries
+                WHERE node_id = ?1
+                  AND summary_level = 'search'
+                  AND subject = 'symbols'
+                ",
+            )?
+            .execute([node_id])?;
     }
     Ok(())
 }
@@ -5393,6 +5544,89 @@ mod tests {
         require_test_projection(&new_reader, 2, "new")?;
         new_reader.finish_index_read_snapshot()?;
         old_reader.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn stale_publication_base_is_rejected_before_batch_mutation() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("projectatlas.db");
+        let mut writer_a = AtlasStore::open(&db_path)?;
+        {
+            let mut publication =
+                writer_a.begin_index_publication_from("contract", IndexGeneration::ZERO)?;
+            write_test_projection(&mut publication, "base")?;
+            publication.complete()?;
+        }
+        let prepared_base = writer_a
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("prepared base publication missing"))?
+            .generation;
+
+        let incomplete_result = {
+            let mut publication =
+                writer_a.begin_index_publication_from("contract", prepared_base)?;
+            publication.begin_scan_replacement()?;
+            publication.complete()
+        };
+        if !matches!(incomplete_result, Err(DbError::ScanReplacementIncomplete)) {
+            return Err(io::Error::other(
+                "unfinished scan replacement was allowed to complete publication",
+            )
+            .into());
+        }
+        require_test_projection(&writer_a, 1, "base")?;
+
+        let mut writer_b = AtlasStore::open(&db_path)?;
+        {
+            let mut publication = writer_b.begin_index_publication("contract")?;
+            write_test_projection(&mut publication, "winner")?;
+            publication.complete()?;
+        }
+
+        let Err(conflict) = writer_a.begin_index_publication_from("contract", prepared_base) else {
+            return Err(io::Error::other("stale prepared publication was accepted").into());
+        };
+        require_eq(
+            &matches!(
+                conflict,
+                DbError::PublicationBaseGenerationChanged { expected, found }
+                    if expected == IndexGeneration::new(1)
+                        && found == IndexGeneration::new(2)
+            ),
+            &true,
+            "stale publication base conflict",
+        )?;
+        require_test_projection(&writer_a, 2, "winner")?;
+        require_eq(
+            &writer_a.load_symbols(Some("src/lib.rs"), None, 10)?.len(),
+            &1,
+            "rejected batch symbol row count",
+        )?;
+        require_eq(
+            &writer_a
+                .load_symbol_relations(Some("src/lib.rs"), None, 10)?
+                .len(),
+            &1,
+            "rejected batch relation row count",
+        )?;
+
+        let Err(zero_conflict) =
+            writer_a.begin_index_publication_from("contract", IndexGeneration::ZERO)
+        else {
+            return Err(io::Error::other("zero base matched an initialized store").into());
+        };
+        require_eq(
+            &matches!(
+                zero_conflict,
+                DbError::PublicationBaseGenerationChanged { expected, found }
+                    if expected == IndexGeneration::ZERO
+                        && found == IndexGeneration::new(2)
+            ),
+            &true,
+            "zero publication base conflict",
+        )?;
+        require_test_projection(&writer_a, 2, "winner")?;
         Ok(())
     }
 
@@ -7260,6 +7494,49 @@ mod tests {
             &nodes[0].purpose.status,
             &PurposeStatus::Approved,
             "agent-approved status",
+        )?;
+        store.set_suggested_purpose("src/main.rs", "Late generated suggestion")?;
+        let nodes = store.load_nodes()?;
+        require_eq(
+            &nodes[0].purpose.purpose,
+            &Some("Application entry point".to_string()),
+            "approved purpose survives a late suggestion",
+        )?;
+        require_eq(
+            &nodes[0].purpose.source,
+            &PurposeSource::Agent,
+            "approved purpose source survives a late suggestion",
+        )?;
+        require_eq(
+            &nodes[0].purpose.status,
+            &PurposeStatus::Approved,
+            "approved purpose status survives a late suggestion",
+        )?;
+
+        store.connection.execute(
+            "
+            UPDATE purposes
+            SET status = ?1
+            WHERE node_id = (SELECT id FROM nodes WHERE path = ?2)
+            ",
+            params![PurposeStatus::Stale.as_str(), "src/main.rs"],
+        )?;
+        store.set_suggested_purpose("src/main.rs", "Later generated suggestion")?;
+        let nodes = store.load_nodes()?;
+        require_eq(
+            &nodes[0].purpose.purpose,
+            &Some("Application entry point".to_string()),
+            "stale reviewed purpose survives a late suggestion",
+        )?;
+        require_eq(
+            &nodes[0].purpose.source,
+            &PurposeSource::Agent,
+            "stale reviewed source survives a late suggestion",
+        )?;
+        require_eq(
+            &nodes[0].purpose.status,
+            &PurposeStatus::Stale,
+            "stale reviewed status survives a late suggestion",
         )?;
         Ok(())
     }
