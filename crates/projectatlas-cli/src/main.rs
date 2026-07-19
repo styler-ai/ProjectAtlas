@@ -25,29 +25,34 @@ use projectatlas_core::toon::{
 use projectatlas_core::{
     PurposeSource, PurposeStatus, normalize_native_path_display, normalize_repo_path_prefix,
 };
-use projectatlas_db::{AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope};
+use projectatlas_db::{
+    AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, ProjectRootTransition,
+    ProjectRootTransitionResult,
+};
 use projectatlas_service::{
     CodeSlice, FileSummaryReport, SearchReport, SymbolSliceSelector,
     build_file_summary_from_source, read_indexed_code_slice_from_source,
     read_symbol_slice_from_source, search_indexed_files,
 };
+use rmcp::schemars;
 use runtime::{
     DEFAULT_HEALTH_LIMIT, InitBootstrapOptions, InitHostConfigStatus, InitSetupReport,
     MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel, PurposeReviewRequest,
     ScanRuntimePlan, SettingsReport, SymbolBuildOptions, WatchStatusReport, absolute_path,
-    build_settings_report, byte_count_to_tokens, canonical_project_root, default_mcp_project_root,
-    defaultable_cli_project_root, estimated_source_tokens_for_indexed_files,
-    estimated_source_tokens_for_paths, init_config_path, init_path_status,
-    lint_database_if_present, next_step_report, next_step_report_payload, normalized_folder_filter,
-    open_atlas_store_for_project, open_atlas_store_read_only_for_project, purpose_curation_page,
-    ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
-    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
-    render_health_page, render_purpose_curation_page, render_purpose_review_report,
-    reset_index_files, resolved_mcp_config_path, review_purposes, run_init_bootstrap,
-    run_scan_pipeline, run_symbol_build_pipeline, run_watch_loop, strip_legacy_purpose,
-    validated_indexed_file_key, verify_index_freshness, watcher_status_report,
+    build_settings_report, byte_count_to_tokens, canonical_project_root,
+    config_root_mismatch_error, default_mcp_project_root, defaultable_cli_project_root,
+    estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths, init_config_path,
+    init_path_status, lint_database_if_present, next_step_report, next_step_report_payload,
+    normalized_folder_filter, open_atlas_store_for_project, open_atlas_store_read_only_for_project,
+    purpose_curation_page, ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons,
+    read_indexed_file_content, record_directory_walk_usage_estimate, record_usage_estimate,
+    record_usage_text, render_health_page, render_purpose_curation_page,
+    render_purpose_review_report, reset_index_files, resolved_mcp_config_path, review_purposes,
+    run_init_bootstrap, run_scan_pipeline, run_symbol_build_pipeline, run_watch_loop,
+    strip_legacy_purpose, validated_indexed_file_key, verify_index_freshness,
+    watcher_status_report,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
@@ -156,6 +161,19 @@ enum CliError {
     /// The selected project root does not own the opened index.
     #[error("{0}")]
     ProjectMismatch(Box<runtime::IndexProjectMismatch>),
+    /// A durable root transition committed before generated configuration failed.
+    #[error(
+        "root transition {transition:?} committed for {root:?}, but generated project configuration is incomplete; rerun `projectatlas root set {root:?}` with the default bind transition to repair it without repeating the transition: {source}"
+    )]
+    RootTransitionFollowup {
+        /// Canonical root already committed to the database.
+        root: String,
+        /// Durable transition that already completed.
+        transition: RootTransition,
+        /// Follow-up configuration failure.
+        #[source]
+        source: Box<CliError>,
+    },
 }
 
 /// Structured CLI error payload for source-state read refusals.
@@ -306,6 +324,40 @@ enum IgnoreKind {
     DirName,
     /// Ignore one repository-relative path subtree.
     PathPrefix,
+}
+
+/// Explicit durable root transition selected by CLI or MCP callers.
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+enum RootTransition {
+    /// Initialize a missing binding or verify an identical existing binding.
+    Bind,
+    /// Preserve identity only after the previously recorded root is proven absent.
+    Move,
+    /// Rotate identity for an independent copy, clone, or worktree.
+    Detach,
+}
+
+impl From<RootTransition> for ProjectRootTransition {
+    fn from(value: RootTransition) -> Self {
+        match value {
+            RootTransition::Bind => Self::Bind,
+            RootTransition::Move => Self::Move,
+            RootTransition::Detach => Self::Detach,
+        }
+    }
+}
+
+impl From<ProjectRootTransition> for RootTransition {
+    fn from(value: ProjectRootTransition) -> Self {
+        match value {
+            ProjectRootTransition::Bind => Self::Bind,
+            ProjectRootTransition::Move => Self::Move,
+            ProjectRootTransition::Detach => Self::Detach,
+        }
+    }
 }
 
 /// MCP host configuration format.
@@ -677,6 +729,9 @@ enum RootCommand {
     Set {
         /// Repository root to bind.
         path: PathBuf,
+        /// Explicit binding behavior for an existing database.
+        #[arg(long, value_enum, default_value_t = RootTransition::Bind)]
+        transition: RootTransition,
         /// Include `mcp --nearest-project` in generated project-local MCP configs.
         #[arg(long)]
         nearest_project: bool,
@@ -1256,10 +1311,11 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         Command::Root { command } => match command {
             Some(RootCommand::Set {
                 path,
+                transition,
                 nearest_project,
             }) => {
                 let root = canonical_project_root(path)?;
-                let report = bind_project_root(&root, *nearest_project)?;
+                let report = bind_project_root(&root, *transition, *nearest_project)?;
                 print_output(cli.format, &render_root_report(&report), &report)?;
             }
             None | Some(RootCommand::Show) => {
@@ -1866,8 +1922,12 @@ fn render_runtime_info(report: &RuntimeInfoReport) -> String {
     encode_agent_payload(&json!({ "runtime": report }))
 }
 
-/// Bind a project root without creating any machine-global root state.
-fn bind_project_root(root: &Path, nearest_project: bool) -> Result<RootReport, CliError> {
+/// Bind, move, or detach a project root without machine-global root state.
+fn bind_project_root(
+    root: &Path,
+    transition: RootTransition,
+    nearest_project: bool,
+) -> Result<RootReport, CliError> {
     if !root.is_dir() {
         return Err(CliError::InvalidInput(format!(
             "project root {} is not a directory",
@@ -1876,33 +1936,60 @@ fn bind_project_root(root: &Path, nearest_project: bool) -> Result<RootReport, C
     }
     let atlas_dir = root.join(".projectatlas");
     let db_path = atlas_dir.join("projectatlas.db");
-    init_project_with_config(root, None)?;
     let config_path = init_config_path(root, None);
-    {
-        let _store = open_atlas_store_for_project(&db_path, root)?;
+    if config_path.exists() {
+        let config = load_atlas_config(Some(&config_path))?;
+        let config_root = canonical_project_root(&config.root)?;
+        if config_root != root {
+            return Err(config_root_mismatch_error(&config_path, &config_root, root));
+        }
     }
-    write_mcp_config_file(
-        &atlas_dir.join("projectatlas.mcp.json"),
-        HarnessConfig::McpJson,
-        &db_path,
-        &config_path,
-        nearest_project,
-    )?;
-    write_mcp_config_file(
-        &atlas_dir.join("projectatlas.claude.mcp.json"),
-        HarnessConfig::ClaudeCode,
-        &db_path,
-        &config_path,
-        nearest_project,
-    )?;
-    write_mcp_config_file(
-        &atlas_dir.join("projectatlas.opencode.json"),
-        HarnessConfig::OpenCode,
-        &db_path,
-        &config_path,
-        nearest_project,
-    )?;
-    build_root_report(&db_path, Some(&config_path))
+
+    let database_exists = db_path.exists();
+    if !database_exists && transition != RootTransition::Bind {
+        return Err(CliError::Db(
+            DbError::ProjectRootTransitionRequiresExistingRoot,
+        ));
+    }
+    if !database_exists {
+        init_project_with_config(root, Some(&config_path))?;
+    }
+    let transition_result = AtlasStore::transition_project_root(&db_path, root, transition.into())
+        .map_err(runtime::project_store_error)?;
+    let configuration_result: Result<(), CliError> = (|| {
+        if database_exists {
+            init_project_with_config(root, Some(&config_path))?;
+        }
+
+        write_mcp_config_file(
+            &atlas_dir.join("projectatlas.mcp.json"),
+            HarnessConfig::McpJson,
+            &db_path,
+            &config_path,
+            nearest_project,
+        )?;
+        write_mcp_config_file(
+            &atlas_dir.join("projectatlas.claude.mcp.json"),
+            HarnessConfig::ClaudeCode,
+            &db_path,
+            &config_path,
+            nearest_project,
+        )?;
+        write_mcp_config_file(
+            &atlas_dir.join("projectatlas.opencode.json"),
+            HarnessConfig::OpenCode,
+            &db_path,
+            &config_path,
+            nearest_project,
+        )?;
+        Ok(())
+    })();
+    configuration_result.map_err(|source| CliError::RootTransitionFollowup {
+        root: normalize_native_path_display(root),
+        transition,
+        source: Box::new(source),
+    })?;
+    build_root_report_with_transition(&db_path, Some(&config_path), Some(&transition_result))
 }
 
 /// Write all generated host MCP configs expected after first-run init.
@@ -1991,6 +2078,15 @@ fn load_purpose_review_requests(path: &Path) -> Result<Vec<PurposeReviewRequest>
 
 /// Build a project-local root identity report.
 fn build_root_report(db: &Path, config_path: Option<&Path>) -> Result<RootReport, CliError> {
+    build_root_report_with_transition(db, config_path, None)
+}
+
+/// Build a root report with optional completed transition details.
+fn build_root_report_with_transition(
+    db: &Path,
+    config_path: Option<&Path>,
+    transition: Option<&ProjectRootTransitionResult>,
+) -> Result<RootReport, CliError> {
     let settings = build_settings_report(db, config_path, OutputFormat::Toon)?;
     let db_project_root = settings
         .index
@@ -2000,6 +2096,13 @@ fn build_root_report(db: &Path, config_path: Option<&Path>) -> Result<RootReport
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let runtime = build_runtime_info();
+    let project_instance_id = if db.exists() {
+        AtlasStore::open_read_only(db)?
+            .project_instance_id()?
+            .map(|identity| identity.to_string())
+    } else {
+        None
+    };
     Ok(RootReport {
         root: settings.repo_root.clone(),
         detection_source: settings.root_detection_source.clone(),
@@ -2019,6 +2122,11 @@ fn build_root_report(db: &Path, config_path: Option<&Path>) -> Result<RootReport
         ),
         runtime_executable: runtime.executable,
         runtime_version: runtime.version,
+        project_instance_id,
+        transition: transition.map(|result| result.transition.into()),
+        previous_root: transition.and_then(|result| result.previous_root.clone()),
+        identity_changed: transition.map(|result| result.identity_changed),
+        publication_invalidated: transition.map(|result| result.publication_invalidated),
         verified: settings.root_verified,
         mismatches: settings.root_mismatches,
     })
@@ -2608,6 +2716,20 @@ struct RootReport {
     runtime_executable: Option<String>,
     /// Current runtime version.
     runtime_version: String,
+    /// Durable identity of this local project instance, when initialized.
+    project_instance_id: Option<String>,
+    /// Explicit transition completed by this request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transition: Option<RootTransition>,
+    /// Previously recorded root for move or detach.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_root: Option<String>,
+    /// Whether the transition created or rotated project identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity_changed: Option<bool>,
+    /// Whether the transition invalidated derived publication trust.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    publication_invalidated: Option<bool>,
     /// Whether config and DB roots agree with the selected root.
     verified: bool,
     /// Root mismatches that must be fixed before trusting the binding.
@@ -3587,6 +3709,14 @@ mod tests {
                 return Err(format!("{required_tool} tool was not registered").into());
             }
         }
+        if tools.tools.len() != REQUIRED_MCP_TOOL_NAMES.len() {
+            return Err(format!(
+                "MCP inventory grew outside the closed required surface: {} != {}",
+                tools.tools.len(),
+                REQUIRED_MCP_TOOL_NAMES.len()
+            )
+            .into());
+        }
         let schema_has_property =
             |tool_name: &str, property: &str| -> Result<bool, Box<dyn Error>> {
                 let tool = tools
@@ -3608,6 +3738,9 @@ mod tests {
         }
         if schema_has_property("atlas_next", "nearest_project")? {
             return Err("atlas_next advertised unused nearest_project parameter".into());
+        }
+        if !schema_has_property("atlas_root_set", "transition")? {
+            return Err("atlas_root_set did not advertise the transition selector".into());
         }
 
         let scan = client
@@ -4550,6 +4683,57 @@ mod tests {
             return Err("project_path-selected scan leaked into the active project".into());
         }
 
+        let mut rejected_move_args = Map::new();
+        rejected_move_args.insert(
+            "root".to_string(),
+            json!(repo_b.to_string_lossy().to_string()),
+        );
+        rejected_move_args.insert("transition".to_string(), json!("move"));
+        let rejected_move = call_text!("atlas_root_set", rejected_move_args);
+        if !rejected_move.contains("move destination") {
+            return Err(
+                format!("atlas_root_set did not reject a same-root move: {rejected_move}").into(),
+            );
+        }
+        let after_failed_transition = call_text!("atlas_root", Map::new());
+        if !after_failed_transition.contains(&normalize_native_path_display(&repo_a)) {
+            return Err("failed durable root transition changed active MCP routing".into());
+        }
+
+        let mut bind_b_args = Map::new();
+        bind_b_args.insert(
+            "root".to_string(),
+            json!(repo_b.to_string_lossy().to_string()),
+        );
+        let bind_b = call_text!("atlas_root_set", bind_b_args);
+        if !bind_b.contains("transition: bind")
+            || !bind_b.contains("project_instance_id:")
+            || !bind_b.contains("verified: true")
+        {
+            return Err(format!(
+                "atlas_root_set omitted transition did not preserve bind behavior: {bind_b}"
+            )
+            .into());
+        }
+        let bound_root_b = call_text!("atlas_root", Map::new());
+        if !bound_root_b.contains(&normalize_native_path_display(&repo_b)) {
+            return Err("successful durable root bind did not change active MCP routing".into());
+        }
+        let refreshed_bound_b = call_text!("atlas_scan", Map::new());
+        if !refreshed_bound_b.contains("scan:") {
+            return Err("durably bound project could not refresh after config generation".into());
+        }
+
+        let mut set_a_args = Map::new();
+        set_a_args.insert(
+            "project_path".to_string(),
+            json!(repo_a.to_string_lossy().to_string()),
+        );
+        let set_a = call_text!("atlas_set_project_path", set_a_args);
+        if !set_a.contains("project:") || !set_a.contains("status: active") {
+            return Err("atlas_set_project_path did not restore repo A routing".into());
+        }
+
         let mut set_b_args = Map::new();
         set_b_args.insert(
             "project_path".to_string(),
@@ -4754,6 +4938,28 @@ mod tests {
                 "startup nearest-project setting did not reject a project without DB: {startup_partial_file}"
             )
             .into());
+        }
+
+        let mut detach_b_args = Map::new();
+        detach_b_args.insert(
+            "root".to_string(),
+            json!(repo_b.to_string_lossy().to_string()),
+        );
+        detach_b_args.insert("transition".to_string(), json!("detach"));
+        let detach_b = call_text_on!("atlas_root_set", detach_b_args);
+        if !detach_b.contains("transition: detach")
+            || !detach_b.contains("identity_changed: true")
+            || !detach_b.contains("publication_invalidated: true")
+        {
+            return Err(
+                format!("atlas_root_set did not accept explicit detach: {detach_b}").into(),
+            );
+        }
+        let root_after_detach = call_text_on!("atlas_root", Map::new());
+        if !root_after_detach.contains(&normalize_native_path_display(&repo_b))
+            || !root_after_detach.contains("verified: true")
+        {
+            return Err("explicit detach did not activate the transitioned root".into());
         }
 
         client.cancel().await?;

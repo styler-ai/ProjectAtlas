@@ -599,6 +599,9 @@ pub(crate) fn initialize(connection: &Connection, expected_root: Option<&str>) -
                 apply_migrations(connection, stored_schema_version(connection)?)?;
             }
         }
+        if expected_root.is_some() {
+            crate::project_identity::ensure_project_identity(connection)?;
+        }
         let current = inspect_connection(connection, expected_root, false)?;
         if current.state != SchemaState::Current {
             return Err(DbError::SchemaPostcondition {
@@ -798,11 +801,14 @@ fn migrate_8_to_9(connection: &Connection) -> DbResult<()> {
 /// Add normalized graph storage and invalidate predecessor publication trust.
 fn migrate_9_to_10(connection: &Connection) -> DbResult<()> {
     connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    if read_metadata(connection, PROJECT_ROOT_KEY)?.is_some() {
+        crate::project_identity::ensure_project_identity(connection)?;
+    }
     invalidate_derived_publication(connection)
 }
 
 /// Invalidate derived rows without deleting authored local state.
-fn invalidate_derived_publication(connection: &Connection) -> DbResult<()> {
+pub(crate) fn invalidate_derived_publication(connection: &Connection) -> DbResult<()> {
     connection.execute(
         "DELETE FROM metadata WHERE key IN (?1, ?2, ?3)",
         params![
@@ -1136,7 +1142,7 @@ fn set_metadata(connection: &Connection, key: &str, value: &str) -> DbResult<()>
 }
 
 /// Preserve the initiating typed error when explicit rollback also fails.
-fn rollback_after_error(connection: &Connection, operation: DbError) -> DbError {
+pub(crate) fn rollback_after_error(connection: &Connection, operation: DbError) -> DbError {
     match connection.execute_batch("ROLLBACK") {
         Ok(()) => operation,
         Err(rollback) => DbError::TransactionRollback {
@@ -1534,8 +1540,19 @@ mod tests {
                     .into());
                 }
             }
+            let identity = store.connection.query_row(
+                "SELECT length(project_instance_id), active_generation FROM project_identity
+                  WHERE singleton = 1",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )?;
+            if identity != (16, 0) {
+                return Err(io::Error::other(format!(
+                    "schema {version} upgrade did not initialize a valid project identity"
+                ))
+                .into());
+            }
             for table in [
-                "project_identity",
                 "graph_entities",
                 "graph_relations",
                 "graph_relation_occurrences",

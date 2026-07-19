@@ -891,7 +891,7 @@ pub(crate) fn open_atlas_store_read_only_for_project(
 }
 
 /// Preserve typed selected-root mismatch diagnostics across store adapters.
-fn project_store_error(source: projectatlas_db::DbError) -> CliError {
+pub(crate) fn project_store_error(source: projectatlas_db::DbError) -> CliError {
     match source {
         projectatlas_db::DbError::ProjectRootMismatch { expected, found } => {
             CliError::ProjectMismatch(Box::new(IndexProjectMismatch {

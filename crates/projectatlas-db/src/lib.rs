@@ -1,8 +1,10 @@
 //! Purpose: Persist `ProjectAtlas` 3 indexes in `SQLite`.
 
+mod project_identity;
 mod repository_graph;
 mod schema;
 
+pub use project_identity::{ProjectRootTransition, ProjectRootTransitionResult};
 pub use repository_graph::{RepositoryGraphPage, RepositoryGraphRelationQuery};
 
 use projectatlas_core::graph::GraphContractError;
@@ -154,6 +156,59 @@ pub enum DbError {
         /// Durable root recorded in `SQLite`.
         found: String,
     },
+    /// A root transition destination is not an absolute existing directory.
+    #[error("invalid project root transition destination {root:?}: {source}")]
+    ProjectRootDestinationInvalid {
+        /// Destination rejected before database preflight or mutation.
+        root: String,
+        /// Filesystem or input failure that made the destination invalid.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A move or detach requires a previously bound project root.
+    #[error("project root transition requires an existing bound root")]
+    ProjectRootTransitionRequiresExistingRoot,
+    /// A move must select a destination different from the old root.
+    #[error("project root move destination {root:?} matches the existing root")]
+    ProjectRootTransitionRequiresDifferentRoot {
+        /// Root that was selected as both source and destination.
+        root: String,
+    },
+    /// A verified move cannot preserve identity while the old root still exists.
+    #[error("project root {root:?} still exists; use detach for an independent copy")]
+    ProjectRootStillPresent {
+        /// Recorded old root that remains accessible.
+        root: String,
+    },
+    /// Filesystem state could not prove that a move's old root is absent.
+    #[error("cannot prove project root {root:?} is absent: {source}")]
+    ProjectRootAbsenceUncertain {
+        /// Recorded old root whose state is uncertain.
+        root: String,
+        /// Filesystem failure that prevents an absence proof.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Root or identity state changed after transition preflight.
+    #[error(
+        "project root transition state changed: root {expected_root:?} -> {found_root:?}, identity {expected_identity:?} -> {found_identity:?}"
+    )]
+    ProjectRootTransitionChanged {
+        /// Root captured by read-only preflight.
+        expected_root: Option<String>,
+        /// Root observed inside the write transaction.
+        found_root: Option<String>,
+        /// Identity captured by read-only preflight.
+        expected_identity: Option<String>,
+        /// Identity observed inside the write transaction.
+        found_identity: Option<String>,
+    },
+    /// A bound project database has no durable instance identity.
+    #[error("bound project database is missing project instance identity")]
+    ProjectInstanceIdentityMissing,
+    /// `SQLite` did not yield a usable nonzero project identity.
+    #[error("failed to generate a distinct nonzero project instance identity")]
+    ProjectInstanceIdentityGenerationFailed,
     /// A transaction failed and the explicit rollback also failed.
     #[error("{operation}; rollback also failed: {rollback}")]
     TransactionRollback {
@@ -929,10 +984,21 @@ impl AtlasStore {
     /// # Errors
     ///
     /// Returns an error if persistence fails.
-    pub fn set_project_root(&self, root: &Path) -> DbResult<()> {
+    pub fn set_project_root(&mut self, root: &Path) -> DbResult<()> {
         let value = normalize_metadata_path(root);
-        if let Some(found) = self.project_root()? {
+        let savepoint = self.connection.savepoint()?;
+        if let Some(found) = savepoint
+            .query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                [PROJECT_ROOT_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
             if found == value {
+                project_identity::ensure_project_identity(&savepoint)?;
+                savepoint.commit()?;
+                self.validated_project_root = Some(value);
                 return Ok(());
             }
             return Err(DbError::ProjectRootMismatch {
@@ -940,7 +1006,11 @@ impl AtlasStore {
                 found,
             });
         }
-        set_metadata(&self.connection, PROJECT_ROOT_KEY, &value)
+        set_metadata(&savepoint, PROJECT_ROOT_KEY, &value)?;
+        project_identity::ensure_project_identity(&savepoint)?;
+        savepoint.commit()?;
+        self.validated_project_root = Some(value);
+        Ok(())
     }
 
     /// Load the canonical filesystem root for indexed repository files.
@@ -5773,7 +5843,7 @@ mod tests {
 
     #[test]
     fn stores_project_root_in_metadata() -> Result<(), Box<dyn Error>> {
-        let store = AtlasStore::in_memory()?;
+        let mut store = AtlasStore::in_memory()?;
         store.set_project_root(Path::new("C:/workspace/example"))?;
         require_eq(
             &store.project_root()?,
@@ -5796,7 +5866,7 @@ mod tests {
             "project identity rebind rejection",
         )?;
 
-        let unc_store = AtlasStore::in_memory()?;
+        let mut unc_store = AtlasStore::in_memory()?;
         unc_store.set_project_root(Path::new(r"\\?\UNC\server\share\repo"))?;
         require_eq(
             &unc_store.project_root()?,
@@ -5814,7 +5884,7 @@ mod tests {
         fs::create_dir_all(&atlas_dir)?;
         let db_path = atlas_dir.join("projectatlas.db");
         {
-            let store = AtlasStore::open(&db_path)?;
+            let mut store = AtlasStore::open(&db_path)?;
             store.set_project_root(&root)?;
             store
                 .connection
@@ -5851,7 +5921,7 @@ mod tests {
         let atlas_dir = root.join(".projectatlas");
         fs::create_dir_all(&atlas_dir)?;
         let db_path = atlas_dir.join("projectatlas.db");
-        let store = AtlasStore::open(&db_path)?;
+        let mut store = AtlasStore::open(&db_path)?;
         store
             .connection
             .execute_batch("PRAGMA wal_autocheckpoint = 0")?;
@@ -5955,7 +6025,7 @@ mod tests {
         fs::create_dir_all(&atlas_dir)?;
         let db_path = atlas_dir.join("projectatlas.db");
         {
-            let store = AtlasStore::open(&db_path)?;
+            let mut store = AtlasStore::open(&db_path)?;
             store.set_project_root(&root)?;
             store
                 .connection
