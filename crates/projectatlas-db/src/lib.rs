@@ -48,7 +48,7 @@ use schema::{PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION, SCHEMA_VERSION_KEY, sqlite
 /// Maximum persisted text for denormalized symbol-name search summaries.
 const MAX_SYMBOL_SEARCH_SUMMARY_CHARS: usize = 16_000;
 /// Maximum time a writer waits for another publication on the same database.
-const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
+const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Select create capability only for a path proven absent by preflight.
 fn writable_open_flags(state: SchemaState) -> OpenFlags {
