@@ -41,15 +41,17 @@ use runtime::{
     ScanRuntimePlan, SettingsReport, SymbolBuildOptions, WatchStatusReport, absolute_path,
     build_settings_report, byte_count_to_tokens, canonical_project_root,
     config_root_mismatch_error, default_mcp_project_root, defaultable_cli_project_root,
-    estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths, init_config_path,
-    init_path_status, lint_database_if_present, next_step_report, next_step_report_payload,
-    normalized_folder_filter, open_atlas_store_for_project, open_atlas_store_read_only_for_project,
+    estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
+    index_work_control, init_config_path, init_path_status, lint_database_if_present,
+    next_step_report, next_step_report_payload, normalized_folder_filter,
+    open_atlas_store_for_project, open_atlas_store_read_only_for_project,
     open_fresh_atlas_store_for_project, purpose_curation_page, ranked_file_nodes_with_reasons,
     ranked_folder_nodes_with_reasons, read_indexed_file_content,
     record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
     render_health_page, render_purpose_curation_page, render_purpose_review_report,
     reset_index_files, resolved_mcp_config_path, review_purposes, run_init_bootstrap,
-    run_scan_pipeline, run_symbol_build_pipeline, run_watch_loop, strip_legacy_purpose,
+    run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
+    run_symbol_build_pipeline_controlled, run_watch_loop, strip_legacy_purpose,
     validated_indexed_file_key, watcher_status_report,
 };
 use serde::{Deserialize, Serialize};
@@ -980,11 +982,17 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             text_index_max_bytes,
         } => {
             let path = defaultable_cli_project_root(path, &cli.db, cli.config.as_deref())?;
-            let plan =
-                ScanRuntimePlan::for_path(cli.config.as_deref(), &path, *text_index_max_bytes)?;
             let symbol_options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None);
+            let control = index_work_control(&symbol_options);
+            let plan = ScanRuntimePlan::for_path_controlled(
+                cli.config.as_deref(),
+                &path,
+                *text_index_max_bytes,
+                &control,
+            )?;
             let mut store = open_atlas_store_for_project(&cli.db, &plan.root)?;
-            let report = run_scan_pipeline(&mut store, &plan, &symbol_options)?;
+            let report =
+                run_scan_pipeline_controlled(&mut store, &plan, &symbol_options, &control)?;
             print_output(
                 cli.format,
                 &encode_agent_payload(&json!({ "scan": report })),
@@ -1221,9 +1229,17 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             } => {
                 let path = defaultable_cli_project_root(path, &cli.db, cli.config.as_deref())?;
                 let options = SymbolBuildOptions::new(*max_bytes, *max_workers, *timeout_seconds);
-                let plan = ScanRuntimePlan::for_path(cli.config.as_deref(), &path, None)?;
+                let control = index_work_control(&options);
+                let plan = ScanRuntimePlan::for_path_controlled(
+                    cli.config.as_deref(),
+                    &path,
+                    None,
+                    &control,
+                )?;
                 let mut store = open_atlas_store_for_project(&cli.db, &plan.root)?;
-                let report = run_symbol_build_pipeline(&mut store, &plan, &options, None)?;
+                let report = run_symbol_build_pipeline_controlled(
+                    &mut store, &plan, &options, None, &control,
+                )?;
                 print_output(
                     cli.format,
                     &encode_agent_payload(&json!({ "symbols_build": report })),
@@ -1402,19 +1418,31 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             text_index_max_bytes,
         } => {
             let path = defaultable_cli_project_root(path, &cli.db, cli.config.as_deref())?;
-            let plan =
-                ScanRuntimePlan::for_path(cli.config.as_deref(), &path, *text_index_max_bytes)?;
-            let mut store = open_atlas_store_for_project(&cli.db, &plan.root)?;
             let symbol_options =
                 SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, *max_workers, *timeout_seconds);
-            let report = run_watch_loop(
-                &mut store,
-                &plan,
-                *once,
-                *poll_seconds,
-                *max_cycles,
-                &symbol_options,
-            )?;
+            let report = if *once {
+                let control = index_work_control(&symbol_options);
+                let plan = ScanRuntimePlan::for_path_controlled(
+                    cli.config.as_deref(),
+                    &path,
+                    *text_index_max_bytes,
+                    &control,
+                )?;
+                let mut store = open_atlas_store_for_project(&cli.db, &plan.root)?;
+                run_single_watch_refresh_controlled(&mut store, &plan, &symbol_options, &control)?
+            } else {
+                let plan =
+                    ScanRuntimePlan::for_path(cli.config.as_deref(), &path, *text_index_max_bytes)?;
+                let mut store = open_atlas_store_for_project(&cli.db, &plan.root)?;
+                run_watch_loop(
+                    &mut store,
+                    &plan,
+                    false,
+                    *poll_seconds,
+                    *max_cycles,
+                    &symbol_options,
+                )?
+            };
             print_output(
                 cli.format,
                 &encode_agent_payload(&json!({ "watch": report })),

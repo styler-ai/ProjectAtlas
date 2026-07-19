@@ -176,8 +176,6 @@ struct PurposeInputReader<'a> {
     complete_paths: BTreeSet<PathBuf>,
     /// Configured legacy folder-purpose filename.
     purpose_filename: String,
-    /// Aggregate input bytes read so far.
-    bytes_read: u64,
     /// Exact digests retained only for complete publication-contract inputs.
     complete_digests: BTreeMap<PathBuf, String>,
 }
@@ -770,7 +768,7 @@ fn revalidate_index_publication_inputs_controlled_with_limits(
 ) -> Result<(), CliError> {
     control.check(IndexWorkStage::Publication)?;
     let current_plan = plan
-        .reload_controlled(control)
+        .reload_controlled_with_limits(control, purpose_limits)
         .map_err(|source| publication_input_error(&plan.root, source))?;
     control.check(IndexWorkStage::Publication)?;
     let staged_fingerprint = plan.publication_contract_fingerprint();
@@ -936,7 +934,6 @@ impl<'a> PurposeInputReader<'a> {
             limits,
             complete_paths,
             purpose_filename,
-            bytes_read: 0,
             complete_digests: BTreeMap::new(),
         }
     }
@@ -1032,18 +1029,10 @@ impl<'a> PurposeInputReader<'a> {
             if read == 0 {
                 break;
             }
-            let read_u64 = u64::try_from(read).unwrap_or(u64::MAX);
-            let observed = self.bytes_read.saturating_add(read_u64);
-            if observed > self.limits.total_bytes {
-                return Err(IndexWorkFailure::resource_limit(
-                    IndexWorkStage::Publication,
-                    IndexWorkResource::PurposeBytes,
-                    self.limits.total_bytes,
-                    observed,
-                )
-                .into());
-            }
-            self.bytes_read = observed;
+            self.control.consume_purpose_bytes(
+                self.limits.total_bytes,
+                u64::try_from(read).unwrap_or(u64::MAX),
+            )?;
             bytes.extend_from_slice(&buffer[..read]);
         }
         self.control.check(IndexWorkStage::Publication)?;
@@ -1074,6 +1063,23 @@ impl ScanRuntimePlan {
         text_index_max_bytes: Option<u64>,
         control: &IndexWorkControl,
     ) -> Result<Self, CliError> {
+        Self::for_path_controlled_with_limits(
+            config_path,
+            path,
+            text_index_max_bytes,
+            control,
+            PurposeImportLimits::default(),
+        )
+    }
+
+    /// Resolve scan policy under explicit authored-input limits used by focused tests.
+    fn for_path_controlled_with_limits(
+        config_path: Option<&Path>,
+        path: &Path,
+        text_index_max_bytes: Option<u64>,
+        control: &IndexWorkControl,
+        purpose_limits: PurposeImportLimits,
+    ) -> Result<Self, CliError> {
         control.check(IndexWorkStage::Publication)?;
         let root = canonical_project_root(path)?;
         let selected_config_path = selected_scan_import_config_path(config_path, &root)?;
@@ -1082,7 +1088,7 @@ impl ScanRuntimePlan {
             complete_paths.insert(path.to_path_buf());
             let mut reader = PurposeInputReader::for_complete_paths(
                 control,
-                PurposeImportLimits::default(),
+                purpose_limits,
                 complete_paths,
                 ".purpose".to_string(),
             );
@@ -1124,11 +1130,21 @@ impl ScanRuntimePlan {
 
     /// Reload effective policy through the operation-owned bounded input reader.
     fn reload_controlled(&self, control: &IndexWorkControl) -> Result<Self, CliError> {
-        Self::for_path_controlled(
+        self.reload_controlled_with_limits(control, PurposeImportLimits::default())
+    }
+
+    /// Reload effective policy under explicit authored-input limits used by focused tests.
+    fn reload_controlled_with_limits(
+        &self,
+        control: &IndexWorkControl,
+        purpose_limits: PurposeImportLimits,
+    ) -> Result<Self, CliError> {
+        Self::for_path_controlled_with_limits(
             self.config_path_override.as_deref(),
             &self.root,
             self.text_index_max_bytes_override,
             control,
+            purpose_limits,
         )
     }
 
@@ -1499,12 +1515,16 @@ pub(crate) fn run_init_bootstrap(
     let (scan_status, scan_report, scan_error) = if options.no_scan {
         (InitPhaseStatus::Skipped, None, None)
     } else {
-        match ScanRuntimePlan::for_path(config_path, &root, options.text_index_max_bytes).and_then(
-            |plan| {
-                let symbol_options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None);
-                run_scan_pipeline(&mut store, &plan, &symbol_options)
-            },
-        ) {
+        let symbol_options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None);
+        let control = index_work_control(&symbol_options);
+        match ScanRuntimePlan::for_path_controlled(
+            config_path,
+            &root,
+            options.text_index_max_bytes,
+            &control,
+        )
+        .and_then(|plan| run_scan_pipeline_controlled(&mut store, &plan, &symbol_options, &control))
+        {
             Ok(report) => (InitPhaseStatus::Verified, Some(report), None),
             Err(error) => {
                 ok = false;
@@ -1724,6 +1744,7 @@ pub(crate) fn text_index_options(
 }
 
 /// Execute the full scan/index/symbol pipeline for a resolved project plan.
+#[cfg(test)]
 pub(crate) fn run_scan_pipeline(
     store: &mut AtlasStore,
     plan: &ScanRuntimePlan,
@@ -1823,6 +1844,7 @@ pub(crate) fn run_scan_pipeline_controlled(
 }
 
 /// Rebuild symbol projections while keeping incomplete work non-queryable.
+#[cfg(test)]
 pub(crate) fn run_symbol_build_pipeline(
     store: &mut AtlasStore,
     plan: &ScanRuntimePlan,
@@ -4261,7 +4283,29 @@ pub(crate) fn run_watch_loop(
     if once {
         return run_single_watch_refresh(store, plan, symbol_options);
     }
-    match run_notify_watch_loop(store, plan, poll_seconds, max_cycles, symbol_options) {
+    run_watch_with_polling_fallback(
+        store,
+        plan,
+        poll_seconds,
+        max_cycles,
+        symbol_options,
+        |store| run_notify_watch_loop(store, plan, poll_seconds, max_cycles, symbol_options),
+    )
+}
+
+/// Run an event-backed watcher and preserve current changes through polling fallback.
+fn run_watch_with_polling_fallback<F>(
+    store: &mut AtlasStore,
+    plan: &ScanRuntimePlan,
+    poll_seconds: u64,
+    max_cycles: usize,
+    symbol_options: &SymbolBuildOptions,
+    run_notify: F,
+) -> Result<WatchReport, CliError>
+where
+    F: FnOnce(&mut AtlasStore) -> Result<WatchReport, CliError>,
+{
+    match run_notify(store) {
         Ok(report) => Ok(report),
         Err(error) => run_polling_watch_loop(
             store,
@@ -5769,6 +5813,91 @@ mod tests {
             .ok_or_else(|| io::Error::other("controlled import text missing"))?;
         let symbol_count_before = store.symbol_count()?;
         let relation_count_before = store.symbol_relation_count()?;
+
+        let config_bytes = fs::metadata(&config_path)?.len();
+        let map_bytes = fs::metadata(&fixture_config.map_path)?.len();
+        let nonsource_bytes = fs::metadata(&fixture_config.nonsource_files_path)?.len();
+        let source_bytes = fs::metadata(temp.path().join("lib.rs"))?.len();
+        let staged_input_bytes = config_bytes
+            .saturating_add(map_bytes)
+            .saturating_add(nonsource_bytes)
+            .saturating_add(source_bytes);
+        let complete_operation_bytes = config_bytes
+            .saturating_add(staged_input_bytes)
+            .saturating_add(config_bytes)
+            .saturating_add(staged_input_bytes);
+        let largest_complete_input = config_bytes.max(map_bytes).max(nonsource_bytes);
+        let aggregate_limits = PurposeImportLimits {
+            total_bytes: complete_operation_bytes,
+            complete_file_bytes: largest_complete_input,
+            header_bytes: source_bytes,
+            records: 100,
+        };
+        let aggregate_control = standalone_index_work_control();
+        let aggregate_plan = ScanRuntimePlan::for_path_controlled_with_limits(
+            None,
+            temp.path(),
+            None,
+            &aggregate_control,
+            aggregate_limits,
+        )?;
+        let aggregate_nodes = scan_repo(&aggregate_plan.root, &aggregate_plan.scan_options)?;
+        let aggregate_snapshot = aggregate_plan.purpose_import_snapshot_controlled_with_limits(
+            &aggregate_nodes,
+            &aggregate_control,
+            aggregate_limits,
+        )?;
+        revalidate_index_publication_inputs_controlled_with_limits(
+            &store,
+            &aggregate_plan,
+            Some(&aggregate_snapshot.fingerprint),
+            &aggregate_control,
+            aggregate_limits,
+        )?;
+
+        let cumulative_limit = complete_operation_bytes.saturating_sub(1);
+        let cumulative_limits = PurposeImportLimits {
+            total_bytes: cumulative_limit,
+            ..aggregate_limits
+        };
+        let cumulative_control = standalone_index_work_control();
+        let cumulative_plan = ScanRuntimePlan::for_path_controlled_with_limits(
+            None,
+            temp.path(),
+            None,
+            &cumulative_control,
+            cumulative_limits,
+        )?;
+        let cumulative_nodes = scan_repo(&cumulative_plan.root, &cumulative_plan.scan_options)?;
+        let cumulative_snapshot = cumulative_plan.purpose_import_snapshot_controlled_with_limits(
+            &cumulative_nodes,
+            &cumulative_control,
+            cumulative_limits,
+        )?;
+        let cumulative_result = revalidate_index_publication_inputs_controlled_with_limits(
+            &store,
+            &cumulative_plan,
+            Some(&cumulative_snapshot.fingerprint),
+            &cumulative_control.with_timeout_ceiling(DEFAULT_INDEX_WORK_TIMEOUT),
+            cumulative_limits,
+        );
+        if !matches!(
+            cumulative_result,
+            Err(CliError::IndexWork(
+                IndexWorkFailure::ResourceLimitExceeded {
+                    stage: IndexWorkStage::Publication,
+                    resource: IndexWorkResource::PurposeBytes,
+                    limit,
+                    observed,
+                }
+            )) if limit == cumulative_limit && observed > limit
+        ) {
+            return Err(io::Error::other(
+                "plan, staging, and revalidation readers did not share one purpose-byte budget",
+            )
+            .into());
+        }
+
         let control = standalone_index_work_control();
         let staged_snapshot = plan.purpose_import_snapshot_controlled(&nodes, &control)?;
         let small_limits = PurposeImportLimits {
@@ -5777,8 +5906,12 @@ mod tests {
             header_bytes: 64,
             records: 100,
         };
-        let initial_limited =
-            plan.purpose_import_snapshot_controlled_with_limits(&nodes, &control, small_limits);
+        let initial_limit_control = standalone_index_work_control();
+        let initial_limited = plan.purpose_import_snapshot_controlled_with_limits(
+            &nodes,
+            &initial_limit_control,
+            small_limits,
+        );
         if !matches!(
             initial_limited,
             Err(CliError::IndexWork(
@@ -5814,11 +5947,12 @@ mod tests {
         publication.set_project_root(&plan.root)?;
         publication.replace_scan(&nodes)?;
         publication.set_purpose(".", "Uncommitted purpose input", PurposeSource::Imported)?;
+        let publication_limit_control = standalone_index_work_control();
         let limited = revalidate_index_publication_inputs_controlled_with_limits(
             &publication,
             &plan,
             Some(&staged_snapshot.fingerprint),
-            &control,
+            &publication_limit_control,
             small_limits,
         );
         if !matches!(
@@ -6258,37 +6392,44 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         let mut changes = WatchChangeSet::default();
         changes.paths.insert(changed_path);
         changes.paths.insert(deleted_path);
-        let canceled = IndexWorkControl::new(IndexCancellation::new(), None);
-        canceled.cancel();
-        let canceled_result = refresh_index_for_changes_controlled(
-            &mut store,
-            &plan,
-            &changes,
-            &symbol_options,
-            &canceled,
-        );
-        if !matches!(
-            canceled_result,
-            Err(CliError::IndexWork(IndexWorkFailure::Cancelled { .. }))
-        ) {
-            return Err(io::Error::other("canceled watcher batch did not fail closed").into());
-        }
+        let fallback_report =
+            run_watch_with_polling_fallback(&mut store, &plan, 0, 1, &symbol_options, |store| {
+                let canceled = IndexWorkControl::new(IndexCancellation::new(), None);
+                canceled.cancel();
+                let Err(error) = refresh_index_for_changes_controlled(
+                    store,
+                    &plan,
+                    &changes,
+                    &symbol_options,
+                    &canceled,
+                ) else {
+                    return Err(CliError::InvalidInput(
+                        "canceled watcher batch unexpectedly succeeded".to_string(),
+                    ));
+                };
+                let generation = store.index_publication()?.map(|state| state.generation);
+                if generation != Some(before.generation) {
+                    return Err(CliError::InvalidInput(
+                        "canceled watcher batch advanced publication before fallback".to_string(),
+                    ));
+                }
+                Err(error)
+            })?;
         require_eq(
-            &store
-                .index_publication()?
-                .as_ref()
-                .map(|state| state.generation),
-            &Some(before.generation),
-            "generation after canceled watcher batch",
+            &fallback_report.mode.as_str(),
+            &WATCH_MODE_POLLING,
+            "canceled notify batch fallback mode",
         )?;
-        let retry_control = standalone_index_work_control();
-        refresh_index_for_changes_controlled(
-            &mut store,
-            &plan,
-            &changes,
-            &symbol_options,
-            &retry_control,
-        )?;
+        if fallback_report
+            .fallback_reason
+            .as_deref()
+            .is_none_or(|reason| !reason.contains("canceled"))
+        {
+            return Err(io::Error::other(
+                "polling fallback did not retain the notify failure reason",
+            )
+            .into());
+        }
 
         let after = store
             .index_publication()?

@@ -3,7 +3,7 @@
 use std::fmt;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -167,6 +167,8 @@ pub struct IndexWorkControl {
     started_at: Instant,
     /// Optional absolute deadline observed by every operation worker.
     deadline: Option<Instant>,
+    /// Authored-purpose bytes consumed by this operation and every clone.
+    purpose_bytes: Arc<AtomicU64>,
 }
 
 impl IndexWorkControl {
@@ -180,6 +182,7 @@ impl IndexWorkControl {
             cancellation,
             started_at,
             deadline,
+            purpose_bytes: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -190,6 +193,7 @@ impl IndexWorkControl {
             cancellation,
             started_at: Instant::now(),
             deadline: Some(deadline),
+            purpose_bytes: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -219,6 +223,30 @@ impl IndexWorkControl {
                 self.deadline
                     .map_or(ceiling, |deadline| deadline.min(ceiling)),
             ),
+            purpose_bytes: Arc::clone(&self.purpose_bytes),
+        }
+    }
+
+    /// Consume authored-purpose bytes from this operation's aggregate budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IndexWorkFailure::ResourceLimitExceeded`] when this read and
+    /// every prior read through a clone would exceed `limit`.
+    pub fn consume_purpose_bytes(&self, limit: u64, bytes: u64) -> Result<u64, IndexWorkFailure> {
+        let updated =
+            self.purpose_bytes
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    (bytes <= limit.saturating_sub(current)).then(|| current.saturating_add(bytes))
+                });
+        match updated {
+            Ok(previous) => Ok(previous.saturating_add(bytes)),
+            Err(previous) => Err(IndexWorkFailure::resource_limit(
+                IndexWorkStage::Publication,
+                IndexWorkResource::PurposeBytes,
+                limit,
+                previous.saturating_add(bytes),
+            )),
         }
     }
 
@@ -269,6 +297,17 @@ mod tests {
         let bounded = worker.with_timeout_ceiling(Duration::from_secs(1));
         assert_eq!(bounded.started_at(), worker.started_at());
         assert!(bounded.deadline().is_some());
+        assert_eq!(control.consume_purpose_bytes(8, 3), Ok(3));
+        assert_eq!(bounded.consume_purpose_bytes(8, 5), Ok(8));
+        assert_eq!(
+            worker.consume_purpose_bytes(8, 1),
+            Err(IndexWorkFailure::ResourceLimitExceeded {
+                stage: IndexWorkStage::Publication,
+                resource: IndexWorkResource::PurposeBytes,
+                limit: 8,
+                observed: 9,
+            })
+        );
 
         let elapsed = IndexWorkControl::with_deadline(IndexCancellation::new(), Instant::now());
         assert_eq!(

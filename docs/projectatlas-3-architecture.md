@@ -220,14 +220,14 @@ flowchart TB
     Runtime --> Service
     Runtime --> DB
     FS -->|reads current paths and bytes| Source
-    Symbols -->|parses controlled current bytes| Source
     Service -->|indexed typed queries| DB
     DB --> Atlas
 ```
 
-The current saved local source is authoritative. SQLite stores authored
-purposes and complete derived generations; it does not make a hosted commit the
-source of truth.
+The current saved local source is authoritative. Runtime orchestration passes
+bounded current content into the symbol engine; the symbol engine does not own
+filesystem I/O. SQLite stores authored purposes and complete derived
+generations; it does not make a hosted commit the source of truth.
 
 ### Crate Dependency And Ownership
 
@@ -332,17 +332,20 @@ current generation unchanged.
 
 ```mermaid
 stateDiagram-v2
+    state "Watcher change remains eligible" as Unacknowledged
+    state "One-shot result returned" as Reported
     [*] --> Admitted
     Admitted --> Running: controlled plan and configuration
     Running --> Published: validation and commit succeed
-    Running --> Failed: error or resource limit
-    Running --> Canceled: cancellation or deadline
-    Failed --> Unacknowledged: watcher batch is not advanced
-    Canceled --> Unacknowledged: watcher batch is not advanced
-    Unacknowledged --> Admitted: new bounded read/watch request or explicit retry
+    Running --> Failed: error, deadline, or resource limit
+    Running --> Canceled: cancellation
+    Failed --> Unacknowledged: watcher
+    Canceled --> Unacknowledged: watcher
+    Unacknowledged --> Admitted: next bounded refresh
     Published --> [*]
-    Failed --> [*]: one-shot task reports failure
-    Canceled --> [*]: one-shot task reports cancellation
+    Failed --> Reported: one-shot
+    Canceled --> Reported: one-shot
+    Reported --> [*]
 ```
 
 Readers continue using the last complete generation while work runs or fails.
@@ -408,9 +411,9 @@ indexing tool. Public and semi-public surfaces use atlas/funnel vocabulary:
   `atlas_settings`, `atlas_watch_status`, `atlas_watch_once`,
   `atlas_strip_legacy_purpose`, `atlas_reset_index`, `atlas_purpose_queue`,
   `atlas_purpose_set`, and `atlas_purpose_review`.
-- Crates/modules: `projectatlas-core`, `projectatlas-db`, `projectatlas-fs`,
-  `projectatlas-service`, `projectatlas-symbols`, `projectatlas-query`,
-  `projectatlas-mcp`.
+- Crates/modules: `projectatlas-cli` (CLI, MCP adapters, and runtime
+  orchestration), `projectatlas-core`, `projectatlas-db`, `projectatlas-fs`,
+  `projectatlas-lints`, `projectatlas-service`, and `projectatlas-symbols`.
 - Avoid names copied from external tools for classes, methods, structs,
   modules, commands, or MCP tools.
 

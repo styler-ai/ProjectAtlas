@@ -6,6 +6,8 @@ use crate::atlas_map::{
     init_gitignore, lint_map, list_ignore_entries, load_atlas_config, load_atlas_config_for_root,
     remove_ignore_entry, write_map,
 };
+#[cfg(test)]
+use crate::runtime::run_scan_pipeline;
 use crate::runtime::{
     DEFAULT_HEALTH_LIMIT, IndexProjectMismatch, IndexRefreshRequired, IndexVerificationIncomplete,
     InitBootstrapOptions, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel,
@@ -19,10 +21,9 @@ use crate::runtime::{
     ranked_folder_nodes_with_reasons, read_indexed_file_content,
     record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
     render_health_page, render_purpose_curation_page, render_purpose_review_report,
-    reset_index_files, review_purposes, run_init_bootstrap, run_scan_pipeline,
-    run_scan_pipeline_controlled, run_single_watch_refresh_controlled, run_symbol_build_pipeline,
-    run_symbol_build_pipeline_controlled, run_watch_loop, strip_legacy_purpose, telemetry_disabled,
-    validated_indexed_file_key, watcher_status_report,
+    reset_index_files, review_purposes, run_init_bootstrap, run_scan_pipeline_controlled,
+    run_single_watch_refresh_controlled, run_symbol_build_pipeline_controlled,
+    strip_legacy_purpose, telemetry_disabled, validated_indexed_file_key, watcher_status_report,
 };
 use crate::token_tui::{
     TokenDashboardTheme, render_token_dashboard_plain_with_theme,
@@ -3567,13 +3568,16 @@ impl ProjectAtlasMcpServer {
                 )?;
                 return Self::encode_named_payload(MCP_PAYLOAD_TASK_START, &task);
             }
-            let plan = ScanRuntimePlan::for_path(
+            let control = index_work_control(&symbol_options);
+            let plan = ScanRuntimePlan::for_path_controlled(
                 state.config_path.as_deref(),
                 &path,
                 text_index_max_bytes,
+                &control,
             )?;
             let mut store = Self::open_mut_store(&state)?;
-            let report = run_scan_pipeline(&mut store, &plan, &symbol_options)?;
+            let report =
+                run_scan_pipeline_controlled(&mut store, &plan, &symbol_options, &control)?;
             Self::encode_named_payload(MCP_PAYLOAD_SCAN, &report)
         })())
     }
@@ -3928,13 +3932,16 @@ impl ProjectAtlasMcpServer {
                 )?;
                 return Self::encode_named_payload(MCP_PAYLOAD_TASK_START, &task);
             }
-            let plan = ScanRuntimePlan::for_path(
+            let control = index_work_control(&options);
+            let plan = ScanRuntimePlan::for_path_controlled(
                 state.config_path.as_deref(),
                 &path,
                 text_index_max_bytes,
+                &control,
             )?;
             let mut store = Self::open_mut_store(&state)?;
-            let report = run_symbol_build_pipeline(&mut store, &plan, &options, None)?;
+            let report =
+                run_symbol_build_pipeline_controlled(&mut store, &plan, &options, None, &control)?;
             Self::encode_named_payload(MCP_PAYLOAD_SYMBOLS_BUILD, &report)
         })())
     }
@@ -4242,13 +4249,16 @@ impl ProjectAtlasMcpServer {
                 )?;
                 return Self::encode_named_payload(MCP_PAYLOAD_TASK_START, &task);
             }
-            let plan = ScanRuntimePlan::for_path(
+            let control = index_work_control(&symbol_options);
+            let plan = ScanRuntimePlan::for_path_controlled(
                 state.config_path.as_deref(),
                 &path,
                 text_index_max_bytes,
+                &control,
             )?;
             let mut store = Self::open_mut_store(&state)?;
-            let report = run_watch_loop(&mut store, &plan, true, 1, 1, &symbol_options)?;
+            let report =
+                run_single_watch_refresh_controlled(&mut store, &plan, &symbol_options, &control)?;
             Self::encode_named_payload(MCP_PAYLOAD_WATCH, &report)
         })())
     }
@@ -5021,7 +5031,7 @@ mod tests {
     }
 
     #[test]
-    fn background_index_adapters_publish_scan_symbol_and_watch_effects()
+    fn index_adapters_publish_scan_symbol_and_watch_effects()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let repo = temp.path().join("repo");
@@ -5131,6 +5141,56 @@ mod tests {
                 McpTaskOperation::Contract | McpTaskOperation::Search => unreachable!(),
             }
         }
+
+        let store = open_atlas_store_for_project(&db_path, &repo)?;
+        store.clear_symbol_graph_for_path("src/lib.rs")?;
+        drop(store);
+        let synchronous_symbols = server.atlas_symbols_build(Parameters(AtlasScanParams {
+            project_path: Some(project_path.clone()),
+            path: None,
+            nearest_project: Some(false),
+            max_bytes: None,
+            max_workers: Some(1),
+            timeout_seconds: None,
+            text_index_max_bytes: None,
+            background: Some(false),
+        }));
+        require(
+            synchronous_symbols.contains(MCP_PAYLOAD_SYMBOLS_BUILD),
+            "synchronous symbol adapter did not return its completed report",
+        )?;
+        let store = open_atlas_store_for_project(&db_path, &repo)?;
+        require(
+            store.symbol_count_for_path("src/lib.rs")? > 0,
+            "synchronous symbol adapter omitted parser output",
+        )?;
+        drop(store);
+
+        fs::write(
+            &source_path,
+            "pub fn first() { second(); fourth(); }\nfn second() {}\nfn fourth() {}\n",
+        )?;
+        let synchronous_watch = server.atlas_watch_once(Parameters(AtlasWatchOnceParams {
+            project_path: Some(project_path),
+            path: None,
+            nearest_project: Some(false),
+            max_workers: Some(1),
+            timeout_seconds: None,
+            text_index_max_bytes: None,
+            background: Some(false),
+        }));
+        require(
+            synchronous_watch.contains(MCP_PAYLOAD_WATCH),
+            "synchronous watch adapter did not return its completed report",
+        )?;
+        let store = open_atlas_store_for_project(&db_path, &repo)?;
+        require(
+            store
+                .load_file_text("src/lib.rs")?
+                .is_some_and(|row| row.content.contains("fourth"))
+                && store.load_symbol_by_name("src/lib.rs", "fourth")?.is_some(),
+            "synchronous watcher omitted changed source and symbols",
+        )?;
         Ok(())
     }
 

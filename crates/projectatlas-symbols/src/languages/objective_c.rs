@@ -4,18 +4,30 @@ use projectatlas_core::symbols::{CodeSymbol, SymbolGraph, SymbolKind};
 use std::collections::HashMap;
 
 use super::{push_contains_relation, set_method_parent, symbol_exists};
-use crate::push_symbol;
+use crate::{check_parser_iteration, push_symbol};
 
 /// Add Objective-C class ownership around interface/implementation blocks.
-pub(super) fn augment(graph: &mut SymbolGraph, content: &str) {
-    augment_blocks(graph, content);
-    normalize_duplicates(graph);
+pub(super) fn augment<E>(
+    graph: &mut SymbolGraph,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    check()?;
+    augment_blocks(graph, content, check)?;
+    normalize_duplicates(graph, check)?;
+    check()?;
+    Ok(())
 }
 
 /// Add symbols and ownership relations from Objective-C block syntax.
-fn augment_blocks(graph: &mut SymbolGraph, content: &str) {
+fn augment_blocks<E>(
+    graph: &mut SymbolGraph,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
     let mut current_class: Option<String> = None;
     for (line_index, line) in content.lines().enumerate() {
+        check_parser_iteration(line_index, check)?;
         let trimmed = line.trim();
         if let Some(class_name) = block_name(trimmed, "@interface") {
             if !symbol_exists(graph, SymbolKind::Class, &class_name) {
@@ -66,14 +78,19 @@ fn augment_blocks(graph: &mut SymbolGraph, content: &str) {
             );
         }
     }
+    Ok(())
 }
 
 /// Collapse Objective-C interface and implementation duplicates in summaries.
-fn normalize_duplicates(graph: &mut SymbolGraph) {
+fn normalize_duplicates<E>(
+    graph: &mut SymbolGraph,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
     let mut normalized = Vec::with_capacity(graph.symbols.len());
     let mut class_indices = HashMap::new();
     let mut method_indices = HashMap::new();
-    for symbol in graph.symbols.drain(..) {
+    for (iteration, symbol) in graph.symbols.drain(..).enumerate() {
+        check_parser_iteration(iteration, check)?;
         match symbol.kind {
             SymbolKind::Class => upsert_class(&mut normalized, &mut class_indices, symbol),
             SymbolKind::Method => upsert_method(&mut normalized, &mut method_indices, symbol),
@@ -81,6 +98,7 @@ fn normalize_duplicates(graph: &mut SymbolGraph) {
         }
     }
     graph.symbols = normalized;
+    Ok(())
 }
 
 /// Insert a class symbol while preferring implementation entries.
