@@ -2,7 +2,7 @@
 
 ### Requirement: Federation Is Explicit, Call-Only, And Read-Only
 
-Federated relation or analysis calls SHALL receive their complete ordered set of already indexed roots explicitly. Participating databases SHALL be opened read-only/query-only and validated before rows are returned. Federation SHALL not discover roots, initialize or scan a root, change the active project, persist roots/edges/cache, write telemetry/settings, or mutate any project.
+Federated relation or analysis calls SHALL receive their complete ordered set of already indexed roots explicitly. They SHALL enforce hard participating-root and simultaneously open connection/read-snapshot limits plus aggregate database/input bytes, rows, entities, edges, decoded/intermediate bytes, elapsed time, output bytes, and cancellation-to-close budgets. Participating databases SHALL be opened read-only/query-only and all validated before rows are returned. Federation SHALL not discover roots, initialize or scan a root, change the active project, persist roots/edges/cache, retain open handles, write telemetry/settings, or mutate any project.
 
 #### Scenario: One selected root is invalid
 - **WHEN** a root is missing, stale beyond the request contract, corrupt, unsupported, or bound to another project
@@ -11,6 +11,14 @@ Federated relation or analysis calls SHALL receive their complete ordered set of
 #### Scenario: Existing single-project request omits roots
 - **WHEN** a client uses the pre-change request shape
 - **THEN** only the selected project is queried and behavior remains compatible
+
+#### Scenario: Many roots include one invalid late root
+- **WHEN** a bounded ordered root set contains a stale, corrupt, or incompatible database after several valid roots
+- **THEN** the call closes every captured snapshot and returns no partial rows, cache, telemetry, settings, or active-project mutation
+
+#### Scenario: Federation is canceled with several roots open
+- **WHEN** cancellation or an aggregate resource limit is reached during validation or bounded resolution
+- **THEN** every connection closes within the cancellation budget and no cross-root state survives the call
 
 ### Requirement: Cross-Root Results Remain Project-Qualified And Fresh
 

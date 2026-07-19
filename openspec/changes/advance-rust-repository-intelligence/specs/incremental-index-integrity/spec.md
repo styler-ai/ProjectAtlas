@@ -32,6 +32,22 @@ Every normal index-backed read, watch, and one-shot refresh SHALL compare persis
 - **WHEN** path, permission, encoding, or root state is uncertain
 - **THEN** ProjectAtlas reports uncertainty and does not misclassify the file as deleted
 
+### Requirement: Verified Source Observation Avoids Repeated Whole-Tree Reads
+
+A long-lived MCP or watch runtime SHALL establish a process-scoped verified source-observation epoch by activating relevant root/policy observation before or during the first exact post-start verification and reconciling events buffered across that verification. Later unchanged indexed reads MAY reuse that epoch only while observation remains healthy; they SHALL bind the SQLite generation/read snapshot and result cursor to the verified epoch and SHALL NOT repeat a whole-tree walk or full indexed-node load per call. A relevant event, observer overflow/gap/disconnect, root or policy uncertainty, cancellation, or source change during a read SHALL invalidate the epoch and trigger bounded reconciliation, exact re-verification, retry, or typed `refresh_required` before current facts are claimed. A short-lived one-shot process still performs its required first exact verification and SHALL NOT rely on another process's unproven in-memory epoch.
+
+#### Scenario: Several unchanged MCP reads follow startup verification
+- **WHEN** the first indexed call completed exact verification and the live source observer remains healthy with no relevant event
+- **THEN** later folder, file, summary, relation, and slice-selection calls reuse the verified epoch without another full filesystem walk or full node-table materialization
+
+#### Scenario: Source observation loses continuity
+- **WHEN** the watcher overflows, disconnects, misses an observation interval, or cannot prove the selected root or policy state
+- **THEN** the epoch becomes invalid and ProjectAtlas re-verifies exactly or returns `refresh_required` instead of treating silence as freshness
+
+#### Scenario: Source changes during a bounded query
+- **WHEN** a relevant event advances or invalidates the source epoch after the query captures its database generation
+- **THEN** ProjectAtlas rejects or retries the result against a current epoch and never labels the older snapshot as current
+
 ### Requirement: Incremental Equals Clean Scan
 
 For the same final structural inputs, a mutation sequence SHALL converge to the same canonical structural graph, coverage, and lexical results as a clean full scan, excluding publication identifiers and telemetry. Cancellation or restart SHALL never expose partial rows.

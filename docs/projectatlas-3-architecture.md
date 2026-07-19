@@ -95,28 +95,49 @@ ProjectAtlas 3 stores index state in SQLite:
 .projectatlas/projectatlas.db
 ```
 
-Headers and `.purpose` files become legacy import sources only. SQLite is the
-durable source of truth. TOON should be the default agent-facing response/export
-format because it is compact, structured, and usually cheaper in tokens than
-JSON. JSON remains available for tests, scripts, and integrations that require
-strict machine parsing.
+Headers and `.purpose` files become legacy import sources only. Current saved
+local source bytes remain authoritative for what exists now; SQLite is the
+durable source of truth for authored atlas state and the active complete derived
+index generation. TOON should be the default agent-facing response/export format
+because it is compact, structured, and usually cheaper in tokens than JSON.
+JSON remains available for tests, scripts, and integrations that require strict
+machine parsing.
 
 ## Storage And Toolchain Decision
 
-SQLite is the default ProjectAtlas 3 local index store because it fits coding
-agent workflows well:
+SQLite is the selected ProjectAtlas 3 local index store because it fits the
+actual workload rather than merely because it is already present:
 
-- embedded single-file database
-- no server process or external service
-- fast enough for local repository metadata and symbol lookups
-- transactional updates for file watcher/index refreshes
-- portable across Windows, macOS, Linux, CI, and editor integrations
-- queryable from CLI, MCP, tests, and future tools
-- supports FTS tables when text search needs to move into the database
+- one embedded project-local database with no daemon, service account, network,
+  or external lifecycle;
+- offline and non-Git operation against the current dirty local source tree;
+- many bounded read snapshots with one atomic publication writer per project;
+- transactional authored-state preservation and all-or-nothing derived refresh;
+- B-tree indexes that support the required folder/file, stable-key, inbound,
+  outbound, occurrence, coverage, purpose, and affected-closure access paths;
+- predictable Windows, macOS, and Linux packaging through the locked bundled
+  SQLite selected by workspace-owned `rusqlite`;
+- engine-native backup, integrity, query-plan, WAL, and optional FTS support;
+- direct inspection from the CLI, MCP runtime, tests, and diagnostic tools.
 
-The Rust implementation should use a storage boundary rather than spreading
-SQLite calls through business logic. This keeps SQLite as the best default
-without making it impossible to add alternatives later.
+`projectatlas-db` is the concrete storage owner. Rust domain and service layers
+do not receive a speculative storage trait: a second implementation would add
+indirection before there is a second owner or consumer. SQLite calls and schema
+strings remain inside the storage crate while services depend on typed bounded
+operations. This keeps replacement possible through a deliberate boundary
+without paying for an imaginary backend now.
+
+The supported operating profile is a local filesystem whose locking and shared
+memory semantics SQLite supports. One selected source tree opens exactly one
+authoritative `.projectatlas/projectatlas.db`; ProjectAtlas never splits that
+tree's purposes, Memory Atlas state, graph, or index across product databases.
+Different selected source trees or checkouts each own one separate project-local
+database and may progress concurrently; one project identity never has two
+authoritative databases. Writers to one project's database are serialized and
+return bounded typed busy/unavailable state instead of spinning. WAL permits
+last-complete-generation readers during publication. Connection pragmas, busy
+timeout, foreign-key enforcement, statistics, checkpoints, and backup behavior
+are validated as operating contracts, not copied as universal tuning folklore.
 
 Initial toolchain choices:
 
@@ -137,10 +158,19 @@ Alternatives considered:
 
 - Plain JSON/TOON files: simple and reviewable, but weak for incremental
   updates, queries, health checks, and usage telemetry.
-- RocksDB/LMDB: fast key-value stores, but heavier operationally and less
-  transparent for ad hoc debugging.
-- Tantivy only: useful for search, but not a full relational metadata store.
-- External server database: too heavy for local agent tooling and CI.
+- RocksDB/LMDB/redb-style key-value stores: capable point access, but they would
+  require custom integrity, joins, adjacency ordering, migration, and diagnostic
+  machinery for a workload SQLite already serves transactionally.
+- DuckDB: excellent local analytical scans, but ProjectAtlas is dominated by
+  small indexed lookups and frequent incremental publication rather than
+  columnar bulk analysis.
+- Embedded or server graph databases: useful for arbitrary or distributed graph
+  computation, but ProjectAtlas exposes closed bounded traversals and would pay
+  extra packaging, query-language, migration, and operational cost.
+- Tantivy only: useful as a measured lexical accelerator, but not a complete
+  relational metadata, authored-state, and atomic-publication store.
+- PostgreSQL or another external server: strong concurrent multi-writer service
+  semantics, but incompatible with zero-service offline project-local operation.
 - In-memory only: fastest, but loses durable purpose and token-savings state.
 - `cargo_metadata` for manifest indexing: canonical for whole-workspace Cargo
   graphs, but it shells through Cargo against filesystem manifests and does not
@@ -149,11 +179,19 @@ Alternatives considered:
   canonical TOML parsing for file summaries and can add `cargo_metadata` later
   only for an explicit workspace graph command.
 
-Decision: use SQLite as the durable default, keep a storage abstraction at the
-core boundary, use TOON as the default compact agent-facing output, keep JSON as
-an explicit `--format json` option, and reserve specialized search/index
-backends for later measured need. MCP still uses JSON-RPC as its required
-transport envelope, but `atlas_*` tool text responses should be TOON by default.
+Decision: keep SQLite as the durable atlas and derived-index engine, keep its
+concrete ownership in `projectatlas-db`, use TOON as the default compact
+agent-facing output, keep JSON as an explicit `--format json` option, and reserve
+specialized search/index backends for later measured need. MCP still uses
+JSON-RPC as its required transport envelope, but `atlas_*` tool text responses
+should be TOON by default.
+
+Reopen the engine decision when a required product contract needs shared remote
+multi-writer state, a live network filesystem unsupported by SQLite,
+unbounded/distributed graph computation, or still misses the preregistered
+huge-source query/publication/resource thresholds after the owning schema,
+indexes, query, statistics, and transaction design has been corrected. The
+shape of the data alone is not an invalidation condition.
 
 ## Workspace Layout
 
@@ -208,7 +246,7 @@ flowchart TB
         Service[Bounded query and ranking services]
         DB[SQLite publication and project state]
     end
-    Source[(Current local source)]
+    Source[Current local source]
     Atlas[(Project-local atlas database)]
 
     Agent --> MCP
@@ -240,7 +278,7 @@ flowchart TB
     Symbols[projectatlas-symbols<br/>language and relation extraction]
     Core[projectatlas-core<br/>shared typed contracts and bounded work]
     Lints[projectatlas-lints<br/>repository Rust source-policy gate]
-    Workspace[(Workspace Rust source)]
+    Workspace[Workspace Rust source]
 
     CLI --> Service
     CLI --> DB
@@ -259,6 +297,317 @@ Dependency direction remains acyclic. The lint crate is a workspace quality
 tool, not a runtime dependency. No eighth crate is justified unless a durable
 independently consumed ownership boundary appears.
 
+### Database Authority And Responsibility
+
+```mermaid
+flowchart TB
+    subgraph Inputs[External authorities and inputs]
+        direction LR
+        Source[Current saved local source<br/>authoritative for what exists now]
+        Policy[Filesystem config, .gitignore,<br/>atlas ignore policy, optional VCS context]
+        PurposeAPI[Purpose review API]
+    end
+
+    subgraph RuntimeFlow[Runtime and service flow]
+        direction LR
+        Runtime[Freshness and publication owner]
+        Extract[Filesystem and symbol extraction]
+        Publish[One SQLite publication transaction]
+        Query[Bounded query and ranking service]
+        Agent[Agent MCP or CLI response]
+        Runtime --> Extract -->|validated typed batch| Publish
+        Query --> Agent
+    end
+
+    subgraph ProjectDB[0.4 target: exactly one authoritative .projectatlas/projectatlas.db for this selected source tree]
+        direction LR
+        subgraph Derived[Reconciled complete generation]
+            direction TB
+            DerivedBoundary[Generation publication and read boundary]
+            Nodes[Node/path anchors, text,<br/>summaries, and parse state]
+            Symbols[Symbols and legacy relations]
+            Graph[Stable entities, logical relations,<br/>occurrences, and coverage]
+            DerivedBoundary --- Nodes
+            DerivedBoundary --- Symbols
+            DerivedBoundary --- Graph
+        end
+
+        subgraph Authored[Durable authored atlas state]
+            direction TB
+            AuthoredBoundary[Authored-state boundary]
+            Identity[Project identity and database metadata]
+            Purposes[Reviewed purposes and lifecycle]
+            Health[Health resolutions]
+            Telemetry[Bounded usage telemetry and aggregates]
+            Memory[Future bounded Memory Atlas<br/>independent context revision]
+            AuthoredBoundary --- Identity
+            AuthoredBoundary --- Purposes
+            AuthoredBoundary --- Health
+            AuthoredBoundary --- Telemetry
+            AuthoredBoundary --- Memory
+        end
+    end
+
+    Source -->|bounded current paths and bytes| Extract
+    Policy -->|freshness and selection inputs| Runtime
+    PurposeAPI --> Purposes
+    Publish -->|replace affected derived closure| DerivedBoundary
+    Publish -. preserves .-> AuthoredBoundary
+    Query -->|one complete generation snapshot| DerivedBoundary
+    Query -->|identity and current purpose projection| AuthoredBoundary
+    classDef future stroke-dasharray: 5 5
+    class Memory future
+```
+
+Source and database authority are intentionally different. SQLite does not
+claim that a committed repository or an old indexed row is current source truth.
+It preserves authored atlas decisions and one complete derived projection of the
+saved local bytes. A purpose update therefore changes later graph-backed output
+without rewriting entity or relation rows. Scan reconciliation updates stable
+node/path anchors in place or marks them absent so their authored purpose rows
+survive; derived publication never implements refresh by deleting authored
+state.
+
+Configuration and ignore rules stay authoritative in their filesystem-owned
+formats. The database records only the fingerprints and derived consequences
+needed for freshness and publication; it does not become a second mutable
+configuration authority. There is one authoritative database for one selected
+source tree. A large extraction may use a bounded disposable spool as an
+implementation detail, but even an SQLite-backed spool is not a ProjectAtlas
+database: it has no project identity, authored state, active generation, or
+query surface and is deleted after the owning operation.
+
+A shared MCP process can route a call to another explicitly selected project;
+that opens the other project's own single database rather than adding a database
+to the active project. Explicit federation likewise takes bounded read-only
+snapshots of participating projects' existing databases for one call and never
+creates a federated or shared authority.
+
+The future Memory Atlas belongs to the same project database because it shares
+project identity, backup, migration, and local/offline constraints, but it does
+not share structural generation ownership. #314 will define capped authored
+records and an independent context revision. Graph publication cannot mutate
+that revision; a memory update cannot bless or advance structural data.
+
+### Normalized Graph Physical Model
+
+```mermaid
+---
+title: Target graph tables inside the same single projectatlas.db
+---
+erDiagram
+    PROJECT_IDENTITY {
+        INTEGER singleton PK
+        BLOB project_instance_id UK
+        INTEGER active_generation
+    }
+    NODE {
+        INTEGER id PK
+        TEXT path UK
+        TEXT kind
+        TEXT content_hash
+        INTEGER exists_now
+    }
+    PURPOSE {
+        INTEGER node_id PK,FK
+        TEXT purpose
+        TEXT source
+        TEXT status
+    }
+    GRAPH_ENTITY {
+        BLOB entity_key PK
+        BLOB project_instance_id FK
+        TEXT canonical_identity UK
+        TEXT entity_kind
+        TEXT repository_path FK
+        TEXT manifest_path FK
+    }
+    GRAPH_RELATION {
+        BLOB relation_key PK
+        BLOB project_instance_id FK
+        BLOB source_entity_key FK
+        BLOB target_entity_key FK
+        TEXT relation_kind
+        TEXT relation_scope
+        TEXT resolution_status
+        TEXT confidence
+        TEXT completeness
+    }
+    GRAPH_OCCURRENCE {
+        INTEGER id PK
+        BLOB relation_key FK
+        TEXT file_path FK
+        INTEGER start_line
+        INTEGER start_column
+        INTEGER end_line
+        INTEGER end_column
+    }
+    GRAPH_COVERAGE {
+        INTEGER id PK
+        BLOB project_instance_id FK
+        TEXT scope_kind
+        TEXT scope_path
+        TEXT relation_kind
+        TEXT state
+    }
+    ENTITY_RESOLUTION_KEY {
+        BLOB entity_key PK,FK
+        TEXT key_domain PK
+        BLOB key_digest PK
+        TEXT canonical_key
+    }
+    RELATION_DEPENDENCY_KEY {
+        BLOB relation_key PK,FK
+        TEXT key_domain PK
+        BLOB key_digest PK
+        TEXT canonical_key
+    }
+
+    PROJECT_IDENTITY ||--o{ GRAPH_ENTITY : scopes
+    PROJECT_IDENTITY ||--o{ GRAPH_RELATION : scopes
+    PROJECT_IDENTITY ||--o{ GRAPH_COVERAGE : reports
+    NODE ||--o| PURPOSE : owns
+    NODE o|--o{ GRAPH_ENTITY : anchors
+    NODE ||--o{ GRAPH_OCCURRENCE : locates
+    GRAPH_ENTITY ||--o{ GRAPH_RELATION : source
+    GRAPH_ENTITY o|--o{ GRAPH_RELATION : target
+    GRAPH_ENTITY ||--o{ ENTITY_RESOLUTION_KEY : exports
+    GRAPH_RELATION ||--o{ GRAPH_OCCURRENCE : evidenced_by
+    GRAPH_RELATION ||--o{ RELATION_DEPENDENCY_KEY : depends_on
+```
+
+The diagram shows the target normalized hot relationship model, not every
+compatibility or telemetry table. `ENTITY_RESOLUTION_KEY` and
+`RELATION_DEPENDENCY_KEY` are the task 3.2 additions needed to find both existing
+inbound edges and unresolved references that may become resolvable when exports
+change. Their compact owner/domain/digest composite primary keys prevent
+duplicate mappings without placing long canonical strings in each hot key.
+Reverse lookup indexes begin with domain and digest, and insertion plus lookup
+verify the stored canonical witness so a digest collision fails closed instead
+of merging identities. They use typed resolver domains rather than display-name
+scans. Stable fixed-width
+entity/relation keys remain independent of display labels and line movement. A
+logical relation is traversed once while every exact supporting span remains
+available through its occurrence rows. Ambiguous and unresolved references keep
+typed reference facts without a fabricated target.
+
+Index ownership follows accepted queries rather than columns in isolation:
+
+- `graph_entities` indexes exact path, package/manifest, symbol, and external
+  selector access;
+- `graph_relations` has separate source-first and target-first adjacency indexes
+  plus bounded family/resolution access;
+- resolution/dependency keys have export-key and dependency-key indexes that map
+  old/new identities to the exact inbound source relations requiring
+  re-resolution, including previously unresolved references;
+- occurrences are ordered by file and span for exact-source retrieval and
+  affected-path invalidation;
+- coverage indexes serve path, family, and state filters;
+- nodes and purposes keep path/parent/kind and lifecycle lookups outside the
+  graph rows so current purpose can be projected without graph write
+  amplification.
+
+### Bounded Graph Read With Purpose Projection
+
+```mermaid
+sequenceDiagram
+    actor Agent
+    participant Service as Query and ranking service
+    box Exactly one projectatlas.db
+        participant DB as projectatlas-db owner
+        participant Graph as Graph tables in the same DB
+        participant Atlas as Node and purpose tables in the same DB
+    end
+
+    Agent->>Service: anchored relation/path request plus hard limits
+    Service->>DB: begin complete-generation read snapshot
+    DB->>Graph: resolve exact stable key or typed selector
+    alt outbound
+        DB->>Graph: source-first adjacency, ordered, LIMIT + 1
+    else inbound
+        DB->>Graph: target-first adjacency, ordered, LIMIT + 1
+    else bounded path
+        loop until depth/visited/edge/time/memory/output budget or cancellation
+            DB->>Graph: page next indexed adjacency
+        end
+    end
+    DB->>Graph: batch unique endpoint selectors for the bounded result
+    DB->>Atlas: batch current file/folder purposes and review state
+    opt exact evidence requested
+        DB->>Graph: bounded occurrence spans and coverage
+    end
+    Graph-->>DB: typed bounded graph rows or terminal error
+    Atlas-->>DB: authoritative batched purpose projection or terminal error
+    alt complete result and cancellation still clear
+        DB->>DB: release read snapshot
+        DB-->>Service: generation-bound rows, total state, truncation, selectors, trust
+        Service-->>Agent: compact TOON rows or typed topology with exact next call
+    else SQLite/row-conversion/cancellation terminal error
+        DB->>DB: discard partial rows and release read snapshot
+        DB-->>Service: typed terminal error
+        Service-->>Agent: error without a partial-success payload
+    end
+```
+
+This is target behavior owned by tasks 5.5 and 5.7. The current schema already
+supports bounded one-hop source/target adjacency and coverage reads; batched
+endpoint/purpose hydration, decoded-byte budgets, multi-hop traversal, and any
+measured filtered high-degree indexes remain intentionally open.
+
+This is the database form of the agent sieve. An initial task still starts with
+purpose-led folder/file narrowing. Once anchored, indexed adjacency removes
+irrelevant files; projected purpose confirms responsibility; summary and trust
+verify current content; exact selectors lead directly to the source slice. The
+agent never needs a graph query language or an unbounded in-memory graph.
+
+One-hop inbound/outbound navigation uses the separate prepared adjacency
+queries directly. Task 5.5 must measure two closed multi-hop implementations
+against cyclic and high-degree corpora: a recursive SQLite CTE with separately
+indexable inbound/outbound branches, and a bounded node-simple Rust frontier
+over paged prepared adjacency. A CTE can reduce repeated query setup; the Rust
+frontier can make per-step coverage, cancellation, topology, selectors, and
+visited/edge/time/memory/output budgets clearer. The chosen path must preserve
+direction, stable ordering, trust filters, explicit truncation, and cancellation;
+neither mechanism may use one broad `source OR target` predicate that defeats
+the owning indexes or rely on depth alone to control cycles.
+
+Traversal cost follows the visited frontier and can grow roughly with branching
+factor raised to depth even when every lookup is indexed. The huge-source matrix
+therefore includes skewed high-degree nodes, diamonds, cycles, disconnected
+targets, narrow and expanded closures, and repeated queries. Relation-family,
+current-state, entity-type, temporal, evidence, and FTS indexes are added only
+for accepted hot queries; the useful index inventory of another graph workload
+is not copied wholesale. Every added index is charged against publication time,
+WAL/checkpoint writes, cache pressure, migration time, and persistent bytes.
+
+ProjectAtlas does not retain bi-temporal history for rebuildable source graph
+rows: current local bytes plus one complete generation are the authority, and
+optional snapshots are explicit artifacts. Deterministic lexical search remains
+the default. FTS, semantic embeddings, rank fusion, or ANN may be separately
+gated accelerators, but an unbounded embedding scan or trigger-maintained search
+copy is not allowed to become hidden default-core cost.
+
+### MCP Call To Database Access Contract
+
+| Agent operation | Principal SQLite access | Physical and authority rule |
+| --- | --- | --- |
+| `overview`, `folders`, `files`, `session_brief` | Nodes, purposes, summaries, parse/coverage aggregates, and bounded graph-role/connection batches | Exact path/name and reviewed purpose remain stronger than graph popularity. Folder/file pages batch graph/purpose facts for only returned candidates. |
+| `summary`, `outline`, `symbols` | Exact node/path, text/summary, parse metadata, symbols, coverage, and bounded related-identity digest | One complete generation and current purpose review state; no default edge dump or per-symbol query loop. |
+| `relations` and bounded path/impact views | Stable selector lookup, source/target adjacency, dependency-key closure, occurrences, coverage, and batch purpose projection | Separate indexes by direction/key; generation-bound cursor; decoded/result byte budgets; exact reusable selectors and spans. |
+| `search` | Current deterministic persisted-text scan with path narrowing; optional FTS candidate acceleration followed by exact verification | Current lexical behavior remains complete. Short, punctuation-sensitive, regex, fuzzy, or unsafe tokenizer/Unicode shapes retain the authoritative fallback. Semantic/ANN state is optional and cannot bless stale structural rows. |
+| `slice` | Database selector/span/freshness validation followed by exact current filesystem read | SQLite helps select and validate the source; it does not override newer saved bytes with stored text. |
+| `health`, `purpose_queue`, `purpose_set`, `purpose_review`, `lint` | Nodes, authored purpose lifecycle, health resolutions, and bounded structural findings | Purpose writes use an authored transaction and do not rewrite graph rows or require hosted CI. |
+| `settings`, `runtime_info`, watcher/task status | Metadata, project/publication identity, schema/capability/coverage and content-free SQLite operating profile | No secrets or arbitrary machine paths; report readiness honestly without running maintenance implicitly. |
+| `scan`, `watch_once`, automatic refresh | Off-writer discovery/extraction/staging followed by one short validated publication transaction | Current local bytes and ignore/config policy are authoritative; uncertainty preserves the last complete generation. |
+
+Task 2.7 verifies these mappings through production query/service/adapter paths.
+In-memory SQLite is sufficient only for behavior independent of file locking,
+WAL, migration, reopen, backup, busy contention, and platform paths. Those
+contracts use test-only temporary on-disk project databases plus real CLI/MCP
+smoke. A mocked
+repository or hand-built row can test service formatting, but cannot close a
+database-backed behavior claim.
+
 ### MCP Read Communication Sequence
 
 ```mermaid
@@ -266,37 +615,52 @@ sequenceDiagram
     actor Agent
     participant MCP as MCP adapter
     participant Runtime as Runtime orchestration
-    participant FS as Filesystem/freshness
+    participant Observer as Root and policy observer
+    participant FS as Exact filesystem verifier
     participant DB as SQLite
     participant Service as Query service
 
     Agent->>MCP: summary, search, relation, or session request
     MCP->>Runtime: typed request plus selected project
-    Runtime->>DB: capture active SQLite read snapshot
-    Runtime->>FS: inspect bounded current local state
-    Runtime->>DB: compare persisted fingerprints in captured snapshot
-    alt index is current
-        DB-->>Runtime: same snapshot is safe to query
-    else safe bounded delta exists
-        Runtime->>DB: release the captured read snapshot
-        Runtime->>FS: read/hash affected current bytes
-        Runtime->>DB: publish one validated transaction
-        Runtime->>DB: capture the newly active read snapshot
-    else reconciliation is unsafe or exceeds a bound
-        break no safe indexed answer
-            Runtime->>DB: release the captured read snapshot
-            Runtime-->>MCP: typed refresh_required
-            MCP-->>Agent: compact recovery next call
+    Runtime->>Observer: inspect verified source-observation epoch
+    alt epoch absent or invalid
+        Runtime->>Observer: activate observation and buffer relevant events
+        Runtime->>FS: exact bounded post-start verification
+        Runtime->>DB: compare fingerprints and reconcile safe delta
+        alt current or complete delta published
+            Runtime->>Observer: reconcile buffered events and establish epoch E
+        else unsafe, uncertain, or over limit
+            break no safe current index
+                Runtime-->>MCP: typed refresh_required
+                MCP-->>Agent: compact recovery next call
+            end
         end
+    else healthy epoch E with no relevant event
+        Observer-->>Runtime: reuse E without a full tree walk or node-table load
     end
-    Runtime->>Service: bounded query against captured active generation
+    Runtime->>DB: capture generation G read snapshot bound to E
+    Runtime->>Service: bounded query against E and G
     Service->>DB: indexed typed read from the same snapshot
     DB-->>Service: rows plus generation and coverage
     Service-->>Runtime: ranked bounded result and next call
-    Runtime->>DB: release the captured read snapshot
-    Runtime-->>MCP: typed report
-    MCP-->>Agent: compact TOON by default
+    Runtime->>Observer: confirm E remains current
+    alt E is still current
+        Runtime->>DB: release the captured read snapshot
+        Runtime-->>MCP: typed report
+        MCP-->>Agent: compact TOON by default
+    else relevant event, gap, overflow, or uncertainty
+        Runtime->>DB: release the captured read snapshot
+        Runtime-->>MCP: bounded retry or refresh_required
+        MCP-->>Agent: no stale result is labeled current
+    end
 ```
+
+This is task 3.5 target behavior. A new long-lived runtime pays for one exact
+post-start verification, then makes later unchanged calls proportional to their
+bounded query while observation remains healthy. A short-lived one-shot CLI
+process performs its own first verification. Silence from a broken observer is
+never accepted as freshness, and a source event racing a query invalidates the
+captured epoch before the response is labeled current.
 
 ### Index And Transactional Publication Flow
 
@@ -305,28 +669,145 @@ flowchart TB
     Request[Index or refresh request]
     Admit[Admit task and create cancellation/deadline control]
     Inputs[Read and validate bounded configuration]
-    Build[Discover current paths; read, hash, extract,<br/>and stage bounded exact-byte rows]
-    Recheck[Recheck source, limits, cancellation, and generation]
-    Commit[One SQLite publication transaction]
+    Build[Discover current paths; read, hash, parse,<br/>resolve, and derive outside the main writer]
+    subgraph Transient[Non-authoritative disposable staging]
+        Stage[Bounded typed Rust batches or measured<br/>memory/file/SQLite-backed spool<br/>no authored state; never queryable]
+    end
+    Recheck[Recheck source/configuration fingerprints,<br/>limits, cancellation, and base generation]
+    Begin[Acquire the SQLite writer<br/>and BEGIN IMMEDIATE]
+    Apply[Prepared batched deletes/upserts<br/>with authored-state preservation]
+    Commit[Mark complete generation and COMMIT]
     NoChange[Successful no-op]
-    Next[(Generation N + 1 becomes active)]
-    Prior[(Generation N remains active)]
+    Next[Generation N + 1 becomes active]
+    Prior[Generation N remains active]
     Fail[Typed failure or cancellation]
+    PrewriteFailure[Pre-publication validation,<br/>limit, or cancellation failure]
+    WriteFailure[Busy, generation-change,<br/>mutation, or commit failure]
+    Restart[Ownership-validated restart]
+    Cleanup[Release memory and delete owned spool]
+    Lifecycle[Bounded staging lifecycle complete]
 
-    Request --> Admit --> Inputs --> Build --> Recheck
-    Recheck -->|changed and valid| Commit --> Next
+    Request --> Admit --> Inputs --> Build --> Stage --> Recheck
+    Recheck -->|changed and valid| Begin --> Apply --> Commit --> Next
     Recheck -->|unchanged and current| NoChange --> Prior
-    Inputs -. invalid, canceled, or over limit .-> Fail
-    Build -. invalid, canceled, or over limit .-> Fail
-    Recheck -. invalid, canceled, or over limit .-> Fail
-    Commit -. rollback on error .-> Fail
+    Inputs -.-> PrewriteFailure
+    Build -.-> PrewriteFailure
+    Stage -.-> PrewriteFailure
+    Recheck -.-> PrewriteFailure
+    PrewriteFailure --> Fail
+    Begin -.-> WriteFailure
+    Apply -.-> WriteFailure
+    Commit -.-> WriteFailure
+    WriteFailure --> Fail
     Fail --> Prior
+    Next -.-> Cleanup
+    NoChange -.-> Cleanup
+    Fail -.-> Cleanup
+    Restart --> Cleanup --> Lifecycle
+    style Transient stroke-dasharray: 5 5
 ```
 
 For background MCP work, admission owns the deadline and cancellation token
 before configuration content is read. Failed work never exposes partial rows
 or advances the active generation, and successful no-change work leaves the
-current generation unchanged.
+current generation unchanged. Expensive filesystem reads and parser work do not
+hold the main database writer. Small incremental closures may remain in admitted
+typed Rust batches. Large full/expanded closures spill only after measured
+cardinality, memory, recovery, and write-amplification behavior selects a
+bounded disposable spool, implemented as a plain temporary file or SQLite-backed
+working file. Even when SQLite-backed, it is not another ProjectAtlas database:
+it has no project identity, authored rows, active generation, or query surface.
+After one final source/configuration and base-generation recheck, only prepared
+mutation of the one project database occurs inside the short publication
+transaction. The spool is never a copied live atlas and is deleted after the
+owning operation publishes, fails, or is canceled.
+
+This diagram is the task 2.3 target. The architecture audit reopened that task
+because the current runtime begins `BEGIN IMMEDIATE` before text reads, symbol
+parsing, and structural summary work. The task remains open until production and
+real database tests match this flow and transaction-hold/WAL costs pass the
+representative scale gates.
+
+### SQLite WAL, Durability, And Checkpoint Flow
+
+```mermaid
+sequenceDiagram
+    participant ReaderN as Reader on generation N
+    participant Writer as One project publication writer
+    participant WAL as WAL file of the same projectatlas.db
+    participant Main as Main file of the same projectatlas.db
+    participant Checkpoint as Bounded checkpoint owner
+
+    ReaderN->>Main: BEGIN read snapshot at complete generation N
+    Writer->>WAL: BEGIN IMMEDIATE and append prepared batched mutation
+    WAL-->>ReaderN: generation N remains readable
+    Writer->>WAL: synchronous FULL commit of complete generation N + 1
+    Note over WAL: Authored state and accepted publication survive the declared power-loss boundary
+    Checkpoint->>WAL: PASSIVE/bounded checkpoint outside the write transaction
+    alt generation N reader still holds old frames
+        WAL-->>Checkpoint: retain required frames and report remaining work
+    else no reader needs old frames
+        Checkpoint->>Main: copy committed frames and advance checkpoint
+    end
+    ReaderN->>Main: release snapshot
+    Note over Writer: A second same-project writer gets bounded busy/unavailable state
+```
+
+The target normal production profile is bundled SQLite on a supported local
+filesystem, `foreign_keys=ON`, WAL, `synchronous=FULL`, and a bounded busy
+timeout. `FULL` is selected because the same database owns reviewed purposes,
+project identity, health resolutions, and future Memory Atlas records as well as
+rebuildable projections. One batched commit per publication keeps the extra sync
+cost small enough to measure rather than weakening authored durability by
+default. If task 7.4 disproves that choice, a split durability class requires an
+explicit authored-versus-disposable transaction owner and power-loss contract;
+it cannot be a silent pragma change.
+
+The current default SQLite auto-checkpoint remains only the initial measured
+baseline. Task 2.3/2.7 must add content-free operating-profile inspection and
+real WAL tests; task 7.4 determines whether a bounded passive post-publication
+checkpoint trigger or statistics/`PRAGMA optimize` lifecycle is needed from WAL
+growth, long-reader, plan, startup, and write-amplification measurements. Request
+paths never force a blocking truncate checkpoint. Live snapshot/export uses the
+SQLite backup API; copying only the main file while WAL is active is not a valid
+general backup procedure.
+
+### Bounded Database Lifecycle
+
+```mermaid
+flowchart TB
+    subgraph TelemetryLifecycle[Bounded telemetry retention]
+        direction LR
+        Calls[Agent tool calls] --> Raw[Recent raw usage events<br/>row, age, and byte budget]
+        Raw -->|within budget| Report[Token report and declared trends]
+        Raw -->|budget boundary| Rollup[Atomically write typed aggregates<br/>and expire/delete compacted raw rows]
+        Rollup --> Report
+        Rollup -->|expired detail is explicit| Detail[Raw session detail unavailable]
+    end
+
+    subgraph PagesAndWal[Pages, WAL, and planner maintenance]
+        direction LR
+        Reuse[SQLite reuses free pages]
+        WAL[WAL growth and long-reader state] --> Checkpoint[Measured passive checkpoint policy]
+        Reuse -->|measured reclaim threshold| Maintenance[Bounded idle or explicit maintenance]
+        Checkpoint --> Maintenance --> State[Content-free settings state]
+    end
+
+    subgraph DerivedAndStaging[Derived rows and disposable staging]
+        direction LR
+        Publish[Successful structural publication] --> Obsolete[Delete ownership-proven<br/>obsolete derived rows]
+        Obsolete --> Reuse
+        Spill[Owned disposable spool<br/>non-authoritative; no authored state;<br/>never queryable] -->|publish, cancel, or fail| Cleanup[Remove after ownership validation]
+        Restart[Next validated open] --> Cleanup --> Removed[Owned spool removed]
+    end
+```
+
+Task 2.8 owns this lifecycle. The normal read path never performs an unbounded
+purge, blocking truncate checkpoint, blind `VACUUM`, or destructive rebuild.
+Telemetry compaction preserves supported all-time totals and declared trend
+windows; expired session-level detail is reported rather than fabricated.
+Derived cleanup never deletes project identity, reviewed purposes, health
+resolutions, or future separately capped Memory Atlas records.
 
 ### Cancellation, Failure, And Watch Retry
 
@@ -422,73 +903,62 @@ API names remain ProjectAtlas-native.
 
 ## Database Model
 
-Initial schema:
+The schema is owned in one append-only migration sequence by
+`projectatlas-db`. The architecture views above describe authority and the
+normalized graph model; the schema source remains authoritative for exact DDL.
+The durable responsibilities and access paths are:
 
-```sql
-metadata(key, value)
+| Responsibility | Principal physical state | Authority and primary access | Current/target state |
+| --- | --- | --- | --- |
+| Compatibility and publication | `metadata`, `project_identity` | Durable schema/root/contract identity; read-only preflight, migration, root transition, and active-generation lookup. | Schema 10 is current; later task-owned tables use the same append-only migration owner. |
+| Local structure | `nodes`, `summaries`, `file_texts`, `source_parse_metadata` | Rebuildable exact path/parent/kind, persisted text, summary, hash, and parse-state projection. | Current; task 5.4 may add exact-verified FTS acceleration without replacing fallback semantics. |
+| Purpose | `purposes` joined to `nodes` | Authored/reviewed purpose and stale/review lifecycle; projected by exact owning path or nearest applicable folder. | Current authoring; tasks 5.2 and 5.5 add bounded batch projection into graph-aware navigation. |
+| Compatible code facts | `symbols`, `symbol_relations` | Rebuildable file-level symbol and relation calls. | Current; co-published from the same typed extraction result as normalized graph facts. |
+| Normalized graph | `graph_entities`, `graph_relations`, `graph_relation_occurrences`, `graph_coverage`; task 3.2 resolution/dependency keys | Rebuildable stable identity, source/target adjacency, occurrences, coverage, and dependency-key closure. | Base one-hop persistence is current; tasks 3.2, 5.5, and 5.7 complete invalidation and bounded hydration/traversal. |
+| Health resolution | `health_resolutions` | Authored exact finding disposition. | Current and preserved across derived publication. |
+| Usage measurement | `usage_events`; task 2.8 aggregate state | Recent raw events, session/time aggregation, all-time totals, declared trends, and explicit retention state. | Raw events are currently unbounded; task 2.8 adds bounded retention/rollup/maintenance. |
+| Future Memory Atlas | #314-owned tables | Separately capped authored context and independent context revision. | Conceptual boundary only; #308 does not prebuild its schema. |
 
-nodes(
-  id,
-  path,
-  kind,
-  parent_path,
-  extension,
-  language,
-  size_bytes,
-  mtime_ns,
-  content_hash,
-  exists_now,
-  first_seen_at,
-  last_seen_at,
-  last_indexed_at
-)
+Legacy symbol rows and normalized graph rows are compatible co-published
+projections from one typed extraction result. Neither projection is the source
+of truth for the other, and neither owns reviewed purpose text.
 
-purposes(
-  node_id,
-  purpose,
-  source,
-  status,
-  updated_at,
-  updated_by
-)
+The validated SQLite operating profile is explicit:
 
-symbols(
-  id,
-  node_id,
-  symbol_id,
-  name,
-  short_name,
-  kind,
-  signature,
-  line_start,
-  line_end,
-  docstring,
-  called_by
-)
+| Concern | Current live state | Accepted target and owner |
+| --- | --- | --- |
+| Schema | Version 10 with append-only 8 to 9 to 10 migration ownership. | Keep one append-only owner; task-specific migrations preserve authored state and refuse incompatible state. |
+| Rust/SQLite build | Workspace `rusqlite` 0.32.1, `libsqlite3-sys` 0.30.1, bundled SQLite 3.46.0. | Task 4.5 reports the actual linked runtime version and compile options; source package versions alone are not runtime proof. |
+| Filesystem | One project-local database on a filesystem with supported SQLite locking/shared-memory behavior. | Reject unsupported live network filesystems with typed guidance; do not weaken locking assumptions silently. |
+| Writable connections | `foreign_keys=ON`, WAL, `synchronous=NORMAL`, one-second busy timeout. | Tasks 2.3 and 2.7 reconcile to measured bounded busy handling and accepted `synchronous=FULL` durability for mixed authored/derived state. |
+| Read connections | Read-only open, `query_only=ON`, deferred read snapshot. | Preserve complete-generation snapshots and bounded busy/corruption propagation through task 2.7. |
+| Checkpoints/statistics | SQLite default auto-checkpoint; no owned statistics lifecycle. | Tasks 2.8 and 7.4 measure WAL growth, long readers, passive checkpoints, `ANALYZE`/`PRAGMA optimize`, free-page reuse/reclaim, and request-path exclusion. |
+| Backup/recovery | Preflight and transaction rollback exist; live-file copying is not accepted as backup. | Task 6.4 uses the SQLite backup API plus bounded isolated import validation without replacing destination identity. |
 
-health_findings(
-  id,
-  severity,
-  category,
-  path,
-  related_path,
-  message,
-  recommendation,
-  created_at
-)
+Hot predicates, joins, ordering, and constraints use typed columns. JSON/TOON is
+an adapter format, not a graph persistence shortcut. Inserts reuse cached
+prepared statements and related rows are batched inside the caller-owned parent
+transaction. Bounded reads request `limit + 1` where necessary to report
+truncation without counting or loading the entire result set. Row-conversion,
+I/O, schema, identity, or corruption failures fail the whole page.
 
-usage_events(
-  id,
-  session_id,
-  command,
-  path,
-  query,
-  estimated_tokens_without_projectatlas,
-  estimated_tokens_with_projectatlas,
-  estimated_tokens_saved,
-  created_at
-)
-```
+Paged graph output always reports `returned`, `truncated`, continuation state,
+and a typed `total_state` of `exact`, `at_least`, or `unknown`. `total` is
+present only when it is already known, the bounded page proves the complete
+cardinality, or it can be computed within the same declared statement, row,
+time, and cancellation budget. A high-degree adjacency page therefore reports
+at least `limit + 1` after the sentinel row instead of running an unbounded
+count solely for display metadata. Existing compatible surfaces may retain an
+established exact file-local total where that count remains within their owning
+query bound.
+
+The database test boundary is real SQLite, not a mocked repository. Owning tests
+create a test-only temporary project database, migrate/open it through the
+production API, write
+through publication/purpose operations, read or reopen through production query
+APIs, and inspect stable plan properties where a scan would be a regression.
+Risk-specific cases add rollback, read snapshots, busy/concurrent access,
+corruption, WAL/reopen, backup/import, and huge-cardinality checks.
 
 Purpose status values:
 

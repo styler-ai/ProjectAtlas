@@ -18,7 +18,7 @@ ProjectAtlas SHALL represent projects, files, packages, declarations, external t
 
 ### Requirement: Logical Relations Retain Every Source Occurrence
 
-ProjectAtlas SHALL represent one logical source-kind-target relationship separately from its distinct source/evidence occurrences. Traversal, ranking, and impact SHALL deduplicate the logical edge, while detailed relation output MAY return bounded call sites, import sites, or other occurrences with exact source spans and total/returned/truncated metadata.
+ProjectAtlas SHALL represent one logical source-kind-target relationship separately from its distinct source/evidence occurrences. Traversal, ranking, and impact SHALL deduplicate the logical edge, while detailed relation output MAY return bounded call sites, import sites, or other occurrences with exact source spans plus returned/truncated/continuation and typed exact/at-least/unknown total state. An exact total is optional unless it is already known or computable inside the same bound.
 
 #### Scenario: One caller invokes the same target twice
 - **WHEN** two source spans support the same logical call relationship
@@ -26,11 +26,55 @@ ProjectAtlas SHALL represent one logical source-kind-target relationship separat
 
 ### Requirement: One Indexed Storage Owner
 
-Typed entities, relationships, source occurrences, coverage, and generation fields SHALL be persisted as typed SQLite columns under one schema owner. Queries SHALL use bounded indexed source/target/kind/path/stable-key access, propagate SQLite terminal failures, and SHALL NOT depend on per-edge JSON decoding or whole-graph scans. Graph publication SHALL not own, overwrite, or silently approve folder/file purposes.
+Typed entities, deduplicated logical relationships, separate source occurrences, coverage, and generation fields SHALL be persisted as typed SQLite columns under one schema owner. The physical model SHALL support bounded indexed outbound and inbound adjacency, exact stable-key/path/kind/generation access, and affected-dependent invalidation without decoding per-edge JSON, scanning or materializing the whole graph, or relinking by display labels. Index order, coverage, and query plans SHALL be validated against representative high-cardinality and high-degree graph workloads. Graph publication SHALL not own, duplicate, overwrite, or silently approve folder/file purposes; local node and path results SHALL project purpose from the authoritative owning file/folder at query time.
 
 #### Scenario: Row iteration fails after returning rows
 - **WHEN** SQLite reports corruption, I/O failure, cancellation, or schema mismatch during iteration
 - **THEN** the entire query fails and partial rows are not returned as successful output
+
+#### Scenario: Huge graph returns one bounded neighborhood
+- **WHEN** an agent requests bounded inbound or outbound connections for a high-degree local entity
+- **THEN** SQLite uses the owning indexed adjacency path, returns explicit returned/truncated/continuation and typed at-least or exact total state, and does not scan the full high-degree adjacency or materialize unrelated graph rows solely to compute display metadata
+
+#### Scenario: Purpose changes without structural graph change
+- **WHEN** an owning file or folder purpose is reviewed or becomes stale while entity and relation identities remain unchanged
+- **THEN** later graph-backed results project the current authoritative purpose state without rewriting or duplicating graph rows
+
+### Requirement: Database Architecture Remains Workload-Fit
+
+ProjectAtlas SHALL maintain one versioned database architecture decision for its current local-first workload. The decision SHALL identify the supported SQLite library/driver and local-filesystem operating profile; authored, derived, cached, and rebuildable authority; conceptual, logical, and physical data models; stable keys and integrity constraints; hot read/write paths and owning indexes; prepared/batched operations; publication and read-snapshot transaction boundaries; WAL, busy, checkpoint, concurrency, migration, backup, recovery, and corruption behavior; huge-source scale/resource assumptions; and measurable conditions that require the engine decision to be revisited. SQLite SHALL remain the default only while it satisfies the accepted offline, cross-platform, bounded-read, atomic-publication, and packaging contracts better than realistic alternatives. Database design SHALL remain owned by `projectatlas-db` inside the accepted seven-crate architecture unless a durable independent owner and consumer are demonstrated.
+
+#### Scenario: Graph database is proposed because the data is graph-shaped
+- **WHEN** an alternative engine is proposed without a measured failure of bounded indexed SQLite traversal, publication, concurrency, recovery, packaging, or scale contracts
+- **THEN** ProjectAtlas retains the simpler embedded design and fixes the logical/physical model or query path at its owning boundary
+
+#### Scenario: SQLite operating assumptions stop matching the product
+- **WHEN** a required workload needs shared remote multi-writer state, an unsupported live network filesystem, unbounded distributed graph computation, or still misses declared scale/query/publication thresholds after correct schema, index, query, and transaction tuning
+- **THEN** the engine decision is explicitly reopened with representative measurements rather than hidden behind another storage abstraction
+
+#### Scenario: Storage behavior is verified
+- **WHEN** graph, purpose projection, publication, migration, or recovery behavior is claimed complete
+- **THEN** owning tests write through the real transaction API to a temporary SQLite database and read or reopen it through the real bounded query API, with risk-required constraint, rollback, read-snapshot, query-plan, corruption, and concurrency cases instead of a mocked repository or SQL-text-only assertion
+
+#### Scenario: Writable WAL placement is unsupported or uncertain
+- **WHEN** connection preflight proves a live network filesystem unsupported by SQLite WAL or cannot establish the required local locking/shared-memory profile
+- **THEN** ProjectAtlas returns typed unsupported or uncertain state before mutation and does not silently weaken durability or continue with the selected WAL profile
+
+### Requirement: Project-Local Storage Growth Is Bounded
+
+Each selected source tree SHALL have exactly one authoritative project database containing its authored atlas state and active complete derived generation; ProjectAtlas SHALL NOT split purposes, future Memory Atlas records, graph/index projections, settings, health resolutions, or telemetry for that tree into separate product databases. ProjectAtlas MAY use bounded memory or one disposable working file, implemented as a plain file or SQLite-backed spool, when admitted extraction exceeds its Rust memory budget. Even when SQLite-backed, that spool SHALL NOT be a ProjectAtlas database: it SHALL have no project identity, authored state, active generation, or query surface and SHALL be removed after publish, cancellation, failure, or ownership-validated restart recovery. Recent raw telemetry and retained aggregates SHALL have explicit row, age, and byte budgets; compaction SHALL preserve supported all-time token-report totals and declared trend semantics while reporting honestly when expired session-level detail is unavailable. Obsolete derived rows, abandoned owned staging artifacts, WAL growth, free pages, and planner statistics SHALL have measured maintenance owners. Normal agent reads SHALL NOT run an unbounded purge, blocking truncate checkpoint, or blind database rebuild/`VACUUM`, and cleanup SHALL NOT delete project identity, reviewed purposes, health resolutions, or future separately capped Memory Atlas state.
+
+#### Scenario: Telemetry exceeds the raw retention budget
+- **WHEN** successful local agent use creates more raw usage events than the declared row, age, or byte budget
+- **THEN** ProjectAtlas atomically compacts or expires raw detail under its retention contract, keeps supported totals and trends correct, reports raw-detail availability honestly, and stops database growth from remaining proportional to lifetime tool-call count
+
+#### Scenario: Publication crashes after creating a spill artifact
+- **WHEN** ProjectAtlas restarts after cancellation or failure left an owned temporary staging artifact
+- **THEN** it validates ownership and removes or safely resumes only that non-authoritative artifact while preserving the single project database and its last complete generation
+
+#### Scenario: Indexed source shrinks substantially
+- **WHEN** obsolete derived rows and free pages accumulate after a large local source tree becomes smaller
+- **THEN** the measured maintenance lifecycle makes those pages reusable or reclaimable without blocking a normal agent read or deleting authored atlas state
 
 ### Requirement: Advertised Relation Families Are End-To-End Live
 

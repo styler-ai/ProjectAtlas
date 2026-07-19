@@ -26,11 +26,47 @@ Representative paired tasks SHALL compare the current candidate with ProjectAtla
 
 ### Requirement: Resource Dimensions Remain Separate
 
-Index time, incremental time, query latency, process-tree memory, database/WAL/staging writes, persistent bytes, package/install bytes, startup, and dependency/public-surface growth SHALL be reported and decided separately. Correctness or agent value MAY justify a trade-off but SHALL NOT convert a regressed resource into a superiority claim.
+Index time, incremental time, query latency, process-tree memory, database/WAL/staging writes, persistent bytes, package/install bytes, startup, and dependency/public-surface growth SHALL be reported and decided separately. Persistent database size SHALL remain proportional to current indexed facts plus declared authored-retention budgets rather than lifetime tool-call or failed-staging count. Correctness or agent value MAY justify a trade-off but SHALL NOT convert a regressed resource into a superiority claim.
 
 #### Scenario: Agent value improves while package size regresses
 - **WHEN** behavior is accepted despite a larger package
 - **THEN** documentation reports the trade-off and does not claim package-size superiority
+
+### Requirement: Huge Local Source Trees Remain Responsive
+
+ProjectAtlas SHALL treat large-source performance as an end-to-end product contract. Full indexing work SHALL remain proportional to included entries and bytes plus emitted facts. After the first exact post-start verification, normal unchanged reads in a healthy source-observation epoch SHALL not repeat a whole-source walk or full indexed-node load. Normal bounded file, summary, relation, coverage, and graph queries SHALL use bounded indexed access rather than whole-repository or whole-graph scans. Indexable search shapes SHALL use a complete indexed candidate path; arbitrary correctness-fallback search SHALL remain proportional to its explicitly bounded selected persisted-text bytes and report that work honestly. Incremental refresh SHALL be proportional to the changed paths plus the bounded affected dependency closure and SHALL explicitly require a full refresh when that safe closure exceeds configured limits instead of silently truncating or repeatedly rebuilding everything.
+
+SQLite storage SHALL use typed normalized columns, responsibility-owned indexes, reusable prepared operations, and batched atomic publication; representative query plans SHALL reject accidental table scans on hot bounded lookups. Rust hot paths SHALL avoid unnecessary allocation, cloning, owned conversion, serialization, and unbounded intermediate collections. Filesystem/database I/O and parsing SHALL batch or stream where correctness permits. Parallel work SHALL derive from one effective host/process CPU and memory envelope, prevent cross-task oversubscription, keep lock/transaction hold times bounded, and preserve cancellation, backpressure, and responsiveness.
+
+A versioned representative scale matrix SHALL preregister at least three scale points and exercise small, medium, and huge local source corpora, including dirty and non-Git trees, high file/symbol/relation cardinality, high-degree graph nodes, concurrent isolated projects, and incremental changes with both narrow and expanded inbound closures. The huge point SHALL include one pinned real-source corpus beyond ordinary regression-fixture scale; synthetic graph stress MAY isolate topology and skew but SHALL NOT by itself support an end-to-end source-scale claim. The matrix SHALL record corpus facts and the SQLite version/compile options, journal/synchronous/busy/checkpoint/statistics profile. It SHALL separately measure full scan, filesystem entries/bytes read, parsed bytes, incremental refresh and affected-closure rows, bounded query latency and plans, startup, process-tree CPU/worker utilization and parallel efficiency, queue/backpressure and database busy/lock time, cancellation-to-quiescence, memory/RSS before and after repeated work, database/WAL/staging writes and checkpoint behavior, persistent bytes, and output size. Thresholds and regression decisions SHALL be explicit for the measured environment; static review or a green correctness test alone SHALL NOT support a performance claim.
+
+#### Scenario: Bounded query runs on a huge graph
+- **WHEN** a file, relation, path, coverage, or search request asks for a bounded page from a huge indexed source tree
+- **THEN** query-plan and runtime checks show bounded indexed access, bounded output and memory, and no repository-wide graph materialization
+
+#### Scenario: Several unchanged reads share a healthy source epoch
+- **WHEN** a long-lived agent runtime has exactly verified the huge local source tree and no relevant event or observation gap occurred
+- **THEN** later bounded navigation calls avoid another full tree walk and full node-table decode while remaining invalidatable by a concurrent edit
+
+#### Scenario: Arbitrary search requires exact fallback
+- **WHEN** regex, fuzzy, short, punctuation-sensitive, or tokenizer/Unicode-unsafe semantics cannot use a complete indexed candidate set
+- **THEN** ProjectAtlas scans only the declared selected persisted-text scope within byte/time/cancellation bounds and reports searched bytes plus truncation instead of making an indexed-complexity claim
+
+#### Scenario: Several projects index concurrently
+- **WHEN** isolated projects perform concurrent scan, parse, or enrichment work
+- **THEN** their combined workers and memory stay within the effective host envelope without one project monopolizing the process or multiplying per-task CPU budgets
+
+#### Scenario: Planner or operating-profile drift changes a hot query
+- **WHEN** SQLite version, statistics, schema, indexes, pragmas, or query text changes for a bounded hot path
+- **THEN** representative query-plan and runtime checks reject an accidental scan, sort, temporary structure, busy amplification, or checkpoint regression before a performance claim is accepted
+
+#### Scenario: Repeated or canceled work releases resources
+- **WHEN** indexing or traversal is repeated or canceled at a bounded checkpoint
+- **THEN** admitted workers drain, queues quiesce, database transactions release, and retained process memory returns within the declared steady-state bound
+
+#### Scenario: Small edit has a large inbound closure
+- **WHEN** an exported identity or dependency key change affects many unchanged dependents
+- **THEN** ProjectAtlas processes the complete bounded closure once or returns typed full-refresh guidance without partial publication, silent truncation, or repeated write amplification
 
 ### Requirement: Lean Verification Uses Normal Gates
 
