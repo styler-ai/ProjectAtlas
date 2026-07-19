@@ -3549,14 +3549,13 @@ pub(crate) fn notify_event_changes(
     }
     let mut changes = WatchChangeSet::default();
     for path in &event.paths {
-        if !watch_path_affects_index(root, path, scan_options) {
+        let Some(index_path) = normalized_watch_index_path(root, path, scan_options) else {
             continue;
-        }
-        let absolute = absolute_watch_path(root, path);
-        if watch_path_requires_full_scan(root, &absolute) {
+        };
+        if watch_path_requires_full_scan(root, &index_path) {
             changes.requires_full_scan = true;
         }
-        changes.paths.insert(absolute);
+        changes.paths.insert(index_path);
     }
     changes
 }
@@ -3567,32 +3566,82 @@ pub(crate) fn event_kind_affects_index(kind: EventKind) -> bool {
 }
 
 /// Return whether a native event path belongs to indexed repository content.
+#[cfg(test)]
 pub(crate) fn watch_path_affects_index(
     root: &Path,
     path: &Path,
     scan_options: &ScanOptions,
 ) -> bool {
+    normalized_watch_index_path(root, path, scan_options).is_some()
+}
+
+/// Return one repository-contained native path after watcher normalization and policy checks.
+fn normalized_watch_index_path(
+    root: &Path,
+    path: &Path,
+    scan_options: &ScanOptions,
+) -> Option<PathBuf> {
     let candidate = absolute_watch_path(root, path);
-    let Some(relative) = safe_watch_relative_path(root, &candidate) else {
-        return false;
-    };
+    let relative = safe_watch_relative_path(root, &candidate)?;
     if relative == "." {
-        return true;
+        return Some(root.to_path_buf());
     }
+    let index_path = root.join(repo_path_to_native(&relative));
     // Unknown ignore state should not admit a path into the incremental index.
-    let Ok(gitignore_ignored) = gitignore_excludes_path(root, &candidate) else {
-        return false;
+    let Ok(gitignore_ignored) = gitignore_excludes_path(root, &index_path) else {
+        return None;
     };
     if gitignore_ignored {
-        return false;
+        return None;
     }
-    !relative.split('/').any(|component| component == ".purpose")
-        && !scan_options.excludes_relative_path(&relative)
+    if relative.split('/').any(|component| component == ".purpose")
+        || scan_options.excludes_relative_path(&relative)
+    {
+        return None;
+    }
+    Some(index_path)
 }
 
 /// Return a safe normalized repository path for a watcher event.
 fn safe_watch_relative_path(root: &Path, candidate: &Path) -> Option<String> {
-    let relative = normalize_repo_path(root, candidate).ok()?;
+    let relative = normalize_repo_path(root, candidate)
+        .ok()
+        .or_else(|| native_display_relative_path(root, candidate))?;
+    valid_watch_relative_path(relative)
+}
+
+/// Reconcile equivalent native paths when Windows extended prefixes differ.
+fn native_display_relative_path(root: &Path, candidate: &Path) -> Option<String> {
+    let root = normalize_native_path_display_str(root.to_str()?);
+    let candidate = normalize_native_path_display_str(candidate.to_str()?);
+    let root = if root == "/" {
+        root.as_str()
+    } else {
+        root.trim_end_matches('/')
+    };
+    if candidate == root || cfg!(windows) && candidate.eq_ignore_ascii_case(root) {
+        return Some(".".to_string());
+    }
+    let prefix = if root == "/" {
+        "/".to_string()
+    } else {
+        format!("{root}/")
+    };
+    if let Some(relative) = candidate.strip_prefix(&prefix) {
+        return Some(relative.to_string());
+    }
+    #[cfg(windows)]
+    {
+        let prefix_candidate = candidate.get(..prefix.len())?;
+        if prefix_candidate.eq_ignore_ascii_case(&prefix) {
+            return candidate.get(prefix.len()..).map(ToOwned::to_owned);
+        }
+    }
+    None
+}
+
+/// Reject empty, current-directory, and parent traversal path components.
+fn valid_watch_relative_path(relative: String) -> Option<String> {
     if relative == "." {
         return Some(relative);
     }
@@ -3616,14 +3665,15 @@ pub(crate) fn absolute_watch_path(root: &Path, path: &Path) -> PathBuf {
 
 /// Return whether a path event requires a full scan for correctness.
 pub(crate) fn watch_path_requires_full_scan(root: &Path, path: &Path) -> bool {
-    if path == root {
+    let Some(relative) = safe_watch_relative_path(root, path) else {
+        return false;
+    };
+    if relative == "." {
         return true;
     }
     path.is_dir()
-        || path.file_name().is_some_and(|name| name == ".gitignore")
-        || normalize_repo_path(root, path)
-            .is_ok_and(|normalized| INDEX_POLICY_PATHS.contains(&normalized.as_str()))
-        || normalize_repo_path(root, path).is_ok_and(|normalized| normalized == ".")
+        || relative.rsplit('/').next() == Some(".gitignore")
+        || INDEX_POLICY_PATHS.contains(&relative.as_str())
 }
 
 /// Run the portable polling watcher fallback loop.
@@ -4101,8 +4151,10 @@ pub(crate) fn normalized_deleted_path(
     path: &Path,
 ) -> Result<Option<String>, CliError> {
     match normalize_repo_path(root, path) {
-        Ok(path) => Ok(Some(path)),
-        Err(projectatlas_core::CoreError::PathOutsideRoot { .. }) => Ok(None),
+        Ok(path) => Ok(valid_watch_relative_path(path)),
+        Err(projectatlas_core::CoreError::PathOutsideRoot { .. }) => {
+            Ok(native_display_relative_path(root, path).and_then(valid_watch_relative_path))
+        }
         Err(source) => Err(CliError::InvalidInput(source.to_string())),
     }
 }
@@ -4489,6 +4541,124 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             "no-op summary candidates",
         )?;
         require_eq(&report.symbols.candidates, &0, "no-op symbol candidates")?;
+        Ok(())
+    }
+
+    #[test]
+    fn changed_and_deleted_paths_publish_one_complete_generation() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let changed_path = temp.path().join("changed.rs");
+        let deleted_path = temp.path().join("deleted.rs");
+        fs::write(&changed_path, "pub fn before() {}\n")?;
+        fs::write(&deleted_path, "pub fn removed() {}\n")?;
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), Some(1))?;
+        let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let mut store = AtlasStore::in_memory()?;
+        refresh_index(&mut store, &plan, &symbol_options)?;
+        let before = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("initial publication missing"))?;
+
+        fs::write(&changed_path, "pub fn after() {}\n")?;
+        fs::remove_file(&deleted_path)?;
+        let mut changes = WatchChangeSet::default();
+        changes.paths.insert(changed_path);
+        changes.paths.insert(deleted_path);
+        refresh_index_for_changes(&mut store, &plan, &changes, &symbol_options)?;
+
+        let after = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("incremental publication missing"))?;
+        require_eq(
+            &after.generation,
+            &before
+                .generation
+                .checked_next()
+                .ok_or_else(|| io::Error::other("test generation overflowed"))?,
+            "one incremental publication generation",
+        )?;
+        require_eq(
+            &store.load_node_by_path("deleted.rs")?.is_none(),
+            &true,
+            "deleted path is absent",
+        )?;
+        require_eq(
+            &store
+                .load_symbols(Some("deleted.rs"), Some("removed"), 10)?
+                .is_empty(),
+            &true,
+            "deleted symbols are invalidated",
+        )?;
+        require_eq(
+            &store
+                .load_symbols(Some("changed.rs"), Some("after"), 10)?
+                .len(),
+            &1,
+            "changed symbols are published",
+        )?;
+        require_eq(
+            &store
+                .load_symbols(Some("changed.rs"), Some("before"), 10)?
+                .is_empty(),
+            &true,
+            "replaced symbols are invalidated",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extended_windows_watch_roots_keep_deleted_paths_in_scope() -> Result<(), Box<dyn Error>> {
+        let root = Path::new(r"\\?\C:\repo");
+        let deleted = Path::new(r"C:\repo\src\deleted.rs");
+        require_eq(
+            &normalized_deleted_path(root, deleted)?,
+            &Some("src/deleted.rs".to_string()),
+            "extended root deleted path",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn notify_events_normalize_unicode_paths_against_extended_windows_roots()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let source_dir = temp.path().join("src");
+        fs::create_dir(&source_dir)?;
+        let deleted = source_dir.join("Über.rs");
+        fs::write(&deleted, "pub fn before() {}\n")?;
+        fs::remove_file(&deleted)?;
+
+        let root_text = temp
+            .path()
+            .to_str()
+            .ok_or_else(|| io::Error::other("temporary path is not UTF-8"))?;
+        let extended_root = if root_text.starts_with(r"\\?\") {
+            temp.path().to_path_buf()
+        } else {
+            PathBuf::from(format!(r"\\?\{root_text}"))
+        };
+        let event =
+            Event::new(EventKind::Remove(notify::event::RemoveKind::File)).add_path(deleted);
+        let changes = notify_event_changes(&extended_root, &ScanOptions::default(), &event);
+        let expected = extended_root.join("src").join("Über.rs");
+
+        require_eq(
+            &changes.paths.contains(&expected),
+            &true,
+            "normalized Unicode watcher path",
+        )?;
+        require_eq(
+            &changes.requires_full_scan,
+            &false,
+            "source removal full-scan policy",
+        )?;
+        require_eq(
+            &normalized_deleted_path(&extended_root, &expected)?,
+            &Some("src/Über.rs".to_string()),
+            "normalized Unicode deleted path",
+        )?;
         Ok(())
     }
 
