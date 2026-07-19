@@ -6,7 +6,7 @@ Work in dependency order. Land significant compiling behavior slices into `dev` 
 
 - [x] 1.1 Replace the old evidence-driven #308 plan with lean proposal, design, capability specs, and behavior-slice tasks that preserve the accepted product scope.
 - [x] 1.2 Map the change to issue #308, replace the stale GitHub status/checklist with this exact task list, and pass strict OpenSpec plus IssueOps validation.
-- [ ] 1.3 Review every retained old #308 branch and dirty worktree, independently reapply useful product behavior on current `dev`, reject obsolete evidence/workflow machinery, and delete the old branches after recovery.
+- [x] 1.3 Review every retained old #308 branch and dirty worktree, map useful product behavior to its owning implementation tasks, reject obsolete evidence/workflow machinery, and retire redundant branches/worktrees after the recovery decisions are recorded.
 - [x] 1.4 Freeze representative 0.3.26 agent workflows and tasks for startup, purpose-led folder/file selection, inspect/summary, relations, and exact slice so navigation improvement can be evaluated without changing the normal funnel.
 
 ## 2. Typed Graph And Safe Storage

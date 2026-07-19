@@ -10,6 +10,20 @@ Version 0.4 must improve what an agent learns from that funnel without adding ma
 
 The earlier implementation branch mixed useful graph/storage work with a per-task proof system. Recovery therefore happens commit by commit: reapply behavior that still fits this design, independently verify it on current `dev`, reject the proof machinery, and delete the old branches after their useful source has been taken over.
 
+### Source recovery decisions
+
+The retained #308 branches and dirty worktrees were reviewed against current `dev`. Current schema preflight, migration, full-publication, generation, WAL, concurrency, and local-read refusal behavior supersede the old schema-16, physical-slot, copied-staging-database, backup-lease, and immutable-read implementations; those mechanisms are rejected rather than replayed.
+
+Useful responsibilities are owned once by the functional tasks that implement them:
+
+- tasks 2.1 and 2.6 own a smaller typed graph identity/selector model and explicit project move/copy/detach behavior;
+- tasks 2.4 and 2.5 own affected-path incremental publication plus normalized indexed graph persistence and queries on the current schema owner;
+- tasks 4.1, 4.2, and 4.5 own one lean language/parser capability authority and generated settings/documentation;
+- tasks 5.5 through 5.7 own reusable target selectors, bounded traversal, and generation-bound cursors through existing relation services;
+- task 6.1 owns the accepted relation-family inventory.
+
+The old hard-coded three-hop query, graph-scale/evidence runners, task receipts, SHA-bound fixtures, per-task test identities, binary schema-history chain, optional parser-pack lifecycle without a selected consumer, and evidence-specific workflows are intentionally not recovered. Seven responsibility-owned crates remain sufficient. The dirty repository root is preserved only because it also contains unfinished #314 Memory Atlas source; it is not an authority for #308 behavior.
+
 ## Goals
 
 - Reach correct source context faster than 0.3.26 with the same normal command/tool vocabulary.
