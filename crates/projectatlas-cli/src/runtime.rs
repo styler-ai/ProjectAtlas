@@ -6811,11 +6811,108 @@ mod tests {
         let mut store = AtlasStore::open(&db_path)?;
         run_scan_pipeline(&mut store, &plan, &symbol_options)?;
         let control = standalone_index_work_control();
-        let initial_generation = store
+        let generation_before_contention = store
             .index_publication()?
             .ok_or_else(|| io::Error::other("initial publication missing"))?
             .generation;
         let contract_fingerprint = plan.publication_contract_fingerprint();
+        let contended_batch =
+            stage_full_index_publication(&store, &plan, &symbol_options, true, false, &control)?;
+        revalidate_staged_publication_inputs_controlled(
+            &plan,
+            contended_batch.nodes.expected_nodes(),
+            None,
+            &control,
+        )?;
+        let writer_blocker = rusqlite::Connection::open(&db_path)?;
+        writer_blocker.execute_batch("BEGIN IMMEDIATE")?;
+        let source_after_contention = "fn later() {}\n";
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let (publish_tx, publish_rx) = std::sync::mpsc::sync_channel(1);
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let publisher = std::thread::spawn(move || {
+            if ready_tx.send(()).is_err() || publish_rx.recv().is_err() {
+                return;
+            }
+            let publication_control = standalone_index_work_control();
+            let result = publish_index_batch(&mut store, contended_batch, &publication_control);
+            drop(result_tx.send((store, result)));
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|source| {
+                io::Error::other(format!("publisher did not become ready: {source}"))
+            })?;
+        fs::write(&source_path, source_after_contention)?;
+        publish_tx
+            .send(())
+            .map_err(|source| io::Error::other(format!("publisher stopped early: {source}")))?;
+        let timely_result = result_rx.recv_timeout(Duration::from_millis(500));
+        writer_blocker.execute_batch("ROLLBACK")?;
+        let (returned_store, contention_result) = match timely_result {
+            Ok(result) => result,
+            Err(source) => {
+                publisher
+                    .join()
+                    .map_err(|_panic| io::Error::other("publication thread panicked"))?;
+                return Err(io::Error::other(format!(
+                    "publication waited for a contending writer instead of failing fast: {source}"
+                ))
+                .into());
+            }
+        };
+        publisher
+            .join()
+            .map_err(|_panic| io::Error::other("publication thread panicked"))?;
+        store = returned_store;
+        let Err(CliError::Db(contention)) = contention_result else {
+            return Err(io::Error::other(
+                "publication waited through contention and accepted stale staged source",
+            )
+            .into());
+        };
+        if !contention.is_write_unavailable() {
+            return Err(io::Error::other(
+                "publication contention did not return typed write-unavailable state",
+            )
+            .into());
+        }
+        require_eq(
+            &store
+                .index_publication()?
+                .ok_or_else(|| io::Error::other("publication missing after contention"))?
+                .generation,
+            &generation_before_contention,
+            "publication generation after contention",
+        )?;
+        require_eq(
+            &store
+                .load_file_text("lib.rs")?
+                .ok_or_else(|| io::Error::other("indexed text missing after contention"))?
+                .content,
+            &staged_source.to_string(),
+            "indexed text after contention",
+        )?;
+        run_scan_pipeline(&mut store, &plan, &symbol_options)?;
+        require_eq(
+            &store
+                .load_file_text("lib.rs")?
+                .ok_or_else(|| io::Error::other("indexed text missing after retry"))?
+                .content,
+            &source_after_contention.to_string(),
+            "restaged text after contention retry",
+        )?;
+        let initial_generation = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("retried publication missing"))?
+            .generation;
+        require_eq(
+            &initial_generation,
+            &generation_before_contention
+                .checked_next()
+                .ok_or_else(|| io::Error::other("test generation overflowed"))?,
+            "single generation advance after contention retry",
+        )?;
         let mut competing_store = AtlasStore::open(&db_path)?;
         let competing_publication = competing_store
             .begin_index_projection_refresh_from(&contract_fingerprint, initial_generation)?;

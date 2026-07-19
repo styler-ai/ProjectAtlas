@@ -53,8 +53,10 @@ use schema::{PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION, SCHEMA_VERSION_KEY, sqlite
 
 /// Maximum persisted text for denormalized symbol-name search summaries.
 const MAX_SYMBOL_SEARCH_SUMMARY_CHARS: usize = 16_000;
-/// Maximum time a writer waits for another publication on the same database.
+/// Maximum time an ordinary write waits for the current database writer.
 const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(1);
+/// Publication acquisition fails fast so callers must restage after contention.
+const SQLITE_PUBLICATION_ACQUIRE_TIMEOUT: Duration = Duration::ZERO;
 
 /// Select create capability only for a path proven absent by preflight.
 fn writable_open_flags(state: SchemaState) -> OpenFlags {
@@ -217,6 +219,17 @@ pub enum DbError {
         operation: Box<DbError>,
         /// Secondary rollback failure retained for diagnosis.
         rollback: rusqlite::Error,
+    },
+    /// Publication acquisition failed and its standard busy policy was not restored.
+    #[error(
+        "publication writer acquisition failed: {operation}; restoring the standard busy policy also failed: {restore}"
+    )]
+    PublicationAcquirePolicyRestore {
+        /// Writer-acquisition failure observed with fail-fast busy handling.
+        #[source]
+        operation: Box<rusqlite::Error>,
+        /// Failure restoring the ordinary connection busy policy.
+        restore: Box<rusqlite::Error>,
     },
     /// Invalid enum value read from the database.
     #[error("invalid {field} value in database: {value}")]
@@ -1184,7 +1197,7 @@ impl AtlasStore {
         contract: PublicationContract,
         expected_base_generation: Option<IndexGeneration>,
     ) -> DbResult<IndexPublicationGuard<'_>> {
-        self.connection.execute_batch("BEGIN IMMEDIATE")?;
+        begin_immediate_publication(&self.connection)?;
         let setup = (|| {
             let previous = load_index_publication(&self.connection)?;
             if let Some(expected) = expected_base_generation {
@@ -4158,6 +4171,22 @@ impl AtlasStore {
     }
 }
 
+/// Acquire the publication writer without waiting after exact input validation.
+fn begin_immediate_publication(connection: &Connection) -> DbResult<()> {
+    connection.busy_timeout(SQLITE_PUBLICATION_ACQUIRE_TIMEOUT)?;
+    let begin_result = connection.execute_batch("BEGIN IMMEDIATE");
+    let restore_result = connection.busy_timeout(SQLITE_WRITE_BUSY_TIMEOUT);
+    match (begin_result, restore_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error.into()),
+        (Ok(()), Err(error)) => Err(schema::rollback_after_error(connection, error.into())),
+        (Err(operation), Err(restore)) => Err(DbError::PublicationAcquirePolicyRestore {
+            operation: Box::new(operation),
+            restore: Box::new(restore),
+        }),
+    }
+}
+
 /// Read the recorded project root without creating or migrating a database.
 ///
 /// # Errors
@@ -5513,7 +5542,16 @@ mod tests {
             require_eq(
                 &(started.elapsed() < Duration::from_secs(2)),
                 &true,
-                "bounded same-database writer wait",
+                "fail-fast same-database writer acquisition",
+            )?;
+            let restored_busy_timeout =
+                writer_b
+                    .connection
+                    .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, u64>(0))?;
+            require_eq(
+                &u128::from(restored_busy_timeout),
+                &SQLITE_WRITE_BUSY_TIMEOUT.as_millis(),
+                "ordinary busy timeout after failed publication acquisition",
             )?;
 
             independent_writer
@@ -5539,6 +5577,15 @@ mod tests {
             write_test_projection(&mut publication, "new")?;
             publication.complete()?;
         }
+        let restored_busy_timeout =
+            writer_a
+                .connection
+                .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, u64>(0))?;
+        require_eq(
+            &u128::from(restored_busy_timeout),
+            &SQLITE_WRITE_BUSY_TIMEOUT.as_millis(),
+            "ordinary busy timeout after successful publication acquisition",
+        )?;
         require_test_projection(&old_reader, 1, "old")?;
         let new_reader = AtlasStore::open_read_only(&db_path)?;
         require_test_projection(&new_reader, 2, "new")?;
