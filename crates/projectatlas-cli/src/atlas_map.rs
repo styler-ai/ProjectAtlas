@@ -1,7 +1,9 @@
 //! Purpose: Generate and lint `ProjectAtlas` structure maps from Rust.
 
 use blake3::Hasher;
-use projectatlas_core::{NodeKind, language::BROAD_SOURCE_EXTENSIONS, validated_repo_file_key};
+use projectatlas_core::{
+    Node, NodeKind, language::BROAD_SOURCE_EXTENSIONS, validated_repo_file_key,
+};
 use projectatlas_db::AtlasStore;
 use projectatlas_fs::{ScanOptions, scan_repo};
 use serde::{Deserialize, Serialize};
@@ -277,6 +279,11 @@ impl AtlasMapConfig {
     pub(crate) fn text_index_max_bytes(&self) -> u64 {
         self.text_index_max_bytes
     }
+
+    /// Return the configured legacy folder-purpose filename.
+    pub(crate) fn purpose_filename(&self) -> &str {
+        &self.purpose_filename
+    }
 }
 
 /// Serializable view of the effective `ProjectAtlas` configuration.
@@ -514,21 +521,31 @@ pub(crate) fn load_atlas_config(config_path: Option<&Path>) -> AtlasMapResult<At
         Some(path) => Some(path.to_path_buf()),
         None => find_config_path(&cwd),
     };
-    let (raw, base_dir) = if let Some(path) = &config_file {
+    if let Some(path) = &config_file {
         let text = fs::read_to_string(path).map_err(|source| AtlasMapError::Io {
             path: path.clone(),
             source,
         })?;
-        let parsed = toml::from_str::<RawConfig>(&text).map_err(|source| AtlasMapError::Toml {
-            path: path.clone(),
-            source: Box::new(source),
-        })?;
-        let parent = path.parent().map_or_else(|| cwd.clone(), Path::to_path_buf);
-        (parsed, parent)
-    } else {
-        (RawConfig::default(), cwd.clone())
-    };
-    normalize_config(raw, config_file.as_deref(), &base_dir, &cwd)
+        return load_atlas_config_from_text(path, &text);
+    }
+    normalize_config(RawConfig::default(), None, &cwd, &cwd)
+}
+
+/// Parse an already-bounded configuration input using normal path semantics.
+pub(crate) fn load_atlas_config_from_text(
+    path: &Path,
+    text: &str,
+) -> AtlasMapResult<AtlasMapConfig> {
+    let cwd = std::env::current_dir().map_err(|source| AtlasMapError::Io {
+        path: PathBuf::from("."),
+        source,
+    })?;
+    let parsed = toml::from_str::<RawConfig>(text).map_err(|source| AtlasMapError::Toml {
+        path: path.to_path_buf(),
+        source: Box::new(source),
+    })?;
+    let base_dir = path.parent().map_or_else(|| cwd.clone(), Path::to_path_buf);
+    normalize_config(parsed, Some(path), &base_dir, &cwd)
 }
 
 /// Load atlas map configuration for an explicit project root.
@@ -729,22 +746,42 @@ pub(crate) fn write_map(config: &AtlasMapConfig, write_json: bool) -> AtlasMapRe
     Ok(())
 }
 
-/// Extract approved legacy purpose records for `SQLite` import.
+/// Extract approved legacy purpose records from an existing controlled scan.
 ///
-/// # Errors
-///
-/// Returns an error when repository scanning or purpose extraction fails.
-pub(crate) fn imported_purpose_records(
+/// The caller owns text-input cancellation and byte accounting through
+/// `read_text`; this function never starts a second repository scan.
+pub(crate) fn imported_purpose_records_from_nodes<E, F>(
     config: &AtlasMapConfig,
-) -> AtlasMapResult<Vec<ImportedPurposeRecord>> {
+    nodes: &[Node],
+    read_text: &mut F,
+) -> Result<Vec<ImportedPurposeRecord>, E>
+where
+    E: From<AtlasMapError>,
+    F: FnMut(&Path) -> Result<String, E>,
+{
+    let paths = repo_paths_from_nodes(config, nodes);
+    imported_purpose_records_from_paths(config, &paths, read_text)
+}
+
+/// Extract approved purpose rows from one already-selected path inventory.
+fn imported_purpose_records_from_paths<E, F>(
+    config: &AtlasMapConfig,
+    paths: &RepoPaths,
+    read_text: &mut F,
+) -> Result<Vec<ImportedPurposeRecord>, E>
+where
+    E: From<AtlasMapError>,
+    F: FnMut(&Path) -> Result<String, E>,
+{
     let mut imported = BTreeMap::new();
-    append_existing_map_purpose_records(config, &mut imported)?;
-    let paths = collect_repo_paths(config)?;
+    append_existing_map_purpose_records_with_reader(config, &mut imported, read_text)?;
     let db_purposes = BTreeMap::new();
-    let (file_records, _, _) = build_file_records(&paths.source_files, config, &db_purposes)?;
-    let nonsource = read_nonsource_file_entries(config)?;
+    let (file_records, _, _) =
+        build_file_records_with_reader(&paths.source_files, config, &db_purposes, read_text)?;
+    let nonsource = read_nonsource_file_entries_with_reader(config, read_text)?;
     let merged_file_records = merge_records(&file_records, &nonsource.records);
-    let (folder_records, _, _) = build_folder_records(&paths.folders, config, &db_purposes)?;
+    let (folder_records, _, _) =
+        build_folder_records_with_reader(&paths.folders, config, &db_purposes, read_text)?;
     append_imported_records(&mut imported, &folder_records);
     append_imported_records(&mut imported, &merged_file_records);
     Ok(imported
@@ -764,17 +801,29 @@ fn append_imported_records(imported: &mut BTreeMap<String, String>, records: &[M
 }
 
 /// Append approved records from an existing committed atlas map.
+#[cfg(test)]
 fn append_existing_map_purpose_records(
     config: &AtlasMapConfig,
     imported: &mut BTreeMap<String, String>,
 ) -> AtlasMapResult<()> {
+    let mut read_text = read_text_file;
+    append_existing_map_purpose_records_with_reader(config, imported, &mut read_text)
+}
+
+/// Append approved map rows using the caller-owned text reader.
+fn append_existing_map_purpose_records_with_reader<E, F>(
+    config: &AtlasMapConfig,
+    imported: &mut BTreeMap<String, String>,
+    read_text: &mut F,
+) -> Result<(), E>
+where
+    E: From<AtlasMapError>,
+    F: FnMut(&Path) -> Result<String, E>,
+{
     if !config.map_path.exists() {
         return Ok(());
     }
-    let content = fs::read_to_string(&config.map_path).map_err(|source| AtlasMapError::Io {
-        path: config.map_path.clone(),
-        source,
-    })?;
+    let content = read_text(&config.map_path)?;
     let mut in_record_rows = false;
     for line in content.lines().map(str::trim) {
         if line.starts_with("folders[") || line.starts_with("files[") {
@@ -796,10 +845,18 @@ fn append_existing_map_purpose_records(
         if summary.is_empty() || summary == "MISSING" || summary == "INVALID" {
             continue;
         }
-        let path = normalize_repo_string(&cells[0])?;
+        let path = normalize_repo_string(&cells[0]).map_err(E::from)?;
         imported.insert(path, summary.to_string());
     }
     Ok(())
+}
+
+/// Read one complete UTF-8 atlas-map input through the compatibility path.
+fn read_text_file(path: &Path) -> AtlasMapResult<String> {
+    fs::read_to_string(path).map_err(|source| AtlasMapError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// Load approved purpose records from the durable `SQLite` index.
@@ -1237,13 +1294,18 @@ fn normalize_style_map(values: Option<BTreeMap<String, String>>) -> BTreeMap<Str
 fn collect_repo_paths(config: &AtlasMapConfig) -> AtlasMapResult<RepoPaths> {
     let options = config.scan_options();
     let nodes = scan_repo(&config.root, &options)?;
+    Ok(repo_paths_from_nodes(config, &nodes))
+}
+
+/// Classify one existing scan into legacy map input paths.
+fn repo_paths_from_nodes(config: &AtlasMapConfig, nodes: &[Node]) -> RepoPaths {
     let mut folders = Vec::new();
     let mut source_files = Vec::new();
     let mut untracked_files = Vec::new();
     let mut excluded_paths = BTreeSet::new();
     for node in nodes {
         if has_excluded_suffix_component(&node.path, &config.exclude_dir_suffixes) {
-            excluded_paths.insert(node.path);
+            excluded_paths.insert(node.path.clone());
             continue;
         }
         match node.kind {
@@ -1251,7 +1313,7 @@ fn collect_repo_paths(config: &AtlasMapConfig) -> AtlasMapResult<RepoPaths> {
                 if is_legacy_map_metadata_folder(&node.path) {
                     continue;
                 }
-                folders.push(node.path);
+                folders.push(node.path.clone());
             }
             NodeKind::File => {
                 if is_durable_projectatlas_input(&node.path, config) {
@@ -1263,9 +1325,9 @@ fn collect_repo_paths(config: &AtlasMapConfig) -> AtlasMapResult<RepoPaths> {
                     node.language.as_deref(),
                     config,
                 ) {
-                    source_files.push(node.path);
+                    source_files.push(node.path.clone());
                 } else {
-                    untracked_files.push(node.path);
+                    untracked_files.push(node.path.clone());
                 }
             }
         }
@@ -1273,12 +1335,12 @@ fn collect_repo_paths(config: &AtlasMapConfig) -> AtlasMapResult<RepoPaths> {
     folders.sort();
     source_files.sort();
     untracked_files.sort();
-    Ok(RepoPaths {
+    RepoPaths {
         folders,
         source_files,
         untracked_files,
         excluded_paths: excluded_paths.into_iter().collect(),
-    })
+    }
 }
 
 /// Return whether any path component has an excluded suffix.
@@ -1399,6 +1461,21 @@ fn build_file_records(
     config: &AtlasMapConfig,
     db_purposes: &BTreeMap<String, String>,
 ) -> AtlasMapResult<(Vec<MapRecord>, Vec<String>, BTreeMap<String, Vec<String>>)> {
+    let mut read_text = read_text_file;
+    build_file_records_with_reader(files, config, db_purposes, &mut read_text)
+}
+
+/// Build file purpose rows through a caller-owned bounded text reader.
+fn build_file_records_with_reader<E, F>(
+    files: &[String],
+    config: &AtlasMapConfig,
+    db_purposes: &BTreeMap<String, String>,
+    read_text: &mut F,
+) -> Result<(Vec<MapRecord>, Vec<String>, BTreeMap<String, Vec<String>>), E>
+where
+    E: From<AtlasMapError>,
+    F: FnMut(&Path) -> Result<String, E>,
+{
     let mut records = Vec::new();
     let mut missing = Vec::new();
     let mut invalid = BTreeMap::new();
@@ -1412,7 +1489,8 @@ fn build_file_records(
             continue;
         }
         let path = repo_join(&config.root, rel_path);
-        let (summary, header_issues) = extract_purpose_header(&path, rel_path, config)?;
+        let (summary, header_issues) =
+            extract_purpose_header_with_reader(&path, rel_path, config, read_text)?;
         if let Some(summary) = summary {
             let issues = validate_summary(&summary, config);
             if issues.is_empty() {
@@ -1445,6 +1523,21 @@ fn build_folder_records(
     config: &AtlasMapConfig,
     db_purposes: &BTreeMap<String, String>,
 ) -> AtlasMapResult<(Vec<MapRecord>, Vec<String>, BTreeMap<String, Vec<String>>)> {
+    let mut read_text = read_text_file;
+    build_folder_records_with_reader(folders, config, db_purposes, &mut read_text)
+}
+
+/// Build folder purpose rows through a caller-owned bounded text reader.
+fn build_folder_records_with_reader<E, F>(
+    folders: &[String],
+    config: &AtlasMapConfig,
+    db_purposes: &BTreeMap<String, String>,
+    read_text: &mut F,
+) -> Result<(Vec<MapRecord>, Vec<String>, BTreeMap<String, Vec<String>>), E>
+where
+    E: From<AtlasMapError>,
+    F: FnMut(&Path) -> Result<String, E>,
+{
     let mut records = Vec::new();
     let mut missing = Vec::new();
     let mut invalid = BTreeMap::new();
@@ -1457,7 +1550,7 @@ fn build_folder_records(
             });
             continue;
         }
-        let (summary, issues) = read_folder_purpose(folder, config)?;
+        let (summary, issues) = read_folder_purpose_with_reader(folder, config, read_text)?;
         if let Some(summary) = summary {
             if issues.is_empty() {
                 records.push(MapRecord {
@@ -1498,16 +1591,17 @@ fn invalid_record(path: &str) -> MapRecord {
     }
 }
 
-/// Extract a purpose header from a file.
-fn extract_purpose_header(
+/// Extract a purpose header through a caller-owned bounded text reader.
+fn extract_purpose_header_with_reader<E, F>(
     path: &Path,
     rel_path: &str,
     config: &AtlasMapConfig,
-) -> AtlasMapResult<(Option<String>, Vec<String>)> {
-    let content = fs::read_to_string(path).map_err(|source| AtlasMapError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    read_text: &mut F,
+) -> Result<(Option<String>, Vec<String>), E>
+where
+    F: FnMut(&Path) -> Result<String, E>,
+{
+    let content = read_text(path)?;
     let lines = content.lines().map(ToString::to_string).collect::<Vec<_>>();
     let style = resolve_purpose_style(rel_path, config);
     let result = match style.as_str() {
@@ -1846,19 +1940,20 @@ fn validate_summary(summary: &str, config: &AtlasMapConfig) -> Vec<String> {
     problems
 }
 
-/// Read folder purpose metadata.
-fn read_folder_purpose(
+/// Read folder purpose metadata through a caller-owned bounded text reader.
+fn read_folder_purpose_with_reader<E, F>(
     folder: &str,
     config: &AtlasMapConfig,
-) -> AtlasMapResult<(Option<String>, Vec<String>)> {
+    read_text: &mut F,
+) -> Result<(Option<String>, Vec<String>), E>
+where
+    F: FnMut(&Path) -> Result<String, E>,
+{
     let purpose_path = repo_join(&config.root, folder).join(&config.purpose_filename);
     if !purpose_path.exists() {
         return Ok((None, vec!["missing .purpose file".to_string()]));
     }
-    let content = fs::read_to_string(&purpose_path).map_err(|source| AtlasMapError::Io {
-        path: purpose_path,
-        source,
-    })?;
+    let content = read_text(&purpose_path)?;
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
@@ -1876,6 +1971,19 @@ fn read_folder_purpose(
 
 /// Read non-source file entries.
 fn read_nonsource_file_entries(config: &AtlasMapConfig) -> AtlasMapResult<NonsourceEntries> {
+    let mut read_text = read_text_file;
+    read_nonsource_file_entries_with_reader(config, &mut read_text)
+}
+
+/// Read non-source purpose rows through a caller-owned bounded text reader.
+fn read_nonsource_file_entries_with_reader<E, F>(
+    config: &AtlasMapConfig,
+    read_text: &mut F,
+) -> Result<NonsourceEntries, E>
+where
+    E: From<AtlasMapError>,
+    F: FnMut(&Path) -> Result<String, E>,
+{
     if !config.nonsource_files_path.exists() {
         return Ok(NonsourceEntries {
             records: Vec::new(),
@@ -1887,11 +1995,7 @@ fn read_nonsource_file_entries(config: &AtlasMapConfig) -> AtlasMapResult<Nonsou
             )],
         });
     }
-    let content =
-        fs::read_to_string(&config.nonsource_files_path).map_err(|source| AtlasMapError::Io {
-            path: config.nonsource_files_path.clone(),
-            source,
-        })?;
+    let content = read_text(&config.nonsource_files_path)?;
     let mut in_nonsource = false;
     let mut records = Vec::new();
     let mut missing = Vec::new();

@@ -11,26 +11,40 @@ use projectatlas_core::symbols::{RelationKind, SymbolGraph, SymbolKind};
 use crate::{push_relation, push_symbol};
 
 /// Add language-specific facts that are not exposed by the generic node pass.
-pub(crate) fn augment_language_graph(graph: &mut SymbolGraph, content: &str) {
+pub(crate) fn augment_language_graph<E>(
+    graph: &mut SymbolGraph,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    check()?;
     match graph.language.as_deref() {
         Some("kotlin") => {
-            kotlin::augment(graph, content);
-            gradle::augment_kotlin(graph, content);
+            kotlin::augment(graph, content, check)?;
+            gradle::augment_kotlin(graph, content, check)?;
         }
-        Some("objective-c") => objective_c::augment(graph, content),
-        Some("zig") => zig::augment(graph, content),
+        Some("objective-c") => objective_c::augment(graph, content, check)?,
+        Some("zig") => zig::augment(graph, content, check)?,
         Some("c" | "cpp" | "h" | "hpp") => c_family::augment(graph, content),
         _ => {}
     }
+    check()?;
+    Ok(())
 }
 
 /// Add language-specific fallback facts for languages without a native parser.
-pub(crate) fn augment_fallback_language_graph(graph: &mut SymbolGraph, content: &str) {
+pub(crate) fn augment_fallback_language_graph<E>(
+    graph: &mut SymbolGraph,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    check()?;
     match graph.language.as_deref() {
-        Some("kotlin") => gradle::augment_kotlin(graph, content),
-        Some("groovy") => gradle::augment_groovy(graph, content),
+        Some("kotlin") => gradle::augment_kotlin(graph, content, check)?,
+        Some("groovy") => gradle::augment_groovy(graph, content, check)?,
         _ => {}
     }
+    check()?;
+    Ok(())
 }
 
 /// Return whether a graph already has a symbol with this exact kind and name.

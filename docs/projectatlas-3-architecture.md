@@ -161,6 +161,7 @@ The current Rust workspace is split by stable runtime boundaries:
 
 ```text
 crates/
+  projectatlas-lints/       repository-owned Rust source policy checks
   projectatlas-core/        domain types, repo-path contracts, health models
   projectatlas-db/          SQLite schema, migrations, persistence
   projectatlas-fs/          walking, ignore handling, hashes, file metadata
@@ -180,6 +181,178 @@ architecture-hardening option if the adapter grows, but shared behavior must
 stay in `runtime.rs` or the reusable `projectatlas-service`,
 `projectatlas-db`, `projectatlas-fs`, `projectatlas-symbols`, and
 `projectatlas-core` crates.
+
+## Architecture Views
+
+These diagrams describe the current seven-crate ownership and the ProjectAtlas
+0.4 request and publication contracts. Target behavior remains explicitly
+subject to the issue #308 acceptance checks until the final documentation
+reconciliation in task 7.5.
+
+### System And Component Architecture
+
+```mermaid
+flowchart TB
+    subgraph Hosts[Consumers]
+        Agent[Agent harness]
+        User[Human or automation]
+    end
+    subgraph Adapters[projectatlas-cli adapters]
+        MCP[MCP JSON-RPC adapter]
+        CLI[CLI adapter]
+    end
+    Runtime[Shared runtime orchestration]
+    subgraph Engines[Responsibility-owned engines]
+        FS[Filesystem discovery and exact hashing]
+        Symbols[Language and relation extraction]
+        Service[Bounded query and ranking services]
+        DB[SQLite publication and project state]
+    end
+    Source[(Current local source)]
+    Atlas[(Project-local atlas database)]
+
+    Agent --> MCP
+    User --> CLI
+    MCP --> Runtime
+    CLI --> Runtime
+    Runtime --> FS
+    Runtime --> Symbols
+    Runtime --> Service
+    Runtime --> DB
+    FS -->|reads current paths and bytes| Source
+    Service -->|indexed typed queries| DB
+    DB --> Atlas
+```
+
+The current saved local source is authoritative. Runtime orchestration passes
+bounded current content into the symbol engine; the symbol engine does not own
+filesystem I/O. SQLite stores authored purposes and complete derived
+generations; it does not make a hosted commit the source of truth.
+
+### Crate Dependency And Ownership
+
+```mermaid
+flowchart TB
+    CLI[projectatlas-cli<br/>adapters and runtime orchestration]
+    Service[projectatlas-service<br/>queries, ranking, summaries, search]
+    DB[projectatlas-db<br/>schema, identity, transactions, graph persistence]
+    FS[projectatlas-fs<br/>ignore-aware discovery and exact hashing]
+    Symbols[projectatlas-symbols<br/>language and relation extraction]
+    Core[projectatlas-core<br/>shared typed contracts and bounded work]
+    Lints[projectatlas-lints<br/>repository Rust source-policy gate]
+    Workspace[(Workspace Rust source)]
+
+    CLI --> Service
+    CLI --> DB
+    CLI --> FS
+    CLI --> Symbols
+    CLI --> Core
+    Service --> DB
+    Service --> Core
+    DB --> Core
+    FS --> Core
+    Symbols --> Core
+    Workspace -. parsed by the local quality gate .-> Lints
+```
+
+Dependency direction remains acyclic. The lint crate is a workspace quality
+tool, not a runtime dependency. No eighth crate is justified unless a durable
+independently consumed ownership boundary appears.
+
+### MCP Read Communication Sequence
+
+```mermaid
+sequenceDiagram
+    actor Agent
+    participant MCP as MCP adapter
+    participant Runtime as Runtime orchestration
+    participant FS as Filesystem/freshness
+    participant DB as SQLite
+    participant Service as Query service
+
+    Agent->>MCP: summary, search, relation, or session request
+    MCP->>Runtime: typed request plus selected project
+    Runtime->>DB: capture active SQLite read snapshot
+    Runtime->>FS: inspect bounded current local state
+    Runtime->>DB: compare persisted fingerprints in captured snapshot
+    alt index is current
+        DB-->>Runtime: same snapshot is safe to query
+    else safe bounded delta exists
+        Runtime->>DB: release the captured read snapshot
+        Runtime->>FS: read/hash affected current bytes
+        Runtime->>DB: publish one validated transaction
+        Runtime->>DB: capture the newly active read snapshot
+    else reconciliation is unsafe or exceeds a bound
+        break no safe indexed answer
+            Runtime->>DB: release the captured read snapshot
+            Runtime-->>MCP: typed refresh_required
+            MCP-->>Agent: compact recovery next call
+        end
+    end
+    Runtime->>Service: bounded query against captured active generation
+    Service->>DB: indexed typed read from the same snapshot
+    DB-->>Service: rows plus generation and coverage
+    Service-->>Runtime: ranked bounded result and next call
+    Runtime->>DB: release the captured read snapshot
+    Runtime-->>MCP: typed report
+    MCP-->>Agent: compact TOON by default
+```
+
+### Index And Transactional Publication Flow
+
+```mermaid
+flowchart TB
+    Request[Index or refresh request]
+    Admit[Admit task and create cancellation/deadline control]
+    Inputs[Read and validate bounded configuration]
+    Build[Discover current paths; read, hash, extract,<br/>and stage bounded exact-byte rows]
+    Recheck[Recheck source, limits, cancellation, and generation]
+    Commit[One SQLite publication transaction]
+    NoChange[Successful no-op]
+    Next[(Generation N + 1 becomes active)]
+    Prior[(Generation N remains active)]
+    Fail[Typed failure or cancellation]
+
+    Request --> Admit --> Inputs --> Build --> Recheck
+    Recheck -->|changed and valid| Commit --> Next
+    Recheck -->|unchanged and current| NoChange --> Prior
+    Inputs -. invalid, canceled, or over limit .-> Fail
+    Build -. invalid, canceled, or over limit .-> Fail
+    Recheck -. invalid, canceled, or over limit .-> Fail
+    Commit -. rollback on error .-> Fail
+    Fail --> Prior
+```
+
+For background MCP work, admission owns the deadline and cancellation token
+before configuration content is read. Failed work never exposes partial rows
+or advances the active generation, and successful no-change work leaves the
+current generation unchanged.
+
+### Cancellation, Failure, And Watch Retry
+
+```mermaid
+stateDiagram-v2
+    state "Watcher change remains eligible" as Unacknowledged
+    state "One-shot result returned" as Reported
+    [*] --> Admitted
+    Admitted --> Running: controlled plan and configuration
+    Running --> Published: validation and commit succeed
+    Running --> Failed: error, deadline, or resource limit
+    Running --> Canceled: cancellation
+    Failed --> Unacknowledged: watcher
+    Canceled --> Unacknowledged: watcher
+    Unacknowledged --> Admitted: next bounded refresh
+    Published --> [*]
+    Failed --> Reported: one-shot
+    Canceled --> Reported: one-shot
+    Reported --> [*]
+```
+
+Readers continue using the last complete generation while work runs or fails.
+Watcher failure does not create a hidden in-process retry loop; the unchanged
+local mismatch stays eligible for a later read, watch, or explicit bounded
+retry. Independent project databases progress independently; ProjectAtlas does
+not serialize them behind one process-global indexing lock.
 
 ## Interface Strategy: Core First, CLI And MCP As Adapters
 
@@ -238,9 +411,9 @@ indexing tool. Public and semi-public surfaces use atlas/funnel vocabulary:
   `atlas_settings`, `atlas_watch_status`, `atlas_watch_once`,
   `atlas_strip_legacy_purpose`, `atlas_reset_index`, `atlas_purpose_queue`,
   `atlas_purpose_set`, and `atlas_purpose_review`.
-- Crates/modules: `projectatlas-core`, `projectatlas-db`, `projectatlas-fs`,
-  `projectatlas-service`, `projectatlas-symbols`, `projectatlas-query`,
-  `projectatlas-mcp`.
+- Crates/modules: `projectatlas-cli` (CLI, MCP adapters, and runtime
+  orchestration), `projectatlas-core`, `projectatlas-db`, `projectatlas-fs`,
+  `projectatlas-lints`, `projectatlas-service`, and `projectatlas-symbols`.
 - Avoid names copied from external tools for classes, methods, structs,
   modules, commands, or MCP tools.
 

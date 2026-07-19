@@ -52,17 +52,88 @@ Folder purposes should be curated broadly because they drive the highest-value n
 
 When purposes are missing or stale, ProjectAtlas reports that state and falls back deterministically to path, current content, symbols, and graph context. It must not pretend a suggestion is authoritative.
 
+### Initial Task Discovery
+
+The first navigation pass uses purpose as the responsibility sieve and graph
+context as bounded supporting evidence:
+
+```mermaid
+flowchart TD
+    Task[Agent task] --> Brief[Session brief or overview]
+    Brief --> Confident{Candidate ready?}
+    Confident -->|no| Folders[Rank folders by authoritative purpose plus state and graph role;<br/>use deterministic fallback when unavailable]
+    Folders --> Files[Rank files by authoritative purpose plus state and crisp connections;<br/>use deterministic fallback when unavailable]
+    Confident -->|yes| Summary[Selected-file summary plus trust]
+    Files --> Summary
+    Summary --> CrossFile{Need cross-file context?}
+    CrossFile -->|no| Slice[Exact source slice]
+    CrossFile -->|yes| Relations[Bounded relation or ranked path]
+    Relations --> Anchored[Continue with anchored target traversal]
+```
+
+The graph may improve a weak candidate choice, but graph popularity never
+displaces an exact path/name or strong reviewed-purpose match.
+
+### Anchored Connection Traversal
+
+Once the agent already has a relevant file or symbol, it does not restart the
+initial discovery funnel. It follows a bounded relationship set from that
+anchor, with purpose projected onto every local target:
+
+```mermaid
+flowchart TB
+    Anchor[Current file or symbol anchor]
+    Graph[(Freshness-checked current graph generation)]
+    Purposes[(Owning file or folder purpose metadata:<br/>approved, stale, missing, or unavailable)]
+    Connections[Ranked inbound and outbound connections]
+    Targets[Target rows:<br/>relation and reason<br/>selector and span<br/>owning file or folder purpose plus state<br/>coverage and trust]
+    Summary[Target summary]
+    SourceNeeded{Need exact source for this target?}
+    Slice[Exact current-source target slice]
+    Continue{Another bounded hop needed?}
+
+    Anchor --> Connections
+    Graph --> Connections
+    Connections --> Targets
+    Purposes -. query-time projection; not duplicated in graph rows .-> Targets
+    Targets -->|purpose or trust needs verification| Summary
+    Targets -->|purpose and trust accepted; selector exact| Slice
+    Targets -->|purpose and trust sufficient for another exact-selector hop| Continue
+    Summary --> SourceNeeded
+    SourceNeeded -->|yes| Slice
+    SourceNeeded -->|no| Continue
+    Slice --> Continue
+    Continue -->|yes; target becomes the anchor| Connections
+    Continue -->|no| Done[Return with sufficient context,<br/>or edit after an exact slice]
+```
+
+The relationship explains why the hop matters to the current task. The purpose
+explains why the target exists. The summary confirms what is currently there,
+trust fields state how much to rely on it, and the slice provides exact source.
+An external or unresolved target reports purpose as not applicable or
+unavailable instead of inheriting or fabricating local responsibility.
+
 ### Background Purpose Curator
 
-Purpose maintenance can run as a bounded low-reasoning “speedboat” beside the main task:
+Purpose maintenance can run as a bounded low-reasoning “speedboat” beside the
+main task:
 
-```text
-main agent continues source work immediately
-        │
-        └─ purpose handoff for relevant missing/stale intent
-              → low-reasoning curator inspects bounded current context
-              → curator writes only through purpose set/review APIs
-              → later rankings use the approved purpose
+```mermaid
+sequenceDiagram
+    participant Host as Agent host
+    participant Main as Main agent
+    participant Curator as Low-reasoning curator
+    participant Atlas as ProjectAtlas purpose APIs
+
+    Host->>Main: continue source task immediately
+    Host->>Curator: spawn bounded low-scope lane
+    Curator->>Atlas: claim coalesced task/generation/path rows
+    Atlas-->>Curator: rows plus bounded current context
+    Curator->>Atlas: approved purpose set/review writes only
+    Main->>Atlas: later normal navigation request
+    Atlas-->>Main: response uses approved purposes
+    Curator-->>Host: minimal machine-facing terminal state
+    Note over Curator,Host: no ordinary conversation or per-path status
 ```
 
 At startup and relevant task/source transitions, a supported agent host launches the packaged purpose-curator lane without blocking the main task. The curator claims a coalesced task/generation/path-scoped queue directly; ordinary session/folder/file responses do not carry a purpose-maintenance handoff or status section. ProjectAtlas itself does not pretend an MCP server can spawn a host agent.
@@ -130,6 +201,8 @@ target:
   symbol: rejects_expired_session
   kind: function
   line: 84
+  owning_purpose: Verify session behavior across authentication boundaries.
+  purpose_status: approved
 resolution: resolved
 confidence: exact
 source:
@@ -181,7 +254,7 @@ API route
 → integration test
 ```
 
-Every step carries its relationship, exact file/symbol selector, source span, resolution, confidence, coverage, and generation. Paths are node-simple, deterministic, and constrained by row, node, edge, depth, time, memory, output, and cancellation budgets.
+Every local step carries its relationship, exact file/symbol selector, authoritative owning-purpose projection and review/stale state, source span, resolution, confidence, coverage, and generation. Paths are node-simple, deterministic, and constrained by row, node, edge, depth, time, memory, output, and cancellation budgets.
 
 ## Freshness Contract
 

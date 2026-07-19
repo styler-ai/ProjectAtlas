@@ -5,11 +5,14 @@ mod languages;
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
 };
+use projectatlas_core::{IndexWorkControl, IndexWorkFailure, IndexWorkStage};
 use regex::Regex;
 use std::borrow::Cow;
+use std::convert::Infallible;
+use std::ops::ControlFlow;
 use std::path::Path;
 use toml::Value as TomlValue;
-use tree_sitter::{Language, Node, Parser};
+use tree_sitter::{Language, Node, ParseOptions, Parser};
 
 /// Maximum symbols kept from one file to bound large generated sources.
 const MAX_SYMBOLS_PER_FILE: usize = 4_000;
@@ -19,33 +22,81 @@ const MAX_RELATIONS_PER_FILE: usize = 8_000;
 const MAX_SNIPPET_CHARS: usize = 240;
 /// Maximum text length stored for extracted documentation.
 const MAX_DOC_CHARS: usize = 500;
+/// Maximum parsed rows between cooperative cancellation/deadline checks.
+const PARSER_CONTROL_CHECK_INTERVAL: usize = 128;
 
 /// Extract a symbol graph from source or manifest content.
 #[must_use]
 pub fn extract_symbol_graph(path: &str, language: Option<&str>, content: &str) -> SymbolGraph {
+    match extract_symbol_graph_checked(path, language, content, &mut || Ok::<(), Infallible>(())) {
+        Ok(graph) => graph,
+        Err(unreachable) => match unreachable {},
+    }
+}
+
+/// Extract a symbol graph while observing the shared indexing cancellation boundary.
+///
+/// # Errors
+///
+/// Returns a typed cancellation or deadline failure without returning a partial graph.
+pub fn extract_symbol_graph_controlled(
+    path: &str,
+    language: Option<&str>,
+    content: &str,
+    control: &IndexWorkControl,
+) -> Result<SymbolGraph, IndexWorkFailure> {
+    extract_symbol_graph_checked(path, language, content, &mut || {
+        control.check(IndexWorkStage::SymbolParsing)
+    })
+}
+
+/// Extract a symbol graph with one cooperative work checkpoint shared by every parser stage.
+fn extract_symbol_graph_checked<E>(
+    path: &str,
+    language: Option<&str>,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<SymbolGraph, E> {
+    check()?;
     if is_cargo_manifest(path, language) {
-        return extract_cargo_manifest_graph(path, language, content);
+        return extract_cargo_manifest_graph_checked(path, language, content, check);
     }
     let parse_content = content_without_leading_purpose_header(content);
     if is_vue_sfc(path, language) {
-        return extract_vue_sfc_graph(path, language, parse_content.as_ref());
+        return extract_vue_sfc_graph_checked(path, language, parse_content.as_ref(), check);
     }
     if is_powershell_script(path, language) {
-        return extract_powershell_graph(path, language, parse_content.as_ref());
+        return extract_powershell_graph_checked(path, language, parse_content.as_ref(), check);
     }
-    if let Some(parsed) = extract_tree_sitter_graph(path, language, parse_content.as_ref()) {
+    if let Some(parsed) = extract_tree_sitter_graph(path, language, parse_content.as_ref(), check)?
+    {
         if !parsed.graph.symbols.is_empty() || !parsed.graph.relations.is_empty() {
-            return parsed.graph;
+            check()?;
+            return Ok(parsed.graph);
         }
         if parsed.had_errors {
-            let fallback = extract_fallback_graph(path, language, parse_content.as_ref());
+            let fallback =
+                extract_fallback_graph_checked(path, language, parse_content.as_ref(), check)?;
             if !fallback.symbols.is_empty() || !fallback.relations.is_empty() {
-                return fallback;
+                check()?;
+                return Ok(fallback);
             }
         }
-        return parsed.graph;
+        check()?;
+        return Ok(parsed.graph);
     }
-    extract_fallback_graph(path, language, parse_content.as_ref())
+    extract_fallback_graph_checked(path, language, parse_content.as_ref(), check)
+}
+
+/// Check cooperative parser control at a bounded row interval.
+pub(crate) fn check_parser_iteration<E>(
+    iteration: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    if iteration.is_multiple_of(PARSER_CONTROL_CHECK_INTERVAL) {
+        check()?;
+    }
+    Ok(())
 }
 
 /// Return whether the language has a specialized tree-sitter parser.
@@ -103,12 +154,18 @@ fn is_powershell_script(path: &str, language: Option<&str>) -> bool {
         })
 }
 
-/// Extract Vue SFC Composition API bindings with a deterministic structural adapter.
-fn extract_vue_sfc_graph(path: &str, language: Option<&str>, content: &str) -> SymbolGraph {
-    let mut graph = extract_fallback_graph(path, language, content);
+/// Extract Vue SFC Composition API bindings with cooperative parser control.
+fn extract_vue_sfc_graph_checked<E>(
+    path: &str,
+    language: Option<&str>,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<SymbolGraph, E> {
+    let mut graph = extract_fallback_graph_checked(path, language, content, check)?;
     graph.parser = ParserKind::Structural;
     let mut structural = empty_graph(path, language, ParserKind::Structural);
     for (line_index, line) in content.lines().enumerate() {
+        check_parser_iteration(line_index, check)?;
         let trimmed = line.trim();
         if let Some(name) = vue_composition_binding_name(trimmed) {
             push_symbol(
@@ -133,16 +190,23 @@ fn extract_vue_sfc_graph(path: &str, language: Option<&str>, content: &str) -> S
             );
         }
     }
-    merge_preferred_graph_entries(&mut graph, structural);
-    graph
+    merge_preferred_graph_entries_checked(&mut graph, structural, check)?;
+    check()?;
+    Ok(graph)
 }
 
-/// Extract `PowerShell` declarations with a deterministic structural adapter.
-fn extract_powershell_graph(path: &str, language: Option<&str>, content: &str) -> SymbolGraph {
-    let mut graph = extract_fallback_graph(path, language, content);
+/// Extract `PowerShell` declarations with cooperative parser control.
+fn extract_powershell_graph_checked<E>(
+    path: &str,
+    language: Option<&str>,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<SymbolGraph, E> {
+    let mut graph = extract_fallback_graph_checked(path, language, content, check)?;
     graph.parser = ParserKind::Structural;
     let mut structural = empty_graph(path, language, ParserKind::Structural);
     for (line_index, line) in content.lines().enumerate() {
+        check_parser_iteration(line_index, check)?;
         let trimmed = line.trim();
         if let Some(name) = powershell_function_name(trimmed) {
             push_symbol(
@@ -179,8 +243,9 @@ fn extract_powershell_graph(path: &str, language: Option<&str>, content: &str) -
             );
         }
     }
-    merge_preferred_graph_entries(&mut graph, structural);
-    graph
+    merge_preferred_graph_entries_checked(&mut graph, structural, check)?;
+    check()?;
+    Ok(graph)
 }
 
 /// Extract one `PowerShell` function declaration name.
@@ -218,9 +283,14 @@ fn powershell_class_name(line: &str) -> Option<String> {
     valid.then(|| name.to_string())
 }
 
-/// Merge preferred graph entries, replacing duplicates and appending within bounds.
-fn merge_preferred_graph_entries(graph: &mut SymbolGraph, preferred: SymbolGraph) {
-    for symbol in preferred.symbols {
+/// Merge preferred graph entries with cooperative parser control.
+fn merge_preferred_graph_entries_checked<E>(
+    graph: &mut SymbolGraph,
+    preferred: SymbolGraph,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    for (iteration, symbol) in preferred.symbols.into_iter().enumerate() {
+        check_parser_iteration(iteration, check)?;
         if let Some(existing) = graph
             .symbols
             .iter()
@@ -231,7 +301,8 @@ fn merge_preferred_graph_entries(graph: &mut SymbolGraph, preferred: SymbolGraph
             graph.symbols.push(symbol);
         }
     }
-    for relation in preferred.relations {
+    for (iteration, relation) in preferred.relations.into_iter().enumerate() {
+        check_parser_iteration(iteration, check)?;
         if let Some(existing) = graph
             .relations
             .iter()
@@ -242,6 +313,7 @@ fn merge_preferred_graph_entries(graph: &mut SymbolGraph, preferred: SymbolGraph
             graph.relations.push(relation);
         }
     }
+    Ok(())
 }
 
 /// Return whether two symbols represent the same declaration.
@@ -309,27 +381,41 @@ fn vue_initializer_is_macro_call(initializer: &str, macro_name: &str) -> bool {
     rest.starts_with('(') || rest.starts_with('<')
 }
 
-/// Extract Cargo package, workspace, and dependency entries.
-fn extract_cargo_manifest_graph(path: &str, language: Option<&str>, content: &str) -> SymbolGraph {
+/// Extract Cargo package, workspace, and dependency entries with cooperative parser control.
+fn extract_cargo_manifest_graph_checked<E>(
+    path: &str,
+    language: Option<&str>,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<SymbolGraph, E> {
+    check()?;
     let mut graph = empty_graph(path, language, ParserKind::Manifest);
     if path.ends_with("Cargo.lock") || matches!(language, Some("cargo-lock")) {
-        extract_cargo_lock_packages(&mut graph, content);
-        return graph;
+        extract_cargo_lock_packages_checked(&mut graph, content, check)?;
+        check()?;
+        return Ok(graph);
     }
-    extract_cargo_toml_entries(&mut graph, content);
-    graph
+    extract_cargo_toml_entries_checked(&mut graph, content, check)?;
+    check()?;
+    Ok(graph)
 }
 
-/// Extract package names from Cargo.lock.
-fn extract_cargo_lock_packages(graph: &mut SymbolGraph, content: &str) {
+/// Extract package names from Cargo.lock with cooperative parser control.
+fn extract_cargo_lock_packages_checked<E>(
+    graph: &mut SymbolGraph,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
     let Ok(lockfile) = content.parse::<TomlValue>() else {
-        return;
+        return Ok(());
     };
+    check()?;
     let Some(packages) = lockfile.get("package").and_then(TomlValue::as_array) else {
-        return;
+        return Ok(());
     };
     let mut next_package_line = 0;
-    for package in packages {
+    for (iteration, package) in packages.iter().enumerate() {
+        check_parser_iteration(iteration, check)?;
         let Some(name) = package
             .as_table()
             .and_then(|table| table.get("name"))
@@ -337,7 +423,7 @@ fn extract_cargo_lock_packages(graph: &mut SymbolGraph, content: &str) {
         else {
             continue;
         };
-        let line = cargo_lock_name_line(content, name, next_package_line);
+        let line = cargo_lock_name_line_checked(content, name, next_package_line, check)?;
         if let Some(found_line) = line {
             next_package_line = found_line;
         }
@@ -353,12 +439,19 @@ fn extract_cargo_lock_packages(graph: &mut SymbolGraph, content: &str) {
             &format!("lock package {name}"),
         );
     }
+    Ok(())
 }
 
-/// Return the one-based source line for a package name in a Cargo.lock file.
-fn cargo_lock_name_line(content: &str, package_name: &str, start_line: usize) -> Option<usize> {
+/// Return the one-based source line for a package name with cooperative parser control.
+fn cargo_lock_name_line_checked<E>(
+    content: &str,
+    package_name: &str,
+    start_line: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<usize>, E> {
     let mut in_package = false;
-    for (index, raw_line) in content.lines().enumerate().skip(start_line) {
+    for (iteration, (index, raw_line)) in content.lines().enumerate().skip(start_line).enumerate() {
+        check_parser_iteration(iteration, check)?;
         let line = raw_line.trim();
         if line == "[[package]]" {
             in_package = true;
@@ -372,21 +465,26 @@ fn cargo_lock_name_line(content: &str, package_name: &str, start_line: usize) ->
             && key.trim() == "name"
             && value.trim().trim_matches('"') == package_name
         {
-            return Some(index + 1);
+            return Ok(Some(index + 1));
         }
     }
-    None
+    Ok(None)
 }
 
-/// Extract package, workspace, and dependencies from Cargo.toml.
-fn extract_cargo_toml_entries(graph: &mut SymbolGraph, content: &str) {
+/// Extract package, workspace, and dependencies from Cargo.toml with cooperative parser control.
+fn extract_cargo_toml_entries_checked<E>(
+    graph: &mut SymbolGraph,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
     let Ok(manifest) = content.parse::<TomlValue>() else {
-        return;
+        return Ok(());
     };
+    check()?;
     let Some(root) = manifest.as_table() else {
-        return;
+        return Ok(());
     };
-    let line_index = CargoTomlLineIndex::new(content);
+    let line_index = CargoTomlLineIndex::new_checked(content, check)?;
     if root.contains_key("workspace") {
         let line = line_index.section_line("workspace").unwrap_or(1);
         push_symbol(
@@ -415,19 +513,23 @@ fn extract_cargo_toml_entries(graph: &mut SymbolGraph, content: &str) {
             line_index.line_text(line).unwrap_or(name),
         );
     }
-    collect_cargo_dependencies(graph, &line_index, &[], root);
+    collect_cargo_dependencies_checked(graph, &line_index, &[], root, check)?;
+    Ok(())
 }
 
-/// Recursively collect dependency tables from parsed Cargo TOML.
-fn collect_cargo_dependencies(
+/// Recursively collect dependency tables from parsed Cargo TOML with cooperative control.
+fn collect_cargo_dependencies_checked<E>(
     graph: &mut SymbolGraph,
     line_index: &CargoTomlLineIndex,
     path: &[String],
     table: &toml::map::Map<String, TomlValue>,
-) {
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    check()?;
     let section = path.join(".");
     if is_dependency_table_path(path) {
-        for (name, value) in table {
+        for (iteration, (name, value)) in table.iter().enumerate() {
+            check_parser_iteration(iteration, check)?;
             let line = line_index
                 .key_line(&section, name)
                 .or_else(|| line_index.section_line(&section))
@@ -455,16 +557,18 @@ fn collect_cargo_dependencies(
                 detail,
             );
         }
-        return;
+        return Ok(());
     }
-    for (key, value) in table {
+    for (iteration, (key, value)) in table.iter().enumerate() {
+        check_parser_iteration(iteration, check)?;
         let Some(child) = value.as_table() else {
             continue;
         };
         let mut child_path = path.to_owned();
         child_path.push(key.clone());
-        collect_cargo_dependencies(graph, line_index, &child_path, child);
+        collect_cargo_dependencies_checked(graph, line_index, &child_path, child, check)?;
     }
+    Ok(())
 }
 
 /// Return whether a parsed TOML table path declares dependencies.
@@ -495,13 +599,17 @@ struct CargoTomlLineIndex<'a> {
 }
 
 impl<'a> CargoTomlLineIndex<'a> {
-    /// Build a line index for TOML source positions.
-    fn new(content: &'a str) -> Self {
+    /// Build a line index for TOML source positions with cooperative parser control.
+    fn new_checked<E>(
+        content: &'a str,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Self, E> {
         let lines = content.lines().collect::<Vec<_>>();
         let mut sections = std::collections::HashMap::new();
         let mut keys = std::collections::HashMap::new();
         let mut current_section = String::new();
         for (index, raw_line) in lines.iter().enumerate() {
+            check_parser_iteration(index, check)?;
             let line_number = index + 1;
             let line = raw_line.trim();
             if line.starts_with('[') && line.ends_with(']') {
@@ -517,11 +625,11 @@ impl<'a> CargoTomlLineIndex<'a> {
                 keys.insert((current_section.clone(), key), line_number);
             }
         }
-        Self {
+        Ok(Self {
             lines,
             sections,
             keys,
-        }
+        })
     }
 
     /// Return the source line for a section declaration.
@@ -575,24 +683,53 @@ struct TreeSitterParse {
 }
 
 /// Extract a graph through tree-sitter when the language has a grammar.
-fn extract_tree_sitter_graph(
+fn extract_tree_sitter_graph<E>(
     path: &str,
     language: Option<&str>,
     content: &str,
-) -> Option<TreeSitterParse> {
-    let language_name = language?;
-    let parser_language = tree_sitter_language(language_name)?;
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<TreeSitterParse>, E> {
+    let Some(language_name) = language else {
+        return Ok(None);
+    };
+    let Some(parser_language) = tree_sitter_language(language_name) else {
+        return Ok(None);
+    };
+    check()?;
     let mut parser = Parser::new();
     if parser.set_language(&parser_language).is_err() {
-        return None;
+        return Ok(None);
     }
-    let tree = parser.parse(content, None)?;
+    let mut parse_failure = None;
+    let mut progress = |_: &tree_sitter::ParseState| match check() {
+        Ok(()) => ControlFlow::Continue(()),
+        Err(error) => {
+            parse_failure = Some(error);
+            ControlFlow::Break(())
+        }
+    };
+    let bytes = content.as_bytes();
+    let mut read = |offset, _| bytes.get(offset..).unwrap_or_default();
+    let tree = parser.parse_with_options(
+        &mut read,
+        None,
+        Some(ParseOptions::new().progress_callback(&mut progress)),
+    );
+    if let Some(error) = parse_failure {
+        return Err(error);
+    }
+    check()?;
+    let Some(tree) = tree else {
+        return Ok(None);
+    };
     let mut graph = empty_graph(path, language, ParserKind::TreeSitter);
     let root = tree.root_node();
     let had_errors = root.has_error();
-    visit_node(root, content, &mut graph);
-    languages::augment_language_graph(&mut graph, content);
-    Some(TreeSitterParse { graph, had_errors })
+    visit_node(root, content, &mut graph, check)?;
+    check()?;
+    languages::augment_language_graph(&mut graph, content, check)?;
+    check()?;
+    Ok(Some(TreeSitterParse { graph, had_errors }))
 }
 
 /// Return a tree-sitter language for supported source families.
@@ -616,7 +753,13 @@ fn tree_sitter_language(language: &str) -> Option<Language> {
 }
 
 /// Recursively inspect one tree-sitter node.
-fn visit_node(node: Node<'_>, content: &str, graph: &mut SymbolGraph) {
+fn visit_node<E>(
+    node: Node<'_>,
+    content: &str,
+    graph: &mut SymbolGraph,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    check()?;
     if graph.symbols.len() < MAX_SYMBOLS_PER_FILE
         && let Some(kind) = declaration_kind(node.kind())
         && should_emit_declaration_symbol(node, content)
@@ -632,8 +775,9 @@ fn visit_node(node: Node<'_>, content: &str, graph: &mut SymbolGraph) {
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        visit_node(child, content, graph);
+        visit_node(child, content, graph, check)?;
     }
+    Ok(())
 }
 
 /// Refine a declaration kind using surrounding syntax context.
@@ -1504,10 +1648,28 @@ fn node_text(node: Node<'_>, content: &str) -> Option<String> {
 }
 
 /// Extract symbols through conservative declaration regexes.
+#[cfg(test)]
 fn extract_fallback_graph(path: &str, language: Option<&str>, content: &str) -> SymbolGraph {
+    match extract_fallback_graph_checked(path, language, content, &mut || Ok::<(), Infallible>(()))
+    {
+        Ok(graph) => graph,
+        Err(unreachable) => match unreachable {},
+    }
+}
+
+/// Extract fallback symbols while observing cooperative parser control.
+fn extract_fallback_graph_checked<E>(
+    path: &str,
+    language: Option<&str>,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<SymbolGraph, E> {
+    check()?;
     let mut graph = empty_graph(path, language, ParserKind::Fallback);
     let patterns = fallback_patterns();
+    check()?;
     for (line_index, line) in content.lines().enumerate() {
+        check_parser_iteration(line_index, check)?;
         let trimmed = line.trim();
         for pattern in &patterns {
             if let Some(capture) = pattern.regex.captures(trimmed)
@@ -1537,8 +1699,10 @@ fn extract_fallback_graph(path: &str, language: Option<&str>, content: &str) -> 
             );
         }
     }
-    languages::augment_fallback_language_graph(&mut graph, content);
-    graph
+    check()?;
+    languages::augment_fallback_language_graph(&mut graph, content, check)?;
+    check()?;
+    Ok(graph)
 }
 
 /// Regex plus mapped symbol kind for fallback extraction.
@@ -1775,9 +1939,145 @@ fn is_snippet_boundary(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_SYMBOLS_PER_FILE, extract_fallback_graph, extract_symbol_graph, specialized_languages,
+        MAX_SYMBOLS_PER_FILE, empty_graph, extract_cargo_manifest_graph_checked,
+        extract_fallback_graph, extract_fallback_graph_checked, extract_powershell_graph_checked,
+        extract_symbol_graph, extract_symbol_graph_checked, extract_symbol_graph_controlled,
+        extract_vue_sfc_graph_checked, languages, specialized_languages,
     };
     use projectatlas_core::symbols::{ParserKind, RelationKind, SymbolKind};
+    use projectatlas_core::{
+        IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
+    };
+
+    #[test]
+    fn controlled_extraction_consumes_cancellation_and_preserves_compatibility() {
+        let fixtures = [
+            (
+                "src/lib.rs",
+                Some("rust"),
+                "pub struct Atlas;\nimpl Atlas { pub fn scan(&self) {} }\n",
+            ),
+            (
+                "Cargo.toml",
+                Some("cargo-manifest"),
+                "[package]\nname = \"atlas\"\n[dependencies]\nserde = \"1\"\n",
+            ),
+            (
+                "Cargo.lock",
+                Some("cargo-lock"),
+                "[[package]]\nname = \"atlas\"\nversion = \"0.1.0\"\n",
+            ),
+            (
+                "src/App.vue",
+                Some("vue"),
+                "const props = defineProps<{ id: string }>()\n",
+            ),
+            (
+                "scripts/Invoke-Atlas.ps1",
+                Some("powershell"),
+                "function Invoke-Atlas { return 1 }\n",
+            ),
+            (
+                "config/atlas.txt",
+                Some("text"),
+                "function fallbackOnly() {}\n",
+            ),
+            (
+                "src/Atlas.kt",
+                Some("kotlin"),
+                "package atlas\nclass Atlas {\nfun scan() {}\n}\n",
+            ),
+            ("build.gradle", Some("groovy"), "tasks.register('atlas')\n"),
+        ];
+        for &(path, language, source) in &fixtures {
+            let expected = extract_symbol_graph(path, language, source);
+            let active = IndexWorkControl::new(IndexCancellation::new(), None);
+            assert_eq!(
+                extract_symbol_graph_controlled(path, language, source, &active),
+                Ok(expected),
+                "controlled extraction changed compatibility output for {path}"
+            );
+        }
+
+        let cancellation = IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), None);
+        let mut checkpoints = 0;
+        let cancelled =
+            extract_symbol_graph_checked("src/lib.rs", Some("rust"), fixtures[0].2, &mut || {
+                checkpoints += 1;
+                if checkpoints == 3 {
+                    cancellation.cancel();
+                }
+                control.check(IndexWorkStage::SymbolParsing)
+            });
+        assert_eq!(
+            cancelled,
+            Err(IndexWorkFailure::Cancelled {
+                stage: IndexWorkStage::SymbolParsing,
+            })
+        );
+        assert_eq!(checkpoints, 3);
+
+        macro_rules! assert_parser_cancels_at {
+            ($label:expr, $checkpoint:expr, $run:expr) => {{
+                let cancellation = IndexCancellation::new();
+                let control = IndexWorkControl::new(cancellation.clone(), None);
+                let mut checkpoints = 0;
+                let mut check = || {
+                    checkpoints += 1;
+                    if checkpoints == $checkpoint {
+                        cancellation.cancel();
+                    }
+                    control.check(IndexWorkStage::SymbolParsing)
+                };
+                let cancelled = ($run)(&mut check);
+                assert_eq!(
+                    cancelled,
+                    Err(IndexWorkFailure::Cancelled {
+                        stage: IndexWorkStage::SymbolParsing,
+                    }),
+                    "{} did not observe cancellation inside its owned parser loop",
+                    $label
+                );
+                assert_eq!(
+                    checkpoints, $checkpoint,
+                    "unexpected parser checkpoint path for {}",
+                    $label
+                );
+            }};
+        }
+
+        assert_parser_cancels_at!("Cargo manifest", 3, |check| {
+            extract_cargo_manifest_graph_checked(fixtures[1].0, fixtures[1].1, fixtures[1].2, check)
+        });
+        assert_parser_cancels_at!("fallback", 3, |check| {
+            extract_fallback_graph_checked(fixtures[5].0, fixtures[5].1, fixtures[5].2, check)
+        });
+        assert_parser_cancels_at!("Vue structural adapter", 8, |check| {
+            extract_vue_sfc_graph_checked(fixtures[3].0, fixtures[3].1, fixtures[3].2, check)
+        });
+        assert_parser_cancels_at!("PowerShell structural adapter", 8, |check| {
+            extract_powershell_graph_checked(fixtures[4].0, fixtures[4].1, fixtures[4].2, check)
+        });
+
+        let mut native_augmentation =
+            empty_graph(fixtures[6].0, fixtures[6].1, ParserKind::TreeSitter);
+        assert_parser_cancels_at!("native language augmentation", 3, |check| {
+            languages::augment_language_graph(&mut native_augmentation, fixtures[6].2, check)
+                .map(|()| native_augmentation.clone())
+        });
+
+        let mut fallback_augmentation =
+            empty_graph(fixtures[7].0, fixtures[7].1, ParserKind::Fallback);
+        assert_parser_cancels_at!("fallback language augmentation", 4, |check| {
+            languages::augment_fallback_language_graph(
+                &mut fallback_augmentation,
+                fixtures[7].2,
+                check,
+            )
+            .map(|()| fallback_augmentation.clone())
+        });
+    }
 
     #[test]
     fn extracts_rust_symbols_and_calls() {

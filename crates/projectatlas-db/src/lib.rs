@@ -840,10 +840,10 @@ impl AtlasStore {
     /// # Errors
     ///
     /// Returns an error if persistence fails.
-    pub fn replace_file_texts_for_paths(
+    pub fn replace_file_texts_for_paths<'text>(
         &mut self,
         paths: &[String],
-        texts: &[IndexedFileText],
+        texts: impl IntoIterator<Item = &'text IndexedFileText>,
     ) -> DbResult<()> {
         let savepoint = self.connection.savepoint()?;
         for path in paths {

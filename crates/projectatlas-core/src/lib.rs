@@ -2,11 +2,16 @@
 
 pub mod graph;
 pub mod health;
+pub mod index_work;
 pub mod language;
 pub mod outline;
 pub mod symbols;
 pub mod telemetry;
 pub mod toon;
+
+pub use index_work::{
+    IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkResource, IndexWorkStage,
+};
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

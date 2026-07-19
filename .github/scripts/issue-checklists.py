@@ -9,6 +9,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 
 UNORDERED_LIST_MARKER_RE = r"[-*+]"
@@ -20,6 +21,11 @@ HEADING_RE = re.compile(r"(?m)^(#{1,6})\s+(.+?)\s*$")
 TASK_SECTION_HEADING_RE = re.compile(r"^(\d+(?:\.\d+)*)\.\s+")
 HTML_COMMENT_RE = re.compile(r"(?s)<!--.*?(?:-->|$)")
 FENCE_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
+MARKDOWN_LINK_RE = re.compile(
+    r"\[(?:[^\[\]\n]|\[[^\[\]\n]*\])+\]"
+    r"\(\s*<?([^)>\s]+)>?"
+    r"(?:\s+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^\)\n]*\)))?\s*\)"
+)
 MITIGATION_RE = re.compile(
     rf"(?mi)^[ ]{{0,3}}{UNORDERED_LIST_MARKER_RE}\s+\[([ xX])\]\s+(.+?)\s+"
     r"\(OpenSpec tasks:\s*(\d+(?:\.\d+)*(?:\s*,\s*\d+(?:\.\d+)*)*)\)\s*$"
@@ -28,6 +34,7 @@ REQUIRED_OPEN_ISSUE_HEADINGS = (
     "why",
     "what changes",
     "capabilities",
+    "architecture diagrams",
     "release scope",
     "non-goals",
     "pre-mortem",
@@ -303,8 +310,83 @@ def heading_section(
     return text[heading.end() : end].strip()
 
 
+def architecture_diagram_link_failures(section: str, repo: str, root: Path) -> list[str]:
+    """Validate durable local architecture-document links for one issue section."""
+
+    matches = list(MARKDOWN_LINK_RE.finditer(section))
+    urls = [match.group(1) for match in matches]
+    if not urls:
+        return [
+            "'architecture diagrams' section must contain at least one Markdown HTTPS link"
+        ]
+    expected_owner, expected_repo = repo_parts(repo)
+    docs_root = (root / "docs").resolve()
+    failures: list[str] = []
+    if "](" in MARKDOWN_LINK_RE.sub("", section):
+        failures.append(
+            "'architecture diagrams' section contains an unsupported or malformed inline Markdown link"
+        )
+    for url in urls:
+        parsed = urlsplit(url)
+        segments = [unquote(segment) for segment in parsed.path.split("/") if segment]
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc.casefold() != "github.com"
+            or parsed.query
+            or len(segments) < 6
+            or segments[0].casefold() != expected_owner.casefold()
+            or segments[1].casefold() != expected_repo.casefold()
+        ):
+            failures.append(
+                f"architecture diagram link {url!r} must target repository {repo!r} over HTTPS"
+            )
+            continue
+        if segments[2:5] != ["blob", "dev", "docs"]:
+            failures.append(
+                f"architecture diagram link {url!r} must use /blob/dev/docs/"
+            )
+            continue
+        relative_parts = segments[5:]
+        if any(
+            part in {".", ".."}
+            or "/" in part
+            or "\\" in part
+            or ":" in part
+            for part in relative_parts
+        ):
+            failures.append(
+                f"architecture diagram link {url!r} contains an unsafe documentation path"
+            )
+            continue
+        if len(relative_parts) != 1:
+            failures.append(
+                f"architecture diagram link {url!r} must target one direct document under /blob/dev/docs/"
+            )
+            continue
+        candidate = docs_root.joinpath(*relative_parts).resolve()
+        try:
+            candidate.relative_to(docs_root)
+        except ValueError:
+            failures.append(
+                f"architecture diagram link {url!r} escapes the local docs directory"
+            )
+            continue
+        if candidate.suffix.casefold() != ".md":
+            failures.append(
+                f"architecture diagram link {url!r} must target a Markdown document"
+            )
+        elif not candidate.is_file():
+            failures.append(
+                f"architecture diagram link {url!r} has no matching local documentation file"
+            )
+    return failures
+
+
 def issue_contract_failures(
-    issue: dict[str, object], expected_tasks: list[tuple[bool, str]]
+    issue: dict[str, object],
+    expected_tasks: list[tuple[bool, str]],
+    repo: str,
+    root: Path,
 ) -> list[str]:
     """Validate the concise #305 issue shape for open mapped work."""
 
@@ -340,6 +422,17 @@ def issue_contract_failures(
         positions
     ):
         failures.append("required issue sections must follow the #305 order")
+
+    architecture_indexes = [
+        index for index, value in enumerate(normalized) if value == "architecture diagrams"
+    ]
+    if len(architecture_indexes) == 1:
+        architecture_section = heading_section(
+            visible_body, headings, architecture_indexes[0]
+        )
+        failures.extend(
+            architecture_diagram_link_failures(architecture_section, repo, root)
+        )
 
     premortem_indexes = [
         index for index, value in enumerate(normalized) if value == "pre-mortem"
@@ -468,7 +561,7 @@ def check_openspec_tasks(
                     f"#{owner.issue} does not exactly mirror {path}: "
                     f"{first_task_difference(expected, remote)}"
                 )
-            for failure in issue_contract_failures(issue, expected):
+            for failure in issue_contract_failures(issue, expected, repo, root):
                 failures.append(f"#{owner.issue} issue contract {failure}")
             if issue.get("state") == "CLOSED" and any(
                 not checked for checked, _ in remote
@@ -638,6 +731,8 @@ Explain the need.
 Describe the change.
 ## Capabilities
 Name the capability.
+## Architecture Diagrams
+- [System architecture](https://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)
 ## Release Scope
 Target the release.
 ## Non-Goals
@@ -653,23 +748,26 @@ Mitigations:
 ## 2. Implementation
 - [ ] 2.1 Same-level task subsection
 """
-    assert issue_contract_failures(
-        {"state": "OPEN", "body": issue_contract}, expected
-    ) == []
+    self_test_root = Path(__file__).resolve().parents[2]
+
+    def contract_failures(
+        issue: dict[str, object], tasks: list[tuple[bool, str]]
+    ) -> list[str]:
+        return issue_contract_failures(issue, tasks, "owner/repo", self_test_root)
+
+    assert contract_failures({"state": "OPEN", "body": issue_contract}, expected) == []
     plus_marker_contract = issue_contract.replace(
         "- [ ] Keep the contract synchronized.",
         "+ [ ] Keep the contract synchronized.",
     )
-    assert issue_contract_failures(
-        {"state": "OPEN", "body": plus_marker_contract}, expected
-    ) == []
+    assert contract_failures({"state": "OPEN", "body": plus_marker_contract}, expected) == []
     unbound_plus_mitigation = issue_contract.replace(
         "## OpenSpec Tasks",
         "+ [ ] Unbound mitigation\n## OpenSpec Tasks",
     )
     assert any(
         "every pre-mortem mitigation checkbox" in failure
-        for failure in issue_contract_failures(
+        for failure in contract_failures(
             {"state": "OPEN", "body": unbound_plus_mitigation}, expected
         )
     )
@@ -679,9 +777,7 @@ Mitigations:
     )
     assert any(
         "must be unchecked" in failure
-        for failure in issue_contract_failures(
-            {"state": "OPEN", "body": premature}, expected
-        )
+        for failure in contract_failures({"state": "OPEN", "body": premature}, expected)
     )
     completed_contract = issue_contract.replace(
         "- [ ] Keep the contract synchronized.",
@@ -690,29 +786,132 @@ Mitigations:
         "- [ ] 2.1 Same-level task subsection",
         "- [x] 2.1 Same-level task subsection",
     )
-    assert issue_contract_failures(
+    assert contract_failures(
         {"state": "OPEN", "body": completed_contract},
         [(True, "1.1 Anchored task"), (True, "2.1 Same-level task subsection")],
     ) == []
     missing_scope = issue_contract.replace("## Release Scope", "## Delivery")
     assert any(
         "'release scope'" in failure
-        for failure in issue_contract_failures(
-            {"state": "OPEN", "body": missing_scope}, expected
-        )
+        for failure in contract_failures({"state": "OPEN", "body": missing_scope}, expected)
     )
     unknown_task = issue_contract.replace(
         "(OpenSpec tasks: 2.1)", "(OpenSpec tasks: 9.9)"
     )
     assert any(
         "unknown or foreign" in failure
-        for failure in issue_contract_failures(
-            {"state": "OPEN", "body": unknown_task}, expected
+        for failure in contract_failures({"state": "OPEN", "body": unknown_task}, expected)
+    )
+    assert contract_failures({"state": "CLOSED", "body": ""}, expected) == []
+    missing_architecture_link = issue_contract.replace(
+        "- [System architecture](https://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)",
+        "Architecture will be documented later.",
+    )
+    assert any(
+        "at least one Markdown HTTPS link" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": missing_architecture_link}, expected
         )
     )
-    assert issue_contract_failures(
-        {"state": "CLOSED", "body": ""}, expected
-    ) == []
+    for invalid_link in (
+        "[Relative architecture](../AGENTS.md)",
+        '[Titled relative architecture](../AGENTS.md "local copy")',
+        "[Insecure architecture](http://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md)",
+        "[Mail architecture](mailto:architecture@example.com)",
+        "[Nested [architecture]](../AGENTS.md)",
+    ):
+        mixed_architecture_links = issue_contract.replace(
+            "## Release Scope", f"{invalid_link}\n## Release Scope"
+        )
+        assert any(
+            "must target repository" in failure
+            for failure in contract_failures(
+                {"state": "OPEN", "body": mixed_architecture_links}, expected
+            )
+        )
+    foreign_architecture = issue_contract.replace("owner/repo", "other/repo")
+    assert any(
+        "must target repository" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": foreign_architecture}, expected
+        )
+    )
+    sha_architecture = issue_contract.replace(
+        "/blob/dev/", "/blob/0123456789abcdef0123456789abcdef01234567/"
+    )
+    assert any(
+        "must use /blob/dev/docs/" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": sha_architecture}, expected
+        )
+    )
+    traversing_architecture = issue_contract.replace(
+        "docs/projectatlas-3-architecture.md", "docs/../AGENTS.md"
+    )
+    assert any(
+        "unsafe documentation path" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": traversing_architecture}, expected
+        )
+    )
+    non_markdown_architecture = issue_contract.replace(
+        "projectatlas-3-architecture.md", "projectatlas-3-architecture.png"
+    )
+    assert any(
+        "must target a Markdown document" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": non_markdown_architecture}, expected
+        )
+    )
+    nested_architecture = issue_contract.replace(
+        "docs/projectatlas-3-architecture.md",
+        "docs/benchmarks/large-application-token-savings.md",
+    )
+    assert any(
+        "one direct document" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": nested_architecture}, expected
+        )
+    )
+    missing_architecture = issue_contract.replace(
+        "projectatlas-3-architecture.md", "missing-architecture.md"
+    )
+    assert any(
+        "no matching local documentation file" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": missing_architecture}, expected
+        )
+    )
+    duplicate_architecture = issue_contract.replace(
+        "## Release Scope",
+        "## Architecture Diagrams\n- [Second view](https://github.com/owner/repo/blob/dev/docs/agent-navigation.md#initial-task-discovery)\n## Release Scope",
+    )
+    assert any(
+        "exactly one visible non-empty 'architecture diagrams' section" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": duplicate_architecture}, expected
+        )
+    )
+    empty_architecture = issue_contract.replace(
+        "## Architecture Diagrams\n- [System architecture](https://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)\n",
+        "## Architecture Diagrams\n",
+    )
+    assert any(
+        "'architecture diagrams' section must not be empty" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": empty_architecture}, expected
+        )
+    )
+    wrong_architecture_order = issue_contract.replace(
+        "## Capabilities\nName the capability.\n## Architecture Diagrams\n- [System architecture](https://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)\n",
+        "## Architecture Diagrams\n- [System architecture](https://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)\n## Capabilities\nName the capability.\n",
+    )
+    assert any(
+        "required issue sections must follow the #305 order" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": wrong_architecture_order}, expected
+        )
+    )
     hidden_issue = """
 ```md
 ## OpenSpec Tasks

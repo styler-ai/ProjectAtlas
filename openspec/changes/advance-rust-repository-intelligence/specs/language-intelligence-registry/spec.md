@@ -16,9 +16,15 @@ One versioned registry SHALL generate language identifiers, aliases, detection p
 
 Generated selection SHALL preserve current exact-filename, compound-extension, extension, content/dialect, and explicit-override behavior before new modes are enabled. Built-in parsers remain closed compile-time choices. Fallback parsing SHALL be identified honestly and SHALL NOT be presented as grammar-backed symbol support.
 
+For every accepted embedded-language capability, extraction SHALL be bounded and SHALL reconcile embedded byte, line, and source spans back to the host file. The registry SHALL identify the host/embedded pairing and its natural fixtures; malformed or truncated embedded content SHALL return honest partial coverage rather than host-relative fabricated spans.
+
 #### Scenario: Existing fixture is rescanned
 - **WHEN** registry-driven selection replaces hand-maintained selection
 - **THEN** every current fixture selects the same effective built-in parser and compatible output
+
+#### Scenario: Component host contains an embedded language
+- **WHEN** a supported template or component file contains an accepted embedded-language region
+- **THEN** definitions and relationships use exact reusable host-file spans and bounded partial coverage is reported when reconciliation is incomplete
 
 ### Requirement: Accepted Language Capability Cannot Shrink Silently
 

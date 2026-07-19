@@ -1648,6 +1648,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "remote != expected",
         "milestone_mapping_failures",
         "REQUIRED_OPEN_ISSUE_HEADINGS",
+        "architecture_diagram_link_failures",
         "MITIGATION_RE",
         "issue_contract_failures",
     ] {
@@ -1667,6 +1668,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "label: Why",
         "label: What Changes",
         "label: Capabilities",
+        "label: Architecture Diagrams",
+        "blob/dev/docs/",
         "label: Release Scope",
         "label: Acceptance criteria",
         "label: Non-Goals",
@@ -1688,6 +1691,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
     for required in [
         "Pre-Mortem",
+        "Architecture Diagrams",
+        "dev/docs/*.md",
         "OpenSpec tasks:",
         "commit/SHA permalink evidence",
     ] {
@@ -9959,7 +9964,7 @@ fn search_and_symbol_slice_are_bounded_and_identity_safe() -> Result<(), Box<dyn
 }
 
 #[test]
-fn skipped_symbol_builds_invalidate_stale_symbols() -> Result<(), Box<dyn Error>> {
+fn skipped_and_failed_symbol_builds_keep_a_consistent_projection() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
@@ -10024,6 +10029,9 @@ fn skipped_symbol_builds_invalidate_stale_symbols() -> Result<(), Box<dyn Error>
         .args(["scan", "."])
         .assert()
         .success();
+    let timeout_publication = AtlasStore::open_read_only(&db)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("pre-timeout publication missing"))?;
 
     fs::write(&source, "pub fn new_timeout_symbol() {}\n")?;
     Command::cargo_bin("projectatlas")?
@@ -10032,18 +10040,26 @@ fn skipped_symbol_builds_invalidate_stale_symbols() -> Result<(), Box<dyn Error>
         .arg(&db)
         .args(["watch", ".", "--once", "--timeout-seconds", "0"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("timed_out: 1"));
+        .failure()
+        .stderr(predicate::str::contains("index work deadline was reached"));
 
-    Command::cargo_bin("projectatlas")?
-        .current_dir(&repo)
-        .arg("--db")
-        .arg(&db)
-        .args(["symbols", "list", "--file", "src/main.rs"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("old_timeout_symbol").not())
-        .stdout(predicate::str::contains("new_timeout_symbol").not());
+    let retained = AtlasStore::open_read_only(&db)?;
+    let retained_publication = retained
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("retained publication missing"))?;
+    if retained_publication.generation != timeout_publication.generation {
+        return Err(io::Error::other("timed-out refresh advanced the generation").into());
+    }
+    let retained_symbols = retained.load_symbols(Some("src/main.rs"), None, 10)?;
+    if !retained_symbols
+        .iter()
+        .any(|symbol| symbol.name == "old_timeout_symbol")
+        || retained_symbols
+            .iter()
+            .any(|symbol| symbol.name == "new_timeout_symbol")
+    {
+        return Err(io::Error::other("timed-out refresh replaced the last-valid symbols").into());
+    }
 
     Ok(())
 }
