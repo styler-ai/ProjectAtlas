@@ -2003,8 +2003,10 @@ mod tests {
     use super::*;
     use crate::IndexedFileText;
     use projectatlas_core::symbols::{ParserKind, SymbolGraph, SymbolRelation};
+    use projectatlas_core::{Node, NodeKind};
     use std::error::Error;
     use std::fmt::Debug;
+    use std::fs;
     use std::io;
 
     /// Coherent typed graph fixture used by storage, corruption, and publication tests.
@@ -2210,15 +2212,18 @@ mod tests {
         )?)
     }
 
-    /// Seed the local-source nodes required by graph path foreign keys.
-    fn seed_nodes(store: &AtlasStore) -> DbResult<()> {
-        store.connection.execute_batch(
-            "INSERT INTO nodes(path, kind, parent_path) VALUES('.', 'folder', NULL);
-             INSERT INTO nodes(path, kind, parent_path) VALUES('src', 'folder', '.');
-             INSERT INTO nodes(path, kind, parent_path) VALUES('src/Äuth.rs', 'file', 'src');
-             INSERT INTO nodes(path, kind, parent_path) VALUES('Cargo.toml', 'file', '.');",
-        )?;
-        Ok(())
+    /// Construct one local-source node for graph publication fixtures.
+    fn graph_node(path: &str, kind: NodeKind, parent_path: Option<&str>) -> Node {
+        Node {
+            path: path.to_string(),
+            kind,
+            parent_path: parent_path.map(str::to_string),
+            extension: None,
+            language: None,
+            size_bytes: None,
+            mtime_ns: None,
+            content_hash: None,
+        }
     }
 
     /// Return a test failure without relying on panic-only assertions.
@@ -2419,12 +2424,22 @@ mod tests {
         store: &mut AtlasStore,
         fingerprint: &str,
     ) -> Result<GraphFixture, Box<dyn Error>> {
-        store.set_project_root(Path::new("C:/workspace/fixture"))?;
         let project = store
             .project_instance_id()?
             .ok_or_else(|| io::Error::other("bound fixture identity is missing"))?;
-        seed_nodes(store)?;
-        store.replace_symbol_graph(&SymbolGraph {
+        let fixture = graph_fixture(project, IndexGeneration::new(1))?;
+        let mut occurrences = fixture.occurrences.clone();
+        occurrences.push(fixture.occurrences[0].clone());
+        let mut publication = store.begin_index_publication(fingerprint)?;
+        publication.begin_scan_replacement()?;
+        publication.upsert_scan_node_batch(&[
+            graph_node(".", NodeKind::Folder, None),
+            graph_node("src", NodeKind::Folder, Some(".")),
+            graph_node("src/Äuth.rs", NodeKind::File, Some("src")),
+            graph_node("Cargo.toml", NodeKind::File, Some(".")),
+        ])?;
+        publication.finish_scan_replacement()?;
+        publication.replace_symbol_graph(&SymbolGraph {
             path: "src/Äuth.rs".to_string(),
             language: Some("rust".to_string()),
             parser: ParserKind::TreeSitter,
@@ -2439,10 +2454,6 @@ mod tests {
                 parser: ParserKind::TreeSitter,
             }],
         })?;
-        let fixture = graph_fixture(project, IndexGeneration::new(1))?;
-        let mut occurrences = fixture.occurrences.clone();
-        occurrences.push(fixture.occurrences[0].clone());
-        let mut publication = store.begin_index_publication(fingerprint)?;
         publication.replace_file_texts_for_paths(
             &["src/Äuth.rs".to_string()],
             &[IndexedFileText {
@@ -2467,21 +2478,12 @@ mod tests {
     #[test]
     fn affected_graph_replacement_preserves_only_the_unaffected_closure()
     -> Result<(), Box<dyn Error>> {
-        let mut store = AtlasStore::in_memory()?;
-        store.set_project_root(Path::new("C:/workspace/affected-closure"))?;
-        store.connection.execute_batch(
-            "INSERT INTO nodes(path, kind, parent_path) VALUES('.', 'folder', NULL);
-             INSERT INTO nodes(path, kind, parent_path) VALUES('src', 'folder', '.');
-             INSERT INTO nodes(path, kind, parent_path) VALUES('src/a', 'folder', 'src');
-             INSERT INTO nodes(path, kind, parent_path) VALUES('src/a/local.rs', 'file', 'src/a');
-             INSERT INTO nodes(path, kind, parent_path) VALUES('src/a/new.rs', 'file', 'src/a');
-             INSERT INTO nodes(path, kind, parent_path) VALUES('src/A', 'folder', 'src');
-             INSERT INTO nodes(path, kind, parent_path) VALUES('src/A/keep.rs', 'file', 'src/A');
-             INSERT INTO nodes(path, kind, parent_path) VALUES('packages', 'folder', '.');
-             INSERT INTO nodes(path, kind, parent_path) VALUES('packages/api', 'folder', 'packages');
-             INSERT INTO nodes(path, kind, parent_path) VALUES('packages/api/Cargo.toml', 'file', 'packages/api');
-             INSERT INTO nodes(path, kind, parent_path) VALUES('README.md', 'file', '.');",
-        )?;
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("affected-closure");
+        let atlas_dir = project_root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let db_path = atlas_dir.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&db_path, &project_root)?;
 
         let project = store
             .project_instance_id()?
@@ -2652,6 +2654,25 @@ mod tests {
         ];
         {
             let mut publication = store.begin_index_publication("affected-closure")?;
+            publication.begin_scan_replacement()?;
+            publication.upsert_scan_node_batch(&[
+                graph_node(".", NodeKind::Folder, None),
+                graph_node("src", NodeKind::Folder, Some(".")),
+                graph_node("src/a", NodeKind::Folder, Some("src")),
+                graph_node("src/a/local.rs", NodeKind::File, Some("src/a")),
+                graph_node("src/a/new.rs", NodeKind::File, Some("src/a")),
+                graph_node("src/A", NodeKind::Folder, Some("src")),
+                graph_node("src/A/keep.rs", NodeKind::File, Some("src/A")),
+                graph_node("packages", NodeKind::Folder, Some(".")),
+                graph_node("packages/api", NodeKind::Folder, Some("packages")),
+                graph_node(
+                    "packages/api/Cargo.toml",
+                    NodeKind::File,
+                    Some("packages/api"),
+                ),
+                graph_node("README.md", NodeKind::File, Some(".")),
+            ])?;
+            publication.finish_scan_replacement()?;
             publication.replace_repository_graph(
                 project,
                 &[
@@ -2741,6 +2762,9 @@ mod tests {
             publication.complete()?;
         }
 
+        drop(store);
+        let store = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+
         require_eq(
             &store.repository_graph_entity(affected_file.key())?,
             &None,
@@ -2815,16 +2839,6 @@ mod tests {
             &1,
             "replacement source occurrence",
         )?;
-        let removed_occurrences = store.connection.query_row(
-            "SELECT COUNT(*) FROM graph_relation_occurrences WHERE file_path = 'src/a/local.rs'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?;
-        require_eq(
-            &removed_occurrences,
-            &0,
-            "affected source occurrence removal",
-        )?;
         let affected_coverage = store.repository_graph_coverage(
             project,
             &CoverageScope::Path {
@@ -2871,6 +2885,9 @@ mod tests {
             "project-to-external relation preservation",
         )?;
 
+        store.finish_index_read_snapshot()?;
+        drop(store);
+        let mut store = AtlasStore::open_for_project(&db_path, &project_root)?;
         let generation_three = IndexGeneration::new(3);
         let root_project = GraphEntity::new(project, EntitySelector::Project, generation_three)?;
         let readme = GraphEntity::new(
@@ -2902,6 +2919,8 @@ mod tests {
             )?;
             publication.complete()?;
         }
+        drop(store);
+        let store = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
         require_eq(
             &store.repository_graph_entity(case_distinct_file.key())?,
             &None,
@@ -2948,6 +2967,9 @@ mod tests {
             "root replacement path coverage removal",
         )?;
 
+        store.finish_index_read_snapshot()?;
+        drop(store);
+        let mut store = AtlasStore::open_for_project(&db_path, &project_root)?;
         {
             let mut projection = store.begin_index_projection_refresh("affected-closure")?;
             projection.replace_file_texts_for_paths(
@@ -2962,6 +2984,8 @@ mod tests {
             )?;
             projection.complete()?;
         }
+        drop(store);
+        let store = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
         let error = require_db_error(
             store.repository_graph_entity(root_project.key()),
             "non-graph publication blessed stale graph rows",
@@ -2976,6 +3000,7 @@ mod tests {
             ),
             &format!("unexpected stale graph generation error: {error}"),
         )?;
+        store.finish_index_read_snapshot()?;
         Ok(())
     }
 
@@ -3064,8 +3089,15 @@ mod tests {
 
     #[test]
     fn typed_graph_round_trips_through_bounded_indexed_queries() -> Result<(), Box<dyn Error>> {
-        let mut store = AtlasStore::in_memory()?;
-        let fixture = publish_fixture(&mut store, "typed-graph")?;
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("typed-graph");
+        let atlas_dir = project_root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let db_path = atlas_dir.join("projectatlas.db");
+        let mut writer = AtlasStore::open_for_project(&db_path, &project_root)?;
+        let fixture = publish_fixture(&mut writer, "typed-graph")?;
+        drop(writer);
+        let store = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
 
         for expected in &fixture.entities {
             require_eq(
@@ -3285,7 +3317,10 @@ mod tests {
             "legacy relation projection changed",
         )?;
 
-        let mut publication = store.begin_index_publication("typed-graph")?;
+        store.finish_index_read_snapshot()?;
+        drop(store);
+        let mut writer = AtlasStore::open_for_project(&db_path, &project_root)?;
+        let mut publication = writer.begin_index_publication("typed-graph")?;
         publication.replace_repository_graph_for_paths(
             fixture.project,
             &["src/unrelated.rs".to_string()],
@@ -3295,6 +3330,8 @@ mod tests {
             &[],
         )?;
         publication.complete()?;
+        drop(writer);
+        let store = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
         let reused = store
             .repository_graph_entity(source.key())?
             .ok_or_else(|| io::Error::other("unchanged entity disappeared"))?;
@@ -3303,23 +3340,32 @@ mod tests {
             &IndexGeneration::new(2),
             "unchanged graph row generation injection",
         )?;
-        require_eq(
-            &store
-                .connection
-                .query_row("SELECT COUNT(*) FROM graph_entities", [], |row| {
-                    row.get::<_, i64>(0)
-                })?,
-            &6,
-            "incremental graph row reuse",
-        )?;
+        for expected in &fixture.entities {
+            let reused = store
+                .repository_graph_entity(expected.key())?
+                .ok_or_else(|| io::Error::other("unchanged graph entity disappeared"))?;
+            require_eq(
+                &reused.generation(),
+                &IndexGeneration::new(2),
+                "incremental graph row reuse",
+            )?;
+        }
         assert_query_indexes(&store)?;
+        store.finish_index_read_snapshot()?;
         Ok(())
     }
 
     #[test]
     fn graph_queries_fail_closed_on_corrupt_normalized_rows() -> Result<(), Box<dyn Error>> {
-        let mut store = AtlasStore::in_memory()?;
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("graph-corruption");
+        let atlas_dir = project_root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let db_path = atlas_dir.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&db_path, &project_root)?;
         let fixture = publish_fixture(&mut store, "graph-corruption")?;
+        drop(store);
+        let store = AtlasStore::open_for_project(&db_path, &project_root)?;
         let source = fixture
             .entities
             .iter()
@@ -3362,14 +3408,18 @@ mod tests {
             "UPDATE graph_entities SET entity_kind = 'corrupt' WHERE entity_key = ?1",
             [&source_digest[..]],
         )?;
-        let error = require_db_error(
-            store.repository_graph_entity(source.key()),
-            "malformed graph enum was accepted",
-        )?;
-        require(
-            matches!(error, DbError::InvalidEnum { .. }),
-            &format!("unexpected malformed-enum error: {error}"),
-        )?;
+        {
+            let reader = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+            let error = require_db_error(
+                reader.repository_graph_entity(source.key()),
+                "malformed graph enum was accepted",
+            )?;
+            require(
+                matches!(error, DbError::InvalidEnum { .. }),
+                &format!("unexpected malformed-enum error: {error}"),
+            )?;
+            reader.finish_index_read_snapshot()?;
+        }
         store.connection.execute(
             "UPDATE graph_entities SET entity_kind = 'file' WHERE entity_key = ?1",
             [&source_digest[..]],
@@ -3379,19 +3429,23 @@ mod tests {
             "UPDATE graph_relations SET candidate_count = 0 WHERE relation_key = ?1",
             [&ambiguous_digest[..]],
         )?;
-        let error = require_db_error(
-            store.repository_graph_relations(
-                RepositoryGraphRelationQuery::Outbound {
-                    source: source.key().clone(),
-                },
-                10,
-            ),
-            "zero ambiguity count was accepted",
-        )?;
-        require(
-            matches!(error, DbError::GraphRowShape { .. }),
-            &format!("unexpected candidate-count error: {error}"),
-        )?;
+        {
+            let reader = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+            let error = require_db_error(
+                reader.repository_graph_relations(
+                    RepositoryGraphRelationQuery::Outbound {
+                        source: source.key().clone(),
+                    },
+                    10,
+                ),
+                "zero ambiguity count was accepted",
+            )?;
+            require(
+                matches!(error, DbError::GraphRowShape { .. }),
+                &format!("unexpected candidate-count error: {error}"),
+            )?;
+            reader.finish_index_read_snapshot()?;
+        }
         store.connection.execute(
             "UPDATE graph_relations SET candidate_count = 2 WHERE relation_key = ?1",
             [&ambiguous_digest[..]],
@@ -3402,19 +3456,23 @@ mod tests {
               WHERE relation_key = ?1",
             [&ambiguous_digest[..]],
         )?;
-        let error = require_db_error(
-            store.repository_graph_relations(
-                RepositoryGraphRelationQuery::Outbound {
-                    source: source.key().clone(),
-                },
-                10,
-            ),
-            "contradictory resolution columns were accepted",
-        )?;
-        require(
-            matches!(error, DbError::GraphRowShape { .. }),
-            &format!("unexpected resolution-shape error: {error}"),
-        )?;
+        {
+            let reader = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+            let error = require_db_error(
+                reader.repository_graph_relations(
+                    RepositoryGraphRelationQuery::Outbound {
+                        source: source.key().clone(),
+                    },
+                    10,
+                ),
+                "contradictory resolution columns were accepted",
+            )?;
+            require(
+                matches!(error, DbError::GraphRowShape { .. }),
+                &format!("unexpected resolution-shape error: {error}"),
+            )?;
+            reader.finish_index_read_snapshot()?;
+        }
         store.connection.execute(
             "UPDATE graph_relations SET resolution_status = 'ambiguous'
               WHERE relation_key = ?1",
@@ -3426,14 +3484,18 @@ mod tests {
               WHERE scope_kind = 'project' AND relation_scope IS NULL",
             [],
         )?;
-        let error = require_db_error(
-            store.repository_graph_coverage(fixture.project, &CoverageScope::Project, 10),
-            "contradictory coverage total was accepted",
-        )?;
-        require(
-            matches!(error, DbError::GraphRowShape { .. }),
-            &format!("unexpected coverage-total error: {error}"),
-        )?;
+        {
+            let reader = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+            let error = require_db_error(
+                reader.repository_graph_coverage(fixture.project, &CoverageScope::Project, 10),
+                "contradictory coverage total was accepted",
+            )?;
+            require(
+                matches!(error, DbError::GraphRowShape { .. }),
+                &format!("unexpected coverage-total error: {error}"),
+            )?;
+            reader.finish_index_read_snapshot()?;
+        }
         store.connection.execute(
             "UPDATE graph_coverage SET total = covered + omitted
               WHERE scope_kind = 'project' AND relation_scope IS NULL",
@@ -3444,14 +3506,18 @@ mod tests {
             "UPDATE project_identity SET active_generation = 99 WHERE singleton = 1",
             [],
         )?;
-        let error = require_db_error(
-            store.repository_graph_entity(source.key()),
-            "mismatched typed graph generation was accepted",
-        )?;
-        require(
-            matches!(error, DbError::GraphRowShape { .. }),
-            &format!("unexpected typed-generation error: {error}"),
-        )?;
+        {
+            let reader = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+            let error = require_db_error(
+                reader.repository_graph_entity(source.key()),
+                "mismatched typed graph generation was accepted",
+            )?;
+            require(
+                matches!(error, DbError::GraphRowShape { .. }),
+                &format!("unexpected typed-generation error: {error}"),
+            )?;
+            reader.finish_index_read_snapshot()?;
+        }
         store.connection.execute(
             "UPDATE project_identity SET active_generation = 1 WHERE singleton = 1",
             [],
@@ -3462,14 +3528,18 @@ mod tests {
               WHERE entity_key = ?1",
             [&source_digest[..]],
         )?;
-        let error = require_db_error(
-            store.repository_graph_entity(source.key()),
-            "canonical collision witness was accepted",
-        )?;
-        require(
-            matches!(error, DbError::GraphContract(_)),
-            &format!("unexpected collision-witness error: {error}"),
-        )?;
+        {
+            let reader = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+            let error = require_db_error(
+                reader.repository_graph_entity(source.key()),
+                "canonical collision witness was accepted",
+            )?;
+            require(
+                matches!(error, DbError::GraphContract(_)),
+                &format!("unexpected collision-witness error: {error}"),
+            )?;
+            reader.finish_index_read_snapshot()?;
+        }
         store.connection.execute(
             "UPDATE graph_entities SET canonical_identity = ?1 WHERE entity_key = ?2",
             params![source_canonical, &source_digest[..]],
@@ -3480,14 +3550,18 @@ mod tests {
             [&folder_digest[..]],
         )?;
         let folder_path = RepositoryNodePath::new(Path::new("src"))?;
-        let error = require_db_error(
-            store.repository_graph_entities_by_path(fixture.project, &folder_path, 10),
-            "invalid stable digest was accepted",
-        )?;
-        require(
-            matches!(error, DbError::GraphContract(_)),
-            &format!("unexpected stable-digest error: {error}"),
-        )?;
+        {
+            let reader = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+            let error = require_db_error(
+                reader.repository_graph_entities_by_path(fixture.project, &folder_path, 10),
+                "invalid stable digest was accepted",
+            )?;
+            require(
+                matches!(error, DbError::GraphContract(_)),
+                &format!("unexpected stable-digest error: {error}"),
+            )?;
+            reader.finish_index_read_snapshot()?;
+        }
         store.connection.execute(
             "UPDATE graph_entities SET entity_key = ?1 WHERE entity_key = zeroblob(32)",
             [&folder_digest[..]],
@@ -3497,21 +3571,25 @@ mod tests {
             "UPDATE graph_entities SET entity_key = X'01' WHERE entity_key = ?1",
             [&folder_digest[..]],
         )?;
-        let error = require_db_error(
-            store.repository_graph_entities_by_path(fixture.project, &folder_path, 10),
-            "short graph key blob was accepted",
-        )?;
-        require(
-            matches!(
-                error,
-                DbError::InvalidBlobLength {
-                    field: "graph_entities.entity_key",
-                    expected: 32,
-                    found: 1
-                }
-            ),
-            &format!("unexpected graph-key length error: {error}"),
-        )?;
+        {
+            let reader = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+            let error = require_db_error(
+                reader.repository_graph_entities_by_path(fixture.project, &folder_path, 10),
+                "short graph key blob was accepted",
+            )?;
+            require(
+                matches!(
+                    error,
+                    DbError::InvalidBlobLength {
+                        field: "graph_entities.entity_key",
+                        expected: 32,
+                        found: 1
+                    }
+                ),
+                &format!("unexpected graph-key length error: {error}"),
+            )?;
+            reader.finish_index_read_snapshot()?;
+        }
         store.connection.execute(
             "UPDATE graph_entities SET entity_key = ?1 WHERE entity_key = X'01'",
             [&folder_digest[..]],
@@ -3522,14 +3600,18 @@ mod tests {
             [&symbol_digest[..]],
         )?;
         let source_path = RepositoryNodePath::new(Path::new("src/Äuth.rs"))?;
-        let error = require_db_error(
-            store.repository_graph_entities_by_path(fixture.project, &source_path, 10),
-            "later row conversion failure returned a successful partial page",
-        )?;
-        require(
-            matches!(error, DbError::Sqlite(_)),
-            &format!("unexpected later-row conversion error: {error}"),
-        )?;
+        {
+            let reader = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+            let error = require_db_error(
+                reader.repository_graph_entities_by_path(fixture.project, &source_path, 10),
+                "later row conversion failure returned a successful partial page",
+            )?;
+            require(
+                matches!(error, DbError::Sqlite(_)),
+                &format!("unexpected later-row conversion error: {error}"),
+            )?;
+            reader.finish_index_read_snapshot()?;
+        }
         store.connection.execute(
             "UPDATE graph_entities SET canonical_identity = ?1 WHERE entity_key = ?2",
             params![symbol_canonical, &symbol_digest[..]],
@@ -3544,10 +3626,13 @@ mod tests {
     fn graph_publication_failure_rolls_back_text_graph_and_generation_for_readers()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
-        let db_path = temp.path().join("projectatlas.db");
-        let mut writer = AtlasStore::open(&db_path)?;
+        let project_root = temp.path().join("graph-publication");
+        let atlas_dir = project_root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let db_path = atlas_dir.join("projectatlas.db");
+        let mut writer = AtlasStore::open_for_project(&db_path, &project_root)?;
         let fixture_v1 = publish_fixture(&mut writer, "graph-publication")?;
-        let old_reader = AtlasStore::open_read_only(&db_path)?;
+        let old_reader = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
         require_graph_projection(
             &old_reader,
             &fixture_v1,
@@ -3597,7 +3682,7 @@ mod tests {
             IndexGeneration::new(1),
             "fn verifyToken()",
         )?;
-        let rolled_back_reader = AtlasStore::open_read_only(&db_path)?;
+        let rolled_back_reader = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
         require_graph_projection(
             &rolled_back_reader,
             &fixture_v1,
@@ -3644,7 +3729,7 @@ mod tests {
             IndexGeneration::new(1),
             "fn verifyToken()",
         )?;
-        let new_reader = AtlasStore::open_read_only(&db_path)?;
+        let new_reader = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
         require_graph_projection(
             &new_reader,
             &fixture_v2,

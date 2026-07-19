@@ -31,10 +31,12 @@ use crate::token_tui::{
     render_token_trend_dashboard_plain_with_theme,
 };
 use crate::{
-    CliError, DEFAULT_FILE_SUMMARY_LIMIT, HarnessConfig, OutputFormat, RootTransition,
-    RuntimeInfoReport, build_harness_mcp_config_report, build_parity_report, build_root_report,
-    build_runtime_info, render_code_slice, render_file_summary, render_parity_report,
-    render_root_report, render_runtime_info, render_search_report, render_watch_status,
+    AgentErrorKind, CliError, DEFAULT_FILE_SUMMARY_LIMIT, DatabaseFilesystemErrorPayload,
+    HarnessConfig, OutputFormat, RootTransition, RuntimeInfoReport,
+    build_harness_mcp_config_report, build_parity_report, build_root_report, build_runtime_info,
+    database_filesystem_error_payload, render_code_slice, render_file_summary,
+    render_parity_report, render_root_report, render_runtime_info, render_search_report,
+    render_watch_status,
 };
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
@@ -50,6 +52,7 @@ use projectatlas_core::{
 };
 use projectatlas_db::{
     AtlasStore, HealthQuery, HealthResolution, HealthScope, read_project_root_read_only,
+    verify_project_database,
 };
 use projectatlas_service::{
     SymbolSliceSelector, build_file_summary_from_source, read_indexed_code_slice_from_source,
@@ -1045,7 +1048,7 @@ struct McpErrorResponse {
 #[derive(Debug, Serialize)]
 struct McpErrorPayload {
     /// Stable machine-readable error kind.
-    kind: McpErrorKind,
+    kind: AgentErrorKind,
     /// Human-readable error and recovery guidance.
     message: String,
     /// Bounded local-source mismatch details when refresh is required.
@@ -1057,23 +1060,12 @@ struct McpErrorPayload {
     /// Project/index identity mismatch details.
     #[serde(skip_serializing_if = "Option::is_none")]
     project_mismatch: Option<IndexProjectMismatch>,
+    /// Content-free database placement details for a rejected `SQLite` profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    database_filesystem: Option<DatabaseFilesystemErrorPayload>,
     /// Reusable recovery call when refresh is required.
     #[serde(skip_serializing_if = "Option::is_none")]
     next: Option<McpRefreshNextCall>,
-}
-
-/// Stable MCP error categories.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum McpErrorKind {
-    /// General command, input, storage, or service failure.
-    Error,
-    /// Current saved local source differs from the durable index.
-    RefreshRequired,
-    /// Current saved local source could not be inspected completely.
-    VerificationIncomplete,
-    /// The selected project root does not own the opened index.
-    ProjectMismatch,
 }
 
 /// Direct recovery selector for a stale index.
@@ -2025,7 +2017,7 @@ impl ProjectAtlasMcpServer {
             summary_only: false,
             scope: HealthScope::all(),
         };
-        let page = store.unresolved_health_findings_page(&store.resolved_health_ids()?, &query)?;
+        let page = store.unresolved_health_findings_page_current(&query)?;
         let total = page.total;
         let returned = page.returned;
         Ok(McpBriefBlockers {
@@ -3253,11 +3245,18 @@ impl ProjectAtlasMcpServer {
 
     /// Encode an MCP error as a structured agent-readable payload.
     fn encode_error_payload(error: &CliError) -> String {
-        let (kind, refresh_required, verification_incomplete, project_mismatch, next) = match error
-        {
+        let (
+            kind,
+            refresh_required,
+            verification_incomplete,
+            project_mismatch,
+            database_filesystem,
+            next,
+        ) = match error {
             CliError::RefreshRequired(report) => (
-                McpErrorKind::RefreshRequired,
+                AgentErrorKind::RefreshRequired,
                 Some(report.as_ref().clone()),
+                None,
                 None,
                 None,
                 Some(McpRefreshNextCall {
@@ -3266,20 +3265,27 @@ impl ProjectAtlasMcpServer {
                 }),
             ),
             CliError::VerificationIncomplete(report) => (
-                McpErrorKind::VerificationIncomplete,
+                AgentErrorKind::VerificationIncomplete,
                 None,
                 Some(report.as_ref().clone()),
+                None,
                 None,
                 None,
             ),
             CliError::ProjectMismatch(report) => (
-                McpErrorKind::ProjectMismatch,
+                AgentErrorKind::ProjectMismatch,
                 None,
                 None,
                 Some(report.as_ref().clone()),
                 None,
+                None,
             ),
-            _ => (McpErrorKind::Error, None, None, None, None),
+            _ => database_filesystem_error_payload(error).map_or(
+                (AgentErrorKind::Error, None, None, None, None, None),
+                |(kind, database_filesystem)| {
+                    (kind, None, None, None, Some(database_filesystem), None)
+                },
+            ),
         };
         let payload = McpErrorResponse {
             error: McpErrorPayload {
@@ -3288,6 +3294,7 @@ impl ProjectAtlasMcpServer {
                 refresh_required,
                 verification_incomplete,
                 project_mismatch,
+                database_filesystem,
                 next,
             },
         };
@@ -3450,8 +3457,8 @@ impl ProjectAtlasMcpServer {
         Self::as_mcp_text((|| {
             let state = self.admin_project_root(params.project_path)?;
             let report = build_root_report(&state.db_path, state.config_path.as_deref())?;
-            if params.verify.unwrap_or(false) && !report.verified {
-                return Ok(render_root_report(&report));
+            if params.verify.unwrap_or(false) && report.verified {
+                verify_project_database(&state.db_path, Path::new(&report.root))?;
             }
             Ok(render_root_report(&report))
         })())
@@ -4089,8 +4096,7 @@ impl ProjectAtlasMcpServer {
                 HealthScope::all()
             };
             let query = health_query_from_params(&params, scope)?;
-            let page =
-                store.unresolved_health_findings_page(&store.resolved_health_ids()?, &query)?;
+            let page = store.unresolved_health_findings_page_current(&query)?;
             let toon = render_health_page(&page, &query);
             record_directory_walk_usage_estimate(
                 &store,
@@ -4539,6 +4545,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn mcp_database_filesystem_failures_are_typed_and_actionable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let error = CliError::Db(projectatlas_db::DbError::DatabaseFilesystemUnsupported {
+            path: PathBuf::from("project")
+                .join(".projectatlas")
+                .join("projectatlas.db"),
+            mount_point: Some(PathBuf::from("project")),
+            filesystem_type: Some("nfs".to_string()),
+        });
+        let payload = ProjectAtlasMcpServer::encode_error_payload(&error);
+        require(
+            payload.contains("kind: database_filesystem_unsupported")
+                && payload.contains("filesystem_type: nfs")
+                && payload.contains("supported local filesystem"),
+            "MCP TOON lost typed filesystem details or recovery guidance",
+        )
+    }
+
     /// Wait for one admitted task to reach a terminal state.
     fn wait_for_background_task(
         server: &ProjectAtlasMcpServer,
@@ -4583,6 +4608,58 @@ mod tests {
             .map(|record| record.task_id.clone())
             .ok_or_else(|| io::Error::other("background task was not admitted"))?;
         wait_for_background_task(server, &task_id)
+    }
+
+    /// Assert that persisted index work is visible through normal agent reads.
+    fn require_agent_index_reads(
+        server: &ProjectAtlasMcpServer,
+        project_path: &str,
+        expected_symbol: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let overview = server.atlas_overview(Parameters(AtlasProjectParams {
+            project_path: Some(project_path.to_string()),
+        }));
+        require(
+            overview.contains("overview:"),
+            "agent overview did not read the published index",
+        )?;
+
+        let summary = server.atlas_file_summary(Parameters(AtlasFileSummaryParams {
+            project_path: Some(project_path.to_string()),
+            file: "src/lib.rs".to_string(),
+            nearest_project: Some(false),
+            limit: Some(25),
+        }));
+        require(
+            summary.contains("file_summary:")
+                && summary.contains("src/lib.rs")
+                && summary.contains(expected_symbol),
+            "agent file summary omitted published source facts",
+        )?;
+
+        let symbols = server.atlas_symbols(Parameters(AtlasSymbolsParams {
+            project_path: Some(project_path.to_string()),
+            file: Some("src/lib.rs".to_string()),
+            nearest_project: Some(false),
+            query: None,
+            limit: Some(50),
+        }));
+        require(
+            symbols.contains("symbols[") && symbols.contains(expected_symbol),
+            "agent symbol read omitted published parser output",
+        )?;
+
+        let relations = server.atlas_symbol_relations(Parameters(AtlasSymbolsParams {
+            project_path: Some(project_path.to_string()),
+            file: Some("src/lib.rs".to_string()),
+            nearest_project: Some(false),
+            query: None,
+            limit: Some(50),
+        }));
+        require(
+            relations.contains("relations[") && relations.contains(expected_symbol),
+            "agent relation read omitted published graph output",
+        )
     }
 
     #[test]
@@ -5287,30 +5364,12 @@ mod tests {
                     .unwrap_or("background task failed"),
             )?;
 
-            let store = open_atlas_store_for_project(&db_path, &repo)?;
-            match operation {
-                McpTaskOperation::Scan => {
-                    require(
-                        store.load_node_by_path("src/lib.rs")?.is_some()
-                            && store.load_file_text("src/lib.rs")?.is_some(),
-                        "background scan omitted indexed source state",
-                    )?;
-                }
-                McpTaskOperation::SymbolsBuild => require(
-                    store.symbol_count_for_path("src/lib.rs")? > 0,
-                    "background symbol build omitted parser output",
-                )?,
-                McpTaskOperation::WatchOnce => {
-                    require(
-                        store
-                            .load_file_text("src/lib.rs")?
-                            .is_some_and(|row| row.content.contains("third"))
-                            && store.load_symbol_by_name("src/lib.rs", "third")?.is_some(),
-                        "background watcher omitted changed source and symbols",
-                    )?;
-                }
+            let expected_symbol = match operation {
+                McpTaskOperation::Scan | McpTaskOperation::SymbolsBuild => "second",
+                McpTaskOperation::WatchOnce => "third",
                 McpTaskOperation::Contract | McpTaskOperation::Search => unreachable!(),
-            }
+            };
+            require_agent_index_reads(&server, &project_path, expected_symbol)?;
         }
 
         let store = open_atlas_store_for_project(&db_path, &repo)?;
@@ -5330,19 +5389,14 @@ mod tests {
             synchronous_symbols.contains(MCP_PAYLOAD_SYMBOLS_BUILD),
             "synchronous symbol adapter did not return its completed report",
         )?;
-        let store = open_atlas_store_for_project(&db_path, &repo)?;
-        require(
-            store.symbol_count_for_path("src/lib.rs")? > 0,
-            "synchronous symbol adapter omitted parser output",
-        )?;
-        drop(store);
+        require_agent_index_reads(&server, &project_path, "second")?;
 
         fs::write(
             &source_path,
             "pub fn first() { second(); fourth(); }\nfn second() {}\nfn fourth() {}\n",
         )?;
         let synchronous_watch = server.atlas_watch_once(Parameters(AtlasWatchOnceParams {
-            project_path: Some(project_path),
+            project_path: Some(project_path.clone()),
             path: None,
             nearest_project: Some(false),
             max_workers: Some(1),
@@ -5354,14 +5408,7 @@ mod tests {
             synchronous_watch.contains(MCP_PAYLOAD_WATCH),
             "synchronous watch adapter did not return its completed report",
         )?;
-        let store = open_atlas_store_for_project(&db_path, &repo)?;
-        require(
-            store
-                .load_file_text("src/lib.rs")?
-                .is_some_and(|row| row.content.contains("fourth"))
-                && store.load_symbol_by_name("src/lib.rs", "fourth")?.is_some(),
-            "synchronous watcher omitted changed source and symbols",
-        )?;
+        require_agent_index_reads(&server, &project_path, "fourth")?;
         Ok(())
     }
 

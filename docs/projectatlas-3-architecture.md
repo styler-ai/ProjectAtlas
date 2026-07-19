@@ -128,12 +128,17 @@ operations. This keeps replacement possible through a deliberate boundary
 without paying for an imaginary backend now.
 
 The supported operating profile is a local filesystem whose locking and shared
-memory semantics SQLite supports. One selected source tree opens exactly one
-authoritative `.projectatlas/projectatlas.db`; ProjectAtlas never splits that
-tree's purposes, Memory Atlas state, graph, or index across product databases.
-Different selected source trees or checkouts each own one separate project-local
-database and may progress concurrently; one project identity never has two
-authoritative databases. Writers to one project's database are serialized and
+memory semantics SQLite supports. One resolved runtime/request source-state
+binding opens exactly one authoritative database; ProjectAtlas never splits
+that binding's purposes, Memory Atlas state, graph, or index across product
+databases. Normal root, `project_path`, and nearest-project discovery select
+`<root>/.projectatlas/projectatlas.db`. Explicit startup `--db` remains an
+isolated compatibility binding for generated host configuration, tests,
+migration/verification, or protected runtime lanes, but it is never
+auto-discovered, attached, merged, substituted, used as fallback, or combined
+with another database in one operation or result. Different selected source
+trees, checkouts, or deliberate isolated runtime bindings may progress
+concurrently without sharing authority. Writers to one selected database are serialized and
 return bounded typed busy/unavailable state instead of spinning. WAL permits
 last-complete-generation readers during publication. Connection pragmas, busy
 timeout, foreign-key enforcement, statistics, checkpoints, and backup behavior
@@ -319,7 +324,7 @@ flowchart TB
         Query --> Agent
     end
 
-    subgraph ProjectDB[0.4 target: exactly one authoritative .projectatlas/projectatlas.db for this selected source tree]
+    subgraph ProjectDB[Exactly one authoritative projectatlas.db for this resolved source-state binding]
         direction LR
         subgraph Derived[Reconciled complete generation]
             direction TB
@@ -371,8 +376,8 @@ state.
 Configuration and ignore rules stay authoritative in their filesystem-owned
 formats. The database records only the fingerprints and derived consequences
 needed for freshness and publication; it does not become a second mutable
-configuration authority. There is one authoritative database for one selected
-source tree. A large extraction may use a bounded disposable spool as an
+configuration authority. There is one authoritative database for one resolved
+source-state binding. A large extraction may use a bounded disposable spool as an
 implementation detail, but even an SQLite-backed spool is not a ProjectAtlas
 database: it has no project identity, authored state, active generation, or
 query surface and is deleted after the owning operation.
@@ -522,14 +527,12 @@ sequenceDiagram
     Agent->>Service: anchored relation/path request plus hard limits
     Service->>DB: begin complete-generation read snapshot
     DB->>Graph: resolve exact stable key or typed selector
-    alt outbound
+    alt one-hop outbound
         DB->>Graph: source-first adjacency, ordered, LIMIT + 1
-    else inbound
+    else one-hop inbound
         DB->>Graph: target-first adjacency, ordered, LIMIT + 1
-    else bounded path
-        loop until depth/visited/edge/time/memory/output budget or cancellation
-            DB->>Graph: page next indexed adjacency
-        end
+    else bounded multi-hop path
+        DB->>Graph: application frontier pages indexed adjacency within all budgets
     end
     DB->>Graph: batch unique endpoint selectors for the bounded result
     DB->>Atlas: batch current file/folder purposes and review state
@@ -589,24 +592,83 @@ copy is not allowed to become hidden default-core cost.
 
 ### MCP Call To Database Access Contract
 
-| Agent operation | Principal SQLite access | Physical and authority rule |
-| --- | --- | --- |
-| `overview`, `folders`, `files`, `session_brief` | Nodes, purposes, summaries, parse/coverage aggregates, and bounded graph-role/connection batches | Exact path/name and reviewed purpose remain stronger than graph popularity. Folder/file pages batch graph/purpose facts for only returned candidates. |
-| `summary`, `outline`, `symbols` | Exact node/path, text/summary, parse metadata, symbols, coverage, and bounded related-identity digest | One complete generation and current purpose review state; no default edge dump or per-symbol query loop. |
-| `relations` and bounded path/impact views | Stable selector lookup, source/target adjacency, dependency-key closure, occurrences, coverage, and batch purpose projection | Separate indexes by direction/key; generation-bound cursor; decoded/result byte budgets; exact reusable selectors and spans. |
-| `search` | Current deterministic persisted-text scan with path narrowing; optional FTS candidate acceleration followed by exact verification | Current lexical behavior remains complete. Short, punctuation-sensitive, regex, fuzzy, or unsafe tokenizer/Unicode shapes retain the authoritative fallback. Semantic/ANN state is optional and cannot bless stale structural rows. |
-| `slice` | Database selector/span/freshness validation followed by exact current filesystem read | SQLite helps select and validate the source; it does not override newer saved bytes with stored text. |
-| `health`, `purpose_queue`, `purpose_set`, `purpose_review`, `lint` | Nodes, authored purpose lifecycle, health resolutions, and bounded structural findings | Purpose writes use an authored transaction and do not rewrite graph rows or require hosted CI. |
-| `settings`, `runtime_info`, watcher/task status | Metadata, project/publication identity, schema/capability/coverage and content-free SQLite operating profile | No secrets or arbitrary machine paths; report readiness honestly without running maintenance implicitly. |
-| `scan`, `watch_once`, automatic refresh | Off-writer discovery/extraction/staging followed by one short validated publication transaction | Current local bytes and ignore/config policy are authoritative; uncertainty preserves the last complete generation. |
+For this section, “the database” always means the one authoritative database
+captured by the resolved runtime/request source-state binding. It contains
+the authored atlas state and the active complete derived generation described
+above. A different repository, clone, or worktree has a different database
+because it represents different current local bytes and authored state; that is
+project isolation, not product sharding. Several connections, the main/WAL/SHM
+files of one SQLite database, or an owned disposable staging file are likewise
+not additional ProjectAtlas databases. Explicit federation opens the independent
+database of each supplied root read-only for one bounded call, creates no shared
+authority, and retains no cross-project database or cache.
 
-Task 2.7 verifies these mappings through production query/service/adapter paths.
-In-memory SQLite is sufficient only for behavior independent of file locking,
-WAL, migration, reopen, backup, busy contention, and platform paths. Those
-contracts use test-only temporary on-disk project databases plus real CLI/MCP
-smoke. A mocked
-repository or hand-built row can test service formatting, but cannot close a
-database-backed behavior claim.
+The matrices below inventory every current CLI route and every registered MCP
+tool. Routes in the same row intentionally share one physical contract. “Current
+bound” records what the implementation enforces now; “target owner” prevents a
+future requirement from being mistaken for already-live behavior.
+
+#### Normal navigation and inspection
+
+| CLI route | MCP route | Physical database and source access | Freshness, generation, purpose, selector, and trust contract | Transaction, bounds, telemetry, and target owner |
+| --- | --- | --- | --- | --- |
+| `overview`; `folders`; `files`; `next` | `atlas_overview`; `atlas_folders`; `atlas_files`; `atlas_next`; `atlas_session_brief` | Read `nodes`, authoritative `purposes`, node summaries, and bounded ranking candidates. Current file ranking may inspect persisted file text for a bounded candidate set. | Normal calls use the freshness gate and one root-bound read snapshot of an active complete generation. Current rows project the latest owning node purpose; graph roles, crisp connections, parser/coverage trust, and graph selectors are not yet part of these rows. | Current row limits exist, but not every caller limit, decoded intermediate, or rendered payload has one uniform product byte ceiling. Tracked navigation may finish the read snapshot and append one usage event to the same project database; `atlas_session_brief` is read-only. Task 3.5 owns the reusable verified observation epoch, task 5.2 owns purpose-plus-connection enrichment, task 5.7 owns uniform cursor/intermediate/output bounds, and task 2.8 owns bounded telemetry retention. |
+| `outline`; `summary` | `atlas_outline`; `atlas_file_summary` | Resolve one exact indexed file, read node/purpose/summary/parse/symbol/relation facts, then read the current saved source bytes for the selected file. | The freshness gate and complete-generation snapshot validate the selection. The current summary exposes file purpose and parser state; it does not yet expose the normalized graph generation, complete coverage, or a purpose-hydrated related-identity digest. | Section row limits are caller supplied and the current source read/render does not yet share the final uniform decoded/output-byte contract. Successful tracked calls may append telemetry to the same database after the read snapshot. Tasks 5.2 and 5.5 own bounded graph context, selectors, trust, coverage, and current purpose projection; task 5.7 owns uniform byte bounds. |
+| `symbols list`; `symbols relations`; `symbols slice`; `slice --symbol` | `atlas_symbols`; `atlas_symbol_relations`; symbol selection through `atlas_slice` | Read exact node/path and legacy symbol or relation rows; symbol slices then read current saved source bytes. | Normal reads use the freshness gate and complete-generation snapshot. Existing relation rows preserve legacy ordering and names, but do not yet provide normalized direction, generation-bound cursors, retained occurrences, reusable target selectors, authoritative target-purpose projection, resolution confidence, or coverage. | Current result counts are limited by the request, while uniform product ceilings and endpoint/intermediate-byte budgets are not yet applied. Tracked calls may append telemetry to the same database. Task 5.5 owns the additive typed relation contract and task 5.7 owns cursor and byte-budget enforcement. |
+| `slice` with exact lines | `atlas_slice` | Validate one indexed file in SQLite and read the exact current filesystem source before returning the requested line range. Persisted `file_texts` never override newer saved bytes. | The freshness gate and complete-generation snapshot protect selection; the repository-relative file path is the reusable selector. Purpose, graph trust, and coverage are not duplicated into verbatim slice output. | The current range is line bounded by the request, but there is not yet one shared rendered-output-byte ceiling. Successful tracked calls may append telemetry to the same database. Task 5.7 owns the uniform output contract. |
+| `search` | `atlas_search` | Read persisted UTF-8 file text, apply optional path narrowing, and perform deterministic literal, regex, or fuzzy matching. Literal prefiltering may reduce decoded rows; regex and fuzzy fallback may visit the selected text scope. | Normal search uses the freshness gate and one complete-generation snapshot. Search proves lexical occurrence, not graph relevance, purpose, trust, or coverage. | Result rows stop at the requested limit, but fallback searched bytes/time, context size, decoded intermediates, and final output do not yet share the target hard budgets. Successful tracked calls may append telemetry to the same database. Task 5.4 owns FTS candidate acceleration plus correctness-authoritative byte/time-bounded fallback; task 5.7 owns uniform output/cursor bounds. |
+| `health-check`; `purpose queue`; database portion of `lint`; `parity`; `parity report` | `atlas_health`; `atlas_purpose_queue`; `atlas_lint`; `atlas_parity_report` | Read nodes, purposes, summaries, parser/index state, structural findings, and authored health resolutions. Filesystem/config lint remains outside SQLite. | Health, queue, lint, and parity use the freshness gate and complete-generation snapshot. Purpose findings project current authored review/stale state. They do not infer graph trust or approve generated purposes. | Health and queue pages clamp row counts and filter durable resolutions with an indexed exact finding-id anti-lookup instead of materializing historical IDs or growing bind lists. Some other aggregates still need the final decoded/intermediate contract. Tracked health/queue calls may append telemetry to the same database; lint and parity do not. Task 3.5 owns repeated-read freshness cost and task 5.7 owns uniform database/result bounds. |
+
+#### Source-wide indexing and explicit maintenance
+
+| CLI route | MCP route | Physical database and source access | Freshness and generation contract | Transaction, bounds, telemetry, and target owner |
+| --- | --- | --- | --- | --- |
+| `init` | `atlas_init` | Create/validate project-local config and the one project database; unless `no_scan`, scan current local source, import controlled purpose inputs, and derive text, summaries, symbols, and graph projections. | The selected source tree and effective ignore/config policy are authoritative. Initialization binds project identity and publishes one active complete generation when scanning runs. | Discovery/extraction is admitted under existing entry, byte, parser-output, worker, deadline, and cancellation limits; prepared mutations publish in one short parent-owned transaction. It writes no separate product database. Task 2.8 owns retained database/WAL/temporary-work lifecycle. |
+| `scan` | `atlas_scan` | Read/hash/parse current included source off-writer, stage bounded typed batches, and replace the complete derived projection in the same database. | Revalidate source, configuration, purpose inputs, and base generation before publication. Readers keep the last complete generation until commit. | One short `BEGIN IMMEDIATE` publication owns all prepared mutations and one generation advance; failure/cancellation rolls back. Background MCP execution changes task delivery, not database ownership. No navigation telemetry is appended. |
+| `symbols build` | `atlas_symbols_build` | Read selected indexed source off-writer and rebuild compatible symbol plus normalized graph projections in the same database. | Revalidate the source and publication contract; preserve the last complete generation on failure. | Bounded parser workers, source bytes, retained parser output, deadline, and cancellation feed one publication transaction. No navigation telemetry is appended. |
+| `watch` and `watch --once` | `atlas_watch_once` | Observe or poll current local source, derive one changed-path batch off-writer, and publish affected text/symbol/graph rows in the same database; a correctness-required event may request a full scan. | Each successful batch revalidates source/policy/base generation and advances exactly once. Failed batches remain eligible for retry and expose no partial generation. | Each batch has bounded path/source/parser/worker/deadline/cancellation controls and one short publication transaction. Task 3.5 owns the long-lived verified observation epoch; task 2.8 owns measured WAL/checkpoint and abandoned-temporary-work maintenance. |
+| `map` | `atlas_map` | Explicitly walk the selected source tree and read all approved purposes from the project database to write a compatibility TOON/optional JSON export. | This is not a normal index-backed navigation response and does not claim a generation-bound compact page. Current local source drives the export while reviewed purposes remain SQLite-authored. | Deliberately source-wide maintenance; current purpose loading/export can materialize the admitted project set and writes no telemetry. It must not be cited as proof that normal navigation is bounded. |
+| `strip-legacy-purpose` | `atlas_strip_legacy_purpose` | Scan filesystem paths and optionally delete legacy `.purpose` files; the command does not create another database or make legacy files a second purpose authority. | This is an explicit migration/file-maintenance operation, not a normal fresh database read. Durable reviewed purpose remains owned by the project database. | Dry-run by default; apply mutates source-side files, not SQLite. Its source walk is explicit and source-wide. |
+
+#### Authored mutations and database/file lifecycle
+
+| CLI route | MCP route | Physical access and authority | Transaction and generation contract | Bounds, telemetry, and target owner |
+| --- | --- | --- | --- | --- |
+| `purpose set` | `atlas_purpose_set` | Validate the current schema/root through bounded metadata and schema-contract reads, validate one indexed path, and write its reviewed purpose into `purposes` in the same project database. Ordinary current-schema opens do not run a whole-database integrity scan; migration and explicit verification retain that work. | The authored write is atomic for that item and does not rewrite graph rows or advance the derived generation; later reads project the new authoritative purpose. | One item and no telemetry. Purpose projection into enriched folder/file/relation results is owned by tasks 5.2 and 5.5. |
+| `purpose review` preview/apply | `atlas_purpose_review` | Read each requested indexed node and preview or apply agent-reviewed purpose rows in the same database. | Preview uses a fresh read snapshot. Current apply semantics are item-oriented: successful rows can be applied while invalid items are reported; the surface must not be described as whole-batch atomic unless that behavior changes. Purpose writes do not advance graph generation. | The request supplies the current item count and purpose text; a uniform input/intermediate/output budget is not yet enforced. No telemetry. Task 5.7 owns the shared byte budget. |
+| `health resolve` | `atlas_health_resolve` | Validate one currently active deterministic finding and write one authored `health_resolutions` row in the same database. | The resolution write is item-atomic and does not mutate derived graph rows or advance generation. | One item, no telemetry. Resolution lookup and later health pages remain subject to the bounded-read contract above. |
+| `root set` with bind/move/detach | `atlas_root_set` | Validate destination identity, mutate project/root identity in the same database, and regenerate project-local MCP config files. Detach assigns an independent identity to a copied destination database without merging authorities. | One explicit root-transition transaction owns identity changes and rollback. A copied worktree database becomes the authority only for that different selected source tree. | Bounded metadata operation, no telemetry, no cross-project graph write. |
+| `reset-index` | `atlas_reset_index` | Preview or explicitly delete the selected database and owned WAL/SHM/journal sidecars, plus optional generated MCP config. | File lifecycle, not a SQLite transaction. It removes the one selected project index; it never creates a replacement or second authority implicitly. | Explicit apply only, fixed owned target inventory, no telemetry. |
+
+#### Diagnostics, administration, and non-database routes
+
+| Classification | CLI route | MCP route | Exact contract and later owner |
+| --- | --- | --- | --- |
+| Database diagnostics | `settings`; `root`, `root show`, `root verify` | `atlas_settings`; `atlas_root` | Settings/show open the existing database read-only and report bounded schema/root/index statistics without source refresh, maintenance, or telemetry. Explicit CLI `root verify` and MCP `atlas_root { verify: true }` additionally run full read-only `quick_check(1)` and foreign-key integrity verification; ordinary navigation and one-item authored writes do not pay that whole-database cost. Current settings does not yet expose the validated content-free SQLite runtime/filesystem/journal/synchronous/busy/checkpoint/statistics profile, active generation, registry digests, or actionable graph coverage; task 4.5 owns that additive report. |
+| Telemetry diagnostics | `token` | `atlas_token_report` | Read usage rows from one read-only snapshot without source freshness or another telemetry write. Raw event lifetime and some aggregates are currently proportional to retained events; task 2.8 owns retention, compaction, expiry truth, and bounded token-report semantics. |
+| MCP configuration | `mcp-config` | `atlas_mcp_config` | Generate host configuration from explicit paths/config and may read project identity only to resolve the selected root/config. It does not scan, publish, write telemetry, or create another database. |
+| Server/process administration | `mcp`; `runtime-info`; `watch-status` | `atlas_runtime_info`; `atlas_watch_status`; `atlas_set_project_path`; `atlas_task_status`; `atlas_task_cancel` | MCP startup owns transport only. Runtime and watcher reports are process/filesystem diagnostics. Active-project selection stores one process-local path choice but does not open, scan, or mutate the selected database. Task status/cancel use the bounded in-memory session registry, not SQLite. Task 4.5 may add content-free compiled/runtime SQLite capability identity without making `runtime-info` a source-data query. |
+| Config and ignore files | `config --print`; `ignore list`; `ignore init-gitignore`; `ignore add`; `ignore remove` | `atlas_config`; `atlas_ignore_list`; `atlas_ignore_init_gitignore`; `atlas_ignore_add`; `atlas_ignore_remove` | Read or explicitly edit project config/`.gitignore` files. Root discovery may consult existing database identity, but these calls do not query or mutate indexed rows and do not create a second settings authority inside SQLite. |
+
+#### Planned additive database-backed behavior
+
+| Existing surface extended in place | Planned physical contract | Owning task |
+| --- | --- | --- |
+| `folders`, `files`, `next`, `atlas_session_brief` | Batch graph roles and only the crisp relevant connections for returned candidates, while projecting current reviewed purpose/review/stale state from `purposes`; never rank graph popularity above exact path/name and strong purpose evidence. | 5.2, with repeated-read freshness cost from 3.5 and byte/cursor bounds from 5.7. |
+| `summary`, `outline`, `symbols` | Hydrate one bounded related-identity/coverage digest for the selected file/symbol without per-symbol or whole-graph query loops. | 5.2 and 5.5; 5.7 owns uniform decoded/intermediate/output bounds. |
+| `symbol relations` extended with direction/depth and bounded path/impact/static-trace modes | Resolve stable selectors, use separately indexed source/target adjacency and dependency keys, page retained occurrences, batch endpoint plus nearest owning-purpose projection, and return generation, trust, resolution, coverage, exact spans, reusable next calls, and explicit truncation. No generic graph query language or separate jump tool is introduced. | 5.5 for relation/path retrieval, 5.7 for generation-bound cursors and all budgets, and 5.6 only for the optional closed architecture/analysis views that prove necessary. |
+| `search` | Use FTS only as a complete candidate accelerator for safe lexical shapes, then exact-verify; keep deterministic path/byte/time-bounded persisted-text fallback authoritative for regex, fuzzy, short, punctuation-sensitive, and tokenizer/Unicode-unsafe shapes. | 5.4 and 5.7. |
+| `settings` and runtime capability reporting | Read validated content-free SQLite runtime/compile identity, supported/unsupported/uncertain filesystem profile, effective journal/synchronous/busy/checkpoint/statistics policy, schema/generation, provider/registry/relation digests, coverage, and optional-pack state without secrets or arbitrary new host paths. | 4.5. |
+| Explicit federated relation/analysis request | Validate the complete ordered root list, open each root's independent existing project database read-only/query-only under aggregate root/connection/database/row/edge/intermediate/time/output/cancellation budgets, bind results to every captured generation, close every handle, and retain nothing. | 6.2. Federation is call-only composition, never product sharding or a shared database. |
+
+Task 2.7 verifies the implemented portions of these mappings through production
+query, service, and adapter paths. In-memory SQLite is sufficient only for
+behavior independent of file locking, WAL, migration, reopen, backup, busy
+contention, and platform paths. Those contracts use test-only temporary on-disk
+project databases plus real CLI/MCP smoke. A mocked repository or hand-built
+row can test pure classification or formatting, but cannot close a
+database-backed persistence, query-plan, rollback, or agent-visible behavior
+claim.
 
 ### MCP Read Communication Sequence
 
@@ -739,25 +801,39 @@ weakening this order or introducing another authoritative database.
 
 ```mermaid
 sequenceDiagram
-    participant ReaderN as Reader on generation N
-    participant Writer as One project publication writer
-    participant WAL as WAL file of the same projectatlas.db
-    participant Main as Main file of the same projectatlas.db
-    participant Checkpoint as Bounded checkpoint owner
-
-    ReaderN->>Main: BEGIN read snapshot at complete generation N
-    Writer->>WAL: BEGIN IMMEDIATE and append prepared batched mutation
-    WAL-->>ReaderN: generation N remains readable
-    Writer->>WAL: synchronous FULL commit of complete generation N + 1
-    Note over WAL: Authored state and accepted publication survive the declared power-loss boundary
-    Checkpoint->>WAL: PASSIVE/bounded checkpoint outside the write transaction
-    alt generation N reader still holds old frames
-        WAL-->>Checkpoint: retain required frames and report remaining work
-    else no reader needs old frames
-        Checkpoint->>Main: copy committed frames and advance checkpoint
+    actor Reader as Agent reader on generation N
+    participant Publisher as Publication owner
+    participant Maintenance as Maintenance owner
+    box Exactly one projectatlas.db through SQLite
+        participant Read as Read-only SQLite connection
+        participant Write as Writable SQLite connection
+        participant Check as Checkpoint SQLite connection
+        participant Engine as SQLite engine and WAL index
+        participant Files as Main, WAL, and SHM files
     end
-    ReaderN->>Main: release snapshot
-    Note over Writer: A second same-project writer gets bounded busy/unavailable state
+
+    Reader->>Read: Open query_only with bounded busy timeout
+    Read->>Engine: BEGIN DEFERRED at complete generation N
+    Engine->>Files: Resolve committed main and WAL frames for snapshot N
+    Publisher->>Write: Submit prepared publication batch
+    Write->>Engine: BEGIN IMMEDIATE and execute cached statements
+    Engine->>Files: Append mutation frames to WAL
+    Write->>Engine: COMMIT with synchronous FULL
+    Engine->>Files: Sync complete-generation commit record
+    Engine-->>Read: Snapshot N remains readable after generation N + 1 commits
+    Note over Engine,Files: SQLite owns physical durability and snapshot visibility
+    Maintenance->>Check: Request bounded PASSIVE checkpoint
+    Check->>Engine: PRAGMA wal_checkpoint(PASSIVE)
+    alt generation N reader still holds old frames
+        Engine->>Files: Retain frames required by snapshot N
+        Engine-->>Check: Report remaining work without blocking the reader
+    else no reader needs old frames
+        Engine->>Files: Copy committed frames to main and advance checkpoint
+        Engine-->>Check: Report bounded checkpoint progress
+    end
+    Reader->>Read: Finish read snapshot
+    Read->>Engine: End transaction and release snapshot N
+    Note over Publisher,Write: A second same-project writer gets bounded busy or unavailable state
 ```
 
 The target normal production profile is bundled SQLite on a supported local
@@ -770,43 +846,58 @@ default. If task 7.4 disproves that choice, a split durability class requires an
 explicit authored-versus-disposable transaction owner and power-loss contract;
 it cannot be a silent pragma change.
 
+The filesystem gate accepts known local Windows, macOS, and Linux filesystems
+whose ordinary locking and shared-memory behavior supports WAL. Linux
+`overlay` is accepted for container-local SQLite operation; the host or
+container owner must still place the writable layer on persistent storage when
+authored atlas state must survive container replacement. `ramfs` and `tmpfs`
+are not accepted for the mixed authored/derived project database because they
+cannot meet the declared restart and power-loss durability boundary. Unknown
+or empty filesystem identities remain typed `uncertain`, and known network or
+distributed filesystems remain typed `unsupported`; ProjectAtlas never falls
+back to a weaker journal or synchronous mode.
+
 The current default SQLite auto-checkpoint remains only the initial measured
-baseline. Task 2.3/2.7 must add content-free operating-profile inspection and
-real WAL tests; task 7.4 determines whether a bounded passive post-publication
-checkpoint trigger or statistics/`PRAGMA optimize` lifecycle is needed from WAL
-growth, long-reader, plan, startup, and write-amplification measurements. Request
-paths never force a blocking truncate checkpoint. Live snapshot/export uses the
-SQLite backup API; copying only the main file while WAL is active is not a valid
-general backup procedure.
+baseline. Content-free operating-profile inspection and real WAL tests now
+verify that baseline; tasks 2.8 and 7.4 determine whether a bounded passive
+post-publication checkpoint trigger or statistics/`PRAGMA optimize` lifecycle
+is needed from WAL growth, long-reader, plan, startup, and write-amplification
+measurements. Request paths never force a blocking truncate checkpoint. Live
+snapshot/export uses the SQLite backup API; copying only the main file while
+WAL is active is not a valid general backup procedure.
 
 ### Bounded Database Lifecycle
 
+#### Telemetry Retention
+
 ```mermaid
 flowchart TB
-    subgraph TelemetryLifecycle[Bounded telemetry retention]
-        direction LR
-        Calls[Agent tool calls] --> Raw[Recent raw usage events<br/>row, age, and byte budget]
-        Raw -->|within budget| Report[Token report and declared trends]
-        Raw -->|budget boundary| Rollup[Atomically write typed aggregates<br/>and expire/delete compacted raw rows]
-        Rollup --> Report
-        Rollup -->|expired detail is explicit| Detail[Raw session detail unavailable]
-    end
+    Calls[Agent tool calls] --> Raw[Recent raw usage events<br/>row, age, and byte budget]
+    Raw -->|within budget| Report[Token report and declared trends]
+    Raw -->|budget boundary| Rollup[Atomically write typed aggregates<br/>and expire compacted raw rows]
+    Rollup --> Report
+    Rollup -->|expired detail is explicit| Detail[Raw session detail unavailable]
+```
 
-    subgraph PagesAndWal[Pages, WAL, and planner maintenance]
-        direction LR
-        Reuse[SQLite reuses free pages]
-        WAL[WAL growth and long-reader state] --> Checkpoint[Measured passive checkpoint policy]
-        Reuse -->|measured reclaim threshold| Maintenance[Bounded idle or explicit maintenance]
-        Checkpoint --> Maintenance --> State[Content-free settings state]
-    end
+#### Pages, WAL, And Planner Maintenance
 
-    subgraph DerivedAndStaging[Derived rows and disposable staging]
-        direction LR
-        Publish[Successful structural publication] --> Obsolete[Delete ownership-proven<br/>obsolete derived rows]
-        Obsolete --> Reuse
-        Spill[Owned disposable spool<br/>non-authoritative; no authored state;<br/>never queryable] -->|publish, cancel, or fail| Cleanup[Remove after ownership validation]
-        Restart[Next validated open] --> Cleanup --> Removed[Owned spool removed]
-    end
+```mermaid
+flowchart TB
+    WAL[WAL growth and long-reader state] --> Checkpoint[Measured passive checkpoint policy]
+    Reuse[SQLite keeps freed pages reusable] -->|measured reclaim threshold| Maintenance[Bounded idle or explicit maintenance]
+    Checkpoint --> Maintenance
+    Maintenance --> State[Content-free settings state]
+```
+
+#### Derived Rows And Disposable Staging
+
+```mermaid
+flowchart TB
+    Publish[Successful structural publication] --> Obsolete[Delete ownership-proven<br/>obsolete derived rows]
+    Obsolete --> Reuse[Pages become reusable inside the same database]
+    Spill[Owned disposable spool<br/>non-authoritative; no authored state;<br/>never queryable] -->|publish, cancel, or fail| Cleanup[Remove after ownership validation]
+    Restart[Next validated open] --> Cleanup
+    Cleanup --> Removed[Owned spool removed]
 ```
 
 Task 2.8 owns this lifecycle. The normal read path never performs an unbounded
@@ -936,11 +1027,23 @@ The validated SQLite operating profile is explicit:
 | --- | --- | --- |
 | Schema | Version 10 with append-only 8 to 9 to 10 migration ownership. | Keep one append-only owner; task-specific migrations preserve authored state and refuse incompatible state. |
 | Rust/SQLite build | Workspace `rusqlite` 0.32.1, `libsqlite3-sys` 0.30.1, bundled SQLite 3.46.0. | Task 4.5 reports the actual linked runtime version and compile options; source package versions alone are not runtime proof. |
-| Filesystem | One project-local database on a filesystem with supported SQLite locking/shared-memory behavior. | Reject unsupported live network filesystems with typed guidance; do not weaken locking assumptions silently. |
-| Writable connections | `foreign_keys=ON`, WAL, `synchronous=NORMAL`, one-second busy timeout. | Tasks 2.3 and 2.7 reconcile to measured bounded busy handling and accepted `synchronous=FULL` durability for mixed authored/derived state. |
-| Read connections | Read-only open, `query_only=ON`, deferred read snapshot. | Preserve complete-generation snapshots and bounded busy/corruption propagation through task 2.7. |
+| Filesystem | One project-local database on a filesystem with supported SQLite locking/shared-memory behavior; writable preflight returns typed supported, unsupported, or uncertain state before mutation. | Keep rejecting unsupported or uncertain live network filesystems without a silent durability downgrade. |
+| Writable connections | `foreign_keys=ON`, WAL, `synchronous=FULL`, one-second busy timeout with bounded WAL-establishment retry for concurrent validated openers. | The accepted mixed authored/derived durability profile is enforced and verified on production writable paths. |
+| Read connections | Read-only open, verified `query_only=ON`, verified one-second busy timeout, validated WAL, deferred read snapshot. | Complete-generation snapshots and bounded busy/corruption propagation are enforced through production read paths. |
 | Checkpoints/statistics | SQLite default auto-checkpoint; no owned statistics lifecycle. | Tasks 2.8 and 7.4 measure WAL growth, long readers, passive checkpoints, `ANALYZE`/`PRAGMA optimize`, free-page reuse/reclaim, and request-path exclusion. |
 | Backup/recovery | Preflight and transaction rollback exist; live-file copying is not accepted as backup. | Task 6.4 uses the SQLite backup API plus bounded isolated import validation without replacing destination identity. |
+
+Before any parent directory or database file is created, ProjectAtlas inspects
+the exact existing database or nearest existing parent, resolves its canonical
+mount/device/filesystem profile, and rejects unsupported or uncertain state.
+It fingerprints that content-free location state and re-resolves it immediately
+before `SQLite` opens the connection. A privileged or adversarial local process
+that replaces a path or mount in the remaining OS-level interval between that
+revalidation and `SQLite`'s own open is outside the supported cooperative local
+user/process contract. ProjectAtlas does not add unsafe handle manipulation, a
+custom VFS, or another database to close that narrow race. If hostile local
+path/mount replacement becomes an accepted trust boundary, the engine/VFS
+decision must be reopened with platform-specific safe-handle evidence.
 
 Hot predicates, joins, ordering, and constraints use typed columns. JSON/TOON is
 an adapter format, not a graph persistence shortcut. Inserts reuse cached

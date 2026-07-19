@@ -58,7 +58,7 @@ impl AtlasStore {
         transition: ProjectRootTransition,
     ) -> DbResult<ProjectRootTransitionResult> {
         let destination = validate_project_root_destination(destination)?;
-        let preflight = schema::preflight(database_path, None)?;
+        let (preflight, _) = schema::preflight(database_path, None)?;
         let previous_root = preflight.project_root.clone();
         let previous_identity = if preflight.state == SchemaState::Current {
             read_current_project_identity(database_path)?
@@ -101,7 +101,7 @@ impl AtlasStore {
                     verify_root_absent(&previous_root)?;
                 }
 
-                let mut store = Self::open(database_path)?;
+                let mut store = Self::open_for_root_transition(database_path)?;
                 let opened_identity = store.project_instance_id()?;
                 if previous_identity.is_some() && opened_identity != previous_identity {
                     return Err(project_transition_changed(
@@ -228,6 +228,7 @@ fn apply_root_transition(
                 ));
             }
             store.validated_project_root = Some(destination.to_string());
+            store.validated_project_instance_id = Some(result.project_instance_id);
             Ok(result)
         }
         Err(error) => Err(schema::rollback_after_error(&store.connection, error)),
@@ -427,12 +428,14 @@ fn project_transition_changed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HealthResolution;
     use projectatlas_core::graph::{
         Completeness, ConfidenceClass, CoverageRecord, CoverageScope, CoverageState,
         EntitySelector, GraphEntity, GraphRelationKind, LogicalRelation, RelationOccurrence,
         RelationResolution, RepositoryFilePath, SourceSpan,
     };
     use projectatlas_core::symbols::RelationKind;
+    use projectatlas_core::telemetry::usage_from_estimates;
     use std::error::Error;
     use std::fmt::Debug;
     use std::io;
@@ -814,6 +817,138 @@ mod tests {
             |row| row.get::<_, i64>(0),
         )?;
         require_eq(&active_generation, &0, "moved graph generation")?;
+        Ok(())
+    }
+
+    #[test]
+    fn stale_stores_cannot_write_after_binding_transitions() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("same-root");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("same-root.db");
+        let initial =
+            AtlasStore::transition_project_root(&database, &root, ProjectRootTransition::Bind)?;
+        let mut stale = AtlasStore::open_for_project(&database, &root)?;
+        seed_authored_and_graph_state(&mut stale, initial.project_instance_id)?;
+
+        let detached =
+            AtlasStore::transition_project_root(&database, &root, ProjectRootTransition::Detach)?;
+        require(
+            detached.project_instance_id != initial.project_instance_id,
+            "same-root detach did not rotate identity",
+        )?;
+        let purpose_error = require_error(
+            stale.set_purpose(
+                "src/lib.rs",
+                "Stale store must not replace this purpose.",
+                projectatlas_core::PurposeSource::Agent,
+            ),
+            "stale store wrote purpose after same-root detach",
+        )?;
+        require(
+            matches!(purpose_error, DbError::ProjectRootTransitionChanged { .. }),
+            "same-root stale purpose returned the wrong error",
+        )?;
+        let scan_error = require_error(
+            stale.replace_scan(&[]),
+            "stale store replaced scan state after same-root detach",
+        )?;
+        require(
+            matches!(scan_error, DbError::ProjectRootTransitionChanged { .. }),
+            "same-root stale scan returned the wrong error",
+        )?;
+        let telemetry_error = require_error(
+            stale.record_usage(&usage_from_estimates(
+                "stale-after-detach",
+                "summary",
+                Some("src/lib.rs".to_string()),
+                None,
+                100,
+                20,
+            )),
+            "stale store recorded telemetry after same-root detach",
+        )?;
+        require(
+            matches!(
+                telemetry_error,
+                DbError::ProjectRootTransitionChanged { .. }
+            ),
+            "same-root stale telemetry returned the wrong error",
+        )?;
+        let health_error = require_error(
+            stale.resolve_health_finding(&HealthResolution {
+                finding_id: "stale-resolution".to_string(),
+                category: "missing-purpose".to_string(),
+                path: "src/lib.rs".to_string(),
+                related_path: None,
+                rationale: "A stale store must not persist this resolution.".to_string(),
+            }),
+            "stale store resolved health state after same-root detach",
+        )?;
+        require(
+            matches!(health_error, DbError::ProjectRootTransitionChanged { .. }),
+            "same-root stale health resolution returned the wrong error",
+        )?;
+        let publication_error = require_error(
+            stale.begin_index_publication("stale-after-detach"),
+            "stale store began publication after same-root detach",
+        )?;
+        require(
+            matches!(
+                publication_error,
+                DbError::ProjectRootTransitionChanged { .. }
+            ),
+            "same-root stale publication returned the wrong error",
+        )?;
+        let detached_store = AtlasStore::open_read_only_for_project(&database, &root)?;
+        assert_authored_state(&detached_store)?;
+        assert_graph_counts(&detached_store, (0, 0, 0, 0))?;
+        require(
+            detached_store.index_publication()?.is_none(),
+            "stale writes restored invalidated publication state",
+        )?;
+        let active_generation = detached_store.connection.query_row(
+            "SELECT active_generation FROM project_identity WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &active_generation,
+            &0,
+            "active generation after rejected stale writes",
+        )?;
+        drop(detached_store);
+        drop(stale);
+
+        let move_root = temp.path().join("move-source");
+        let destination = temp.path().join("move-destination");
+        fs::create_dir(&move_root)?;
+        fs::create_dir(&destination)?;
+        let move_database = temp.path().join("move.db");
+        AtlasStore::transition_project_root(
+            &move_database,
+            &move_root,
+            ProjectRootTransition::Bind,
+        )?;
+        let mut stale_move = AtlasStore::open_for_project(&move_database, &move_root)?;
+        fs::remove_dir(&move_root)?;
+        AtlasStore::transition_project_root(
+            &move_database,
+            &destination,
+            ProjectRootTransition::Move,
+        )?;
+        let move_error = require_error(
+            stale_move.begin_index_publication("stale-after-move"),
+            "stale store began publication after root move",
+        )?;
+        require(
+            matches!(move_error, DbError::ProjectRootMismatch { .. }),
+            "moved stale publication returned the wrong error",
+        )?;
+        drop(AtlasStore::open_read_only_for_project(
+            &move_database,
+            &destination,
+        )?);
         Ok(())
     }
 

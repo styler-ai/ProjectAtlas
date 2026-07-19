@@ -27,7 +27,7 @@ use projectatlas_core::{
 };
 use projectatlas_db::{
     AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, ProjectRootTransition,
-    ProjectRootTransitionResult,
+    ProjectRootTransitionResult, verify_project_database,
 };
 use projectatlas_service::{
     CodeSlice, FileSummaryReport, SearchReport, SymbolSliceSelector,
@@ -79,6 +79,10 @@ const DEFAULT_FILE_SUMMARY_LIMIT: usize = 25;
 const WATCH_MODE_ONCE: &str = "single-refresh";
 /// Event-backed watcher mode.
 const WATCH_MODE_NOTIFY: &str = "notify";
+/// Recovery guidance for a database whose local WAL-safe placement was rejected.
+const DATABASE_FILESYSTEM_RECOVERY: &str = "Place the selected local source tree and its .projectatlas database on a supported local filesystem, resolve any mount or permission uncertainty, and retry; ProjectAtlas will not weaken the WAL durability profile.";
+/// Existing CLI command that performs one bounded refresh pass.
+const CLI_REFRESH_COMMAND: &str = "watch";
 /// Portable fallback watcher mode.
 const WATCH_MODE_POLLING: &str = "portable-polling";
 /// Default parity profile for repository-intelligence checks.
@@ -181,18 +185,18 @@ enum CliError {
     },
 }
 
-/// Structured CLI error payload for source-state read refusals.
+/// Structured CLI error payload for typed agent-recoverable failures.
 #[derive(Serialize)]
-struct CliIndexReadErrorResponse<'a> {
+struct CliErrorResponse<'a> {
     /// Typed error details.
-    error: CliIndexReadErrorPayload<'a>,
+    error: CliErrorPayload<'a>,
 }
 
 /// Stable CLI error details shared by TOON and JSON output.
 #[derive(Serialize)]
-struct CliIndexReadErrorPayload<'a> {
-    /// Machine-readable source-state status.
-    kind: runtime::IndexReadStatus,
+struct CliErrorPayload<'a> {
+    /// Machine-readable error kind.
+    kind: AgentErrorKind,
     /// Human-readable recovery guidance.
     message: String,
     /// Local-source mismatch details when a refresh is required.
@@ -204,9 +208,48 @@ struct CliIndexReadErrorPayload<'a> {
     /// Project/index identity mismatch details.
     #[serde(skip_serializing_if = "Option::is_none")]
     project_mismatch: Option<&'a runtime::IndexProjectMismatch>,
+    /// Content-free database placement details for a rejected `SQLite` profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    database_filesystem: Option<DatabaseFilesystemErrorPayload>,
     /// Direct CLI recovery selector for a confirmed mismatch.
     #[serde(skip_serializing_if = "Option::is_none")]
     next: Option<CliRefreshNextCall<'a>>,
+}
+
+/// Stable error kinds shared by CLI and MCP agent payloads.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AgentErrorKind {
+    /// General command, input, storage, or service failure.
+    Error,
+    /// Current saved local source differs from the durable index.
+    RefreshRequired,
+    /// Current saved local source could not be inspected completely.
+    VerificationIncomplete,
+    /// The selected project root does not own the opened index.
+    ProjectMismatch,
+    /// The database is on a known unsupported network or distributed filesystem.
+    DatabaseFilesystemUnsupported,
+    /// The database's required local filesystem guarantees could not be established.
+    DatabaseFilesystemUncertain,
+}
+
+/// Content-free database placement details with direct recovery guidance.
+#[derive(Clone, Debug, Serialize)]
+struct DatabaseFilesystemErrorPayload {
+    /// Database path rejected before mutation.
+    path: String,
+    /// Resolved owning mount when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mount_point: Option<String>,
+    /// Normalized filesystem type when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filesystem_type: Option<String>,
+    /// Bounded reason when placement was uncertain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    /// Safe recovery action.
+    recovery: &'static str,
 }
 
 /// Existing CLI command that repairs a confirmed stale index.
@@ -1344,6 +1387,9 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             Some(RootCommand::Verify) => {
                 let report = build_root_report(&cli.db, cli.config.as_deref())?;
                 let verified = report.verified;
+                if verified {
+                    verify_project_database(&cli.db, Path::new(&report.root))?;
+                }
                 print_output(cli.format, &render_root_report(&report), &report)?;
                 if !verified {
                     std::process::exit(1);
@@ -1472,8 +1518,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     HealthScope::all()
                 },
             );
-            let page =
-                store.unresolved_health_findings_page(&store.resolved_health_ids()?, &query)?;
+            let page = store.unresolved_health_findings_page_current(&query)?;
             let toon = render_health_page(&page, &query);
             print_tracked_directory_output_estimate(
                 cli.format,
@@ -1720,40 +1765,53 @@ fn run(cli: &Cli) -> Result<(), CliError> {
 /// Render typed source-state failures in the selected agent/script format.
 fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, serde_json::Error> {
     let details = match error {
-        CliError::RefreshRequired(report) => Some(CliIndexReadErrorPayload {
-            kind: runtime::IndexReadStatus::RefreshRequired,
+        CliError::RefreshRequired(report) => Some(CliErrorPayload {
+            kind: AgentErrorKind::RefreshRequired,
             message: error.to_string(),
             refresh_required: Some(report.as_ref()),
             verification_incomplete: None,
             project_mismatch: None,
+            database_filesystem: None,
             next: Some(CliRefreshNextCall {
-                command: "watch",
+                command: CLI_REFRESH_COMMAND,
                 project_path: &report.project_root,
                 once: true,
             }),
         }),
-        CliError::VerificationIncomplete(report) => Some(CliIndexReadErrorPayload {
-            kind: runtime::IndexReadStatus::VerificationIncomplete,
+        CliError::VerificationIncomplete(report) => Some(CliErrorPayload {
+            kind: AgentErrorKind::VerificationIncomplete,
             message: error.to_string(),
             refresh_required: None,
             verification_incomplete: Some(report.as_ref()),
             project_mismatch: None,
+            database_filesystem: None,
             next: None,
         }),
-        CliError::ProjectMismatch(report) => Some(CliIndexReadErrorPayload {
-            kind: runtime::IndexReadStatus::ProjectMismatch,
+        CliError::ProjectMismatch(report) => Some(CliErrorPayload {
+            kind: AgentErrorKind::ProjectMismatch,
             message: error.to_string(),
             refresh_required: None,
             verification_incomplete: None,
             project_mismatch: Some(report.as_ref()),
+            database_filesystem: None,
             next: None,
         }),
-        _ => None,
+        _ => database_filesystem_error_payload(error).map(|(kind, database_filesystem)| {
+            CliErrorPayload {
+                kind,
+                message: error.to_string(),
+                refresh_required: None,
+                verification_incomplete: None,
+                project_mismatch: None,
+                database_filesystem: Some(database_filesystem),
+                next: None,
+            }
+        }),
     };
     let Some(error) = details else {
         return Ok(format!("error: {error}\n"));
     };
-    let response = CliIndexReadErrorResponse { error };
+    let response = CliErrorResponse { error };
     match format {
         OutputFormat::Toon => {
             serde_json::to_value(response).map(|value| encode_agent_payload(&value))
@@ -1762,6 +1820,50 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
             serde_json::to_string_pretty(&response).map(|text| format!("{text}\n"))
         }
     }
+}
+
+/// Extract a stable content-free `SQLite` placement failure from a CLI error.
+fn database_filesystem_error_payload(
+    error: &CliError,
+) -> Option<(AgentErrorKind, DatabaseFilesystemErrorPayload)> {
+    let (kind, path, mount_point, filesystem_type, reason) = match error {
+        CliError::Db(DbError::DatabaseFilesystemUnsupported {
+            path,
+            mount_point,
+            filesystem_type,
+        }) => (
+            AgentErrorKind::DatabaseFilesystemUnsupported,
+            path,
+            mount_point,
+            filesystem_type,
+            None,
+        ),
+        CliError::Db(DbError::DatabaseFilesystemUncertain {
+            path,
+            mount_point,
+            filesystem_type,
+            reason,
+        }) => (
+            AgentErrorKind::DatabaseFilesystemUncertain,
+            path,
+            mount_point,
+            filesystem_type,
+            Some(reason.clone()),
+        ),
+        _ => return None,
+    };
+    Some((
+        kind,
+        DatabaseFilesystemErrorPayload {
+            path: path.display().to_string(),
+            mount_point: mount_point
+                .as_deref()
+                .map(|mount| mount.display().to_string()),
+            filesystem_type: filesystem_type.clone(),
+            reason,
+            recovery: DATABASE_FILESYSTEM_RECOVERY,
+        },
+    ))
 }
 
 /// Open the selected current index through one root-bound read snapshot.
@@ -2857,9 +2959,7 @@ fn build_parity_report(store: &AtlasStore, profile: &str) -> Result<ParityReport
     let indexed_text_bytes = store.file_text_byte_count()?;
     let symbols = store.symbol_count()?;
     let relations = store.symbol_relation_count()?;
-    let health_findings = store
-        .unresolved_health_findings(&store.resolved_health_ids()?)?
-        .len();
+    let health_findings = store.unresolved_health_finding_count_current()?;
     let token_calls = store.token_overview(None)?.calls;
     let watcher_status = watcher_status_report(false);
     let watcher_mode = watcher_status.mode.clone();
@@ -3042,7 +3142,8 @@ mod tests {
         watch_path_requires_full_scan, watcher_status_report,
     };
     use super::{
-        OutputFormat, build_runtime_info, render_token_dashboard, serialized_output, truthy_env,
+        CliError, OutputFormat, build_runtime_info, render_cli_error, render_token_dashboard,
+        serialized_output, truthy_env,
     };
     use notify::EventKind;
     use projectatlas_core::symbols::{
@@ -3050,7 +3151,7 @@ mod tests {
     };
     use projectatlas_core::telemetry::TokenOverview;
     use projectatlas_core::{Node, NodeKind, normalize_native_path_display};
-    use projectatlas_db::AtlasStore;
+    use projectatlas_db::{AtlasStore, DbError};
     use projectatlas_fs::ScanOptions;
     use rmcp::model::{CallToolRequestParams, ClientInfo};
     use rmcp::{ClientHandler, ServiceExt};
@@ -3058,7 +3159,7 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use std::io;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     /// Minimal MCP client handler for in-process routing tests.
     #[derive(Clone, Default)]
@@ -3391,6 +3492,48 @@ mod tests {
         } else {
             Err(io::Error::other(message.to_string()).into())
         }
+    }
+
+    #[test]
+    fn cli_database_filesystem_failures_are_typed_in_json_and_toon() -> Result<(), Box<dyn Error>> {
+        let database = PathBuf::from("project")
+            .join(".projectatlas")
+            .join("projectatlas.db");
+        let error = CliError::Db(DbError::DatabaseFilesystemUncertain {
+            path: database,
+            mount_point: None,
+            filesystem_type: Some("unknown-local".to_string()),
+            reason: "filesystem type is not in the supported local profile".to_string(),
+        });
+
+        let json_text = render_cli_error(OutputFormat::Json, &error)?;
+        let json: Value = serde_json::from_str(&json_text)?;
+        require_condition(
+            json.pointer("/error/kind").and_then(Value::as_str)
+                == Some("database_filesystem_uncertain"),
+            "CLI JSON lost the typed filesystem error kind",
+        )?;
+        require_condition(
+            json.pointer("/error/database_filesystem/path")
+                .and_then(Value::as_str)
+                .is_some_and(|path| path.ends_with("projectatlas.db")),
+            "CLI JSON lost the rejected database path",
+        )?;
+        require_condition(
+            json.pointer("/error/database_filesystem/recovery")
+                .and_then(Value::as_str)
+                .is_some_and(|recovery| recovery.contains("supported local filesystem")),
+            "CLI JSON lost database recovery guidance",
+        )?;
+
+        let toon = render_cli_error(OutputFormat::Toon, &error)?;
+        require_condition(
+            toon.contains("database_filesystem_uncertain")
+                && toon.contains("unknown-local")
+                && toon.contains("supported local filesystem"),
+            "CLI TOON lost typed filesystem details",
+        )?;
+        Ok(())
     }
 
     #[test]
