@@ -27,10 +27,10 @@ use crate::token_tui::{
     render_token_trend_dashboard_plain_with_theme,
 };
 use crate::{
-    CliError, DEFAULT_FILE_SUMMARY_LIMIT, HarnessConfig, OutputFormat, RuntimeInfoReport,
-    build_harness_mcp_config_report, build_parity_report, build_root_report, build_runtime_info,
-    render_code_slice, render_file_summary, render_parity_report, render_root_report,
-    render_runtime_info, render_search_report, render_watch_status,
+    CliError, DEFAULT_FILE_SUMMARY_LIMIT, HarnessConfig, OutputFormat, RootTransition,
+    RuntimeInfoReport, build_harness_mcp_config_report, build_parity_report, build_root_report,
+    build_runtime_info, render_code_slice, render_file_summary, render_parity_report,
+    render_root_report, render_runtime_info, render_search_report, render_watch_status,
 };
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
@@ -477,6 +477,8 @@ struct AtlasRootParams {
 struct AtlasRootSetParams {
     /// Project root to bind and make active for later calls.
     root: String,
+    /// Explicit durable transition. Omitted requests retain bind behavior.
+    transition: Option<RootTransition>,
     /// Include mcp --nearest-project in generated project-local MCP configs.
     nearest_project: Option<bool>,
 }
@@ -3085,15 +3087,19 @@ impl ProjectAtlasMcpServer {
         })())
     }
 
-    /// Bind a project root and make it active for subsequent defaulted calls.
+    /// Bind, move, or detach a project root and then make it active.
     #[tool(
         name = "atlas_root_set",
-        description = "Bind a repository root, generate project-local MCP configs, and make it active for later MCP calls."
+        description = "Bind a repository root by default, or explicitly move/detach an existing copied database, then generate project-local MCP configs and make the successfully transitioned root active."
     )]
     fn atlas_root_set(&self, Parameters(params): Parameters<AtlasRootSetParams>) -> String {
         Self::as_mcp_text((|| {
             let root = canonical_project_root(Path::new(&params.root))?;
-            let report = crate::bind_project_root(&root, params.nearest_project.unwrap_or(false))?;
+            let report = crate::bind_project_root(
+                &root,
+                params.transition.unwrap_or(RootTransition::Bind),
+                params.nearest_project.unwrap_or(false),
+            )?;
             let state = Self::project_state_from_root(&root)?;
             self.set_active_project_state(state)?;
             Ok(render_root_report(&report))

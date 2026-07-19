@@ -1,6 +1,10 @@
 //! Normalized repository-graph persistence and bounded prepared queries.
 
 use super::{AtlasStore, DbError, DbResult, IndexPublicationGuard, IndexPublicationState};
+use crate::project_identity::{
+    load_graph_generation, load_project_identity, require_bound_project_identity,
+    set_graph_generation, verify_project_identity,
+};
 use projectatlas_core::IndexGeneration;
 use projectatlas_core::graph::{
     Completeness, ConfidenceClass, CoverageRecord, CoverageScope, CoverageState, EntitySelector,
@@ -472,7 +476,7 @@ impl IndexPublicationGuard<'_> {
             coverage,
         )?;
         let savepoint = self.store.connection.savepoint()?;
-        ensure_project_identity(&savepoint, project)?;
+        require_bound_project_identity(&savepoint, project)?;
         savepoint.execute("DELETE FROM graph_coverage", [])?;
         savepoint.execute("DELETE FROM graph_relations", [])?;
         savepoint.execute("DELETE FROM graph_entities", [])?;
@@ -484,7 +488,7 @@ impl IndexPublicationGuard<'_> {
             occurrences,
             coverage,
         )?;
-        update_graph_generation(&savepoint, generation)?;
+        set_graph_generation(&savepoint, generation)?;
         savepoint.commit()?;
         Ok(())
     }
@@ -522,7 +526,7 @@ impl IndexPublicationGuard<'_> {
             .map(|path| RepositoryNodePath::new(Path::new(path)))
             .collect::<Result<Vec<_>, _>>()?;
         let savepoint = self.store.connection.savepoint()?;
-        ensure_project_identity(&savepoint, project)?;
+        require_bound_project_identity(&savepoint, project)?;
         if affected_paths.iter().any(|path| path.as_str() == ".") {
             savepoint.execute("DELETE FROM graph_coverage", [])?;
             savepoint.execute("DELETE FROM graph_relations", [])?;
@@ -535,7 +539,7 @@ impl IndexPublicationGuard<'_> {
                 occurrences,
                 coverage,
             )?;
-            update_graph_generation(&savepoint, generation)?;
+            set_graph_generation(&savepoint, generation)?;
             savepoint.commit()?;
             return Ok(());
         }
@@ -555,7 +559,7 @@ impl IndexPublicationGuard<'_> {
             }
         }
         remove_orphan_external_candidates(&savepoint, &orphan_candidates)?;
-        update_graph_generation(&savepoint, generation)?;
+        set_graph_generation(&savepoint, generation)?;
         savepoint.commit()?;
         Ok(())
     }
@@ -749,20 +753,6 @@ fn remove_orphan_external_candidates(
 /// Return case-preserving indexed bounds for every slash-delimited descendant.
 fn repository_descendant_bounds(path: &str) -> (String, String) {
     (format!("{path}/"), format!("{path}0"))
-}
-
-/// Bind the normalized graph to the publication that actually replaced it.
-fn update_graph_generation(connection: &Connection, generation: IndexGeneration) -> DbResult<()> {
-    let generation =
-        i64::try_from(generation.get()).map_err(|_source| DbError::GraphCountOverflow {
-            field: "project_identity.active_generation",
-            value: generation.get(),
-        })?;
-    connection.execute(
-        "UPDATE project_identity SET active_generation = ?1 WHERE singleton = 1",
-        [generation],
-    )?;
-    Ok(())
 }
 
 /// Validate ownership and generation before any graph mutation occurs.
@@ -1569,59 +1559,6 @@ fn load_entity_cached(
     Ok(entity)
 }
 
-/// Read the graph project singleton, validating its fixed binary identity.
-fn load_project_identity(connection: &Connection) -> DbResult<Option<ProjectInstanceId>> {
-    let bytes = connection
-        .query_row(
-            "SELECT project_instance_id FROM project_identity WHERE singleton = 1",
-            [],
-            |row| row.get::<_, Vec<u8>>(0),
-        )
-        .optional()?;
-    bytes
-        .map(|value| project_from_blob("project_identity.project_instance_id", value))
-        .transpose()
-}
-
-/// Read the typed graph generation owned by the project singleton.
-fn load_graph_generation(connection: &Connection) -> DbResult<Option<IndexGeneration>> {
-    let generation = connection
-        .query_row(
-            "SELECT active_generation FROM project_identity WHERE singleton = 1",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?;
-    generation
-        .map(|value| {
-            nonnegative_u64("project_identity.active_generation", value).map(IndexGeneration::new)
-        })
-        .transpose()
-}
-
-/// Return whether the graph singleton exists and matches the selected project.
-fn verify_project_identity(connection: &Connection, expected: ProjectInstanceId) -> DbResult<bool> {
-    let Some(found) = load_project_identity(connection)? else {
-        return Ok(false);
-    };
-    require_project(expected, found)?;
-    Ok(true)
-}
-
-/// Initialize or verify the one graph project identity inside publication.
-fn ensure_project_identity(connection: &Connection, expected: ProjectInstanceId) -> DbResult<()> {
-    connection.execute(
-        "INSERT INTO project_identity(singleton, project_instance_id)
-         VALUES(1, ?1) ON CONFLICT(singleton) DO NOTHING",
-        [&expected.as_bytes()[..]],
-    )?;
-    let found = load_project_identity(connection)?.ok_or(DbError::GraphRowShape {
-        table: "project_identity",
-        reason: "singleton insert did not produce an identity",
-    })?;
-    require_project(expected, found)
-}
-
 /// Fail with both project identities when normalized ownership differs.
 fn require_project(expected: ProjectInstanceId, found: ProjectInstanceId) -> DbResult<()> {
     if expected != found {
@@ -2085,8 +2022,10 @@ mod tests {
     }
 
     /// Build one complete typed graph for the selected generation.
-    fn graph_fixture(generation: IndexGeneration) -> Result<GraphFixture, Box<dyn Error>> {
-        let project = ProjectInstanceId::from_bytes([0x11; 16])?;
+    fn graph_fixture(
+        project: ProjectInstanceId,
+        generation: IndexGeneration,
+    ) -> Result<GraphFixture, Box<dyn Error>> {
         let project_entity = GraphEntity::new(project, EntitySelector::Project, generation)?;
         let folder = GraphEntity::new(
             project,
@@ -2480,6 +2419,10 @@ mod tests {
         store: &mut AtlasStore,
         fingerprint: &str,
     ) -> Result<GraphFixture, Box<dyn Error>> {
+        store.set_project_root(Path::new("C:/workspace/fixture"))?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("bound fixture identity is missing"))?;
         seed_nodes(store)?;
         store.replace_symbol_graph(&SymbolGraph {
             path: "src/Äuth.rs".to_string(),
@@ -2496,7 +2439,7 @@ mod tests {
                 parser: ParserKind::TreeSitter,
             }],
         })?;
-        let fixture = graph_fixture(IndexGeneration::new(1))?;
+        let fixture = graph_fixture(project, IndexGeneration::new(1))?;
         let mut occurrences = fixture.occurrences.clone();
         occurrences.push(fixture.occurrences[0].clone());
         let mut publication = store.begin_index_publication(fingerprint)?;
@@ -2525,6 +2468,7 @@ mod tests {
     fn affected_graph_replacement_preserves_only_the_unaffected_closure()
     -> Result<(), Box<dyn Error>> {
         let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(Path::new("C:/workspace/affected-closure"))?;
         store.connection.execute_batch(
             "INSERT INTO nodes(path, kind, parent_path) VALUES('.', 'folder', NULL);
              INSERT INTO nodes(path, kind, parent_path) VALUES('src', 'folder', '.');
@@ -2539,7 +2483,9 @@ mod tests {
              INSERT INTO nodes(path, kind, parent_path) VALUES('README.md', 'file', '.');",
         )?;
 
-        let project = ProjectInstanceId::from_bytes([0x22; 16])?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("bound affected-closure identity is missing"))?;
         let generation_one = IndexGeneration::new(1);
         let project_entity = GraphEntity::new(project, EntitySelector::Project, generation_one)?;
         let affected_folder = GraphEntity::new(
@@ -3666,7 +3612,10 @@ mod tests {
         )?;
         rolled_back_reader.finish_index_read_snapshot()?;
 
-        let fixture_v2 = graph_fixture(IndexGeneration::new(2))?;
+        let project = writer
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("bound writer identity is missing"))?;
+        let fixture_v2 = graph_fixture(project, IndexGeneration::new(2))?;
         {
             let mut publication = writer.begin_index_publication("graph-publication")?;
             publication.replace_file_texts_for_paths(

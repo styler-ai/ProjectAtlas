@@ -4473,13 +4473,28 @@ fn root_and_metadata_validation_flow() -> Result<(), Box<dyn Error>> {
     fs::write(repo.join(SRC_DIR_NAME).join("a.rs"), "pub fn a() {}\n")?;
     fs::write(repo.join(SRC_DIR_NAME).join("b.rs"), "pub fn b() {}\n")?;
 
-    Command::cargo_bin("projectatlas")?
+    let root_set = Command::cargo_bin("projectatlas")?
         .arg("--format")
         .arg("json")
         .args(["root", "set"])
         .arg(&repo)
-        .assert()
-        .success();
+        .output()?;
+    if !root_set.status.success() {
+        return Err(io::Error::other(format!(
+            "root set failed: {}",
+            String::from_utf8_lossy(&root_set.stderr)
+        ))
+        .into());
+    }
+    let root_set_json: Value = serde_json::from_slice(&root_set.stdout)?;
+    require_json_string(&root_set_json, &["transition"], "bind")?;
+    require_json_bool(&root_set_json, &["identity_changed"], true)?;
+    require_json_bool(&root_set_json, &["publication_invalidated"], false)?;
+    let source_identity = root_set_json["project_instance_id"]
+        .as_str()
+        .filter(|identity| !identity.is_empty())
+        .ok_or_else(|| io::Error::other("root set did not report project identity"))?
+        .to_string();
 
     let db = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
     let config = repo.join(ATLAS_DIR_NAME).join("config.toml");
@@ -4498,6 +4513,140 @@ fn root_and_metadata_validation_flow() -> Result<(), Box<dyn Error>> {
     let root_json: Value = serde_json::from_slice(&root_show.stdout)?;
     require_json_bool(&root_json, &["verified"], true)?;
     require_json_string(&root_json, &["detection_source"], "config")?;
+    require_json_string(&root_json, &["project_instance_id"], &source_identity)?;
+
+    let copied_repo = temp.path().join("copied-repo");
+    let copied_atlas_dir = copied_repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&copied_atlas_dir)?;
+    let copied_db = copied_atlas_dir.join("projectatlas.db");
+    fs::copy(&db, &copied_db)?;
+    let copied_config = copied_atlas_dir.join("config.toml");
+
+    Command::cargo_bin("projectatlas")?
+        .arg("--format")
+        .arg("json")
+        .args(["root", "set"])
+        .arg(&copied_repo)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("project_mismatch"));
+    if copied_config.exists()
+        || copied_atlas_dir.join("projectatlas.mcp.json").exists()
+        || copied_atlas_dir
+            .join("projectatlas.claude.mcp.json")
+            .exists()
+        || copied_atlas_dir.join("projectatlas.opencode.json").exists()
+    {
+        return Err(io::Error::other(
+            "rejected copied-database bind created destination config files",
+        )
+        .into());
+    }
+
+    let blocked_mcp_config = copied_atlas_dir.join("projectatlas.mcp.json");
+    fs::create_dir(&blocked_mcp_config)?;
+    let detached = Command::cargo_bin("projectatlas")?
+        .arg("--format")
+        .arg("json")
+        .args(["root", "set"])
+        .arg(&copied_repo)
+        .args(["--transition", "detach"])
+        .output()?;
+    if detached.status.success() {
+        return Err(io::Error::other(
+            "detach unexpectedly succeeded through a blocked generated config path",
+        )
+        .into());
+    }
+    let detach_error = String::from_utf8_lossy(&detached.stderr);
+    for required in [
+        "root transition Detach committed",
+        "generated project configuration is incomplete",
+        "default bind transition",
+    ] {
+        if !detach_error.contains(required) {
+            return Err(io::Error::other(format!(
+                "partial detach failure omitted {required:?}: {detach_error}"
+            ))
+            .into());
+        }
+    }
+    let committed_show = Command::cargo_bin("projectatlas")?
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&copied_db)
+        .arg("--config")
+        .arg(&copied_config)
+        .args(["root", "show"])
+        .output()?;
+    if !committed_show.status.success() {
+        return Err(io::Error::other(format!(
+            "committed detach could not be inspected: {}",
+            String::from_utf8_lossy(&committed_show.stderr)
+        ))
+        .into());
+    }
+    let committed_json: Value = serde_json::from_slice(&committed_show.stdout)?;
+    let detached_identity = committed_json["project_instance_id"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("committed detach did not retain project identity"))?
+        .to_string();
+    if detached_identity == source_identity {
+        return Err(io::Error::other("detach preserved the copied project identity").into());
+    }
+    fs::remove_dir(&blocked_mcp_config)?;
+    let repaired = Command::cargo_bin("projectatlas")?
+        .arg("--format")
+        .arg("json")
+        .args(["root", "set"])
+        .arg(&copied_repo)
+        .output()?;
+    if !repaired.status.success() {
+        return Err(io::Error::other(format!(
+            "bind repair after committed detach failed: {}",
+            String::from_utf8_lossy(&repaired.stderr)
+        ))
+        .into());
+    }
+    let repaired_json: Value = serde_json::from_slice(&repaired.stdout)?;
+    require_json_string(&repaired_json, &["transition"], "bind")?;
+    require_json_bool(&repaired_json, &["identity_changed"], false)?;
+    require_json_bool(&repaired_json, &["publication_invalidated"], false)?;
+    require_json_string(&repaired_json, &["project_instance_id"], &detached_identity)?;
+    for generated in [
+        copied_config.clone(),
+        blocked_mcp_config,
+        copied_atlas_dir.join("projectatlas.claude.mcp.json"),
+        copied_atlas_dir.join("projectatlas.opencode.json"),
+    ] {
+        if !generated.exists() {
+            return Err(io::Error::other(format!(
+                "detach did not generate {}",
+                generated.display()
+            ))
+            .into());
+        }
+    }
+    let copied_root_show = Command::cargo_bin("projectatlas")?
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&copied_db)
+        .arg("--config")
+        .arg(&copied_config)
+        .args(["root", "show"])
+        .output()?;
+    if !copied_root_show.status.success() {
+        return Err(io::Error::other("detached root show failed").into());
+    }
+    let copied_root_json: Value = serde_json::from_slice(&copied_root_show.stdout)?;
+    require_json_bool(&copied_root_json, &["verified"], true)?;
+    require_json_string(
+        &copied_root_json,
+        &["project_instance_id"],
+        &detached_identity,
+    )?;
     Command::cargo_bin("projectatlas")?
         .arg("--db")
         .arg(&db)
@@ -4582,6 +4731,108 @@ fn root_and_metadata_validation_flow() -> Result<(), Box<dyn Error>> {
         .assert()
         .failure()
         .stderr(predicate::str::contains("project_mismatch"));
+
+    let moved_repo = temp.path().join("moved-test-repo");
+    fs::rename(&repo, &moved_repo)?;
+    let moved_db = moved_repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let moved_config = moved_repo.join(ATLAS_DIR_NAME).join("config.toml");
+    let moved_root = Command::cargo_bin("projectatlas")?
+        .arg("--format")
+        .arg("json")
+        .args(["root", "set"])
+        .arg(&moved_repo)
+        .args(["--transition", "move"])
+        .output()?;
+    if !moved_root.status.success() {
+        return Err(io::Error::other(format!(
+            "identity-preserving CLI move failed: {}",
+            String::from_utf8_lossy(&moved_root.stderr)
+        ))
+        .into());
+    }
+    let moved_json: Value = serde_json::from_slice(&moved_root.stdout)?;
+    require_json_string(&moved_json, &["transition"], "move")?;
+    require_json_string(&moved_json, &["project_instance_id"], &source_identity)?;
+    require_json_bool(&moved_json, &["identity_changed"], false)?;
+    require_json_bool(&moved_json, &["publication_invalidated"], true)?;
+    if !fs::read_to_string(&moved_config)?.contains("root = \".\"") {
+        return Err(
+            io::Error::other("moved relative config no longer remained relocatable").into(),
+        );
+    }
+
+    let moved_atlas_dir = moved_repo.join(ATLAS_DIR_NAME);
+    let codex_config = read_json_file(&moved_atlas_dir.join("projectatlas.mcp.json"))?;
+    let claude_config = read_json_file(&moved_atlas_dir.join("projectatlas.claude.mcp.json"))?;
+    let opencode_config = read_json_file(&moved_atlas_dir.join("projectatlas.opencode.json"))?;
+    for (actual, expected, label) in [
+        (
+            json_string_at(&codex_config, &["mcpServers", "projectatlas", "args", "3"])?,
+            moved_db.as_path(),
+            "moved codex database",
+        ),
+        (
+            json_string_at(&codex_config, &["mcpServers", "projectatlas", "args", "5"])?,
+            moved_config.as_path(),
+            "moved codex config",
+        ),
+        (
+            json_string_at(&claude_config, &["mcpServers", "projectatlas", "args", "3"])?,
+            moved_db.as_path(),
+            "moved Claude database",
+        ),
+        (
+            json_string_at(&claude_config, &["mcpServers", "projectatlas", "args", "5"])?,
+            moved_config.as_path(),
+            "moved Claude config",
+        ),
+        (
+            json_string_at(&opencode_config, &["mcp", "projectatlas", "command", "4"])?,
+            moved_db.as_path(),
+            "moved OpenCode database",
+        ),
+        (
+            json_string_at(&opencode_config, &["mcp", "projectatlas", "command", "6"])?,
+            moved_config.as_path(),
+            "moved OpenCode config",
+        ),
+    ] {
+        require_same_canonical_path(actual, expected, label)?;
+    }
+    require_same_directory(
+        json_string_at(&codex_config, &["mcpServers", "projectatlas", "cwd"])?,
+        &moved_repo,
+        "moved codex cwd",
+    )?;
+    require_same_directory(
+        json_string_at(&opencode_config, &["mcp", "projectatlas", "cwd"])?,
+        &moved_repo,
+        "moved OpenCode cwd",
+    )?;
+
+    let moved_show = Command::cargo_bin("projectatlas")?
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&moved_db)
+        .arg("--config")
+        .arg(&moved_config)
+        .args(["root", "show"])
+        .output()?;
+    if !moved_show.status.success() {
+        return Err(io::Error::other("moved root show failed").into());
+    }
+    let moved_show_json: Value = serde_json::from_slice(&moved_show.stdout)?;
+    require_json_bool(&moved_show_json, &["verified"], true)?;
+    require_json_string(&moved_show_json, &["project_instance_id"], &source_identity)?;
+    Command::cargo_bin("projectatlas")?
+        .arg("--db")
+        .arg(&moved_db)
+        .arg("--config")
+        .arg(&moved_config)
+        .arg("scan")
+        .assert()
+        .success();
 
     Ok(())
 }
@@ -10646,6 +10897,28 @@ fn require_same_executable(
 
 /// Require an emitted working directory to point at the expected project root.
 fn require_same_directory(
+    actual: &str,
+    expected: &Path,
+    label: &str,
+) -> Result<(), Box<dyn Error>> {
+    let actual_path = Path::new(actual);
+    if !actual_path.is_absolute() {
+        return Err(io::Error::other(format!("{label} path was not absolute")).into());
+    }
+    if actual_path.canonicalize()? == expected.canonicalize()? {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "{label} path mismatch: expected {}, found {}",
+            expected.display(),
+            actual_path.display()
+        ))
+        .into())
+    }
+}
+
+/// Require one emitted database or config path to resolve to the expected file.
+fn require_same_canonical_path(
     actual: &str,
     expected: &Path,
     label: &str,
