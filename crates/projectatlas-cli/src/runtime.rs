@@ -3586,9 +3586,17 @@ fn normalized_watch_index_path(
     if relative == "." {
         return Some(root.to_path_buf());
     }
-    let index_path = root.join(repo_path_to_native(&relative));
+    let policy_path = if candidate.strip_prefix(root).is_ok() {
+        candidate.clone()
+    } else {
+        match candidate.try_exists() {
+            Ok(true) => candidate.clone(),
+            Ok(false) => root.join(repo_path_to_native(&relative)),
+            Err(_) => return None,
+        }
+    };
     // Unknown ignore state should not admit a path into the incremental index.
-    let Ok(gitignore_ignored) = gitignore_excludes_path(root, &index_path) else {
+    let Ok(gitignore_ignored) = gitignore_excludes_path(root, &policy_path) else {
         return None;
     };
     if gitignore_ignored {
@@ -3599,7 +3607,7 @@ fn normalized_watch_index_path(
     {
         return None;
     }
-    Some(index_path)
+    Some(candidate)
 }
 
 /// Return a safe normalized repository path for a watcher event.
@@ -4639,15 +4647,14 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         } else {
             PathBuf::from(format!(r"\\?\{root_text}"))
         };
-        let event =
-            Event::new(EventKind::Remove(notify::event::RemoveKind::File)).add_path(deleted);
+        let event = Event::new(EventKind::Remove(notify::event::RemoveKind::File))
+            .add_path(deleted.clone());
         let changes = notify_event_changes(&extended_root, &ScanOptions::default(), &event);
-        let expected = extended_root.join("src").join("Über.rs");
 
         require_eq(
-            &changes.paths.contains(&expected),
+            &changes.paths.contains(&deleted),
             &true,
-            "normalized Unicode watcher path",
+            "native Unicode watcher path",
         )?;
         require_eq(
             &changes.requires_full_scan,
@@ -4655,9 +4662,30 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             "source removal full-scan policy",
         )?;
         require_eq(
-            &normalized_deleted_path(&extended_root, &expected)?,
+            &normalized_deleted_path(&extended_root, &deleted)?,
             &Some("src/Über.rs".to_string()),
             "normalized Unicode deleted path",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn notify_events_preserve_native_backslash_paths_on_unix() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let source = temp.path().join(r"src\generated.rs");
+        fs::write(&source, "pub fn generated() {}\n")?;
+        let event = Event::new(EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )))
+        .add_path(source.clone());
+
+        let changes = notify_event_changes(temp.path(), &ScanOptions::default(), &event);
+
+        require_eq(
+            &changes.paths,
+            &BTreeSet::from([source]),
+            "native Unix watcher paths",
         )?;
         Ok(())
     }
