@@ -5,7 +5,8 @@ use crate::sqlite_profile::{
     open_read_only_connection, verify_current_read_profile,
 };
 use crate::{DbError, DbResult};
-use rusqlite::{Connection, OptionalExtension, params};
+use projectatlas_core::graph::ProjectInstanceId;
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -670,12 +671,98 @@ pub(crate) fn open_current_read_only(
     }
 }
 
-/// Validate the current schema and optional project identity in an active transaction.
-pub(crate) fn validate_current(
+/// Revalidate the exact current root binding on a newly opened writer.
+pub(crate) fn revalidate_current_binding(
     connection: &Connection,
     expected_root: Option<&str>,
+    require_identity: bool,
+) -> DbResult<Option<ProjectInstanceId>> {
+    let transaction =
+        rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Deferred)?;
+    let result = current_binding(&transaction, expected_root, require_identity);
+    match result {
+        Ok(identity) => {
+            transaction.commit()?;
+            Ok(identity)
+        }
+        Err(operation) => match transaction.rollback() {
+            Ok(()) => Err(operation),
+            Err(rollback) => Err(DbError::TransactionRollback {
+                operation: Box::new(operation),
+                rollback,
+            }),
+        },
+    }
+}
+
+/// Require the exact root and project identity captured by this store.
+pub(crate) fn validate_active_binding(
+    connection: &Connection,
+    expected_root: Option<&str>,
+    expected_identity: Option<ProjectInstanceId>,
 ) -> DbResult<()> {
-    inspect_current(connection, expected_root).map(drop)
+    let found_identity = current_binding(connection, expected_root, false)?;
+    if found_identity != expected_identity {
+        return Err(DbError::ProjectRootTransitionChanged {
+            expected_root: expected_root.map(str::to_owned),
+            found_root: expected_root.map(str::to_owned),
+            expected_identity: expected_identity.map(|identity| identity.to_string()),
+            found_identity: found_identity.map(|identity| identity.to_string()),
+        });
+    }
+    Ok(())
+}
+
+/// Load one current binding while enforcing the selected root and identity depth.
+fn current_binding(
+    connection: &Connection,
+    expected_root: Option<&str>,
+    require_identity: bool,
+) -> DbResult<Option<ProjectInstanceId>> {
+    let found_version = stored_schema_version(connection)?;
+    if found_version != SCHEMA_VERSION {
+        return Err(DbError::SchemaVersion {
+            found: found_version,
+            expected: SCHEMA_VERSION,
+        });
+    }
+    let found_root = read_metadata(connection, PROJECT_ROOT_KEY)?;
+    if found_root.as_deref() != expected_root {
+        return match (expected_root, found_root) {
+            (Some(expected), Some(found)) => Err(DbError::ProjectRootMismatch {
+                expected: expected.to_string(),
+                found,
+            }),
+            (Some(_), None) => Err(DbError::ProjectRootMissing),
+            (None, found_root) => Err(DbError::ProjectRootTransitionChanged {
+                expected_root: None,
+                found_root,
+                expected_identity: None,
+                found_identity: None,
+            }),
+        };
+    }
+    let identity = crate::project_identity::load_project_identity(connection)?;
+    validate_binding_completeness(expected_root, identity, require_identity)?;
+    Ok(identity)
+}
+
+/// Validate the durable root/identity pair without repairing incomplete state.
+pub(crate) fn validate_binding_completeness(
+    project_root: Option<&str>,
+    identity: Option<ProjectInstanceId>,
+    require_identity: bool,
+) -> DbResult<()> {
+    match (project_root, identity) {
+        (None, Some(found_identity)) => Err(DbError::ProjectRootTransitionChanged {
+            expected_root: None,
+            found_root: None,
+            expected_identity: None,
+            found_identity: Some(found_identity.to_string()),
+        }),
+        (Some(_), None) if require_identity => Err(DbError::ProjectInstanceIdentityMissing),
+        _ => Ok(()),
+    }
 }
 
 /// Return the validated current schema state from an active transaction.
@@ -1512,7 +1599,8 @@ mod tests {
     }
 
     #[test]
-    fn bound_current_schema_requires_identity_without_repair() -> Result<(), Box<dyn Error>> {
+    fn current_schema_requires_complete_project_binding_without_repair()
+    -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("repository");
         fs::create_dir_all(&root)?;
@@ -1538,6 +1626,40 @@ mod tests {
         }
         if fs::read(&database)? != bytes_before {
             return Err(io::Error::other("ordinary open repaired the missing identity").into());
+        }
+
+        let orphan_database = temp.path().join("orphan-identity.db");
+        let orphan = AtlasStore::open(&orphan_database)?;
+        let orphan_identity = ProjectInstanceId::from_bytes([0x51; 16])?;
+        orphan.connection.execute(
+            "INSERT INTO project_identity(singleton, project_instance_id, active_generation)
+             VALUES(1, ?1, 0)",
+            [&orphan_identity.as_bytes()[..]],
+        )?;
+        orphan
+            .connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        drop(orphan);
+        let orphan_bytes = fs::read(&orphan_database)?;
+
+        for result in [
+            AtlasStore::open(&orphan_database),
+            AtlasStore::open_read_only(&orphan_database),
+        ] {
+            let Err(error) = result else {
+                return Err(
+                    io::Error::other("unbound database accepted an orphan identity").into(),
+                );
+            };
+            if !matches!(error, DbError::ProjectRootTransitionChanged { .. }) {
+                return Err(io::Error::other(format!(
+                    "orphan identity returned the wrong error: {error}"
+                ))
+                .into());
+            }
+        }
+        if fs::read(&orphan_database)? != orphan_bytes {
+            return Err(io::Error::other("rejected orphan identity changed the database").into());
         }
         Ok(())
     }
@@ -1958,6 +2080,44 @@ mod tests {
             &unbound_bytes,
             &unbound_inventory,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn current_writer_revalidates_binding_captured_by_preflight() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("root-a");
+        let replacement_root = temp.path().join("root-b");
+        fs::create_dir_all(&root)?;
+        fs::create_dir_all(&replacement_root)?;
+        let db_path = temp.path().join("projectatlas.db");
+        drop(AtlasStore::open_for_project(&db_path, &root)?);
+
+        let expected_root = crate::normalize_metadata_path(&root);
+        let replacement_root = crate::normalize_metadata_path(&replacement_root);
+        let (preflight, location) = preflight(&db_path, Some(&expected_root))?;
+        let transition = Connection::open(&db_path)?;
+        crate::set_metadata(&transition, PROJECT_ROOT_KEY, &replacement_root)?;
+        drop(transition);
+
+        let writer = crate::sqlite_profile::open_writable_connection(
+            &db_path,
+            crate::writable_open_flags(preflight.state, location.database_exists),
+            &location,
+            crate::SQLITE_BUSY_TIMEOUT,
+            crate::writable_journal_policy(preflight.state),
+        )?;
+        let Err(error) =
+            revalidate_current_binding(&writer, preflight.project_root.as_deref(), true)
+        else {
+            return Err(io::Error::other("writer accepted a replaced project binding").into());
+        };
+        if !matches!(error, DbError::ProjectRootMismatch { .. }) {
+            return Err(io::Error::other("binding race returned the wrong error").into());
+        }
+        if read_metadata(&writer, PROJECT_ROOT_KEY)? != Some(replacement_root) {
+            return Err(io::Error::other("rejected binding changed the database").into());
+        }
         Ok(())
     }
 

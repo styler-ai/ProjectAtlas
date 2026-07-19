@@ -9,7 +9,7 @@ pub use project_identity::{ProjectRootTransition, ProjectRootTransitionResult};
 pub use repository_graph::{RepositoryGraphPage, RepositoryGraphRelationQuery};
 pub use sqlite_profile::validate_database_location;
 
-use projectatlas_core::graph::GraphContractError;
+use projectatlas_core::graph::{GraphContractError, ProjectInstanceId};
 use projectatlas_core::health::{
     CATEGORY_DUPLICATE_PURPOSE, CATEGORY_MISSING_PURPOSE, CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
     CATEGORY_REPEATED_TEMPORARY_FOLDER, CATEGORY_STALE_PURPOSE, CATEGORY_SUGGESTED_PURPOSE_REVIEW,
@@ -36,7 +36,10 @@ use projectatlas_core::{
     normalize_repo_path_prefix,
 };
 use rusqlite::types::Value;
-use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, params, params_from_iter};
+use rusqlite::{
+    Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior, params,
+    params_from_iter,
+};
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -58,7 +61,6 @@ use sqlite_profile::{JournalModePolicy, SQLITE_BUSY_TIMEOUT, open_writable_conne
 const MAX_SYMBOL_SEARCH_SUMMARY_CHARS: usize = 16_000;
 /// Publication acquisition fails fast so callers must restage after contention.
 const SQLITE_PUBLICATION_ACQUIRE_TIMEOUT: Duration = Duration::ZERO;
-
 /// Select create capability only for a path proven absent by preflight.
 fn writable_open_flags(state: SchemaState, database_exists: bool) -> OpenFlags {
     match (state, database_exists) {
@@ -447,6 +449,24 @@ pub struct AtlasStore {
     read_only: bool,
     /// Project root validated for this store, when the database records one.
     validated_project_root: Option<String>,
+    /// Project identity captured with the validated root binding.
+    validated_project_instance_id: Option<ProjectInstanceId>,
+}
+
+/// Identity depth required while opening one current project binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectIdentityRequirement {
+    /// Ordinary stores require a complete root and identity binding.
+    Required,
+    /// An explicit root transition owns identity creation or repair.
+    TransitionOwned,
+}
+
+impl ProjectIdentityRequirement {
+    /// Whether a missing identity must fail the open.
+    const fn is_required(self) -> bool {
+        matches!(self, Self::Required)
+    }
 }
 
 impl Deref for IndexPublicationGuard<'_> {
@@ -763,6 +783,64 @@ const PURPOSE_HEALTH_SPECS: [PurposeHealthSpec; 3] = [
 ];
 
 impl AtlasStore {
+    /// Reject mutations while this connection owns an ordinary read snapshot.
+    fn require_mutation_scope(&self) -> DbResult<()> {
+        if self.read_snapshot_active.get() {
+            Err(DbError::IndexReadSnapshotActive)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Open a nested-capable write scope after validating the active binding.
+    fn validated_savepoint(&mut self) -> DbResult<rusqlite::Savepoint<'_>> {
+        self.require_mutation_scope()?;
+        let validate_binding = self.connection.is_autocommit();
+        let expected_root = self.validated_project_root.clone();
+        let expected_identity = self.validated_project_instance_id;
+        let savepoint = self.connection.savepoint()?;
+        if validate_binding {
+            schema::validate_active_binding(
+                &savepoint,
+                expected_root.as_deref(),
+                expected_identity,
+            )?;
+        }
+        Ok(savepoint)
+    }
+
+    /// Run one atomic standalone write, reusing an already validated parent transaction.
+    fn with_validated_write<T>(
+        &self,
+        operation: impl FnOnce(&Connection) -> DbResult<T>,
+    ) -> DbResult<T> {
+        self.require_mutation_scope()?;
+        if !self.connection.is_autocommit() {
+            return operation(&self.connection);
+        }
+        let transaction =
+            rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)?;
+        let result = schema::validate_active_binding(
+            &transaction,
+            self.validated_project_root.as_deref(),
+            self.validated_project_instance_id,
+        )
+        .and_then(|()| operation(&transaction));
+        match result {
+            Ok(value) => {
+                transaction.commit()?;
+                Ok(value)
+            }
+            Err(operation) => match transaction.rollback() {
+                Ok(()) => Err(operation),
+                Err(rollback) => Err(DbError::TransactionRollback {
+                    operation: Box::new(operation),
+                    rollback,
+                }),
+            },
+        }
+    }
+
     /// Open or create an index store.
     ///
     /// # Errors
@@ -789,6 +867,24 @@ impl AtlasStore {
 
     /// Open with an optional source-owned project identity.
     fn open_with_project_root(path: &Path, expected_root: Option<&str>) -> DbResult<Self> {
+        Self::open_with_binding_requirement(
+            path,
+            expected_root,
+            ProjectIdentityRequirement::Required,
+        )
+    }
+
+    /// Open for an explicit root transition that owns identity repair.
+    fn open_for_root_transition(path: &Path) -> DbResult<Self> {
+        Self::open_with_binding_requirement(path, None, ProjectIdentityRequirement::TransitionOwned)
+    }
+
+    /// Open with the root and identity validation required by the caller.
+    fn open_with_binding_requirement(
+        path: &Path,
+        expected_root: Option<&str>,
+        identity_requirement: ProjectIdentityRequirement,
+    ) -> DbResult<Self> {
         let (preflight, location) = schema::preflight(path, expected_root)?;
         let validated_project_root = expected_root.map(str::to_owned).or(preflight.project_root);
         let connection = open_writable_connection(
@@ -798,17 +894,30 @@ impl AtlasStore {
             SQLITE_BUSY_TIMEOUT,
             writable_journal_policy(preflight.state),
         )?;
-        let store = Self {
+        let validated_project_instance_id = if preflight.state == SchemaState::Current {
+            schema::revalidate_current_binding(
+                &connection,
+                validated_project_root.as_deref(),
+                identity_requirement.is_required(),
+            )?
+        } else {
+            schema::initialize(&connection, expected_root)?;
+            project_identity::load_project_identity(&connection)?
+        };
+        if identity_requirement.is_required()
+            && validated_project_root.is_some()
+            && validated_project_instance_id.is_none()
+        {
+            return Err(DbError::ProjectInstanceIdentityMissing);
+        }
+        Ok(Self {
             connection,
             read_snapshot_active: Cell::new(false),
             database_path: Some(path.to_path_buf()),
             read_only: false,
             validated_project_root,
-        };
-        if preflight.state != SchemaState::Current {
-            schema::initialize(&store.connection, expected_root)?;
-        }
-        Ok(store)
+            validated_project_instance_id,
+        })
     }
 
     /// Open an existing index without creating, migrating, or backfilling it.
@@ -838,12 +947,19 @@ impl AtlasStore {
         expected_root: Option<&str>,
     ) -> DbResult<Self> {
         let (connection, preflight) = schema::open_current_read_only(path, expected_root)?;
+        let validated_project_instance_id = project_identity::load_project_identity(&connection)?;
+        schema::validate_binding_completeness(
+            preflight.project_root.as_deref(),
+            validated_project_instance_id,
+            true,
+        )?;
         Ok(Self {
             connection,
             read_snapshot_active: Cell::new(true),
             database_path: Some(path.to_path_buf()),
             read_only: true,
             validated_project_root: preflight.project_root,
+            validated_project_instance_id,
         })
     }
 
@@ -859,6 +975,7 @@ impl AtlasStore {
             database_path: None,
             read_only: false,
             validated_project_root: None,
+            validated_project_instance_id: None,
         };
         schema::initialize(&store.connection, None)?;
         Ok(store)
@@ -879,7 +996,7 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn replace_scan(&mut self, nodes: &[Node]) -> DbResult<()> {
-        let savepoint = self.connection.savepoint()?;
+        let savepoint = self.validated_savepoint()?;
         mark_all_scan_nodes_absent(&savepoint)?;
         upsert_nodes(&savepoint, nodes)?;
         delete_absent_scan_projections(&savepoint)?;
@@ -893,7 +1010,7 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn upsert_scan_nodes(&mut self, nodes: &[Node]) -> DbResult<()> {
-        let savepoint = self.connection.savepoint()?;
+        let savepoint = self.validated_savepoint()?;
         upsert_nodes(&savepoint, nodes)?;
         savepoint.commit()?;
         Ok(())
@@ -905,7 +1022,7 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn mark_paths_absent(&mut self, paths: &[String]) -> DbResult<()> {
-        let savepoint = self.connection.savepoint()?;
+        let savepoint = self.validated_savepoint()?;
         {
             let mut mark_nodes = savepoint.prepare_cached(
                 "UPDATE nodes SET exists_now = 0 WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
@@ -952,7 +1069,7 @@ impl AtlasStore {
         paths: &[String],
         texts: impl IntoIterator<Item = &'text IndexedFileText>,
     ) -> DbResult<()> {
-        let savepoint = self.connection.savepoint()?;
+        let savepoint = self.validated_savepoint()?;
         {
             let mut delete = savepoint.prepare_cached("DELETE FROM file_texts WHERE path = ?1")?;
             for path in paths {
@@ -1131,7 +1248,7 @@ impl AtlasStore {
     /// Returns an error if persistence fails.
     pub fn set_project_root(&mut self, root: &Path) -> DbResult<()> {
         let value = normalize_metadata_path(root);
-        let savepoint = self.connection.savepoint()?;
+        let savepoint = self.validated_savepoint()?;
         if let Some(found) = savepoint
             .query_row(
                 "SELECT value FROM metadata WHERE key = ?1",
@@ -1141,9 +1258,10 @@ impl AtlasStore {
             .optional()?
         {
             if found == value {
-                project_identity::ensure_project_identity(&savepoint)?;
+                let (identity, _) = project_identity::ensure_project_identity(&savepoint)?;
                 savepoint.commit()?;
                 self.validated_project_root = Some(value);
+                self.validated_project_instance_id = Some(identity);
                 return Ok(());
             }
             return Err(DbError::ProjectRootMismatch {
@@ -1152,9 +1270,10 @@ impl AtlasStore {
             });
         }
         set_metadata(&savepoint, PROJECT_ROOT_KEY, &value)?;
-        project_identity::ensure_project_identity(&savepoint)?;
+        let (identity, _) = project_identity::ensure_project_identity(&savepoint)?;
         savepoint.commit()?;
         self.validated_project_root = Some(value);
+        self.validated_project_instance_id = Some(identity);
         Ok(())
     }
 
@@ -1259,6 +1378,11 @@ impl AtlasStore {
     ) -> DbResult<IndexPublicationGuard<'_>> {
         begin_immediate_publication(&self.connection)?;
         let setup = (|| {
+            schema::validate_active_binding(
+                &self.connection,
+                self.validated_project_root.as_deref(),
+                self.validated_project_instance_id,
+            )?;
             let previous = load_index_publication(&self.connection)?;
             if let Some(expected) = expected_base_generation {
                 let base_matches = match previous.as_ref() {
@@ -1361,7 +1485,7 @@ impl AtlasStore {
     /// Returns an error if persistence fails.
     pub fn replace_symbol_graph(&mut self, graph: &SymbolGraph) -> DbResult<()> {
         let metadata = SourceParseMetadata::from_graph(graph);
-        let savepoint = self.connection.savepoint()?;
+        let savepoint = self.validated_savepoint()?;
         let node_id = {
             let mut delete_symbols =
                 savepoint.prepare_cached("DELETE FROM symbols WHERE path = ?1")?;
@@ -1485,19 +1609,20 @@ impl AtlasStore {
     ///
     /// Returns an error if the path does not exist or persistence fails.
     pub fn clear_source_index_for_path(&self, path: &str) -> DbResult<()> {
-        let node_id = self.node_id_for_path(path)?;
-        self.connection
-            .prepare_cached("DELETE FROM symbols WHERE path = ?1")?
-            .execute([path])?;
-        self.connection
-            .prepare_cached("DELETE FROM symbol_relations WHERE path = ?1")?
-            .execute([path])?;
-        self.connection
-            .prepare_cached("DELETE FROM source_parse_metadata WHERE path = ?1")?
-            .execute([path])?;
-        self.connection
-            .prepare_cached(
-                "
+        self.with_validated_write(|connection| {
+            let node_id = self.node_id_for_path(path)?;
+            connection
+                .prepare_cached("DELETE FROM symbols WHERE path = ?1")?
+                .execute([path])?;
+            connection
+                .prepare_cached("DELETE FROM symbol_relations WHERE path = ?1")?
+                .execute([path])?;
+            connection
+                .prepare_cached("DELETE FROM source_parse_metadata WHERE path = ?1")?
+                .execute([path])?;
+            connection
+                .prepare_cached(
+                    "
             DELETE FROM summaries
             WHERE node_id = ?1
               AND (
@@ -1505,9 +1630,10 @@ impl AtlasStore {
                     OR (summary_level = 'search' AND subject = 'symbols')
                   )
             ",
-            )?
-            .execute([node_id])?;
-        Ok(())
+                )?
+                .execute([node_id])?;
+            Ok(())
+        })
     }
 
     /// Clear symbols and relations for one live file path while preserving node summaries.
@@ -1516,27 +1642,29 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn clear_symbol_graph_for_path(&self, path: &str) -> DbResult<()> {
-        let node_id = self.node_id_for_path(path)?;
-        self.connection
-            .prepare_cached("DELETE FROM symbols WHERE path = ?1")?
-            .execute([path])?;
-        self.connection
-            .prepare_cached("DELETE FROM symbol_relations WHERE path = ?1")?
-            .execute([path])?;
-        self.connection
-            .prepare_cached("DELETE FROM source_parse_metadata WHERE path = ?1")?
-            .execute([path])?;
-        self.connection
-            .prepare_cached(
-                "
+        self.with_validated_write(|connection| {
+            let node_id = self.node_id_for_path(path)?;
+            connection
+                .prepare_cached("DELETE FROM symbols WHERE path = ?1")?
+                .execute([path])?;
+            connection
+                .prepare_cached("DELETE FROM symbol_relations WHERE path = ?1")?
+                .execute([path])?;
+            connection
+                .prepare_cached("DELETE FROM source_parse_metadata WHERE path = ?1")?
+                .execute([path])?;
+            connection
+                .prepare_cached(
+                    "
             DELETE FROM summaries
             WHERE node_id = ?1
               AND summary_level = 'search'
               AND subject = 'symbols'
             ",
-            )?
-            .execute([node_id])?;
-        Ok(())
+                )?
+                .execute([node_id])?;
+            Ok(())
+        })
     }
 
     /// Persist an observed one-line summary for an indexed node.
@@ -1545,10 +1673,11 @@ impl AtlasStore {
     ///
     /// Returns an error if the path does not exist or persistence fails.
     pub fn set_node_summary(&self, path: &str, summary: &str) -> DbResult<()> {
-        let node_id = self.node_id_for_path(path)?;
-        self.connection
-            .prepare_cached(
-                "
+        self.with_validated_write(|connection| {
+            let node_id = self.node_id_for_path(path)?;
+            connection
+                .prepare_cached(
+                    "
             INSERT INTO summaries(node_id, summary_level, subject, summary, updated_at)
             VALUES(?1, 'node', '', ?2, CURRENT_TIMESTAMP)
             ON CONFLICT(node_id, summary_level, subject) DO UPDATE SET
@@ -1557,9 +1686,10 @@ impl AtlasStore {
                 summary = excluded.summary,
                 updated_at = CURRENT_TIMESTAMP
             ",
-            )?
-            .execute(params![node_id, summary])?;
-        Ok(())
+                )?
+                .execute(params![node_id, summary])?;
+            Ok(())
+        })
     }
 
     /// Remove the observed node-level summary for an indexed node.
@@ -1568,18 +1698,20 @@ impl AtlasStore {
     ///
     /// Returns an error if the path does not exist or persistence fails.
     pub fn clear_node_summary(&self, path: &str) -> DbResult<()> {
-        let node_id = self.node_id_for_path(path)?;
-        self.connection
-            .prepare_cached(
-                "
+        self.with_validated_write(|connection| {
+            let node_id = self.node_id_for_path(path)?;
+            connection
+                .prepare_cached(
+                    "
             DELETE FROM summaries
             WHERE node_id = ?1
               AND summary_level = 'node'
               AND subject = ''
             ",
-            )?
-            .execute([node_id])?;
-        Ok(())
+                )?
+                .execute([node_id])?;
+            Ok(())
+        })
     }
 
     /// Load symbols filtered by optional file path and query.
@@ -2346,10 +2478,11 @@ impl AtlasStore {
     ///
     /// Returns an error if the path does not exist or persistence fails.
     pub fn set_purpose(&self, path: &str, purpose: &str, source: PurposeSource) -> DbResult<()> {
-        let node_id = self.node_id_for_path(path)?;
-        self.connection
-            .prepare_cached(
-                "
+        self.with_validated_write(|connection| {
+            let node_id = self.node_id_for_path(path)?;
+            connection
+                .prepare_cached(
+                    "
             INSERT INTO purposes(node_id, purpose, source, status, updated_at)
             VALUES(?1, ?2, ?3, 'approved', CURRENT_TIMESTAMP)
             ON CONFLICT(node_id) DO UPDATE SET
@@ -2358,9 +2491,10 @@ impl AtlasStore {
                 status = 'approved',
                 updated_at = CURRENT_TIMESTAMP
             ",
-            )?
-            .execute(params![node_id, purpose, source.to_string()])?;
-        Ok(())
+                )?
+                .execute(params![node_id, purpose, source.to_string()])?;
+            Ok(())
+        })
     }
 
     /// Persist a non-approved purpose suggestion for a path.
@@ -2369,10 +2503,11 @@ impl AtlasStore {
     ///
     /// Returns an error if the path does not exist or persistence fails.
     pub fn set_suggested_purpose(&self, path: &str, purpose: &str) -> DbResult<()> {
-        let node_id = self.node_id_for_path(path)?;
-        self.connection
-            .prepare_cached(
-                "
+        self.with_validated_write(|connection| {
+            let node_id = self.node_id_for_path(path)?;
+            connection
+                .prepare_cached(
+                    "
             INSERT INTO purposes(node_id, purpose, source, status, updated_at)
             VALUES(?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
             ON CONFLICT(node_id) DO UPDATE SET
@@ -2382,16 +2517,17 @@ impl AtlasStore {
                 updated_at = CURRENT_TIMESTAMP
             WHERE purposes.status IN (?5, ?6)
             ",
-            )?
-            .execute(params![
-                node_id,
-                purpose,
-                PurposeSource::Generated.to_string(),
-                PurposeStatus::Suggested.as_str(),
-                PurposeStatus::Missing.as_str(),
-                PurposeStatus::Suggested.as_str(),
-            ])?;
-        Ok(())
+                )?
+                .execute(params![
+                    node_id,
+                    purpose,
+                    PurposeSource::Generated.to_string(),
+                    PurposeStatus::Suggested.as_str(),
+                    PurposeStatus::Missing.as_str(),
+                    PurposeStatus::Suggested.as_str(),
+                ])?;
+            Ok(())
+        })
     }
 
     /// Load a node id for a repository path.
@@ -3795,7 +3931,8 @@ impl AtlasStore {
     /// Returns an error if persistence fails.
     pub fn record_usage(&self, event: &UsageEvent) -> DbResult<()> {
         if !self.read_only {
-            return record_usage_on_connection(&self.connection, event);
+            return self
+                .with_validated_write(|connection| record_usage_on_connection(connection, event));
         }
         self.finish_index_read_snapshot()?;
         let path = self
@@ -3811,13 +3948,17 @@ impl AtlasStore {
             JournalModePolicy::RequireWal,
         )?;
         let result = (|| {
-            connection.execute_batch("BEGIN IMMEDIATE")?;
-            let operation =
-                schema::validate_current(&connection, self.validated_project_root.as_deref())
-                    .and_then(|()| record_usage_on_connection(&connection, event));
+            let transaction =
+                rusqlite::Transaction::new_unchecked(&connection, TransactionBehavior::Immediate)?;
+            let operation = schema::validate_active_binding(
+                &transaction,
+                self.validated_project_root.as_deref(),
+                self.validated_project_instance_id,
+            )
+            .and_then(|()| record_usage_on_connection(&transaction, event));
             match operation {
-                Ok(()) => connection.execute_batch("COMMIT").map_err(Into::into),
-                Err(operation) => match connection.execute_batch("ROLLBACK") {
+                Ok(()) => transaction.commit().map_err(Into::into),
+                Err(operation) => match transaction.rollback() {
                     Ok(()) => Err(operation),
                     Err(rollback) => Err(DbError::TransactionRollback {
                         operation: Box::new(operation),
@@ -4189,15 +4330,16 @@ impl AtlasStore {
     ///
     /// Returns an error if the finding is not active or persistence fails.
     pub fn resolve_health_finding(&self, resolution: &HealthResolution) -> DbResult<()> {
-        if !self.active_health_finding_matches(resolution)? {
-            return Err(DbError::HealthFindingNotActive {
-                finding_id: resolution.finding_id.clone(),
-                category: resolution.category.clone(),
-                path: resolution.path.clone(),
-            });
-        }
-        self.connection.execute(
-            "
+        self.with_validated_write(|connection| {
+            if !self.active_health_finding_matches(resolution)? {
+                return Err(DbError::HealthFindingNotActive {
+                    finding_id: resolution.finding_id.clone(),
+                    category: resolution.category.clone(),
+                    path: resolution.path.clone(),
+                });
+            }
+            connection.execute(
+                "
             INSERT INTO health_resolutions(
                 finding_id,
                 category,
@@ -4216,15 +4358,16 @@ impl AtlasStore {
                 resolved_by = 'agent',
                 resolved_at = CURRENT_TIMESTAMP
             ",
-            params![
-                resolution.finding_id,
-                resolution.category,
-                resolution.path,
-                resolution.related_path,
-                resolution.rationale,
-            ],
-        )?;
-        Ok(())
+                params![
+                    resolution.finding_id,
+                    resolution.category,
+                    resolution.path,
+                    resolution.related_path,
+                    resolution.rationale,
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     /// Return whether the visible SQL health surface contains the exact finding.
@@ -5767,6 +5910,45 @@ mod tests {
     }
 
     #[test]
+    fn writable_mutators_reject_an_active_read_snapshot() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open(&db_path)?;
+        store.replace_scan(&[test_file_node("src/lib.rs", "initial")])?;
+        store.begin_index_read_snapshot()?;
+
+        let Err(purpose_error) = store.set_purpose(
+            "src/lib.rs",
+            "Must not be written through a read snapshot.",
+            PurposeSource::Agent,
+        ) else {
+            return Err(io::Error::other("purpose wrote through a read snapshot").into());
+        };
+        require_eq(
+            &matches!(purpose_error, DbError::IndexReadSnapshotActive),
+            &true,
+            "read-snapshot purpose rejection",
+        )?;
+
+        let Err(scan_error) = store.replace_scan(&[]) else {
+            return Err(io::Error::other("scan wrote through a read snapshot").into());
+        };
+        require_eq(
+            &matches!(scan_error, DbError::IndexReadSnapshotActive),
+            &true,
+            "read-snapshot scan rejection",
+        )?;
+
+        store.finish_index_read_snapshot()?;
+        require_eq(
+            &store.load_node_by_path("src/lib.rs")?.is_some(),
+            &true,
+            "read-snapshot rejected writes preserved indexed state",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn stale_publication_base_is_rejected_before_batch_mutation() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let db_path = temp.path().join("projectatlas.db");
@@ -6412,22 +6594,14 @@ mod tests {
     fn read_only_telemetry_revalidates_project_identity_before_write() -> Result<(), Box<dyn Error>>
     {
         let temp = tempfile::tempdir()?;
-        let root = temp.path().join("repository-a");
-        let replacement_root = temp.path().join("repository-b");
+        let root = temp.path().join("repository");
         fs::create_dir_all(&root)?;
-        fs::create_dir_all(&replacement_root)?;
         let db_path = temp.path().join("projectatlas.db");
         drop(AtlasStore::open_for_project(&db_path, &root)?);
 
         let reader = AtlasStore::open_read_only_for_project(&db_path, &root)?;
         reader.finish_index_read_snapshot()?;
-        let replacement = Connection::open(&db_path)?;
-        set_metadata(
-            &replacement,
-            PROJECT_ROOT_KEY,
-            &normalize_native_path_display(&replacement_root),
-        )?;
-        drop(replacement);
+        AtlasStore::transition_project_root(&db_path, &root, ProjectRootTransition::Detach)?;
 
         let event = usage_from_estimates(
             "identity-race",
@@ -6441,7 +6615,7 @@ mod tests {
             return Err(io::Error::other("telemetry wrote through replaced identity").into());
         };
         require_eq(
-            &matches!(error, DbError::ProjectRootMismatch { .. }),
+            &matches!(error, DbError::ProjectRootTransitionChanged { .. }),
             &true,
             "telemetry project identity recheck",
         )?;

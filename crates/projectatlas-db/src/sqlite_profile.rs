@@ -113,6 +113,7 @@ pub fn validate_database_location(path: &Path) -> DbResult<()> {
 /// Inspect the exact database path or its nearest existing parent.
 pub(crate) fn inspect_database_location(path: &Path) -> DbResult<DatabaseLocation> {
     let absolute = absolute_database_path(path)?;
+    #[cfg(windows)]
     reject_unsupported_windows_prefix(&absolute)?;
     let (database_exists, probe) = database_probe_path(&absolute)?;
     let resolved = whichdisk::resolve(&probe).map_err(|source| {
@@ -436,12 +437,6 @@ fn windows_drive_letter(path: &Path) -> Option<u8> {
         | Prefix::DeviceNS(_)
         | Prefix::Verbatim(_) => None,
     }
-}
-
-/// Other platforms rely on direct mount resolution and filesystem classification.
-#[cfg(not(windows))]
-fn reject_unsupported_windows_prefix(_path: &Path) -> DbResult<()> {
-    Ok(())
 }
 
 /// Verify the durable database journal mode.
