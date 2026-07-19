@@ -722,11 +722,18 @@ mutation of the one project database occurs inside the short publication
 transaction. The spool is never a copied live atlas and is deleted after the
 owning operation publishes, fails, or is canceled.
 
-This diagram is the task 2.3 target. The architecture audit reopened that task
-because the current runtime begins `BEGIN IMMEDIATE` before text reads, symbol
-parsing, and structural summary work. The task remains open until production and
-real database tests match this flow and transaction-hold/WAL costs pass the
-representative scale gates.
+Task 2.3 implements this flow. Full scan, full watcher refresh, incremental
+watcher refresh, and symbol-only projection refresh now capture their base
+generation and prepare admitted filesystem, text, symbol, relationship, and
+summary state before acquiring the writer. Immediately before publication they
+reload current configuration, exactly revalidate source and consumed purpose
+inputs, then enter `BEGIN IMMEDIATE`, compare the staged base generation, apply
+only prepared mutations, advance the generation once, and commit. Competing
+publication, source/configuration drift, cancellation, or a late mutation error
+leaves the last complete generation visible. Representative task 7.4 scale
+measurement still owns final transaction-duration, WAL-write, contention, CPU,
+RSS, and spill-threshold decisions; it must optimize measured costs without
+weakening this order or introducing another authoritative database.
 
 ### SQLite WAL, Durability, And Checkpoint Flow
 
