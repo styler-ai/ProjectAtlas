@@ -540,7 +540,7 @@ impl IndexPublicationGuard<'_> {
             return Ok(());
         }
         let mut orphan_candidates = affected_external_candidates(&savepoint, &affected_paths)?;
-        invalidate_repository_graph_paths(&savepoint, &affected_paths)?;
+        invalidate_repository_graph_paths(&savepoint, &affected_paths, &mut orphan_candidates)?;
         insert_graph_batch(
             &savepoint,
             project,
@@ -630,7 +630,13 @@ fn affected_external_candidates(
 fn invalidate_repository_graph_paths(
     connection: &Connection,
     affected_paths: &[RepositoryNodePath],
+    orphan_candidates: &mut HashSet<[u8; 32]>,
 ) -> DbResult<()> {
+    let mut affected_relations = HashSet::new();
+    let mut relation_occurrences = connection.prepare_cached(
+        "SELECT relation_key FROM graph_relation_occurrences
+          WHERE file_path = ?1 OR (file_path >= ?2 AND file_path < ?3)",
+    )?;
     let mut occurrences = connection.prepare_cached(
         "DELETE FROM graph_relation_occurrences
           WHERE file_path = ?1 OR (file_path >= ?2 AND file_path < ?3)",
@@ -653,10 +659,66 @@ fn invalidate_repository_graph_paths(
     for path in affected_paths {
         let path = path.as_str();
         let (descendant_start, descendant_end) = repository_descendant_bounds(path);
+        let mut rows =
+            relation_occurrences.query(params![path, descendant_start, descendant_end])?;
+        while let Some(row) = rows.next()? {
+            affected_relations.insert(fixed_bytes::<32>(
+                "graph_relation_occurrences.relation_key",
+                row.get::<_, Vec<u8>>(0)?,
+            )?);
+        }
         occurrences.execute(params![path, descendant_start, descendant_end])?;
         coverage.execute(params![path, descendant_start, descendant_end])?;
         entities_by_path.execute(params![path, descendant_start, descendant_end])?;
         entities_by_manifest.execute(params![path, descendant_start, descendant_end])?;
+    }
+    collect_external_relation_endpoints(connection, &affected_relations, orphan_candidates)?;
+    let mut relation = connection.prepare_cached(
+        "DELETE FROM graph_relations
+          WHERE relation_key = ?1
+            AND NOT EXISTS (
+                SELECT 1 FROM graph_relation_occurrences
+                 WHERE relation_key = ?1
+            )",
+    )?;
+    for relation_key in affected_relations {
+        relation.execute([&relation_key[..]])?;
+    }
+    Ok(())
+}
+
+/// Retain external endpoints whose occurrence-backed relation may be removed.
+fn collect_external_relation_endpoints(
+    connection: &Connection,
+    relation_keys: &HashSet<[u8; 32]>,
+    candidates: &mut HashSet<[u8; 32]>,
+) -> DbResult<()> {
+    let mut endpoints = connection.prepare_cached(
+        "SELECT source_entity_key, target_entity_key
+           FROM graph_relations
+          WHERE relation_key = ?1",
+    )?;
+    let mut is_external = connection.prepare_cached(
+        "SELECT EXISTS(
+            SELECT 1 FROM graph_entities
+             WHERE entity_key = ?1 AND entity_kind = 'external'
+        )",
+    )?;
+    for relation_key in relation_keys {
+        let endpoints = endpoints
+            .query_row([&relation_key[..]], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
+            })
+            .optional()?;
+        let Some((source, target)) = endpoints else {
+            continue;
+        };
+        for endpoint in [Some(source), target].into_iter().flatten() {
+            let endpoint = fixed_bytes::<32>("graph_relations endpoint", endpoint)?;
+            if is_external.query_row([&endpoint[..]], |row| row.get::<_, bool>(0))? {
+                candidates.insert(endpoint);
+            }
+        }
     }
     Ok(())
 }
@@ -2532,6 +2594,16 @@ mod tests {
             },
             generation_one,
         )?;
+        let occurrence_owned_external = GraphEntity::new(
+            project,
+            EntitySelector::External {
+                external: ExternalSelector {
+                    system: GraphIdentityText::new("crates.io")?,
+                    identity: GraphIdentityText::new("occurrence-owned@1")?,
+                },
+            },
+            generation_one,
+        )?;
         let affected_relation = LogicalRelation::new(
             &affected_file,
             GraphRelationKind::Legacy(RelationKind::DependsOn),
@@ -2564,6 +2636,14 @@ mod tests {
             Completeness::Complete,
             generation_one,
         )?;
+        let occurrence_backed_project_relation = LogicalRelation::new(
+            &project_entity,
+            GraphRelationKind::Legacy(RelationKind::DependsOn),
+            RelationResolution::external(&occurrence_owned_external)?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation_one,
+        )?;
         let affected_occurrence = RelationOccurrence::new(
             &affected_relation,
             RepositoryFilePath::new(Path::new("src/a/local.rs"))?,
@@ -2574,6 +2654,18 @@ mod tests {
             &retained_relation,
             RepositoryFilePath::new(Path::new("src/A/keep.rs"))?,
             SourceSpan::new(5, 0, 5, 14)?,
+            generation_one,
+        )?;
+        let retained_relation_affected_occurrence = RelationOccurrence::new(
+            &retained_relation,
+            RepositoryFilePath::new(Path::new("src/a/local.rs"))?,
+            SourceSpan::new(6, 0, 6, 14)?,
+            generation_one,
+        )?;
+        let project_relation_occurrence = RelationOccurrence::new(
+            &occurrence_backed_project_relation,
+            RepositoryFilePath::new(Path::new("src/a/local.rs"))?,
+            SourceSpan::new(9, 0, 9, 16)?,
             generation_one,
         )?;
         let initial_coverage = vec![
@@ -2624,14 +2716,21 @@ mod tests {
                     package.clone(),
                     orphan_external.clone(),
                     retained_external.clone(),
+                    occurrence_owned_external.clone(),
                 ],
                 &[
                     affected_relation,
                     package_relation,
                     retained_relation,
                     project_external_relation,
+                    occurrence_backed_project_relation,
                 ],
-                &[affected_occurrence, retained_occurrence],
+                &[
+                    affected_occurrence,
+                    retained_occurrence,
+                    retained_relation_affected_occurrence,
+                    project_relation_occurrence,
+                ],
                 &initial_coverage,
             )?;
             publication.complete()?;
@@ -2711,6 +2810,11 @@ mod tests {
             &None,
             "candidate-bounded orphan external cleanup",
         )?;
+        require_eq(
+            &store.repository_graph_entity(occurrence_owned_external.key())?,
+            &None,
+            "final affected occurrence relation and external cleanup",
+        )?;
         let preserved_case = store
             .repository_graph_entity(case_distinct_file.key())?
             .ok_or_else(|| io::Error::other("case-distinct sibling was removed"))?;
@@ -2726,6 +2830,25 @@ mod tests {
             &preserved_external.generation(),
             &generation_two,
             "unaffected external generation injection",
+        )?;
+        let retained_relations = store.repository_graph_relations(
+            RepositoryGraphRelationQuery::Outbound {
+                source: case_distinct_file.key().clone(),
+            },
+            10,
+        )?;
+        require_eq(
+            &retained_relations.rows.len(),
+            &1,
+            "relation with one unaffected occurrence",
+        )?;
+        require_eq(
+            &store
+                .repository_graph_occurrences(&retained_relations.rows[0], 10)?
+                .rows
+                .len(),
+            &1,
+            "only the affected occurrence was removed",
         )?;
         let replacement_relations = store.repository_graph_relations(
             RepositoryGraphRelationQuery::Outbound {
