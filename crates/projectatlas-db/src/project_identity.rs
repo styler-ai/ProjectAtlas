@@ -194,9 +194,9 @@ fn apply_root_transition(
         let (project_instance_id, identity_changed) = match transition {
             ProjectRootTransition::Bind => unreachable!("bind does not use transition mutation"),
             ProjectRootTransition::Move => {
-                let identity = found_identity.ok_or(DbError::ProjectInstanceIdentityMissing)?;
+                let (identity, identity_changed) = ensure_project_identity(&store.connection)?;
                 set_graph_generation(&store.connection, IndexGeneration::ZERO)?;
-                (identity, false)
+                (identity, identity_changed)
             }
             ProjectRootTransition::Detach => {
                 store.connection.execute("DELETE FROM graph_coverage", [])?;
@@ -669,6 +669,46 @@ mod tests {
         require(
             migrated_move.project_instance_id.as_bytes() != [0_u8; 16],
             "pre-graph-schema move initialized a zero identity",
+        )?;
+
+        let current_missing_identity_db = temp.path().join("current-missing-identity.db");
+        let current_missing_identity_root = temp.path().join("current-missing-identity-root");
+        let current_missing_identity_destination =
+            temp.path().join("current-missing-identity-destination");
+        fs::create_dir(&current_missing_identity_root)?;
+        fs::create_dir(&current_missing_identity_destination)?;
+        AtlasStore::transition_project_root(
+            &current_missing_identity_db,
+            &current_missing_identity_root,
+            ProjectRootTransition::Bind,
+        )?;
+        {
+            let current = AtlasStore::open(&current_missing_identity_db)?;
+            current
+                .connection
+                .execute("DELETE FROM project_identity", [])?;
+            current
+                .connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        }
+        fs::remove_dir(&current_missing_identity_root)?;
+        let repaired_current_move = AtlasStore::transition_project_root(
+            &current_missing_identity_db,
+            &current_missing_identity_destination,
+            ProjectRootTransition::Move,
+        )?;
+        require(
+            repaired_current_move.identity_changed,
+            "current bound database move did not report its repaired identity",
+        )?;
+        let repaired_current = AtlasStore::open_read_only_for_project(
+            &current_missing_identity_db,
+            &current_missing_identity_destination,
+        )?;
+        require_eq(
+            &repaired_current.project_instance_id()?,
+            &Some(repaired_current_move.project_instance_id),
+            "current bound database repaired identity",
         )?;
 
         let detached =
