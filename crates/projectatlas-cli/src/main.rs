@@ -117,6 +117,9 @@ const REQUIRED_CLI_COMMANDS: &[RequiredCliCommand] = &[
 /// Error type for CLI boundary failures.
 #[derive(Debug, Error)]
 enum CliError {
+    /// Cooperative index work was canceled or exceeded a declared bound.
+    #[error("{0}")]
+    IndexWork(#[from] projectatlas_core::IndexWorkFailure),
     /// Database operation failed.
     #[error("{0}")]
     Db(#[from] DbError),

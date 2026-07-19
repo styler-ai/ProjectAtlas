@@ -22,7 +22,7 @@ An absent parser/semantic pack SHALL contribute no runtime initialization, netwo
 
 ### Requirement: Installed Packs Are Supply-Chain Bound And Contained
 
-Every installed pack SHALL bind pinned provenance, digest, license, ABI/runtime compatibility, and accepted capability rows. Normal use SHALL be offline and SHALL run through a supervised out-of-process boundary or a capability-denied WASM/native boundary with no repository-code execution, shell/build/compiler execution, or network capability. Hard time, process-tree memory, output, and cancellation limits SHALL apply. Pack crash, timeout, invalid output, or containment failure SHALL leave the MCP process responsive and SHALL NOT publish, invalidate, or damage the active structural generation.
+Every installed pack SHALL bind pinned provenance, digest, license, ABI/runtime compatibility, and accepted capability rows. Normal use SHALL be offline and SHALL run through a supervised out-of-process boundary or a capability-denied WASM/native boundary with no repository-code execution, shell/build/compiler execution, or network capability. Hard time, progress-aware no-progress, process-tree memory, output, and cancellation limits SHALL apply. Pack crash, timeout, invalid output, or containment failure SHALL leave the MCP process responsive and SHALL NOT publish, invalidate, or damage the active structural generation.
 
 #### Scenario: Pack violates a resource or capability boundary
 - **WHEN** a pack crashes, hangs, exceeds a limit, requests a forbidden capability, or returns invalid output
@@ -40,6 +40,12 @@ A selected optional semantic pack SHALL bind vectors to one structural generatio
 
 Snapshot export SHALL use a consistent SQLite backup, bounded compression, schema/runtime/root/generation metadata, and a digest. Import SHALL validate in a temporary path, enforce size/path/integrity/schema/root rules, preserve authored data and destination project identity, and publish derived data only through the normal atomic generation path.
 
+Snapshot metadata SHALL also bind the source-state and capability/registry identity used to produce the derived generation. Import MAY enforce an explicit trust/signature policy for shared snapshots; local-only export/import SHALL NOT require signatures. When a configured policy requires a signature, an absent, unknown, invalid, or mismatched signature SHALL reject the temporary artifact before activation.
+
 #### Scenario: Snapshot is torn or incompatible
 - **WHEN** digest, expansion, integrity, schema, root, or generation checks fail
 - **THEN** import is rejected before live activation and current project data remains unchanged
+
+#### Scenario: Shared snapshot fails trust policy
+- **WHEN** import requires a trusted signer and the temporary archive is unsigned, signed by an unknown key, or binds different source/capability identity
+- **THEN** import fails before publication and the destination identity, authored data, and active generation remain unchanged

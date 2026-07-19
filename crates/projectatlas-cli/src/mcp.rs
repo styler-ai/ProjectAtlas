@@ -12,15 +12,16 @@ use crate::runtime::{
     PurposeReviewRequest, ScanRuntimePlan, SymbolBuildOptions, build_settings_report,
     byte_count_to_tokens, canonical_project_root, config_root_mismatch_error,
     default_mcp_project_root, estimated_source_tokens_for_indexed_files,
-    estimated_source_tokens_for_paths, init_config_path, lint_database_if_present,
-    next_step_report, next_step_report_payload, normalized_folder_filter,
+    estimated_source_tokens_for_paths, index_work_control, init_config_path,
+    lint_database_if_present, next_step_report, next_step_report_payload, normalized_folder_filter,
     open_atlas_store_for_project, open_atlas_store_read_only_for_project,
     open_fresh_atlas_store_for_project, purpose_curation_page, ranked_file_nodes_with_reasons,
     ranked_folder_nodes_with_reasons, read_indexed_file_content,
     record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
     render_health_page, render_purpose_curation_page, render_purpose_review_report,
     reset_index_files, review_purposes, run_init_bootstrap, run_scan_pipeline,
-    run_symbol_build_pipeline, run_watch_loop, strip_legacy_purpose, telemetry_disabled,
+    run_scan_pipeline_controlled, run_single_watch_refresh_controlled, run_symbol_build_pipeline,
+    run_symbol_build_pipeline_controlled, run_watch_loop, strip_legacy_purpose, telemetry_disabled,
     validated_indexed_file_key, watcher_status_report,
 };
 use crate::token_tui::{
@@ -41,9 +42,9 @@ use projectatlas_core::toon::{
     render_symbol_relations, render_symbols, render_token_overview, render_token_trends,
 };
 use projectatlas_core::{
-    Overview, PurposeSource, PurposeStatus, RankedNode, normalize_native_path_display,
-    normalize_repo_path, normalize_repo_path_prefix, validated_repo_file_key,
-    validated_repo_node_key,
+    IndexWorkControl, IndexWorkFailure, Overview, PurposeSource, PurposeStatus, RankedNode,
+    normalize_native_path_display, normalize_repo_path, normalize_repo_path_prefix,
+    validated_repo_file_key, validated_repo_node_key,
 };
 use projectatlas_db::{
     AtlasStore, HealthQuery, HealthResolution, HealthScope, read_project_root_read_only,
@@ -60,7 +61,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    Arc, RwLock,
+    atomic::{AtomicU64, Ordering},
+};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// MCP tools required for the agent-first repository-intelligence surface.
@@ -252,6 +257,8 @@ const MCP_PAYLOAD_SELECTED_PROJECT: &str = "selected_project";
 const MCP_PAYLOAD_SETTINGS: &str = "settings";
 /// MCP payload key for agent startup briefs.
 const MCP_PAYLOAD_SESSION_BRIEF: &str = "session_brief";
+/// MCP payload key for accepted background tasks.
+const MCP_PAYLOAD_TASK_START: &str = "task_start";
 /// MCP payload key for task status lookups.
 const MCP_PAYLOAD_TASK_STATUS: &str = "task_status";
 /// MCP payload key for task cancellation responses.
@@ -399,8 +406,36 @@ const SESSION_BRIEF_DEFAULT_LIMIT: usize = 5;
 const SESSION_BRIEF_MAX_LIMIT: usize = 8;
 /// Bounded MCP task registry capacity.
 const MCP_TASK_REGISTRY_CAPACITY: usize = 32;
+/// Maximum concise task failure text retained in the session registry.
+const MCP_TASK_ERROR_MAX_CHARS: usize = 512;
 /// Built-in task id that exposes the task-progress contract itself.
 const MCP_TASK_CONTRACT_ID: &str = "task-progress-contract";
+/// Task-registry synchronization failure diagnostic.
+const MCP_TASK_REGISTRY_LOCK_POISONED: &str = "MCP task registry lock is poisoned";
+/// Prefix for generated background index task identifiers.
+const MCP_INDEX_TASK_ID_PREFIX: &str = "index-";
+/// Prefix for named background index worker threads.
+const MCP_INDEX_WORKER_NAME_PREFIX: &str = "projectatlas-";
+/// Prefix for active background task limit diagnostics.
+const MCP_INDEX_TASK_LIMIT_PREFIX: &str = "background indexing task limit ";
+/// Suffix for active background task limit diagnostics.
+const MCP_INDEX_TASK_LIMIT_SUFFIX: &str = " is already active";
+/// Terminal diagnostic when a background worker panics.
+const MCP_INDEX_WORKER_PANIC_ERROR: &str = "background indexing worker panicked";
+/// Prefix for background worker spawn failures.
+const MCP_INDEX_WORKER_SPAWN_ERROR_PREFIX: &str = "failed to start background indexing: ";
+/// Progress message recorded after task admission.
+const MCP_TASK_PROGRESS_ACCEPTED: &str = "accepted";
+/// Progress message recorded while task work is active.
+const MCP_TASK_PROGRESS_RUNNING: &str = "running";
+/// Progress message recorded after successful task completion.
+const MCP_TASK_PROGRESS_COMPLETE: &str = "complete";
+/// Progress message recorded after task failure.
+const MCP_TASK_PROGRESS_FAILED: &str = "failed";
+/// Progress message recorded after cooperative cancellation completes.
+const MCP_TASK_PROGRESS_CANCELED: &str = "canceled";
+/// Progress message recorded after cancellation is requested.
+const MCP_TASK_PROGRESS_CANCELLATION_REQUESTED: &str = "cancellation_requested";
 /// Agent-facing MCP server instructions.
 const MCP_SERVER_INSTRUCTIONS: &str = "ProjectAtlas provides TOON-first repository orientation, folder/file ranking, structured file summaries, symbol graph lookup, exact slices, health checks, and token telemetry for coding agents.";
 
@@ -575,6 +610,8 @@ struct AtlasScanParams {
     timeout_seconds: Option<u64>,
     /// Maximum UTF-8 file size persisted into `SQLite` text search.
     text_index_max_bytes: Option<u64>,
+    /// Run indexing in the bounded session task registry and return immediately.
+    background: Option<bool>,
 }
 
 /// MCP parameter payload for one-shot watcher refresh.
@@ -592,6 +629,8 @@ struct AtlasWatchOnceParams {
     timeout_seconds: Option<u64>,
     /// Maximum UTF-8 file size persisted into `SQLite` text search.
     text_index_max_bytes: Option<u64>,
+    /// Run indexing in the bounded session task registry and return immediately.
+    background: Option<bool>,
 }
 
 /// MCP parameter payload for ranked node lookup.
@@ -849,6 +888,15 @@ struct McpProjectState {
     db_path: PathBuf,
     /// Selected scan/import configuration path.
     config_path: Option<PathBuf>,
+}
+
+/// Select whether project-state discovery validates configuration content immediately.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum McpConfigValidation {
+    /// Validate configuration before returning selected project state.
+    Immediate,
+    /// Defer configuration reads to the admitted operation-owned work boundary.
+    Deferred,
 }
 
 /// MCP response for compatibility map export.
@@ -1330,6 +1378,7 @@ impl McpTaskRegistry {
             error: None,
             result_ref: Some(MCP_TOOL_ATLAS_TASK_STATUS.to_string()),
             cancelable: false,
+            control: None,
         });
         registry
     }
@@ -1400,6 +1449,9 @@ struct McpTaskRecord {
     result_ref: Option<String>,
     /// Whether this task can be canceled by the current server.
     cancelable: bool,
+    /// Shared cooperative cancellation boundary for active indexing work.
+    #[serde(skip)]
+    control: Option<IndexWorkControl>,
 }
 
 impl McpTaskRecord {
@@ -1418,10 +1470,12 @@ impl McpTaskRecord {
 enum McpTaskOperation {
     /// Contract/schema marker task.
     Contract,
-    /// Future scan operation.
+    /// Repository scan and index operation.
     Scan,
-    /// Future one-shot watch refresh operation.
+    /// One-shot watch refresh operation.
     WatchOnce,
+    /// Symbol projection rebuild operation.
+    SymbolsBuild,
     /// Future search operation.
     Search,
 }
@@ -1493,12 +1547,27 @@ struct McpTaskCancelResponse {
     task: Option<McpTaskRecord>,
 }
 
+/// Immediate response for one accepted background indexing task.
+#[derive(Debug, Serialize)]
+struct McpTaskStartResponse {
+    /// Opaque session-local task id.
+    task_id: String,
+    /// Accepted operation family.
+    operation: McpTaskOperation,
+    /// Initial task state.
+    state: McpTaskState,
+    /// Existing MCP tool used to poll the task.
+    status_tool: &'static str,
+    /// Existing MCP tool used to request cancellation.
+    cancel_tool: &'static str,
+}
+
 /// Task cancellation outcome.
 #[derive(Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum McpTaskCancelResult {
-    /// The task was canceled.
-    Canceled,
+    /// Cooperative cancellation was delivered to active work.
+    CancellationRequested,
     /// The task id is unknown to this MCP session.
     NotFound,
     /// The task was already finished.
@@ -1518,6 +1587,8 @@ pub(crate) struct ProjectAtlasMcpServer {
     allow_nearest_project: bool,
     /// Bounded MCP task-progress records for this server session.
     task_registry: Arc<RwLock<McpTaskRegistry>>,
+    /// Monotonic session-local task identifier source.
+    next_task_sequence: Arc<AtomicU64>,
     /// Official RMCP tool router.
     tool_router: ToolRouter<Self>,
 }
@@ -1538,6 +1609,7 @@ impl ProjectAtlasMcpServer {
             session,
             allow_nearest_project,
             task_registry: Arc::new(RwLock::new(McpTaskRegistry::new())),
+            next_task_sequence: Arc::new(AtomicU64::new(1)),
             tool_router: Self::tool_router(),
         }
     }
@@ -2057,8 +2129,158 @@ impl ProjectAtlasMcpServer {
             McpTaskOperation::Contract,
             McpTaskOperation::Scan,
             McpTaskOperation::WatchOnce,
+            McpTaskOperation::SymbolsBuild,
             McpTaskOperation::Search,
         ]
+    }
+
+    /// Start one bounded session-local indexing task.
+    fn start_index_task<F>(
+        &self,
+        operation: McpTaskOperation,
+        control: IndexWorkControl,
+        result_ref: &'static str,
+        work: F,
+    ) -> Result<McpTaskStartResponse, CliError>
+    where
+        F: FnOnce(&IndexWorkControl) -> Result<(), CliError> + Send + 'static,
+    {
+        let mut task_id = MCP_INDEX_TASK_ID_PREFIX.to_string();
+        task_id.push_str(
+            &self
+                .next_task_sequence
+                .fetch_add(1, Ordering::Relaxed)
+                .to_string(),
+        );
+        let now = mcp_unix_time_ms();
+        {
+            let mut registry = self
+                .task_registry
+                .write()
+                .map_err(|_poisoned| CliError::Mcp(MCP_PROJECT_STATE_LOCK_POISONED.to_string()))?;
+            let active = registry
+                .records
+                .iter()
+                .filter(|record| !record.is_terminal_state())
+                .count();
+            if active >= mcp_background_task_limit() {
+                let mut message = MCP_INDEX_TASK_LIMIT_PREFIX.to_string();
+                message.push_str(&mcp_background_task_limit().to_string());
+                message.push_str(MCP_INDEX_TASK_LIMIT_SUFFIX);
+                return Err(CliError::Mcp(message));
+            }
+            registry.insert(McpTaskRecord {
+                task_id: task_id.clone(),
+                operation: operation.clone(),
+                state: McpTaskState::Pending,
+                created_at_ms: now,
+                updated_at_ms: now,
+                progress: Some(McpTaskProgress {
+                    current: None,
+                    total: None,
+                    message: Some(MCP_TASK_PROGRESS_ACCEPTED.to_string()),
+                }),
+                error: None,
+                result_ref: None,
+                cancelable: true,
+                control: Some(control.clone()),
+            });
+        }
+
+        let registry = Arc::clone(&self.task_registry);
+        let worker_task_id = task_id.clone();
+        let mut worker_name = MCP_INDEX_WORKER_NAME_PREFIX.to_string();
+        worker_name.push_str(&task_id);
+        let spawn_result = thread::Builder::new().name(worker_name).spawn(move || {
+            if let Ok(mut registry) = registry.write() {
+                registry.update(&worker_task_id, |record| {
+                    record.state = McpTaskState::Running;
+                    record.updated_at_ms = mcp_unix_time_ms();
+                    record.progress = Some(McpTaskProgress {
+                        current: None,
+                        total: None,
+                        message: Some(MCP_TASK_PROGRESS_RUNNING.to_string()),
+                    });
+                });
+            }
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&control)));
+            let (state, progress, error, completed_result_ref) = match outcome {
+                Ok(Ok(())) => (
+                    McpTaskState::Complete,
+                    MCP_TASK_PROGRESS_COMPLETE,
+                    None,
+                    Some(result_ref.to_string()),
+                ),
+                Ok(Err(error)) => {
+                    let state = if matches!(
+                        &error,
+                        CliError::IndexWork(IndexWorkFailure::Cancelled { .. })
+                    ) {
+                        McpTaskState::Canceled
+                    } else {
+                        McpTaskState::Failed
+                    };
+                    (
+                        state,
+                        if state == McpTaskState::Canceled {
+                            MCP_TASK_PROGRESS_CANCELED
+                        } else {
+                            MCP_TASK_PROGRESS_FAILED
+                        },
+                        Some(bounded_task_error(&error)),
+                        None,
+                    )
+                }
+                Err(_panic) => (
+                    McpTaskState::Failed,
+                    MCP_TASK_PROGRESS_FAILED,
+                    Some(MCP_INDEX_WORKER_PANIC_ERROR.to_string()),
+                    None,
+                ),
+            };
+            if let Ok(mut registry) = registry.write() {
+                registry.update(&worker_task_id, |record| {
+                    record.state = state;
+                    record.updated_at_ms = mcp_unix_time_ms();
+                    record.progress = Some(McpTaskProgress {
+                        current: None,
+                        total: None,
+                        message: Some(progress.to_string()),
+                    });
+                    record.error = error;
+                    record.result_ref = completed_result_ref;
+                    record.cancelable = false;
+                    record.control = None;
+                });
+            }
+        });
+        if let Err(source) = spawn_result {
+            let mut spawn_error = MCP_INDEX_WORKER_SPAWN_ERROR_PREFIX.to_string();
+            spawn_error.push_str(&source.to_string());
+            if let Ok(mut registry) = self.task_registry.write() {
+                registry.update(&task_id, |record| {
+                    record.state = McpTaskState::Failed;
+                    record.updated_at_ms = mcp_unix_time_ms();
+                    record.progress = Some(McpTaskProgress {
+                        current: None,
+                        total: None,
+                        message: Some(MCP_TASK_PROGRESS_FAILED.to_string()),
+                    });
+                    record.error = Some(spawn_error.clone());
+                    record.cancelable = false;
+                    record.control = None;
+                });
+            }
+            return Err(CliError::Mcp(spawn_error));
+        }
+
+        Ok(McpTaskStartResponse {
+            task_id,
+            operation,
+            state: McpTaskState::Pending,
+            status_tool: MCP_TOOL_ATLAS_TASK_STATUS,
+            cancel_tool: MCP_TOOL_ATLAS_TASK_CANCEL,
+        })
     }
 
     /// Look up one MCP task status.
@@ -2066,7 +2288,7 @@ impl ProjectAtlasMcpServer {
         let registry = self
             .task_registry
             .read()
-            .map_err(|_poisoned| CliError::Mcp(MCP_PROJECT_STATE_LOCK_POISONED.to_string()))?;
+            .map_err(|_poisoned| CliError::Mcp(MCP_TASK_REGISTRY_LOCK_POISONED.to_string()))?;
         let task = registry.get(&task_id);
         Ok(McpTaskStatusResponse {
             task_id,
@@ -2087,7 +2309,7 @@ impl ProjectAtlasMcpServer {
         let mut registry = self
             .task_registry
             .write()
-            .map_err(|_poisoned| CliError::Mcp(MCP_PROJECT_STATE_LOCK_POISONED.to_string()))?;
+            .map_err(|_poisoned| CliError::Mcp(MCP_TASK_REGISTRY_LOCK_POISONED.to_string()))?;
         let Some(record) = registry.get(&task_id) else {
             return Ok(McpTaskCancelResponse {
                 task_id,
@@ -2116,12 +2338,20 @@ impl ProjectAtlasMcpServer {
             });
         }
         let task = registry.update(&task_id, |record| {
-            record.state = McpTaskState::Canceled;
+            if let Some(control) = &record.control {
+                control.cancel();
+            }
             record.updated_at_ms = mcp_unix_time_ms();
+            record.progress = Some(McpTaskProgress {
+                current: None,
+                total: None,
+                message: Some(MCP_TASK_PROGRESS_CANCELLATION_REQUESTED.to_string()),
+            });
+            record.cancelable = false;
         });
         Ok(McpTaskCancelResponse {
             task_id,
-            result: McpTaskCancelResult::Canceled,
+            result: McpTaskCancelResult::CancellationRequested,
             registry_capacity: MCP_TASK_REGISTRY_CAPACITY,
             task,
         })
@@ -2222,10 +2452,24 @@ impl ProjectAtlasMcpServer {
         &self,
         project_path: Option<String>,
     ) -> Result<McpProjectState, CliError> {
+        self.state_for_project_path_with_config_validation(
+            project_path,
+            McpConfigValidation::Immediate,
+        )
+    }
+
+    /// Return project state under the requested configuration-validation timing.
+    fn state_for_project_path_with_config_validation(
+        &self,
+        project_path: Option<String>,
+        validation: McpConfigValidation,
+    ) -> Result<McpProjectState, CliError> {
         let project_path = Self::normalized_optional_path(project_path);
         project_path.map_or_else(
             || self.active_project_state(),
-            |path| Self::project_state_from_root(Path::new(&path)),
+            |path| {
+                Self::project_state_from_root_with_config_validation(Path::new(&path), validation)
+            },
         )
     }
 
@@ -2241,7 +2485,39 @@ impl ProjectAtlasMcpServer {
         path: Option<String>,
         nearest_project: bool,
     ) -> Result<(McpProjectState, PathBuf), CliError> {
-        let state = self.state_for_project_path(project_path.clone())?;
+        self.state_and_root_path_with_config_validation(
+            project_path,
+            path,
+            nearest_project,
+            McpConfigValidation::Immediate,
+        )
+    }
+
+    /// Select a background project without reading configuration before task admission.
+    fn background_state_and_root_path(
+        &self,
+        project_path: Option<String>,
+        path: Option<String>,
+        nearest_project: bool,
+    ) -> Result<(McpProjectState, PathBuf), CliError> {
+        self.state_and_root_path_with_config_validation(
+            project_path,
+            path,
+            nearest_project,
+            McpConfigValidation::Deferred,
+        )
+    }
+
+    /// Select project state and validate a root assertion under one config timing policy.
+    fn state_and_root_path_with_config_validation(
+        &self,
+        project_path: Option<String>,
+        path: Option<String>,
+        nearest_project: bool,
+        validation: McpConfigValidation,
+    ) -> Result<(McpProjectState, PathBuf), CliError> {
+        let state =
+            self.state_for_project_path_with_config_validation(project_path.clone(), validation)?;
         let root = match (
             Self::normalized_optional_path(project_path),
             Self::normalized_optional_path(path),
@@ -2256,7 +2532,10 @@ impl ProjectAtlasMcpServer {
                         return Err(active_error);
                     }
                     let Some(indexed_state) =
-                        Self::nearest_root_state_for_root_argument(Path::new(&path))?
+                        Self::nearest_root_state_for_root_argument_with_config_validation(
+                            Path::new(&path),
+                            validation,
+                        )?
                     else {
                         return Err(active_error);
                     };
@@ -2282,14 +2561,17 @@ impl ProjectAtlasMcpServer {
         Ok(resolved != state.root && resolved.starts_with(&state.root))
     }
 
-    /// Return nearest indexed state only when the addressed path is the project root itself.
-    fn nearest_root_state_for_root_argument(
+    /// Return nearest indexed root under one configuration-validation timing policy.
+    fn nearest_root_state_for_root_argument_with_config_validation(
         path: &Path,
+        validation: McpConfigValidation,
     ) -> Result<Option<McpProjectState>, CliError> {
         let Ok(addressed_root) = canonical_project_root(path) else {
             return Ok(None);
         };
-        let Some(indexed_state) = Self::project_state_from_nearest_indexed_path(path)? else {
+        let Some(indexed_state) =
+            Self::project_state_from_nearest_indexed_path_with_config_validation(path, validation)?
+        else {
             return Ok(None);
         };
         if addressed_root == indexed_state.root {
@@ -2473,6 +2755,14 @@ impl ProjectAtlasMcpServer {
 
     /// Build `ProjectAtlas` state for one project root.
     fn project_state_from_root(root: &Path) -> Result<McpProjectState, CliError> {
+        Self::project_state_from_root_with_config_validation(root, McpConfigValidation::Immediate)
+    }
+
+    /// Build project state while controlling when configuration content is validated.
+    fn project_state_from_root_with_config_validation(
+        root: &Path,
+        validation: McpConfigValidation,
+    ) -> Result<McpProjectState, CliError> {
         let root = canonical_project_root(root)?;
         if !root.is_dir() {
             return Err(CliError::InvalidInput(format!(
@@ -2481,7 +2771,7 @@ impl ProjectAtlasMcpServer {
             )));
         }
         let db_path = Self::projectatlas_db_path(&root);
-        let config_path = Self::config_path_for_project_root(&root)?;
+        let config_path = Self::config_path_for_project_root(&root, validation)?;
         Ok(McpProjectState {
             root,
             db_path,
@@ -2493,13 +2783,25 @@ impl ProjectAtlasMcpServer {
     fn project_state_from_nearest_indexed_path(
         path: &Path,
     ) -> Result<Option<McpProjectState>, CliError> {
+        Self::project_state_from_nearest_indexed_path_with_config_validation(
+            path,
+            McpConfigValidation::Immediate,
+        )
+    }
+
+    /// Build nearest canonical project state under one config-validation policy.
+    fn project_state_from_nearest_indexed_path_with_config_validation(
+        path: &Path,
+        validation: McpConfigValidation,
+    ) -> Result<Option<McpProjectState>, CliError> {
         let Ok(absolute_path) = McpAbsolutePath::canonicalize(path) else {
             return Ok(None);
         };
         let mut candidate = absolute_path.nearest_search_start();
         loop {
             if let Some(indexed_root) = Self::indexed_root_from_candidate(candidate) {
-                let config_path = Self::config_path_for_project_root(&indexed_root.root)?;
+                let config_path =
+                    Self::config_path_for_project_root(&indexed_root.root, validation)?;
                 return Ok(Some(McpProjectState {
                     root: indexed_root.root,
                     db_path: indexed_root.db_path,
@@ -2517,6 +2819,17 @@ impl ProjectAtlasMcpServer {
     fn project_state_from_nearest_lexical_indexed_path(
         path: &Path,
     ) -> Result<Option<McpProjectState>, CliError> {
+        Self::project_state_from_nearest_lexical_indexed_path_with_config_validation(
+            path,
+            McpConfigValidation::Immediate,
+        )
+    }
+
+    /// Build nearest lexical project state under one config-validation policy.
+    fn project_state_from_nearest_lexical_indexed_path_with_config_validation(
+        path: &Path,
+        validation: McpConfigValidation,
+    ) -> Result<Option<McpProjectState>, CliError> {
         if !path.is_absolute() {
             return Ok(None);
         }
@@ -2531,7 +2844,8 @@ impl ProjectAtlasMcpServer {
         };
         loop {
             if let Some(indexed_root) = Self::indexed_root_from_lexical_candidate(&candidate) {
-                let config_path = Self::config_path_for_project_root(&indexed_root.root)?;
+                let config_path =
+                    Self::config_path_for_project_root(&indexed_root.root, validation)?;
                 return Ok(Some(McpProjectState {
                     root: indexed_root.root,
                     db_path: indexed_root.db_path,
@@ -2725,14 +3039,19 @@ impl ProjectAtlasMcpServer {
         root.join(PROJECTATLAS_FLAT_CONFIG_FILE_NAME)
     }
 
-    /// Find a project-local config and reject stale configs pointing at another root.
-    fn config_path_for_project_root(root: &Path) -> Result<Option<PathBuf>, CliError> {
+    /// Find a project-local config and optionally reject one pointing at another root.
+    fn config_path_for_project_root(
+        root: &Path,
+        validation: McpConfigValidation,
+    ) -> Result<Option<PathBuf>, CliError> {
         for config_path in [
             Self::projectatlas_nested_config_path(root),
             Self::projectatlas_flat_config_path(root),
         ] {
             if config_path.exists() {
-                Self::validate_project_config_root(root, &config_path)?;
+                if validation == McpConfigValidation::Immediate {
+                    Self::validate_project_config_root(root, &config_path)?;
+                }
                 return Ok(Some(config_path));
             }
         }
@@ -3212,19 +3531,48 @@ impl ProjectAtlasMcpServer {
     fn atlas_scan(&self, Parameters(params): Parameters<AtlasScanParams>) -> String {
         Self::as_mcp_text((|| {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
-            let (state, path) =
-                self.state_and_root_path(params.project_path, params.path, nearest_project)?;
-            let plan = ScanRuntimePlan::for_path(
-                state.config_path.as_deref(),
-                &path,
-                params.text_index_max_bytes,
-            )?;
-            let mut store = Self::open_mut_store(&state)?;
+            let background = params.background.unwrap_or(false);
+            let (state, path) = if background {
+                self.background_state_and_root_path(
+                    params.project_path,
+                    params.path,
+                    nearest_project,
+                )?
+            } else {
+                self.state_and_root_path(params.project_path, params.path, nearest_project)?
+            };
             let symbol_options = SymbolBuildOptions::new(
                 params.max_bytes.unwrap_or(MAX_SYMBOL_FILE_BYTES),
                 params.max_workers,
                 params.timeout_seconds,
             );
+            let text_index_max_bytes = params.text_index_max_bytes;
+            if background {
+                let control = index_work_control(&symbol_options);
+                let task = self.start_index_task(
+                    McpTaskOperation::Scan,
+                    control,
+                    MCP_TOOL_ATLAS_OVERVIEW,
+                    move |control| {
+                        let plan = ScanRuntimePlan::for_path_controlled(
+                            state.config_path.as_deref(),
+                            &path,
+                            text_index_max_bytes,
+                            control,
+                        )?;
+                        let mut store = Self::open_mut_store(&state)?;
+                        run_scan_pipeline_controlled(&mut store, &plan, &symbol_options, control)?;
+                        Ok(())
+                    },
+                )?;
+                return Self::encode_named_payload(MCP_PAYLOAD_TASK_START, &task);
+            }
+            let plan = ScanRuntimePlan::for_path(
+                state.config_path.as_deref(),
+                &path,
+                text_index_max_bytes,
+            )?;
+            let mut store = Self::open_mut_store(&state)?;
             let report = run_scan_pipeline(&mut store, &plan, &symbol_options)?;
             Self::encode_named_payload(MCP_PAYLOAD_SCAN, &report)
         })())
@@ -3542,19 +3890,50 @@ impl ProjectAtlasMcpServer {
     fn atlas_symbols_build(&self, Parameters(params): Parameters<AtlasScanParams>) -> String {
         Self::as_mcp_text((|| {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
-            let (state, path) =
-                self.state_and_root_path(params.project_path, params.path, nearest_project)?;
-            let mut store = Self::open_mut_store(&state)?;
+            let background = params.background.unwrap_or(false);
+            let (state, path) = if background {
+                self.background_state_and_root_path(
+                    params.project_path,
+                    params.path,
+                    nearest_project,
+                )?
+            } else {
+                self.state_and_root_path(params.project_path, params.path, nearest_project)?
+            };
             let options = SymbolBuildOptions::new(
                 params.max_bytes.unwrap_or(MAX_SYMBOL_FILE_BYTES),
                 params.max_workers,
                 params.timeout_seconds,
             );
+            let text_index_max_bytes = params.text_index_max_bytes;
+            if background {
+                let control = index_work_control(&options);
+                let task = self.start_index_task(
+                    McpTaskOperation::SymbolsBuild,
+                    control,
+                    MCP_TOOL_ATLAS_SYMBOLS,
+                    move |control| {
+                        let plan = ScanRuntimePlan::for_path_controlled(
+                            state.config_path.as_deref(),
+                            &path,
+                            text_index_max_bytes,
+                            control,
+                        )?;
+                        let mut store = Self::open_mut_store(&state)?;
+                        run_symbol_build_pipeline_controlled(
+                            &mut store, &plan, &options, None, control,
+                        )?;
+                        Ok(())
+                    },
+                )?;
+                return Self::encode_named_payload(MCP_PAYLOAD_TASK_START, &task);
+            }
             let plan = ScanRuntimePlan::for_path(
                 state.config_path.as_deref(),
                 &path,
-                params.text_index_max_bytes,
+                text_index_max_bytes,
             )?;
+            let mut store = Self::open_mut_store(&state)?;
             let report = run_symbol_build_pipeline(&mut store, &plan, &options, None)?;
             Self::encode_named_payload(MCP_PAYLOAD_SYMBOLS_BUILD, &report)
         })())
@@ -3822,19 +4201,53 @@ impl ProjectAtlasMcpServer {
     fn atlas_watch_once(&self, Parameters(params): Parameters<AtlasWatchOnceParams>) -> String {
         Self::as_mcp_text((|| {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
-            let (state, path) =
-                self.state_and_root_path(params.project_path, params.path, nearest_project)?;
-            let mut store = Self::open_mut_store(&state)?;
-            let plan = ScanRuntimePlan::for_path(
-                state.config_path.as_deref(),
-                &path,
-                params.text_index_max_bytes,
-            )?;
+            let background = params.background.unwrap_or(false);
+            let (state, path) = if background {
+                self.background_state_and_root_path(
+                    params.project_path,
+                    params.path,
+                    nearest_project,
+                )?
+            } else {
+                self.state_and_root_path(params.project_path, params.path, nearest_project)?
+            };
             let symbol_options = SymbolBuildOptions::new(
                 MAX_SYMBOL_FILE_BYTES,
                 params.max_workers,
                 params.timeout_seconds,
             );
+            let text_index_max_bytes = params.text_index_max_bytes;
+            if background {
+                let control = index_work_control(&symbol_options);
+                let task = self.start_index_task(
+                    McpTaskOperation::WatchOnce,
+                    control,
+                    MCP_TOOL_ATLAS_OVERVIEW,
+                    move |control| {
+                        let plan = ScanRuntimePlan::for_path_controlled(
+                            state.config_path.as_deref(),
+                            &path,
+                            text_index_max_bytes,
+                            control,
+                        )?;
+                        let mut store = Self::open_mut_store(&state)?;
+                        run_single_watch_refresh_controlled(
+                            &mut store,
+                            &plan,
+                            &symbol_options,
+                            control,
+                        )?;
+                        Ok(())
+                    },
+                )?;
+                return Self::encode_named_payload(MCP_PAYLOAD_TASK_START, &task);
+            }
+            let plan = ScanRuntimePlan::for_path(
+                state.config_path.as_deref(),
+                &path,
+                text_index_max_bytes,
+            )?;
+            let mut store = Self::open_mut_store(&state)?;
             let report = run_watch_loop(&mut store, &plan, true, 1, 1, &symbol_options)?;
             Self::encode_named_payload(MCP_PAYLOAD_WATCH, &report)
         })())
@@ -4054,11 +4467,28 @@ fn mcp_unix_time_ms() -> u128 {
         .map_or(0, |duration| duration.as_millis())
 }
 
+/// Derive a small per-session background-task ceiling from the host.
+fn mcp_background_task_limit() -> usize {
+    thread::available_parallelism().map_or(1, |parallelism| parallelism.get().min(4))
+}
+
+/// Retain one concise task failure without letting diagnostics grow unbounded.
+fn bounded_task_error(error: &CliError) -> String {
+    error
+        .to_string()
+        .chars()
+        .take(MCP_TASK_ERROR_MAX_CHARS)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atlas_map::init_project_with_config;
+    use projectatlas_core::IndexCancellation;
     use std::fs;
     use std::io;
+    use std::time::Duration;
 
     fn require(condition: bool, message: &str) -> Result<(), Box<dyn std::error::Error>> {
         if condition {
@@ -4066,6 +4496,31 @@ mod tests {
         } else {
             Err(io::Error::other(message.to_string()).into())
         }
+    }
+
+    /// Wait for the latest task of one operation to reach a terminal state.
+    fn wait_for_background_operation(
+        server: &ProjectAtlasMcpServer,
+        operation: &McpTaskOperation,
+    ) -> Result<McpTaskRecord, Box<dyn std::error::Error>> {
+        let task_id = server
+            .task_registry
+            .read()
+            .map_err(|_poisoned| io::Error::other("task registry lock poisoned"))?
+            .records
+            .iter()
+            .rev()
+            .find(|record| &record.operation == operation)
+            .map(|record| record.task_id.clone())
+            .ok_or_else(|| io::Error::other("background task was not admitted"))?;
+        for _attempt in 0..5_000 {
+            let status = server.task_status(task_id.clone())?;
+            if let Some(record) = status.task.filter(McpTaskRecord::is_terminal_state) {
+                return Ok(record);
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        Err(io::Error::other("background task did not reach a terminal state").into())
     }
 
     #[test]
@@ -4432,6 +4887,254 @@ mod tests {
     }
 
     #[test]
+    fn background_task_cancellation_reaches_owned_work_control()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo-a");
+        fs::create_dir(&repo)?;
+        let db_path = repo.join(".projectatlas").join("projectatlas.db");
+        let server = ProjectAtlasMcpServer::new(db_path, None, "mcp-test".to_string(), false);
+        let started = Arc::new(std::sync::Barrier::new(2));
+        let worker_started = Arc::clone(&started);
+        let task = server.start_index_task(
+            McpTaskOperation::Scan,
+            IndexWorkControl::new(IndexCancellation::new(), None),
+            MCP_TOOL_ATLAS_OVERVIEW,
+            move |control| {
+                worker_started.wait();
+                loop {
+                    control.check(projectatlas_core::IndexWorkStage::RepositoryTraversal)?;
+                    thread::yield_now();
+                }
+            },
+        )?;
+        started.wait();
+
+        let running = server.task_status(task.task_id.clone())?;
+        require(
+            running
+                .task
+                .as_ref()
+                .is_some_and(|record| record.state == McpTaskState::Running),
+            "background task did not become running",
+        )?;
+        require(
+            server.task_status(MCP_TASK_CONTRACT_ID.to_string())?.lookup
+                == McpTaskLookupStatus::Found,
+            "task status became unresponsive while background work was active",
+        )?;
+        let cancel = server.task_cancel(task.task_id.clone())?;
+        require(
+            cancel.result == McpTaskCancelResult::CancellationRequested,
+            "task cancellation did not reach the active work control",
+        )?;
+
+        let mut terminal = None;
+        for _attempt in 0..1_000 {
+            let status = server.task_status(task.task_id.clone())?;
+            if status
+                .task
+                .as_ref()
+                .is_some_and(McpTaskRecord::is_terminal_state)
+            {
+                terminal = status.task;
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        require(
+            terminal
+                .as_ref()
+                .is_some_and(|record| record.state == McpTaskState::Canceled),
+            "background task did not finish canceled after consuming the signal",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn background_scan_defers_config_validation_and_rejects_root_redirection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo-a");
+        let redirected = temp.path().join("repo-b");
+        let atlas_dir = repo.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        fs::create_dir_all(&redirected)?;
+        let config_path = atlas_dir.join("config.toml");
+        fs::write(&config_path, "[project]\nroot = \"../../repo-b\"\n")?;
+        let db_path = atlas_dir.join("projectatlas.db");
+        let server =
+            ProjectAtlasMcpServer::new(db_path, Some(config_path), "mcp-test".to_string(), false);
+
+        let response = server.atlas_scan(Parameters(AtlasScanParams {
+            project_path: Some(repo.to_string_lossy().into_owned()),
+            path: None,
+            nearest_project: Some(false),
+            max_bytes: None,
+            max_workers: Some(1),
+            timeout_seconds: None,
+            text_index_max_bytes: None,
+            background: Some(true),
+        }));
+        require(
+            response.contains(MCP_PAYLOAD_TASK_START),
+            "explicit background project validated redirecting config before task admission",
+        )?;
+        let admitted_task_id = server
+            .task_registry
+            .read()
+            .map_err(|_poisoned| io::Error::other("task registry lock poisoned"))?
+            .records
+            .iter()
+            .find(|record| matches!(record.operation, McpTaskOperation::Scan))
+            .map(|record| record.task_id.clone())
+            .ok_or_else(|| io::Error::other("admitted background scan task missing"))?;
+        let mut admitted_terminal = None;
+        for _attempt in 0..1_000 {
+            let status = server.task_status(admitted_task_id.clone())?;
+            if status
+                .task
+                .as_ref()
+                .is_some_and(McpTaskRecord::is_terminal_state)
+            {
+                admitted_terminal = status.task;
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        require(
+            admitted_terminal
+                .as_ref()
+                .is_some_and(|record| record.state == McpTaskState::Failed),
+            "redirecting background config did not fail inside the admitted task",
+        )?;
+        require(
+            admitted_terminal
+                .as_ref()
+                .and_then(|record| record.error.as_deref())
+                .is_some_and(|error| error.contains("outside selected project root")),
+            "controlled plan loading did not preserve root-redirection refusal",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn background_index_adapters_publish_scan_symbol_and_watch_effects()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        let source_dir = repo.join("src");
+        fs::create_dir_all(&source_dir)?;
+        let source_path = source_dir.join("lib.rs");
+        fs::write(
+            &source_path,
+            "pub fn first() { second(); }\nfn second() {}\n",
+        )?;
+        let config_path = repo.join(".projectatlas").join("config.toml");
+        init_project_with_config(&repo, Some(&config_path))?;
+        let db_path = repo.join(".projectatlas").join("projectatlas.db");
+        let server =
+            ProjectAtlasMcpServer::new(db_path.clone(), None, "mcp-test".to_string(), false);
+        let project_path = repo.to_string_lossy().into_owned();
+
+        for operation in [
+            McpTaskOperation::Scan,
+            McpTaskOperation::SymbolsBuild,
+            McpTaskOperation::WatchOnce,
+        ] {
+            match operation {
+                McpTaskOperation::SymbolsBuild => {
+                    let store = open_atlas_store_for_project(&db_path, &repo)?;
+                    store.clear_symbol_graph_for_path("src/lib.rs")?;
+                    require(
+                        store.symbol_count_for_path("src/lib.rs")? == 0,
+                        "symbol fixture was not cleared before background rebuild",
+                    )?;
+                }
+                McpTaskOperation::WatchOnce => {
+                    fs::write(
+                        &source_path,
+                        "pub fn first() { second(); third(); }\nfn second() {}\nfn third() {}\n",
+                    )?;
+                }
+                McpTaskOperation::Scan | McpTaskOperation::Contract | McpTaskOperation::Search => {}
+            }
+
+            let response = match operation {
+                McpTaskOperation::Scan | McpTaskOperation::SymbolsBuild => {
+                    let params = AtlasScanParams {
+                        project_path: Some(project_path.clone()),
+                        path: None,
+                        nearest_project: Some(false),
+                        max_bytes: None,
+                        max_workers: Some(1),
+                        timeout_seconds: None,
+                        text_index_max_bytes: None,
+                        background: Some(true),
+                    };
+                    if operation == McpTaskOperation::Scan {
+                        server.atlas_scan(Parameters(params))
+                    } else {
+                        server.atlas_symbols_build(Parameters(params))
+                    }
+                }
+                McpTaskOperation::WatchOnce => {
+                    server.atlas_watch_once(Parameters(AtlasWatchOnceParams {
+                        project_path: Some(project_path.clone()),
+                        path: None,
+                        nearest_project: Some(false),
+                        max_workers: Some(1),
+                        timeout_seconds: None,
+                        text_index_max_bytes: None,
+                        background: Some(true),
+                    }))
+                }
+                McpTaskOperation::Contract | McpTaskOperation::Search => unreachable!(),
+            };
+            require(
+                response.contains(MCP_PAYLOAD_TASK_START),
+                "production background adapter did not admit its task",
+            )?;
+            let terminal = wait_for_background_operation(&server, &operation)?;
+            require(
+                terminal.state == McpTaskState::Complete,
+                terminal
+                    .error
+                    .as_deref()
+                    .unwrap_or("background task failed"),
+            )?;
+
+            let store = open_atlas_store_for_project(&db_path, &repo)?;
+            match operation {
+                McpTaskOperation::Scan => {
+                    require(
+                        store.load_node_by_path("src/lib.rs")?.is_some()
+                            && store.load_file_text("src/lib.rs")?.is_some(),
+                        "background scan omitted indexed source state",
+                    )?;
+                }
+                McpTaskOperation::SymbolsBuild => require(
+                    store.symbol_count_for_path("src/lib.rs")? > 0,
+                    "background symbol build omitted parser output",
+                )?,
+                McpTaskOperation::WatchOnce => {
+                    require(
+                        store
+                            .load_file_text("src/lib.rs")?
+                            .is_some_and(|row| row.content.contains("third"))
+                            && store.load_symbol_by_name("src/lib.rs", "third")?.is_some(),
+                        "background watcher omitted changed source and symbols",
+                    )?;
+                }
+                McpTaskOperation::Contract | McpTaskOperation::Search => unreachable!(),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn task_registry_evictions_prefer_old_terminal_records()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut registry = McpTaskRegistry {
@@ -4447,6 +5150,7 @@ mod tests {
             error: None,
             result_ref: None,
             cancelable: true,
+            control: None,
         });
         for index in 1..MCP_TASK_REGISTRY_CAPACITY {
             registry.insert(McpTaskRecord {
@@ -4459,6 +5163,7 @@ mod tests {
                 error: None,
                 result_ref: None,
                 cancelable: false,
+                control: None,
             });
         }
 
@@ -4472,6 +5177,7 @@ mod tests {
             error: None,
             result_ref: Some("atlas_search".to_string()),
             cancelable: false,
+            control: None,
         });
 
         require(

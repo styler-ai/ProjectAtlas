@@ -4,13 +4,18 @@ use blake3::Hasher;
 use ignore::{DirEntry, WalkBuilder, WalkState, gitignore::GitignoreBuilder};
 use projectatlas_core::language::detect_language_for_path;
 use projectatlas_core::{
-    CoreError, Node, NodeKind, normalize_repo_path, normalized_extension, normalized_parent,
+    CoreError, IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkResource,
+    IndexWorkStage, Node, NodeKind, normalize_repo_path, normalized_extension, normalized_parent,
 };
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 /// Reserved metadata files that should not become indexed project nodes.
@@ -23,6 +28,17 @@ const INDEXED_PROJECTATLAS_INPUT_PATHS: &[&str] = &[
     ".projectatlas/projectatlas-nonsource-files.toon",
     ".projectatlas/projectatlas-purpose-review.json",
 ];
+
+/// Maximum worker count used even when callers request more host parallelism.
+const SCAN_WORKER_SAFE_CEILING: usize = 32;
+/// Default maximum repository entries considered by one scan.
+const DEFAULT_SCAN_MAX_ENTRIES: u64 = 1_000_000;
+/// Default maximum source bytes hashed by one scan.
+const DEFAULT_SCAN_MAX_SOURCE_BYTES: u64 = 16 * 1_024 * 1_024 * 1_024;
+/// Default deadline for the compatibility repository scan.
+const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Exact-byte hash read buffer size.
+const HASH_BUFFER_BYTES: usize = 8_192;
 
 /// Filesystem scanner errors.
 #[derive(Debug, Error)]
@@ -41,6 +57,9 @@ pub enum FsError {
     /// The supplied root is not a directory.
     #[error("scan root is not a directory: {0:?}")]
     RootNotDirectory(PathBuf),
+    /// Cooperative indexing work was canceled or exceeded a declared bound.
+    #[error("{0}")]
+    IndexWork(#[from] IndexWorkFailure),
 }
 
 /// Convenient result alias for scanner operations.
@@ -88,6 +107,132 @@ impl ScanOptions {
     }
 }
 
+/// Hard repository-scan resource limits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScanLimits {
+    /// Maximum repository entries considered, including folders.
+    entries: u64,
+    /// Maximum cumulative file bytes admitted for exact hashing.
+    source_bytes: u64,
+    /// Maximum requested scanner workers before host and safety caps.
+    workers: usize,
+}
+
+impl ScanLimits {
+    /// Create explicit repository-scan limits.
+    #[must_use]
+    pub const fn new(max_entries: u64, max_source_bytes: u64, max_workers: usize) -> Self {
+        Self {
+            entries: max_entries,
+            source_bytes: max_source_bytes,
+            workers: max_workers,
+        }
+    }
+
+    /// Return the maximum repository entries considered.
+    #[must_use]
+    pub const fn max_entries(self) -> u64 {
+        self.entries
+    }
+
+    /// Return the maximum cumulative source bytes hashed.
+    #[must_use]
+    pub const fn max_source_bytes(self) -> u64 {
+        self.source_bytes
+    }
+
+    /// Return the requested maximum worker count.
+    #[must_use]
+    pub const fn max_workers(self) -> usize {
+        self.workers
+    }
+
+    /// Derive the worker count from the request, host availability, and safety cap.
+    #[must_use]
+    pub fn effective_workers(self) -> usize {
+        let available = thread::available_parallelism().map_or(1, usize::from);
+        self.workers.min(available).min(SCAN_WORKER_SAFE_CEILING)
+    }
+}
+
+impl Default for ScanLimits {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_SCAN_MAX_ENTRIES,
+            DEFAULT_SCAN_MAX_SOURCE_BYTES,
+            SCAN_WORKER_SAFE_CEILING,
+        )
+    }
+}
+
+/// Shared counters and controls for one repository scan.
+#[derive(Debug)]
+struct ScanBudget {
+    /// Hard resource limits for the scan.
+    limits: ScanLimits,
+    /// Shared cancellation and deadline boundary.
+    control: IndexWorkControl,
+    /// Repository entries admitted so far.
+    entries: AtomicU64,
+    /// File bytes admitted for hashing so far.
+    source_bytes: AtomicU64,
+}
+
+impl ScanBudget {
+    /// Create an unused scan budget.
+    fn new(limits: ScanLimits, control: IndexWorkControl) -> Self {
+        Self {
+            limits,
+            control,
+            entries: AtomicU64::new(0),
+            source_bytes: AtomicU64::new(0),
+        }
+    }
+
+    /// Check traversal state and admit one repository entry.
+    fn claim_entry(&self) -> Result<(), IndexWorkFailure> {
+        self.control.check(IndexWorkStage::RepositoryTraversal)?;
+        claim_resource(
+            &self.entries,
+            1,
+            self.limits.entries,
+            IndexWorkStage::RepositoryTraversal,
+            IndexWorkResource::Entries,
+        )
+    }
+
+    /// Admit source bytes before starting exact content hashing.
+    fn claim_source_bytes(&self, bytes: u64) -> Result<(), IndexWorkFailure> {
+        claim_resource(
+            &self.source_bytes,
+            bytes,
+            self.limits.source_bytes,
+            IndexWorkStage::SourceHash,
+            IndexWorkResource::SourceBytes,
+        )
+    }
+}
+
+/// Atomically claim an inclusive bounded resource amount.
+fn claim_resource(
+    counter: &AtomicU64,
+    amount: u64,
+    limit: u64,
+    stage: IndexWorkStage,
+    resource: IndexWorkResource,
+) -> Result<(), IndexWorkFailure> {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current
+                .checked_add(amount)
+                .filter(|observed| *observed <= limit)
+        })
+        .map(|_previous| ())
+        .map_err(|current| {
+            IndexWorkFailure::resource_limit(stage, resource, limit, current.saturating_add(amount))
+        })
+}
+
 /// Scan a repository into `ProjectAtlas` nodes.
 ///
 /// # Errors
@@ -95,6 +240,27 @@ impl ScanOptions {
 /// Returns an error when the root is invalid or filesystem metadata cannot be
 /// read.
 pub fn scan_repo(root: &Path, options: &ScanOptions) -> FsResult<Vec<Node>> {
+    let control = IndexWorkControl::new(IndexCancellation::new(), Some(DEFAULT_SCAN_TIMEOUT));
+    scan_repo_controlled(root, options, ScanLimits::default(), &control)
+}
+
+/// Scan a repository with explicit resource and cooperative-stop controls.
+///
+/// The scan hashes current file bytes exactly. Cancellation, elapsed deadlines,
+/// and resource failures discard all staged nodes instead of returning a partial
+/// repository view.
+///
+/// # Errors
+///
+/// Returns an error when the root is invalid, filesystem metadata cannot be
+/// read, cancellation or the deadline is observed, or a scan limit is exceeded.
+pub fn scan_repo_controlled(
+    root: &Path,
+    options: &ScanOptions,
+    limits: ScanLimits,
+    control: &IndexWorkControl,
+) -> FsResult<Vec<Node>> {
+    control.check(IndexWorkStage::RepositoryTraversal)?;
     if !root.is_dir() {
         return Err(FsError::RootNotDirectory(root.to_path_buf()));
     }
@@ -108,16 +274,32 @@ pub fn scan_repo(root: &Path, options: &ScanOptions) -> FsResult<Vec<Node>> {
         .git_ignore(true)
         .git_exclude(true)
         .require_git(false);
-    builder.threads(0);
+    let effective_workers = limits.effective_workers();
+    if effective_workers == 0 {
+        return Err(IndexWorkFailure::resource_limit(
+            IndexWorkStage::RepositoryTraversal,
+            IndexWorkResource::Workers,
+            0,
+            1,
+        )
+        .into());
+    }
+    builder.threads(effective_workers);
 
     let nodes = Arc::new(Mutex::new(Vec::new()));
     let errors = Arc::new(Mutex::new(Vec::new()));
+    let budget = Arc::new(ScanBudget::new(limits, control.clone()));
     builder.build_parallel().run(|| {
         let root = root.clone();
         let options = options.clone();
         let nodes = Arc::clone(&nodes);
         let errors = Arc::clone(&errors);
+        let budget = Arc::clone(&budget);
         Box::new(move |result| {
+            if let Err(error) = budget.claim_entry() {
+                push_error(&errors, error.into());
+                return WalkState::Quit;
+            }
             let entry = match result {
                 Ok(entry) => entry,
                 Err(error) => {
@@ -135,7 +317,7 @@ pub fn scan_repo(root: &Path, options: &ScanOptions) -> FsResult<Vec<Node>> {
             if should_skip_path(&root, path, &options) {
                 return skip_entry_state(&entry);
             }
-            match scanned_node(&root, path) {
+            match scanned_node(&root, path, &budget) {
                 Ok(Some(node)) => {
                     if let Ok(mut guard) = nodes.lock() {
                         guard.push(node);
@@ -164,6 +346,7 @@ pub fn scan_repo(root: &Path, options: &ScanOptions) -> FsResult<Vec<Node>> {
     if let Some(error) = errors.pop() {
         return Err(error);
     }
+    control.check(IndexWorkStage::ScanFinalization)?;
     let nodes = Arc::try_unwrap(nodes)
         .map_err(|_remaining| state_error(&root, "parallel scanner node state still shared"))?;
     let mut nodes = nodes.into_inner().map_err(|source| {
@@ -173,6 +356,7 @@ pub fn scan_repo(root: &Path, options: &ScanOptions) -> FsResult<Vec<Node>> {
         )
     })?;
     nodes.sort_by(|left, right| left.path.cmp(&right.path));
+    control.check(IndexWorkStage::ScanFinalization)?;
     Ok(nodes)
 }
 
@@ -182,6 +366,25 @@ pub fn scan_repo(root: &Path, options: &ScanOptions) -> FsResult<Vec<Node>> {
 ///
 /// Returns an error when root canonicalization or metadata reads fail.
 pub fn scan_path(root: &Path, path: &Path, options: &ScanOptions) -> FsResult<Option<Node>> {
+    let control = IndexWorkControl::new(IndexCancellation::new(), Some(DEFAULT_SCAN_TIMEOUT));
+    scan_path_controlled(root, path, options, ScanLimits::default(), &control)
+}
+
+/// Scan one path with explicit resource and cooperative-stop controls.
+///
+/// # Errors
+///
+/// Returns an error when root canonicalization or metadata reads fail,
+/// cancellation or the deadline is observed, or a scan limit is exceeded.
+pub fn scan_path_controlled(
+    root: &Path,
+    path: &Path,
+    options: &ScanOptions,
+    limits: ScanLimits,
+    control: &IndexWorkControl,
+) -> FsResult<Option<Node>> {
+    let budget = ScanBudget::new(limits, control.clone());
+    budget.claim_entry()?;
     let root = root.canonicalize().map_err(|source| FsError::Io {
         path: root.to_path_buf(),
         source,
@@ -192,10 +395,12 @@ pub fn scan_path(root: &Path, path: &Path, options: &ScanOptions) -> FsResult<Op
         root.join(path)
     };
     if !absolute.exists() {
+        control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
     }
     let symlink_checked_absolute = path_for_symlink_component_check(&absolute)?;
     if path_has_symlink_component(&root, &symlink_checked_absolute)? {
+        control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
     }
     let absolute = symlink_checked_absolute
@@ -205,12 +410,16 @@ pub fn scan_path(root: &Path, path: &Path, options: &ScanOptions) -> FsResult<Op
             source,
         })?;
     if !absolute.starts_with(&root) {
+        control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
     }
     if gitignore_excludes_path(&root, &absolute)? || should_skip_path(&root, &absolute, options) {
+        control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
     }
-    scanned_node(&root, &absolute)
+    let node = scanned_node(&root, &absolute, &budget)?;
+    control.check(IndexWorkStage::ScanFinalization)?;
+    Ok(node)
 }
 
 /// Return a path with a canonical parent but the leaf component preserved.
@@ -359,7 +568,8 @@ fn skip_entry_state(entry: &DirEntry) -> WalkState {
 }
 
 /// Convert one walker entry into an indexed node.
-fn scanned_node(root: &Path, path: &Path) -> FsResult<Option<Node>> {
+fn scanned_node(root: &Path, path: &Path, budget: &ScanBudget) -> FsResult<Option<Node>> {
+    budget.control.check(IndexWorkStage::SourceMetadata)?;
     let metadata = fs::symlink_metadata(path).map_err(|source| FsError::Io {
         path: path.to_path_buf(),
         source,
@@ -371,7 +581,7 @@ fn scanned_node(root: &Path, path: &Path) -> FsResult<Option<Node>> {
         return folder_node(root, path).map(Some);
     }
     if metadata.is_file() {
-        return file_node(root, path, &metadata).map(Some);
+        return file_node(root, path, &metadata, budget).map(Some);
     }
     Ok(None)
 }
@@ -465,11 +675,17 @@ fn folder_node(root: &Path, path: &Path) -> FsResult<Node> {
 }
 
 /// Build a file node from filesystem metadata and content hash.
-fn file_node(root: &Path, path: &Path, metadata: &fs::Metadata) -> FsResult<Node> {
+fn file_node(
+    root: &Path,
+    path: &Path,
+    metadata: &fs::Metadata,
+    budget: &ScanBudget,
+) -> FsResult<Node> {
     let normalized = normalize_repo_path(root, path)?;
     let extension = normalized_extension(path);
     let language = detect_language_for_path(&normalized, extension.as_deref());
-    let hash = hash_file(path)?;
+    budget.control.check(IndexWorkStage::SourceHash)?;
+    let (hash, size_bytes) = hash_file(path, budget)?;
     let mtime_ns = metadata
         .modified()
         .ok()
@@ -481,31 +697,42 @@ fn file_node(root: &Path, path: &Path, metadata: &fs::Metadata) -> FsResult<Node
         kind: NodeKind::File,
         extension,
         language,
-        size_bytes: Some(metadata.len()),
+        size_bytes: Some(size_bytes),
         mtime_ns,
         content_hash: Some(hash),
     })
 }
 
 /// Hash a file with BLAKE3 for stale-purpose detection.
-fn hash_file(path: &Path) -> FsResult<String> {
-    let mut file = fs::File::open(path).map_err(|source| FsError::Io {
+fn hash_file(path: &Path, budget: &ScanBudget) -> FsResult<(String, u64)> {
+    budget.control.check(IndexWorkStage::SourceHash)?;
+    let file = fs::File::open(path).map_err(|source| FsError::Io {
         path: path.to_path_buf(),
         source,
     })?;
+    hash_reader(path, file, budget)
+}
+
+/// Hash every byte from a reader while observing cancellation and deadline state.
+fn hash_reader(path: &Path, mut reader: impl Read, budget: &ScanBudget) -> FsResult<(String, u64)> {
     let mut hasher = Hasher::new();
-    let mut buffer = [0_u8; 8192];
+    let mut buffer = [0_u8; HASH_BUFFER_BYTES];
+    let mut size_bytes = 0_u64;
     loop {
-        let count = file.read(&mut buffer).map_err(|source| FsError::Io {
+        budget.control.check(IndexWorkStage::SourceHash)?;
+        let count = reader.read(&mut buffer).map_err(|source| FsError::Io {
             path: path.to_path_buf(),
             source,
         })?;
         if count == 0 {
             break;
         }
+        budget.claim_source_bytes(count as u64)?;
+        size_bytes = size_bytes.saturating_add(count as u64);
         hasher.update(&buffer[..count]);
     }
-    Ok(hasher.finalize().to_hex().to_string())
+    budget.control.check(IndexWorkStage::SourceHash)?;
+    Ok((hasher.finalize().to_hex().to_string(), size_bytes))
 }
 
 /// Convert a system timestamp into nanoseconds since the Unix epoch.
@@ -520,6 +747,198 @@ mod tests {
     use super::*;
     use std::error::Error;
     use std::io;
+    use std::time::Instant;
+
+    /// Reader that requests cancellation after yielding its first non-empty chunk.
+    struct CancelAfterFirstChunk<R> {
+        /// Wrapped source reader.
+        inner: R,
+        /// Signal shared with the work control under test.
+        cancellation: IndexCancellation,
+        /// Whether cancellation was already requested.
+        canceled: bool,
+    }
+
+    impl<R: Read> Read for CancelAfterFirstChunk<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let count = self.inner.read(buffer)?;
+            if count > 0 && !self.canceled {
+                self.cancellation.cancel();
+                self.canceled = true;
+            }
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn controlled_scan_refuses_precancelled_work() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        fs::write(temp.path().join("source.rs"), "fn source() {}\n")?;
+        let cancellation = IndexCancellation::new();
+        cancellation.cancel();
+        let control = IndexWorkControl::new(cancellation, None);
+
+        let result = scan_repo_controlled(
+            temp.path(),
+            &ScanOptions::default(),
+            ScanLimits::default(),
+            &control,
+        );
+        require(
+            matches!(
+                result,
+                Err(FsError::IndexWork(IndexWorkFailure::Cancelled {
+                    stage: IndexWorkStage::RepositoryTraversal,
+                }))
+            ),
+            "pre-canceled repository scan did not return typed cancellation",
+        )?;
+
+        let expired = IndexWorkControl::with_deadline(IndexCancellation::new(), Instant::now());
+        let deadline_result = scan_repo_controlled(
+            temp.path(),
+            &ScanOptions::default(),
+            ScanLimits::default(),
+            &expired,
+        );
+        require(
+            matches!(
+                deadline_result,
+                Err(FsError::IndexWork(IndexWorkFailure::DeadlineExceeded {
+                    stage: IndexWorkStage::RepositoryTraversal,
+                }))
+            ),
+            "expired repository scan did not return the typed deadline",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn controlled_scan_enforces_entry_and_byte_limits_without_partial_results()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        fs::write(temp.path().join("source.rs"), "four")?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+
+        let entry_result = scan_repo_controlled(
+            temp.path(),
+            &ScanOptions::default(),
+            ScanLimits::new(1, 64, 1),
+            &control,
+        );
+        require(
+            matches!(
+                entry_result,
+                Err(FsError::IndexWork(
+                    IndexWorkFailure::ResourceLimitExceeded {
+                        resource: IndexWorkResource::Entries,
+                        ..
+                    }
+                ))
+            ),
+            "entry-bounded scan did not return the typed entry limit",
+        )?;
+
+        let byte_result = scan_repo_controlled(
+            temp.path(),
+            &ScanOptions::default(),
+            ScanLimits::new(8, 3, 1),
+            &control,
+        );
+        require(
+            matches!(
+                byte_result,
+                Err(FsError::IndexWork(
+                    IndexWorkFailure::ResourceLimitExceeded {
+                        resource: IndexWorkResource::SourceBytes,
+                        ..
+                    }
+                ))
+            ),
+            "byte-bounded scan did not return the typed source-byte limit",
+        )?;
+
+        let host_workers = thread::available_parallelism().map_or(1, usize::from);
+        let bounded_workers = ScanLimits::new(8, 64, usize::MAX).effective_workers();
+        require(
+            bounded_workers == host_workers.min(SCAN_WORKER_SAFE_CEILING),
+            "effective workers did not honor host availability and the safety cap",
+        )?;
+
+        let worker_result = scan_repo_controlled(
+            temp.path(),
+            &ScanOptions::default(),
+            ScanLimits::new(8, 64, 0),
+            &control,
+        );
+        require(
+            matches!(
+                worker_result,
+                Err(FsError::IndexWork(
+                    IndexWorkFailure::ResourceLimitExceeded {
+                        resource: IndexWorkResource::Workers,
+                        ..
+                    }
+                ))
+            ),
+            "zero-worker scan did not return the typed worker limit",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn exact_hash_loop_observes_cancellation_between_chunks() {
+        let exact_budget = ScanBudget::new(
+            ScanLimits::new(8, (HASH_BUFFER_BYTES * 2) as u64, 1),
+            IndexWorkControl::new(IndexCancellation::new(), None),
+        );
+        let exact = hash_reader(
+            Path::new("exact-source.rs"),
+            io::Cursor::new(vec![3_u8; HASH_BUFFER_BYTES + 17]),
+            &exact_budget,
+        );
+        assert!(matches!(
+            exact,
+            Ok((_hash, size_bytes)) if size_bytes == (HASH_BUFFER_BYTES + 17) as u64
+        ));
+
+        let cancellation = IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), None);
+        let budget = ScanBudget::new(ScanLimits::default(), control);
+        let reader = CancelAfterFirstChunk {
+            inner: io::Cursor::new(vec![7_u8; HASH_BUFFER_BYTES * 2]),
+            cancellation,
+            canceled: false,
+        };
+
+        let result = hash_reader(Path::new("source.rs"), reader, &budget);
+        assert!(matches!(
+            result,
+            Err(FsError::IndexWork(IndexWorkFailure::Cancelled {
+                stage: IndexWorkStage::SourceHash,
+            }))
+        ));
+
+        let byte_budget = ScanBudget::new(
+            ScanLimits::new(8, HASH_BUFFER_BYTES as u64, 1),
+            IndexWorkControl::new(IndexCancellation::new(), None),
+        );
+        let oversized = hash_reader(
+            Path::new("growing-source.rs"),
+            io::Cursor::new(vec![7_u8; HASH_BUFFER_BYTES * 2]),
+            &byte_budget,
+        );
+        assert!(matches!(
+            oversized,
+            Err(FsError::IndexWork(
+                IndexWorkFailure::ResourceLimitExceeded {
+                    stage: IndexWorkStage::SourceHash,
+                    resource: IndexWorkResource::SourceBytes,
+                    ..
+                }
+            ))
+        ));
+    }
 
     #[test]
     fn scans_files_and_folders() -> Result<(), Box<dyn Error>> {
@@ -841,6 +1260,15 @@ mod tests {
             Err(io::Error::other(format!("unexpected scanned path {rejected}")).into())
         } else {
             Ok(())
+        }
+    }
+
+    /// Require a test condition without panicking from a fallible test.
+    fn require(condition: bool, message: &str) -> Result<(), Box<dyn Error>> {
+        if condition {
+            Ok(())
+        } else {
+            Err(io::Error::other(message).into())
         }
     }
 }

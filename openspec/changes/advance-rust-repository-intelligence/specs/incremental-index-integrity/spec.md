@@ -42,8 +42,12 @@ For the same final structural inputs, a mutation sequence SHALL converge to the 
 
 ### Requirement: Bounded Work Preserves Service Availability
 
-Index work SHALL enforce explicit file, relation, worker, time, memory, output, and cancellation limits. Failed work SHALL leave last-valid queries available. Explicitly isolated project databases SHALL not be serialized by one process-global indexing lock.
+Index work SHALL enforce explicit file, relation, worker, time, memory, output, and cancellation limits. Exact local-byte freshness verification SHALL remain authoritative inside those bounds; metadata-only shortcuts SHALL NOT replace current-byte verification. Failed work SHALL leave last-valid queries available. A watcher SHALL acknowledge a change batch only after its complete refresh publishes successfully, so failure or cancellation leaves the pending change eligible for retry. Explicitly isolated project databases SHALL not be serialized by one process-global indexing lock.
 
 #### Scenario: Worker exceeds a limit
 - **WHEN** bounded parsing or enrichment hangs, crashes, or exceeds its resource policy
 - **THEN** the task fails with context, the active generation remains valid, and normal reads remain responsive
+
+#### Scenario: Watch refresh fails before publication
+- **WHEN** a watcher observes changes but indexing is canceled, exceeds a bound, or fails before a complete publication
+- **THEN** the active generation remains valid and the watcher does not advance its acknowledged change state past the uncommitted batch

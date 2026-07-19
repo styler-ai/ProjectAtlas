@@ -5,11 +5,14 @@ mod languages;
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
 };
+use projectatlas_core::{IndexWorkControl, IndexWorkFailure, IndexWorkStage};
 use regex::Regex;
 use std::borrow::Cow;
+use std::convert::Infallible;
+use std::ops::ControlFlow;
 use std::path::Path;
 use toml::Value as TomlValue;
-use tree_sitter::{Language, Node, Parser};
+use tree_sitter::{Language, Node, ParseOptions, Parser};
 
 /// Maximum symbols kept from one file to bound large generated sources.
 const MAX_SYMBOLS_PER_FILE: usize = 4_000;
@@ -23,29 +26,71 @@ const MAX_DOC_CHARS: usize = 500;
 /// Extract a symbol graph from source or manifest content.
 #[must_use]
 pub fn extract_symbol_graph(path: &str, language: Option<&str>, content: &str) -> SymbolGraph {
+    match extract_symbol_graph_checked(path, language, content, &mut || Ok::<(), Infallible>(())) {
+        Ok(graph) => graph,
+        Err(unreachable) => match unreachable {},
+    }
+}
+
+/// Extract a symbol graph while observing the shared indexing cancellation boundary.
+///
+/// # Errors
+///
+/// Returns a typed cancellation or deadline failure without returning a partial graph.
+pub fn extract_symbol_graph_controlled(
+    path: &str,
+    language: Option<&str>,
+    content: &str,
+    control: &IndexWorkControl,
+) -> Result<SymbolGraph, IndexWorkFailure> {
+    extract_symbol_graph_checked(path, language, content, &mut || {
+        control.check(IndexWorkStage::SymbolParsing)
+    })
+}
+
+/// Extract a symbol graph with one cooperative work checkpoint shared by every parser stage.
+fn extract_symbol_graph_checked<E>(
+    path: &str,
+    language: Option<&str>,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<SymbolGraph, E> {
+    check()?;
     if is_cargo_manifest(path, language) {
-        return extract_cargo_manifest_graph(path, language, content);
+        let graph = extract_cargo_manifest_graph(path, language, content);
+        check()?;
+        return Ok(graph);
     }
     let parse_content = content_without_leading_purpose_header(content);
     if is_vue_sfc(path, language) {
-        return extract_vue_sfc_graph(path, language, parse_content.as_ref());
+        let graph = extract_vue_sfc_graph(path, language, parse_content.as_ref());
+        check()?;
+        return Ok(graph);
     }
     if is_powershell_script(path, language) {
-        return extract_powershell_graph(path, language, parse_content.as_ref());
+        let graph = extract_powershell_graph(path, language, parse_content.as_ref());
+        check()?;
+        return Ok(graph);
     }
-    if let Some(parsed) = extract_tree_sitter_graph(path, language, parse_content.as_ref()) {
+    if let Some(parsed) = extract_tree_sitter_graph(path, language, parse_content.as_ref(), check)?
+    {
         if !parsed.graph.symbols.is_empty() || !parsed.graph.relations.is_empty() {
-            return parsed.graph;
+            check()?;
+            return Ok(parsed.graph);
         }
         if parsed.had_errors {
             let fallback = extract_fallback_graph(path, language, parse_content.as_ref());
             if !fallback.symbols.is_empty() || !fallback.relations.is_empty() {
-                return fallback;
+                check()?;
+                return Ok(fallback);
             }
         }
-        return parsed.graph;
+        check()?;
+        return Ok(parsed.graph);
     }
-    extract_fallback_graph(path, language, parse_content.as_ref())
+    let graph = extract_fallback_graph(path, language, parse_content.as_ref());
+    check()?;
+    Ok(graph)
 }
 
 /// Return whether the language has a specialized tree-sitter parser.
@@ -575,24 +620,53 @@ struct TreeSitterParse {
 }
 
 /// Extract a graph through tree-sitter when the language has a grammar.
-fn extract_tree_sitter_graph(
+fn extract_tree_sitter_graph<E>(
     path: &str,
     language: Option<&str>,
     content: &str,
-) -> Option<TreeSitterParse> {
-    let language_name = language?;
-    let parser_language = tree_sitter_language(language_name)?;
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<TreeSitterParse>, E> {
+    let Some(language_name) = language else {
+        return Ok(None);
+    };
+    let Some(parser_language) = tree_sitter_language(language_name) else {
+        return Ok(None);
+    };
+    check()?;
     let mut parser = Parser::new();
     if parser.set_language(&parser_language).is_err() {
-        return None;
+        return Ok(None);
     }
-    let tree = parser.parse(content, None)?;
+    let mut parse_failure = None;
+    let mut progress = |_: &tree_sitter::ParseState| match check() {
+        Ok(()) => ControlFlow::Continue(()),
+        Err(error) => {
+            parse_failure = Some(error);
+            ControlFlow::Break(())
+        }
+    };
+    let bytes = content.as_bytes();
+    let mut read = |offset, _| bytes.get(offset..).unwrap_or_default();
+    let tree = parser.parse_with_options(
+        &mut read,
+        None,
+        Some(ParseOptions::new().progress_callback(&mut progress)),
+    );
+    if let Some(error) = parse_failure {
+        return Err(error);
+    }
+    check()?;
+    let Some(tree) = tree else {
+        return Ok(None);
+    };
     let mut graph = empty_graph(path, language, ParserKind::TreeSitter);
     let root = tree.root_node();
     let had_errors = root.has_error();
-    visit_node(root, content, &mut graph);
+    visit_node(root, content, &mut graph, check)?;
+    check()?;
     languages::augment_language_graph(&mut graph, content);
-    Some(TreeSitterParse { graph, had_errors })
+    check()?;
+    Ok(Some(TreeSitterParse { graph, had_errors }))
 }
 
 /// Return a tree-sitter language for supported source families.
@@ -616,7 +690,13 @@ fn tree_sitter_language(language: &str) -> Option<Language> {
 }
 
 /// Recursively inspect one tree-sitter node.
-fn visit_node(node: Node<'_>, content: &str, graph: &mut SymbolGraph) {
+fn visit_node<E>(
+    node: Node<'_>,
+    content: &str,
+    graph: &mut SymbolGraph,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    check()?;
     if graph.symbols.len() < MAX_SYMBOLS_PER_FILE
         && let Some(kind) = declaration_kind(node.kind())
         && should_emit_declaration_symbol(node, content)
@@ -632,8 +712,9 @@ fn visit_node(node: Node<'_>, content: &str, graph: &mut SymbolGraph) {
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        visit_node(child, content, graph);
+        visit_node(child, content, graph, check)?;
     }
+    Ok(())
 }
 
 /// Refine a declaration kind using surrounding syntax context.
@@ -1775,9 +1856,43 @@ fn is_snippet_boundary(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_SYMBOLS_PER_FILE, extract_fallback_graph, extract_symbol_graph, specialized_languages,
+        MAX_SYMBOLS_PER_FILE, extract_fallback_graph, extract_symbol_graph,
+        extract_symbol_graph_checked, extract_symbol_graph_controlled, specialized_languages,
     };
     use projectatlas_core::symbols::{ParserKind, RelationKind, SymbolKind};
+    use projectatlas_core::{
+        IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
+    };
+
+    #[test]
+    fn controlled_extraction_consumes_cancellation_and_preserves_compatibility() {
+        let source = "pub struct Atlas;\nimpl Atlas { pub fn scan(&self) {} }\n";
+        let expected = extract_symbol_graph("src/lib.rs", Some("rust"), source);
+        let active = IndexWorkControl::new(IndexCancellation::new(), None);
+        assert_eq!(
+            extract_symbol_graph_controlled("src/lib.rs", Some("rust"), source, &active),
+            Ok(expected)
+        );
+
+        let cancellation = IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), None);
+        let mut checkpoints = 0;
+        let cancelled =
+            extract_symbol_graph_checked("src/lib.rs", Some("rust"), source, &mut || {
+                checkpoints += 1;
+                if checkpoints == 3 {
+                    cancellation.cancel();
+                }
+                control.check(IndexWorkStage::SymbolParsing)
+            });
+        assert_eq!(
+            cancelled,
+            Err(IndexWorkFailure::Cancelled {
+                stage: IndexWorkStage::SymbolParsing,
+            })
+        );
+        assert_eq!(checkpoints, 3);
+    }
 
     #[test]
     fn extracts_rust_symbols_and_calls() {

@@ -52,13 +52,19 @@ Literal, regex, fuzzy, case, context, pagination, ordering, punctuation, short-s
 
 Existing summary and health surfaces SHALL expose bounded relationship/parse coverage digests and opt-in project-wide pages for complete, partial, failed, ignored, oversized, quarantined, and stale states. Every coverage row SHALL include an actionable path or bounded range, extraction pass or relation family, reason, reached limit when applicable, active generation, and trust state. Pages SHALL include total, returned, truncated, continuation, and output-byte metadata and SHALL use current indexed rows without a new tool or implicit scan.
 
+Opt-in coverage discovery SHALL support bounded filters for path, parser/provider pass, relation family, coverage state, and reason. It SHALL distinguish complete, partial, failed, ignored, oversized, quarantined, and stale records when those states apply, and SHALL report total, returned, truncated, and continuation state without starting a scan.
+
 #### Scenario: Agent investigates missing relationships
 - **WHEN** a summary reports partial relationship coverage
 - **THEN** the agent can request the bounded affected coverage page and distinguish parser, limit, quarantine, ignore, and stale causes
 
+#### Scenario: Agent narrows incomplete coverage
+- **WHEN** an agent filters a current generation to partial or failed route relationships under one path
+- **THEN** only matching bounded rows are returned with reason, trust state, exact path/span selectors where available, totals, truncation, and the next safe call
+
 ### Requirement: Detailed Relations And Analysis Are Typed And Bounded
 
-Existing relation requests SHALL retain legacy defaults, rows, ordering, and relation kinds. Additive closed view, direction, extended family, depth, confidence, resolution, source occurrence, exact reusable target selector/next call, cursor, and hard-limit fields MAY expose richer graph detail without a separate jump tool. Architecture, language-valid complexity/bottleneck candidate, VCS-aware impact, and trace begin as typed views of existing relation/summary/health services; trace paths SHALL be node-simple and complexity, bottleneck, and dead-code output SHALL remain explicitly heuristic candidate-only. VCS selectors SHALL be closed typed working-tree/index/revision-range values, use a maintained Git crate or shell-free argument-vector boundary, and SHALL NOT mutate, replace local source truth, or implicitly scan the source tree.
+Existing relation requests SHALL retain legacy defaults, rows, ordering, and relation kinds. Additive closed view, direction, extended family, depth, confidence, resolution, source occurrence, exact reusable target selector/next call, cursor, and hard-limit fields MAY expose richer graph detail without a separate jump tool. Every returned node or path step backed by local source SHALL project the authoritative reviewed purpose of its owning file or applicable folder plus review/stale state; symbols SHALL inherit that owning-file projection, external or unresolved nodes SHALL report purpose as not applicable or unavailable, and derived graph rows SHALL NOT duplicate or own authored purpose text. Architecture, relationship-derived component/community candidate, dependency-cycle or strongly connected component candidate, reviewed-purpose alignment/drift, language-valid complexity/bottleneck candidate, VCS-aware impact, and trace SHALL begin as typed views of existing relation/summary/health services. Inferred architecture SHALL remain deterministic and candidate-labeled, retain exact reusable source selectors plus coverage/resolution/trust state, and expose totals and explicit truncation under row, edge, time, memory, output, and cancellation budgets. Expensive community or cycle analysis SHALL remain opt-in. Trace paths SHALL be node-simple, and inferred component, cycle, complexity, bottleneck, and dead-code output SHALL NOT be presented as architectural truth. VCS selectors SHALL be closed typed working-tree/index/revision-range values, use a maintained Git crate or shell-free argument-vector boundary, and SHALL NOT mutate, replace local source truth, or implicitly scan the source tree.
 
 #### Scenario: Old relation request is repeated
 - **WHEN** a client supplies only pre-change fields
@@ -70,7 +76,23 @@ Existing relation requests SHALL retain legacy defaults, rows, ordering, and rel
 
 #### Scenario: Agent follows a relationship target
 - **WHEN** a relation resolves to a file or symbol in the selected local source generation
-- **THEN** the result includes an exact selector accepted directly by summary, relation, or slice plus the supporting source span and trust state
+- **THEN** the result includes an exact selector accepted directly by summary, relation, or slice plus the supporting source span, trust state, and authoritative owning-purpose projection with review/stale state
+
+#### Scenario: Agent already has a source anchor
+- **WHEN** an agent starts from a selected file or symbol and asks which inbound or outbound connection to follow
+- **THEN** ProjectAtlas ranks a bounded relevant connection set with relation reason, exact target selector, owning-purpose projection, coverage, resolution, trust, and next call without requiring overview, folder, or file discovery to run again
+
+#### Scenario: Relationship target has no local purpose owner
+- **WHEN** a returned node is external, unresolved, or otherwise not backed by a local file or applicable folder
+- **THEN** the result reports purpose as not applicable or unavailable instead of fabricating, inheriting, or persisting purpose text
+
+#### Scenario: Topology component crosses responsibility folders
+- **WHEN** bounded relationship topology forms a deterministic component across folder or package boundaries
+- **THEN** ProjectAtlas returns the component as an inferred candidate with exact selectors, coverage/trust state, and reviewed-purpose agreement or drift reasons rather than silently redefining responsibility
+
+#### Scenario: Dependency cycle is present or absent
+- **WHEN** opt-in bounded cycle analysis inspects cyclic and acyclic fixtures
+- **THEN** the real strongly connected component is returned as a candidate, the acyclic fixture produces no false cycle, and any reached budget is reported as explicit truncation rather than a complete negative result
 
 ### Requirement: MCP Discovery Is Compact With Full Compatibility Available
 
