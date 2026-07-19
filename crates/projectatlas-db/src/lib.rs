@@ -4,10 +4,15 @@ mod project_identity;
 mod repository_graph;
 mod schema;
 mod sqlite_profile;
+mod telemetry;
 
 pub use project_identity::{ProjectRootTransition, ProjectRootTransitionResult};
 pub use repository_graph::{RepositoryGraphPage, RepositoryGraphRelationQuery};
 pub use sqlite_profile::validate_database_location;
+pub use telemetry::{
+    PlannerStatisticsPolicy, PlannerStatisticsState, SpillCleanupState, TelemetryCheckpointState,
+    TelemetryRetentionPolicy, TelemetryRetentionState,
+};
 
 use projectatlas_core::graph::{GraphContractError, ProjectInstanceId};
 use projectatlas_core::health::{
@@ -25,9 +30,8 @@ use projectatlas_core::symbols::{
     SymbolRelation,
 };
 use projectatlas_core::telemetry::{
-    TokenBucketOverview, TokenOverview, TokenTrendPeriod, TokenTrendReport, TokenTrendWindow,
-    UsageEvent, default_estimate_method, default_token_accuracy, default_token_model,
-    default_token_provider, default_token_trace, default_tokenizer_backend,
+    TelemetryContractError, TokenOverview, TokenTrendReport, TokenTrendWindow, UsageEvent,
+    UsageInstanceId, UsageInstanceOwner,
 };
 use projectatlas_core::{
     AGENT_REVIEWED_SOURCE_VALUES, HIGH_IMPACT_FILE_NAMES, HIGH_IMPACT_PATH_PREFIXES,
@@ -41,8 +45,8 @@ use rusqlite::{
     params_from_iter,
 };
 use serde::{Deserialize, Serialize};
-use std::cell::Cell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::num::{ParseIntError, TryFromIntError};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
@@ -55,12 +59,16 @@ use schema::{
 };
 #[cfg(test)]
 use schema::{PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION, SCHEMA_VERSION_KEY, sqlite_sidecar_path};
-use sqlite_profile::{JournalModePolicy, SQLITE_BUSY_TIMEOUT, open_writable_connection};
+use sqlite_profile::{
+    DatabaseLocation, JournalModePolicy, SQLITE_BUSY_TIMEOUT, open_writable_connection,
+};
 
 /// Maximum persisted text for denormalized symbol-name search summaries.
 const MAX_SYMBOL_SEARCH_SUMMARY_CHARS: usize = 16_000;
 /// Publication acquisition fails fast so callers must restage after contention.
 const SQLITE_PUBLICATION_ACQUIRE_TIMEOUT: Duration = Duration::ZERO;
+/// Ancillary telemetry must not delay a valid navigation result under contention.
+const SQLITE_TELEMETRY_BUSY_TIMEOUT: Duration = Duration::from_millis(25);
 /// Select create capability only for a path proven absent by preflight.
 fn writable_open_flags(state: SchemaState, database_exists: bool) -> OpenFlags {
     match (state, database_exists) {
@@ -127,6 +135,9 @@ pub enum DbError {
     /// A persisted or requested graph value violates the typed domain contract.
     #[error("repository graph contract error: {0}")]
     GraphContract(#[from] GraphContractError),
+    /// A telemetry identity violates its typed domain contract.
+    #[error("telemetry contract error: {0}")]
+    TelemetryContract(#[from] TelemetryContractError),
     /// Persisted graph project identity differs from the selected identity.
     #[error(
         "repository graph project identity {found} does not match selected identity {expected}"
@@ -352,6 +363,48 @@ pub enum DbError {
     /// A read-only store cannot locate its database for a separate telemetry write.
     #[error("read-only store has no database path for telemetry persistence")]
     TelemetryPathUnavailable,
+    /// One telemetry field exceeds its declared UTF-8 byte budget.
+    #[error("telemetry field {field} uses {bytes} UTF-8 bytes; limit is {limit}")]
+    TelemetryFieldTooLarge {
+        /// Stable field owner.
+        field: &'static str,
+        /// Observed UTF-8 byte count.
+        bytes: usize,
+        /// Maximum admitted UTF-8 byte count.
+        limit: usize,
+    },
+    /// A telemetry retention policy bound cannot make forward progress.
+    #[error("invalid telemetry retention limit for {field}: {value}")]
+    TelemetryLimitInvalid {
+        /// Stable retention-policy field.
+        field: &'static str,
+        /// Rejected policy value.
+        value: usize,
+    },
+    /// A telemetry counter cannot be represented exactly in `SQLite`.
+    #[error("telemetry integer overflow for {field}")]
+    TelemetryIntegerOverflow {
+        /// Stable counter owner.
+        field: &'static str,
+    },
+    /// A runtime attempted to reuse a sealed or expired instance.
+    #[error("telemetry usage instance is sealed or expired")]
+    TelemetryInstanceInactive,
+    /// Operating-system randomness was unavailable for optional telemetry identity creation.
+    #[error("telemetry runtime identity is unavailable")]
+    TelemetryIdentityUnavailable,
+    /// A runtime identity was reused with incompatible durable instance metadata.
+    #[error("telemetry runtime identity does not match its retained owner or caller label")]
+    TelemetryInstanceMismatch,
+    /// The bounded active-instance capacity is exhausted.
+    #[error("telemetry active-instance capacity is exhausted")]
+    TelemetryInstanceCapacity,
+    /// The bounded active-baseline capacity is exhausted.
+    #[error("telemetry modeled-baseline capacity is exhausted")]
+    TelemetryBaselineCapacity,
+    /// A compact modeled-baseline key collided with different witness material.
+    #[error("telemetry modeled-baseline key collided with different witness material")]
+    TelemetryBaselineCollision,
 }
 
 impl DbError {
@@ -445,12 +498,25 @@ pub struct AtlasStore {
     read_snapshot_active: Cell<bool>,
     /// Durable database path when the store is file-backed.
     database_path: Option<PathBuf>,
+    /// WAL-safe filesystem identity retained for later ancillary connections.
+    database_location: Option<DatabaseLocation>,
     /// Whether this connection is restricted to non-mutating queries.
     read_only: bool,
     /// Project root validated for this store, when the database records one.
     validated_project_root: Option<String>,
     /// Project identity captured with the validated root binding.
     validated_project_instance_id: Option<ProjectInstanceId>,
+    /// Bounded per-label instances used by direct library callers for this handle lifetime.
+    library_usage_instances: RefCell<HashMap<String, Option<UsageInstanceId>>>,
+}
+
+/// Root and project identity captured when one store binding was validated.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CapturedProjectBinding {
+    /// Stable project identity captured at open or explicit root transition.
+    pub project_instance_id: ProjectInstanceId,
+    /// Normalized local source root captured with the project identity.
+    pub project_root: String,
 }
 
 /// Identity depth required while opening one current project binding.
@@ -841,6 +907,39 @@ impl AtlasStore {
         }
     }
 
+    /// Run telemetry against this store's exact captured database binding.
+    ///
+    /// File-backed stores use a separate short-lived writable connection with
+    /// an ancillary fail-fast busy budget. Read-only navigation stores release
+    /// their read snapshot first. The connection is never discovered, attached,
+    /// substituted, or shared with another project.
+    fn with_telemetry_connection<T>(
+        &self,
+        operation: impl FnOnce(&Connection) -> DbResult<T>,
+    ) -> DbResult<T> {
+        if self.read_only {
+            self.finish_index_read_snapshot()?;
+        } else {
+            self.require_mutation_scope()?;
+        }
+        let (Some(path), Some(location)) =
+            (self.database_path.as_ref(), self.database_location.as_ref())
+        else {
+            if self.database_path.is_none() && self.database_location.is_none() {
+                return operation(&self.connection);
+            }
+            return Err(DbError::TelemetryPathUnavailable);
+        };
+        let connection = open_writable_connection(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE,
+            location,
+            SQLITE_TELEMETRY_BUSY_TIMEOUT,
+            JournalModePolicy::RequireWal,
+        )?;
+        operation(&connection)
+    }
+
     /// Open or create an index store.
     ///
     /// # Errors
@@ -910,13 +1009,20 @@ impl AtlasStore {
         {
             return Err(DbError::ProjectInstanceIdentityMissing);
         }
+        let database_location = if location.database_exists {
+            location
+        } else {
+            sqlite_profile::inspect_database_location(path)?
+        };
         Ok(Self {
             connection,
             read_snapshot_active: Cell::new(false),
             database_path: Some(path.to_path_buf()),
+            database_location: Some(database_location),
             read_only: false,
             validated_project_root,
             validated_project_instance_id,
+            library_usage_instances: RefCell::new(HashMap::new()),
         })
     }
 
@@ -953,13 +1059,16 @@ impl AtlasStore {
             validated_project_instance_id,
             true,
         )?;
+        let database_location = sqlite_profile::inspect_database_location(path)?;
         Ok(Self {
             connection,
             read_snapshot_active: Cell::new(true),
             database_path: Some(path.to_path_buf()),
+            database_location: Some(database_location),
             read_only: true,
             validated_project_root: preflight.project_root,
             validated_project_instance_id,
+            library_usage_instances: RefCell::new(HashMap::new()),
         })
     }
 
@@ -973,9 +1082,11 @@ impl AtlasStore {
             connection: Connection::open_in_memory()?,
             read_snapshot_active: Cell::new(false),
             database_path: None,
+            database_location: None,
             read_only: false,
             validated_project_root: None,
             validated_project_instance_id: None,
+            library_usage_instances: RefCell::new(HashMap::new()),
         };
         schema::initialize(&store.connection, None)?;
         Ok(store)
@@ -1248,6 +1359,7 @@ impl AtlasStore {
     /// Returns an error if persistence fails.
     pub fn set_project_root(&mut self, root: &Path) -> DbResult<()> {
         let value = normalize_metadata_path(root);
+        let previous_identity = self.validated_project_instance_id;
         let savepoint = self.validated_savepoint()?;
         if let Some(found) = savepoint
             .query_row(
@@ -1258,10 +1370,14 @@ impl AtlasStore {
             .optional()?
         {
             if found == value {
-                let (identity, _) = project_identity::ensure_project_identity(&savepoint)?;
+                let (identity, identity_changed) =
+                    project_identity::ensure_project_identity(&savepoint)?;
                 savepoint.commit()?;
                 self.validated_project_root = Some(value);
                 self.validated_project_instance_id = Some(identity);
+                if identity_changed {
+                    self.library_usage_instances.get_mut().clear();
+                }
                 return Ok(());
             }
             return Err(DbError::ProjectRootMismatch {
@@ -1271,9 +1387,13 @@ impl AtlasStore {
         }
         set_metadata(&savepoint, PROJECT_ROOT_KEY, &value)?;
         let (identity, _) = project_identity::ensure_project_identity(&savepoint)?;
+        let identity_changed = previous_identity != Some(identity);
         savepoint.commit()?;
         self.validated_project_root = Some(value);
         self.validated_project_instance_id = Some(identity);
+        if identity_changed {
+            self.library_usage_instances.get_mut().clear();
+        }
         Ok(())
     }
 
@@ -1291,6 +1411,54 @@ impl AtlasStore {
             )
             .optional()
             .map_err(DbError::from)
+    }
+
+    /// Return the project binding captured when this store was validated.
+    ///
+    /// This accessor performs no database read. It is intended for services
+    /// that must bind a result to the exact root and identity selected at open.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store has no complete project binding.
+    pub fn captured_project_binding(&self) -> DbResult<CapturedProjectBinding> {
+        Ok(CapturedProjectBinding {
+            project_instance_id: self
+                .validated_project_instance_id
+                .ok_or(DbError::ProjectInstanceIdentityMissing)?,
+            project_root: self
+                .validated_project_root
+                .clone()
+                .ok_or(DbError::ProjectRootMissing)?,
+        })
+    }
+
+    /// Revalidate the captured binding against a fresh database snapshot.
+    ///
+    /// File-backed stores open an independent read-only snapshot so a report
+    /// connection pinned to an older WAL end mark cannot hide a concurrent
+    /// same-root identity rotation. In-memory stores validate their only
+    /// connection because no external database binding exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database, root, identity, schema, or
+    /// filesystem binding no longer matches the state captured at open.
+    pub fn revalidate_captured_project_binding(&self) -> DbResult<()> {
+        let binding = self.captured_project_binding()?;
+        let Some(path) = self.database_path.as_deref() else {
+            return schema::validate_active_binding(
+                &self.connection,
+                Some(&binding.project_root),
+                Some(binding.project_instance_id),
+            );
+        };
+        let (connection, _) = schema::open_current_read_only(path, Some(&binding.project_root))?;
+        schema::validate_active_binding(
+            &connection,
+            Some(&binding.project_root),
+            Some(binding.project_instance_id),
+        )
     }
 
     /// Begin one exclusive full derived-index publication.
@@ -3930,32 +4098,138 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn record_usage(&self, event: &UsageEvent) -> DbResult<()> {
-        if !self.read_only {
-            return self
-                .with_validated_write(|connection| record_usage_on_connection(connection, event));
+        telemetry::validate_event(event, TelemetryRetentionPolicy::default())?;
+        let instance_id = self.library_usage_instance(&event.session_id, false)?;
+        match self.record_usage_for_instance(
+            instance_id,
+            UsageInstanceOwner::LibraryHandle,
+            event,
+            false,
+        ) {
+            Err(DbError::TelemetryInstanceInactive) => {
+                let replacement = self.library_usage_instance(&event.session_id, true)?;
+                self.record_usage_for_instance(
+                    replacement,
+                    UsageInstanceOwner::LibraryHandle,
+                    event,
+                    false,
+                )
+            }
+            Err(DbError::TelemetryBaselineCapacity) => {
+                let replacement = telemetry::generate_usage_instance_id()?;
+                self.seal_usage_instance(instance_id)?;
+                self.library_usage_instances
+                    .borrow_mut()
+                    .insert(event.session_id.clone(), Some(replacement));
+                self.record_usage_for_instance(
+                    replacement,
+                    UsageInstanceOwner::LibraryHandle,
+                    event,
+                    false,
+                )
+            }
+            result => result,
         }
-        self.finish_index_read_snapshot()?;
-        let path = self
-            .database_path
-            .as_ref()
-            .ok_or(DbError::TelemetryPathUnavailable)?;
-        let location = sqlite_profile::inspect_database_location(path)?;
-        let connection = open_writable_connection(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE,
-            &location,
-            SQLITE_BUSY_TIMEOUT,
-            JournalModePolicy::RequireWal,
-        )?;
-        let result = (|| {
+    }
+
+    /// Return or rotate one bounded direct-library runtime instance per caller label.
+    fn library_usage_instance(
+        &self,
+        caller_label: &str,
+        rotate: bool,
+    ) -> DbResult<UsageInstanceId> {
+        let mut instances = self.library_usage_instances.borrow_mut();
+        if !rotate && let Some(instance) = instances.get(caller_label) {
+            return instance.ok_or(DbError::TelemetryIdentityUnavailable);
+        }
+        if !instances.contains_key(caller_label)
+            && instances.len() >= TelemetryRetentionPolicy::default().max_retained_labels
+        {
+            return Err(DbError::TelemetryInstanceCapacity);
+        }
+        let instance = telemetry::generate_usage_instance_id().ok();
+        instances.insert(caller_label.to_string(), instance);
+        instance.ok_or(DbError::TelemetryIdentityUnavailable)
+    }
+
+    /// Record a usage event for one bounded runtime or invocation instance.
+    ///
+    /// The internal instance is deliberately separate from the optional
+    /// caller-visible label carried by [`UsageEvent::session_id`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the selected binding changes, the instance is
+    /// inactive, a retention bound rejects the event, or `SQLite` cannot commit
+    /// the complete telemetry transaction.
+    pub fn record_usage_for_instance(
+        &self,
+        instance_id: UsageInstanceId,
+        owner: UsageInstanceOwner,
+        event: &UsageEvent,
+        seal_after_record: bool,
+    ) -> DbResult<()> {
+        let policy = TelemetryRetentionPolicy::default();
+        let project_instance_id = self
+            .validated_project_instance_id
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        self.with_telemetry_connection(|connection| {
             let transaction =
-                rusqlite::Transaction::new_unchecked(&connection, TransactionBehavior::Immediate)?;
+                rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+            let operation = schema::validate_active_binding(
+                &transaction,
+                self.validated_project_root.as_deref(),
+                Some(project_instance_id),
+            )
+            .and_then(|()| {
+                telemetry::record_usage_for_project(
+                    &transaction,
+                    project_instance_id,
+                    instance_id,
+                    owner,
+                    event,
+                    policy,
+                    seal_after_record,
+                )
+            });
+            match operation {
+                Ok(()) => transaction.commit().map_err(DbError::from),
+                Err(operation) => match transaction.rollback() {
+                    Ok(()) => Err(operation),
+                    Err(rollback) => Err(DbError::TransactionRollback {
+                        operation: Box::new(operation),
+                        rollback,
+                    }),
+                },
+            }?;
+            // The event is already committed. Passive maintenance remains
+            // observable through retention state and must never make callers
+            // retry a successfully persisted event.
+            drop(telemetry::maintain_after_commit_for_project(
+                connection,
+                project_instance_id,
+                policy,
+            ));
+            Ok(())
+        })
+    }
+
+    /// Seal one cleanly completed runtime or invocation instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the selected binding changed, the instance is
+    /// already inactive, or `SQLite` cannot commit the state transition.
+    pub fn seal_usage_instance(&self, instance_id: UsageInstanceId) -> DbResult<()> {
+        self.with_telemetry_connection(|connection| {
+            let transaction =
+                rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
             let operation = schema::validate_active_binding(
                 &transaction,
                 self.validated_project_root.as_deref(),
                 self.validated_project_instance_id,
             )
-            .and_then(|()| record_usage_on_connection(&transaction, event));
+            .and_then(|()| telemetry::seal_usage_instance(&transaction, instance_id));
             match operation {
                 Ok(()) => transaction.commit().map_err(Into::into),
                 Err(operation) => match transaction.rollback() {
@@ -3966,18 +4240,16 @@ impl AtlasStore {
                     }),
                 },
             }
-        })();
-        match result {
-            Err(DbError::Sqlite(error))
-                if matches!(
-                    error.sqlite_error_code(),
-                    Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
-                ) =>
-            {
-                Ok(())
-            }
-            result => result,
-        }
+        })
+    }
+
+    /// Return content-free bounded telemetry retention and maintenance state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persisted state is missing, corrupt, or cannot be read.
+    pub fn telemetry_retention_state(&self) -> DbResult<TelemetryRetentionState> {
+        telemetry::retention_state(&self.connection)
     }
 
     /// Load usage events.
@@ -3986,134 +4258,7 @@ impl AtlasStore {
     ///
     /// Returns an error if loading fails.
     pub fn usage_events(&self, session_id: Option<&str>) -> DbResult<Vec<UsageEvent>> {
-        let sql = if session_id.is_some() {
-            "
-            SELECT session_id, command, path, query, estimated_tokens_without_projectatlas,
-                   estimated_tokens_with_projectatlas, estimated_tokens_saved,
-                   token_savings_bucket, provider, model, tokenizer_backend,
-                   accuracy, baseline_kind, confidence, calculation_trace,
-                   accounting_layer, estimate_method, denominator_kind,
-                   baseline_identity, baseline_fingerprint, dedupe_scope
-            FROM usage_events
-            WHERE session_id = ?1
-            ORDER BY id
-            "
-        } else {
-            "
-            SELECT session_id, command, path, query, estimated_tokens_without_projectatlas,
-                   estimated_tokens_with_projectatlas, estimated_tokens_saved,
-                   token_savings_bucket, provider, model, tokenizer_backend,
-                   accuracy, baseline_kind, confidence, calculation_trace,
-                   accounting_layer, estimate_method, denominator_kind,
-                   baseline_identity, baseline_fingerprint, dedupe_scope
-            FROM usage_events
-            ORDER BY id
-            "
-        };
-        let mut statement = self.connection.prepare(sql)?;
-        let mapper = |row: &rusqlite::Row<'_>| {
-            Ok(UsageEvent {
-                session_id: row.get(0)?,
-                command: row.get(1)?,
-                path: row.get(2)?,
-                query: row.get(3)?,
-                estimated_tokens_without_projectatlas: row.get(4)?,
-                estimated_tokens_with_projectatlas: row.get(5)?,
-                estimated_tokens_saved: row.get(6)?,
-                token_savings_bucket: row.get(7)?,
-                provider: row.get(8)?,
-                model: row.get(9)?,
-                tokenizer_backend: row.get(10)?,
-                accuracy: row.get(11)?,
-                baseline_kind: row.get(12)?,
-                confidence: row.get(13)?,
-                calculation_trace: row.get(14)?,
-                accounting_layer: row.get(15)?,
-                estimate_method: row.get(16)?,
-                denominator_kind: row.get(17)?,
-                baseline_identity: row.get(18)?,
-                baseline_fingerprint: row.get(19)?,
-                dedupe_scope: row.get(20)?,
-            })
-        };
-        let rows = if let Some(session) = session_id {
-            statement.query_map([session], mapper)?
-        } else {
-            statement.query_map([], mapper)?
-        };
-        let mut events = Vec::new();
-        for row in rows {
-            events.push(row?);
-        }
-        Ok(events)
-    }
-
-    /// Load the narrow raw-event fields required for token accounting dedupe.
-    fn token_accounting_events(&self, session_id: Option<&str>) -> DbResult<Vec<UsageEvent>> {
-        let sql = if session_id.is_some() {
-            "
-            SELECT session_id, command, path, query,
-                   estimated_tokens_without_projectatlas,
-                   estimated_tokens_with_projectatlas,
-                   token_savings_bucket, baseline_kind, confidence,
-                   accounting_layer, denominator_kind,
-                   baseline_identity, baseline_fingerprint, dedupe_scope
-            FROM usage_events
-            WHERE session_id = ?1
-              AND estimated_tokens_without_projectatlas IS NOT NULL
-              AND estimated_tokens_with_projectatlas IS NOT NULL
-            ORDER BY id
-            "
-        } else {
-            "
-            SELECT session_id, command, path, query,
-                   estimated_tokens_without_projectatlas,
-                   estimated_tokens_with_projectatlas,
-                   token_savings_bucket, baseline_kind, confidence,
-                   accounting_layer, denominator_kind,
-                   baseline_identity, baseline_fingerprint, dedupe_scope
-            FROM usage_events
-            WHERE estimated_tokens_without_projectatlas IS NOT NULL
-              AND estimated_tokens_with_projectatlas IS NOT NULL
-            ORDER BY id
-            "
-        };
-        let mut statement = self.connection.prepare(sql)?;
-        let mapper = |row: &rusqlite::Row<'_>| {
-            Ok(UsageEvent {
-                session_id: row.get(0)?,
-                command: row.get(1)?,
-                path: row.get(2)?,
-                query: row.get(3)?,
-                estimated_tokens_without_projectatlas: row.get(4)?,
-                estimated_tokens_with_projectatlas: row.get(5)?,
-                estimated_tokens_saved: None,
-                token_savings_bucket: row.get(6)?,
-                provider: default_token_provider(),
-                model: default_token_model(),
-                tokenizer_backend: default_tokenizer_backend(),
-                accuracy: default_token_accuracy(),
-                baseline_kind: row.get(7)?,
-                confidence: row.get(8)?,
-                calculation_trace: default_token_trace(),
-                accounting_layer: row.get(9)?,
-                estimate_method: default_estimate_method(),
-                denominator_kind: row.get(10)?,
-                baseline_identity: row.get(11)?,
-                baseline_fingerprint: row.get(12)?,
-                dedupe_scope: row.get(13)?,
-            })
-        };
-        let rows = if let Some(session) = session_id {
-            statement.query_map([session], mapper)?
-        } else {
-            statement.query_map([], mapper)?
-        };
-        let mut events = Vec::new();
-        for row in rows {
-            events.push(row?);
-        }
-        Ok(events)
+        telemetry::usage_events(&self.connection, session_id)
     }
 
     /// Build a token overview.
@@ -4122,92 +4267,7 @@ impl AtlasStore {
     ///
     /// Returns an error if loading events fails.
     pub fn token_overview(&self, session_id: Option<&str>) -> DbResult<TokenOverview> {
-        let sql = if session_id.is_some() {
-            "
-            SELECT
-                token_savings_bucket,
-                provider,
-                model,
-                tokenizer_backend,
-                accuracy,
-                baseline_kind,
-                confidence,
-                accounting_layer,
-                estimate_method,
-                denominator_kind,
-                dedupe_scope,
-                COUNT(*),
-                TOTAL(estimated_tokens_without_projectatlas),
-                TOTAL(estimated_tokens_with_projectatlas)
-            FROM usage_events
-            WHERE session_id = ?1
-              AND estimated_tokens_without_projectatlas IS NOT NULL
-              AND estimated_tokens_with_projectatlas IS NOT NULL
-            GROUP BY token_savings_bucket, provider, model, tokenizer_backend,
-                     accuracy, baseline_kind, confidence, accounting_layer,
-                     estimate_method, denominator_kind, dedupe_scope
-            ORDER BY token_savings_bucket, accuracy, baseline_kind, confidence,
-                     accounting_layer, estimate_method, denominator_kind, dedupe_scope
-            "
-        } else {
-            "
-            SELECT
-                token_savings_bucket,
-                provider,
-                model,
-                tokenizer_backend,
-                accuracy,
-                baseline_kind,
-                confidence,
-                accounting_layer,
-                estimate_method,
-                denominator_kind,
-                dedupe_scope,
-                COUNT(*),
-                TOTAL(estimated_tokens_without_projectatlas),
-                TOTAL(estimated_tokens_with_projectatlas)
-            FROM usage_events
-            WHERE estimated_tokens_without_projectatlas IS NOT NULL
-              AND estimated_tokens_with_projectatlas IS NOT NULL
-            GROUP BY token_savings_bucket, provider, model, tokenizer_backend,
-                     accuracy, baseline_kind, confidence, accounting_layer,
-                     estimate_method, denominator_kind, dedupe_scope
-            ORDER BY token_savings_bucket, accuracy, baseline_kind, confidence,
-                     accounting_layer, estimate_method, denominator_kind, dedupe_scope
-            "
-        };
-        let mapper = |row: &rusqlite::Row<'_>| {
-            let calls = row.get::<_, i64>(11)?.max(0) as u128;
-            Ok(TokenBucketOverview::from_totals(
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-                row.get(7)?,
-                row.get(8)?,
-                row.get(9)?,
-                row.get(10)?,
-                calls,
-                token_total_from_sql("estimated_tokens_without_projectatlas", row.get(12)?),
-                token_total_from_sql("estimated_tokens_with_projectatlas", row.get(13)?),
-            ))
-        };
-        let mut statement = self.connection.prepare(sql)?;
-        let rows = if let Some(session) = session_id {
-            statement.query_map([session], mapper)?
-        } else {
-            statement.query_map([], mapper)?
-        };
-        let mut buckets = Vec::new();
-        for row in rows {
-            buckets.push(row?);
-        }
-        let mut overview = TokenOverview::from_buckets(buckets);
-        overview.apply_accounting_from_events(&self.token_accounting_events(session_id)?);
-        Ok(overview)
+        telemetry::token_overview(&self.connection, session_id)
     }
 
     /// Build token trend aggregates grouped by day, week, month, or year.
@@ -4220,108 +4280,7 @@ impl AtlasStore {
         session_id: Option<&str>,
         window: TokenTrendWindow,
     ) -> DbResult<TokenTrendReport> {
-        let period_expr = token_trend_period_expression(window);
-        let sql = if session_id.is_some() {
-            format!(
-                "
-            SELECT
-                {period_expr} AS period,
-                token_savings_bucket,
-                provider,
-                model,
-                tokenizer_backend,
-                accuracy,
-                baseline_kind,
-                confidence,
-                accounting_layer,
-                estimate_method,
-                denominator_kind,
-                dedupe_scope,
-                COUNT(*),
-                TOTAL(estimated_tokens_without_projectatlas),
-                TOTAL(estimated_tokens_with_projectatlas)
-            FROM usage_events
-            WHERE session_id = ?1
-              AND estimated_tokens_without_projectatlas IS NOT NULL
-              AND estimated_tokens_with_projectatlas IS NOT NULL
-            GROUP BY period, token_savings_bucket, provider, model, tokenizer_backend,
-                     accuracy, baseline_kind, confidence, accounting_layer, estimate_method,
-                     denominator_kind, dedupe_scope
-            ORDER BY period, token_savings_bucket, accuracy, baseline_kind, confidence,
-                     accounting_layer, estimate_method, denominator_kind, dedupe_scope
-            "
-            )
-        } else {
-            format!(
-                "
-            SELECT
-                {period_expr} AS period,
-                token_savings_bucket,
-                provider,
-                model,
-                tokenizer_backend,
-                accuracy,
-                baseline_kind,
-                confidence,
-                accounting_layer,
-                estimate_method,
-                denominator_kind,
-                dedupe_scope,
-                COUNT(*),
-                TOTAL(estimated_tokens_without_projectatlas),
-                TOTAL(estimated_tokens_with_projectatlas)
-            FROM usage_events
-            WHERE estimated_tokens_without_projectatlas IS NOT NULL
-              AND estimated_tokens_with_projectatlas IS NOT NULL
-            GROUP BY period, token_savings_bucket, provider, model, tokenizer_backend,
-                     accuracy, baseline_kind, confidence, accounting_layer, estimate_method,
-                     denominator_kind, dedupe_scope
-            ORDER BY period, token_savings_bucket, accuracy, baseline_kind, confidence,
-                     accounting_layer, estimate_method, denominator_kind, dedupe_scope
-            "
-            )
-        };
-        let mapper = |row: &rusqlite::Row<'_>| {
-            let period = row.get::<_, String>(0)?;
-            let calls = row.get::<_, i64>(12)?.max(0) as u128;
-            let bucket = TokenBucketOverview::from_totals(
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-                row.get(7)?,
-                row.get(8)?,
-                row.get(9)?,
-                row.get(10)?,
-                row.get(11)?,
-                calls,
-                token_total_from_sql("estimated_tokens_without_projectatlas", row.get(13)?),
-                token_total_from_sql("estimated_tokens_with_projectatlas", row.get(14)?),
-            );
-            Ok((period, bucket))
-        };
-        let mut statement = self.connection.prepare(&sql)?;
-        let rows = if let Some(session) = session_id {
-            statement.query_map([session], mapper)?
-        } else {
-            statement.query_map([], mapper)?
-        };
-        let mut buckets_by_period = BTreeMap::<String, Vec<TokenBucketOverview>>::new();
-        for row in rows {
-            let (period, bucket) = row?;
-            buckets_by_period.entry(period).or_default().push(bucket);
-        }
-        let periods = buckets_by_period
-            .into_iter()
-            .map(|(period, buckets)| TokenTrendPeriod::from_buckets(period, buckets))
-            .collect();
-        Ok(TokenTrendReport::new(
-            session_id.map(ToString::to_string),
-            window,
-            periods,
-        ))
+        telemetry::token_trends(&self.connection, session_id, window)
     }
 
     /// Mark a deterministic health finding as agent-resolved.
@@ -4470,8 +4429,12 @@ fn set_metadata(connection: &Connection, key: &str, value: &str) -> DbResult<()>
     Ok(())
 }
 
-/// Persist one usage event through the supplied writable connection.
-fn record_usage_on_connection(connection: &Connection, event: &UsageEvent) -> DbResult<()> {
+/// Persist one usage event in the immutable released schema-8 fixture shape.
+#[cfg(test)]
+fn record_released_schema_eight_usage_event(
+    connection: &Connection,
+    event: &UsageEvent,
+) -> DbResult<()> {
     connection.execute(
         "
         INSERT INTO usage_events(
@@ -4924,27 +4887,6 @@ fn count_to_usize(field: &'static str, value: i64) -> DbResult<usize> {
         value,
         source,
     })
-}
-
-/// Convert a `SQLite` REAL aggregate token total to a saturating wide integer.
-fn token_total_from_sql(_field: &'static str, value: f64) -> u128 {
-    if !value.is_finite() || value <= 0.0 {
-        0
-    } else if value >= u128::MAX as f64 {
-        u128::MAX
-    } else {
-        value.round() as u128
-    }
-}
-
-/// Return the `SQLite` period expression for one token trend window.
-fn token_trend_period_expression(window: TokenTrendWindow) -> &'static str {
-    match window {
-        TokenTrendWindow::Day => "substr(COALESCE(created_at, CURRENT_TIMESTAMP), 1, 10)",
-        TokenTrendWindow::Week => "strftime('%Y-W%W', COALESCE(created_at, CURRENT_TIMESTAMP))",
-        TokenTrendWindow::Month => "substr(COALESCE(created_at, CURRENT_TIMESTAMP), 1, 7)",
-        TokenTrendWindow::Year => "substr(COALESCE(created_at, CURRENT_TIMESTAMP), 1, 4)",
-    }
 }
 
 /// Convert a usize to i64 with saturation for database storage.
@@ -5419,13 +5361,15 @@ mod tests {
         TOKEN_ACCURACY_HEURISTIC, TOKEN_BASELINE_SELECTED_CANDIDATES,
         TOKEN_BUCKET_FULL_FILE_COMPRESSION, TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
         TOKEN_COMMAND_SEARCH, TOKEN_CONFIDENCE_INFERRED, TOKEN_DEDUPE_SCOPE_EVENT,
-        usage_from_estimates, usage_from_estimates_with_accounting, usage_from_text,
+        usage_from_estimates, usage_from_estimates_with_accounting,
+        usage_from_estimates_with_context, usage_from_text,
     };
     use projectatlas_core::{NodeKind, normalized_parent};
     use std::error::Error;
     use std::fmt::Debug;
     use std::fs;
     use std::io;
+    use std::time::Instant;
 
     #[test]
     fn stores_nodes_and_overview() -> Result<(), Box<dyn Error>> {
@@ -5742,9 +5686,10 @@ mod tests {
         )?;
         let telemetry_state = connection.query_row(
             "
-            SELECT COUNT(*), SUM(estimated_tokens_saved)
-            FROM usage_events
-            WHERE session_id = 'schema-session'
+            SELECT COUNT(*), SUM(e.estimated_tokens_saved)
+            FROM usage_events AS e
+            JOIN usage_instances AS i USING(instance_row_id)
+            WHERE i.caller_label = 'schema-session'
             ",
             [],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
@@ -6033,7 +5978,9 @@ mod tests {
 
     #[test]
     fn records_token_overview() -> Result<(), Box<dyn Error>> {
-        let store = AtlasStore::in_memory()?;
+        let project = tempfile::tempdir()?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(project.path())?;
         let mut session_event = usage_from_estimates(
             "session",
             "outline",
@@ -6296,118 +6243,243 @@ mod tests {
             "zero baseline savings rate",
         )?;
 
-        for index in 0..3 {
-            store.connection.execute(
-                "
-                INSERT INTO usage_events(
-                    session_id,
-                    command,
-                    path,
-                    query,
-                    estimated_tokens_without_projectatlas,
-                    estimated_tokens_with_projectatlas,
-                    estimated_tokens_saved
-                )
-                VALUES(?1, 'large', NULL, NULL, ?2, 0, ?2)
-                ",
-                params![format!("large-{index}"), i64::MAX,],
-            )?;
-        }
-        let large = store.token_overview(None)?;
+        let large_project = tempfile::tempdir()?;
+        let mut large_store = AtlasStore::in_memory()?;
+        large_store.set_project_root(large_project.path())?;
+        let maximum_estimate = usize::try_from(i64::MAX)?;
+        large_store.record_usage(&usage_from_estimates(
+            "large-primary",
+            "large",
+            None,
+            None,
+            maximum_estimate,
+            0,
+        ))?;
+        let Err(overflow) = large_store.record_usage(&usage_from_estimates(
+            "large-rejected",
+            "large",
+            None,
+            None,
+            maximum_estimate,
+            0,
+        )) else {
+            return Err(io::Error::other("overflowing telemetry aggregate was committed").into());
+        };
+        require_eq(
+            &matches!(overflow, DbError::TelemetryIntegerOverflow { .. }),
+            &true,
+            "overflowing telemetry aggregate error",
+        )?;
+        let large = large_store.token_overview(Some("large-primary"))?;
         require_eq(
             &large.estimated_saved,
             &isize::MAX,
-            "large aggregate saturates without sqlite SUM overflow",
+            "largest accepted aggregate narrows at the public boundary",
+        )?;
+        require_eq(
+            &large_store.token_overview(Some("large-rejected"))?.calls,
+            &0,
+            "rejected aggregate left no partial report",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn direct_library_usage_rotates_at_baseline_capacity_without_reopening_the_old_scope()
+    -> Result<(), Box<dyn Error>> {
+        let project = tempfile::tempdir()?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(project.path())?;
+        let policy = TelemetryRetentionPolicy::default();
+        let label = "bounded-library-label";
+
+        for index in 0..policy.max_baselines_per_instance {
+            store.record_usage(&usage_from_estimates(
+                label,
+                "search",
+                None,
+                Some(format!("query-{index}")),
+                100,
+                20,
+            ))?;
+        }
+        let old_instance = store
+            .library_usage_instances
+            .borrow()
+            .get(label)
+            .copied()
+            .flatten()
+            .ok_or_else(|| io::Error::other("library instance was not retained"))?;
+
+        let boundary_event = usage_from_estimates(
+            label,
+            "search",
+            None,
+            Some("capacity-boundary".to_string()),
+            100,
+            20,
+        );
+        store.record_usage(&boundary_event)?;
+        let replacement = store
+            .library_usage_instances
+            .borrow()
+            .get(label)
+            .copied()
+            .flatten()
+            .ok_or_else(|| io::Error::other("replacement library instance was not retained"))?;
+        require_eq(
+            &(replacement != old_instance),
+            &true,
+            "capacity rotation created a new internal instance",
+        )?;
+        require_eq(
+            &store.connection.query_row(
+                "SELECT COUNT(*) FROM usage_instances WHERE state = 'sealed'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            &1,
+            "sealed predecessor instances",
+        )?;
+        require_eq(
+            &store.connection.query_row(
+                "SELECT COUNT(*) FROM usage_instances WHERE state = 'active'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            &1,
+            "active replacement instances",
+        )?;
+        require_eq(
+            &store.connection.query_row(
+                "SELECT COUNT(*) FROM usage_instance_baselines",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            &1,
+            "only replacement baseline witnesses remain",
+        )?;
+        require_eq(
+            &store.token_overview(Some(label))?.calls,
+            &(policy.max_baselines_per_instance + 1),
+            "caller-label report spans both bounded instances",
+        )?;
+        require_eq(
+            &store.token_overview(None)?.estimated_saved,
+            &(isize::try_from(policy.max_baselines_per_instance + 1)? * 80),
+            "global totals remain exact across rotation",
+        )?;
+        require_eq(
+            &matches!(
+                store.record_usage_for_instance(
+                    old_instance,
+                    UsageInstanceOwner::LibraryHandle,
+                    &boundary_event,
+                    false,
+                ),
+                Err(DbError::TelemetryInstanceInactive)
+            ),
+            &true,
+            "sealed predecessor cannot be reopened",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn rejected_library_labels_do_not_consume_the_bounded_identity_map()
+    -> Result<(), Box<dyn Error>> {
+        let project = tempfile::tempdir()?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(project.path())?;
+        let maximum = TelemetryRetentionPolicy::default().max_label_bytes;
+
+        for extra in 1..=4 {
+            let event =
+                usage_from_estimates(&"x".repeat(maximum + extra), "summary", None, None, 100, 20);
+            require_eq(
+                &matches!(
+                    store.record_usage(&event),
+                    Err(DbError::TelemetryFieldTooLarge {
+                        field: "session_id",
+                        ..
+                    })
+                ),
+                &true,
+                "oversized caller label rejection",
+            )?;
+        }
+        require_eq(
+            &store.library_usage_instances.borrow().len(),
+            &0,
+            "rejected labels retained no identity-map entries",
         )?;
         Ok(())
     }
 
     #[test]
     fn token_trends_group_usage_by_period_and_bucket() -> Result<(), Box<dyn Error>> {
-        let store = AtlasStore::in_memory()?;
-        for (session, created_at, bucket, baseline_kind, confidence, without, with) in [
+        let project = tempfile::tempdir()?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(project.path())?;
+        for (session, bucket, baseline_kind, confidence, without, with) in [
             (
                 "session",
-                "2026-06-01 00:00:00",
                 TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
                 "selected_candidates",
                 "inferred",
-                100_i64,
-                25_i64,
+                100_usize,
+                25_usize,
             ),
             (
                 "session",
-                "2026-06-10 00:00:00",
                 TOKEN_BUCKET_FULL_FILE_COMPRESSION,
                 "full_file",
                 "observed",
-                50_i64,
-                10_i64,
+                50_usize,
+                10_usize,
             ),
             (
                 "session",
-                "2026-07-01 00:00:00",
                 TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
                 "selected_candidates",
                 "inferred",
-                80_i64,
-                20_i64,
+                80_usize,
+                20_usize,
             ),
             (
                 "other",
-                "2026-06-03 00:00:00",
                 TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
                 "selected_candidates",
                 "inferred",
-                999_i64,
-                1_i64,
+                999_usize,
+                1_usize,
             ),
         ] {
-            store.connection.execute(
-                "
-                INSERT INTO usage_events(
-                    session_id,
-                    command,
-                    estimated_tokens_without_projectatlas,
-                    estimated_tokens_with_projectatlas,
-                    estimated_tokens_saved,
-                    token_savings_bucket,
-                    baseline_kind,
-                    confidence,
-                    created_at
-                )
-                VALUES(?1, 'trend', ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                ",
-                params![
-                    session,
-                    without,
-                    with,
-                    without - with,
-                    bucket,
-                    baseline_kind,
-                    confidence,
-                    created_at
-                ],
-            )?;
+            store.record_usage(&usage_from_estimates_with_context(
+                session,
+                "trend",
+                None,
+                None,
+                without,
+                with,
+                bucket,
+                baseline_kind,
+                confidence,
+            ))?;
         }
 
-        let trends = store.token_trends(Some("session"), TokenTrendWindow::Month)?;
-        require_eq(&trends.periods.len(), &2, "monthly periods")?;
-        require_eq(
-            &trends.periods[0].period,
-            &"2026-06".to_string(),
-            "first month",
-        )?;
-        require_eq(&trends.periods[0].calls, &2, "june call count")?;
+        let trends = store.token_trends(Some("session"), TokenTrendWindow::Day)?;
+        require_eq(&trends.periods.len(), &1, "current daily period")?;
+        require_eq(&trends.periods[0].calls, &3, "session trend call count")?;
         require_eq(
             &trends.periods[0].estimated_saved,
-            &115,
-            "june saved tokens",
+            &175,
+            "session trend saved tokens",
         )?;
         require_eq(
             &trends.periods[0].buckets.len(),
             &2,
-            "june preserves evidence buckets",
+            "trend preserves evidence buckets",
         )?;
         require_eq(
             &trends.periods[0].buckets[0].token_savings_bucket,
@@ -6419,12 +6491,9 @@ mod tests {
             &"observed".to_string(),
             "bucket confidence remains visible",
         )?;
-        require_eq(
-            &trends.periods[1].period,
-            &"2026-07".to_string(),
-            "second month",
-        )?;
-        require_eq(&trends.periods[1].calls, &1, "july call count")?;
+        let all_labels = store.token_trends(None, TokenTrendWindow::Day)?;
+        require_eq(&all_labels.periods.len(), &1, "all-label daily period")?;
+        require_eq(&all_labels.periods[0].calls, &4, "all-label trend calls")?;
         Ok(())
     }
 
@@ -6619,12 +6688,58 @@ mod tests {
             &true,
             "telemetry project identity recheck",
         )?;
-        let count = Connection::open(&db_path)?.query_row(
-            "SELECT COUNT(*) FROM usage_events WHERE session_id = 'identity-race'",
-            [],
-            |row| row.get::<_, i64>(0),
+        let current = AtlasStore::open_read_only_for_project(&db_path, &root)?;
+        require_eq(
+            &current.token_overview(Some("identity-race"))?.calls,
+            &0,
+            "telemetry refused after identity replacement",
         )?;
-        require_eq(&count, &0, "telemetry refused after identity replacement")?;
+        Ok(())
+    }
+
+    #[test]
+    fn telemetry_contention_uses_ancillary_busy_budget() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let db_path = temp.path().join("projectatlas.db");
+        drop(AtlasStore::open_for_project(&db_path, &root)?);
+
+        let reader = AtlasStore::open_read_only_for_project(&db_path, &root)?;
+        let writer = Connection::open(&db_path)?;
+        writer.execute_batch("BEGIN IMMEDIATE")?;
+        let started = Instant::now();
+        let result = reader.record_usage(&usage_from_estimates(
+            "contended",
+            "overview",
+            None,
+            None,
+            100,
+            20,
+        ));
+        let elapsed = started.elapsed();
+        writer.execute_batch("ROLLBACK")?;
+
+        let Err(error) = result else {
+            return Err(
+                io::Error::other("contended telemetry write unexpectedly succeeded").into(),
+            );
+        };
+        require_eq(
+            &error.is_write_unavailable(),
+            &true,
+            "contended telemetry error kind",
+        )?;
+        require_eq(
+            &(elapsed < Duration::from_millis(500)),
+            &true,
+            "ancillary telemetry busy latency",
+        )?;
+        require_eq(
+            &reader.token_overview(Some("contended"))?.calls,
+            &0,
+            "contended telemetry rollback",
+        )?;
         Ok(())
     }
 
@@ -8437,7 +8552,7 @@ mod tests {
                 ",
                 [CATEGORY_DUPLICATE_PURPOSE],
             )?;
-            record_usage_on_connection(
+            record_released_schema_eight_usage_event(
                 &connection,
                 &usage_from_estimates(
                     "schema-session",

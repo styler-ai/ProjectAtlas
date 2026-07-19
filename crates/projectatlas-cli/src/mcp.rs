@@ -12,7 +12,7 @@ use crate::runtime::{
     DEFAULT_HEALTH_LIMIT, INDEX_WORKER_SAFE_CEILING, IndexProjectMismatch, IndexRefreshRequired,
     IndexVerificationIncomplete, InitBootstrapOptions, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES,
     PurposeLintLevel, PurposeReviewRequest, ScanRuntimePlan, SymbolBuildOptions,
-    build_settings_report, byte_count_to_tokens, canonical_project_root,
+    UsageRuntimeInstance, build_settings_report, byte_count_to_tokens, canonical_project_root,
     config_root_mismatch_error, default_mcp_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     index_work_control, init_config_path, lint_database_if_present, next_step_report,
@@ -38,9 +38,10 @@ use crate::{
     render_parity_report, render_root_report, render_runtime_info, render_search_report,
     render_watch_status,
 };
+use projectatlas_core::graph::ProjectInstanceId;
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
-use projectatlas_core::telemetry::TokenTrendWindow;
+use projectatlas_core::telemetry::{TokenTrendWindow, UsageInstanceOwner};
 use projectatlas_core::toon::{
     encode_agent_payload, render_outline, render_overview, render_ranked_nodes,
     render_symbol_relations, render_symbols, render_token_overview, render_token_trends,
@@ -51,12 +52,13 @@ use projectatlas_core::{
     validated_repo_file_key, validated_repo_node_key,
 };
 use projectatlas_db::{
-    AtlasStore, HealthQuery, HealthResolution, HealthScope, read_project_root_read_only,
+    AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, read_project_root_read_only,
     verify_project_database,
 };
 use projectatlas_service::{
-    SymbolSliceSelector, build_file_summary_from_source, read_indexed_code_slice_from_source,
-    read_symbol_slice_from_source, search_indexed_files,
+    SymbolSliceSelector, TokenReport, TokenReportRequest, build_file_summary_from_source,
+    load_token_report, read_indexed_code_slice_from_source, read_symbol_slice_from_source,
+    search_indexed_files,
 };
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
@@ -67,7 +69,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{
-    Arc, RwLock,
+    Arc, Mutex, RwLock,
     atomic::{AtomicU64, Ordering},
 };
 use std::thread;
@@ -205,6 +207,8 @@ const PROJECTATLAS_DB_FILE_NAME: &str = "projectatlas.db";
 const PROJECTATLAS_CONFIG_FILE_NAME: &str = "config.toml";
 /// Project-local flat config filename.
 const PROJECTATLAS_FLAT_CONFIG_FILE_NAME: &str = "projectatlas.toml";
+/// Maximum distinct project bindings whose MCP telemetry can be sealed at shutdown.
+const MCP_TELEMETRY_PROJECT_BINDING_LIMIT: usize = 64;
 /// Default MCP config server key.
 const MCP_DEFAULT_CONFIG_SERVER_NAME: &str = "projectatlas";
 /// Missing-index recovery guidance for MCP tools.
@@ -398,6 +402,10 @@ const SEVERITY_EXPECTED_SEPARATOR: &str = ", ";
 const SEVERITY_EXPECTED_FINAL_SEPARATOR: &str = ", or ";
 /// Token trend validation error suffix.
 const TOKEN_TREND_WINDOW_ERROR_SUFFIX: &str = "expected day, week, month, or year";
+/// Internal mismatch when a trend request returns the overview variant.
+const TOKEN_TRENDS_RESULT_VARIANT_MISMATCH: &str = "token trend request returned an overview";
+/// Internal mismatch when an overview request returns the trends variant.
+const TOKEN_OVERVIEW_RESULT_VARIANT_MISMATCH: &str = "token overview request returned trends";
 /// Token chart theme validation error prefix.
 const TOKEN_CHART_THEME_ERROR_PREFIX: &str = "unsupported token chart theme ";
 /// Token chart theme validation error suffix.
@@ -573,11 +581,12 @@ pub(crate) fn run_mcp_server(
     allow_nearest_project: bool,
 ) -> Result<(), CliError> {
     let server = ProjectAtlasMcpServer::new(db_path, config_path, session, allow_nearest_project);
+    let shutdown_server = server.clone();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|source| CliError::Mcp(source.to_string()))?;
-    runtime.block_on(async move {
+    let result = runtime.block_on(async move {
         server
             .serve(rmcp::transport::stdio())
             .await
@@ -586,7 +595,9 @@ pub(crate) fn run_mcp_server(
             .await
             .map_err(|source| CliError::Mcp(source.to_string()))
             .map(|_| ())
-    })
+    });
+    shutdown_server.seal_usage_instances_for_projects();
+    result
 }
 
 /// Return whether the generated RMCP router contains required tool families.
@@ -762,7 +773,7 @@ struct AtlasSymbolsParams {
 struct AtlasTokenParams {
     /// Optional project root for this call. Defaults to the active MCP project.
     project_path: Option<String>,
-    /// Optional session id filter.
+    /// Optional caller-visible compatibility-label filter.
     session: Option<String>,
     /// Include a readable ASCII chart in the MCP result.
     include_chart: Option<bool>,
@@ -895,6 +906,73 @@ struct McpProjectState {
     db_path: PathBuf,
     /// Selected scan/import configuration path.
     config_path: Option<PathBuf>,
+}
+
+/// Exact root/database/project identity where this MCP process recorded telemetry.
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct McpUsageProjectBinding {
+    /// Canonical selected repository root.
+    root: PathBuf,
+    /// Exact authoritative database used for the telemetry write.
+    db_path: PathBuf,
+    /// Project identity captured by the already-open selected store.
+    project_instance_id: ProjectInstanceId,
+}
+
+impl McpUsageProjectBinding {
+    /// Capture one exact root/database/identity authority without another SQL read.
+    fn capture(state: &McpProjectState, store: &AtlasStore) -> Result<Self, DbError> {
+        let captured = store.captured_project_binding()?;
+        Ok(Self {
+            root: state.root.clone(),
+            db_path: state.db_path.clone(),
+            project_instance_id: captured.project_instance_id,
+        })
+    }
+}
+
+/// Current telemetry identity for one exact selected project binding.
+#[derive(Clone, Debug)]
+struct McpUsageProjectRuntime {
+    /// Exact root/database authority that owns this identity.
+    binding: McpUsageProjectBinding,
+    /// Current bounded identity for this process/project pair.
+    instance: Arc<Mutex<UsageRuntimeInstance>>,
+}
+
+/// Mutable bounded telemetry lifecycles shared by all MCP server clones.
+#[derive(Debug, Default)]
+struct McpUsageRuntime {
+    /// Distinct selected-project identities owned by this MCP process.
+    entries: Vec<McpUsageProjectRuntime>,
+}
+
+impl McpUsageRuntime {
+    /// Return or create the identity for one selected project binding.
+    fn instance_for_binding(
+        &mut self,
+        binding: McpUsageProjectBinding,
+    ) -> Option<Arc<Mutex<UsageRuntimeInstance>>> {
+        if let Some(entry) = self.entries.iter().find(|entry| entry.binding == binding) {
+            return Some(Arc::clone(&entry.instance));
+        }
+        if self.entries.len() >= MCP_TELEMETRY_PROJECT_BINDING_LIMIT {
+            return None;
+        }
+        let instance = Arc::new(Mutex::new(UsageRuntimeInstance::new(
+            UsageInstanceOwner::McpProcess,
+        )?));
+        self.entries.push(McpUsageProjectRuntime {
+            binding,
+            instance: Arc::clone(&instance),
+        });
+        Some(instance)
+    }
+
+    /// Clone the bounded project/runtime set before shutdown database I/O.
+    fn snapshot(&self) -> Vec<McpUsageProjectRuntime> {
+        self.entries.clone()
+    }
 }
 
 /// Select whether project-state discovery validates configuration content immediately.
@@ -1608,8 +1686,10 @@ impl McpBackgroundResourceEnvelope {
 pub(crate) struct ProjectAtlasMcpServer {
     /// Active project state for calls that omit `project_path`.
     project_state: Arc<RwLock<McpProjectState>>,
-    /// Token telemetry session id.
+    /// Caller-visible compatibility label applied to this MCP process's events.
     session: String,
+    /// Bounded telemetry lifecycle shared by every server clone and routed project.
+    usage_runtime: Arc<Mutex<McpUsageRuntime>>,
     /// Whether absolute path arguments may select the nearest indexed project by default.
     allow_nearest_project: bool,
     /// Bounded MCP task-progress records for this server session.
@@ -1636,6 +1716,7 @@ impl ProjectAtlasMcpServer {
                 config_path,
             ))),
             session,
+            usage_runtime: Arc::new(Mutex::new(McpUsageRuntime::default())),
             allow_nearest_project,
             task_registry: Arc::new(RwLock::new(McpTaskRegistry::new())),
             background_resources: McpBackgroundResourceEnvelope::for_host(),
@@ -1683,6 +1764,74 @@ impl ProjectAtlasMcpServer {
             )));
         }
         Self::open_mut_store(state)
+    }
+
+    /// Return whether this MCP process can record optional telemetry.
+    fn telemetry_enabled() -> bool {
+        !telemetry_disabled()
+    }
+
+    /// Record telemetry and rotate only this project's scope if baselines are full.
+    fn record_usage_for_state<F>(&self, state: &McpProjectState, store: &AtlasStore, mut record: F)
+    where
+        F: FnMut(UsageRuntimeInstance) -> Result<(), CliError>,
+    {
+        if telemetry_disabled() {
+            return;
+        }
+        let Ok(binding) = McpUsageProjectBinding::capture(state, store) else {
+            return;
+        };
+        let Some(project_instance) = self
+            .usage_runtime
+            .lock()
+            .ok()
+            .and_then(|mut runtime| runtime.instance_for_binding(binding))
+        else {
+            return;
+        };
+        let Ok(mut usage_instance) = project_instance.lock() else {
+            return;
+        };
+        if !matches!(
+            record(*usage_instance),
+            Err(CliError::Db(DbError::TelemetryBaselineCapacity))
+        ) {
+            return;
+        }
+
+        let Some(next_instance) = UsageRuntimeInstance::new(UsageInstanceOwner::McpProcess) else {
+            return;
+        };
+        // Creating a candidate has no lifecycle effect; install it only after
+        // the old identity is durably sealed so failure cannot leak or replace it.
+        if usage_instance.seal(store).is_err() {
+            return;
+        }
+        *usage_instance = next_instance;
+        drop(record(next_instance));
+    }
+
+    /// Best-effort seal each selected project's current identity at shutdown.
+    fn seal_usage_instances_for_projects(&self) {
+        let Some(projects) = self
+            .usage_runtime
+            .lock()
+            .ok()
+            .map(|runtime| runtime.snapshot())
+        else {
+            return;
+        };
+        for project in projects {
+            let Ok(instance) = project.instance.lock() else {
+                continue;
+            };
+            if let Ok(store) =
+                open_atlas_store_for_project(&project.binding.db_path, &project.binding.root)
+            {
+                drop(instance.seal(&store));
+            }
+        }
     }
 
     /// Load effective atlas config for the selected state.
@@ -3639,15 +3788,23 @@ impl ProjectAtlasMcpServer {
             let store = Self::open_fresh_store(&state)?;
             let overview = store.overview()?;
             let toon = render_overview(&overview);
-            record_directory_walk_usage_estimate(
-                &store,
-                &self.session,
-                MCP_EVENT_ATLAS_OVERVIEW,
-                None,
-                None,
-                estimated_source_tokens_for_indexed_files(&store, None, None)?,
-                &toon,
-            )?;
+            if Self::telemetry_enabled()
+                && let Ok(baseline_tokens) =
+                    estimated_source_tokens_for_indexed_files(&store, None, None)
+            {
+                self.record_usage_for_state(&state, &store, |usage_instance| {
+                    record_directory_walk_usage_estimate(
+                        &store,
+                        Some(usage_instance),
+                        &self.session,
+                        MCP_EVENT_ATLAS_OVERVIEW,
+                        None,
+                        None,
+                        baseline_tokens,
+                        &toon,
+                    )
+                });
+            }
             Ok(toon)
         })())
     }
@@ -3665,15 +3822,23 @@ impl ProjectAtlasMcpServer {
             let selected =
                 ranked_folder_nodes_with_reasons(&store, &query, params.limit.unwrap_or(10))?;
             let toon = render_ranked_nodes(NODE_LABEL_FOLDERS, &selected);
-            record_directory_walk_usage_estimate(
-                &store,
-                &self.session,
-                MCP_EVENT_ATLAS_FOLDERS,
-                None,
-                Some(query),
-                estimated_source_tokens_for_indexed_files(&store, None, None)?,
-                &toon,
-            )?;
+            if Self::telemetry_enabled()
+                && let Ok(baseline_tokens) =
+                    estimated_source_tokens_for_indexed_files(&store, None, None)
+            {
+                self.record_usage_for_state(&state, &store, |usage_instance| {
+                    record_directory_walk_usage_estimate(
+                        &store,
+                        Some(usage_instance),
+                        &self.session,
+                        MCP_EVENT_ATLAS_FOLDERS,
+                        None,
+                        Some(query.clone()),
+                        baseline_tokens,
+                        &toon,
+                    )
+                });
+            }
             Ok(toon)
         })())
     }
@@ -3701,25 +3866,32 @@ impl ProjectAtlasMcpServer {
                 params.limit.unwrap_or(10),
                 params.include_content.unwrap_or(false),
             )?;
-            let baseline_tokens = estimated_source_tokens_for_indexed_files(
-                &store,
-                folder_filter.as_deref(),
-                params.file_pattern.as_deref(),
-            )?;
             let toon = Self::with_selected_project_audit(
                 &state,
                 routed_project,
                 render_ranked_nodes(NODE_LABEL_FILES, &selected),
             )?;
-            record_usage_estimate(
-                &store,
-                &self.session,
-                MCP_EVENT_ATLAS_FILES,
-                params.file_pattern.or(folder_filter),
-                Some(query),
-                baseline_tokens,
-                &toon,
-            )?;
+            if Self::telemetry_enabled()
+                && let Ok(baseline_tokens) = estimated_source_tokens_for_indexed_files(
+                    &store,
+                    folder_filter.as_deref(),
+                    params.file_pattern.as_deref(),
+                )
+            {
+                let path = params.file_pattern.or(folder_filter);
+                self.record_usage_for_state(&state, &store, |usage_instance| {
+                    record_usage_estimate(
+                        &store,
+                        Some(usage_instance),
+                        &self.session,
+                        MCP_EVENT_ATLAS_FILES,
+                        path.clone(),
+                        Some(query.clone()),
+                        baseline_tokens,
+                        &toon,
+                    )
+                });
+            }
             Ok(toon)
         })())
     }
@@ -3737,15 +3909,23 @@ impl ProjectAtlasMcpServer {
             let report = next_step_report(&store, &query, params.limit)?;
             let payload = next_step_report_payload(&report);
             let toon = Self::encode_named_payload(MCP_PAYLOAD_NEXT, &payload)?;
-            record_directory_walk_usage_estimate(
-                &store,
-                &self.session,
-                MCP_EVENT_ATLAS_NEXT,
-                None,
-                Some(query),
-                estimated_source_tokens_for_indexed_files(&store, None, None)?,
-                &toon,
-            )?;
+            if Self::telemetry_enabled()
+                && let Ok(baseline_tokens) =
+                    estimated_source_tokens_for_indexed_files(&store, None, None)
+            {
+                self.record_usage_for_state(&state, &store, |usage_instance| {
+                    record_directory_walk_usage_estimate(
+                        &store,
+                        Some(usage_instance),
+                        &self.session,
+                        MCP_EVENT_ATLAS_NEXT,
+                        None,
+                        Some(query.clone()),
+                        baseline_tokens,
+                        &toon,
+                    )
+                });
+            }
             Ok(toon)
         })())
     }
@@ -3776,15 +3956,18 @@ impl ProjectAtlasMcpServer {
                 resolved.routed_project,
                 render_outline(&outline),
             )?;
-            record_usage_text(
-                &store,
-                &self.session,
-                MCP_EVENT_ATLAS_OUTLINE,
-                Some(file_key),
-                None,
-                &content,
-                &toon,
-            )?;
+            self.record_usage_for_state(&state, &store, |usage_instance| {
+                record_usage_text(
+                    &store,
+                    Some(usage_instance),
+                    &self.session,
+                    MCP_EVENT_ATLAS_OUTLINE,
+                    Some(file_key.clone()),
+                    None,
+                    &content,
+                    &toon,
+                )
+            });
             Ok(toon)
         })())
     }
@@ -3817,15 +4000,18 @@ impl ProjectAtlasMcpServer {
                 resolved.routed_project,
                 render_file_summary(&report),
             )?;
-            record_usage_text(
-                &store,
-                &self.session,
-                MCP_EVENT_ATLAS_FILE_SUMMARY,
-                Some(report.file_path),
-                None,
-                &content,
-                &toon,
-            )?;
+            self.record_usage_for_state(&state, &store, |usage_instance| {
+                record_usage_text(
+                    &store,
+                    Some(usage_instance),
+                    &self.session,
+                    MCP_EVENT_ATLAS_FILE_SUMMARY,
+                    Some(report.file_path.clone()),
+                    None,
+                    &content,
+                    &toon,
+                )
+            });
             Ok(toon)
         })())
     }
@@ -3851,15 +4037,18 @@ impl ProjectAtlasMcpServer {
                 params.limit.unwrap_or(20),
             )?;
             let toon = render_search_report(&report);
-            record_usage_estimate(
-                &store,
-                &self.session,
-                MCP_EVENT_ATLAS_SEARCH,
-                params.file_pattern,
-                Some(params.pattern),
-                byte_count_to_tokens(report.searched_bytes),
-                &toon,
-            )?;
+            self.record_usage_for_state(&state, &store, |usage_instance| {
+                record_usage_estimate(
+                    &store,
+                    Some(usage_instance),
+                    &self.session,
+                    MCP_EVENT_ATLAS_SEARCH,
+                    params.file_pattern.clone(),
+                    Some(params.pattern.clone()),
+                    byte_count_to_tokens(report.searched_bytes),
+                    &toon,
+                )
+            });
             Ok(toon)
         })())
     }
@@ -3919,15 +4108,18 @@ impl ProjectAtlasMcpServer {
                 resolved.routed_project,
                 render_code_slice(&report),
             )?;
-            record_usage_text(
-                &store,
-                &self.session,
-                MCP_EVENT_ATLAS_SLICE,
-                Some(report.path),
-                None,
-                &content,
-                &toon,
-            )?;
+            self.record_usage_for_state(&state, &store, |usage_instance| {
+                record_usage_text(
+                    &store,
+                    Some(usage_instance),
+                    &self.session,
+                    MCP_EVENT_ATLAS_SLICE,
+                    Some(report.path.clone()),
+                    None,
+                    &content,
+                    &toon,
+                )
+            });
             Ok(toon)
         })())
     }
@@ -4019,19 +4211,25 @@ impl ProjectAtlasMcpServer {
                 routed_project,
                 render_symbols(&symbols),
             )?;
-            let baseline_tokens = estimated_source_tokens_for_paths(
-                &store,
-                symbols.iter().map(|symbol| symbol.path.as_str()),
-            )?;
-            record_usage_estimate(
-                &store,
-                &self.session,
-                MCP_EVENT_ATLAS_SYMBOLS,
-                file,
-                params.query,
-                baseline_tokens,
-                &toon,
-            )?;
+            if Self::telemetry_enabled()
+                && let Ok(baseline_tokens) = estimated_source_tokens_for_paths(
+                    &store,
+                    symbols.iter().map(|symbol| symbol.path.as_str()),
+                )
+            {
+                self.record_usage_for_state(&state, &store, |usage_instance| {
+                    record_usage_estimate(
+                        &store,
+                        Some(usage_instance),
+                        &self.session,
+                        MCP_EVENT_ATLAS_SYMBOLS,
+                        file.clone(),
+                        params.query.clone(),
+                        baseline_tokens,
+                        &toon,
+                    )
+                });
+            }
             Ok(toon)
         })())
     }
@@ -4064,19 +4262,25 @@ impl ProjectAtlasMcpServer {
                 routed_project,
                 render_symbol_relations(&relations),
             )?;
-            let baseline_tokens = estimated_source_tokens_for_paths(
-                &store,
-                relations.iter().map(|relation| relation.path.as_str()),
-            )?;
-            record_usage_estimate(
-                &store,
-                &self.session,
-                MCP_EVENT_ATLAS_SYMBOL_RELATIONS,
-                file,
-                params.query,
-                baseline_tokens,
-                &toon,
-            )?;
+            if Self::telemetry_enabled()
+                && let Ok(baseline_tokens) = estimated_source_tokens_for_paths(
+                    &store,
+                    relations.iter().map(|relation| relation.path.as_str()),
+                )
+            {
+                self.record_usage_for_state(&state, &store, |usage_instance| {
+                    record_usage_estimate(
+                        &store,
+                        Some(usage_instance),
+                        &self.session,
+                        MCP_EVENT_ATLAS_SYMBOL_RELATIONS,
+                        file.clone(),
+                        params.query.clone(),
+                        baseline_tokens,
+                        &toon,
+                    )
+                });
+            }
             Ok(toon)
         })())
     }
@@ -4098,15 +4302,23 @@ impl ProjectAtlasMcpServer {
             let query = health_query_from_params(&params, scope)?;
             let page = store.unresolved_health_findings_page_current(&query)?;
             let toon = render_health_page(&page, &query);
-            record_directory_walk_usage_estimate(
-                &store,
-                &self.session,
-                MCP_EVENT_ATLAS_HEALTH,
-                None,
-                None,
-                estimated_source_tokens_for_indexed_files(&store, None, None)?,
-                &toon,
-            )?;
+            if Self::telemetry_enabled()
+                && let Ok(baseline_tokens) =
+                    estimated_source_tokens_for_indexed_files(&store, None, None)
+            {
+                self.record_usage_for_state(&state, &store, |usage_instance| {
+                    record_directory_walk_usage_estimate(
+                        &store,
+                        Some(usage_instance),
+                        &self.session,
+                        MCP_EVENT_ATLAS_HEALTH,
+                        None,
+                        None,
+                        baseline_tokens,
+                        &toon,
+                    )
+                });
+            }
             Ok(toon)
         })())
     }
@@ -4165,7 +4377,20 @@ impl ProjectAtlasMcpServer {
                         "unsupported token trend window {window:?}; {TOKEN_TREND_WINDOW_ERROR_SUFFIX}"
                     ))
                 })?;
-                let report = store.token_trends(params.session.as_deref(), window)?;
+                let report = match load_token_report(
+                    &store,
+                    TokenReportRequest::Trends {
+                        caller_label: params.session.as_deref(),
+                        window,
+                    },
+                )? {
+                    TokenReport::Trends(report) => report,
+                    TokenReport::Overview(_) => {
+                        return Err(CliError::InvalidInput(
+                            TOKEN_TRENDS_RESULT_VARIANT_MISMATCH.to_string(),
+                        ));
+                    }
+                };
                 if include_chart {
                     let chart = render_token_trend_dashboard_plain_with_theme(&report, chart_theme);
                     return Self::encode_two_named_payloads(
@@ -4177,7 +4402,19 @@ impl ProjectAtlasMcpServer {
                 }
                 return Ok(render_token_trends(&report));
             }
-            let overview = store.token_overview(params.session.as_deref())?;
+            let overview = match load_token_report(
+                &store,
+                TokenReportRequest::Overview {
+                    caller_label: params.session.as_deref(),
+                },
+            )? {
+                TokenReport::Overview(overview) => overview,
+                TokenReport::Trends(_) => {
+                    return Err(CliError::InvalidInput(
+                        TOKEN_OVERVIEW_RESULT_VARIANT_MISMATCH.to_string(),
+                    ));
+                }
+            };
             if include_chart {
                 let chart = render_token_dashboard_plain_with_theme(
                     &overview,
@@ -4434,15 +4671,23 @@ impl ProjectAtlasMcpServer {
             let query = health_query_from_params(&params, purpose_queue_scope(&params))?;
             let page = purpose_curation_page(&store, &query)?;
             let toon = render_purpose_curation_page(&page);
-            record_directory_walk_usage_estimate(
-                &store,
-                &self.session,
-                MCP_EVENT_ATLAS_PURPOSE_QUEUE,
-                None,
-                None,
-                estimated_source_tokens_for_indexed_files(&store, None, None)?,
-                &toon,
-            )?;
+            if Self::telemetry_enabled()
+                && let Ok(baseline_tokens) =
+                    estimated_source_tokens_for_indexed_files(&store, None, None)
+            {
+                self.record_usage_for_state(&state, &store, |usage_instance| {
+                    record_directory_walk_usage_estimate(
+                        &store,
+                        Some(usage_instance),
+                        &self.session,
+                        MCP_EVENT_ATLAS_PURPOSE_QUEUE,
+                        None,
+                        None,
+                        baseline_tokens,
+                        &toon,
+                    )
+                });
+            }
             Ok(toon)
         })())
     }
@@ -4543,6 +4788,457 @@ mod tests {
         } else {
             Err(io::Error::other(message.to_string()).into())
         }
+    }
+
+    fn usage_test_project(
+        parent: &Path,
+        name: &str,
+    ) -> Result<(McpProjectState, AtlasStore), Box<dyn std::error::Error>> {
+        let root = parent.join(name);
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        let db_path = root.join(".projectatlas").join("projectatlas.db");
+        let store = AtlasStore::open_for_project(&db_path, &root)?;
+        Ok((
+            McpProjectState {
+                root,
+                db_path,
+                config_path: None,
+            },
+            store,
+        ))
+    }
+
+    fn usage_runtime_identity(
+        server: &ProjectAtlasMcpServer,
+        state: &McpProjectState,
+        store: &AtlasStore,
+    ) -> Result<UsageRuntimeInstance, Box<dyn std::error::Error>> {
+        let binding = McpUsageProjectBinding::capture(state, store)?;
+        let project_instance = server
+            .usage_runtime
+            .lock()
+            .map_err(|_poisoned| io::Error::other("usage runtime lock poisoned"))?
+            .entries
+            .iter()
+            .find(|entry| entry.binding == binding)
+            .map(|entry| Arc::clone(&entry.instance))
+            .ok_or_else(|| io::Error::other("operating-system entropy was unavailable"))?;
+        let identity = *project_instance
+            .lock()
+            .map_err(|_poisoned| io::Error::other("project usage lock poisoned"))?;
+        Ok(identity)
+    }
+
+    #[test]
+    fn mcp_server_clones_share_one_runtime_identity() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (state, store) = usage_test_project(temp.path(), "selected-project")?;
+        let first = ProjectAtlasMcpServer::new(
+            state.db_path.clone(),
+            None,
+            "shared-label".to_string(),
+            false,
+        );
+        first.record_usage_for_state(&state, &store, |_usage_instance| Ok(()));
+        let first_identity = usage_runtime_identity(&first, &state, &store)?;
+        let cloned = first.clone();
+        require(
+            usage_runtime_identity(&first, &state, &store)? == first_identity,
+            "cloning an MCP server changed the original telemetry identity",
+        )?;
+        let restarted = ProjectAtlasMcpServer::new(
+            state.db_path.clone(),
+            None,
+            "shared-label".to_string(),
+            false,
+        );
+        restarted.record_usage_for_state(&state, &store, |_usage_instance| Ok(()));
+        let restarted_identity = usage_runtime_identity(&restarted, &state, &store)?;
+
+        require(
+            usage_runtime_identity(&cloned, &state, &store)? == first_identity,
+            "cloning an MCP server changed its process-scoped telemetry identity",
+        )?;
+        require(
+            restarted_identity != first_identity,
+            "a separately constructed MCP server reused the prior runtime identity",
+        )
+    }
+
+    #[test]
+    fn mcp_same_path_project_identity_rotation_starts_a_distinct_runtime_entry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if telemetry_disabled() {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let (state, store) = usage_test_project(temp.path(), "selected-project")?;
+        let server = ProjectAtlasMcpServer::new(
+            state.db_path.clone(),
+            None,
+            "shared-label".to_string(),
+            false,
+        );
+        let old_project_identity = store.captured_project_binding()?.project_instance_id;
+        server.record_usage_for_state(&state, &store, |_usage_instance| Ok(()));
+        let old_runtime_identity = usage_runtime_identity(&server, &state, &store)?;
+        drop(store);
+
+        AtlasStore::transition_project_root(
+            &state.db_path,
+            &state.root,
+            projectatlas_db::ProjectRootTransition::Detach,
+        )?;
+        let detached_store = AtlasStore::open_for_project(&state.db_path, &state.root)?;
+        let detached_project_identity = detached_store
+            .captured_project_binding()?
+            .project_instance_id;
+        server.record_usage_for_state(&state, &detached_store, |_usage_instance| Ok(()));
+        let detached_runtime_identity = usage_runtime_identity(&server, &state, &detached_store)?;
+        let tracked = server
+            .usage_runtime
+            .lock()
+            .map_err(|_poisoned| io::Error::other("usage runtime lock poisoned"))?
+            .entries
+            .len();
+
+        require(
+            detached_project_identity != old_project_identity,
+            "detach did not rotate the captured project identity",
+        )?;
+        require(
+            detached_runtime_identity != old_runtime_identity,
+            "same-path detach reused the previous project's telemetry identity",
+        )?;
+        require(
+            tracked == 2,
+            "same-path project identities did not retain distinct bounded runtime entries",
+        )
+    }
+
+    #[test]
+    fn mcp_telemetry_project_bindings_are_deduplicated_and_hard_bounded()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bindings = (0..=MCP_TELEMETRY_PROJECT_BINDING_LIMIT)
+            .map(|index| {
+                let identity_byte = u8::try_from(index + 1)?;
+                Ok(McpUsageProjectBinding {
+                    project_instance_id: ProjectInstanceId::from_bytes([identity_byte; 16])?,
+                    root: PathBuf::from(format!("project-{index}")),
+                    db_path: PathBuf::from(format!("project-{index}.db")),
+                })
+            })
+            .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+        let mut runtime = McpUsageRuntime::default();
+
+        for binding in bindings.iter().take(MCP_TELEMETRY_PROJECT_BINDING_LIMIT) {
+            require(
+                runtime.instance_for_binding(binding.clone()).is_some(),
+                "a binding inside the telemetry project bound was rejected",
+            )?;
+        }
+        require(
+            runtime.instance_for_binding(bindings[0].clone()).is_some(),
+            "an existing binding was rejected after the telemetry project bound was full",
+        )?;
+        require(
+            runtime
+                .instance_for_binding(bindings[MCP_TELEMETRY_PROJECT_BINDING_LIMIT].clone())
+                .is_none(),
+            "a new binding exceeded the telemetry project bound",
+        )?;
+        require(
+            runtime.entries.len() == MCP_TELEMETRY_PROJECT_BINDING_LIMIT,
+            "telemetry project binding registry exceeded its hard bound",
+        )
+    }
+
+    #[test]
+    fn mcp_telemetry_busy_project_does_not_block_another_project()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if telemetry_disabled() {
+            return Ok(());
+        }
+        let server = ProjectAtlasMcpServer::new(
+            PathBuf::from("startup.db"),
+            None,
+            "shared-label".to_string(),
+            false,
+        );
+        let temp = tempfile::tempdir()?;
+        let (state_a, store_a) = usage_test_project(temp.path(), "project-a")?;
+        let (state_b, store_b) = usage_test_project(temp.path(), "project-b")?;
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let server_a = server.clone();
+        let a_handle = std::thread::spawn(move || -> Result<(), String> {
+            server_a.record_usage_for_state(&state_a, &store_a, |_usage_instance| {
+                entered_tx.send(()).map_err(|error| {
+                    CliError::InvalidInput(format!("test coordination failed: {error}"))
+                })?;
+                release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|error| {
+                        CliError::InvalidInput(format!("test coordination failed: {error}"))
+                    })?;
+                Ok(())
+            });
+            Ok(())
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2))?;
+
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        let server_b = server;
+        let b_handle = std::thread::spawn(move || -> Result<(), String> {
+            server_b.record_usage_for_state(&state_b, &store_b, |_usage_instance| {
+                done_tx.send(()).map_err(|error| {
+                    CliError::InvalidInput(format!("test coordination failed: {error}"))
+                })?;
+                Ok(())
+            });
+            Ok(())
+        });
+        let project_b_completed = done_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        release_tx.send(())?;
+        a_handle
+            .join()
+            .map_err(|_panic| io::Error::other("project A telemetry thread panicked"))?
+            .map_err(io::Error::other)?;
+        b_handle
+            .join()
+            .map_err(|_panic| io::Error::other("project B telemetry thread panicked"))?
+            .map_err(io::Error::other)?;
+
+        require(
+            project_b_completed,
+            "one project's blocked telemetry delayed another project",
+        )
+    }
+
+    #[test]
+    fn mcp_telemetry_keeps_identity_when_capacity_seal_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if telemetry_disabled() {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let (state, store) = usage_test_project(temp.path(), "selected-project")?;
+        let server = ProjectAtlasMcpServer::new(
+            state.db_path.clone(),
+            None,
+            "shared-label".to_string(),
+            false,
+        );
+        server.record_usage_for_state(&state, &store, |usage_instance| {
+            record_usage_estimate(
+                &store,
+                Some(usage_instance),
+                "seal-failure-test",
+                MCP_EVENT_ATLAS_OVERVIEW,
+                None,
+                None,
+                8,
+                "overview:\n  files: 1\n",
+            )
+        });
+        let initial_identity = usage_runtime_identity(&server, &state, &store)?;
+        let busy_connection = rusqlite::Connection::open(&state.db_path)?;
+        busy_connection.execute_batch("BEGIN IMMEDIATE")?;
+        let mut calls = 0usize;
+
+        server.record_usage_for_state(&state, &store, |_usage_instance| {
+            calls += 1;
+            Err(CliError::Db(DbError::TelemetryBaselineCapacity))
+        });
+        busy_connection.execute_batch("ROLLBACK")?;
+
+        require(calls == 1, "failed sealing unexpectedly retried the event")?;
+        require(
+            usage_runtime_identity(&server, &state, &store)? == initial_identity,
+            "failed sealing replaced the still-active project identity",
+        )
+    }
+
+    #[test]
+    fn mcp_telemetry_rotates_and_retries_once_when_baselines_reach_capacity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if telemetry_disabled() {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("selected-project");
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        let db_path = root.join(".projectatlas").join("projectatlas.db");
+        let store = AtlasStore::open_for_project(&db_path, &root)?;
+        let state = McpProjectState {
+            root,
+            db_path: db_path.clone(),
+            config_path: None,
+        };
+        let other_root = temp.path().join("other-project");
+        fs::create_dir_all(other_root.join(".projectatlas"))?;
+        let other_db_path = other_root.join(".projectatlas").join("projectatlas.db");
+        let other_store = AtlasStore::open_for_project(&other_db_path, &other_root)?;
+        let other_state = McpProjectState {
+            root: other_root,
+            db_path: other_db_path,
+            config_path: None,
+        };
+        let server = ProjectAtlasMcpServer::new(db_path, None, "shared-label".to_string(), false);
+        server.record_usage_for_state(&state, &store, |usage_instance| {
+            record_usage_estimate(
+                &store,
+                Some(usage_instance),
+                "rotation-test",
+                MCP_EVENT_ATLAS_OVERVIEW,
+                None,
+                None,
+                8,
+                "overview:\n  files: 1\n",
+            )
+        });
+        server.record_usage_for_state(&other_state, &other_store, |_usage_instance| Ok(()));
+        let initial_identity = usage_runtime_identity(&server, &state, &store)?;
+        let other_identity = usage_runtime_identity(&server, &other_state, &other_store)?;
+        let mut calls = 0usize;
+
+        server.record_usage_for_state(&state, &store, |_usage_instance| {
+            calls += 1;
+            if calls == 1 {
+                Err(CliError::Db(DbError::TelemetryBaselineCapacity))
+            } else {
+                Ok(())
+            }
+        });
+
+        let tracked = server
+            .usage_runtime
+            .lock()
+            .map_err(|_poisoned| io::Error::other("usage runtime lock poisoned"))?
+            .entries
+            .len();
+        let rotated_identity = usage_runtime_identity(&server, &state, &store)?;
+        require(calls == 2, "capacity handling did not retry exactly once")?;
+        require(
+            rotated_identity != initial_identity,
+            "capacity handling did not rotate the bounded runtime identity",
+        )?;
+        require(
+            tracked == 2,
+            "rotation changed the bounded project binding inventory",
+        )?;
+        require(
+            usage_runtime_identity(&server, &other_state, &other_store)? == other_identity,
+            "one project's capacity rotation changed another project's identity",
+        )
+    }
+
+    #[test]
+    fn navigation_result_survives_telemetry_write_failure() -> Result<(), Box<dyn std::error::Error>>
+    {
+        if telemetry_disabled() {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join("src"))?;
+        fs::write(repo.join("src").join("lib.rs"), "pub fn owner() {}\n")?;
+        let config_path = repo.join(".projectatlas").join("config.toml");
+        init_project_with_config(&repo, Some(&config_path))?;
+        let db_path = repo.join(".projectatlas").join("projectatlas.db");
+        let plan = ScanRuntimePlan::for_path(Some(&config_path), &repo, None)?;
+        let mut store = open_atlas_store_for_project(&db_path, &repo)?;
+        run_scan_pipeline(
+            &mut store,
+            &plan,
+            &SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, Some(1), Some(30)),
+        )?;
+        drop(store);
+
+        let connection = rusqlite::Connection::open(&db_path)?;
+        connection.execute_batch("BEGIN IMMEDIATE")?;
+
+        let server = ProjectAtlasMcpServer::new(
+            db_path,
+            Some(config_path),
+            "shared-label".to_string(),
+            false,
+        );
+        let result = server.atlas_overview(Parameters(AtlasProjectParams { project_path: None }));
+        connection.execute_batch("ROLLBACK")?;
+
+        if result.contains("overview:") && result.contains("files:") {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "telemetry failure replaced an already-built navigation result: {result}"
+            ))
+            .into())
+        }
+    }
+
+    #[test]
+    fn mcp_calls_share_server_identity_and_new_server_uses_another()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if telemetry_disabled() {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join("src"))?;
+        fs::write(repo.join("src").join("lib.rs"), "pub fn owner() {}\n")?;
+        let config_path = repo.join(".projectatlas").join("config.toml");
+        init_project_with_config(&repo, Some(&config_path))?;
+        let db_path = repo.join(".projectatlas").join("projectatlas.db");
+        let plan = ScanRuntimePlan::for_path(Some(&config_path), &repo, None)?;
+        let mut store = open_atlas_store_for_project(&db_path, &repo)?;
+        run_scan_pipeline(
+            &mut store,
+            &plan,
+            &SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, Some(1), Some(30)),
+        )?;
+        drop(store);
+
+        let call_overview = |server: &ProjectAtlasMcpServer| {
+            server.atlas_overview(Parameters(AtlasProjectParams { project_path: None }))
+        };
+        let first = ProjectAtlasMcpServer::new(
+            db_path.clone(),
+            Some(config_path.clone()),
+            "shared-label".to_string(),
+            false,
+        );
+        require(
+            call_overview(&first).contains("overview:"),
+            "first MCP call failed",
+        )?;
+        require(
+            call_overview(&first).contains("overview:"),
+            "second MCP call failed",
+        )?;
+        let restarted = ProjectAtlasMcpServer::new(
+            db_path.clone(),
+            Some(config_path),
+            "shared-label".to_string(),
+            false,
+        );
+        require(
+            call_overview(&restarted).contains("overview:"),
+            "restarted MCP call failed",
+        )?;
+
+        let connection = rusqlite::Connection::open(db_path)?;
+        let instances: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM usage_instances WHERE owner = 'mcp_process' AND caller_label = 'shared-label'",
+            [],
+            |row| row.get(0),
+        )?;
+        let events: i64 =
+            connection.query_row("SELECT COUNT(*) FROM usage_events", [], |row| row.get(0))?;
+        require(
+            instances == 2 && events == 3,
+            "MCP calls did not reuse one identity per server construction",
+        )
     }
 
     #[test]

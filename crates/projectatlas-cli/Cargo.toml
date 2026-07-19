@@ -11,6 +11,7 @@ name = "projectatlas"
 path = "src/main.rs"
 
 [dependencies]
+getrandom.workspace = true
 projectatlas-core.workspace = true
 projectatlas-db.workspace = true
 projectatlas-fs.workspace = true

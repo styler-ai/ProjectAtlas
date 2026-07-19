@@ -189,6 +189,11 @@ fn apply_root_transition(
             ));
         }
 
+        if transition == ProjectRootTransition::Detach
+            && let Some(previous_identity) = found_identity
+        {
+            crate::telemetry::seal_project_usage_instances(&store.connection, previous_identity)?;
+        }
         set_metadata(&store.connection, PROJECT_ROOT_KEY, destination)?;
         schema::invalidate_derived_publication(&store.connection)?;
         let (project_instance_id, identity_changed) = match transition {
@@ -229,6 +234,9 @@ fn apply_root_transition(
             }
             store.validated_project_root = Some(destination.to_string());
             store.validated_project_instance_id = Some(result.project_instance_id);
+            if result.identity_changed {
+                store.library_usage_instances.get_mut().clear();
+            }
             Ok(result)
         }
         Err(error) => Err(schema::rollback_after_error(&store.connection, error)),
@@ -554,6 +562,8 @@ mod tests {
             "rejected transition identity",
         )?;
         assert_authored_state(&rejected_store)?;
+        assert_usage_report(&rejected_store, true)?;
+        assert_runtime_scope(&rejected_store, source_identity, 1, 0, 1)?;
         assert_graph_counts(&rejected_store, (2, 1, 1, 1))?;
         require(
             rejected_store.index_publication()?.is_some(),
@@ -732,6 +742,8 @@ mod tests {
             "detached identity",
         )?;
         assert_authored_state(&detached_store)?;
+        assert_usage_report(&detached_store, false)?;
+        assert_runtime_scope(&detached_store, source_identity, 0, 1, 0)?;
         assert_graph_counts(&detached_store, (0, 0, 0, 0))?;
         require(
             detached_store.index_publication()?.is_none(),
@@ -745,6 +757,8 @@ mod tests {
             "source identity after copy detach",
         )?;
         assert_authored_state(&source_store)?;
+        assert_usage_report(&source_store, true)?;
+        assert_runtime_scope(&source_store, source_identity, 1, 0, 1)?;
         assert_graph_counts(&source_store, (2, 1, 1, 1))?;
         drop(source_store);
 
@@ -779,6 +793,8 @@ mod tests {
             "rollback project identity",
         )?;
         assert_authored_state(&rollback_store)?;
+        assert_usage_report(&rollback_store, true)?;
+        assert_runtime_scope(&rollback_store, source_identity, 1, 0, 1)?;
         assert_graph_counts(&rollback_store, (2, 1, 1, 1))?;
         require(
             rollback_store.index_publication()?.is_some(),
@@ -806,6 +822,8 @@ mod tests {
             "stored moved identity",
         )?;
         assert_authored_state(&moved_store)?;
+        assert_usage_report(&moved_store, true)?;
+        assert_runtime_scope(&moved_store, source_identity, 1, 0, 1)?;
         assert_graph_counts(&moved_store, (2, 1, 1, 1))?;
         require(
             moved_store.index_publication()?.is_none(),
@@ -902,6 +920,8 @@ mod tests {
         )?;
         let detached_store = AtlasStore::open_read_only_for_project(&database, &root)?;
         assert_authored_state(&detached_store)?;
+        assert_usage_report(&detached_store, false)?;
+        assert_runtime_scope(&detached_store, initial.project_instance_id, 0, 1, 0)?;
         assert_graph_counts(&detached_store, (0, 0, 0, 0))?;
         require(
             detached_store.index_publication()?.is_none(),
@@ -1032,16 +1052,9 @@ mod tests {
              ) VALUES(
                 'resolved-purpose', 'duplicate-purpose', 'src/lib.rs', 'src/main.rs',
                 'The responsibilities are intentionally distinct.', 'agent'
-             );
-             INSERT INTO usage_events(
-                session_id, command, path, query,
-                estimated_tokens_without_projectatlas,
-                estimated_tokens_with_projectatlas,
-                estimated_tokens_saved
-             ) VALUES(
-                'identity-test', 'summary', 'src/lib.rs', 'identity transition', 120, 20, 100
              );",
         )?;
+        store.record_usage(&identity_transition_usage_event())?;
         let generation = IndexGeneration::new(1);
         let project_entity = GraphEntity::new(project, EntitySelector::Project, generation)?;
         let file_entity = GraphEntity::new(
@@ -1174,45 +1187,73 @@ mod tests {
             "health resolution content",
         )?;
 
-        let telemetry = store.connection.query_row(
-            "SELECT session_id, command, path, query,
-                    estimated_tokens_without_projectatlas,
-                    estimated_tokens_with_projectatlas,
-                    estimated_tokens_saved, token_savings_bucket, provider, model
-               FROM usage_events",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<i64>>(4)?,
-                    row.get::<_, Option<i64>>(5)?,
-                    row.get::<_, Option<i64>>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                ))
-            },
-        )?;
-        require_eq(
-            &telemetry,
-            &(
-                "identity-test".to_string(),
-                "summary".to_string(),
-                Some("src/lib.rs".to_string()),
-                Some("identity transition".to_string()),
-                Some(120),
-                Some(20),
-                Some(100),
-                "navigation_avoidance".to_string(),
-                "heuristic".to_string(),
-                "unknown".to_string(),
-            ),
-            "telemetry content",
-        )?;
         Ok(())
+    }
+
+    /// Build the modeled event used to prove project-scoped runtime lifecycle.
+    fn identity_transition_usage_event() -> projectatlas_core::telemetry::UsageEvent {
+        usage_from_estimates(
+            "identity-test",
+            "summary",
+            Some("src/lib.rs".to_string()),
+            Some("identity transition".to_string()),
+            120,
+            20,
+        )
+    }
+
+    /// Assert the current project report without reading schema-private raw columns.
+    fn assert_usage_report(store: &AtlasStore, retained: bool) -> Result<(), Box<dyn Error>> {
+        let events = store.usage_events(Some("identity-test"))?;
+        let overview = store.token_overview(Some("identity-test"))?;
+        if retained {
+            require_eq(
+                &events,
+                &vec![identity_transition_usage_event()],
+                "project-scoped usage event",
+            )?;
+            require_eq(&overview.calls, &1, "project-scoped usage calls")?;
+        } else {
+            require(
+                events.is_empty(),
+                "detached project exposed prior raw usage",
+            )?;
+            require_eq(&overview.calls, &0, "detached project usage calls")?;
+        }
+        Ok(())
+    }
+
+    /// Assert active/sealed instance and baseline ownership for one project identity.
+    fn assert_runtime_scope(
+        store: &AtlasStore,
+        project: ProjectInstanceId,
+        expected_active: i64,
+        expected_sealed: i64,
+        expected_baselines: i64,
+    ) -> Result<(), Box<dyn Error>> {
+        const ACTIVE: &str = "active";
+        const SEALED: &str = "sealed";
+        let project_bytes = project.as_bytes();
+        let (active, sealed) = store.connection.query_row(
+            "SELECT
+                 COALESCE(SUM(CASE WHEN state = ?2 THEN 1 ELSE 0 END), 0),
+                 COALESCE(SUM(CASE WHEN state = ?3 THEN 1 ELSE 0 END), 0)
+             FROM usage_instances
+             WHERE project_instance_id = ?1",
+            rusqlite::params![project_bytes.as_slice(), ACTIVE, SEALED],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        let baselines = store.connection.query_row(
+            "SELECT COUNT(*)
+             FROM usage_instance_baselines AS b
+             JOIN usage_instances AS i USING(instance_row_id)
+             WHERE i.project_instance_id = ?1",
+            [project_bytes.as_slice()],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&active, &expected_active, "active runtime instances")?;
+        require_eq(&sealed, &expected_sealed, "sealed runtime instances")?;
+        require_eq(&baselines, &expected_baselines, "active baseline witnesses")
     }
 
     /// Require that a rejected transition left the main database bytes unchanged.

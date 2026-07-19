@@ -612,7 +612,7 @@ future requirement from being mistaken for already-live behavior.
 
 | CLI route | MCP route | Physical database and source access | Freshness, generation, purpose, selector, and trust contract | Transaction, bounds, telemetry, and target owner |
 | --- | --- | --- | --- | --- |
-| `overview`; `folders`; `files`; `next` | `atlas_overview`; `atlas_folders`; `atlas_files`; `atlas_next`; `atlas_session_brief` | Read `nodes`, authoritative `purposes`, node summaries, and bounded ranking candidates. Current file ranking may inspect persisted file text for a bounded candidate set. | Normal calls use the freshness gate and one root-bound read snapshot of an active complete generation. Current rows project the latest owning node purpose; graph roles, crisp connections, parser/coverage trust, and graph selectors are not yet part of these rows. | Current row limits exist, but not every caller limit, decoded intermediate, or rendered payload has one uniform product byte ceiling. Tracked navigation may finish the read snapshot and append one usage event to the same project database; `atlas_session_brief` is read-only. Task 3.5 owns the reusable verified observation epoch, task 5.2 owns purpose-plus-connection enrichment, task 5.7 owns uniform cursor/intermediate/output bounds, and task 2.8 owns bounded telemetry retention. |
+| `overview`; `folders`; `files`; `next` | `atlas_overview`; `atlas_folders`; `atlas_files`; `atlas_next`; `atlas_session_brief` | Read `nodes`, authoritative `purposes`, node summaries, and bounded ranking candidates. Current file ranking may inspect persisted file text for a bounded candidate set. | Normal calls use the freshness gate and one root-bound read snapshot of an active complete generation. Current rows project the latest owning node purpose; graph roles, crisp connections, parser/coverage trust, and graph selectors are not yet part of these rows. | Current row limits exist, but not every caller limit, decoded intermediate, or rendered payload has one uniform product byte ceiling. After a valid tracked result exists, schema 11 may append telemetry through a separate 25 ms ancillary writer bound to the same project identity; telemetry failure never invalidates navigation and `atlas_session_brief` stays read-only. Task 3.5 owns the reusable verified observation epoch, task 5.2 owns purpose-plus-connection enrichment, and task 5.7 owns uniform cursor/intermediate/output bounds. |
 | `outline`; `summary` | `atlas_outline`; `atlas_file_summary` | Resolve one exact indexed file, read node/purpose/summary/parse/symbol/relation facts, then read the current saved source bytes for the selected file. | The freshness gate and complete-generation snapshot validate the selection. The current summary exposes file purpose and parser state; it does not yet expose the normalized graph generation, complete coverage, or a purpose-hydrated related-identity digest. | Section row limits are caller supplied and the current source read/render does not yet share the final uniform decoded/output-byte contract. Successful tracked calls may append telemetry to the same database after the read snapshot. Tasks 5.2 and 5.5 own bounded graph context, selectors, trust, coverage, and current purpose projection; task 5.7 owns uniform byte bounds. |
 | `symbols list`; `symbols relations`; `symbols slice`; `slice --symbol` | `atlas_symbols`; `atlas_symbol_relations`; symbol selection through `atlas_slice` | Read exact node/path and legacy symbol or relation rows; symbol slices then read current saved source bytes. | Normal reads use the freshness gate and complete-generation snapshot. Existing relation rows preserve legacy ordering and names, but do not yet provide normalized direction, generation-bound cursors, retained occurrences, reusable target selectors, authoritative target-purpose projection, resolution confidence, or coverage. | Current result counts are limited by the request, while uniform product ceilings and endpoint/intermediate-byte budgets are not yet applied. Tracked calls may append telemetry to the same database. Task 5.5 owns the additive typed relation contract and task 5.7 owns cursor and byte-budget enforcement. |
 | `slice` with exact lines | `atlas_slice` | Validate one indexed file in SQLite and read the exact current filesystem source before returning the requested line range. Persisted `file_texts` never override newer saved bytes. | The freshness gate and complete-generation snapshot protect selection; the repository-relative file path is the reusable selector. Purpose, graph trust, and coverage are not duplicated into verbatim slice output. | The current range is line bounded by the request, but there is not yet one shared rendered-output-byte ceiling. Successful tracked calls may append telemetry to the same database. Task 5.7 owns the uniform output contract. |
@@ -623,10 +623,10 @@ future requirement from being mistaken for already-live behavior.
 
 | CLI route | MCP route | Physical database and source access | Freshness and generation contract | Transaction, bounds, telemetry, and target owner |
 | --- | --- | --- | --- | --- |
-| `init` | `atlas_init` | Create/validate project-local config and the one project database; unless `no_scan`, scan current local source, import controlled purpose inputs, and derive text, summaries, symbols, and graph projections. | The selected source tree and effective ignore/config policy are authoritative. Initialization binds project identity and publishes one active complete generation when scanning runs. | Discovery/extraction is admitted under existing entry, byte, parser-output, worker, deadline, and cancellation limits; prepared mutations publish in one short parent-owned transaction. It writes no separate product database. Task 2.8 owns retained database/WAL/temporary-work lifecycle. |
+| `init` | `atlas_init` | Create/validate project-local config and the one project database; unless `no_scan`, scan current local source, import controlled purpose inputs, and derive text, summaries, symbols, and graph projections. | The selected source tree and effective ignore/config policy are authoritative. Initialization binds project identity and publishes one active complete generation when scanning runs. | Discovery/extraction is admitted under existing entry, byte, parser-output, worker, deadline, and cancellation limits; prepared mutations publish in one short parent-owned transaction. It writes no separate product database. Schema 11 owns bounded telemetry, passive checkpoint state, reusable-page state, and the explicit no-spill lifecycle. |
 | `scan` | `atlas_scan` | Read/hash/parse current included source off-writer, stage bounded typed batches, and replace the complete derived projection in the same database. | Revalidate source, configuration, purpose inputs, and base generation before publication. Readers keep the last complete generation until commit. | One short `BEGIN IMMEDIATE` publication owns all prepared mutations and one generation advance; failure/cancellation rolls back. Background MCP execution changes task delivery, not database ownership. No navigation telemetry is appended. |
 | `symbols build` | `atlas_symbols_build` | Read selected indexed source off-writer and rebuild compatible symbol plus normalized graph projections in the same database. | Revalidate the source and publication contract; preserve the last complete generation on failure. | Bounded parser workers, source bytes, retained parser output, deadline, and cancellation feed one publication transaction. No navigation telemetry is appended. |
-| `watch` and `watch --once` | `atlas_watch_once` | Observe or poll current local source, derive one changed-path batch off-writer, and publish affected text/symbol/graph rows in the same database; a correctness-required event may request a full scan. | Each successful batch revalidates source/policy/base generation and advances exactly once. Failed batches remain eligible for retry and expose no partial generation. | Each batch has bounded path/source/parser/worker/deadline/cancellation controls and one short publication transaction. Task 3.5 owns the long-lived verified observation epoch; task 2.8 owns measured WAL/checkpoint and abandoned-temporary-work maintenance. |
+| `watch` and `watch --once` | `atlas_watch_once` | Observe or poll current local source, derive one changed-path batch off-writer, and publish affected text/symbol/graph rows in the same database; a correctness-required event may request a full scan. | Each successful batch revalidates source/policy/base generation and advances exactly once. Failed batches remain eligible for retry and expose no partial generation. | Each batch has bounded path/source/parser/worker/deadline/cancellation controls and one short publication transaction. Task 3.5 owns the long-lived verified observation epoch. Database maintenance is bounded, content-free, and never introduces an abandoned spill authority. |
 | `map` | `atlas_map` | Explicitly walk the selected source tree and read all approved purposes from the project database to write a compatibility TOON/optional JSON export. | This is not a normal index-backed navigation response and does not claim a generation-bound compact page. Current local source drives the export while reviewed purposes remain SQLite-authored. | Deliberately source-wide maintenance; current purpose loading/export can materialize the admitted project set and writes no telemetry. It must not be cited as proof that normal navigation is bounded. |
 | `strip-legacy-purpose` | `atlas_strip_legacy_purpose` | Scan filesystem paths and optionally delete legacy `.purpose` files; the command does not create another database or make legacy files a second purpose authority. | This is an explicit migration/file-maintenance operation, not a normal fresh database read. Durable reviewed purpose remains owned by the project database. | Dry-run by default; apply mutates source-side files, not SQLite. Its source walk is explicit and source-wide. |
 
@@ -644,8 +644,8 @@ future requirement from being mistaken for already-live behavior.
 
 | Classification | CLI route | MCP route | Exact contract and later owner |
 | --- | --- | --- | --- |
-| Database diagnostics | `settings`; `root`, `root show`, `root verify` | `atlas_settings`; `atlas_root` | Settings/show open the existing database read-only and report bounded schema/root/index statistics without source refresh, maintenance, or telemetry. Explicit CLI `root verify` and MCP `atlas_root { verify: true }` additionally run full read-only `quick_check(1)` and foreign-key integrity verification; ordinary navigation and one-item authored writes do not pay that whole-database cost. Current settings does not yet expose the validated content-free SQLite runtime/filesystem/journal/synchronous/busy/checkpoint/statistics profile, active generation, registry digests, or actionable graph coverage; task 4.5 owns that additive report. |
-| Telemetry diagnostics | `token` | `atlas_token_report` | Read usage rows from one read-only snapshot without source freshness or another telemetry write. Raw event lifetime and some aggregates are currently proportional to retained events; task 2.8 owns retention, compaction, expiry truth, and bounded token-report semantics. |
+| Database diagnostics | `settings`; `root`, `root show`, `root verify` | `atlas_settings`; `atlas_root` | Settings/show open the existing database read-only and report bounded schema/root/index statistics without source refresh, maintenance, or telemetry. Explicit CLI `root verify` and MCP `atlas_root { verify: true }` additionally run full read-only `quick_check(1)` and foreign-key integrity verification; ordinary navigation and one-item authored writes do not pay that whole-database cost. Settings now exposes schema-11 content-free retention, journal/synchronous/busy, checkpoint, statistics, and page-lifecycle truth. Task 4.5 still owns linked SQLite compile identity, the complete filesystem/capability/generation report, registry digests, and actionable graph coverage. |
+| Telemetry diagnostics | `token` | `atlas_token_report` | A shared service use case reads schema-11 exact global/instance/day aggregates plus only retained raw detail from one read-only snapshot, without source freshness or another telemetry write. Reports expose `retained`, `partial`, `expired`, or `unavailable` detail truth. Raw events, labels, dimensions, instances, baselines, trends, and tombstones are independently bounded; all-time supported totals remain exact after compaction. |
 | MCP configuration | `mcp-config` | `atlas_mcp_config` | Generate host configuration from explicit paths/config and may read project identity only to resolve the selected root/config. It does not scan, publish, write telemetry, or create another database. |
 | Server/process administration | `mcp`; `runtime-info`; `watch-status` | `atlas_runtime_info`; `atlas_watch_status`; `atlas_set_project_path`; `atlas_task_status`; `atlas_task_cancel` | MCP startup owns transport only. Runtime and watcher reports are process/filesystem diagnostics. Active-project selection stores one process-local path choice but does not open, scan, or mutate the selected database. Task status/cancel use the bounded in-memory session registry, not SQLite. Task 4.5 may add content-free compiled/runtime SQLite capability identity without making `runtime-info` a source-data query. |
 | Config and ignore files | `config --print`; `ignore list`; `ignore init-gitignore`; `ignore add`; `ignore remove` | `atlas_config`; `atlas_ignore_list`; `atlas_ignore_init_gitignore`; `atlas_ignore_add`; `atlas_ignore_remove` | Read or explicitly edit project config/`.gitignore` files. Root discovery may consult existing database identity, but these calls do not query or mutate indexed rows and do not create a second settings authority inside SQLite. |
@@ -857,55 +857,220 @@ or empty filesystem identities remain typed `uncertain`, and known network or
 distributed filesystems remain typed `unsupported`; ProjectAtlas never falls
 back to a weaker journal or synchronous mode.
 
-The current default SQLite auto-checkpoint remains only the initial measured
-baseline. Content-free operating-profile inspection and real WAL tests now
-verify that baseline; tasks 2.8 and 7.4 determine whether a bounded passive
-post-publication checkpoint trigger or statistics/`PRAGMA optimize` lifecycle
-is needed from WAL growth, long-reader, plan, startup, and write-amplification
-measurements. Request paths never force a blocking truncate checkpoint. Live
+SQLite auto-checkpoint remains the engine baseline for structural publication.
+Schema 11 additionally counts committed telemetry writes and, after 1,024
+writes by default, attempts one `PASSIVE` checkpoint only after the event
+transaction has committed. Busy or failed checkpoint state is recorded for
+later maintenance without converting an already committed usage event into a
+caller-visible failure. Content-free settings expose the effective policy,
+checkpoint outcome, page/freelist state, and whether explicit bounded
+maintenance remains pending. Task 7.4 still owns representative WAL,
+long-reader, plan, startup, and write-amplification measurements. Request paths
+never force a blocking truncate checkpoint or blind `VACUUM`. Live
 snapshot/export uses the SQLite backup API; copying only the main file while
 WAL is active is not a valid general backup procedure.
 
 ### Bounded Database Lifecycle
 
+#### Telemetry Physical Model
+
+```mermaid
+flowchart TB
+    subgraph Database[Exactly one projectatlas.db]
+        direction TB
+        subgraph Scope[Project and dimension scope]
+            direction LR
+            Project[project_identity<br/>selected 16-byte project instance]
+            Dimensions[usage_bucket_dimensions<br/>normalized typed dimensions]
+            Retention[usage_retention_state<br/>budgets, checkpoint, pages, detail truth]
+        end
+        subgraph Lifecycle[Runtime and label lifecycle]
+            direction LR
+            Labels[usage_labels<br/>bounded label detail state]
+            Instances[usage_instances<br/>runtime identity, owner, label, lifecycle]
+            Baselines[usage_instance_baselines<br/>active dedupe witnesses]
+        end
+        subgraph Measurement[Exact history and bounded detail]
+            direction LR
+            Exact[Project-scoped exact aggregate tables<br/>global, instance, day, instance-day]
+            Events[usage_events<br/>recent instance and dimension detail]
+            Tombstones[Label and instance tombstones<br/>prevent silent scope reopening]
+        end
+
+        Project -->|project scope| Instances
+        Project -->|project scope| Labels
+        Dimensions -->|dimension key| Exact
+        Instances -->|instance key| Exact
+        Instances --> Baselines
+        Instances --> Events
+        Dimensions -->|dimension key| Events
+        Labels -. report selection .-> Instances
+        Labels --> Tombstones
+        Instances --> Tombstones
+        Retention -. instance and label caps .-> Instances
+        Retention -. baseline rows and witness bytes .-> Baselines
+        Retention -. raw rows, age, and bytes .-> Events
+        Retention -. daily and tombstone caps .-> Tombstones
+    end
+```
+
+Exact aggregates and retained raw detail are deliberately separate. Pruning an
+event cannot subtract history from the all-time aggregate authority, while
+active baseline witnesses remain bounded state that can disappear only through
+the explicit seal/expiry contract.
+
 #### Telemetry Retention
 
 ```mermaid
 flowchart TB
-    Calls[Agent tool calls] --> Raw[Recent raw usage events<br/>row, age, and byte budget]
-    Raw -->|within budget| Report[Token report and declared trends]
-    Raw -->|budget boundary| Rollup[Atomically write typed aggregates<br/>and expire compacted raw rows]
-    Rollup --> Report
-    Rollup -->|expired detail is explicit| Detail[Raw session detail unavailable]
+    EventTx[Committed event transaction] --> Exact[Exact aggregates already durable]
+    EventTx --> Raw[Recent raw event]
+    Raw --> Bound{Row, age, and logical-byte budgets}
+    Bound -->|inside| Retained[Retained detail]
+    Bound -->|exceeded| Compact[Minimum required oldest prefix<br/>within a fixed work bound]
+    Compact --> Partial[Partial detail; totals unchanged]
+    Retire[Label or instance retirement] --> Tombstone[Bounded tombstone]
+    Tombstone --> Expired[Expired detail; scope cannot reopen]
+    Missing[No retained scope or history] --> Unavailable[Unavailable detail]
+    Exact --> Report[Render-neutral token report]
+    Retained --> Report
+    Partial --> Report
+    Expired --> Report
+    Unavailable --> Report
+```
+
+The internal identity, not the optional label, owns deduplication. A CLI
+invocation seals atomically with its final event. One MCP process retains one
+current identity per bounded exact project binding, so capacity or contention
+in one local source database cannot rotate or serialize telemetry in another.
+Reusing a public label after retirement creates a new identity and cannot
+silently reopen discarded baseline witnesses.
+
+#### Runtime Instance Lifecycle
+
+```mermaid
+stateDiagram-v2
+    state "Active for one process and exact project binding" as Active
+    state "Prepare unused candidate identity" as Prepare
+    state "Seal current bounded baseline scope" as Rotate
+    state "Install candidate and retry exact event once" as Replace
+    state "Candidate identity unavailable" as CandidateFailed
+    state "Typed telemetry failure - identity unchanged" as SealFailed
+    state "Sealed - no more events or baselines" as Sealed
+    state "Expired after crash/idle recovery" as Expired
+    state "Bounded tombstone prevents reopening" as Tombstone
+    [*] --> Active: fresh CLI invocation or first MCP call for binding
+    Active --> Prepare: modeled-baseline capacity reached
+    Prepare --> CandidateFailed: entropy unavailable
+    CandidateFailed --> Active: keep identity and preserve navigation result
+    Prepare --> Rotate: candidate ready but not installed
+    Rotate --> Replace: seal succeeds
+    Replace --> Active: candidate becomes current
+    Rotate --> SealFailed: seal fails and candidate is discarded
+    SealFailed --> Active: keep identity and preserve navigation result
+    Active --> Sealed: CLI final event or MCP clean shutdown
+    Active --> Expired: crash leaves idle instance for maintenance
+    Sealed --> Tombstone: retained instance history expires
+    Expired --> Tombstone: expired instance row retires
+    Tombstone --> [*]: bounded tombstone retention expires
+```
+
+Every new CLI invocation receives a fresh identity, while an MCP process
+creates one fresh identity when it first records telemetry for an exact project
+binding. Baseline capacity seals and replaces only that binding's current
+identity. It prepares an unused candidate first so entropy failure cannot seal
+the current scope, then installs that candidate only after the current identity
+seals successfully. The bounded registry lock is not held during SQLite work,
+and a per-binding lock keeps concurrent projects independent. Clean MCP shutdown
+seals each current bounded entry; a crash relies on idle expiry instead. A later
+process never revives a sealed, expired, or tombstoned identity.
+
+#### Telemetry Event Transaction
+
+```mermaid
+sequenceDiagram
+    participant Adapter as CLI or MCP adapter
+    participant Service as Telemetry report/use-case boundary
+    participant Store as projectatlas-db
+    participant SQLite as One projectatlas.db
+    Adapter->>Adapter: Build valid navigation payload first
+    Adapter->>Store: Record with captured project and runtime identity
+    alt event transaction succeeds
+        Store->>SQLite: BEGIN IMMEDIATE with 25 ms busy budget
+        Store->>SQLite: Validate project and instance lifecycle
+        Store->>SQLite: Update aggregates, baseline, and raw detail
+        Store->>SQLite: Prune the minimum required prefix inside fixed work bounds
+        opt CLI invocation completes
+            Store->>SQLite: Seal instance in the same transaction
+        end
+        Store->>SQLite: COMMIT
+        Store->>SQLite: If due, attempt PASSIVE checkpoint
+    else begin, validation, update, or commit fails
+        Store->>SQLite: Roll back if a transaction began
+        Store-->>Adapter: Typed telemetry failure is isolated
+    end
+    Adapter->>Adapter: Return already-built navigation payload
+    Adapter->>Service: Later request overview or trends
+    Service->>Store: Read bounded aggregates and detail availability
+    Store-->>Service: Render-neutral typed report
 ```
 
 #### Pages, WAL, And Planner Maintenance
 
 ```mermaid
 flowchart TB
-    WAL[WAL growth and long-reader state] --> Checkpoint[Measured passive checkpoint policy]
-    Reuse[SQLite keeps freed pages reusable] -->|measured reclaim threshold| Maintenance[Bounded idle or explicit maintenance]
-    Checkpoint --> Maintenance
-    Maintenance --> State[Content-free settings state]
+    Structural[Structural commits] --> Auto[SQLite auto-checkpoint baseline]
+    Auto --> State[Content-free checkpoint state]
+    Commit[Committed telemetry writes] --> Counter[Bounded checkpoint counter]
+    Counter -->|below threshold| NotDue[Checkpoint not due]
+    NotDue --> State
+    Counter -->|threshold reached| Passive[PASSIVE checkpoint attempt]
+    Passive --> Completed[Completed]
+    Passive --> Busy[Busy; readers keep required frames]
+    Passive --> Error[Error; event remains committed]
+    Busy --> Pending[Maintenance pending]
+    Error --> Pending
+    Pending -->|next due bounded post-commit attempt| Passive
+    Completed --> State
+    Pending --> State
+```
+
+```mermaid
+flowchart LR
+    Delete[Exact required detail expiry<br/>inside a fixed work bound] --> Reuse[SQLite freelist pages remain reusable]
+    Reuse --> State[Content-free page and statistics state]
+    Policy[Planner-statistics maintenance policy] --> NotConfigured[Not configured]
+    NotConfigured --> State
+    Stats[Read sqlite_stat1 availability] --> NotInitialized[Not initialized]
+    Stats --> Available[Available]
+    NotInitialized --> State
+    Available --> State
+    Normal[Normal agent read] --> NoReclaim[No blocking checkpoint, optimize, or VACUUM]
+    NoReclaim --> State
 ```
 
 #### Derived Rows And Disposable Staging
 
 ```mermaid
 flowchart TB
-    Publish[Successful structural publication] --> Obsolete[Delete ownership-proven<br/>obsolete derived rows]
-    Obsolete --> Reuse[Pages become reusable inside the same database]
-    Spill[Owned disposable spool<br/>non-authoritative; no authored state;<br/>never queryable] -->|publish, cancel, or fail| Cleanup[Remove after ownership validation]
-    Restart[Next validated open] --> Cleanup
-    Cleanup --> Removed[Owned spool removed]
+    subgraph Database[Exactly one projectatlas.db]
+        Publish[Successful structural publication] --> Obsolete[Delete ownership-proven<br/>obsolete derived rows]
+        Obsolete --> Reuse[Pages become reusable inside the same database]
+        NoSpill[No production spill owner selected] --> State[spill_cleanup: not_applicable]
+        Settings[Read-only settings inspection] -. reads .-> State
+    end
+    Lookalike[Arbitrary lookalike files] --> Untouched[Left untouched]
 ```
 
-Task 2.8 owns this lifecycle. The normal read path never performs an unbounded
-purge, blocking truncate checkpoint, blind `VACUUM`, or destructive rebuild.
-Telemetry compaction preserves supported all-time totals and declared trend
-windows; expired session-level detail is reported rather than fabricated.
-Derived cleanup never deletes project identity, reviewed purposes, health
-resolutions, or future separately capped Memory Atlas records.
+Schema 11 implements this bounded lifecycle in the one authoritative database.
+The normal read path never performs an unbounded purge, blocking truncate
+checkpoint, blind `VACUUM`, or destructive rebuild. Telemetry compaction
+preserves supported all-time totals and declared trend windows; retained,
+partial, expired, and unavailable detail are reported rather than fabricated.
+No production spill owner currently exists, so restart maintenance reports
+`not_applicable` and never deletes arbitrary lookalike files. Derived cleanup
+never deletes project identity, reviewed purposes, health resolutions, or
+future separately capped Memory Atlas records.
 
 ### Cancellation, Failure, And Watch Retry
 
@@ -1008,13 +1173,13 @@ The durable responsibilities and access paths are:
 
 | Responsibility | Principal physical state | Authority and primary access | Current/target state |
 | --- | --- | --- | --- |
-| Compatibility and publication | `metadata`, `project_identity` | Durable schema/root/contract identity; read-only preflight, migration, root transition, and active-generation lookup. | Schema 10 is current; later task-owned tables use the same append-only migration owner. |
+| Compatibility and publication | `metadata`, `project_identity` | Durable schema/root/contract identity; read-only preflight, migration, root transition, and active-generation lookup. | Schema 11 is current and retains one append-only migration owner. |
 | Local structure | `nodes`, `summaries`, `file_texts`, `source_parse_metadata` | Rebuildable exact path/parent/kind, persisted text, summary, hash, and parse-state projection. | Current; task 5.4 may add exact-verified FTS acceleration without replacing fallback semantics. |
 | Purpose | `purposes` joined to `nodes` | Authored/reviewed purpose and stale/review lifecycle; projected by exact owning path or nearest applicable folder. | Current authoring; tasks 5.2 and 5.5 add bounded batch projection into graph-aware navigation. |
 | Compatible code facts | `symbols`, `symbol_relations` | Rebuildable file-level symbol and relation calls. | Current; co-published from the same typed extraction result as normalized graph facts. |
 | Normalized graph | `graph_entities`, `graph_relations`, `graph_relation_occurrences`, `graph_coverage`; task 3.2 resolution/dependency keys | Rebuildable stable identity, source/target adjacency, occurrences, coverage, and dependency-key closure. | Base one-hop persistence is current; tasks 3.2, 5.5, and 5.7 complete invalidation and bounded hydration/traversal. |
 | Health resolution | `health_resolutions` | Authored exact finding disposition. | Current and preserved across derived publication. |
-| Usage measurement | `usage_events`; task 2.8 aggregate state | Recent raw events, session/time aggregation, all-time totals, declared trends, and explicit retention state. | Raw events are currently unbounded; task 2.8 adds bounded retention/rollup/maintenance. |
+| Usage measurement | `usage_instances`, `usage_bucket_dimensions`, `usage_instance_baselines`, `usage_labels`, exact global/instance/day aggregate tables, bounded `usage_events`, retention state, and label/instance tombstones | Internal runtime lifecycle, active modeled-baseline witnesses, exact durable totals/trends, recent optional detail, and content-free maintenance truth. Source rows are project-scoped; indexes own label/state/age and raw instance/time access. | Schema 11 bounds every detail dimension independently, preserves exact supported totals after pruning, and reports retained/partial/expired/unavailable detail without a second database. |
 | Future Memory Atlas | #314-owned tables | Separately capped authored context and independent context revision. | Conceptual boundary only; #308 does not prebuild its schema. |
 
 Legacy symbol rows and normalized graph rows are compatible co-published
@@ -1025,12 +1190,12 @@ The validated SQLite operating profile is explicit:
 
 | Concern | Current live state | Accepted target and owner |
 | --- | --- | --- |
-| Schema | Version 10 with append-only 8 to 9 to 10 migration ownership. | Keep one append-only owner; task-specific migrations preserve authored state and refuse incompatible state. |
+| Schema | Version 11 with append-only 8 to 9 to 10 to 11 migration ownership; schema 10 telemetry is streamed into normalized instances, dimensions, aggregates, raw detail, and retention state in one migration transaction. | Keep one append-only owner; migration rollback preserves the complete predecessor for deterministic retry, and incompatible future state is refused without mutation. |
 | Rust/SQLite build | Workspace `rusqlite` 0.32.1, `libsqlite3-sys` 0.30.1, bundled SQLite 3.46.0. | Task 4.5 reports the actual linked runtime version and compile options; source package versions alone are not runtime proof. |
 | Filesystem | One project-local database on a filesystem with supported SQLite locking/shared-memory behavior; writable preflight returns typed supported, unsupported, or uncertain state before mutation. | Keep rejecting unsupported or uncertain live network filesystems without a silent durability downgrade. |
 | Writable connections | `foreign_keys=ON`, WAL, `synchronous=FULL`, one-second busy timeout with bounded WAL-establishment retry for concurrent validated openers. | The accepted mixed authored/derived durability profile is enforced and verified on production writable paths. |
 | Read connections | Read-only open, verified `query_only=ON`, verified one-second busy timeout, validated WAL, deferred read snapshot. | Complete-generation snapshots and bounded busy/corruption propagation are enforced through production read paths. |
-| Checkpoints/statistics | SQLite default auto-checkpoint; no owned statistics lifecycle. | Tasks 2.8 and 7.4 measure WAL growth, long readers, passive checkpoints, `ANALYZE`/`PRAGMA optimize`, free-page reuse/reclaim, and request-path exclusion. |
+| Checkpoints/statistics | SQLite auto-checkpoint for structural work plus a schema-11 post-commit `PASSIVE` checkpoint attempt after the configured telemetry-write interval; content-free state reports the live auto-checkpoint threshold, outcome, pending work, page/freelist counts, and that no explicit planner-statistics maintenance policy is currently configured. | Task 7.4 measures representative WAL growth, long readers, plans, page reuse/reclaim, and whether an explicit bounded statistics lifecycle is justified; normal reads never run blocking reclaim or optimization. |
 | Backup/recovery | Preflight and transaction rollback exist; live-file copying is not accepted as backup. | Task 6.4 uses the SQLite backup API plus bounded isolated import validation without replacing destination identity. |
 
 Before any parent directory or database file is created, ProjectAtlas inspects
@@ -1396,10 +1561,11 @@ Token accounting model:
   telemetry must measure TOON output for TOON commands and JSON output for
   `--format json`; MCP telemetry measures TOON tool text inside the JSON-RPC
   envelope.
-- Save the raw estimates, per-event delta, bucket, provider, model, tokenizer
-  backend, accuracy, baseline kind, confidence, calculation trace, accounting
-  layer, estimate method, denominator kind, baseline identity/fingerprint, and
-  dedupe scope in `usage_events`.
+- Normalize bucket, provider, model, tokenizer, accuracy, baseline, confidence,
+  accounting, estimate, denominator, and dedupe dimensions once. Update exact
+  project/runtime/day aggregates in the same transaction as each recent raw
+  event. Retain raw command/path/query/calculation detail only inside the
+  declared row, age, and logical-byte budgets.
 - Compute aggregate `saved = estimated_tokens_without_projectatlas -
   estimated_tokens_with_projectatlas` from the stored raw estimates instead of
   trusting historical per-row saved values. Keep this as the legacy gross
@@ -1408,17 +1574,22 @@ Token accounting model:
   deduped_modeled_tokens_avoided`. `measured_tokens_saved` is observed
   before/after source-compression evidence. `gross_modeled_tokens_avoided` is
   counterfactual navigation avoidance before dedupe. `deduped_modeled_tokens_avoided`
-  counts session-scoped repeated modeled baselines once per session/baseline
-  identity/fingerprint and subtracts every ProjectAtlas payload emitted for
-  that repeated baseline. Modeled rows with `dedupe_scope = "event"` are kept
-  as individual events. `repeated_baselines_deduped` counts duplicate
-  session-scoped modeled events collapsed, not unique baseline groups.
+  counts repeated modeled baselines once per internal runtime/invocation
+  instance plus baseline identity/fingerprint and subtracts every ProjectAtlas
+  payload emitted for that baseline while the instance is active. The optional
+  caller label is only a report selector; it never owns or reopens baseline
+  state. Modeled rows with `dedupe_scope = "event"` remain individual events.
+  `repeated_baselines_deduped` counts duplicate instance-scoped modeled events
+  collapsed, not unique baseline groups.
 - Compute `savings_rate = saved / estimated_tokens_without_projectatlas` only
   when the baseline is greater than zero. A zero baseline yields an unknown rate
   instead of a fake percentage.
-- Use bounded aggregate reads and saturating Rust conversions so very large
-  long-lived projects do not produce overflowing token reports.
-- Report per session and all-time totals.
+- Use checked wide Rust accounting internally and saturate only at the final
+  public compatibility boundary so very large long-lived projects cannot wrap
+  or corrupt exact stored totals.
+- Report all-time totals from exact aggregates. A caller-label report combines
+  retained instances honestly and exposes `retained`, `partial`, `expired`, or
+  `unavailable` detail state after raw or instance history ages out.
 - Prefer TOON output for usage reports shown to agents. A human terminal
   Ratatui dashboard is allowed only as an explicit `--view tui` view.
 - The default estimator is an offline text-size heuristic: emitted text uses
@@ -1489,6 +1660,7 @@ token_savings:
   estimate_kind: heuristic
   estimator: chars_or_bytes_div_ceil_4
   estimate_scope: workflow_payload_estimate_not_model_billing_tokens
+  detail_availability: retained
   calls: 14
   estimated_without_projectatlas: 118000
   estimated_with_projectatlas: 9200
@@ -1506,8 +1678,12 @@ token_savings:
 ```
 
 Every funnel command should record telemetry when it can estimate a baseline.
-Commands that cannot estimate honestly should record `unknown` rather than fake
-precision.
+One CLI invocation owns one opaque instance and seals it with its final event;
+one MCP server process retains one opaque instance per exact captured project
+binding across that binding's calls. Entropy,
+contention, retention, or checkpoint failure can disable or skip telemetry but
+cannot invalidate an already constructed navigation result. Commands that
+cannot estimate honestly should record `unknown` rather than fake precision.
 Read-only review flows can set `PROJECTATLAS_NO_TELEMETRY=1` to prevent usage
 row writes while preserving normal orientation output.
 

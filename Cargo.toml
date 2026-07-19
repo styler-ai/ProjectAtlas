@@ -79,6 +79,7 @@ blake3 = "1.5"
 clap = { version = "4.5", features = ["derive"] }
 cssparser = "0.37"
 globset = "0.4"
+getrandom = "0.4.3"
 ignore = "0.4"
 jsonc-parser = { version = "0.32", features = ["serde"] }
 notify = "8.2"
