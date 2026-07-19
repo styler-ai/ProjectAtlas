@@ -58,7 +58,7 @@ impl AtlasStore {
         transition: ProjectRootTransition,
     ) -> DbResult<ProjectRootTransitionResult> {
         let destination = validate_project_root_destination(destination)?;
-        let preflight = schema::preflight(database_path, None)?;
+        let (preflight, _) = schema::preflight(database_path, None)?;
         let previous_root = preflight.project_root.clone();
         let previous_identity = if preflight.state == SchemaState::Current {
             read_current_project_identity(database_path)?

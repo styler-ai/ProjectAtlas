@@ -1,7 +1,11 @@
 //! Own the durable `SQLite` schema, compatibility preflight, and migrations.
 
+use crate::sqlite_profile::{
+    DatabaseLocation, configure_writable_connection, inspect_database_location,
+    open_read_only_connection, verify_current_read_profile,
+};
 use crate::{DbError, DbResult};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -557,8 +561,32 @@ const GRAPH_SCHEMA_SQL: &str = "
 ";
 
 /// Inspect an existing database without creating, migrating, or repairing it.
-pub(crate) fn preflight(path: &Path, expected_root: Option<&str>) -> DbResult<SchemaPreflight> {
-    preflight_with_integrity(path, expected_root, true)
+pub(crate) fn preflight(
+    path: &Path,
+    expected_root: Option<&str>,
+) -> DbResult<(SchemaPreflight, DatabaseLocation)> {
+    let preflight = preflight_with_integrity(path, expected_root, false)?;
+    if preflight.0.state == SchemaState::UpgradeRequired {
+        preflight_with_integrity(path, expected_root, true)
+    } else {
+        Ok(preflight)
+    }
+}
+
+/// Run explicit current-schema integrity verification without writable access.
+pub(crate) fn verify_current_integrity(path: &Path, expected_root: Option<&str>) -> DbResult<()> {
+    let (preflight, _) = preflight_with_integrity(path, expected_root, true)?;
+    match preflight.state {
+        SchemaState::Current => Ok(()),
+        SchemaState::Fresh => Err(DbError::SchemaVersion {
+            found: 0,
+            expected: SCHEMA_VERSION,
+        }),
+        SchemaState::UpgradeRequired => Err(DbError::SchemaVersion {
+            found: PREVIOUS_SCHEMA_VERSION,
+            expected: SCHEMA_VERSION,
+        }),
+    }
 }
 
 /// Inspect one stable read snapshot with caller-selected integrity depth.
@@ -566,20 +594,24 @@ fn preflight_with_integrity(
     path: &Path,
     expected_root: Option<&str>,
     run_integrity_check: bool,
-) -> DbResult<SchemaPreflight> {
-    if !path.exists() {
-        return Ok(SchemaPreflight {
-            state: SchemaState::Fresh,
-            project_root: None,
-        });
+) -> DbResult<(SchemaPreflight, DatabaseLocation)> {
+    let location = inspect_database_location(path)?;
+    if !location.database_exists {
+        return Ok((
+            SchemaPreflight {
+                state: SchemaState::Fresh,
+                project_root: None,
+            },
+            location,
+        ));
     }
-    let connection = open_read_only_connection(path)?;
+    let connection = open_read_only_connection(path, &location)?;
     connection.execute_batch("BEGIN DEFERRED")?;
     let inspected = inspect_connection(&connection, expected_root, run_integrity_check);
     match inspected {
         Ok(preflight) => {
             connection.execute_batch("COMMIT")?;
-            Ok(preflight)
+            Ok((preflight, location))
         }
         Err(error) => Err(rollback_after_error(&connection, error)),
     }
@@ -618,8 +650,7 @@ pub(crate) fn initialize(connection: &Connection, expected_root: Option<&str>) -
 
 /// Enable the connection-local integrity rules required for every write path.
 pub(crate) fn configure_writable(connection: &Connection) -> DbResult<()> {
-    connection.pragma_update(None, "foreign_keys", true)?;
-    Ok(())
+    configure_writable_connection(connection)
 }
 
 /// Open and validate one current read-only snapshot.
@@ -627,10 +658,14 @@ pub(crate) fn open_current_read_only(
     path: &Path,
     expected_root: Option<&str>,
 ) -> DbResult<(Connection, SchemaPreflight)> {
-    let connection = open_read_only_connection(path)?;
+    let location = inspect_database_location(path)?;
+    let connection = open_read_only_connection(path, &location)?;
     connection.execute_batch("BEGIN DEFERRED")?;
     match inspect_current(&connection, expected_root) {
-        Ok(preflight) => Ok((connection, preflight)),
+        Ok(preflight) => {
+            verify_current_read_profile(&connection)?;
+            Ok((connection, preflight))
+        }
         Err(error) => Err(rollback_after_error(&connection, error)),
     }
 }
@@ -660,10 +695,11 @@ fn inspect_current(
 
 /// Read the existing project identity without mutating or migrating the database.
 pub(crate) fn read_project_root(path: &Path) -> DbResult<Option<String>> {
-    if !path.exists() {
+    let location = inspect_database_location(path)?;
+    if !location.database_exists {
         return Ok(None);
     }
-    let connection = open_read_only_connection(path)?;
+    let connection = open_read_only_connection(path, &location)?;
     connection.execute_batch("BEGIN DEFERRED")?;
     let inspected = inspect_connection(&connection, None, false);
     match inspected {
@@ -673,17 +709,6 @@ pub(crate) fn read_project_root(path: &Path) -> DbResult<Option<String>> {
         }
         Err(error) => Err(rollback_after_error(&connection, error)),
     }
-}
-
-/// Open a database-non-mutating connection without ignoring committed WAL state.
-///
-/// `SQLite` may materialize its own WAL/SHM support files for a locked read.
-/// That native coordination is intentional: `immutable=1` would avoid the
-/// sidecars by bypassing locks even though another local process may write.
-fn open_read_only_connection(path: &Path) -> DbResult<Connection> {
-    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    connection.execute_batch("PRAGMA query_only = ON")?;
-    Ok(connection)
 }
 
 /// Inspect compatibility, integrity, object shape, and root identity.
@@ -716,6 +741,12 @@ fn inspect_connection(
             None if state == SchemaState::Fresh => {}
             None => return Err(DbError::ProjectRootMissing),
         }
+    }
+    if state == SchemaState::Current
+        && expected_root.is_some()
+        && crate::project_identity::load_project_identity(connection)?.is_none()
+    {
+        return Err(DbError::ProjectInstanceIdentityMissing);
     }
     Ok(SchemaPreflight {
         state,
@@ -1444,6 +1475,69 @@ mod tests {
                 ))
                 .into());
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_current_open_skips_full_scan_while_explicit_verify_checks_integrity()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        drop(AtlasStore::open_for_project(&database, &root)?);
+
+        let connection = Connection::open(&database)?;
+        connection.pragma_update(None, "foreign_keys", false)?;
+        connection.execute(
+            "INSERT INTO purposes(node_id, source, status) VALUES(999, 'agent', 'approved')",
+            [],
+        )?;
+        drop(connection);
+
+        let writer = Connection::open(&database)?;
+        writer.execute_batch("BEGIN IMMEDIATE")?;
+        drop(AtlasStore::open_for_project(&database, &root)?);
+        writer.execute_batch("ROLLBACK")?;
+
+        if verify_current_integrity(&database, Some(&normalize_native_path_display(&root))).is_ok()
+        {
+            return Err(io::Error::other(
+                "explicit verification accepted a foreign-key integrity failure",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bound_current_schema_requires_identity_without_repair() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        store
+            .connection
+            .execute("DELETE FROM project_identity", [])?;
+        store
+            .connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        drop(store);
+        let bytes_before = fs::read(&database)?;
+
+        let Err(error) = AtlasStore::open_for_project(&database, &root) else {
+            return Err(io::Error::other("bound database without identity was reopened").into());
+        };
+        if !matches!(error, DbError::ProjectInstanceIdentityMissing) {
+            return Err(io::Error::other(format!(
+                "missing identity returned the wrong error: {error}"
+            ))
+            .into());
+        }
+        if fs::read(&database)? != bytes_before {
+            return Err(io::Error::other("ordinary open repaired the missing identity").into());
         }
         Ok(())
     }

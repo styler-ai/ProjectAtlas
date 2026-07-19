@@ -11,6 +11,7 @@ projectatlas-core.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+whichdisk.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

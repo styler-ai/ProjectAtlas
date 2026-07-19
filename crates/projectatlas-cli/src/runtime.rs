@@ -38,6 +38,7 @@ use projectatlas_core::{
 use projectatlas_db::{
     AtlasStore, HealthFindingsPage, HealthQuery, HealthScope, IndexPublicationGuard,
     IndexPublicationState, IndexedFileText, read_project_root_read_only,
+    validate_database_location,
 };
 use projectatlas_fs::{
     FsError, ScanLimits, ScanOptions, gitignore_excludes_path, scan_path_controlled, scan_repo,
@@ -1444,6 +1445,19 @@ pub(crate) fn open_atlas_store_for_project(
     path: &Path,
     root: &Path,
 ) -> Result<AtlasStore, CliError> {
+    open_atlas_store_for_project_with_location_validator(path, root, validate_database_location)
+}
+
+/// Validate storage before creating the database parent and opening the store.
+fn open_atlas_store_for_project_with_location_validator<F>(
+    path: &Path,
+    root: &Path,
+    validate_location: F,
+) -> Result<AtlasStore, CliError>
+where
+    F: FnOnce(&Path) -> projectatlas_db::DbResult<()>,
+{
+    validate_location(path).map_err(project_store_error)?;
     ensure_parent_dir(path)?;
     AtlasStore::open_for_project(path, root).map_err(project_store_error)
 }
@@ -2625,7 +2639,7 @@ pub(crate) fn purpose_curation_page(
     store: &AtlasStore,
     query: &HealthQuery,
 ) -> Result<PurposeCurationPage, CliError> {
-    let page = store.unresolved_health_findings_page(&store.resolved_health_ids()?, query)?;
+    let page = store.unresolved_health_findings_page_current(query)?;
     let paths = page
         .findings
         .iter()
@@ -3299,9 +3313,7 @@ pub(crate) fn build_settings_report(
 /// Build index statistics for settings diagnostics.
 pub(crate) fn settings_index_stats(store: &AtlasStore) -> Result<SettingsIndexStats, CliError> {
     let overview = store.overview()?;
-    let health_findings = store
-        .unresolved_health_findings(&store.resolved_health_ids()?)?
-        .len();
+    let health_findings = store.unresolved_health_finding_count_current()?;
     Ok(SettingsIndexStats {
         project_root: store
             .project_root()?
@@ -3484,7 +3496,7 @@ pub(crate) fn lint_database_if_present(
     }
     let store = open_fresh_atlas_store_for_project(db, root, config_path)?;
     let query = purpose_level.health_query();
-    let page = store.unresolved_health_findings_page(&store.resolved_health_ids()?, &query)?;
+    let page = store.unresolved_health_findings_page_current(&query)?;
     let blocking = page
         .findings
         .iter()
@@ -5977,6 +5989,107 @@ mod tests {
     use super::*;
     use std::error::Error;
     use std::fmt::Debug;
+
+    #[test]
+    fn rejected_database_location_does_not_create_or_change_database() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+
+        for uncertain in [false, true] {
+            let database_parent = temp
+                .path()
+                .join(if uncertain {
+                    "uncertain"
+                } else {
+                    "unsupported"
+                })
+                .join("nested");
+            let database = database_parent.join("projectatlas.db");
+            let rejected_path = database.clone();
+            let result = open_atlas_store_for_project_with_location_validator(
+                &database,
+                &root,
+                move |_path| {
+                    if uncertain {
+                        Err(projectatlas_db::DbError::DatabaseFilesystemUncertain {
+                            path: rejected_path,
+                            mount_point: None,
+                            filesystem_type: None,
+                            reason: "injected filesystem uncertainty".to_string(),
+                        })
+                    } else {
+                        Err(projectatlas_db::DbError::DatabaseFilesystemUnsupported {
+                            path: rejected_path,
+                            mount_point: None,
+                            filesystem_type: Some("nfs".to_string()),
+                        })
+                    }
+                },
+            );
+            let rejected = matches!(
+                result,
+                Err(CliError::Db(
+                    projectatlas_db::DbError::DatabaseFilesystemUnsupported { .. }
+                        | projectatlas_db::DbError::DatabaseFilesystemUncertain { .. }
+                ))
+            );
+            require_eq(&rejected, &true, "typed location rejection")?;
+            require_eq(
+                &database_parent.exists(),
+                &false,
+                "rejected database parent absence",
+            )?;
+            require_eq(&database.exists(), &false, "rejected database absence")?;
+
+            let existing_database = temp.path().join(if uncertain {
+                "uncertain-existing.db"
+            } else {
+                "unsupported-existing.db"
+            });
+            let original_bytes = b"existing database bytes stay untouched";
+            fs::write(&existing_database, original_bytes)?;
+            let rejected_path = existing_database.clone();
+            let existing_result = open_atlas_store_for_project_with_location_validator(
+                &existing_database,
+                &root,
+                move |_path| {
+                    if uncertain {
+                        Err(projectatlas_db::DbError::DatabaseFilesystemUncertain {
+                            path: rejected_path,
+                            mount_point: None,
+                            filesystem_type: None,
+                            reason: "injected filesystem uncertainty".to_string(),
+                        })
+                    } else {
+                        Err(projectatlas_db::DbError::DatabaseFilesystemUnsupported {
+                            path: rejected_path,
+                            mount_point: None,
+                            filesystem_type: Some("nfs".to_string()),
+                        })
+                    }
+                },
+            );
+            require_eq(
+                &matches!(
+                    existing_result,
+                    Err(CliError::Db(
+                        projectatlas_db::DbError::DatabaseFilesystemUnsupported { .. }
+                            | projectatlas_db::DbError::DatabaseFilesystemUncertain { .. }
+                    ))
+                ),
+                &true,
+                "typed existing location rejection",
+            )?;
+            require_eq(
+                &fs::read(&existing_database)?,
+                &original_bytes.to_vec(),
+                "rejected existing database bytes",
+            )?;
+        }
+        Ok(())
+    }
 
     #[test]
     fn operation_deadline_starts_with_default_or_shorter_explicit_timeout() {

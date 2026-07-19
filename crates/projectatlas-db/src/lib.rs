@@ -3,9 +3,11 @@
 mod project_identity;
 mod repository_graph;
 mod schema;
+mod sqlite_profile;
 
 pub use project_identity::{ProjectRootTransition, ProjectRootTransitionResult};
 pub use repository_graph::{RepositoryGraphPage, RepositoryGraphRelationQuery};
+pub use sqlite_profile::validate_database_location;
 
 use projectatlas_core::graph::GraphContractError;
 use projectatlas_core::health::{
@@ -50,19 +52,31 @@ use schema::{
 };
 #[cfg(test)]
 use schema::{PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION, SCHEMA_VERSION_KEY, sqlite_sidecar_path};
+use sqlite_profile::{JournalModePolicy, SQLITE_BUSY_TIMEOUT, open_writable_connection};
 
 /// Maximum persisted text for denormalized symbol-name search summaries.
 const MAX_SYMBOL_SEARCH_SUMMARY_CHARS: usize = 16_000;
-/// Maximum time an ordinary write waits for the current database writer.
-const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(1);
 /// Publication acquisition fails fast so callers must restage after contention.
 const SQLITE_PUBLICATION_ACQUIRE_TIMEOUT: Duration = Duration::ZERO;
 
 /// Select create capability only for a path proven absent by preflight.
-fn writable_open_flags(state: SchemaState) -> OpenFlags {
+fn writable_open_flags(state: SchemaState, database_exists: bool) -> OpenFlags {
+    match (state, database_exists) {
+        (SchemaState::Fresh, false) => {
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE
+        }
+        (SchemaState::Fresh | SchemaState::Current | SchemaState::UpgradeRequired, true)
+        | (SchemaState::Current | SchemaState::UpgradeRequired, false) => {
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+        }
+    }
+}
+
+/// Establish WAL only while creating or upgrading an admitted database.
+const fn writable_journal_policy(state: SchemaState) -> JournalModePolicy {
     match state {
-        SchemaState::Fresh => OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-        SchemaState::Current | SchemaState::UpgradeRequired => OpenFlags::SQLITE_OPEN_READ_WRITE,
+        SchemaState::Current => JournalModePolicy::RequireWal,
+        SchemaState::Fresh | SchemaState::UpgradeRequired => JournalModePolicy::EnsureWal,
     }
 }
 
@@ -72,6 +86,42 @@ pub enum DbError {
     /// `SQLite` operation failed.
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// A live project database is located on a known unsupported filesystem.
+    #[error(
+        "database path {path:?} is on an unsupported filesystem (mount: {mount_point:?}, type: {filesystem_type:?}); live SQLite WAL requires supported local storage"
+    )]
+    DatabaseFilesystemUnsupported {
+        /// Database path rejected before writable access.
+        path: PathBuf,
+        /// Resolved mount point when one was safely available.
+        mount_point: Option<PathBuf>,
+        /// Normalized filesystem type when one was safely available.
+        filesystem_type: Option<String>,
+    },
+    /// Local WAL-safe filesystem placement could not be proved.
+    #[error(
+        "database path {path:?} has uncertain filesystem placement (mount: {mount_point:?}, type: {filesystem_type:?}): {reason}"
+    )]
+    DatabaseFilesystemUncertain {
+        /// Database path rejected before writable access.
+        path: PathBuf,
+        /// Resolved mount point when one was safely available.
+        mount_point: Option<PathBuf>,
+        /// Normalized filesystem type when one was safely available.
+        filesystem_type: Option<String>,
+        /// Bounded reason the local profile could not be established.
+        reason: String,
+    },
+    /// `SQLite` did not retain a required connection operating-profile value.
+    #[error("SQLite operating profile mismatch for {setting}: expected {expected}, found {found}")]
+    DatabaseOperatingProfile {
+        /// Connection or durable setting that did not match.
+        setting: &'static str,
+        /// Required value.
+        expected: String,
+        /// Observed value.
+        found: String,
+    },
     /// A persisted or requested graph value violates the typed domain contract.
     #[error("repository graph contract error: {0}")]
     GraphContract(#[from] GraphContractError),
@@ -558,6 +608,15 @@ pub struct HealthQuery {
     pub scope: HealthScope,
 }
 
+/// Resolution ownership used by bounded health queries.
+#[derive(Clone, Copy)]
+enum HealthResolutionFilter<'a> {
+    /// Caller-owned compatibility filter.
+    Explicit(&'a [String]),
+    /// Durable resolutions owned by the current project database.
+    Stored,
+}
+
 /// Scope controls for bounded health and purpose-curation queries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HealthScope {
@@ -730,10 +789,15 @@ impl AtlasStore {
 
     /// Open with an optional source-owned project identity.
     fn open_with_project_root(path: &Path, expected_root: Option<&str>) -> DbResult<Self> {
-        let preflight = schema::preflight(path, expected_root)?;
+        let (preflight, location) = schema::preflight(path, expected_root)?;
         let validated_project_root = expected_root.map(str::to_owned).or(preflight.project_root);
-        let connection = Connection::open_with_flags(path, writable_open_flags(preflight.state))?;
-        connection.busy_timeout(SQLITE_WRITE_BUSY_TIMEOUT)?;
+        let connection = open_writable_connection(
+            path,
+            writable_open_flags(preflight.state, location.database_exists),
+            &location,
+            SQLITE_BUSY_TIMEOUT,
+            writable_journal_policy(preflight.state),
+        )?;
         let store = Self {
             connection,
             read_snapshot_active: Cell::new(false),
@@ -741,13 +805,9 @@ impl AtlasStore {
             read_only: false,
             validated_project_root,
         };
-        schema::initialize(&store.connection, expected_root)?;
-        store
-            .connection
-            .pragma_update(None, "journal_mode", "WAL")?;
-        store
-            .connection
-            .pragma_update(None, "synchronous", "NORMAL")?;
+        if preflight.state != SchemaState::Current {
+            schema::initialize(&store.connection, expected_root)?;
+        }
         Ok(store)
     }
 
@@ -2622,13 +2682,59 @@ impl AtlasStore {
         resolved_ids: &[String],
         query: &HealthQuery,
     ) -> DbResult<HealthFindingsPage> {
+        self.unresolved_health_findings_page_with_filter(
+            HealthResolutionFilter::Explicit(resolved_ids),
+            query,
+        )
+    }
+
+    /// Build a bounded page filtered by this store's durable resolutions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading fails or stored enum values are invalid.
+    pub fn unresolved_health_findings_page_current(
+        &self,
+        query: &HealthQuery,
+    ) -> DbResult<HealthFindingsPage> {
+        self.unresolved_health_findings_page_with_filter(HealthResolutionFilter::Stored, query)
+    }
+
+    /// Count all unresolved findings without materializing finding rows or resolution ids.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading fails or stored enum values are invalid.
+    pub fn unresolved_health_finding_count_current(&self) -> DbResult<usize> {
+        self.unresolved_health_findings_page_current(&HealthQuery {
+            start_index: 0,
+            limit: 0,
+            category: None,
+            severity: None,
+            path_prefix: None,
+            summary_only: true,
+            scope: HealthScope::all(),
+        })
+        .map(|page| page.total)
+    }
+
+    /// Build a bounded unresolved page with caller-owned or store-owned filtering.
+    fn unresolved_health_findings_page_with_filter(
+        &self,
+        resolution_filter: HealthResolutionFilter<'_>,
+        query: &HealthQuery,
+    ) -> DbResult<HealthFindingsPage> {
         let mut unfiltered_total = 0_usize;
         let mut total = 0_usize;
         let mut findings = Vec::new();
 
         for spec in PURPOSE_HEALTH_SPECS {
-            unfiltered_total +=
-                self.count_purpose_status_findings(spec, None, resolved_ids, HealthScope::all())?;
+            unfiltered_total += self.count_purpose_status_findings(
+                spec,
+                None,
+                resolution_filter,
+                HealthScope::all(),
+            )?;
         }
 
         let scope = query.scope;
@@ -2639,7 +2745,7 @@ impl AtlasStore {
             {
                 self.count_purpose_lifecycle_findings(
                     query.path_prefix.as_deref(),
-                    resolved_ids,
+                    resolution_filter,
                     scope,
                 )?
             } else {
@@ -2653,7 +2759,7 @@ impl AtlasStore {
                 let local_limit = query.limit - findings.len();
                 findings.extend(self.load_purpose_lifecycle_findings_page(
                     query.path_prefix.as_deref(),
-                    resolved_ids,
+                    resolution_filter,
                     scope,
                     local_start,
                     local_limit,
@@ -2669,7 +2775,7 @@ impl AtlasStore {
                 let matching_count = self.count_purpose_status_findings(
                     spec,
                     query.path_prefix.as_deref(),
-                    resolved_ids,
+                    resolution_filter,
                     scope,
                 )?;
                 if !query.summary_only
@@ -2681,7 +2787,7 @@ impl AtlasStore {
                     findings.extend(self.load_purpose_status_findings_page(
                         spec,
                         query.path_prefix.as_deref(),
-                        resolved_ids,
+                        resolution_filter,
                         scope,
                         local_start,
                         local_limit,
@@ -2700,7 +2806,7 @@ impl AtlasStore {
             let unfiltered_count = self.count_structural_health_findings(
                 category,
                 None,
-                resolved_ids,
+                resolution_filter,
                 unfiltered_scope,
             )?;
             unfiltered_total += unfiltered_count;
@@ -2710,7 +2816,7 @@ impl AtlasStore {
             let matching_count = self.count_structural_health_findings(
                 category,
                 query.path_prefix.as_deref(),
-                resolved_ids,
+                resolution_filter,
                 scope,
             )?;
             if !query.summary_only
@@ -2722,7 +2828,7 @@ impl AtlasStore {
                 findings.extend(self.load_structural_health_findings_page(
                     category,
                     query.path_prefix.as_deref(),
-                    resolved_ids,
+                    resolution_filter,
                     scope,
                     local_start,
                     local_limit,
@@ -2826,11 +2932,11 @@ impl AtlasStore {
     fn count_purpose_lifecycle_findings(
         &self,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
     ) -> DbResult<usize> {
         let (where_clause, values) =
-            purpose_lifecycle_where_clause(path_prefix, resolved_ids, scope);
+            purpose_lifecycle_where_clause(path_prefix, resolution_filter, scope);
         let sql = format!(
             "
             SELECT COUNT(*)
@@ -2849,7 +2955,7 @@ impl AtlasStore {
     fn load_purpose_lifecycle_findings_page(
         &self,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
         start_index: usize,
         limit: usize,
@@ -2858,7 +2964,7 @@ impl AtlasStore {
             return Ok(Vec::new());
         }
         let (where_clause, mut values) =
-            purpose_lifecycle_where_clause(path_prefix, resolved_ids, scope);
+            purpose_lifecycle_where_clause(path_prefix, resolution_filter, scope);
         let limit_placeholder = values.len() + 1;
         let offset_placeholder = values.len() + 2;
         values.push(Value::from(usize_to_i64(limit)));
@@ -2900,11 +3006,11 @@ impl AtlasStore {
         &self,
         spec: PurposeHealthSpec,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
     ) -> DbResult<usize> {
         let (where_clause, values) =
-            purpose_status_where_clause(spec, path_prefix, resolved_ids, scope);
+            purpose_status_where_clause(spec, path_prefix, resolution_filter, scope);
         let sql = format!(
             "
             SELECT COUNT(*)
@@ -2924,7 +3030,7 @@ impl AtlasStore {
         &self,
         spec: PurposeHealthSpec,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
         start_index: usize,
         limit: usize,
@@ -2933,7 +3039,7 @@ impl AtlasStore {
             return Ok(Vec::new());
         }
         let (where_clause, mut values) =
-            purpose_status_where_clause(spec, path_prefix, resolved_ids, scope);
+            purpose_status_where_clause(spec, path_prefix, resolution_filter, scope);
         let limit_placeholder = values.len() + 1;
         let offset_placeholder = values.len() + 2;
         values.push(Value::from(usize_to_i64(limit)));
@@ -2976,18 +3082,18 @@ impl AtlasStore {
         &self,
         category: &str,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
     ) -> DbResult<usize> {
         match category {
             CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED => {
-                self.count_agent_review_required_findings(path_prefix, resolved_ids, scope)
+                self.count_agent_review_required_findings(path_prefix, resolution_filter, scope)
             }
             CATEGORY_DUPLICATE_PURPOSE => {
-                self.count_duplicate_purpose_findings(path_prefix, resolved_ids, scope)
+                self.count_duplicate_purpose_findings(path_prefix, resolution_filter, scope)
             }
             CATEGORY_REPEATED_TEMPORARY_FOLDER => {
-                self.count_repeated_temp_folder_findings(path_prefix, resolved_ids, scope)
+                self.count_repeated_temp_folder_findings(path_prefix, resolution_filter, scope)
             }
             _ => Ok(0),
         }
@@ -2998,7 +3104,7 @@ impl AtlasStore {
         &self,
         category: &str,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
         start_index: usize,
         limit: usize,
@@ -3007,21 +3113,21 @@ impl AtlasStore {
             CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED => self
                 .load_agent_review_required_findings_page(
                     path_prefix,
-                    resolved_ids,
+                    resolution_filter,
                     scope,
                     start_index,
                     limit,
                 ),
             CATEGORY_DUPLICATE_PURPOSE => self.load_duplicate_purpose_findings_page(
                 path_prefix,
-                resolved_ids,
+                resolution_filter,
                 scope,
                 start_index,
                 limit,
             ),
             CATEGORY_REPEATED_TEMPORARY_FOLDER => self.load_repeated_temp_folder_findings_page(
                 path_prefix,
-                resolved_ids,
+                resolution_filter,
                 scope,
                 start_index,
                 limit,
@@ -3069,13 +3175,13 @@ impl AtlasStore {
     fn count_agent_review_required_findings(
         &self,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
     ) -> DbResult<usize> {
         let (where_clause, values) = structural_finding_where_clause(
             CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
             path_prefix,
-            resolved_ids,
+            resolution_filter,
             scope,
             1,
         );
@@ -3113,7 +3219,7 @@ impl AtlasStore {
     fn load_agent_review_required_findings_page(
         &self,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
         start_index: usize,
         limit: usize,
@@ -3124,7 +3230,7 @@ impl AtlasStore {
         let (where_clause, mut values) = structural_finding_where_clause(
             CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
             path_prefix,
-            resolved_ids,
+            resolution_filter,
             scope,
             1,
         );
@@ -3171,13 +3277,13 @@ impl AtlasStore {
     fn count_duplicate_purpose_findings(
         &self,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
     ) -> DbResult<usize> {
         let (where_clause, values) = structural_finding_where_clause(
             CATEGORY_DUPLICATE_PURPOSE,
             path_prefix,
-            resolved_ids,
+            resolution_filter,
             scope,
             1,
         );
@@ -3231,7 +3337,7 @@ impl AtlasStore {
     fn load_duplicate_purpose_findings_page(
         &self,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
         start_index: usize,
         limit: usize,
@@ -3242,7 +3348,7 @@ impl AtlasStore {
         let (where_clause, mut values) = structural_finding_where_clause(
             CATEGORY_DUPLICATE_PURPOSE,
             path_prefix,
-            resolved_ids,
+            resolution_filter,
             scope,
             1,
         );
@@ -3324,7 +3430,7 @@ impl AtlasStore {
     fn count_repeated_temp_folder_findings(
         &self,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
     ) -> DbResult<usize> {
         let mut total = 0_usize;
@@ -3332,7 +3438,7 @@ impl AtlasStore {
             total += self.count_repeated_temp_folder_bucket_findings(
                 bucket,
                 path_prefix,
-                resolved_ids,
+                resolution_filter,
                 scope,
             )?;
         }
@@ -3344,7 +3450,7 @@ impl AtlasStore {
         &self,
         bucket: &str,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
     ) -> DbResult<usize> {
         let exact = bucket.to_string();
@@ -3352,7 +3458,7 @@ impl AtlasStore {
         let (where_clause, mut filter_values) = structural_finding_where_clause(
             CATEGORY_REPEATED_TEMPORARY_FOLDER,
             path_prefix,
-            resolved_ids,
+            resolution_filter,
             scope,
             3,
         );
@@ -3395,7 +3501,7 @@ impl AtlasStore {
     fn load_repeated_temp_folder_findings_page(
         &self,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
         start_index: usize,
         limit: usize,
@@ -3409,7 +3515,7 @@ impl AtlasStore {
             let matching_count = self.count_repeated_temp_folder_bucket_findings(
                 bucket,
                 path_prefix,
-                resolved_ids,
+                resolution_filter,
                 scope,
             )?;
             if findings.len() < limit && total + matching_count > start_index {
@@ -3418,7 +3524,7 @@ impl AtlasStore {
                 findings.extend(self.load_repeated_temp_folder_bucket_findings_page(
                     bucket,
                     path_prefix,
-                    resolved_ids,
+                    resolution_filter,
                     scope,
                     local_start,
                     local_limit,
@@ -3437,7 +3543,7 @@ impl AtlasStore {
         &self,
         bucket: &str,
         path_prefix: Option<&str>,
-        resolved_ids: &[String],
+        resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
         start_index: usize,
         limit: usize,
@@ -3450,7 +3556,7 @@ impl AtlasStore {
         let (where_clause, mut filter_values) = structural_finding_where_clause(
             CATEGORY_REPEATED_TEMPORARY_FOLDER,
             path_prefix,
-            resolved_ids,
+            resolution_filter,
             scope,
             3,
         );
@@ -3696,9 +3802,14 @@ impl AtlasStore {
             .database_path
             .as_ref()
             .ok_or(DbError::TelemetryPathUnavailable)?;
-        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-        connection.busy_timeout(SQLITE_WRITE_BUSY_TIMEOUT)?;
-        schema::configure_writable(&connection)?;
+        let location = sqlite_profile::inspect_database_location(path)?;
+        let connection = open_writable_connection(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE,
+            &location,
+            SQLITE_BUSY_TIMEOUT,
+            JournalModePolicy::RequireWal,
+        )?;
         let result = (|| {
             connection.execute_batch("BEGIN IMMEDIATE")?;
             let operation =
@@ -4078,8 +4189,7 @@ impl AtlasStore {
     ///
     /// Returns an error if the finding is not active or persistence fails.
     pub fn resolve_health_finding(&self, resolution: &HealthResolution) -> DbResult<()> {
-        let resolved_ids = self.resolved_health_ids()?;
-        if !self.active_health_finding_matches(&resolved_ids, resolution)? {
+        if !self.active_health_finding_matches(resolution)? {
             return Err(DbError::HealthFindingNotActive {
                 finding_id: resolution.finding_id.clone(),
                 category: resolution.category.clone(),
@@ -4118,26 +4228,19 @@ impl AtlasStore {
     }
 
     /// Return whether the visible SQL health surface contains the exact finding.
-    fn active_health_finding_matches(
-        &self,
-        resolved_ids: &[String],
-        resolution: &HealthResolution,
-    ) -> DbResult<bool> {
+    fn active_health_finding_matches(&self, resolution: &HealthResolution) -> DbResult<bool> {
         const PAGE_SIZE: usize = 256;
         let mut start_index = 0_usize;
         loop {
-            let page = self.unresolved_health_findings_page(
-                resolved_ids,
-                &HealthQuery {
-                    start_index,
-                    limit: PAGE_SIZE,
-                    category: Some(resolution.category.clone()),
-                    severity: Some(Severity::Warning),
-                    path_prefix: Some(resolution.path.clone()),
-                    summary_only: false,
-                    scope: HealthScope::all(),
-                },
-            )?;
+            let page = self.unresolved_health_findings_page_current(&HealthQuery {
+                start_index,
+                limit: PAGE_SIZE,
+                category: Some(resolution.category.clone()),
+                severity: Some(Severity::Warning),
+                path_prefix: Some(resolution.path.clone()),
+                summary_only: false,
+                scope: HealthScope::all(),
+            })?;
             if page.findings.iter().any(|finding| {
                 finding.id == resolution.finding_id
                     && finding.category == resolution.category
@@ -4175,7 +4278,7 @@ impl AtlasStore {
 fn begin_immediate_publication(connection: &Connection) -> DbResult<()> {
     connection.busy_timeout(SQLITE_PUBLICATION_ACQUIRE_TIMEOUT)?;
     let begin_result = connection.execute_batch("BEGIN IMMEDIATE");
-    let restore_result = connection.busy_timeout(SQLITE_WRITE_BUSY_TIMEOUT);
+    let restore_result = connection.busy_timeout(SQLITE_BUSY_TIMEOUT);
     match (begin_result, restore_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) => Err(error.into()),
@@ -4194,6 +4297,16 @@ fn begin_immediate_publication(connection: &Connection) -> DbResult<()> {
 /// Returns an error if `SQLite` cannot open or query the database read-only.
 pub fn read_project_root_read_only(path: &Path) -> DbResult<Option<String>> {
     schema::read_project_root(path)
+}
+
+/// Verify the current project database schema, identity, and full integrity read-only.
+///
+/// # Errors
+///
+/// Returns an error when the database is missing, incompatible, corrupt, or belongs to another
+/// project root.
+pub fn verify_project_database(path: &Path, project_root: &Path) -> DbResult<()> {
+    schema::verify_current_integrity(path, Some(&normalize_native_path_display(project_root)))
 }
 
 /// Normalize a filesystem path stored in `SQLite` metadata.
@@ -4805,7 +4918,7 @@ fn agent_review_required_finding(path: String) -> HealthFinding {
 /// Build the shared SQL filter for globally ordered purpose lifecycle findings.
 fn purpose_lifecycle_where_clause(
     path_prefix: Option<&str>,
-    resolved_ids: &[String],
+    resolution_filter: HealthResolutionFilter<'_>,
     scope: HealthScope,
 ) -> (String, Vec<Value>) {
     let statuses = PURPOSE_HEALTH_SPECS
@@ -4839,16 +4952,23 @@ fn purpose_lifecycle_where_clause(
         values.push(Value::from(sqlite_descendant_pattern(&prefix)));
     }
 
-    for spec in PURPOSE_HEALTH_SPECS {
-        let resolved_paths = resolved_purpose_paths(resolved_ids, spec.category);
-        if !resolved_paths.is_empty() {
-            clauses.push(format!(
-                "NOT (p.status = '{}' AND n.path IN ({}))",
-                spec.status,
-                numbered_placeholders(values.len() + 1, resolved_paths.len())
-            ));
-            values.extend(resolved_paths.into_iter().map(Value::from));
+    match resolution_filter {
+        HealthResolutionFilter::Explicit(resolved_ids) => {
+            for spec in PURPOSE_HEALTH_SPECS {
+                let resolved_paths = resolved_purpose_paths(resolved_ids, spec.category);
+                if !resolved_paths.is_empty() {
+                    clauses.push(format!(
+                        "NOT (p.status = '{}' AND n.path IN ({}))",
+                        spec.status,
+                        numbered_placeholders(values.len() + 1, resolved_paths.len())
+                    ));
+                    values.extend(resolved_paths.into_iter().map(Value::from));
+                }
+            }
         }
+        HealthResolutionFilter::Stored => clauses.push(stored_resolution_filter_clause(
+            &purpose_lifecycle_finding_id_expression("n", "p"),
+        )),
     }
 
     (clauses.join(" AND "), values)
@@ -4858,7 +4978,7 @@ fn purpose_lifecycle_where_clause(
 fn purpose_status_where_clause(
     spec: PurposeHealthSpec,
     path_prefix: Option<&str>,
-    resolved_ids: &[String],
+    resolution_filter: HealthResolutionFilter<'_>,
     scope: HealthScope,
 ) -> (String, Vec<Value>) {
     let mut clauses = vec!["n.exists_now = 1".to_string(), "p.status = ?1".to_string()];
@@ -4884,13 +5004,21 @@ fn purpose_status_where_clause(
         values.push(Value::from(sqlite_descendant_pattern(&prefix)));
     }
 
-    let resolved_paths = resolved_purpose_paths(resolved_ids, spec.category);
-    if !resolved_paths.is_empty() {
-        clauses.push(format!(
-            "n.path NOT IN ({})",
-            numbered_placeholders(values.len() + 1, resolved_paths.len())
-        ));
-        values.extend(resolved_paths.into_iter().map(Value::from));
+    match resolution_filter {
+        HealthResolutionFilter::Explicit(resolved_ids) => {
+            let resolved_paths = resolved_purpose_paths(resolved_ids, spec.category);
+            if !resolved_paths.is_empty() {
+                clauses.push(format!(
+                    "n.path NOT IN ({})",
+                    numbered_placeholders(values.len() + 1, resolved_paths.len())
+                ));
+                values.extend(resolved_paths.into_iter().map(Value::from));
+            }
+        }
+        HealthResolutionFilter::Stored => clauses.push(stored_resolution_filter_clause(&format!(
+            "'{}:' || n.path || ':'",
+            spec.category
+        ))),
     }
 
     (clauses.join(" AND "), values)
@@ -4900,7 +5028,7 @@ fn purpose_status_where_clause(
 fn structural_finding_where_clause(
     category: &str,
     path_prefix: Option<&str>,
-    resolved_ids: &[String],
+    resolution_filter: HealthResolutionFilter<'_>,
     scope: HealthScope,
     first_placeholder: usize,
 ) -> (String, Vec<Value>) {
@@ -4934,13 +5062,20 @@ fn structural_finding_where_clause(
         placeholder += 4;
     }
 
-    let resolved_ids = resolved_ids_for_category(resolved_ids, category);
-    if !resolved_ids.is_empty() {
-        clauses.push(format!(
-            "('{category}:' || path || ':' || related_path) NOT IN ({})",
-            numbered_placeholders(placeholder, resolved_ids.len())
-        ));
-        values.extend(resolved_ids.into_iter().map(Value::from));
+    match resolution_filter {
+        HealthResolutionFilter::Explicit(resolved_ids) => {
+            let resolved_ids = resolved_ids_for_category(resolved_ids, category);
+            if !resolved_ids.is_empty() {
+                clauses.push(format!(
+                    "('{category}:' || path || ':' || related_path) NOT IN ({})",
+                    numbered_placeholders(placeholder, resolved_ids.len())
+                ));
+                values.extend(resolved_ids.into_iter().map(Value::from));
+            }
+        }
+        HealthResolutionFilter::Stored => clauses.push(stored_resolution_filter_clause(&format!(
+            "'{category}:' || path || ':' || related_path"
+        ))),
     }
 
     if clauses.is_empty() {
@@ -4948,6 +5083,25 @@ fn structural_finding_where_clause(
     } else {
         (format!("WHERE {}", clauses.join(" AND ")), values)
     }
+}
+
+/// Build the exact stored finding-id expression for mixed purpose lifecycle rows.
+fn purpose_lifecycle_finding_id_expression(node_alias: &str, purpose_alias: &str) -> String {
+    let category_cases = PURPOSE_HEALTH_SPECS
+        .iter()
+        .map(|spec| format!("WHEN '{}' THEN '{}:'", spec.status, spec.category))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "(CASE {purpose_alias}.status {category_cases} ELSE '' END || {node_alias}.path || ':')"
+    )
+}
+
+/// Build an indexed anti-lookup against durable health resolutions.
+fn stored_resolution_filter_clause(finding_id_expression: &str) -> String {
+    format!(
+        "NOT EXISTS (SELECT 1 FROM health_resolutions hr WHERE hr.finding_id = {finding_id_expression})"
+    )
 }
 
 /// SQL expression for approved purposes that need agent review at the requested scope.
@@ -5180,14 +5334,19 @@ mod tests {
 
         let current_path = temp.path().join("current.db");
         drop(AtlasStore::open(&current_path)?);
-        let current = schema::preflight(&current_path, None)?;
+        let (current, current_location) = schema::preflight(&current_path, None)?;
         require_eq(
             &current.state,
             &SchemaState::Current,
             "current preflight state",
         )?;
         fs::remove_file(&current_path)?;
-        if Connection::open_with_flags(&current_path, writable_open_flags(current.state)).is_ok() {
+        if Connection::open_with_flags(
+            &current_path,
+            writable_open_flags(current.state, current_location.database_exists),
+        )
+        .is_ok()
+        {
             return Err(io::Error::other("current database path was recreated").into());
         }
         require_eq(&current_path.exists(), &false, "current path stays absent")?;
@@ -5195,14 +5354,18 @@ mod tests {
         let released_path = temp.path().join("released.db");
         let released_root = temp.path().join("released-root");
         write_released_schema_eight_compatibility_fixture(&released_path, &released_root)?;
-        let released = schema::preflight(&released_path, None)?;
+        let (released, released_location) = schema::preflight(&released_path, None)?;
         require_eq(
             &released.state,
             &SchemaState::UpgradeRequired,
             "released preflight state",
         )?;
         fs::remove_file(&released_path)?;
-        if Connection::open_with_flags(&released_path, writable_open_flags(released.state)).is_ok()
+        if Connection::open_with_flags(
+            &released_path,
+            writable_open_flags(released.state, released_location.database_exists),
+        )
+        .is_ok()
         {
             return Err(io::Error::other("released database path was recreated").into());
         }
@@ -5213,7 +5376,7 @@ mod tests {
         )?;
 
         let fresh_path = temp.path().join("fresh.db");
-        let fresh = schema::preflight(&fresh_path, None)?;
+        let (fresh, _) = schema::preflight(&fresh_path, None)?;
         require_eq(&fresh.state, &SchemaState::Fresh, "fresh preflight state")?;
         drop(AtlasStore::open(&fresh_path)?);
         require_eq(&fresh_path.is_file(), &true, "fresh path is created")?;
@@ -5505,6 +5668,7 @@ mod tests {
         let db_path = temp.path().join("projectatlas.db");
         let independent_db_path = temp.path().join("independent.db");
         let mut writer_a = AtlasStore::open(&db_path)?;
+        require_writable_connection_profile(&writer_a.connection)?;
         {
             let mut publication = writer_a.begin_index_publication("contract")?;
             write_test_projection(&mut publication, "old")?;
@@ -5513,6 +5677,14 @@ mod tests {
         let mut writer_b = AtlasStore::open(&db_path)?;
         let mut independent_writer = AtlasStore::open(&independent_db_path)?;
         let old_reader = AtlasStore::open_read_only(&db_path)?;
+        require_read_connection_profile(&old_reader.connection)?;
+        if old_reader
+            .connection
+            .execute("DELETE FROM metadata", [])
+            .is_ok()
+        {
+            return Err(io::Error::other("read-only connection accepted a mutation").into());
+        }
         require_test_projection(&old_reader, 1, "old")?;
 
         {
@@ -5550,7 +5722,7 @@ mod tests {
                     .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, u64>(0))?;
             require_eq(
                 &u128::from(restored_busy_timeout),
-                &SQLITE_WRITE_BUSY_TIMEOUT.as_millis(),
+                &SQLITE_BUSY_TIMEOUT.as_millis(),
                 "ordinary busy timeout after failed publication acquisition",
             )?;
 
@@ -5583,7 +5755,7 @@ mod tests {
                 .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, u64>(0))?;
         require_eq(
             &u128::from(restored_busy_timeout),
-            &SQLITE_WRITE_BUSY_TIMEOUT.as_millis(),
+            &SQLITE_BUSY_TIMEOUT.as_millis(),
             "ordinary busy timeout after successful publication acquisition",
         )?;
         require_test_projection(&old_reader, 1, "old")?;
@@ -6635,18 +6807,15 @@ mod tests {
             rationale: "Resolved for pagination regression.".to_string(),
         })?;
 
-        let page = store.unresolved_health_findings_page(
-            &store.resolved_health_ids()?,
-            &HealthQuery {
-                start_index: 0,
-                limit: 2,
-                category: Some("missing-purpose".to_string()),
-                severity: Some(Severity::Warning),
-                path_prefix: Some("src".to_string()),
-                summary_only: false,
-                scope: HealthScope::all(),
-            },
-        )?;
+        let page = store.unresolved_health_findings_page_current(&HealthQuery {
+            start_index: 0,
+            limit: 2,
+            category: Some("missing-purpose".to_string()),
+            severity: Some(Severity::Warning),
+            path_prefix: Some("src".to_string()),
+            summary_only: false,
+            scope: HealthScope::all(),
+        })?;
 
         require_eq(&page.total, &3, "filtered unresolved missing total")?;
         require_eq(&page.returned, &2, "returned unresolved missing rows")?;
@@ -6659,6 +6828,88 @@ mod tests {
             &vec!["src/a.rs", "src/c.rs"],
             "resolved row skipped before limit",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn stored_health_resolution_filter_stays_indexed_and_bind_bounded() -> Result<(), Box<dyn Error>>
+    {
+        const HISTORICAL_RESOLUTIONS: usize = 1_500;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(root.join("src"))?;
+        let database = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        store.replace_scan(&[test_file_node("src/current.rs", "hash-current")])?;
+        {
+            let transaction = store.connection.transaction()?;
+            {
+                let mut statement = transaction.prepare(
+                    "
+                    INSERT INTO health_resolutions(
+                        finding_id, category, path, related_path, rationale, resolved_by
+                    )
+                    VALUES(?1, 'missing-purpose', ?2, NULL, 'historical', 'agent')
+                    ",
+                )?;
+                for index in 0..HISTORICAL_RESOLUTIONS {
+                    let path = format!("removed/{index}.rs");
+                    statement.execute(params![finding_id("missing-purpose", &path, None), path])?;
+                }
+            }
+            transaction.commit()?;
+        }
+
+        drop(store);
+        let store = AtlasStore::open_read_only_for_project(&database, &root)?;
+        let page = store.unresolved_health_findings_page_current(&HealthQuery {
+            start_index: 0,
+            limit: 2,
+            category: Some("missing-purpose".to_string()),
+            severity: Some(Severity::Warning),
+            path_prefix: Some("src".to_string()),
+            summary_only: false,
+            scope: HealthScope::all(),
+        })?;
+        require_eq(&page.total, &1, "current unresolved total")?;
+        require_eq(
+            &page.findings[0].path,
+            &"src/current.rs".to_string(),
+            "current unresolved path",
+        )?;
+
+        let (where_clause, values) = purpose_status_where_clause(
+            PURPOSE_HEALTH_SPECS[0],
+            None,
+            HealthResolutionFilter::Stored,
+            HealthScope::all(),
+        );
+        require_eq(&values.len(), &1, "stored filter bind count")?;
+        let plan_sql = format!(
+            "EXPLAIN QUERY PLAN
+             SELECT COUNT(*)
+             FROM nodes n
+             JOIN purposes p ON p.node_id = n.id
+             WHERE {where_clause}"
+        );
+        let mut statement = store.connection.prepare(&plan_sql)?;
+        let rows = statement.query_map(params_from_iter(values), |row| row.get::<_, String>(3))?;
+        let mut plan = Vec::new();
+        for row in rows {
+            plan.push(row?);
+        }
+        if !plan.iter().any(|detail| {
+            detail.contains("health_resolutions")
+                && detail.contains("finding_id")
+                && detail.contains("SEARCH")
+        }) {
+            return Err(io::Error::other(format!(
+                "stored resolution anti-lookup did not use the finding-id index: {plan:?}"
+            ))
+            .into());
+        }
+        store.finish_index_read_snapshot()?;
         Ok(())
     }
 
@@ -8204,6 +8455,49 @@ mod tests {
         require_eq(&metadata.symbol_count, &1, "projection symbol metadata")?;
         require_eq(&metadata.relation_count, &1, "projection relation metadata")?;
         Ok(())
+    }
+
+    /// Assert the connection settings required for every production writer.
+    fn require_writable_connection_profile(connection: &Connection) -> Result<(), Box<dyn Error>> {
+        let foreign_keys =
+            connection.pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))?;
+        require_eq(&foreign_keys, &1, "writable foreign-key enforcement")?;
+        require_wal_profile(connection)?;
+        let synchronous =
+            connection.pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))?;
+        require_eq(&synchronous, &2, "writable FULL synchronous mode")?;
+        require_busy_timeout(connection)
+    }
+
+    /// Assert the connection settings required for every production reader.
+    fn require_read_connection_profile(connection: &Connection) -> Result<(), Box<dyn Error>> {
+        let query_only =
+            connection.pragma_query_value(None, "query_only", |row| row.get::<_, i64>(0))?;
+        require_eq(&query_only, &1, "read query-only mode")?;
+        require_wal_profile(connection)?;
+        require_busy_timeout(connection)
+    }
+
+    /// Assert that a connection observes the selected durable journal mode.
+    fn require_wal_profile(connection: &Connection) -> Result<(), Box<dyn Error>> {
+        let journal_mode =
+            connection.pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))?;
+        require_eq(
+            &journal_mode.to_ascii_lowercase(),
+            &"wal".to_string(),
+            "WAL journal mode",
+        )
+    }
+
+    /// Assert the bounded contention wait shared by ordinary connections.
+    fn require_busy_timeout(connection: &Connection) -> Result<(), Box<dyn Error>> {
+        let busy_timeout =
+            connection.pragma_query_value(None, "busy_timeout", |row| row.get::<_, u64>(0))?;
+        require_eq(
+            &u128::from(busy_timeout),
+            &SQLITE_BUSY_TIMEOUT.as_millis(),
+            "bounded connection busy timeout",
+        )
     }
 
     /// Build a representative folder node for store tests.
