@@ -1399,7 +1399,6 @@ dependencies = [
  "projectatlas-core",
  "rusqlite",
  "serde",
- "serde_json",
  "tempfile",
  "thiserror",
 ]

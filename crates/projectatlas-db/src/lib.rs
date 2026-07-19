@@ -1,7 +1,11 @@
 //! Purpose: Persist `ProjectAtlas` 3 indexes in `SQLite`.
 
+mod repository_graph;
 mod schema;
 
+pub use repository_graph::{RepositoryGraphPage, RepositoryGraphRelationQuery};
+
+use projectatlas_core::graph::GraphContractError;
 use projectatlas_core::health::{
     CATEGORY_DUPLICATE_PURPOSE, CATEGORY_MISSING_PURPOSE, CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
     CATEGORY_REPEATED_TEMPORARY_FOLDER, CATEGORY_STALE_PURPOSE, CATEGORY_SUGGESTED_PURPOSE_REVIEW,
@@ -54,7 +58,7 @@ const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(1);
 fn writable_open_flags(state: SchemaState) -> OpenFlags {
     match state {
         SchemaState::Fresh => OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-        SchemaState::Current | SchemaState::UpgradeFrom8 => OpenFlags::SQLITE_OPEN_READ_WRITE,
+        SchemaState::Current | SchemaState::UpgradeRequired => OpenFlags::SQLITE_OPEN_READ_WRITE,
     }
 }
 
@@ -64,6 +68,48 @@ pub enum DbError {
     /// `SQLite` operation failed.
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// A persisted or requested graph value violates the typed domain contract.
+    #[error("repository graph contract error: {0}")]
+    GraphContract(#[from] GraphContractError),
+    /// Persisted graph project identity differs from the selected identity.
+    #[error(
+        "repository graph project identity {found} does not match selected identity {expected}"
+    )]
+    GraphProjectIdentityMismatch {
+        /// Project identity selected by the caller.
+        expected: String,
+        /// Project identity stored in the database.
+        found: String,
+    },
+    /// A graph query requires one complete nonzero publication generation.
+    #[error("repository graph is unavailable without a complete published generation")]
+    GraphPublicationUnavailable,
+    /// A normalized graph row has an impossible column shape.
+    #[error("invalid {table} row: {reason}")]
+    GraphRowShape {
+        /// Owning normalized graph table.
+        table: &'static str,
+        /// Stable shape diagnostic.
+        reason: &'static str,
+    },
+    /// A normalized binary graph field has the wrong width.
+    #[error("invalid {field} blob length {found}; expected {expected}")]
+    InvalidBlobLength {
+        /// Owning database field.
+        field: &'static str,
+        /// Required fixed byte width.
+        expected: usize,
+        /// Observed byte width.
+        found: usize,
+    },
+    /// An unsigned graph count cannot be represented by `SQLite`.
+    #[error("graph count for {field} exceeds SQLite integer range: {value}")]
+    GraphCountOverflow {
+        /// Owning database field.
+        field: &'static str,
+        /// Unsigned domain value that exceeded the database range.
+        value: u64,
+    },
     /// Schema version is not supported.
     #[error("unsupported schema version {found}, expected {expected}")]
     SchemaVersion {
@@ -125,7 +171,7 @@ pub enum DbError {
         /// Invalid value.
         value: String,
     },
-    /// Count value from `SQLite` could not fit in `usize`.
+    /// Count value from `SQLite` could not fit its owning unsigned domain type.
     #[error("invalid count for {field}: {value}")]
     InvalidCount {
         /// Count field name.
@@ -4887,7 +4933,7 @@ mod tests {
         let released = schema::preflight(&released_path, None)?;
         require_eq(
             &released.state,
-            &SchemaState::UpgradeFrom8,
+            &SchemaState::UpgradeRequired,
             "released preflight state",
         )?;
         fs::remove_file(&released_path)?;
