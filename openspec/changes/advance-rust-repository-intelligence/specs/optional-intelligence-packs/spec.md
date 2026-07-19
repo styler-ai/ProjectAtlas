@@ -38,7 +38,7 @@ A selected optional semantic pack SHALL bind vectors to one structural generatio
 
 ### Requirement: Derived Snapshots Are Integrity-First
 
-Snapshot export SHALL use a consistent SQLite backup, bounded compression, schema/runtime/root/generation metadata, and a digest. Import SHALL validate in a temporary path, enforce size/path/integrity/schema/root rules, preserve authored data and destination project identity, and publish derived data only through the normal atomic generation path.
+Snapshot export SHALL use the SQLite backup API only to obtain a private consistent capture. The distributable snapshot SHALL then be constructed freshly from an explicit allowlist of derived tables and columns, include a content inventory plus bounded compression, schema/runtime/root/generation metadata, and a digest, and SHALL exclude project identity, reviewed purposes, health resolutions, telemetry, settings, future Memory Atlas state, secret-bearing raw values, nonportable machine-local paths, and deleted/free-page remnants. Import SHALL validate in a temporary path, enforce size/path/content-inventory/integrity/schema/root rules, preserve authored data and destination project identity, and publish derived data only through the normal atomic generation path.
 
 Snapshot metadata SHALL also bind the source-state and capability/registry identity used to produce the derived generation. Import MAY enforce an explicit trust/signature policy for shared snapshots; local-only export/import SHALL NOT require signatures. When a configured policy requires a signature, an absent, unknown, invalid, or mismatched signature SHALL reject the temporary artifact before activation.
 
@@ -49,3 +49,7 @@ Snapshot metadata SHALL also bind the source-state and capability/registry ident
 #### Scenario: Shared snapshot fails trust policy
 - **WHEN** import requires a trusted signer and the temporary archive is unsigned, signed by an unknown key, or binds different source/capability identity
 - **THEN** import fails before publication and the destination identity, authored data, and active generation remain unchanged
+
+#### Scenario: Export source contains authored or private state
+- **WHEN** a live project database also contains purposes, telemetry, health resolutions, machine-local values, or future Memory Atlas records
+- **THEN** the distributable artifact is built from the derived allowlist and an archive/free-page inspection proves that excluded values were not copied merely because the private capture was consistent
