@@ -9,21 +9,22 @@ use crate::atlas_map::{
 #[cfg(test)]
 use crate::runtime::run_scan_pipeline;
 use crate::runtime::{
-    DEFAULT_HEALTH_LIMIT, IndexProjectMismatch, IndexRefreshRequired, IndexVerificationIncomplete,
-    InitBootstrapOptions, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel,
-    PurposeReviewRequest, ScanRuntimePlan, SymbolBuildOptions, build_settings_report,
-    byte_count_to_tokens, canonical_project_root, config_root_mismatch_error,
-    default_mcp_project_root, estimated_source_tokens_for_indexed_files,
-    estimated_source_tokens_for_paths, index_work_control, init_config_path,
-    lint_database_if_present, next_step_report, next_step_report_payload, normalized_folder_filter,
-    open_atlas_store_for_project, open_atlas_store_read_only_for_project,
-    open_fresh_atlas_store_for_project, purpose_curation_page, ranked_file_nodes_with_reasons,
-    ranked_folder_nodes_with_reasons, read_indexed_file_content,
-    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
-    render_health_page, render_purpose_curation_page, render_purpose_review_report,
-    reset_index_files, review_purposes, run_init_bootstrap, run_scan_pipeline_controlled,
-    run_single_watch_refresh_controlled, run_symbol_build_pipeline_controlled,
-    strip_legacy_purpose, telemetry_disabled, validated_indexed_file_key, watcher_status_report,
+    DEFAULT_HEALTH_LIMIT, INDEX_WORKER_SAFE_CEILING, IndexProjectMismatch, IndexRefreshRequired,
+    IndexVerificationIncomplete, InitBootstrapOptions, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES,
+    PurposeLintLevel, PurposeReviewRequest, ScanRuntimePlan, SymbolBuildOptions,
+    build_settings_report, byte_count_to_tokens, canonical_project_root,
+    config_root_mismatch_error, default_mcp_project_root,
+    estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
+    index_work_control, init_config_path, lint_database_if_present, next_step_report,
+    next_step_report_payload, normalized_folder_filter, open_atlas_store_for_project,
+    open_atlas_store_read_only_for_project, open_fresh_atlas_store_for_project,
+    purpose_curation_page, ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons,
+    read_indexed_file_content, record_directory_walk_usage_estimate, record_usage_estimate,
+    record_usage_text, render_health_page, render_purpose_curation_page,
+    render_purpose_review_report, reset_index_files, review_purposes, run_init_bootstrap,
+    run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
+    run_symbol_build_pipeline_controlled, strip_legacy_purpose, telemetry_disabled,
+    validated_indexed_file_key, watcher_status_report,
 };
 use crate::token_tui::{
     TokenDashboardTheme, render_token_dashboard_plain_with_theme,
@@ -421,6 +422,8 @@ const MCP_INDEX_WORKER_NAME_PREFIX: &str = "projectatlas-";
 const MCP_INDEX_TASK_LIMIT_PREFIX: &str = "background indexing task limit ";
 /// Suffix for active background task limit diagnostics.
 const MCP_INDEX_TASK_LIMIT_SUFFIX: &str = " is already active";
+/// Maximum background indexing tasks admitted by one MCP server session.
+const MCP_BACKGROUND_TASK_SAFE_CEILING: usize = 4;
 /// Terminal diagnostic when a background worker panics.
 const MCP_INDEX_WORKER_PANIC_ERROR: &str = "background indexing worker panicked";
 /// Prefix for background worker spawn failures.
@@ -1577,6 +1580,37 @@ enum McpTaskCancelResult {
     NotCancelable,
 }
 
+/// Fixed worker partition shared by background indexing tasks in one MCP server.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct McpBackgroundResourceEnvelope {
+    /// Maximum concurrently admitted background tasks.
+    task_limit: usize,
+    /// Maximum scan and parser workers available to each admitted task.
+    workers_per_task: usize,
+    /// Maximum aggregate workers owned by all admitted tasks.
+    total_worker_limit: usize,
+}
+
+impl McpBackgroundResourceEnvelope {
+    /// Derive one fixed partition from supported host availability and process policy.
+    fn for_host() -> Self {
+        let available_workers = thread::available_parallelism().map_or(1, usize::from);
+        Self::from_available_workers(available_workers)
+    }
+
+    /// Derive a deterministic envelope from an observed host worker count.
+    fn from_available_workers(available_workers: usize) -> Self {
+        let total_worker_limit = available_workers.clamp(1, INDEX_WORKER_SAFE_CEILING);
+        let task_limit = total_worker_limit.min(MCP_BACKGROUND_TASK_SAFE_CEILING);
+        let workers_per_task = (total_worker_limit / task_limit).max(1);
+        Self {
+            task_limit,
+            workers_per_task,
+            total_worker_limit,
+        }
+    }
+}
+
 /// Native `ProjectAtlas` MCP server backed by the same services as the CLI.
 #[derive(Debug, Clone)]
 pub(crate) struct ProjectAtlasMcpServer {
@@ -1588,6 +1622,8 @@ pub(crate) struct ProjectAtlasMcpServer {
     allow_nearest_project: bool,
     /// Bounded MCP task-progress records for this server session.
     task_registry: Arc<RwLock<McpTaskRegistry>>,
+    /// Fixed aggregate worker partition for background indexing tasks.
+    background_resources: McpBackgroundResourceEnvelope,
     /// Monotonic session-local task identifier source.
     next_task_sequence: Arc<AtomicU64>,
     /// Official RMCP tool router.
@@ -1610,6 +1646,7 @@ impl ProjectAtlasMcpServer {
             session,
             allow_nearest_project,
             task_registry: Arc::new(RwLock::new(McpTaskRegistry::new())),
+            background_resources: McpBackgroundResourceEnvelope::for_host(),
             next_task_sequence: Arc::new(AtomicU64::new(1)),
             tool_router: Self::tool_router(),
         }
@@ -2139,13 +2176,15 @@ impl ProjectAtlasMcpServer {
     fn start_index_task<F>(
         &self,
         operation: McpTaskOperation,
-        control: IndexWorkControl,
+        options: SymbolBuildOptions,
         result_ref: &'static str,
         work: F,
     ) -> Result<McpTaskStartResponse, CliError>
     where
-        F: FnOnce(&IndexWorkControl) -> Result<(), CliError> + Send + 'static,
+        F: FnOnce(&IndexWorkControl, SymbolBuildOptions) -> Result<(), CliError> + Send + 'static,
     {
+        let options = options.with_worker_ceiling(self.background_resources.workers_per_task);
+        let control = index_work_control(&options);
         let mut task_id = MCP_INDEX_TASK_ID_PREFIX.to_string();
         task_id.push_str(
             &self
@@ -2164,9 +2203,9 @@ impl ProjectAtlasMcpServer {
                 .iter()
                 .filter(|record| !record.is_terminal_state())
                 .count();
-            if active >= mcp_background_task_limit() {
+            if active >= self.background_resources.task_limit {
                 let mut message = MCP_INDEX_TASK_LIMIT_PREFIX.to_string();
-                message.push_str(&mcp_background_task_limit().to_string());
+                message.push_str(&self.background_resources.task_limit.to_string());
                 message.push_str(MCP_INDEX_TASK_LIMIT_SUFFIX);
                 return Err(CliError::Mcp(message));
             }
@@ -2204,7 +2243,8 @@ impl ProjectAtlasMcpServer {
                     });
                 });
             }
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&control)));
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&control, options)));
             let (state, progress, error, completed_result_ref) = match outcome {
                 Ok(Ok(())) => (
                     McpTaskState::Complete,
@@ -3549,12 +3589,11 @@ impl ProjectAtlasMcpServer {
             );
             let text_index_max_bytes = params.text_index_max_bytes;
             if background {
-                let control = index_work_control(&symbol_options);
                 let task = self.start_index_task(
                     McpTaskOperation::Scan,
-                    control,
+                    symbol_options,
                     MCP_TOOL_ATLAS_OVERVIEW,
-                    move |control| {
+                    move |control, symbol_options| {
                         let plan = ScanRuntimePlan::for_path_controlled(
                             state.config_path.as_deref(),
                             &path,
@@ -3911,12 +3950,11 @@ impl ProjectAtlasMcpServer {
             );
             let text_index_max_bytes = params.text_index_max_bytes;
             if background {
-                let control = index_work_control(&options);
                 let task = self.start_index_task(
                     McpTaskOperation::SymbolsBuild,
-                    control,
+                    options,
                     MCP_TOOL_ATLAS_SYMBOLS,
-                    move |control| {
+                    move |control, options| {
                         let plan = ScanRuntimePlan::for_path_controlled(
                             state.config_path.as_deref(),
                             &path,
@@ -4225,12 +4263,11 @@ impl ProjectAtlasMcpServer {
             );
             let text_index_max_bytes = params.text_index_max_bytes;
             if background {
-                let control = index_work_control(&symbol_options);
                 let task = self.start_index_task(
                     McpTaskOperation::WatchOnce,
-                    control,
+                    symbol_options,
                     MCP_TOOL_ATLAS_OVERVIEW,
-                    move |control| {
+                    move |control, symbol_options| {
                         let plan = ScanRuntimePlan::for_path_controlled(
                             state.config_path.as_deref(),
                             &path,
@@ -4477,11 +4514,6 @@ fn mcp_unix_time_ms() -> u128 {
         .map_or(0, |duration| duration.as_millis())
 }
 
-/// Derive a small per-session background-task ceiling from the host.
-fn mcp_background_task_limit() -> usize {
-    thread::available_parallelism().map_or(1, |parallelism| parallelism.get().min(4))
-}
-
 /// Retain one concise task failure without letting diagnostics grow unbounded.
 fn bounded_task_error(error: &CliError) -> String {
     error
@@ -4495,7 +4527,6 @@ fn bounded_task_error(error: &CliError) -> String {
 mod tests {
     use super::*;
     use crate::atlas_map::init_project_with_config;
-    use projectatlas_core::IndexCancellation;
     use std::fs;
     use std::io;
     use std::time::Duration;
@@ -4506,6 +4537,34 @@ mod tests {
         } else {
             Err(io::Error::other(message.to_string()).into())
         }
+    }
+
+    /// Wait for one admitted task to reach a terminal state.
+    fn wait_for_background_task(
+        server: &ProjectAtlasMcpServer,
+        task_id: &str,
+    ) -> Result<McpTaskRecord, Box<dyn std::error::Error>> {
+        for _attempt in 0..5_000 {
+            let status = server.task_status(task_id.to_string())?;
+            if let Some(record) = status.task.filter(McpTaskRecord::is_terminal_state) {
+                return Ok(record);
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        Err(io::Error::other("background task did not reach a terminal state").into())
+    }
+
+    /// Admit one successful task and wait for completion.
+    fn run_successful_background_task(
+        server: &ProjectAtlasMcpServer,
+    ) -> Result<McpTaskRecord, Box<dyn std::error::Error>> {
+        let task = server.start_index_task(
+            McpTaskOperation::Scan,
+            SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None),
+            MCP_TOOL_ATLAS_OVERVIEW,
+            |_control, _options| Ok(()),
+        )?;
+        wait_for_background_task(server, &task.task_id)
     }
 
     /// Wait for the latest task of one operation to reach a terminal state.
@@ -4523,14 +4582,7 @@ mod tests {
             .find(|record| &record.operation == operation)
             .map(|record| record.task_id.clone())
             .ok_or_else(|| io::Error::other("background task was not admitted"))?;
-        for _attempt in 0..5_000 {
-            let status = server.task_status(task_id.clone())?;
-            if let Some(record) = status.task.filter(McpTaskRecord::is_terminal_state) {
-                return Ok(record);
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-        Err(io::Error::other("background task did not reach a terminal state").into())
+        wait_for_background_task(server, &task_id)
     }
 
     #[test]
@@ -4897,30 +4949,130 @@ mod tests {
     }
 
     #[test]
-    fn background_task_cancellation_reaches_owned_work_control()
+    fn background_task_envelope_and_cancellation_reach_owned_control()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let repo = temp.path().join("repo-a");
         fs::create_dir(&repo)?;
         let db_path = repo.join(".projectatlas").join("projectatlas.db");
-        let server = ProjectAtlasMcpServer::new(db_path, None, "mcp-test".to_string(), false);
-        let started = Arc::new(std::sync::Barrier::new(2));
-        let worker_started = Arc::clone(&started);
-        let task = server.start_index_task(
+        let mut server = ProjectAtlasMcpServer::new(db_path, None, "mcp-test".to_string(), false);
+        let host_envelope = server.background_resources;
+        let host_workers = thread::available_parallelism().map_or(1, usize::from);
+        let representative_envelope = McpBackgroundResourceEnvelope::from_available_workers(8);
+        require(
+            host_envelope.task_limit <= MCP_BACKGROUND_TASK_SAFE_CEILING
+                && host_envelope.workers_per_task > 0
+                && host_envelope.total_worker_limit
+                    <= host_workers.clamp(1, INDEX_WORKER_SAFE_CEILING)
+                && host_envelope.workers_per_task * host_envelope.task_limit
+                    <= host_envelope.total_worker_limit,
+            "background resource envelope exceeded its host or process worker budget",
+        )?;
+        require(
+            representative_envelope
+                == (McpBackgroundResourceEnvelope {
+                    task_limit: 4,
+                    workers_per_task: 2,
+                    total_worker_limit: 8,
+                })
+                && McpBackgroundResourceEnvelope::from_available_workers(0).total_worker_limit == 1
+                && McpBackgroundResourceEnvelope::from_available_workers(usize::MAX)
+                    .total_worker_limit
+                    == INDEX_WORKER_SAFE_CEILING,
+            "background resource envelope did not partition representative host capacities",
+        )?;
+
+        server.background_resources = McpBackgroundResourceEnvelope::from_available_workers(4);
+        let envelope = server.background_resources;
+        let started = Arc::new(std::sync::Barrier::new(envelope.task_limit + 1));
+        let databases_ready = Arc::new(std::sync::Barrier::new(envelope.task_limit + 1));
+        let release = Arc::new(std::sync::Barrier::new(envelope.task_limit + 1));
+        let observed_option_workers = Arc::new(AtomicU64::new(0));
+        let observed_control_workers = Arc::new(AtomicU64::new(0));
+        let mut concurrent_tasks = Vec::new();
+        for task_index in 0..envelope.task_limit {
+            let isolated_root = temp.path().join(format!("repo-{task_index}"));
+            let isolated_db = isolated_root.join(".projectatlas").join("projectatlas.db");
+            fs::create_dir_all(isolated_root.join(".projectatlas"))?;
+            let worker_started = Arc::clone(&started);
+            let worker_databases_ready = Arc::clone(&databases_ready);
+            let worker_release = Arc::clone(&release);
+            let worker_option_workers = Arc::clone(&observed_option_workers);
+            let worker_control_workers = Arc::clone(&observed_control_workers);
+            concurrent_tasks.push(server.start_index_task(
+                McpTaskOperation::Scan,
+                SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None),
+                MCP_TOOL_ATLAS_OVERVIEW,
+                move |control, options| {
+                    worker_option_workers
+                        .fetch_add(options.reported_workers() as u64, Ordering::Relaxed);
+                    worker_control_workers.fetch_add(
+                        control.worker_ceiling().unwrap_or_default() as u64,
+                        Ordering::Relaxed,
+                    );
+                    worker_started.wait();
+                    let store = open_atlas_store_for_project(&isolated_db, &isolated_root);
+                    worker_databases_ready.wait();
+                    worker_release.wait();
+                    let _store = store?;
+                    Ok(())
+                },
+            )?);
+        }
+        started.wait();
+        let admitted_workers = envelope.workers_per_task * envelope.task_limit;
+        require(
+            observed_option_workers.load(Ordering::Relaxed) == admitted_workers as u64
+                && observed_control_workers.load(Ordering::Relaxed) == admitted_workers as u64
+                && admitted_workers <= envelope.total_worker_limit,
+            "concurrent background tasks did not share the aggregate worker envelope",
+        )?;
+        let overflow = server.start_index_task(
             McpTaskOperation::Scan,
-            IndexWorkControl::new(IndexCancellation::new(), None),
+            SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None),
             MCP_TOOL_ATLAS_OVERVIEW,
-            move |control| {
-                worker_started.wait();
+            |_control, _options| Ok(()),
+        );
+        require(
+            matches!(overflow, Err(CliError::Mcp(message)) if message.starts_with(MCP_INDEX_TASK_LIMIT_PREFIX)),
+            "background task admission exceeded the server task limit",
+        )?;
+        require(
+            server.task_status(MCP_TASK_CONTRACT_ID.to_string())?.lookup
+                == McpTaskLookupStatus::Found,
+            "task status became unresponsive while concurrent work was active",
+        )?;
+        databases_ready.wait();
+        release.wait();
+        for task in concurrent_tasks {
+            require(
+                wait_for_background_task(&server, &task.task_id)?.state == McpTaskState::Complete,
+                "concurrent background task did not finish successfully",
+            )?;
+        }
+
+        let cancel_started = Arc::new(std::sync::Barrier::new(2));
+        let worker_cancel_started = Arc::clone(&cancel_started);
+        let canceled_task = server.start_index_task(
+            McpTaskOperation::Scan,
+            SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None),
+            MCP_TOOL_ATLAS_OVERVIEW,
+            move |control, options| {
+                if options.reported_workers() != control.worker_ceiling().unwrap_or_default() {
+                    return Err(CliError::Mcp(
+                        "background parser and operation worker ceilings diverged".to_string(),
+                    ));
+                }
+                worker_cancel_started.wait();
                 loop {
                     control.check(projectatlas_core::IndexWorkStage::RepositoryTraversal)?;
                     thread::yield_now();
                 }
             },
         )?;
-        started.wait();
+        cancel_started.wait();
 
-        let running = server.task_status(task.task_id.clone())?;
+        let running = server.task_status(canceled_task.task_id.clone())?;
         require(
             running
                 .task
@@ -4928,35 +5080,54 @@ mod tests {
                 .is_some_and(|record| record.state == McpTaskState::Running),
             "background task did not become running",
         )?;
-        require(
-            server.task_status(MCP_TASK_CONTRACT_ID.to_string())?.lookup
-                == McpTaskLookupStatus::Found,
-            "task status became unresponsive while background work was active",
-        )?;
-        let cancel = server.task_cancel(task.task_id.clone())?;
+        let cancel = server.task_cancel(canceled_task.task_id.clone())?;
         require(
             cancel.result == McpTaskCancelResult::CancellationRequested,
             "task cancellation did not reach the active work control",
         )?;
 
-        let mut terminal = None;
-        for _attempt in 0..1_000 {
-            let status = server.task_status(task.task_id.clone())?;
-            if status
-                .task
-                .as_ref()
-                .is_some_and(McpTaskRecord::is_terminal_state)
-            {
-                terminal = status.task;
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
         require(
-            terminal
-                .as_ref()
-                .is_some_and(|record| record.state == McpTaskState::Canceled),
+            wait_for_background_task(&server, &canceled_task.task_id)?.state
+                == McpTaskState::Canceled,
             "background task did not finish canceled after consuming the signal",
+        )?;
+        require(
+            run_successful_background_task(&server)?.state == McpTaskState::Complete,
+            "successful task was not admitted after cancellation",
+        )?;
+
+        let failed_task = server.start_index_task(
+            McpTaskOperation::Scan,
+            SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None),
+            MCP_TOOL_ATLAS_OVERVIEW,
+            |_control, _options| Err(CliError::Mcp("expected task failure".to_string())),
+        )?;
+        require(
+            wait_for_background_task(&server, &failed_task.task_id)?.state == McpTaskState::Failed,
+            "background task error did not become a terminal failure",
+        )?;
+        require(
+            run_successful_background_task(&server)?.state == McpTaskState::Complete,
+            "successful task was not admitted after failure",
+        )?;
+
+        let panicked_task = server.start_index_task(
+            McpTaskOperation::Scan,
+            SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None),
+            MCP_TOOL_ATLAS_OVERVIEW,
+            |_control, _options| -> Result<(), CliError> {
+                std::panic::resume_unwind(Box::new("expected background task panic"));
+            },
+        )?;
+        let panicked = wait_for_background_task(&server, &panicked_task.task_id)?;
+        require(
+            panicked.state == McpTaskState::Failed
+                && panicked.error.as_deref() == Some(MCP_INDEX_WORKER_PANIC_ERROR),
+            "background task panic did not remain bounded and terminal",
+        )?;
+        require(
+            run_successful_background_task(&server)?.state == McpTaskState::Complete,
+            "terminal task lifecycle did not release background admission capacity",
         )?;
 
         Ok(())

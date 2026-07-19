@@ -167,6 +167,8 @@ pub struct IndexWorkControl {
     started_at: Instant,
     /// Optional absolute deadline observed by every operation worker.
     deadline: Option<Instant>,
+    /// Optional maximum worker count shared by every operation stage.
+    worker_ceiling: Option<usize>,
     /// Authored-purpose bytes consumed by this operation and every clone.
     purpose_bytes: Arc<AtomicU64>,
 }
@@ -182,6 +184,7 @@ impl IndexWorkControl {
             cancellation,
             started_at,
             deadline,
+            worker_ceiling: None,
             purpose_bytes: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -193,6 +196,7 @@ impl IndexWorkControl {
             cancellation,
             started_at: Instant::now(),
             deadline: Some(deadline),
+            worker_ceiling: None,
             purpose_bytes: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -209,6 +213,28 @@ impl IndexWorkControl {
         self.deadline
     }
 
+    /// Return the maximum workers available to each operation stage, when bounded.
+    #[must_use]
+    pub fn worker_ceiling(&self) -> Option<usize> {
+        self.worker_ceiling
+    }
+
+    /// Clone this boundary while applying a worker ceiling to every operation stage.
+    #[must_use]
+    pub fn with_worker_ceiling(&self, max_workers: usize) -> Self {
+        let ceiling = max_workers.max(1);
+        Self {
+            cancellation: self.cancellation.clone(),
+            started_at: self.started_at,
+            deadline: self.deadline,
+            worker_ceiling: Some(
+                self.worker_ceiling
+                    .map_or(ceiling, |current| current.min(ceiling)),
+            ),
+            purpose_bytes: Arc::clone(&self.purpose_bytes),
+        }
+    }
+
     /// Clone this boundary while applying a maximum duration from its original start.
     #[must_use]
     pub fn with_timeout_ceiling(&self, timeout: Duration) -> Self {
@@ -223,6 +249,7 @@ impl IndexWorkControl {
                 self.deadline
                     .map_or(ceiling, |deadline| deadline.min(ceiling)),
             ),
+            worker_ceiling: self.worker_ceiling,
             purpose_bytes: Arc::clone(&self.purpose_bytes),
         }
     }
@@ -279,13 +306,25 @@ impl IndexWorkControl {
 mod tests {
     use super::*;
 
-    /// Clones must observe one cancellation flag and one absolute deadline.
+    /// Clones must observe one cancellation flag, deadline, and resource boundary.
     #[test]
     fn work_control_shares_cancellation_and_deadline() {
         let cancellation = IndexCancellation::new();
         let control = IndexWorkControl::new(cancellation.clone(), None);
         let worker = control.clone();
         assert_eq!(worker.started_at(), control.started_at());
+        assert_eq!(worker.worker_ceiling(), None);
+
+        let worker_bounded = worker.with_worker_ceiling(4);
+        let tighter_worker_bound = worker_bounded.with_worker_ceiling(2);
+        assert_eq!(worker_bounded.worker_ceiling(), Some(4));
+        assert_eq!(tighter_worker_bound.worker_ceiling(), Some(2));
+        assert_eq!(
+            tighter_worker_bound
+                .with_timeout_ceiling(Duration::from_secs(1))
+                .worker_ceiling(),
+            Some(2)
+        );
         cancellation.cancel();
         assert_eq!(
             worker.check(IndexWorkStage::SourceHash),
@@ -294,7 +333,7 @@ mod tests {
             })
         );
 
-        let bounded = worker.with_timeout_ceiling(Duration::from_secs(1));
+        let bounded = tighter_worker_bound.with_timeout_ceiling(Duration::from_secs(1));
         assert_eq!(bounded.started_at(), worker.started_at());
         assert!(bounded.deadline().is_some());
         assert_eq!(control.consume_purpose_bytes(8, 3), Ok(3));

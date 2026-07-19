@@ -82,7 +82,7 @@ const MAX_INCREMENTAL_CHANGED_PATHS: usize = 100_000;
 /// Maximum source bytes accepted by one incremental watcher publication.
 const MAX_INCREMENTAL_SOURCE_BYTES: u64 = 1024 * 1024 * 1024;
 /// Maximum indexing workers regardless of a larger caller request.
-const INDEX_WORKER_SAFE_CEILING: usize = 32;
+pub(crate) const INDEX_WORKER_SAFE_CEILING: usize = 32;
 /// Chunk size used by cancellation-aware bounded source reads.
 const CONTROLLED_SOURCE_READ_BUFFER_BYTES: usize = 8_192;
 /// Maximum aggregate authored-purpose bytes inspected by one publication.
@@ -3195,6 +3195,17 @@ impl SymbolBuildOptions {
         }
     }
 
+    /// Apply a worker ceiling without weakening a tighter caller limit.
+    #[must_use]
+    pub(crate) fn with_worker_ceiling(mut self, max_workers: usize) -> Self {
+        let ceiling = max_workers.max(1);
+        self.max_workers = Some(
+            self.max_workers
+                .map_or(ceiling, |workers| workers.min(ceiling)),
+        );
+        self
+    }
+
     /// Return the worker count that will be reported.
     pub(crate) fn reported_workers(self) -> usize {
         self.effective_workers()
@@ -3240,6 +3251,7 @@ impl SymbolPublicationLimits {
 pub(crate) fn index_work_control(options: &SymbolBuildOptions) -> IndexWorkControl {
     IndexWorkControl::new(IndexCancellation::new(), options.timeout)
         .with_timeout_ceiling(DEFAULT_INDEX_WORK_TIMEOUT)
+        .with_worker_ceiling(options.effective_workers())
 }
 
 /// Create a bounded work boundary for runtime paths without symbol options.

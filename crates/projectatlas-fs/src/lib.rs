@@ -165,6 +165,14 @@ impl Default for ScanLimits {
     }
 }
 
+/// Apply the operation-owned worker ceiling to the scan-specific limits.
+fn effective_scan_workers(limits: ScanLimits, control: &IndexWorkControl) -> usize {
+    let workers = limits.effective_workers();
+    control
+        .worker_ceiling()
+        .map_or(workers, |ceiling| workers.min(ceiling))
+}
+
 /// Shared counters and controls for one repository scan.
 #[derive(Debug)]
 struct ScanBudget {
@@ -274,7 +282,7 @@ pub fn scan_repo_controlled(
         .git_ignore(true)
         .git_exclude(true)
         .require_git(false);
-    let effective_workers = limits.effective_workers();
+    let effective_workers = effective_scan_workers(limits, control);
     if effective_workers == 0 {
         return Err(IndexWorkFailure::resource_limit(
             IndexWorkStage::RepositoryTraversal,
@@ -863,6 +871,14 @@ mod tests {
         require(
             bounded_workers == host_workers.min(SCAN_WORKER_SAFE_CEILING),
             "effective workers did not honor host availability and the safety cap",
+        )?;
+        let operation_bounded_workers = effective_scan_workers(
+            ScanLimits::new(8, 64, usize::MAX),
+            &control.with_worker_ceiling(1),
+        );
+        require(
+            operation_bounded_workers == 1,
+            "operation-owned worker ceiling did not reach the repository scanner",
         )?;
 
         let worker_result = scan_repo_controlled(
