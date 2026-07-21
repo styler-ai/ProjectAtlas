@@ -29,6 +29,7 @@ using System.IO;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -56,6 +57,7 @@ namespace ProjectAtlas.Release
         private const uint ExtendedStartupInfoPresent = 0x00080000;
         private const uint WaitObject0 = 0x00000000;
         private const uint WaitTimeout = 0x00000102;
+        private const uint AdmissionCleanupWaitMilliseconds = 5000;
         private const uint JobObjectExtendedLimitInformation = 9;
         private const uint JobObjectLimitKillOnJobClose = 0x00002000;
         private static readonly IntPtr ProcThreadAttributeSecurityCapabilities = new IntPtr(0x00020009);
@@ -185,6 +187,20 @@ namespace ProjectAtlas.Release
             internal List<string> ReadWriteRoots { get; private set; }
             internal List<string> ExecuteFiles { get; private set; }
             internal Dictionary<string, string> Environment { get; private set; }
+        }
+
+        private enum AdmissionScenario
+        {
+            Normal,
+            FailBeforeJobAssignment
+        }
+
+        private sealed class AdmissionReceipt
+        {
+            internal int ProcessId { get; set; }
+            internal bool TerminationAttempted { get; set; }
+            internal uint WaitResult { get; set; }
+            internal bool Reaped { get; set; }
         }
 
         private sealed class Profile : IDisposable
@@ -522,6 +538,14 @@ namespace ProjectAtlas.Release
 
         private static int LaunchContained(LaunchConfiguration configuration)
         {
+            return LaunchContained(configuration, AdmissionScenario.Normal, null);
+        }
+
+        private static int LaunchContained(
+            LaunchConfiguration configuration,
+            AdmissionScenario admissionScenario,
+            AdmissionReceipt admissionReceipt)
+        {
             ValidateConfiguration(configuration);
             string executable = CanonicalFile(configuration.Executable, "executable");
             List<string> readOnlyRoots = CanonicalRoots(configuration.ReadOnlyRoots, "read-root");
@@ -582,7 +606,9 @@ namespace ProjectAtlas.Release
                     configuration.Arguments.ToArray(),
                     workingDirectory,
                     environment,
-                    timeoutMilliseconds);
+                    timeoutMilliseconds,
+                    admissionScenario,
+                    admissionReceipt);
             }
             finally
             {
@@ -1111,13 +1137,70 @@ namespace ProjectAtlas.Release
             return restored;
         }
 
+        private static uint TerminateAndWaitProcess(
+            IntPtr process,
+            uint exitCode,
+            string stage,
+            AdmissionReceipt receipt)
+        {
+            if (receipt != null)
+            {
+                receipt.TerminationAttempted = true;
+            }
+            if (!TerminateProcess(process, exitCode))
+            {
+                int terminationError = Marshal.GetLastWin32Error();
+                uint completed = WaitForSingleObject(process, 0);
+                if (completed != WaitObject0)
+                {
+                    throw Win32Failure("terminate-" + stage, terminationError);
+                }
+            }
+            uint wait = WaitForSingleObject(process, AdmissionCleanupWaitMilliseconds);
+            if (receipt != null)
+            {
+                receipt.WaitResult = wait;
+                receipt.Reaped = wait == WaitObject0;
+            }
+            if (wait != WaitObject0)
+            {
+                throw new ContainmentFailure("reap-" + stage);
+            }
+            return wait;
+        }
+
+        private static uint TerminateJobAndWaitProcess(
+            IntPtr job,
+            IntPtr process,
+            uint exitCode,
+            string stage)
+        {
+            if (!TerminateJobObject(job, exitCode))
+            {
+                int terminationError = Marshal.GetLastWin32Error();
+                uint completed = WaitForSingleObject(process, 0);
+                if (completed != WaitObject0)
+                {
+                    throw Win32Failure("terminate-" + stage, terminationError);
+                }
+            }
+            uint wait = WaitForSingleObject(process, AdmissionCleanupWaitMilliseconds);
+            if (wait != WaitObject0)
+            {
+                throw new ContainmentFailure("reap-" + stage);
+            }
+            return wait;
+        }
+
         private static int LaunchCore(
             string profileName,
             string applicationName,
             string[] arguments,
             string currentDirectory,
             IDictionary<string, string> environment,
-            uint timeoutMilliseconds)
+            uint timeoutMilliseconds,
+            AdmissionScenario admissionScenario,
+            AdmissionReceipt admissionReceipt)
         {
             IntPtr sid = IntPtr.Zero;
             IntPtr attributeList = IntPtr.Zero;
@@ -1126,6 +1209,11 @@ namespace ProjectAtlas.Release
             IntPtr job = IntPtr.Zero;
             ProcessInformation process = new ProcessInformation();
             bool attributeListInitialized = false;
+            bool assignedToJob = false;
+            bool processReaped = false;
+            Exception operationFailure = null;
+            ContainmentFailure processCleanupFailure = null;
+            int operationResult = FailureExitCode;
 
             try
             {
@@ -1185,17 +1273,26 @@ namespace ProjectAtlas.Release
                 {
                     throw Win32Failure("create-contained-process");
                 }
+                if (admissionReceipt != null)
+                {
+                    admissionReceipt.ProcessId = checked((int)process.ProcessId);
+                }
+                if (admissionScenario == AdmissionScenario.FailBeforeJobAssignment)
+                {
+                    throw new ContainmentFailure("self-test-before-job-assignment");
+                }
                 if (!ProcessIsAppContainer(process.Process))
                 {
-                    TerminateProcess(process.Process, FailureExitCode);
                     throw new ContainmentFailure("verify-contained-token");
                 }
 
                 job = CreateJobObject(IntPtr.Zero, null);
                 if (job == IntPtr.Zero)
                 {
-                    TerminateProcess(process.Process, FailureExitCode);
-                    throw Win32Failure("create-containment-job");
+                    ContainmentFailure createJobFailure = Win32Failure(
+                        "create-containment-job",
+                        Marshal.GetLastWin32Error());
+                    throw createJobFailure;
                 }
                 JobObjectExtendedLimitInformationValue jobInformation = new JobObjectExtendedLimitInformationValue();
                 jobInformation.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
@@ -1205,59 +1302,107 @@ namespace ProjectAtlas.Release
                     ref jobInformation,
                     (uint)Marshal.SizeOf(typeof(JobObjectExtendedLimitInformationValue))))
                 {
-                    TerminateProcess(process.Process, FailureExitCode);
-                    throw Win32Failure("configure-containment-job");
+                    ContainmentFailure configureJobFailure = Win32Failure(
+                        "configure-containment-job",
+                        Marshal.GetLastWin32Error());
+                    throw configureJobFailure;
                 }
                 if (!AssignProcessToJobObject(job, process.Process))
                 {
-                    TerminateProcess(process.Process, FailureExitCode);
-                    throw Win32Failure("assign-containment-job");
+                    ContainmentFailure assignJobFailure = Win32Failure(
+                        "assign-containment-job",
+                        Marshal.GetLastWin32Error());
+                    throw assignJobFailure;
                 }
+                assignedToJob = true;
                 if (ResumeThread(process.Thread) == UInt32.MaxValue)
                 {
-                    TerminateJobObject(job, FailureExitCode);
-                    throw Win32Failure("resume-contained-process");
+                    ContainmentFailure resumeFailure = Win32Failure(
+                        "resume-contained-process",
+                        Marshal.GetLastWin32Error());
+                    throw resumeFailure;
                 }
 
                 uint wait = WaitForSingleObject(process.Process, timeoutMilliseconds);
                 if (wait == WaitTimeout)
                 {
-                    if (!TerminateJobObject(job, TimeoutExitCode))
+                    TerminateJobAndWaitProcess(
+                        job,
+                        process.Process,
+                        TimeoutExitCode,
+                        "timed-out-process-tree");
+                    processReaped = true;
+                    operationResult = TimeoutExitCode;
+                }
+                else
+                {
+                    if (wait != WaitObject0)
                     {
-                        throw Win32Failure("terminate-timed-out-process-tree");
+                        ContainmentFailure waitFailure = Win32Failure(
+                            "wait-contained-process",
+                            Marshal.GetLastWin32Error());
+                        throw waitFailure;
                     }
-                    WaitForSingleObject(process.Process, 5000);
-                    return TimeoutExitCode;
+                    processReaped = true;
+                    uint exitCode;
+                    if (!GetExitCodeProcess(process.Process, out exitCode))
+                    {
+                        throw Win32Failure("read-contained-exit-code");
+                    }
+                    operationResult = unchecked((int)exitCode);
                 }
-                if (wait != WaitObject0)
-                {
-                    TerminateJobObject(job, FailureExitCode);
-                    throw Win32Failure("wait-contained-process");
-                }
-                uint exitCode;
-                if (!GetExitCodeProcess(process.Process, out exitCode))
-                {
-                    throw Win32Failure("read-contained-exit-code");
-                }
-                return unchecked((int)exitCode);
+            }
+            catch (Exception failure)
+            {
+                operationFailure = failure;
             }
             finally
             {
-                if (job != IntPtr.Zero)
+                try
                 {
-                    CloseHandle(job);
+                    if (process.Process != IntPtr.Zero && !processReaped)
+                    {
+                        if (assignedToJob)
+                        {
+                            TerminateJobAndWaitProcess(
+                                job,
+                                process.Process,
+                                FailureExitCode,
+                                "contained-process-cleanup");
+                        }
+                        else
+                        {
+                            TerminateAndWaitProcess(
+                                process.Process,
+                                FailureExitCode,
+                                "unassigned-process-cleanup",
+                                admissionReceipt);
+                        }
+                    }
                 }
-                else if (process.Process != IntPtr.Zero)
+                catch (ContainmentFailure failure)
                 {
-                    TerminateProcess(process.Process, FailureExitCode);
+                    processCleanupFailure = failure;
                 }
-                if (process.Thread != IntPtr.Zero)
+                catch
                 {
-                    CloseHandle(process.Thread);
+                    processCleanupFailure = new ContainmentFailure(
+                        "unhandled-process-cleanup");
                 }
-                if (process.Process != IntPtr.Zero)
+                finally
                 {
-                    CloseHandle(process.Process);
+                    if (job != IntPtr.Zero)
+                    {
+                        CloseHandle(job);
+                    }
+                    if (process.Thread != IntPtr.Zero)
+                    {
+                        CloseHandle(process.Thread);
+                    }
+                    if (process.Process != IntPtr.Zero)
+                    {
+                        CloseHandle(process.Process);
+                    }
                 }
                 if (environmentBlock != IntPtr.Zero)
                 {
@@ -1280,6 +1425,19 @@ namespace ProjectAtlas.Release
                     FreeSid(sid);
                 }
             }
+            if (operationFailure != null)
+            {
+                if (processCleanupFailure != null)
+                {
+                    throw ComposeLaunchFailures(operationFailure, processCleanupFailure);
+                }
+                ExceptionDispatchInfo.Capture(operationFailure).Throw();
+            }
+            if (processCleanupFailure != null)
+            {
+                throw processCleanupFailure;
+            }
+            return operationResult;
         }
 
         private static bool ProcessIsAppContainer(IntPtr process)
@@ -1453,6 +1611,22 @@ namespace ProjectAtlas.Release
 
         private static void RunSelfTest()
         {
+            ContainmentFailure capturedOperation = Win32Failure(
+                "captured-operation",
+                5);
+            ContainmentFailure capturedCleanup = new ContainmentFailure(
+                "captured-cleanup",
+                "win32=6");
+            ContainmentFailure combinedFailure = ComposeLaunchFailures(
+                capturedOperation,
+                capturedCleanup);
+            if (combinedFailure.Stage !=
+                    "captured-operation-with-cleanup-captured-cleanup" ||
+                combinedFailure.Code !=
+                    "operation=win32=5;cleanup=win32=6")
+            {
+                throw new ContainmentFailure("failure-composition-self-test");
+            }
             string temporaryBase = Path.GetFullPath(Path.GetTempPath()).TrimEnd(
                 Path.DirectorySeparatorChar,
                 Path.AltDirectorySeparatorChar);
@@ -1568,6 +1742,44 @@ namespace ProjectAtlas.Release
                     throw new ContainmentFailure(
                         "dual-principal-canary",
                         "exit=" + dualPrincipalExit.ToString(CultureInfo.InvariantCulture));
+                }
+
+                LaunchConfiguration failedAdmission = new LaunchConfiguration();
+                failedAdmission.Executable = canaryExecutable;
+                failedAdmission.WorkingDirectory = writeRoot;
+                failedAdmission.TempDirectory = writeRoot;
+                failedAdmission.TimeoutSeconds = 30;
+                failedAdmission.ReadOnlyRoots.Add(readRoot);
+                failedAdmission.ReadWriteRoots.Add(writeRoot);
+                failedAdmission.ExecuteFiles.Add(canaryExecutable);
+                failedAdmission.Arguments.AddRange(new string[] { "canary", "sleep", "5000" });
+                AdmissionReceipt failedAdmissionReceipt = new AdmissionReceipt();
+                RequireContainmentFailure(
+                    delegate
+                    {
+                        LaunchContained(
+                            failedAdmission,
+                            AdmissionScenario.FailBeforeJobAssignment,
+                            failedAdmissionReceipt);
+                    },
+                    "self-test-before-job-assignment");
+                if (failedAdmissionReceipt.ProcessId <= 0
+                    || !failedAdmissionReceipt.TerminationAttempted
+                    || failedAdmissionReceipt.WaitResult != WaitObject0
+                    || !failedAdmissionReceipt.Reaped)
+                {
+                    throw new ContainmentFailure("unreaped-failed-admission");
+                }
+                try
+                {
+                    using (Process unexpectedProcess = Process.GetProcessById(
+                        failedAdmissionReceipt.ProcessId))
+                    {
+                        throw new ContainmentFailure("failed-admission-process-survived");
+                    }
+                }
+                catch (ArgumentException)
+                {
                 }
 
                 LaunchConfiguration timeout = new LaunchConfiguration();
@@ -2006,9 +2218,34 @@ namespace ProjectAtlas.Release
 
         private static ContainmentFailure Win32Failure(string stage)
         {
+            return Win32Failure(stage, Marshal.GetLastWin32Error());
+        }
+
+        private static ContainmentFailure Win32Failure(string stage, int error)
+        {
             return new ContainmentFailure(
                 stage,
-                "win32=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+                "win32=" + error.ToString(CultureInfo.InvariantCulture));
+        }
+
+        private static ContainmentFailure ComposeLaunchFailures(
+            Exception operationFailure,
+            ContainmentFailure cleanupFailure)
+        {
+            ContainmentFailure containedOperation = operationFailure as ContainmentFailure;
+            string operationStage = containedOperation != null
+                ? containedOperation.Stage
+                : "unhandled-containment-error";
+            string operationCode = containedOperation != null &&
+                !String.IsNullOrEmpty(containedOperation.Code)
+                    ? containedOperation.Code
+                    : "none";
+            string cleanupCode = !String.IsNullOrEmpty(cleanupFailure.Code)
+                ? cleanupFailure.Code
+                : "none";
+            return new ContainmentFailure(
+                operationStage + "-with-cleanup-" + cleanupFailure.Stage,
+                "operation=" + operationCode + ";cleanup=" + cleanupCode);
         }
 
         private static ContainmentFailure HResultFailure(string stage, int result)
