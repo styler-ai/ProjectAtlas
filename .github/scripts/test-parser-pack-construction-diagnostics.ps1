@@ -87,6 +87,36 @@ try {
             [ref]$wrapperParseErrors
         )
         Require ($wrapperParseErrors.Count -eq 0) "Windows construction wrapper did not parse."
+        $nativeSourceAssignments = @($wrapperAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    $node.Left.Extent.Text -eq '$nativeSource'
+            },
+            $true
+        ))
+        Require ($nativeSourceAssignments.Count -eq 1) "Expected one native adapter source assignment."
+        Invoke-Expression $nativeSourceAssignments[0].Extent.Text
+        if (-not ('ProjectAtlasConstructionProcess' -as [type])) {
+            Add-Type -TypeDefinition $nativeSource -Language CSharp
+        }
+
+        $probeSourceAssignments = @($wrapperAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    $node.Left.Extent.Text -eq '$probeSource'
+            },
+            $true
+        ))
+        Require ($probeSourceAssignments.Count -eq 1) "Expected one boundary probe source assignment."
+        Invoke-Expression $probeSourceAssignments[0].Extent.Text
+        Require `
+            ($probeSource.Contains('ReadToEndAsync()') -and
+                $probeSource.Contains('$expectedCargoMakeflags') -and
+                -not $probeSource.Contains('StandardOutput.ReadToEnd()')) `
+            "Construction boundary probe did not drain both streams asynchronously or verify jobserver transport."
+
         $cleanupDefinitions = @($wrapperAst.FindAll(
             {
                 param($node)
@@ -150,6 +180,11 @@ try {
         $jobserver = New-ConstructionJobserver -Sid $currentSid -Name $jobserverName
         $openedJobserver = $null
         try {
+            Require `
+                ([ProjectAtlasConstructionProcess]::HasMediumMandatoryLabel(
+                    $jobserver.SafeWaitHandle
+                )) `
+                "Construction jobserver did not retain its medium mandatory label."
             $openedJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(
                 $jobserverName,
                 $jobserverRights

@@ -613,6 +613,7 @@ $nativeSource = @'
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
+using Microsoft.Win32.SafeHandles;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
@@ -630,6 +631,8 @@ public static class ProjectAtlasConstructionProcess
     private const uint WindowStationAllAccess = 0x000F037F;
     private const uint DesktopAllAccess = 0x000F01FF;
     private const uint SddlRevision1 = 1;
+    private const int SeKernelObject = 6;
+    private const uint LabelSecurityInformation = 0x00000010;
 
     public static uint LastTotalProcesses { get; private set; }
 
@@ -746,6 +749,44 @@ public static class ProjectAtlasConstructionProcess
         out IntPtr securityDescriptor,
         IntPtr securityDescriptorSize);
 
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetSecurityDescriptorSacl(
+        IntPtr securityDescriptor,
+        [MarshalAs(UnmanagedType.Bool)] out bool saclPresent,
+        out IntPtr sacl,
+        [MarshalAs(UnmanagedType.Bool)] out bool saclDefaulted);
+
+    [DllImport("advapi32.dll")]
+    private static extern uint SetSecurityInfo(
+        SafeWaitHandle handle,
+        int objectType,
+        uint securityInfo,
+        IntPtr owner,
+        IntPtr group,
+        IntPtr dacl,
+        IntPtr sacl);
+
+    [DllImport("advapi32.dll")]
+    private static extern uint GetSecurityInfo(
+        SafeWaitHandle handle,
+        int objectType,
+        uint securityInfo,
+        IntPtr owner,
+        IntPtr group,
+        IntPtr dacl,
+        out IntPtr sacl,
+        out IntPtr securityDescriptor);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ConvertSecurityDescriptorToStringSecurityDescriptor(
+        IntPtr securityDescriptor,
+        uint stringSecurityDescriptorRevision,
+        uint securityInformation,
+        out IntPtr stringSecurityDescriptor,
+        IntPtr stringSecurityDescriptorLength);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr LocalFree(IntPtr memory);
 
@@ -829,6 +870,120 @@ public static class ProjectAtlasConstructionProcess
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr handle);
+
+    public static void SetMediumMandatoryLabel(SafeWaitHandle handle)
+    {
+        // The elevated runner creates this target-only semaphore for one medium-integrity builder.
+        if (handle == null || handle.IsInvalid || handle.IsClosed)
+        {
+            throw new ArgumentException("apply-jobserver-label", nameof(handle));
+        }
+
+        IntPtr securityDescriptor = IntPtr.Zero;
+        try
+        {
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
+                "S:(ML;;NW;;;ME)",
+                SddlRevision1,
+                out securityDescriptor,
+                IntPtr.Zero))
+            {
+                throw Failure("create-jobserver-label");
+            }
+
+            bool saclPresent;
+            bool saclDefaulted;
+            IntPtr sacl;
+            if (!GetSecurityDescriptorSacl(
+                securityDescriptor,
+                out saclPresent,
+                out sacl,
+                out saclDefaulted))
+            {
+                throw Failure("read-jobserver-label");
+            }
+            if (!saclPresent || sacl == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("read-jobserver-label");
+            }
+
+            uint result = SetSecurityInfo(
+                handle,
+                SeKernelObject,
+                LabelSecurityInformation,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                sacl);
+            if (result != 0)
+            {
+                throw new Win32Exception(unchecked((int)result), "apply-jobserver-label");
+            }
+        }
+        finally
+        {
+            if (securityDescriptor != IntPtr.Zero)
+            {
+                LocalFree(securityDescriptor);
+            }
+        }
+    }
+
+    public static bool HasMediumMandatoryLabel(SafeWaitHandle handle)
+    {
+        if (handle == null || handle.IsInvalid || handle.IsClosed)
+        {
+            throw new ArgumentException("read-jobserver-label", nameof(handle));
+        }
+
+        IntPtr securityDescriptor = IntPtr.Zero;
+        IntPtr stringSecurityDescriptor = IntPtr.Zero;
+        try
+        {
+            IntPtr sacl;
+            uint result = GetSecurityInfo(
+                handle,
+                SeKernelObject,
+                LabelSecurityInformation,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                out sacl,
+                out securityDescriptor);
+            if (result != 0)
+            {
+                throw new Win32Exception(unchecked((int)result), "read-jobserver-label");
+            }
+            if (sacl == IntPtr.Zero || securityDescriptor == IntPtr.Zero)
+            {
+                return false;
+            }
+            if (!ConvertSecurityDescriptorToStringSecurityDescriptor(
+                securityDescriptor,
+                SddlRevision1,
+                LabelSecurityInformation,
+                out stringSecurityDescriptor,
+                IntPtr.Zero))
+            {
+                throw Failure("format-jobserver-label");
+            }
+            return string.Equals(
+                Marshal.PtrToStringUni(stringSecurityDescriptor),
+                "S:(ML;;NW;;;ME)",
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (stringSecurityDescriptor != IntPtr.Zero)
+            {
+                LocalFree(stringSecurityDescriptor);
+            }
+            if (securityDescriptor != IntPtr.Zero)
+            {
+                LocalFree(securityDescriptor);
+            }
+        }
+    }
 
     public static int Run(
         string username,
@@ -1225,6 +1380,20 @@ function New-ConstructionJobserver {
         $semaphore.Dispose()
         throw "Construction jobserver name was not unique."
     }
+    try {
+        [ProjectAtlasConstructionProcess]::SetMediumMandatoryLabel(
+            $semaphore.SafeWaitHandle
+        )
+        if (-not [ProjectAtlasConstructionProcess]::HasMediumMandatoryLabel(
+            $semaphore.SafeWaitHandle
+        )) {
+            throw "Construction jobserver integrity label could not be verified."
+        }
+    }
+    catch {
+        $semaphore.Dispose()
+        throw "Construction jobserver integrity label could not be applied."
+    }
     return $semaphore
 }
 
@@ -1602,6 +1771,10 @@ foreach ($entry in [Environment]::GetEnvironmentVariables().Keys) {
         exit 23
     }
 }
+$expectedCargoMakeflags = "-j --jobserver-fds=$JobserverName --jobserver-auth=$JobserverName"
+if ([string]$env:CARGO_MAKEFLAGS -cne $expectedCargoMakeflags) {
+    exit 24
+}
 $jobserverRights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
     [System.Security.AccessControl.SemaphoreRights]::Modify
 $inheritedJobserver = $null
@@ -1612,17 +1785,17 @@ try {
     )
 }
 catch [System.Threading.WaitHandleCannotBeOpenedException] {
-    exit 24
-}
-catch [System.UnauthorizedAccessException] {
     exit 25
 }
-catch {
+catch [System.UnauthorizedAccessException] {
     exit 26
+}
+catch {
+    exit 27
 }
 try {
     if (-not $inheritedJobserver.WaitOne(0) -or $inheritedJobserver.Release() -ne 0) {
-        exit 27
+        exit 28
     }
 }
 finally {
@@ -1637,15 +1810,18 @@ $rustcStart.RedirectStandardError = $true
 $rustcStart.ArgumentList.Add("--print")
 $rustcStart.ArgumentList.Add("cfg")
 $rustc = [System.Diagnostics.Process]::Start($rustcStart)
-$rustcOutput = $rustc.StandardOutput.ReadToEnd()
-$rustcError = $rustc.StandardError.ReadToEnd()
+$rustcOutputTask = $rustc.StandardOutput.ReadToEndAsync()
+$rustcErrorTask = $rustc.StandardError.ReadToEndAsync()
 $rustc.WaitForExit()
-if ($rustc.ExitCode -ne 0 -or
-    -not [string]::IsNullOrEmpty($rustcError) -or
-    $rustcOutput -notmatch '(?m)^target_os="windows"$') {
-    exit 28
-}
+$rustcOutput = $rustcOutputTask.GetAwaiter().GetResult()
+$rustcError = $rustcErrorTask.GetAwaiter().GetResult()
+$rustcExitCode = $rustc.ExitCode
 $rustc.Dispose()
+if ($rustcExitCode -ne 0 -or
+    -not [string]::IsNullOrEmpty($rustcError) -or
+    $rustcOutput -notmatch '(?m)^target_os="windows"\r?$') {
+    exit 29
+}
 exit 0
 '@
     [System.IO.File]::WriteAllText($probePath, $probeSource, [System.Text.UTF8Encoding]::new($false))
@@ -1661,12 +1837,13 @@ exit 0
             21 { "identity" }
             22 { "descendant" }
             23 { "environment" }
-            24 { "jobserver-missing" }
-            25 { "jobserver-access" }
-            26 { "jobserver-open" }
-            27 { "jobserver-token" }
-            28 { "rustc-jobserver" }
-            default { "unexpected-exit" }
+            24 { "environment-jobserver" }
+            25 { "jobserver-missing" }
+            26 { "jobserver-access" }
+            27 { "jobserver-open" }
+            28 { "jobserver-token" }
+            29 { "rustc-jobserver" }
+            default { "unexpected-exit-$probeExitCode" }
         }
         throw "Construction principal boundary probe failed at $probeFailure."
     }
