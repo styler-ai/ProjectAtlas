@@ -263,6 +263,7 @@ jobs:
             "--read-root", $toolchainRoot,
             "--read-root", $vcTools,
             "--read-root", $windowsSdk,
+            "--execute-file", (Join-Path $toolchainBin "rustc.exe"),
             "--write-root", $output,
             "--write-root", $cargoHome,
             "--write-root", $containedTemp,

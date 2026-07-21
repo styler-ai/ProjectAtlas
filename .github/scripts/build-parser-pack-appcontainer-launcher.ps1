@@ -12,7 +12,10 @@ param(
 #   launcher.exe self-test
 #   launcher.exe launch --executable <absolute> --working-directory <absolute>
 #     --temp-directory <absolute> --timeout-seconds <1..86400>
-#     [--read-root <absolute>]... --write-root <absolute> [--environment NAME=VALUE]... -- [argv]...
+#     [--read-root <absolute>]... [--execute-file <absolute>]...
+#     --write-root <absolute> [--environment NAME=VALUE]... -- [argv]...
+# --execute-file adds direct RX access for a protected/non-inheriting executable; it is not an
+# executable allowlist because declared roots retain their normal inherited access contract.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -39,6 +42,7 @@ namespace ProjectAtlas.Release
         private const int FailureExitCode = 125;
         private const int TimeoutExitCode = 124;
         private const int MaximumRootCount = 64;
+        private const int MaximumExecuteFileCount = 16;
         private const int MaximumArgumentCount = 256;
         private const int MaximumEnvironmentCount = 128;
         private const int MaximumEnvironmentBytes = 65534;
@@ -167,6 +171,7 @@ namespace ProjectAtlas.Release
                 Arguments = new List<string>();
                 ReadOnlyRoots = new List<string>();
                 ReadWriteRoots = new List<string>();
+                ExecuteFiles = new List<string>();
                 Environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 TimeoutSeconds = 3600;
             }
@@ -178,6 +183,7 @@ namespace ProjectAtlas.Release
             internal List<string> Arguments { get; private set; }
             internal List<string> ReadOnlyRoots { get; private set; }
             internal List<string> ReadWriteRoots { get; private set; }
+            internal List<string> ExecuteFiles { get; private set; }
             internal Dictionary<string, string> Environment { get; private set; }
         }
 
@@ -205,14 +211,20 @@ namespace ProjectAtlas.Release
         private sealed class AclSnapshot
         {
             // Preserve the binary DACL for restoration and its effective contract for verification.
-            internal AclSnapshot(string path, byte[] descriptor, AclContract contract)
+            internal AclSnapshot(
+                string path,
+                bool isDirectory,
+                byte[] descriptor,
+                AclContract contract)
             {
                 Path = path;
+                IsDirectory = isDirectory;
                 Descriptor = descriptor;
                 Contract = contract;
             }
 
             internal string Path { get; private set; }
+            internal bool IsDirectory { get; private set; }
             internal byte[] Descriptor { get; private set; }
             internal AclContract Contract { get; private set; }
         }
@@ -458,6 +470,10 @@ namespace ProjectAtlas.Release
                 {
                     configuration.ReadWriteRoots.Add(value);
                 }
+                else if (String.Equals(option, "--execute-file", StringComparison.Ordinal))
+                {
+                    configuration.ExecuteFiles.Add(value);
+                }
                 else if (String.Equals(option, "--environment", StringComparison.Ordinal))
                 {
                     AddEnvironment(configuration.Environment, value);
@@ -510,15 +526,13 @@ namespace ProjectAtlas.Release
             string executable = CanonicalFile(configuration.Executable, "executable");
             List<string> readOnlyRoots = CanonicalRoots(configuration.ReadOnlyRoots, "read-root");
             List<string> readWriteRoots = CanonicalRoots(configuration.ReadWriteRoots, "write-root");
+            List<string> executeFiles = CanonicalFiles(configuration.ExecuteFiles, "execute-file");
             string workingDirectory = CanonicalDirectory(configuration.WorkingDirectory, "working-directory");
             string tempDirectory = CanonicalDirectory(configuration.TempDirectory, "temp-directory");
 
             List<string> allRoots = new List<string>(readOnlyRoots);
             allRoots.AddRange(readWriteRoots);
-            if (!AnyRootContains(allRoots, executable))
-            {
-                throw new ContainmentFailure("executable-outside-declared-roots");
-            }
+            RequireFileWithinRoots(allRoots, executable, "executable");
             if (!AnyRootContains(allRoots, workingDirectory))
             {
                 throw new ContainmentFailure("working-directory-outside-declared-roots");
@@ -526,6 +540,10 @@ namespace ProjectAtlas.Release
             if (!AnyRootContains(readWriteRoots, tempDirectory))
             {
                 throw new ContainmentFailure("temp-directory-outside-write-roots");
+            }
+            foreach (string executeFile in executeFiles)
+            {
+                RequireFileWithinRoots(allRoots, executeFile, "execute-file");
             }
 
             Dictionary<string, string> environment = BuildSafeEnvironment(configuration.Environment, tempDirectory);
@@ -547,6 +565,14 @@ namespace ProjectAtlas.Release
                 {
                     GrantRoot(root, profile.Sid, FileSystemRights.Modify | FileSystemRights.Synchronize, snapshots);
                 }
+                foreach (string executeFile in executeFiles)
+                {
+                    GrantFile(
+                        executeFile,
+                        profile.Sid,
+                        FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize,
+                        snapshots);
+                }
                 uint timeoutMilliseconds = checked((uint)configuration.TimeoutSeconds * 1000U);
                 return LaunchCore(
                     profile.Name,
@@ -558,7 +584,7 @@ namespace ProjectAtlas.Release
             }
             finally
             {
-                if (!RestoreRoots(snapshots))
+                if (!RestoreAcls(snapshots))
                 {
                     cleanupFailed = true;
                 }
@@ -609,6 +635,10 @@ namespace ProjectAtlas.Release
             {
                 throw new ContainmentFailure("environment-count-bound");
             }
+            if (configuration.ExecuteFiles.Count > MaximumExecuteFileCount)
+            {
+                throw new ContainmentFailure("execute-file-count-bound");
+            }
         }
 
         private static List<string> CanonicalRoots(List<string> roots, string role)
@@ -617,6 +647,22 @@ namespace ProjectAtlas.Release
             foreach (string root in roots)
             {
                 string canonical = CanonicalDirectory(root, role);
+                if (!unique.Add(canonical))
+                {
+                    throw new ContainmentFailure("duplicate-" + role);
+                }
+            }
+            List<string> result = new List<string>(unique);
+            result.Sort(PathComparer);
+            return result;
+        }
+
+        private static List<string> CanonicalFiles(List<string> files, string role)
+        {
+            HashSet<string> unique = new HashSet<string>(PathComparer);
+            foreach (string file in files)
+            {
+                string canonical = CanonicalFile(file, role);
                 if (!unique.Add(canonical))
                 {
                     throw new ContainmentFailure("duplicate-" + role);
@@ -669,13 +715,61 @@ namespace ProjectAtlas.Release
         {
             foreach (string root in roots)
             {
-                if (PathComparer.Equals(root, path)
-                    || path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                if (RootContains(root, path))
                 {
                     return true;
                 }
             }
             return false;
+        }
+
+        private static bool RootContains(string root, string path)
+        {
+            return PathComparer.Equals(root, path)
+                || path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void RequireFileWithinRoots(List<string> roots, string path, string role)
+        {
+            bool matchedRoot = false;
+            foreach (string root in roots)
+            {
+                if (!RootContains(root, path))
+                {
+                    continue;
+                }
+                matchedRoot = true;
+                if (!HasReparseDirectoryBetween(root, path))
+                {
+                    return;
+                }
+            }
+            if (!matchedRoot)
+            {
+                throw new ContainmentFailure(role + "-outside-declared-roots");
+            }
+            throw new ContainmentFailure("reparse-" + role + "-ancestor");
+        }
+
+        private static bool HasReparseDirectoryBetween(string root, string file)
+        {
+            DirectoryInfo directory = new FileInfo(file).Directory;
+            while (directory != null)
+            {
+                string current = directory.FullName.TrimEnd(
+                    Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar);
+                if (PathComparer.Equals(root, current))
+                {
+                    return false;
+                }
+                if ((directory.Attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    return true;
+                }
+                directory = directory.Parent;
+            }
+            throw new ContainmentFailure("file-root-walk");
         }
 
         private static Dictionary<string, string> BuildSafeEnvironment(
@@ -836,6 +930,18 @@ namespace ProjectAtlas.Release
         {
             DirectorySecurity security = new DirectoryInfo(path)
                 .GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
+            return CaptureAclContract(security, stage);
+        }
+
+        private static AclContract CaptureFileAclContract(string path, string stage)
+        {
+            FileSecurity security = new FileInfo(path)
+                .GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
+            return CaptureAclContract(security, stage);
+        }
+
+        private static AclContract CaptureAclContract(FileSystemSecurity security, string stage)
+        {
             if (!security.AreAccessRulesCanonical)
             {
                 throw new ContainmentFailure(stage + "-noncanonical-acl");
@@ -896,7 +1002,7 @@ namespace ProjectAtlas.Release
             DirectorySecurity security = directory.GetAccessControl(AccessControlSections.Access);
             byte[] descriptor = security.GetSecurityDescriptorBinaryForm();
             AclContract contract = CaptureAclContract(path, "grant-root-before");
-            snapshots.Add(new AclSnapshot(path, descriptor, contract));
+            snapshots.Add(new AclSnapshot(path, true, descriptor, contract));
             FileSystemAccessRule rule = new FileSystemAccessRule(
                 sid,
                 rights,
@@ -912,7 +1018,28 @@ namespace ProjectAtlas.Release
             directory.SetAccessControl(security);
         }
 
-        private static bool RestoreRoots(List<AclSnapshot> snapshots)
+        private static void GrantFile(
+            string path,
+            SecurityIdentifier sid,
+            FileSystemRights rights,
+            List<AclSnapshot> snapshots)
+        {
+            FileInfo file = new FileInfo(path);
+            FileSecurity security = file.GetAccessControl(AccessControlSections.Access);
+            byte[] descriptor = security.GetSecurityDescriptorBinaryForm();
+            AclContract contract = CaptureFileAclContract(path, "grant-file-before");
+            snapshots.Add(new AclSnapshot(path, false, descriptor, contract));
+            FileSystemAccessRule rule = new FileSystemAccessRule(sid, rights, AccessControlType.Allow);
+            bool modified;
+            security.ModifyAccessRule(AccessControlModification.Add, rule, out modified);
+            if (!modified)
+            {
+                throw new ContainmentFailure("grant-file-access");
+            }
+            file.SetAccessControl(security);
+        }
+
+        private static bool RestoreAcls(List<AclSnapshot> snapshots)
         {
             bool restored = true;
             for (int index = snapshots.Count - 1; index >= 0; index -= 1)
@@ -920,19 +1047,35 @@ namespace ProjectAtlas.Release
                 try
                 {
                     AclSnapshot snapshot = snapshots[index];
-                    DirectoryInfo directory = new DirectoryInfo(snapshot.Path);
-                    DirectorySecurity security = directory.GetAccessControl(AccessControlSections.Access);
-                    security.SetSecurityDescriptorBinaryForm(
-                        snapshot.Descriptor,
-                        AccessControlSections.Access);
-                    directory.SetAccessControl(security);
+                    AclContract actual;
+                    if (snapshot.IsDirectory)
+                    {
+                        DirectoryInfo directory = new DirectoryInfo(snapshot.Path);
+                        DirectorySecurity security = directory.GetAccessControl(AccessControlSections.Access);
+                        security.SetSecurityDescriptorBinaryForm(
+                            snapshot.Descriptor,
+                            AccessControlSections.Access);
+                        directory.SetAccessControl(security);
+                        actual = CaptureAclContract(snapshot.Path, "restore-root-after");
+                    }
+                    else
+                    {
+                        FileInfo file = new FileInfo(snapshot.Path);
+                        FileSecurity security = file.GetAccessControl(AccessControlSections.Access);
+                        security.SetSecurityDescriptorBinaryForm(
+                            snapshot.Descriptor,
+                            AccessControlSections.Access);
+                        file.SetAccessControl(security);
+                        actual = CaptureFileAclContract(snapshot.Path, "restore-file-after");
+                    }
                     string difference = snapshot.Contract.Difference(
-                        CaptureAclContract(snapshot.Path, "restore-root-after"));
+                        actual);
                     if (difference != null)
                     {
                         if (restored)
                         {
-                            WriteFailure("restore-root-" + difference, null);
+                            string role = snapshot.IsDirectory ? "root" : "execute-file";
+                            WriteFailure("restore-" + role + "-" + difference, null);
                         }
                         restored = false;
                     }
@@ -941,7 +1084,7 @@ namespace ProjectAtlas.Release
                 {
                     if (restored)
                     {
-                        WriteFailure("restore-root-operation", null);
+                        WriteFailure("restore-acl-operation", null);
                     }
                     restored = false;
                 }
@@ -1229,6 +1372,66 @@ namespace ProjectAtlas.Release
             return quoted.ToString();
         }
 
+        private static void RequireContainmentFailure(Action action, string expectedStage)
+        {
+            try
+            {
+                action();
+            }
+            catch (ContainmentFailure failure)
+            {
+                if (String.Equals(failure.Stage, expectedStage, StringComparison.Ordinal))
+                {
+                    return;
+                }
+                throw new ContainmentFailure("unexpected-self-test-failure", failure.Stage);
+            }
+            throw new ContainmentFailure("missing-self-test-failure", expectedStage);
+        }
+
+        private static void CreateJunction(string path, string target)
+        {
+            string command = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.System),
+                "cmd.exe");
+            ProcessStartInfo start = new ProcessStartInfo();
+            start.FileName = command;
+            start.Arguments = "/d /c mklink /J " + QuoteCommandPath(path) + " " + QuoteCommandPath(target);
+            start.UseShellExecute = false;
+            start.CreateNoWindow = true;
+            start.RedirectStandardOutput = true;
+            start.RedirectStandardError = true;
+            using (Process process = Process.Start(start))
+            {
+                if (process == null)
+                {
+                    throw new ContainmentFailure("create-junction-start");
+                }
+                if (!process.WaitForExit(30000))
+                {
+                    process.Kill();
+                    process.WaitForExit();
+                    throw new ContainmentFailure("create-junction-timeout");
+                }
+                if (process.ExitCode != 0 || !Directory.Exists(path))
+                {
+                    throw new ContainmentFailure("create-junction");
+                }
+            }
+        }
+
+        private static string QuoteCommandPath(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path)
+                || path.IndexOf('\0') >= 0
+                || path.IndexOf('"') >= 0
+                || path.IndexOf('%') >= 0)
+            {
+                throw new ContainmentFailure("invalid-junction-path");
+            }
+            return "\"" + path + "\"";
+        }
+
         private static void RunSelfTest()
         {
             string temporaryBase = Path.GetFullPath(Path.GetTempPath()).TrimEnd(
@@ -1256,6 +1459,19 @@ namespace ProjectAtlas.Release
                 string sourceExecutable = Process.GetCurrentProcess().MainModule.FileName;
                 string canaryExecutable = Path.Combine(readRoot, "projectatlas-appcontainer-canary.exe");
                 File.Copy(sourceExecutable, canaryExecutable, false);
+                SecurityIdentifier currentUser = WindowsIdentity.GetCurrent().User;
+                if (currentUser == null)
+                {
+                    throw new ContainmentFailure("self-test-current-user");
+                }
+                FileInfo canaryFile = new FileInfo(canaryExecutable);
+                FileSecurity canarySecurity = canaryFile.GetAccessControl(AccessControlSections.Access);
+                canarySecurity.SetAccessRuleProtection(true, false);
+                canarySecurity.AddAccessRule(new FileSystemAccessRule(
+                    currentUser,
+                    FileSystemRights.FullControl,
+                    AccessControlType.Allow));
+                canaryFile.SetAccessControl(canarySecurity);
                 string readMarker = Path.Combine(readRoot, "allowed-read.txt");
                 string writeMarker = Path.Combine(writeRoot, "allowed-write.txt");
                 string forbiddenMarker = Path.Combine(forbiddenRoot, "forbidden-read.txt");
@@ -1267,6 +1483,7 @@ namespace ProjectAtlas.Release
                 string dnsResolver = GetDnsResolver();
                 AclContract readAclBefore = CaptureAclContract(readRoot, "read-before");
                 AclContract writeAclBefore = CaptureAclContract(writeRoot, "write-before");
+                AclContract canaryAclBefore = CaptureFileAclContract(canaryExecutable, "canary-before");
 
                 string[] baselineArguments = new string[]
                 {
@@ -1289,6 +1506,7 @@ namespace ProjectAtlas.Release
                 contained.TimeoutSeconds = 30;
                 contained.ReadOnlyRoots.Add(readRoot);
                 contained.ReadWriteRoots.Add(writeRoot);
+                contained.ExecuteFiles.Add(canaryExecutable);
                 contained.Arguments.AddRange(new string[]
                 {
                     "canary", "contained", readMarker, writeMarker, forbiddenMarker, containedReport,
@@ -1311,6 +1529,7 @@ namespace ProjectAtlas.Release
                 timeout.TimeoutSeconds = 1;
                 timeout.ReadOnlyRoots.Add(readRoot);
                 timeout.ReadWriteRoots.Add(writeRoot);
+                timeout.ExecuteFiles.Add(canaryExecutable);
                 timeout.Arguments.AddRange(new string[] { "canary", "sleep", "5000" });
                 if (LaunchContained(timeout) != TimeoutExitCode)
                 {
@@ -1326,6 +1545,7 @@ namespace ProjectAtlas.Release
                 tree.TimeoutSeconds = 10;
                 tree.ReadOnlyRoots.Add(readRoot);
                 tree.ReadWriteRoots.Add(writeRoot);
+                tree.ExecuteFiles.Add(canaryExecutable);
                 tree.Arguments.AddRange(new string[]
                 {
                     "canary", "tree-parent", descendantStarted, descendantCompleted
@@ -1341,15 +1561,101 @@ namespace ProjectAtlas.Release
                 {
                     throw new ContainmentFailure("descendant-cleanup-canary");
                 }
+
+                LaunchConfiguration duplicateFile = new LaunchConfiguration();
+                duplicateFile.Executable = canaryExecutable;
+                duplicateFile.WorkingDirectory = writeRoot;
+                duplicateFile.TempDirectory = writeRoot;
+                duplicateFile.ReadOnlyRoots.Add(readRoot);
+                duplicateFile.ReadWriteRoots.Add(writeRoot);
+                duplicateFile.ExecuteFiles.Add(canaryExecutable);
+                duplicateFile.ExecuteFiles.Add(canaryExecutable);
+                RequireContainmentFailure(
+                    delegate { LaunchContained(duplicateFile); },
+                    "duplicate-execute-file");
+
+                LaunchConfiguration missingFile = new LaunchConfiguration();
+                missingFile.Executable = canaryExecutable;
+                missingFile.WorkingDirectory = writeRoot;
+                missingFile.TempDirectory = writeRoot;
+                missingFile.ReadOnlyRoots.Add(readRoot);
+                missingFile.ReadWriteRoots.Add(writeRoot);
+                missingFile.ExecuteFiles.Add(Path.Combine(readRoot, "missing.exe"));
+                RequireContainmentFailure(
+                    delegate { LaunchContained(missingFile); },
+                    "missing-or-reparse-execute-file");
+
+                LaunchConfiguration outsideFile = new LaunchConfiguration();
+                outsideFile.Executable = canaryExecutable;
+                outsideFile.WorkingDirectory = writeRoot;
+                outsideFile.TempDirectory = writeRoot;
+                outsideFile.ReadOnlyRoots.Add(readRoot);
+                outsideFile.ReadWriteRoots.Add(writeRoot);
+                outsideFile.ExecuteFiles.Add(sourceExecutable);
+                RequireContainmentFailure(
+                    delegate { LaunchContained(outsideFile); },
+                    "execute-file-outside-declared-roots");
+
+                string reparseTarget = Path.Combine(forbiddenRoot, "junction-target");
+                string reparseDirectory = Path.Combine(readRoot, "junction-to-outside");
+                string reparseExecutable = Path.Combine(reparseTarget, "outside-canary.exe");
+                Directory.CreateDirectory(reparseTarget);
+                File.Copy(sourceExecutable, reparseExecutable, false);
+                CreateJunction(reparseDirectory, reparseTarget);
+
+                LaunchConfiguration reparseFile = new LaunchConfiguration();
+                reparseFile.Executable = canaryExecutable;
+                reparseFile.WorkingDirectory = writeRoot;
+                reparseFile.TempDirectory = writeRoot;
+                reparseFile.ReadOnlyRoots.Add(readRoot);
+                reparseFile.ReadWriteRoots.Add(writeRoot);
+                reparseFile.ExecuteFiles.Add(Path.Combine(
+                    reparseDirectory,
+                    Path.GetFileName(reparseExecutable)));
+                RequireContainmentFailure(
+                    delegate { LaunchContained(reparseFile); },
+                    "reparse-execute-file-ancestor");
+
+                LaunchConfiguration reparsePrimary = new LaunchConfiguration();
+                reparsePrimary.Executable = Path.Combine(
+                    reparseDirectory,
+                    Path.GetFileName(reparseExecutable));
+                reparsePrimary.WorkingDirectory = writeRoot;
+                reparsePrimary.TempDirectory = writeRoot;
+                reparsePrimary.ReadOnlyRoots.Add(readRoot);
+                reparsePrimary.ReadWriteRoots.Add(writeRoot);
+                RequireContainmentFailure(
+                    delegate { LaunchContained(reparsePrimary); },
+                    "reparse-executable-ancestor");
+                Directory.Delete(reparseDirectory, false);
+
+                LaunchConfiguration tooManyFiles = new LaunchConfiguration();
+                tooManyFiles.Executable = canaryExecutable;
+                tooManyFiles.WorkingDirectory = writeRoot;
+                tooManyFiles.TempDirectory = writeRoot;
+                tooManyFiles.ReadOnlyRoots.Add(readRoot);
+                tooManyFiles.ReadWriteRoots.Add(writeRoot);
+                for (int index = 0; index <= MaximumExecuteFileCount; index += 1)
+                {
+                    tooManyFiles.ExecuteFiles.Add(canaryExecutable);
+                }
+                RequireContainmentFailure(
+                    delegate { LaunchContained(tooManyFiles); },
+                    "execute-file-count-bound");
+
                 AclContract readAclAfter = CaptureAclContract(readRoot, "read-after");
                 AclContract writeAclAfter = CaptureAclContract(writeRoot, "write-after");
+                AclContract canaryAclAfter = CaptureFileAclContract(canaryExecutable, "canary-after");
                 string readDifference = readAclBefore.Difference(readAclAfter);
                 string writeDifference = writeAclBefore.Difference(writeAclAfter);
-                if (readDifference != null || writeDifference != null)
+                string canaryDifference = canaryAclBefore.Difference(canaryAclAfter);
+                if (readDifference != null || writeDifference != null || canaryDifference != null)
                 {
-                    string difference = readDifference == null
-                        ? "write-" + writeDifference
-                        : "read-" + readDifference;
+                    string difference = readDifference != null
+                        ? "read-" + readDifference
+                        : writeDifference != null
+                            ? "write-" + writeDifference
+                            : "execute-file-" + canaryDifference;
                     throw new ContainmentFailure("acl-restoration-" + difference);
                 }
             }
