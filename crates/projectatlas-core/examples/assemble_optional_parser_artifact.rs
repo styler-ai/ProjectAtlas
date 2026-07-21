@@ -2,7 +2,10 @@
 
 use object::endian::LittleEndian as LE;
 use object::read::ReadRef as _;
-use object::read::elf::{ElfFile, FileHeader as ElfFileHeader, ProgramHeader as _};
+use object::read::elf::{
+    Dyn as _, ElfFile, ElfFile64, FileHeader as ElfFileHeader, ProgramHeader as _,
+    SectionHeader as _,
+};
 use object::read::macho::{MachHeader, MachOFile};
 use object::read::pe::{ImageNtHeaders, Import as PeImport, PeFile};
 use object::{Architecture, BinaryFormat, File as NativeObject, Object, ObjectKind, ObjectSymbol};
@@ -85,6 +88,14 @@ const MAX_EXPORTS_PER_WORKER: usize = 1_024;
 const MAX_DEFINED_SYMBOLS_PER_WORKER: usize = 262_144;
 /// Maximum UTF-8 bytes retained for one audited native name.
 const MAX_NATIVE_AUDIT_NAME_BYTES: usize = 4 * 1024;
+/// Maximum program headers admitted while normalizing the Linux worker.
+const MAX_LINUX_WORKER_PROGRAM_HEADERS: usize = 256;
+/// Maximum section headers admitted while normalizing the Linux worker.
+const MAX_LINUX_WORKER_SECTION_HEADERS: usize = 4_096;
+/// Maximum dynamic entries admitted while normalizing the Linux worker.
+const MAX_LINUX_WORKER_DYNAMIC_ENTRIES: usize = 4_096;
+/// Size of one ELF64 dynamic-table entry.
+const ELF64_DYNAMIC_ENTRY_BYTES: usize = 16;
 /// Hard wall-clock limit for the containment broker's build-contract probe.
 const CONTAINMENT_BROKER_BUILD_CONTRACT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Poll interval while waiting for the bounded containment-broker probe.
@@ -671,6 +682,16 @@ struct WorkerInspection {
     defined_symbols_sha256: Option<String>,
 }
 
+/// One validated in-place removal from the Linux worker dynamic table.
+struct LinuxDynamicEntryRemoval {
+    /// Complete dynamic-table file range.
+    dynamic: std::ops::Range<usize>,
+    /// Redundant `DT_NEEDED` entry.
+    entry_offset: usize,
+    /// First terminating `DT_NULL` entry.
+    terminator_offset: usize,
+}
+
 /// Bounded native facts retained for the exact runtime-containment broker.
 struct ContainmentBrokerInspection {
     /// Native binary format.
@@ -1165,7 +1186,8 @@ fn assemble(inputs: &Inputs) -> ToolResult<()> {
         read_json::<AssemblyContextWire>(&inputs.assembly_context, MAX_ASSEMBLY_CONTEXT_BYTES)?;
 
     let worker_path = canonical_worker_path(&inputs.worker)?;
-    let worker_bytes = read_bounded(&worker_path, MAX_WORKER_BYTES)?;
+    let mut worker_bytes = read_bounded(&worker_path, MAX_WORKER_BYTES)?;
+    normalize_worker_dependencies(&mut worker_bytes, inputs.platform)?;
     let worker_sha256 = sha256_bytes(&worker_bytes);
     let worker_inspection = inspect_worker(
         &worker_bytes,
@@ -2257,6 +2279,244 @@ fn inspect_native_library(
     })
 }
 
+/// Normalize target-specific worker dependencies before hashing and immutable audit.
+fn normalize_worker_dependencies(bytes: &mut [u8], platform: PackPlatform) -> ToolResult<()> {
+    if platform != PackPlatform::LinuxX86_64 {
+        return Ok(());
+    }
+    let removal = {
+        let object = NativeObject::parse(&*bytes)?;
+        validate_executable_identity(&object, platform, "parser worker")?;
+        validate_worker_program_interpreter(&object, platform)?;
+        let NativeObject::Elf64(file) = object else {
+            return Err(invalid("Linux parser worker is not an ELF64 image"));
+        };
+        linux_loader_dependency_removal(&file)?
+    };
+    apply_linux_dynamic_entry_removal(bytes, removal)
+}
+
+/// Locate at most one redundant loader dependency through the canonical ELF reader.
+///
+/// The reader does not edit executables, and an external binary editor would add an unbound host
+/// tool to offline construction. The returned plan changes one fixed-size dynamic entry in memory,
+/// preserves every file offset and the file length, and is followed by the immutable worker audit.
+fn linux_loader_dependency_removal(
+    file: &ElfFile64<'_>,
+) -> ToolResult<Option<LinuxDynamicEntryRemoval>> {
+    let endian = file.endian();
+    let program_headers = file.elf_program_headers();
+    if program_headers.is_empty() || program_headers.len() > MAX_LINUX_WORKER_PROGRAM_HEADERS {
+        return Err(invalid(
+            "parser worker program-header table has an unsupported bounded shape",
+        ));
+    }
+    let mut dynamic_segments = program_headers
+        .iter()
+        .filter(|header| header.p_type(endian) == object::elf::PT_DYNAMIC);
+    let dynamic_segment = dynamic_segments
+        .next()
+        .ok_or_else(|| invalid("parser worker has no ELF dynamic segment"))?;
+    if dynamic_segments.next().is_some() {
+        return Err(invalid(
+            "parser worker declares multiple ELF dynamic segments",
+        ));
+    }
+    let dynamic_offset = dynamic_segment.p_offset(endian);
+    let dynamic_address = dynamic_segment.p_vaddr(endian);
+    let dynamic_size = dynamic_segment.p_filesz(endian);
+    if dynamic_segment.p_memsz(endian) != dynamic_size {
+        return Err(invalid(
+            "parser worker ELF dynamic segment has different file and memory sizes",
+        ));
+    }
+    let dynamic_segment = bounded_file_range(
+        dynamic_offset,
+        dynamic_size,
+        file.data().len(),
+        "parser worker dynamic segment",
+    )?;
+
+    let sections = file.elf_section_table();
+    if sections.is_empty() || sections.len() > MAX_LINUX_WORKER_SECTION_HEADERS {
+        return Err(invalid(
+            "parser worker section-header table has an unsupported bounded shape",
+        ));
+    }
+    let mut dynamic_sections = sections
+        .iter()
+        .filter(|section| section.sh_type(endian) == object::elf::SHT_DYNAMIC);
+    let dynamic_section = dynamic_sections
+        .next()
+        .ok_or_else(|| invalid("parser worker has no ELF dynamic section"))?;
+    if dynamic_sections.next().is_some() {
+        return Err(invalid(
+            "parser worker declares multiple ELF dynamic sections",
+        ));
+    }
+    let dynamic = bounded_file_range(
+        dynamic_section.sh_offset(endian),
+        dynamic_section.sh_size(endian),
+        file.data().len(),
+        "parser worker dynamic section",
+    )?;
+    if dynamic != dynamic_segment {
+        return Err(invalid(
+            "parser worker ELF dynamic section and segment disagree",
+        ));
+    }
+    let section_flags = dynamic_section.sh_flags(endian);
+    if dynamic_section.sh_addr(endian) != dynamic_address
+        || dynamic_section.sh_entsize(endian) != u64::try_from(ELF64_DYNAMIC_ENTRY_BYTES)?
+        || section_flags & u64::from(object::elf::SHF_ALLOC) == 0
+        || section_flags & u64::from(object::elf::SHF_WRITE) == 0
+        || section_flags & u64::from(object::elf::SHF_EXECINSTR) != 0
+    {
+        return Err(invalid(
+            "parser worker ELF dynamic section has an unsupported load-image shape",
+        ));
+    }
+
+    let dynamic_file_end = dynamic_offset
+        .checked_add(dynamic_size)
+        .ok_or_else(|| invalid("parser worker dynamic file range overflowed"))?;
+    let dynamic_memory_end = dynamic_address
+        .checked_add(dynamic_size)
+        .ok_or_else(|| invalid("parser worker dynamic memory range overflowed"))?;
+    let mut load_owner_count = 0;
+    for header in program_headers {
+        if header.p_type(endian) != object::elf::PT_LOAD {
+            continue;
+        }
+        let load_offset = header.p_offset(endian);
+        let load_file_end = load_offset
+            .checked_add(header.p_filesz(endian))
+            .ok_or_else(|| invalid("parser worker load-segment file range overflowed"))?;
+        let load_address = header.p_vaddr(endian);
+        let load_memory_end = load_address
+            .checked_add(header.p_memsz(endian))
+            .ok_or_else(|| invalid("parser worker load-segment memory range overflowed"))?;
+        let flags = header.p_flags(endian);
+        if dynamic_offset < load_offset
+            || dynamic_file_end > load_file_end
+            || dynamic_memory_end > load_memory_end
+            || load_address.checked_add(dynamic_offset - load_offset) != Some(dynamic_address)
+            || flags & object::elf::PF_R == 0
+            || flags & object::elf::PF_W == 0
+            || flags & object::elf::PF_X != 0
+        {
+            continue;
+        }
+        load_owner_count += 1;
+    }
+    if load_owner_count != 1 {
+        return Err(invalid(
+            "parser worker ELF dynamic table is not owned by exactly one writable load segment",
+        ));
+    }
+
+    let table = file.elf_dynamic_table()?;
+    if table.is_empty()
+        || table.len() > MAX_LINUX_WORKER_DYNAMIC_ENTRIES
+        || dynamic.len() != table.len() * ELF64_DYNAMIC_ENTRY_BYTES
+    {
+        return Err(invalid(
+            "parser worker dynamic table has an unsupported bounded shape",
+        ));
+    }
+    let dynamics = table.dynamics();
+    let terminator_index = dynamics
+        .iter()
+        .position(|entry| entry.tag(endian) == object::elf::DT_NULL)
+        .ok_or_else(|| invalid("parser worker dynamic table has no DT_NULL terminator"))?;
+    let mut dependency_count = 0;
+    let mut loader_index = None;
+    for (index, entry) in dynamics[..terminator_index].iter().enumerate() {
+        if entry.tag(endian) != object::elf::DT_NEEDED {
+            continue;
+        }
+        dependency_count += 1;
+        if dependency_count > MAX_NATIVE_LIBRARIES_PER_LIBRARY {
+            return Err(invalid(
+                "parser worker native dependency count exceeds the audit bound",
+            ));
+        }
+        let dynamic = object::read::elf::Dynamic {
+            tag: object::elf::DT_NEEDED,
+            val: entry.val(endian),
+        };
+        let name = std::str::from_utf8(table.string(dynamic)?)?;
+        validate_native_audit_name(name, "parser worker native dependency")?;
+        if name != OPTIONAL_PARSER_PACK_LINUX_RUNTIME_LOADER_BASENAME {
+            continue;
+        }
+        if loader_index.replace(index).is_some() {
+            return Err(invalid(
+                "parser worker declares the Linux runtime loader more than once in DT_NEEDED",
+            ));
+        }
+    }
+    let Some(loader_index) = loader_index else {
+        return Ok(None);
+    };
+
+    let entry_offset = dynamic
+        .start
+        .checked_add(loader_index * ELF64_DYNAMIC_ENTRY_BYTES)
+        .ok_or_else(|| invalid("parser worker loader dependency offset overflowed"))?;
+    let terminator_offset = dynamic
+        .start
+        .checked_add(terminator_index * ELF64_DYNAMIC_ENTRY_BYTES)
+        .ok_or_else(|| invalid("parser worker dynamic terminator offset overflowed"))?;
+    Ok(Some(LinuxDynamicEntryRemoval {
+        dynamic,
+        entry_offset,
+        terminator_offset,
+    }))
+}
+
+/// Apply one prevalidated fixed-width dynamic-entry removal without changing layout.
+fn apply_linux_dynamic_entry_removal(
+    bytes: &mut [u8],
+    removal: Option<LinuxDynamicEntryRemoval>,
+) -> ToolResult<()> {
+    let Some(removal) = removal else {
+        return Ok(());
+    };
+    let shifted_start = removal
+        .entry_offset
+        .checked_add(ELF64_DYNAMIC_ENTRY_BYTES)
+        .ok_or_else(|| invalid("parser worker dynamic-entry offset overflowed"))?;
+    let shifted_end = removal
+        .terminator_offset
+        .checked_add(ELF64_DYNAMIC_ENTRY_BYTES)
+        .ok_or_else(|| invalid("parser worker dynamic terminator overflowed"))?;
+    if shifted_start > shifted_end || shifted_end > removal.dynamic.end {
+        return Err(invalid(
+            "parser worker loader dependency is outside the bounded dynamic table",
+        ));
+    }
+    bytes.copy_within(shifted_start..shifted_end, removal.entry_offset);
+    bytes[removal.terminator_offset..shifted_end].fill(0);
+    Ok(())
+}
+
+/// Resolve one bounded file range from 64-bit ELF offsets.
+fn bounded_file_range(
+    offset: u64,
+    size: u64,
+    file_length: usize,
+    role: &str,
+) -> ToolResult<std::ops::Range<usize>> {
+    let end = offset
+        .checked_add(size)
+        .ok_or_else(|| invalid(format!("{role} overflowed")))?;
+    if end > u64::try_from(file_length)? {
+        return Err(invalid(format!("{role} exceeds the worker bytes")));
+    }
+    Ok(usize::try_from(offset)?..usize::try_from(end)?)
+}
+
 /// Require the supplied parser worker to match its declared target.
 fn inspect_worker(
     bytes: &[u8],
@@ -3017,6 +3277,514 @@ fn invalid(message: impl Into<String>) -> Box<dyn Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FIXTURE_ELF_HEADER_BYTES: usize = 64;
+    const FIXTURE_PROGRAM_HEADER_BYTES: usize = 56;
+    const FIXTURE_SECTION_HEADER_BYTES: usize = 64;
+    const FIXTURE_PROGRAM_HEADERS_OFFSET: usize = 64;
+    const FIXTURE_DYNAMIC_OFFSET: usize = 0x140;
+    const FIXTURE_INTERPRETER_OFFSET: usize = 0x200;
+    const FIXTURE_STRINGS_OFFSET: usize = 0x240;
+    const FIXTURE_SECTION_HEADERS_OFFSET: usize = 0x300;
+    const FIXTURE_DYNAMIC_ADDRESS: u64 = 0x0050_0000;
+    const FIXTURE_STRINGS_ADDRESS: u64 = 0x0040_0000;
+    const FIXTURE_FILE_BYTES: usize = 0x400;
+
+    /// Build one bounded synthetic ELF64 worker with configurable loader duplication.
+    fn synthetic_linux_worker(loader_dependencies: usize, interpreter: &str) -> Vec<u8> {
+        let mut strings = vec![0];
+        let mut dependencies = Vec::new();
+        for name in ["libgcc_s.so.1", "libc.so.6"]
+            .into_iter()
+            .chain(std::iter::repeat_n(
+                OPTIONAL_PARSER_PACK_LINUX_RUNTIME_LOADER_BASENAME,
+                loader_dependencies,
+            ))
+            .chain(["libm.so.6", "libstdc++.so.6"])
+        {
+            let offset = u64::try_from(strings.len()).expect("bounded fixture string table");
+            strings.extend_from_slice(name.as_bytes());
+            strings.push(0);
+            dependencies.push(offset);
+        }
+        let dynamic_entries = 2 + dependencies.len() + 1;
+        let dynamic_bytes = dynamic_entries * ELF64_DYNAMIC_ENTRY_BYTES;
+        let interpreter_bytes = format!("{interpreter}\0").into_bytes();
+
+        let mut worker = vec![0; FIXTURE_FILE_BYTES];
+        worker[..4].copy_from_slice(b"\x7fELF");
+        worker[4] = object::elf::ELFCLASS64;
+        worker[5] = object::elf::ELFDATA2LSB;
+        worker[6] = object::elf::EV_CURRENT;
+        write_fixture_u16(&mut worker, 16, object::elf::ET_DYN);
+        write_fixture_u16(&mut worker, 18, object::elf::EM_X86_64);
+        write_fixture_u32(&mut worker, 20, u32::from(object::elf::EV_CURRENT));
+        write_fixture_u64(&mut worker, 24, 0x1000);
+        write_fixture_u64(
+            &mut worker,
+            32,
+            u64::try_from(FIXTURE_PROGRAM_HEADERS_OFFSET).expect("bounded fixture offset"),
+        );
+        write_fixture_u64(
+            &mut worker,
+            40,
+            u64::try_from(FIXTURE_SECTION_HEADERS_OFFSET).expect("bounded fixture section offset"),
+        );
+        write_fixture_u16(
+            &mut worker,
+            52,
+            u16::try_from(FIXTURE_ELF_HEADER_BYTES).expect("fixed ELF header size"),
+        );
+        write_fixture_u16(
+            &mut worker,
+            54,
+            u16::try_from(FIXTURE_PROGRAM_HEADER_BYTES).expect("fixed program-header size"),
+        );
+        write_fixture_u16(&mut worker, 56, 4);
+        write_fixture_u16(
+            &mut worker,
+            58,
+            u16::try_from(FIXTURE_SECTION_HEADER_BYTES).expect("fixed section-header size"),
+        );
+        write_fixture_u16(&mut worker, 60, 3);
+        write_fixture_u16(&mut worker, 62, 1);
+
+        write_fixture_program_header(
+            &mut worker,
+            0,
+            object::elf::PT_LOAD,
+            FIXTURE_STRINGS_OFFSET,
+            FIXTURE_STRINGS_ADDRESS,
+            strings.len(),
+        );
+        write_fixture_program_header(
+            &mut worker,
+            1,
+            object::elf::PT_LOAD,
+            FIXTURE_DYNAMIC_OFFSET,
+            FIXTURE_DYNAMIC_ADDRESS,
+            dynamic_bytes,
+        );
+        write_fixture_program_header(
+            &mut worker,
+            2,
+            object::elf::PT_DYNAMIC,
+            FIXTURE_DYNAMIC_OFFSET,
+            FIXTURE_DYNAMIC_ADDRESS,
+            dynamic_bytes,
+        );
+        write_fixture_program_header(
+            &mut worker,
+            3,
+            object::elf::PT_INTERP,
+            FIXTURE_INTERPRETER_OFFSET,
+            0x0060_0000,
+            interpreter_bytes.len(),
+        );
+        write_fixture_section_header(
+            &mut worker,
+            1,
+            object::elf::SHT_STRTAB,
+            FIXTURE_STRINGS_OFFSET,
+            FIXTURE_STRINGS_ADDRESS,
+            strings.len(),
+            0,
+            0,
+        );
+        write_fixture_section_header(
+            &mut worker,
+            2,
+            object::elf::SHT_DYNAMIC,
+            FIXTURE_DYNAMIC_OFFSET,
+            FIXTURE_DYNAMIC_ADDRESS,
+            dynamic_bytes,
+            1,
+            ELF64_DYNAMIC_ENTRY_BYTES,
+        );
+
+        write_fixture_dynamic_entry(
+            &mut worker,
+            FIXTURE_DYNAMIC_OFFSET,
+            object::elf::DT_STRTAB,
+            FIXTURE_STRINGS_ADDRESS,
+        );
+        write_fixture_dynamic_entry(
+            &mut worker,
+            FIXTURE_DYNAMIC_OFFSET + ELF64_DYNAMIC_ENTRY_BYTES,
+            object::elf::DT_STRSZ,
+            u64::try_from(strings.len()).expect("bounded fixture string size"),
+        );
+        for (index, string_offset) in dependencies.into_iter().enumerate() {
+            write_fixture_dynamic_entry(
+                &mut worker,
+                FIXTURE_DYNAMIC_OFFSET + (index + 2) * ELF64_DYNAMIC_ENTRY_BYTES,
+                object::elf::DT_NEEDED,
+                string_offset,
+            );
+        }
+        write_fixture_dynamic_entry(
+            &mut worker,
+            FIXTURE_DYNAMIC_OFFSET + (dynamic_entries - 1) * ELF64_DYNAMIC_ENTRY_BYTES,
+            object::elf::DT_NULL,
+            0,
+        );
+        worker[FIXTURE_INTERPRETER_OFFSET..FIXTURE_INTERPRETER_OFFSET + interpreter_bytes.len()]
+            .copy_from_slice(&interpreter_bytes);
+        worker[FIXTURE_STRINGS_OFFSET..FIXTURE_STRINGS_OFFSET + strings.len()]
+            .copy_from_slice(&strings);
+        worker
+    }
+
+    /// Write one synthetic ELF64 program header.
+    fn write_fixture_program_header(
+        bytes: &mut [u8],
+        index: usize,
+        kind: u32,
+        file_offset: usize,
+        virtual_address: u64,
+        file_size: usize,
+    ) {
+        let offset = FIXTURE_PROGRAM_HEADERS_OFFSET + index * FIXTURE_PROGRAM_HEADER_BYTES;
+        write_fixture_u32(bytes, offset, kind);
+        let flags = if kind == object::elf::PT_DYNAMIC
+            || (kind == object::elf::PT_LOAD && virtual_address == FIXTURE_DYNAMIC_ADDRESS)
+        {
+            object::elf::PF_R | object::elf::PF_W
+        } else {
+            object::elf::PF_R
+        };
+        write_fixture_u32(bytes, offset + 4, flags);
+        write_fixture_u64(
+            bytes,
+            offset + 8,
+            u64::try_from(file_offset).expect("bounded fixture file offset"),
+        );
+        write_fixture_u64(bytes, offset + 16, virtual_address);
+        write_fixture_u64(bytes, offset + 24, virtual_address);
+        write_fixture_u64(
+            bytes,
+            offset + 32,
+            u64::try_from(file_size).expect("bounded fixture segment size"),
+        );
+        write_fixture_u64(
+            bytes,
+            offset + 40,
+            u64::try_from(file_size).expect("bounded fixture memory size"),
+        );
+        write_fixture_u64(bytes, offset + 48, 8);
+    }
+
+    /// Write one synthetic ELF64 section header.
+    #[allow(clippy::too_many_arguments)]
+    fn write_fixture_section_header(
+        bytes: &mut [u8],
+        index: usize,
+        kind: u32,
+        file_offset: usize,
+        virtual_address: u64,
+        file_size: usize,
+        linked_section: u32,
+        entry_size: usize,
+    ) {
+        let offset = FIXTURE_SECTION_HEADERS_OFFSET + index * FIXTURE_SECTION_HEADER_BYTES;
+        write_fixture_u32(bytes, offset + 4, kind);
+        let flags = if kind == object::elf::SHT_DYNAMIC {
+            u64::from(object::elf::SHF_ALLOC | object::elf::SHF_WRITE)
+        } else {
+            0
+        };
+        write_fixture_u64(bytes, offset + 8, flags);
+        write_fixture_u64(bytes, offset + 16, virtual_address);
+        write_fixture_u64(
+            bytes,
+            offset + 24,
+            u64::try_from(file_offset).expect("bounded fixture section offset"),
+        );
+        write_fixture_u64(
+            bytes,
+            offset + 32,
+            u64::try_from(file_size).expect("bounded fixture section size"),
+        );
+        write_fixture_u32(bytes, offset + 40, linked_section);
+        write_fixture_u64(bytes, offset + 48, 8);
+        write_fixture_u64(
+            bytes,
+            offset + 56,
+            u64::try_from(entry_size).expect("bounded fixture entry size"),
+        );
+    }
+
+    /// Write one synthetic ELF64 dynamic-table entry.
+    fn write_fixture_dynamic_entry(bytes: &mut [u8], offset: usize, tag: i64, value: u64) {
+        bytes[offset..offset + 8].copy_from_slice(&tag.to_le_bytes());
+        write_fixture_u64(bytes, offset + 8, value);
+    }
+
+    /// Write one little-endian fixture scalar.
+    fn write_fixture_u16(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    /// Write one little-endian fixture scalar.
+    fn write_fixture_u32(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    /// Write one little-endian fixture scalar.
+    fn write_fixture_u64(bytes: &mut [u8], offset: usize, value: u64) {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    /// Require malformed fixture rejection before any byte changes.
+    fn assert_linux_normalization_rejected(role: &str, mut worker: Vec<u8>) {
+        let before = worker.clone();
+        assert!(
+            normalize_worker_dependencies(&mut worker, PackPlatform::LinuxX86_64).is_err(),
+            "{role} was accepted"
+        );
+        assert_eq!(worker, before, "{role} was mutated before rejection");
+    }
+
+    /// Swap two complete dynamic entries in a synthetic worker.
+    fn swap_fixture_dynamic_entries(worker: &mut [u8], left: usize, right: usize) {
+        let left = FIXTURE_DYNAMIC_OFFSET + left * ELF64_DYNAMIC_ENTRY_BYTES;
+        let right = FIXTURE_DYNAMIC_OFFSET + right * ELF64_DYNAMIC_ENTRY_BYTES;
+        for byte in 0..ELF64_DYNAMIC_ENTRY_BYTES {
+            worker.swap(left + byte, right + byte);
+        }
+    }
+
+    /// Return the exact direct dependencies retained after fixture normalization.
+    fn expected_fixture_dependencies() -> BTreeSet<String> {
+        BTreeSet::from([
+            "libc.so.6".to_owned(),
+            "libgcc_s.so.1".to_owned(),
+            "libm.so.6".to_owned(),
+            "libstdc++.so.6".to_owned(),
+        ])
+    }
+
+    /// Remove only the redundant loader entry without changing layout or other file bytes.
+    #[test]
+    fn linux_loader_dependency_normalization_is_layout_preserving() -> ToolResult<()> {
+        let mut worker = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
+        let before = worker.clone();
+        let dynamic = {
+            let object = NativeObject::parse(&*worker)?;
+            let NativeObject::Elf64(file) = object else {
+                return Err(invalid("synthetic Linux worker is not ELF64"));
+            };
+            linux_loader_dependency_removal(&file)?
+                .ok_or_else(|| invalid("synthetic worker has no loader dependency"))?
+                .dynamic
+        };
+        normalize_worker_dependencies(&mut worker, PackPlatform::LinuxX86_64)?;
+
+        assert_eq!(worker.len(), before.len());
+        assert_eq!(&worker[..dynamic.start], &before[..dynamic.start]);
+        assert_eq!(&worker[dynamic.end..], &before[dynamic.end..]);
+        let object = NativeObject::parse(&*worker)?;
+        let NativeObject::Elf64(file) = object else {
+            return Err(invalid("normalized Linux worker is not ELF64"));
+        };
+        let dependencies = elf_needed_libraries(&file)?;
+        assert_eq!(dependencies, expected_fixture_dependencies());
+        Ok(())
+    }
+
+    /// Accept an already-normalized worker without changing a byte.
+    #[test]
+    fn linux_loader_dependency_normalization_is_idempotent() -> ToolResult<()> {
+        let mut worker = synthetic_linux_worker(0, "/lib64/ld-linux-x86-64.so.2");
+        let before = worker.clone();
+        normalize_worker_dependencies(&mut worker, PackPlatform::LinuxX86_64)?;
+        assert_eq!(worker, before);
+        Ok(())
+    }
+
+    /// Fail closed before mutation for inconsistent ownership, bounds, and dynamic metadata.
+    #[test]
+    fn linux_loader_dependency_normalization_rejects_ambiguous_or_malformed_workers() {
+        assert_linux_normalization_rejected(
+            "duplicate loader",
+            synthetic_linux_worker(2, "/lib64/ld-linux-x86-64.so.2"),
+        );
+        assert_linux_normalization_rejected(
+            "wrong interpreter",
+            synthetic_linux_worker(1, "/lib64/other-loader.so"),
+        );
+        let mut truncated = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
+        truncated.truncate(80);
+        assert_linux_normalization_rejected("truncated worker", truncated);
+
+        let mut missing_segment = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
+        write_fixture_u32(
+            &mut missing_segment,
+            FIXTURE_PROGRAM_HEADERS_OFFSET + 2 * FIXTURE_PROGRAM_HEADER_BYTES,
+            object::elf::PT_NULL,
+        );
+        assert_linux_normalization_rejected("missing dynamic segment", missing_segment);
+
+        let mut duplicate_segment = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
+        write_fixture_u32(
+            &mut duplicate_segment,
+            FIXTURE_PROGRAM_HEADERS_OFFSET,
+            object::elf::PT_DYNAMIC,
+        );
+        assert_linux_normalization_rejected("duplicate dynamic segment", duplicate_segment);
+
+        let mut missing_section = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
+        write_fixture_u32(
+            &mut missing_section,
+            FIXTURE_SECTION_HEADERS_OFFSET + 2 * FIXTURE_SECTION_HEADER_BYTES + 4,
+            object::elf::SHT_NULL,
+        );
+        assert_linux_normalization_rejected("missing dynamic section", missing_section);
+
+        let mut duplicate_section = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
+        write_fixture_u32(
+            &mut duplicate_section,
+            FIXTURE_SECTION_HEADERS_OFFSET + FIXTURE_SECTION_HEADER_BYTES + 4,
+            object::elf::SHT_DYNAMIC,
+        );
+        assert_linux_normalization_rejected("duplicate dynamic section", duplicate_section);
+
+        let dynamic_section = FIXTURE_SECTION_HEADERS_OFFSET + 2 * FIXTURE_SECTION_HEADER_BYTES;
+        let dynamic_segment = FIXTURE_PROGRAM_HEADERS_OFFSET + 2 * FIXTURE_PROGRAM_HEADER_BYTES;
+        let dynamic_load = FIXTURE_PROGRAM_HEADERS_OFFSET + FIXTURE_PROGRAM_HEADER_BYTES;
+
+        let mut range_mismatch = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
+        write_fixture_u64(
+            &mut range_mismatch,
+            dynamic_section + 24,
+            u64::try_from(FIXTURE_DYNAMIC_OFFSET + ELF64_DYNAMIC_ENTRY_BYTES)
+                .expect("bounded fixture offset"),
+        );
+        assert_linux_normalization_rejected("dynamic file-range mismatch", range_mismatch);
+
+        let mut address_mismatch = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
+        write_fixture_u64(
+            &mut address_mismatch,
+            dynamic_section + 16,
+            FIXTURE_DYNAMIC_ADDRESS + 8,
+        );
+        assert_linux_normalization_rejected("dynamic address mismatch", address_mismatch);
+
+        let mut invalid_entry_size = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
+        write_fixture_u64(&mut invalid_entry_size, dynamic_section + 56, 8);
+        assert_linux_normalization_rejected("invalid dynamic entry size", invalid_entry_size);
+
+        let mut memory_size_mismatch = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
+        write_fixture_u64(&mut memory_size_mismatch, dynamic_segment + 40, 1);
+        assert_linux_normalization_rejected(
+            "dynamic file-memory size mismatch",
+            memory_size_mismatch,
+        );
+
+        let mut missing_load_owner = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
+        write_fixture_u32(&mut missing_load_owner, dynamic_load, object::elf::PT_NULL);
+        assert_linux_normalization_rejected("missing dynamic load owner", missing_load_owner);
+
+        let mut invalid_section_flags = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
+        write_fixture_u64(
+            &mut invalid_section_flags,
+            dynamic_section + 8,
+            u64::from(object::elf::SHF_ALLOC),
+        );
+        assert_linux_normalization_rejected("invalid dynamic section flags", invalid_section_flags);
+
+        let mut missing_terminator = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
+        write_fixture_dynamic_entry(
+            &mut missing_terminator,
+            FIXTURE_DYNAMIC_OFFSET + 7 * ELF64_DYNAMIC_ENTRY_BYTES,
+            object::elf::DT_DEBUG,
+            0,
+        );
+        assert_linux_normalization_rejected("missing dynamic terminator", missing_terminator);
+
+        let mut invalid_string = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
+        write_fixture_u64(
+            &mut invalid_string,
+            FIXTURE_DYNAMIC_OFFSET + 4 * ELF64_DYNAMIC_ENTRY_BYTES + 8,
+            u64::MAX,
+        );
+        assert_linux_normalization_rejected("invalid dependency string", invalid_string);
+
+        let mut excessive_program_headers =
+            synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
+        let program_headers = MAX_LINUX_WORKER_PROGRAM_HEADERS + 1;
+        excessive_program_headers.resize(
+            FIXTURE_PROGRAM_HEADERS_OFFSET + program_headers * FIXTURE_PROGRAM_HEADER_BYTES,
+            0,
+        );
+        write_fixture_u16(
+            &mut excessive_program_headers,
+            56,
+            u16::try_from(program_headers).expect("bounded program-header fixture"),
+        );
+        assert_linux_normalization_rejected("excessive program headers", excessive_program_headers);
+
+        let mut excessive_section_headers =
+            synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
+        let section_headers = MAX_LINUX_WORKER_SECTION_HEADERS + 1;
+        excessive_section_headers.resize(
+            FIXTURE_SECTION_HEADERS_OFFSET + section_headers * FIXTURE_SECTION_HEADER_BYTES,
+            0,
+        );
+        write_fixture_u16(
+            &mut excessive_section_headers,
+            60,
+            u16::try_from(section_headers).expect("bounded section-header fixture"),
+        );
+        assert_linux_normalization_rejected("excessive section headers", excessive_section_headers);
+
+        let mut excessive_dynamic_entries =
+            synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
+        let dynamic_size = (MAX_LINUX_WORKER_DYNAMIC_ENTRIES + 1) * ELF64_DYNAMIC_ENTRY_BYTES;
+        excessive_dynamic_entries.resize(FIXTURE_DYNAMIC_OFFSET + dynamic_size, 0);
+        for offset in [dynamic_load, dynamic_segment] {
+            write_fixture_u64(
+                &mut excessive_dynamic_entries,
+                offset + 32,
+                u64::try_from(dynamic_size).expect("bounded dynamic fixture"),
+            );
+            write_fixture_u64(
+                &mut excessive_dynamic_entries,
+                offset + 40,
+                u64::try_from(dynamic_size).expect("bounded dynamic fixture"),
+            );
+        }
+        write_fixture_u64(
+            &mut excessive_dynamic_entries,
+            dynamic_section + 32,
+            u64::try_from(dynamic_size).expect("bounded dynamic fixture"),
+        );
+        assert_linux_normalization_rejected("excessive dynamic entries", excessive_dynamic_entries);
+    }
+
+    /// Remove a loader at either dependency boundary and leave Windows bytes untouched.
+    #[test]
+    fn worker_dependency_normalization_handles_boundaries_and_windows_noop() -> ToolResult<()> {
+        for target in [2, 6] {
+            let mut worker = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
+            swap_fixture_dynamic_entries(&mut worker, 4, target);
+            normalize_worker_dependencies(&mut worker, PackPlatform::LinuxX86_64)?;
+            let object = NativeObject::parse(&*worker)?;
+            let NativeObject::Elf64(file) = object else {
+                return Err(invalid("normalized boundary worker is not ELF64"));
+            };
+            assert_eq!(
+                elf_needed_libraries(&file)?,
+                expected_fixture_dependencies()
+            );
+        }
+
+        let mut windows = vec![0xff; 64];
+        let before = windows.clone();
+        normalize_worker_dependencies(&mut windows, PackPlatform::WindowsX86_64)?;
+        assert_eq!(windows, before);
+        Ok(())
+    }
 
     /// Reject a self-consistent digest pair whose JSON bytes are not canonical.
     #[test]

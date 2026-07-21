@@ -1507,8 +1507,7 @@ fn terminate_process(process: &ProcessIdentity) -> Result<(), Box<dyn Error>> {
     if !process.is_same_process(&current) {
         return Err(io::Error::other("refusing to terminate a reused Linux PID").into());
     }
-    let raw_pid = i32::try_from(process.pid)
-        .map_err(|_| io::Error::other("Linux PID exceeds the signal API range"))?;
+    let raw_pid = i32::try_from(process.pid)?;
     kill(Pid::from_raw(raw_pid), Signal::SIGKILL)?;
     Ok(())
 }
@@ -1522,8 +1521,7 @@ fn suspend_process(process: &ProcessIdentity) -> Result<(), Box<dyn Error>> {
     if !process.is_same_process(&current) {
         return Err(io::Error::other("refusing to suspend a reused Linux PID").into());
     }
-    let raw_pid = i32::try_from(process.pid)
-        .map_err(|_| io::Error::other("Linux PID exceeds the signal API range"))?;
+    let raw_pid = i32::try_from(process.pid)?;
     kill(Pid::from_raw(raw_pid), Signal::SIGSTOP)?;
     let deadline = Instant::now()
         .checked_add(PROCESS_HELPER_TIMEOUT)
@@ -1556,8 +1554,7 @@ fn resume_process(process: &ProcessIdentity) -> Result<(), Box<dyn Error>> {
     if !process.is_same_process(&current) {
         return Err(io::Error::other("refusing to resume a reused Linux PID").into());
     }
-    let raw_pid = i32::try_from(process.pid)
-        .map_err(|_| io::Error::other("Linux PID exceeds the signal API range"))?;
+    let raw_pid = i32::try_from(process.pid)?;
     kill(Pid::from_raw(raw_pid), Signal::SIGCONT)?;
     Ok(())
 }

@@ -293,8 +293,6 @@ $env:CARGO_TARGET_DIR = $buildDirectory
 $env:TSLP_OFFLINE = "1"
 $env:TSLP_LINK_MODE = "dynamic"
 
-Push-Location -LiteralPath $source
-try {
     $workerBuildArguments = @(
         "build",
         "--frozen",
@@ -315,9 +313,9 @@ try {
         $workerBuildArguments += @(
             "--",
             "-Clink-arg=-Wl,--push-state,--no-as-needed",
-            "-Clink-arg=-lgcc_s",
-            "-Clink-arg=-lm",
-            "-Clink-arg=-lstdc++",
+            "-Clink-arg=-Wl,-l:libgcc_s.so.1",
+            "-Clink-arg=-Wl,-l:libm.so.6",
+            "-Clink-arg=-Wl,-l:libstdc++.so.6",
             "-Clink-arg=-Wl,--pop-state",
             "-Clink-arg=-Wl,-z,now",
             "-Clink-arg=-Wl,-z,relro"
@@ -400,11 +398,6 @@ try {
             ) `
             -Role "runtime-containment broker build and self-test"
     }
-}
-finally {
-    Pop-Location
-}
-
 $executableSuffix = ""
 if ($Target -eq "x86_64-pc-windows-msvc") {
     $executableSuffix = ".exe"

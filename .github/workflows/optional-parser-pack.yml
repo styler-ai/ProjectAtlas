@@ -175,6 +175,7 @@ jobs:
           setpriv_path="$(command -v setpriv)"
           runner_uid="$(id -u)"
           runner_gid="$(id -g)"
+          cd "$GITHUB_WORKSPACE"
           sudo --non-interactive unshare --net -- \
             "$setpriv_path" --no-new-privs --reuid="$runner_uid" --regid="$runner_gid" --clear-groups \
             /usr/bin/env -i \
