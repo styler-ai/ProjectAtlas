@@ -10,6 +10,27 @@ homepage.workspace = true
 name = "projectatlas"
 path = "src/main.rs"
 
+[[bin]]
+name = "projectatlas-parser-worker"
+path = "src/parser_worker.rs"
+required-features = ["optional-parser-worker"]
+
+[[example]]
+name = "optional_parser_pack_release"
+path = "examples/optional_parser_pack_release.rs"
+required-features = ["optional-parser-supervisor"]
+
+[features]
+default = ["optional-parser-supervisor"]
+optional-parser-supervisor = ["dep:nix", "dep:tar", "dep:tempfile", "dep:zstd"]
+optional-parser-worker = [
+    "optional-parser-supervisor",
+    "dep:landlock",
+    "dep:seccompiler",
+    "dep:tree-sitter",
+    "dep:tree-sitter-language-pack",
+]
+
 [dependencies]
 getrandom.workspace = true
 projectatlas-core.workspace = true
@@ -30,13 +51,24 @@ rmcp.workspace = true
 scraper.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tiktoken.workspace = true
 tokio.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
 toon-format.workspace = true
+tar = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+tree-sitter = { workspace = true, optional = true }
+tree-sitter-language-pack = { workspace = true, optional = true }
 yaml-rust2.workspace = true
+zstd = { workspace = true, optional = true }
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+landlock = { workspace = true, optional = true }
+nix = { workspace = true, optional = true }
+seccompiler = { workspace = true, optional = true }
 
 [dev-dependencies]
 assert_cmd.workspace = true
@@ -44,8 +76,9 @@ predicates.workspace = true
 rusqlite.workspace = true
 rmcp = { workspace = true, features = ["client"] }
 serde_json.workspace = true
-sha2.workspace = true
+tar.workspace = true
 tempfile.workspace = true
+zstd.workspace = true
 
 [lints]
 workspace = true

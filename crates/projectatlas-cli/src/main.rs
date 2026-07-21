@@ -12,6 +12,10 @@ use atlas_map::{
     remove_ignore_entry, write_map,
 };
 use clap::{Parser, Subcommand, ValueEnum};
+#[cfg(feature = "optional-parser-supervisor")]
+use projectatlas_cli::optional_parser_lifecycle::{
+    OptionalParserPackLifecycle, OptionalParserPackLifecycleError,
+};
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
 use projectatlas_core::telemetry::{
@@ -102,6 +106,8 @@ const REQUIRED_CLI_COMMANDS: &[RequiredCliCommand] = &[
     RequiredCliCommand::Slice,
     RequiredCliCommand::Symbols,
     RequiredCliCommand::Settings,
+    #[cfg(feature = "optional-parser-supervisor")]
+    RequiredCliCommand::ParserPack,
     RequiredCliCommand::Root,
     RequiredCliCommand::Config,
     RequiredCliCommand::Ignore,
@@ -158,6 +164,21 @@ enum CliError {
     /// Atlas map operation failed.
     #[error("{0}")]
     AtlasMap(#[from] atlas_map::AtlasMapError),
+    /// Optional parser-pack lifecycle operation failed.
+    #[cfg(feature = "optional-parser-supervisor")]
+    #[error("{0}")]
+    ParserPack(#[from] OptionalParserPackLifecycleError),
+    /// Optional parsing failed and the requested process cleanup also failed.
+    #[cfg(feature = "optional-parser-supervisor")]
+    #[error(
+        "optional parser operation failed: {operation}; mandatory cleanup also failed: {cleanup}"
+    )]
+    OptionalParserOperationAndCleanup {
+        /// Original staging or parser failure.
+        operation: Box<Self>,
+        /// Cleanup failure observed before releasing process ownership.
+        cleanup: Box<Self>,
+    },
     /// User input was invalid.
     #[error("invalid input: {0}")]
     InvalidInput(String),
@@ -232,6 +253,9 @@ enum AgentErrorKind {
     DatabaseFilesystemUnsupported,
     /// The database's required local filesystem guarantees could not be established.
     DatabaseFilesystemUncertain,
+    /// The host has no accepted optional parser containment adapter.
+    #[cfg(feature = "optional-parser-supervisor")]
+    UnsupportedContainment,
 }
 
 /// Content-free database placement details with direct recovery guidance.
@@ -599,6 +623,16 @@ enum Command {
     },
     /// Print local `ProjectAtlas` settings and cache/index locations.
     Settings,
+    /// Manage the separately shipped optional parser pack.
+    #[cfg(feature = "optional-parser-supervisor")]
+    ParserPack {
+        /// Override the user-owned pack storage root for isolated verification and tests.
+        #[arg(long, hide = true)]
+        storage_root: Option<PathBuf>,
+        /// Explicit lifecycle operation.
+        #[command(subcommand)]
+        command: ParserPackCommand,
+    },
     /// Show, verify, or bind the project-local root.
     Root {
         /// Root subcommand to run.
@@ -768,6 +802,42 @@ enum Command {
         #[command(subcommand)]
         command: PurposeCommand,
     },
+}
+
+/// Explicit optional parser-pack lifecycle commands.
+#[cfg(feature = "optional-parser-supervisor")]
+#[derive(Debug, Subcommand)]
+enum ParserPackCommand {
+    /// Validate a local completed archive without installing it.
+    Verify {
+        /// Completed platform archive to validate.
+        #[arg(long)]
+        archive: PathBuf,
+    },
+    /// Install a local completed archive without enabling it.
+    Install {
+        /// Completed platform archive to install.
+        #[arg(long)]
+        archive: PathBuf,
+    },
+    /// Enable one explicitly named installed artifact for this project.
+    Enable {
+        /// BLAKE3 identity of the installed artifact manifest.
+        #[arg(long)]
+        artifact: String,
+    },
+    /// Install and atomically select a replacement while retaining rollback identity.
+    Update {
+        /// Completed replacement platform archive.
+        #[arg(long)]
+        archive: PathBuf,
+    },
+    /// Disable the optional pack for this project without deleting installed slots.
+    Disable,
+    /// Disable this project and remove this logical pack's user-owned slots.
+    Remove,
+    /// Print bounded content-free lifecycle state.
+    Status,
 }
 
 /// Project root diagnostics and binding subcommands.
@@ -1385,6 +1455,11 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             let toon = render_settings_report(&report);
             print_output(cli.format, &toon, &report)?;
         }
+        #[cfg(feature = "optional-parser-supervisor")]
+        Command::ParserPack {
+            storage_root,
+            command,
+        } => run_parser_pack_command(cli.format, storage_root.as_ref(), command)?,
         Command::Root { command } => match command {
             Some(RootCommand::Set {
                 path,
@@ -1803,9 +1878,46 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Execute one explicit optional parser-pack lifecycle command from the selected project root.
+#[cfg(feature = "optional-parser-supervisor")]
+fn run_parser_pack_command(
+    format: OutputFormat,
+    storage_root: Option<&PathBuf>,
+    command: &ParserPackCommand,
+) -> Result<(), CliError> {
+    let project_root = std::env::current_dir().map_err(|source| CliError::Io {
+        path: PathBuf::from("."),
+        source,
+    })?;
+    let lifecycle = OptionalParserPackLifecycle::new(&project_root, storage_root.cloned())?;
+    let report = match command {
+        ParserPackCommand::Verify { archive } => lifecycle.verify(archive)?,
+        ParserPackCommand::Install { archive } => lifecycle.install(archive)?,
+        ParserPackCommand::Enable { artifact } => lifecycle.enable(artifact)?,
+        ParserPackCommand::Update { archive } => lifecycle.update(archive)?,
+        ParserPackCommand::Disable => lifecycle.disable()?,
+        ParserPackCommand::Remove => lifecycle.remove()?,
+        ParserPackCommand::Status => lifecycle.status()?,
+    };
+    let toon = encode_agent_payload(&json!({ "parser_pack": report }));
+    print_output(format, &toon, &report)
+}
+
 /// Render typed source-state failures in the selected agent/script format.
 fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, serde_json::Error> {
     let details = match error {
+        #[cfg(feature = "optional-parser-supervisor")]
+        CliError::ParserPack(source) if source.is_unsupported_containment() => {
+            Some(CliErrorPayload {
+                kind: AgentErrorKind::UnsupportedContainment,
+                message: error.to_string(),
+                refresh_required: None,
+                verification_incomplete: None,
+                project_mismatch: None,
+                database_filesystem: None,
+                next: None,
+            })
+        }
         CliError::RefreshRequired(report) => Some(CliErrorPayload {
             kind: AgentErrorKind::RefreshRequired,
             message: error.to_string(),
@@ -2600,6 +2712,9 @@ enum RequiredCliCommand {
     Symbols,
     /// `projectatlas settings`.
     Settings,
+    /// `projectatlas parser-pack`.
+    #[cfg(feature = "optional-parser-supervisor")]
+    ParserPack,
     /// `projectatlas root`.
     Root,
     /// `projectatlas config`.
@@ -2651,6 +2766,8 @@ impl RequiredCliCommand {
             Self::Slice => "slice",
             Self::Symbols => "symbols",
             Self::Settings => "settings",
+            #[cfg(feature = "optional-parser-supervisor")]
+            Self::ParserPack => "parser-pack",
             Self::Root => "root",
             Self::Config => "config",
             Self::Ignore => "ignore",
@@ -2737,6 +2854,11 @@ impl RequiredCliCommand {
                 },
             },
             Self::Settings => Command::Settings,
+            #[cfg(feature = "optional-parser-supervisor")]
+            Self::ParserPack => Command::ParserPack {
+                storage_root: None,
+                command: ParserPackCommand::Status,
+            },
             Self::Root => Command::Root {
                 command: Some(RootCommand::Show),
             },
@@ -3169,6 +3291,8 @@ fn cli_command_name(command: &Command) -> &'static str {
         Command::Slice { .. } => "slice",
         Command::Symbols { .. } => "symbols",
         Command::Settings => "settings",
+        #[cfg(feature = "optional-parser-supervisor")]
+        Command::ParserPack { .. } => "parser-pack",
         Command::Root { .. } => "root",
         Command::Config { .. } => "config",
         Command::Ignore { .. } => "ignore",
@@ -3219,10 +3343,14 @@ mod tests {
         suggest_file_purpose, summarize_symbol_graph, watch_path_affects_index,
         watch_path_requires_full_scan, watcher_status_report,
     };
+    #[cfg(feature = "optional-parser-supervisor")]
+    use super::{Cli, Command, OptionalParserPackLifecycleError, ParserPackCommand};
     use super::{
         CliError, OutputFormat, build_runtime_info, render_cli_error, render_token_dashboard,
         serialized_output, truthy_env,
     };
+    #[cfg(feature = "optional-parser-supervisor")]
+    use clap::Parser as _;
     use notify::EventKind;
     use projectatlas_core::symbols::{
         CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
@@ -3234,6 +3362,7 @@ mod tests {
     use rmcp::model::{CallToolRequestParams, ClientInfo};
     use rmcp::{ClientHandler, ServiceExt};
     use serde_json::{Map, Value, json};
+    use std::collections::BTreeMap;
     use std::error::Error;
     use std::fs;
     use std::io;
@@ -3487,6 +3616,8 @@ mod tests {
             ],
             exclude_dir_suffixes: Vec::new(),
             exclude_path_prefixes: vec!["docs/api".to_string()],
+            language_overrides: BTreeMap::new(),
+            admit_optional_languages: false,
         };
         require_condition(
             watch_path_affects_index(root, &root.join("src/lib.rs"), &scan_options),
@@ -3612,6 +3743,81 @@ mod tests {
             "CLI TOON lost typed filesystem details",
         )?;
         Ok(())
+    }
+
+    #[cfg(feature = "optional-parser-supervisor")]
+    #[test]
+    fn parser_pack_cli_exposes_every_explicit_lifecycle_operation() -> Result<(), Box<dyn Error>> {
+        let artifact = "a".repeat(64);
+        let commands = [
+            vec![
+                "projectatlas",
+                "parser-pack",
+                "verify",
+                "--archive",
+                "pack.tar.zst",
+            ],
+            vec![
+                "projectatlas",
+                "parser-pack",
+                "install",
+                "--archive",
+                "pack.tar.zst",
+            ],
+            vec![
+                "projectatlas",
+                "parser-pack",
+                "enable",
+                "--artifact",
+                artifact.as_str(),
+            ],
+            vec![
+                "projectatlas",
+                "parser-pack",
+                "update",
+                "--archive",
+                "pack.tar.zst",
+            ],
+            vec!["projectatlas", "parser-pack", "disable"],
+            vec!["projectatlas", "parser-pack", "remove"],
+            vec!["projectatlas", "parser-pack", "status"],
+        ];
+        for arguments in commands {
+            let parsed = Cli::try_parse_from(arguments)?;
+            require_condition(
+                matches!(
+                    parsed.command,
+                    Command::ParserPack {
+                        command: ParserPackCommand::Verify { .. }
+                            | ParserPackCommand::Install { .. }
+                            | ParserPackCommand::Enable { .. }
+                            | ParserPackCommand::Update { .. }
+                            | ParserPackCommand::Disable
+                            | ParserPackCommand::Remove
+                            | ParserPackCommand::Status,
+                        ..
+                    }
+                ),
+                "parser-pack command did not route to an explicit lifecycle operation",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "optional-parser-supervisor")]
+    #[test]
+    fn parser_pack_unsupported_containment_is_typed() -> Result<(), Box<dyn Error>> {
+        let error =
+            CliError::ParserPack(OptionalParserPackLifecycleError::UnsupportedContainment {
+                os: "test-os",
+                architecture: "test-arch",
+            });
+        let json_text = render_cli_error(OutputFormat::Json, &error)?;
+        let json: Value = serde_json::from_str(&json_text)?;
+        require_condition(
+            json.pointer("/error/kind").and_then(Value::as_str) == Some("unsupported_containment"),
+            "parser-pack unsupported host did not retain its typed error kind",
+        )
     }
 
     #[test]

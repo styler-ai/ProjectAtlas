@@ -16,13 +16,17 @@ use projectatlas_core::normalize_native_path_display;
 use std::path::PathBuf;
 
 /// Current `SQLite` schema version supported by this crate.
-pub(crate) const SCHEMA_VERSION: i64 = 11;
+pub(crate) const SCHEMA_VERSION: i64 = 13;
 /// Released 0.3.26 schema accepted by the migration inventory.
 pub(crate) const PREVIOUS_SCHEMA_VERSION: i64 = 8;
 /// First internal schema with explicit publication invalidation.
 const PUBLICATION_SCHEMA_VERSION: i64 = 9;
 /// First schema with normalized repository-graph storage.
 const GRAPH_SCHEMA_VERSION: i64 = 10;
+/// First schema with bounded telemetry retention and aggregation.
+const TELEMETRY_SCHEMA_VERSION: i64 = 11;
+/// First schema with canonical entity and relation resolution keys.
+const RESOLUTION_SCHEMA_VERSION: i64 = 12;
 /// Metadata key for the durable schema version.
 pub(crate) const SCHEMA_VERSION_KEY: &str = "schema_version";
 /// Metadata key for the owning project root.
@@ -50,6 +54,8 @@ pub(crate) enum SchemaState {
 pub(crate) struct SchemaPreflight {
     /// Closed compatibility state.
     pub(crate) state: SchemaState,
+    /// Existing durable schema version, when a `ProjectAtlas` schema exists.
+    pub(crate) schema_version: Option<i64>,
     /// Existing normalized project identity, when present.
     pub(crate) project_root: Option<String>,
 }
@@ -78,10 +84,36 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         from: GRAPH_SCHEMA_VERSION,
-        to: SCHEMA_VERSION,
+        to: TELEMETRY_SCHEMA_VERSION,
         apply: migrate_10_to_11,
     },
+    Migration {
+        from: TELEMETRY_SCHEMA_VERSION,
+        to: RESOLUTION_SCHEMA_VERSION,
+        apply: migrate_11_to_12,
+    },
+    Migration {
+        from: RESOLUTION_SCHEMA_VERSION,
+        to: SCHEMA_VERSION,
+        apply: migrate_12_to_13,
+    },
 ];
+
+/// Return the bounded migration distance from one admitted schema to current.
+pub(crate) fn migration_steps_remaining(from: i64) -> Option<u32> {
+    if from == SCHEMA_VERSION {
+        return Some(0);
+    }
+    let mut version = from;
+    let mut steps = 0_u32;
+    for migration in MIGRATIONS {
+        if migration.from == version {
+            version = migration.to;
+            steps = steps.checked_add(1)?;
+        }
+    }
+    (version == SCHEMA_VERSION).then_some(steps)
+}
 
 /// Behavior-relevant schema contract derived from the authoritative DDL.
 #[derive(Debug, Eq, PartialEq)]
@@ -187,6 +219,10 @@ static SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
 static PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
 /// Process-local immutable schema-10 contract derived from graph DDL.
 static GRAPH_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
+/// Process-local immutable schema-11 contract derived from graph and telemetry DDL.
+static TELEMETRY_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
+/// Process-local immutable schema-12 contract before parser provenance separation.
+static RESOLUTION_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
 
 /// Immutable physical schema emitted by the released 0.3.26 runtime.
 #[cfg(test)]
@@ -316,6 +352,43 @@ const BASE_SCHEMA_SQL: &str = "
     CREATE INDEX idx_symbol_relations_target ON symbol_relations(target_name);
     CREATE INDEX idx_health_resolutions_category ON health_resolutions(category);
     CREATE INDEX idx_file_texts_hash ON file_texts(content_hash);
+";
+
+/// Separate file-level parse provenance from the parser provenance of derived facts.
+const SOURCE_PARSE_PROVENANCE_SCHEMA_SQL: &str = "
+    ALTER TABLE source_parse_metadata RENAME TO source_parse_metadata_legacy;
+
+    CREATE TABLE source_parse_metadata (
+        path TEXT PRIMARY KEY,
+        language TEXT,
+        source_parser TEXT NOT NULL,
+        fact_parser TEXT NOT NULL,
+        symbol_count INTEGER NOT NULL,
+        relation_count INTEGER NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    INSERT INTO source_parse_metadata(
+        path,
+        language,
+        source_parser,
+        fact_parser,
+        symbol_count,
+        relation_count,
+        updated_at
+    )
+    SELECT
+        path,
+        language,
+        parser,
+        parser,
+        symbol_count,
+        relation_count,
+        updated_at
+    FROM source_parse_metadata_legacy;
+
+    DROP TABLE source_parse_metadata_legacy;
+
 ";
 
 /// Usage-event layout owned by released schemas 8 through 10.
@@ -571,6 +644,83 @@ const GRAPH_SCHEMA_SQL: &str = "
         ON graph_coverage(scope_path, id);
     CREATE INDEX idx_graph_coverage_relation_state
         ON graph_coverage(relation_scope, relation_kind, state, id);
+";
+
+/// Canonical resolution identities and their graph-owner bindings.
+const RESOLUTION_KEY_SCHEMA_SQL: &str = "
+    CREATE UNIQUE INDEX idx_graph_relations_project_key
+        ON graph_relations(project_instance_id, relation_key);
+
+    CREATE TABLE graph_resolution_keys (
+        project_instance_id BLOB NOT NULL
+            CHECK(typeof(project_instance_id) = 'blob' AND length(project_instance_id) = 16),
+        resolution_domain TEXT NOT NULL
+            CHECK(resolution_domain IN ('declaration', 'module', 'package')),
+        key_digest BLOB NOT NULL
+            CHECK(typeof(key_digest) = 'blob' AND length(key_digest) = 32),
+        canonical_identity TEXT NOT NULL
+            CHECK(typeof(canonical_identity) = 'text' AND length(canonical_identity) > 0),
+        PRIMARY KEY(project_instance_id, resolution_domain, key_digest),
+        FOREIGN KEY(project_instance_id)
+            REFERENCES project_identity(project_instance_id) ON DELETE RESTRICT
+    ) STRICT;
+
+    CREATE TABLE graph_entity_exports (
+        project_instance_id BLOB NOT NULL
+            CHECK(typeof(project_instance_id) = 'blob' AND length(project_instance_id) = 16),
+        entity_key BLOB NOT NULL
+            CHECK(typeof(entity_key) = 'blob' AND length(entity_key) = 32),
+        owner_path TEXT NOT NULL
+            CHECK(typeof(owner_path) = 'text' AND length(owner_path) > 0),
+        resolution_domain TEXT NOT NULL
+            CHECK(resolution_domain IN ('declaration', 'module', 'package')),
+        key_digest BLOB NOT NULL
+            CHECK(typeof(key_digest) = 'blob' AND length(key_digest) = 32),
+        PRIMARY KEY(project_instance_id, entity_key, resolution_domain, key_digest),
+        FOREIGN KEY(project_instance_id, entity_key)
+            REFERENCES graph_entities(project_instance_id, entity_key) ON DELETE CASCADE,
+        FOREIGN KEY(project_instance_id, resolution_domain, key_digest)
+            REFERENCES graph_resolution_keys(project_instance_id, resolution_domain, key_digest)
+                ON DELETE CASCADE,
+        FOREIGN KEY(owner_path) REFERENCES nodes(path) ON DELETE CASCADE
+    ) STRICT;
+
+    CREATE TABLE graph_relation_dependencies (
+        project_instance_id BLOB NOT NULL
+            CHECK(typeof(project_instance_id) = 'blob' AND length(project_instance_id) = 16),
+        relation_key BLOB NOT NULL
+            CHECK(typeof(relation_key) = 'blob' AND length(relation_key) = 32),
+        owner_path TEXT NOT NULL
+            CHECK(typeof(owner_path) = 'text' AND length(owner_path) > 0),
+        resolution_domain TEXT NOT NULL
+            CHECK(resolution_domain IN ('declaration', 'module', 'package')),
+        key_digest BLOB NOT NULL
+            CHECK(typeof(key_digest) = 'blob' AND length(key_digest) = 32),
+        PRIMARY KEY(project_instance_id, relation_key, resolution_domain, key_digest),
+        FOREIGN KEY(project_instance_id, relation_key)
+            REFERENCES graph_relations(project_instance_id, relation_key) ON DELETE CASCADE,
+        FOREIGN KEY(project_instance_id, resolution_domain, key_digest)
+            REFERENCES graph_resolution_keys(project_instance_id, resolution_domain, key_digest)
+                ON DELETE CASCADE,
+        FOREIGN KEY(owner_path) REFERENCES nodes(path) ON DELETE CASCADE
+    ) STRICT;
+
+    CREATE INDEX idx_graph_entity_exports_key
+        ON graph_entity_exports(
+            project_instance_id, resolution_domain, key_digest, entity_key
+        );
+    CREATE INDEX idx_graph_entity_exports_owner
+        ON graph_entity_exports(
+            project_instance_id, owner_path, resolution_domain, key_digest, entity_key
+        );
+    CREATE INDEX idx_graph_relation_dependencies_key
+        ON graph_relation_dependencies(
+            project_instance_id, resolution_domain, key_digest, owner_path, relation_key
+        );
+    CREATE INDEX idx_graph_relation_dependencies_owner
+        ON graph_relation_dependencies(
+            project_instance_id, owner_path, resolution_domain, key_digest, relation_key
+        );
 ";
 
 /// Bounded telemetry state shared by fresh databases and the 10-to-11 migration.
@@ -887,6 +1037,14 @@ pub(crate) fn preflight(
     }
 }
 
+/// Inspect compatibility without the full migration-admission integrity scan.
+pub(crate) fn inspect_compatibility(
+    path: &Path,
+    expected_root: Option<&str>,
+) -> DbResult<(SchemaPreflight, DatabaseLocation)> {
+    preflight_with_integrity(path, expected_root, false)
+}
+
 /// Run explicit current-schema integrity verification without writable access.
 pub(crate) fn verify_current_integrity(path: &Path, expected_root: Option<&str>) -> DbResult<()> {
     let (preflight, _) = preflight_with_integrity(path, expected_root, true)?;
@@ -914,6 +1072,7 @@ fn preflight_with_integrity(
         return Ok((
             SchemaPreflight {
                 state: SchemaState::Fresh,
+                schema_version: None,
                 project_root: None,
             },
             location,
@@ -1150,6 +1309,9 @@ fn inspect_connection(
     }
     Ok(SchemaPreflight {
         state,
+        schema_version: (state != SchemaState::Fresh)
+            .then(|| stored_schema_version(connection))
+            .transpose()?,
         project_root,
     })
 }
@@ -1185,9 +1347,11 @@ fn schema_state(connection: &Connection) -> DbResult<SchemaState> {
     let found = stored_schema_version(connection)?;
     match found {
         SCHEMA_VERSION => Ok(SchemaState::Current),
-        PREVIOUS_SCHEMA_VERSION | PUBLICATION_SCHEMA_VERSION | GRAPH_SCHEMA_VERSION => {
-            Ok(SchemaState::UpgradeRequired)
-        }
+        PREVIOUS_SCHEMA_VERSION
+        | PUBLICATION_SCHEMA_VERSION
+        | GRAPH_SCHEMA_VERSION
+        | TELEMETRY_SCHEMA_VERSION
+        | RESOLUTION_SCHEMA_VERSION => Ok(SchemaState::UpgradeRequired),
         _ => Err(DbError::SchemaVersion {
             found,
             expected: SCHEMA_VERSION,
@@ -1198,7 +1362,9 @@ fn schema_state(connection: &Connection) -> DbResult<SchemaState> {
 /// Create a new schema and stamp identity/version only after all DDL succeeds.
 fn create_fresh(connection: &Connection, expected_root: Option<&str>) -> DbResult<()> {
     connection.execute_batch(BASE_SCHEMA_SQL)?;
+    connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
     connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
     crate::telemetry::initialize_empty_storage(connection)?;
@@ -1253,6 +1419,22 @@ fn migrate_10_to_11(connection: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Add canonical resolution keys, normalize legacy purpose approval, and invalidate graph trust.
+fn migrate_11_to_12(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
+    connection.execute(
+        "UPDATE purposes SET status = 'approved' WHERE status = 'stale'",
+        [],
+    )?;
+    invalidate_derived_publication(connection)
+}
+
+/// Persist source-parse and derived-fact parser provenance independently.
+fn migrate_12_to_13(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
+    Ok(())
+}
+
 /// Invalidate derived rows without deleting authored local state.
 pub(crate) fn invalidate_derived_publication(connection: &Connection) -> DbResult<()> {
     connection.execute(
@@ -1291,6 +1473,8 @@ fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResul
         SchemaState::UpgradeRequired => match stored_schema_version(connection)? {
             PREVIOUS_SCHEMA_VERSION | PUBLICATION_SCHEMA_VERSION => predecessor_schema_contract()?,
             GRAPH_SCHEMA_VERSION => graph_predecessor_schema_contract()?,
+            TELEMETRY_SCHEMA_VERSION => telemetry_predecessor_schema_contract()?,
+            RESOLUTION_SCHEMA_VERSION => resolution_predecessor_schema_contract()?,
             found => {
                 return Err(DbError::SchemaVersion {
                     found,
@@ -1372,7 +1556,9 @@ fn schema_contract() -> DbResult<&'static SchemaContract> {
     }
     let connection = Connection::open_in_memory()?;
     connection.execute_batch(BASE_SCHEMA_SQL)?;
+    connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
     connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
@@ -1390,6 +1576,35 @@ fn graph_predecessor_schema_contract() -> DbResult<&'static SchemaContract> {
     connection.execute_batch(GRAPH_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
     Ok(GRAPH_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
+}
+
+/// Build the immutable schema-11 contract before resolution-key storage.
+fn telemetry_predecessor_schema_contract() -> DbResult<&'static SchemaContract> {
+    if let Some(contract) = TELEMETRY_PREDECESSOR_SCHEMA_CONTRACT.get() {
+        return Ok(contract);
+    }
+    let connection = Connection::open_in_memory()?;
+    connection.execute_batch(BASE_SCHEMA_SQL)?;
+    connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
+    connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
+    let contract = read_schema_contract(&connection)?;
+    Ok(TELEMETRY_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
+}
+
+/// Build the immutable schema-12 contract before parser provenance separation.
+fn resolution_predecessor_schema_contract() -> DbResult<&'static SchemaContract> {
+    if let Some(contract) = RESOLUTION_PREDECESSOR_SCHEMA_CONTRACT.get() {
+        return Ok(contract);
+    }
+    let connection = Connection::open_in_memory()?;
+    connection.execute_batch(BASE_SCHEMA_SQL)?;
+    connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
+    connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
+    connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
+    let contract = read_schema_contract(&connection)?;
+    Ok(RESOLUTION_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
 }
 
 /// Build the immutable schema-8/9 contract from the unchanged base DDL.
@@ -2206,6 +2421,198 @@ mod tests {
     }
 
     #[test]
+    fn resolution_schema_migrates_parser_provenance_without_weakening_existing_facts()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let database = temp.path().join("projectatlas.db");
+        let connection = Connection::open(&database)?;
+        configure_writable(&connection)?;
+        connection.execute_batch(BASE_SCHEMA_SQL)?;
+        connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+        connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
+        connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
+        connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
+        crate::telemetry::initialize_empty_storage(&connection)?;
+        set_metadata(
+            &connection,
+            SCHEMA_VERSION_KEY,
+            &RESOLUTION_SCHEMA_VERSION.to_string(),
+        )?;
+        set_metadata(&connection, INDEX_PUBLICATION_STATE_KEY, "complete")?;
+        set_metadata(
+            &connection,
+            INDEX_PUBLICATION_FINGERPRINT_KEY,
+            "resolution-schema-publication",
+        )?;
+        set_metadata(&connection, INDEX_PUBLICATION_GENERATION_KEY, "4")?;
+        connection.execute_batch(
+            "INSERT INTO source_parse_metadata(
+                 path, language, parser, symbol_count, relation_count, updated_at
+             ) VALUES(
+                 'src/lib.rs', 'rust', 'tree-sitter', 1, 1, '2026-01-02 03:04:05'
+             );
+             INSERT INTO symbols(
+                 path, language, name, kind, signature, line_start, line_end, parser
+             ) VALUES(
+                 'src/lib.rs', 'rust', 'run', 'function', 'fn run()', 1, 1, 'tree-sitter'
+             );
+             INSERT INTO symbol_relations(
+                 path, source_name, target_name, kind, line, context, parser
+             ) VALUES(
+                 'src/lib.rs', 'run', 'helper', 'calls', 1, 'helper()', 'tree-sitter'
+             );",
+        )?;
+        drop(connection);
+
+        let store = AtlasStore::open(&database)?;
+        let provenance = store.connection.query_row(
+            "SELECT source_parser, fact_parser, symbol_count, relation_count, updated_at
+               FROM source_parse_metadata WHERE path = 'src/lib.rs'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )?;
+        if provenance
+            != (
+                "tree-sitter".to_string(),
+                "tree-sitter".to_string(),
+                1,
+                1,
+                "2026-01-02 03:04:05".to_string(),
+            )
+        {
+            return Err(io::Error::other(format!(
+                "schema-12 parser provenance changed during migration: {provenance:?}"
+            ))
+            .into());
+        }
+        if read_metadata(&store.connection, SCHEMA_VERSION_KEY)? != Some(SCHEMA_VERSION.to_string())
+            || read_metadata(&store.connection, INDEX_PUBLICATION_STATE_KEY)?
+                != Some("complete".to_string())
+            || read_metadata(&store.connection, INDEX_PUBLICATION_FINGERPRINT_KEY)?
+                != Some("resolution-schema-publication".to_string())
+            || read_metadata(&store.connection, INDEX_PUBLICATION_GENERATION_KEY)?
+                != Some("4".to_string())
+        {
+            return Err(io::Error::other(
+                "parser-provenance migration changed valid publication metadata",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn telemetry_schema_migrates_resolution_keys_and_legacy_purpose_state_atomically()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let db_path = temp.path().join("projectatlas.db");
+        let connection = Connection::open(&db_path)?;
+        configure_writable(&connection)?;
+        connection.execute_batch(BASE_SCHEMA_SQL)?;
+        connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+        connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
+        connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
+        crate::telemetry::initialize_empty_storage(&connection)?;
+        set_metadata(
+            &connection,
+            PROJECT_ROOT_KEY,
+            &normalize_native_path_display(&root),
+        )?;
+        set_metadata(
+            &connection,
+            SCHEMA_VERSION_KEY,
+            &TELEMETRY_SCHEMA_VERSION.to_string(),
+        )?;
+        set_metadata(&connection, INDEX_PUBLICATION_STATE_KEY, "complete")?;
+        set_metadata(
+            &connection,
+            INDEX_PUBLICATION_FINGERPRINT_KEY,
+            "telemetry-schema-publication",
+        )?;
+        set_metadata(&connection, INDEX_PUBLICATION_GENERATION_KEY, "7")?;
+        crate::project_identity::ensure_project_identity(&connection)?;
+        connection.execute_batch(
+            "INSERT INTO nodes(id, path, kind) VALUES(1, 'src/lib.rs', 'file');
+             INSERT INTO purposes(node_id, purpose, source, status, updated_at, updated_by)
+                 VALUES(
+                     1,
+                     'Own the library.',
+                     'agent',
+                     'stale',
+                     '2026-01-02 03:04:05',
+                     'review-agent'
+                 );",
+        )?;
+        drop(connection);
+
+        let store = AtlasStore::open_for_project(&db_path, &root)?;
+        let objects = store.connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema
+              WHERE type = 'table' AND name IN (
+                  'graph_resolution_keys',
+                  'graph_entity_exports',
+                  'graph_relation_dependencies'
+              )",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if objects != 3 {
+            return Err(io::Error::other("resolution-key migration is incomplete").into());
+        }
+        if read_metadata(&store.connection, SCHEMA_VERSION_KEY)? != Some(SCHEMA_VERSION.to_string())
+        {
+            return Err(io::Error::other("resolution-key migration version is stale").into());
+        }
+        if read_metadata(&store.connection, INDEX_PUBLICATION_STATE_KEY)?.is_some()
+            || read_metadata(&store.connection, INDEX_PUBLICATION_FINGERPRINT_KEY)?.is_some()
+            || read_metadata(&store.connection, INDEX_PUBLICATION_GENERATION_KEY)?.is_some()
+        {
+            return Err(io::Error::other("migration retained stale publication trust").into());
+        }
+        let authored = store.connection.query_row(
+            "SELECT purpose, source, status, updated_at, updated_by
+               FROM purposes WHERE node_id = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )?;
+        if authored
+            != (
+                "Own the library.".to_string(),
+                "agent".to_string(),
+                "approved".to_string(),
+                "2026-01-02 03:04:05".to_string(),
+                Some("review-agent".to_string()),
+            )
+        {
+            return Err(io::Error::other(format!(
+                "migration changed authored purpose fields: {authored:?}"
+            ))
+            .into());
+        }
+        drop(store);
+        drop(AtlasStore::open_read_only_for_project(&db_path, &root)?);
+        Ok(())
+    }
+
+    #[test]
     fn graph_schema_constraints_reject_inconsistent_typed_rows() -> Result<(), Box<dyn Error>> {
         let store = AtlasStore::in_memory()?;
         let project = vec![1_u8; 16];
@@ -2670,20 +3077,20 @@ mod tests {
             SCHEMA_VERSION_KEY,
             &PUBLICATION_SCHEMA_VERSION.to_string(),
         )?;
-        connection.execute_batch(
+        connection.execute_batch(&format!(
             "
             INSERT INTO nodes(id, path, kind) VALUES(1, 'src/lib.rs', 'file');
             INSERT INTO purposes(node_id, purpose, source, status)
-                VALUES(1, 'Own the library.', 'agent', 'approved');
+                VALUES(1, 'Own the library.', 'agent', 'stale');
             INSERT INTO usage_events(session_id, command) VALUES('session', 'files');
             CREATE TEMP TRIGGER abort_final_schema_version
             BEFORE UPDATE OF value ON metadata
-            WHEN OLD.key = 'schema_version' AND NEW.value = '11'
+            WHEN OLD.key = 'schema_version' AND NEW.value = '{SCHEMA_VERSION}'
             BEGIN
                 SELECT RAISE(ABORT, 'forced final schema-version failure');
             END;
             ",
-        )?;
+        ))?;
         let Err(error) = initialize(&connection, Some(&normalize_native_path_display(&root)))
         else {
             return Err(io::Error::other("late migration failure unexpectedly committed").into());
@@ -2700,6 +3107,8 @@ mod tests {
              WHERE type = 'table' AND name IN (
                 'project_identity', 'graph_entities', 'graph_relations',
                 'graph_relation_occurrences', 'graph_coverage',
+                'graph_resolution_keys', 'graph_entity_exports',
+                'graph_relation_dependencies',
                 'usage_instances', 'usage_bucket_dimensions',
                 'usage_instance_baselines', 'usage_labels',
                 'usage_global_aggregates', 'usage_instance_aggregates',
@@ -2741,6 +3150,16 @@ mod tests {
                 ))
                 .into());
             }
+        }
+        let purpose_status =
+            connection.query_row("SELECT status FROM purposes WHERE node_id = 1", [], |row| {
+                row.get::<_, String>(0)
+            })?;
+        if purpose_status != "stale" {
+            return Err(io::Error::other(
+                "failed migration exposed partial purpose-state normalization",
+            )
+            .into());
         }
         if read_metadata(&connection, PROJECT_ROOT_KEY)?
             != Some(normalize_native_path_display(&root))

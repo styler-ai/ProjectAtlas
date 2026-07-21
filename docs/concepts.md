@@ -12,7 +12,7 @@ Each project has its own database under the project root. Folder purpose and fil
 - A folder purpose describes the folder's structural responsibility.
 - A file purpose describes why that file exists inside its folder.
 
-Missing purposes are health/lint findings. Agents should inspect enough context to set a correct one-line purpose with `projectatlas purpose set` or the MCP `atlas_purpose_set` tool. Folder purposes should be curated broadly; file purposes should be curated selectively for current-task, public API, build/config, workflow, test, runtime, route, migration, command, MCP, or stale trusted metadata paths.
+Missing purposes are health/lint findings. Agents should inspect enough context to set a correct one-line purpose with `projectatlas purpose set` or the MCP `atlas_purpose_set` tool. Folder purposes should be curated broadly; file purposes should be curated selectively for current-task, public API, build/config, workflow, test, runtime, route, migration, command, MCP, or trusted metadata paths whose recorded responsibility is inconsistent.
 
 ## Summaries
 
@@ -21,7 +21,7 @@ Use `projectatlas summary <file> --limit 25` or `atlas_file_summary` before open
 
 Generated file-purpose guesses may be stored as suggestions, but they remain `agent_reviewed=false` until an agent approves or corrects them.
 
-`stale` belongs to purpose metadata, not to the refreshed content summary. When an approved folder or file purpose becomes stale after a meaningful indexed change, agents should inspect the current `content_summary` and approve or correct the purpose. Scans and watch refreshes should update content summaries from the current file facts instead of preserving stale summary text.
+An accepted purpose is durable authored responsibility state. Scans and watch refreshes update `content_summary` and other derived facts without demoting, invalidating, or overwriting that purpose. The legacy `stale` purpose status remains readable for wire/schema compatibility and is normalized to `approved` during migration; normal source, hash, summary, symbol, and graph changes do not create it. An agent or user may still correct an accepted purpose explicitly after finding a mistake, inconsistency, or genuine repurposing.
 
 ## Legacy metadata
 
@@ -37,6 +37,6 @@ ProjectAtlas surfaces:
 - duplicate or overlapping approved purposes across files or folders
 - untracked assets outside approved roots
 - repeated temporary/generated folder roles
-- stale approved purposes, stale index, or structure drift signals
+- legacy stale-purpose records, stale index, or structure drift signals
 
 These signals are meant to prompt cleanup before the structure drifts.

@@ -2,6 +2,7 @@
 
 use cssparser::{Parser as CssParser, ParserInput as CssParserInput, Token as CssToken};
 use jsonc_parser::{ParseOptions as JsoncParseOptions, parse_to_serde_value};
+use projectatlas_core::language::{StructuralSummaryOwner, language_capability};
 use pulldown_cmark::{
     Event as MarkdownEvent, HeadingLevel, Options as MarkdownOptions, Parser as MarkdownParser,
     Tag as MarkdownTag, TagEnd as MarkdownTagEnd,
@@ -24,38 +25,34 @@ pub(crate) fn structural_summary_for_path(
     language: Option<&str>,
     content: &str,
 ) -> Option<String> {
-    let language = language.unwrap_or_default();
-    match language {
-        "markdown" => markdown_summary(content),
-        "json" => json_summary(path, content),
-        "yaml" => yaml_summary(path, content),
-        "toml" | "cargo-manifest" => toml_summary(path, content),
-        "xml" => xml_summary(content),
-        "css" => css_summary(content),
-        "html" => html_summary(content),
-        "powershell" => powershell_summary(content),
-        "config" | "text" => config_text_summary(path, content),
-        _ if has_extension(path, "toon") => toon_summary(content),
-        _ => None,
+    let owner = structural_summary_owner(path, language)?;
+    match owner {
+        StructuralSummaryOwner::Markdown => markdown_summary(content),
+        StructuralSummaryOwner::Json => json_summary(path, content),
+        StructuralSummaryOwner::Yaml => yaml_summary(path, content),
+        StructuralSummaryOwner::Toml => toml_summary(path, content),
+        StructuralSummaryOwner::Xml => xml_summary(content),
+        StructuralSummaryOwner::Css => css_summary(content),
+        StructuralSummaryOwner::Html => html_summary(content),
+        StructuralSummaryOwner::Toon => toon_summary(content),
+        StructuralSummaryOwner::PowerShell => powershell_summary(content),
+        StructuralSummaryOwner::ConfigText => config_text_summary(path, content),
     }
 }
 
 /// Return whether a file family has a lightweight structural adapter.
 pub(crate) fn is_structural_summary_candidate(path: &str, language: Option<&str>) -> bool {
-    matches!(
-        language.unwrap_or_default(),
-        "markdown"
-            | "json"
-            | "yaml"
-            | "toml"
-            | "cargo-manifest"
-            | "xml"
-            | "css"
-            | "html"
-            | "powershell"
-            | "config"
-            | "text"
-    ) || has_extension(path, "toon")
+    structural_summary_owner(path, language).is_some()
+}
+
+/// Select the registry-owned structural adapter, with legacy TOON inference when undetected.
+fn structural_summary_owner(path: &str, language: Option<&str>) -> Option<StructuralSummaryOwner> {
+    match language {
+        Some(language) => {
+            language_capability(language).and_then(|capability| capability.structural_summary)
+        }
+        None => has_extension(path, "toon").then_some(StructuralSummaryOwner::Toon),
+    }
 }
 
 /// Return whether a repository path has a case-insensitive extension.
@@ -995,6 +992,43 @@ mod tests {
             Some(
                 "powershell script defining functions Get-ReleaseRuntimeInstallPath, Install-ReleaseBinary, Resolve-DefaultProjectRoot."
             )
+        );
+    }
+
+    #[test]
+    fn supplied_language_overrides_structural_path_owner() {
+        assert_eq!(
+            structural_summary_for_path("Cargo.toml", Some("json"), "{\"name\":\"atlas\"}",)
+                .as_deref(),
+            Some("json document with top-level keys name.")
+        );
+        assert_eq!(
+            structural_summary_for_path("scripts/install.ps1", Some("text"), "name=atlas\n",)
+                .as_deref(),
+            Some("config file install.ps1 with keys name.")
+        );
+        assert_eq!(
+            structural_summary_for_path("data/report.toon", Some("json"), "{\"items\":[]}",)
+                .as_deref(),
+            Some("json document with top-level keys items.")
+        );
+        assert!(
+            structural_summary_for_path("data/report.toon", Some("rust"), "items[1]{id}:\n  1\n",)
+                .is_none()
+        );
+        assert_eq!(
+            structural_summary_for_path("data/report.txt", Some("toon"), "items[1]{id}:\n  1\n",)
+                .as_deref(),
+            Some("TOON document with sections items.")
+        );
+    }
+
+    #[test]
+    fn missing_language_preserves_toon_path_inference() {
+        assert_eq!(
+            structural_summary_for_path("data/report.toon", None, "items[1]{id}:\n  1\n",)
+                .as_deref(),
+            Some("TOON document with sections items.")
         );
     }
 

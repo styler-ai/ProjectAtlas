@@ -169,6 +169,11 @@ jobs:
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_repairs_stale_mirror_without_registering_it --test e2e
 
+      - name: macOS unsupported parser-pack boundary E2E
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_access --test e2e
+
       - name: MCP project binding E2E
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli mcp_server_stays_bound_to_one_project_database --test e2e

@@ -2,7 +2,9 @@
 
 use blake3::Hasher;
 use projectatlas_core::{
-    Node, NodeKind, language::BROAD_SOURCE_EXTENSIONS, validated_repo_file_key,
+    Node, NodeKind,
+    language::{BROAD_SOURCE_EXTENSIONS, canonical_language_id},
+    validated_repo_file_key,
 };
 use projectatlas_db::AtlasStore;
 use projectatlas_fs::{ScanOptions, scan_repo};
@@ -115,6 +117,16 @@ pub(crate) enum AtlasMapError {
         /// Validation failure.
         message: String,
     },
+    /// A configured language selector or target is invalid.
+    #[error("invalid language override {selector:?} = {language:?}: {message}")]
+    InvalidLanguageOverride {
+        /// Exact filename or extension selector.
+        selector: String,
+        /// Requested canonical ID or alias.
+        language: String,
+        /// Validation failure.
+        message: String,
+    },
     /// Editable TOML config was malformed for the requested operation.
     #[error("toml edit error for {path:?}: {message}")]
     TomlEdit {
@@ -175,6 +187,8 @@ struct RawScan {
     max_scan_lines: Option<usize>,
     /// Maximum UTF-8 file size persisted into `SQLite` text search.
     text_index_max_bytes: Option<u64>,
+    /// Explicit exact-filename or extension language selections.
+    language_overrides: Option<BTreeMap<String, String>>,
 }
 
 /// Raw purpose table.
@@ -235,6 +249,8 @@ pub(crate) struct AtlasMapConfig {
     exclude_path_prefixes: BTreeSet<String>,
     /// Prefixes treated as non-source even when extensions match.
     non_source_path_prefixes: BTreeSet<String>,
+    /// Validated exact-filename or extension language overrides.
+    language_overrides: BTreeMap<String, String>,
     /// Allowed untracked filenames.
     allowed_untracked_filenames: BTreeSet<String>,
     /// Allowed untracked directory prefixes.
@@ -272,6 +288,8 @@ impl AtlasMapConfig {
             exclude_dir_names: self.exclude_dir_names.iter().cloned().collect(),
             exclude_dir_suffixes: self.exclude_dir_suffixes.iter().cloned().collect(),
             exclude_path_prefixes: self.exclude_path_prefixes.iter().cloned().collect(),
+            language_overrides: self.language_overrides.clone(),
+            admit_optional_languages: false,
         }
     }
 
@@ -307,6 +325,8 @@ pub(crate) struct EffectiveConfigReport {
     pub(crate) exclude_path_prefixes: Vec<String>,
     /// Configured non-source path prefixes.
     pub(crate) non_source_path_prefixes: Vec<String>,
+    /// Validated exact-filename or extension language overrides.
+    pub(crate) language_overrides: BTreeMap<String, String>,
     /// Default purpose style.
     pub(crate) purpose_default_style: String,
     /// Per-extension purpose style overrides.
@@ -335,6 +355,7 @@ pub(crate) fn effective_config_report(config: &AtlasMapConfig) -> EffectiveConfi
         exclude_dir_names: config.exclude_dir_names.iter().cloned().collect(),
         exclude_path_prefixes: config.exclude_path_prefixes.iter().cloned().collect(),
         non_source_path_prefixes: config.non_source_path_prefixes.iter().cloned().collect(),
+        language_overrides: config.language_overrides.clone(),
         purpose_default_style: config.purpose_default_style.clone(),
         purpose_styles: config.purpose_styles.clone(),
         line_comment_prefixes: config.line_comment_prefixes.clone(),
@@ -1092,6 +1113,7 @@ fn normalize_config(
         exclude_dir_suffixes: string_set(scan.exclude_dir_suffixes, &[".egg-info"]),
         exclude_path_prefixes: normalize_prefix_set(scan.exclude_path_prefixes)?,
         non_source_path_prefixes: normalize_prefix_set(scan.non_source_path_prefixes)?,
+        language_overrides: normalize_language_overrides(scan.language_overrides)?,
         allowed_untracked_filenames: string_set(untracked.allowed_filenames, &[]),
         untracked_allowlist_dir_prefixes: normalize_prefix_set(untracked.allowlist_dir_prefixes)?,
         untracked_allowlist_files: normalize_prefix_set(untracked.allowlist_files)?,
@@ -1162,6 +1184,45 @@ fn normalize_set(values: Vec<String>) -> BTreeSet<String> {
         .map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| !value.is_empty())
         .collect()
+}
+
+/// Validate explicit exact-filename and extension language selections.
+fn normalize_language_overrides(
+    values: Option<BTreeMap<String, String>>,
+) -> AtlasMapResult<BTreeMap<String, String>> {
+    let mut normalized = BTreeMap::new();
+    for (raw_selector, raw_language) in values.unwrap_or_default() {
+        let selector = raw_selector.trim();
+        let valid_selector = !selector.is_empty() && !selector.contains(['/', '\\']);
+        if !valid_selector {
+            return Err(AtlasMapError::InvalidLanguageOverride {
+                selector: raw_selector,
+                language: raw_language,
+                message: "selector must be one exact filename or a dot-prefixed extension"
+                    .to_string(),
+            });
+        }
+        let Some(language) = canonical_language_id(&raw_language) else {
+            return Err(AtlasMapError::InvalidLanguageOverride {
+                selector: raw_selector,
+                language: raw_language,
+                message: "target is not an accepted canonical language ID or alias".to_string(),
+            });
+        };
+        let selector = if selector.starts_with('.') {
+            selector.to_ascii_lowercase()
+        } else {
+            selector.to_string()
+        };
+        if let Some(previous) = normalized.insert(selector.clone(), language.to_string()) {
+            return Err(AtlasMapError::InvalidLanguageOverride {
+                selector,
+                language: language.to_string(),
+                message: format!("selector collides after normalization with target {previous:?}"),
+            });
+        }
+    }
+    Ok(normalized)
 }
 
 /// Normalize one manual ignore entry.
@@ -2679,6 +2740,8 @@ fn default_config_text_with_root(root_value: &str) -> String {
         "max_scan_lines = 80",
         &format!("text_index_max_bytes = {DEFAULT_TEXT_INDEX_MAX_BYTES}"),
         "",
+        "[scan.language_overrides]",
+        "",
         "[purpose]",
         "default_style = \"line-comment\"",
         "line_comment_prefixes = [\"//\", \"#\", \"--\", \";\"]",
@@ -2736,13 +2799,16 @@ impl From<serde_json::Error> for AtlasMapError {
 #[cfg(test)]
 mod tests {
     use super::{
-        AtlasMapConfig, DEFAULT_TEXT_INDEX_MAX_BYTES, MapRecord,
+        AtlasMapConfig, AtlasMapError, DEFAULT_TEXT_INDEX_MAX_BYTES, MapRecord,
         append_existing_map_purpose_records, append_record_rows, collect_repo_paths,
         default_config_root_value, exclude_dir_name_set, extract_block_comment_purpose,
-        extract_line_comment_purpose, normalize_repo_string, project_root_for_projectatlas_config,
-        split_record_cells, stable_generated_at, toon_cell,
+        extract_line_comment_purpose, load_atlas_config_from_text, normalize_repo_string,
+        project_root_for_projectatlas_config, split_record_cells, stable_generated_at, toon_cell,
     };
     use std::collections::{BTreeMap, BTreeSet};
+    use std::error::Error;
+    use std::io;
+    use std::path::Path;
 
     fn test_config(map_path: std::path::PathBuf) -> AtlasMapConfig {
         let root = map_path.parent().map_or_else(
@@ -2759,6 +2825,7 @@ mod tests {
             exclude_dir_suffixes: BTreeSet::new(),
             exclude_path_prefixes: BTreeSet::new(),
             non_source_path_prefixes: BTreeSet::new(),
+            language_overrides: BTreeMap::new(),
             allowed_untracked_filenames: BTreeSet::new(),
             untracked_allowlist_dir_prefixes: BTreeSet::new(),
             untracked_allowlist_files: BTreeSet::new(),
@@ -2783,6 +2850,53 @@ mod tests {
         assert!(names.contains("target"));
         assert!(names.contains(".git"));
         assert!(names.contains(".projectatlas"));
+    }
+
+    #[test]
+    fn config_normalizes_validated_language_overrides() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join(".projectatlas").join("config.toml");
+        let config = load_atlas_config_from_text(
+            &path,
+            r#"
+[project]
+root = "."
+
+[scan.language_overrides]
+".D.TS" = "ts"
+"Cargo.toml" = "py"
+"#,
+        )?;
+        if config.language_overrides.get(".d.ts").map(String::as_str) != Some("typescript") {
+            return Err(io::Error::other("compound extension override was not normalized").into());
+        }
+        if config
+            .language_overrides
+            .get("Cargo.toml")
+            .map(String::as_str)
+            != Some("python")
+        {
+            return Err(io::Error::other("exact filename override was not normalized").into());
+        }
+        if config.scan_options().language_overrides != config.language_overrides {
+            return Err(io::Error::other("scanner did not receive language overrides").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn config_rejects_unknown_language_override_target() {
+        let result = load_atlas_config_from_text(
+            Path::new(".projectatlas/config.toml"),
+            r#"
+[scan.language_overrides]
+".rs" = "not-a-language"
+"#,
+        );
+        assert!(matches!(
+            result,
+            Err(AtlasMapError::InvalidLanguageOverride { .. })
+        ));
     }
 
     #[test]

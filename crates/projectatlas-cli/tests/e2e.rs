@@ -2,8 +2,19 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+#[cfg(feature = "optional-parser-supervisor")]
+use projectatlas_cli::optional_parser_lifecycle::OPTIONAL_PARSER_PACK_SELECTION_POLICY_PATH;
 use projectatlas_core::PurposeSource;
+use projectatlas_core::graph::{
+    CoverageScope, ExtendedRelationKind, GraphRelationKind, RelationResolution, RepositoryNodePath,
+};
 use projectatlas_core::language::{BROAD_SOURCE_EXTENSIONS, detect_language_for_path};
+#[cfg(feature = "optional-parser-supervisor")]
+use projectatlas_core::optional_parser_pack::{
+    OPTIONAL_PARSER_PACK_ID, OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES,
+    OPTIONAL_PARSER_PACK_MAX_ARCHIVE_BYTES, OPTIONAL_PARSER_PACK_MAX_EXPANDED_BYTES,
+    OPTIONAL_PARSER_PACK_MAX_FILE_BYTES, OPTIONAL_PARSER_PACK_MAX_FILE_ENTRIES, PackRelativePath,
+};
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
 };
@@ -12,13 +23,17 @@ use projectatlas_core::telemetry::{
 };
 use projectatlas_db::{
     AtlasStore, HealthResolution, IndexedFileText, PlannerStatisticsPolicy, PlannerStatisticsState,
-    TelemetryCheckpointState,
+    RepositoryGraphRelationQuery, TelemetryCheckpointState,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+#[cfg(feature = "optional-parser-supervisor")]
+use std::ffi::OsStr;
+#[cfg(all(target_os = "macos", feature = "optional-parser-supervisor"))]
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read as IoRead, Write as IoWrite};
@@ -31,6 +46,10 @@ use yaml_rust2::{Yaml, YamlLoader};
 const TEST_REPO_DIR: &str = "repo";
 const SRC_DIR_NAME: &str = "src";
 const TESTS_DIR_NAME: &str = "tests";
+const ALPHA_RS_FILE_NAME: &str = "alpha.rs";
+const CREATED_RS_FILE_NAME: &str = "created.rs";
+const HIDDEN_RS_FILE_NAME: &str = "hidden.rs";
+const IGNORED_DIR_NAME: &str = "ignored";
 const INSTALLER_RS_FILE_NAME: &str = "installer.rs";
 const ATLAS_DIR_NAME: &str = ".projectatlas";
 const GITHOOKS_DIR_NAME: &str = ".githooks";
@@ -49,13 +68,28 @@ const FAKE_CODEX_SKILL_CONTENT: &str = "# ProjectAtlas\n";
 const FAKE_PATH_DIR: &str = "fake-path";
 const IGNORED_FIXTURE_DIR: &str = "ignored-dir";
 const ISOLATED_HOME_DIR: &str = "isolated-home";
+#[cfg(feature = "optional-parser-supervisor")]
+const OPTIONAL_PARSER_ARCHIVE_ENV: &str = "PROJECTATLAS_OPTIONAL_PARSER_ARCHIVE";
+#[cfg(feature = "optional-parser-supervisor")]
+const PARSER_PACK_TEST_HOME_DIR: &str = "home";
+#[cfg(feature = "optional-parser-supervisor")]
+const PARSER_PACK_TEST_LOCAL_APP_DATA_DIR: &str = "local-app-data";
+#[cfg(feature = "optional-parser-supervisor")]
+const PARSER_PACK_TEST_XDG_DATA_DIR: &str = "xdg-data";
+#[cfg(feature = "optional-parser-supervisor")]
+const OPTIONAL_PARSER_PACKS_DIR_NAME: &str = "parser-packs";
 const PROJECTATLAS_SKILL_DIR: &str = "skills";
 const PROJECTATLAS_SKILL_NAME: &str = "projectatlas";
 const SKILL_FILE_NAME: &str = "SKILL.md";
 const SUBDIR_CONFIG_DIR: &str = "config";
 const SESSION_TEST_FILE_NAME: &str = "session.rs";
-#[cfg(windows)]
+#[cfg(any(
+    windows,
+    all(target_os = "macos", feature = "optional-parser-supervisor")
+))]
 const PROJECTATLAS_LOCAL_APPDATA_DIR: &str = "ProjectAtlas";
+#[cfg(all(not(windows), feature = "optional-parser-supervisor"))]
+const PROJECTATLAS_XDG_DATA_DIR: &str = "projectatlas";
 
 /// Return one `SQLite` sidecar path for exact no-mutation assertions.
 fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
@@ -111,6 +145,521 @@ fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn E
         .stderr(predicate::str::contains(
             "does not satisfy required version",
         ));
+    Ok(())
+}
+
+#[cfg(feature = "optional-parser-supervisor")]
+#[test]
+fn parser_pack_disable_does_not_require_default_user_storage() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let selection = repo.join(OPTIONAL_PARSER_PACK_SELECTION_POLICY_PATH);
+    fs::create_dir_all(
+        selection
+            .parent()
+            .ok_or_else(|| io::Error::other("parser-pack selection has no parent"))?,
+    )?;
+    fs::write(&selection, b"stale-selection")?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env_remove("HOME")
+        .env_remove("LOCALAPPDATA")
+        .env_remove("XDG_DATA_HOME")
+        .args(["--format", "json", "parser-pack", "disable"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"operation\": \"disable\""));
+
+    if selection.exists() {
+        return Err(io::Error::other(
+            "parser-pack disable retained project selection without user storage",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "optional-parser-supervisor"))]
+#[test]
+fn parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_access()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let home = temp.path().join(PARSER_PACK_TEST_HOME_DIR);
+    let missing_archive = temp.path().join("missing-parser-pack.tar.zst");
+    let selection = repo.join(OPTIONAL_PARSER_PACK_SELECTION_POLICY_PATH);
+    let storage = home
+        .join("Library")
+        .join("Application Support")
+        .join(PROJECTATLAS_LOCAL_APPDATA_DIR)
+        .join(OPTIONAL_PARSER_PACKS_DIR_NAME);
+    fs::create_dir(&repo)?;
+    fs::create_dir(&home)?;
+
+    let commands = [
+        (
+            "verify",
+            vec![
+                OsString::from("parser-pack"),
+                OsString::from("verify"),
+                OsString::from("--archive"),
+                missing_archive.as_os_str().to_owned(),
+            ],
+        ),
+        (
+            "install",
+            vec![
+                OsString::from("parser-pack"),
+                OsString::from("install"),
+                OsString::from("--archive"),
+                missing_archive.as_os_str().to_owned(),
+            ],
+        ),
+        (
+            "enable",
+            vec![
+                OsString::from("parser-pack"),
+                OsString::from("enable"),
+                OsString::from("--artifact"),
+                OsString::from("a".repeat(64)),
+            ],
+        ),
+        (
+            "update",
+            vec![
+                OsString::from("parser-pack"),
+                OsString::from("update"),
+                OsString::from("--archive"),
+                missing_archive.as_os_str().to_owned(),
+            ],
+        ),
+    ];
+    for (operation, arguments) in commands {
+        let output = Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .env("HOME", &home)
+            .env_remove("LOCALAPPDATA")
+            .env_remove("XDG_DATA_HOME")
+            .args(["--format", "json"])
+            .args(arguments)
+            .output()?;
+        if output.status.success() {
+            return Err(io::Error::other(format!(
+                "unsupported macOS parser-pack {operation} unexpectedly succeeded"
+            ))
+            .into());
+        }
+        let error: Value = serde_json::from_slice(&output.stderr)?;
+        require_json_string(&error, &["error", "kind"], "unsupported_containment")?;
+        if missing_archive.exists() || selection.exists() || storage.exists() {
+            return Err(io::Error::other(format!(
+                "unsupported macOS parser-pack {operation} touched archive or lifecycle state"
+            ))
+            .into());
+        }
+    }
+
+    let source = repo.join(SRC_DIR_NAME).join("main.rs");
+    let selection_bytes = b"malformed selection must not be inspected";
+    let source_bytes = b"pub fn untouched() {}\n";
+    fs::create_dir_all(
+        selection
+            .parent()
+            .ok_or_else(|| io::Error::other("parser-pack selection has no parent"))?,
+    )?;
+    fs::create_dir_all(
+        source
+            .parent()
+            .ok_or_else(|| io::Error::other("macOS source path has no parent"))?,
+    )?;
+    fs::write(&selection, selection_bytes)?;
+    fs::write(&source, source_bytes)?;
+    let scan = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("HOME", &home)
+        .env_remove("LOCALAPPDATA")
+        .env_remove("XDG_DATA_HOME")
+        .args(["--format", "json", "scan"])
+        .output()?;
+    if scan.status.success() {
+        return Err(io::Error::other(
+            "unsupported macOS normal scan unexpectedly accepted parser-pack state",
+        )
+        .into());
+    }
+    let scan_error: Value = serde_json::from_slice(&scan.stderr)?;
+    require_json_string(&scan_error, &["error", "kind"], "unsupported_containment")?;
+    if fs::read(&selection)? != selection_bytes
+        || fs::read(&source)? != source_bytes
+        || storage.exists()
+    {
+        return Err(io::Error::other(
+            "unsupported macOS normal scan touched parser selection, storage, or source",
+        )
+        .into());
+    }
+
+    for expected_changed in [true, false] {
+        let remove = Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .env("HOME", &home)
+            .env_remove("LOCALAPPDATA")
+            .env_remove("XDG_DATA_HOME")
+            .args(["--format", "json", "parser-pack", "remove"])
+            .output()?;
+        if !remove.status.success() {
+            return Err(io::Error::other(format!(
+                "unsupported macOS parser-pack remove failed: {}",
+                String::from_utf8_lossy(&remove.stderr)
+            ))
+            .into());
+        }
+        let report: Value = serde_json::from_slice(&remove.stdout)?;
+        require_json_string(&report, &["operation"], "remove")?;
+        require_json_string(&report, &["state"], "unsupported_containment")?;
+        require_json_bool(&report, &["changed"], expected_changed)?;
+        if selection.exists() || storage.exists() || fs::read(&source)? != source_bytes {
+            return Err(io::Error::other(
+                "unsupported macOS parser-pack remove touched storage or source",
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "optional-parser-supervisor")]
+#[test]
+#[ignore = "requires one exact workflow-built optional parser-pack archive"]
+fn optional_parser_pack_real_archive_normal_runtime_lifecycle() -> Result<(), Box<dyn Error>> {
+    let archive = std::env::var_os(OPTIONAL_PARSER_ARCHIVE_ENV)
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::other("real optional parser archive environment is absent"))?;
+    let archive = archive.canonicalize()?;
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let source_dir = repo.join(SRC_DIR_NAME);
+    let optional_source = source_dir.join("main.awk");
+    let host_state = temp.path().join("host-state");
+    let local_app_data = host_state.join(PARSER_PACK_TEST_LOCAL_APP_DATA_DIR);
+    let xdg_data = host_state.join(PARSER_PACK_TEST_XDG_DATA_DIR);
+    let isolated_home = host_state.join(PARSER_PACK_TEST_HOME_DIR);
+    #[cfg(windows)]
+    let storage = local_app_data
+        .join(PROJECTATLAS_LOCAL_APPDATA_DIR)
+        .join(OPTIONAL_PARSER_PACKS_DIR_NAME);
+    #[cfg(not(windows))]
+    let storage = xdg_data
+        .join(PROJECTATLAS_XDG_DATA_DIR)
+        .join(OPTIONAL_PARSER_PACKS_DIR_NAME);
+    let logical_pack_root = storage.join(OPTIONAL_PARSER_PACK_ID);
+    let db = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let selection = repo.join(OPTIONAL_PARSER_PACK_SELECTION_POLICY_PATH);
+    fs::create_dir_all(&source_dir)?;
+    fs::create_dir_all(&local_app_data)?;
+    fs::create_dir_all(&xdg_data)?;
+    fs::create_dir_all(&isolated_home)?;
+    fs::write(source_dir.join("lib.rs"), "pub fn built_in() {}\n")?;
+    fs::write(&optional_source, "# Hello\n{}\n")?;
+
+    projectatlas_json(&repo, &host_state, &[OsStr::new("init")])?;
+    if storage.exists() {
+        return Err(io::Error::other("default-core init touched optional pack storage").into());
+    }
+    let inactive = AtlasStore::open_read_only(&db)?
+        .load_node_by_path("src/main.awk")?
+        .ok_or_else(|| io::Error::other("inactive optional source node missing"))?;
+    if inactive.node.language.is_some()
+        || AtlasStore::open_read_only(&db)?
+            .load_source_parse_metadata("src/main.awk")?
+            .is_some()
+    {
+        return Err(
+            io::Error::other("default-core scan admitted optional catalog source work").into(),
+        );
+    }
+
+    let verified = projectatlas_json(
+        &repo,
+        &host_state,
+        &[
+            OsStr::new("parser-pack"),
+            OsStr::new("verify"),
+            OsStr::new("--archive"),
+            archive.as_os_str(),
+        ],
+    )?;
+    let artifact = json_string_at(&verified, &["artifact", "artifact"])?.to_owned();
+    require_json_string(&verified, &["operation"], "verify")?;
+    if storage.exists() || selection.exists() {
+        return Err(io::Error::other("parser-pack verification mutated installed state").into());
+    }
+
+    let installed = projectatlas_json(
+        &repo,
+        &host_state,
+        &[
+            OsStr::new("parser-pack"),
+            OsStr::new("install"),
+            OsStr::new("--archive"),
+            archive.as_os_str(),
+        ],
+    )?;
+    require_json_string(&installed, &["operation"], "install")?;
+    if !logical_pack_root.is_dir() || selection.exists() {
+        return Err(io::Error::other(
+            "parser-pack installation did not remain installed but disabled",
+        )
+        .into());
+    }
+    let enabled = projectatlas_json(
+        &repo,
+        &host_state,
+        &[
+            OsStr::new("parser-pack"),
+            OsStr::new("enable"),
+            OsStr::new("--artifact"),
+            OsStr::new(&artifact),
+        ],
+    )?;
+    require_json_string(&enabled, &["operation"], "enable")?;
+    require_json_string(&enabled, &["selected", "artifact"], &artifact)?;
+    if !selection.is_file() {
+        return Err(io::Error::other("parser-pack enable did not persist selection").into());
+    }
+
+    projectatlas_json(&repo, &host_state, &[OsStr::new("scan")])?;
+    let store = AtlasStore::open_read_only(&db)?;
+    let selected_node = store
+        .load_node_by_path("src/main.awk")?
+        .ok_or_else(|| io::Error::other("selected optional source node missing"))?;
+    if selected_node.node.language.as_deref() != Some("awk") {
+        return Err(io::Error::other("selected optional source was not admitted as AWK").into());
+    }
+    let source_metadata = store
+        .load_source_parse_metadata("src/main.awk")?
+        .ok_or_else(|| io::Error::other("optional source parse metadata missing"))?;
+    if source_metadata.parser != ParserKind::TreeSitter {
+        return Err(
+            io::Error::other("normal scan did not retain Tree-sitter source provenance").into(),
+        );
+    }
+    let graphs = store.load_symbol_graphs_for_paths(&["src/main.awk".to_string()])?;
+    if graphs.len() != 1 || graphs[0].parser != ParserKind::Fallback {
+        return Err(io::Error::other(
+            "normal scan did not retain independent fallback fact provenance",
+        )
+        .into());
+    }
+    let first_generation = store
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("selected scan publication missing"))?
+        .generation;
+    drop(store);
+
+    let updated_source = b"BEGIN { print \"atlas\" }\n";
+    fs::write(&optional_source, updated_source)?;
+    projectatlas_json(
+        &repo,
+        &host_state,
+        &[OsStr::new("watch"), OsStr::new("--once")],
+    )?;
+    let refreshed = AtlasStore::open_read_only(&db)?;
+    let second_generation = refreshed
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("watch publication missing"))?
+        .generation;
+    if second_generation <= first_generation
+        || refreshed
+            .load_source_parse_metadata("src/main.awk")?
+            .is_none_or(|metadata| metadata.parser != ParserKind::TreeSitter)
+    {
+        return Err(io::Error::other(
+            "optional source watcher refresh did not publish new Tree-sitter provenance",
+        )
+        .into());
+    }
+    let refreshed_node = refreshed
+        .load_node_by_path("src/main.awk")?
+        .ok_or_else(|| io::Error::other("refreshed optional source node missing"))?;
+    if refreshed_node.node.content_hash.as_deref()
+        != Some(blake3::hash(updated_source).to_hex().as_str())
+    {
+        return Err(io::Error::other(
+            "optional source watcher refresh did not index the updated source bytes",
+        )
+        .into());
+    }
+    let refreshed_graphs = refreshed.load_symbol_graphs_for_paths(&["src/main.awk".to_string()])?;
+    if refreshed_graphs.len() != 1 || refreshed_graphs[0].parser != ParserKind::Fallback {
+        return Err(io::Error::other(
+            "optional source watcher refresh did not retain independent fallback fact provenance",
+        )
+        .into());
+    }
+    drop(refreshed);
+
+    let selection_before_failed_update = fs::read(&selection)?;
+    let mut corrupt_bytes = fs::read(&archive)?;
+    if corrupt_bytes.is_empty() {
+        return Err(io::Error::other("real optional parser archive is empty").into());
+    }
+    corrupt_bytes.truncate(corrupt_bytes.len() / 2);
+    let corrupt_archive = temp.path().join("corrupt-parser-pack.tar.zst");
+    fs::write(&corrupt_archive, corrupt_bytes)?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("HOME", &isolated_home)
+        .env("LOCALAPPDATA", &local_app_data)
+        .env("XDG_DATA_HOME", &xdg_data)
+        .arg("--format")
+        .arg("json")
+        .arg("parser-pack")
+        .arg("update")
+        .arg("--archive")
+        .arg(&corrupt_archive)
+        .assert()
+        .failure();
+    if fs::read(&selection)? != selection_before_failed_update
+        || AtlasStore::open_read_only(&db)?
+            .index_publication()?
+            .is_none_or(|publication| publication.generation != second_generation)
+    {
+        return Err(io::Error::other(
+            "failed real-archive update changed selection or active generation",
+        )
+        .into());
+    }
+
+    let replacement_dir = temp.path().join("replacement");
+    fs::create_dir(&replacement_dir)?;
+    let replacement_archive = replacement_dir.join(
+        archive
+            .file_name()
+            .ok_or_else(|| io::Error::other("real optional parser archive has no file name"))?,
+    );
+    let replacement_artifact =
+        derive_whitespace_distinct_parser_archive(&archive, &replacement_archive)?;
+    if replacement_artifact == artifact {
+        return Err(io::Error::other("replacement parser artifact identity did not change").into());
+    }
+    let updated = projectatlas_json(
+        &repo,
+        &host_state,
+        &[
+            OsStr::new("parser-pack"),
+            OsStr::new("update"),
+            OsStr::new("--archive"),
+            replacement_archive.as_os_str(),
+        ],
+    )?;
+    require_json_bool(&updated, &["changed"], true)?;
+    require_json_string(&updated, &["state"], "rollback_ready")?;
+    require_json_string(&updated, &["selected", "artifact"], &replacement_artifact)?;
+    require_json_string(&updated, &["rollback", "artifact"], &artifact)?;
+    let release_version = json_string_at(&updated, &["selected", "projectatlas_version"])?;
+    let versions_root = logical_pack_root.join("versions").join(release_version);
+    if !versions_root.join(&artifact).is_dir()
+        || !versions_root.join(&replacement_artifact).is_dir()
+    {
+        return Err(io::Error::other(
+            "successful parser-pack update did not retain both exact immutable slots",
+        )
+        .into());
+    }
+
+    let replacement_source = b"BEGIN { print \"replacement\" }\n";
+    fs::write(&optional_source, replacement_source)?;
+    projectatlas_json(
+        &repo,
+        &host_state,
+        &[OsStr::new("watch"), OsStr::new("--once")],
+    )?;
+    let replacement_store = AtlasStore::open_read_only(&db)?;
+    let replacement_generation = replacement_store
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("replacement watch publication missing"))?
+        .generation;
+    let replacement_node = replacement_store
+        .load_node_by_path("src/main.awk")?
+        .ok_or_else(|| io::Error::other("replacement optional source node missing"))?;
+    if replacement_generation <= second_generation
+        || replacement_node.node.content_hash.as_deref()
+            != Some(blake3::hash(replacement_source).to_hex().as_str())
+        || replacement_store
+            .load_source_parse_metadata("src/main.awk")?
+            .is_none_or(|metadata| metadata.parser != ParserKind::TreeSitter)
+    {
+        return Err(io::Error::other(
+            "replacement parser artifact did not publish the exact updated source with Tree-sitter provenance",
+        )
+        .into());
+    }
+    let replacement_graphs =
+        replacement_store.load_symbol_graphs_for_paths(&["src/main.awk".to_string()])?;
+    if replacement_graphs.len() != 1 || replacement_graphs[0].parser != ParserKind::Fallback {
+        return Err(io::Error::other(
+            "replacement parser artifact did not publish independent fallback fact provenance",
+        )
+        .into());
+    }
+    drop(replacement_store);
+
+    let idempotent_update = projectatlas_json(
+        &repo,
+        &host_state,
+        &[
+            OsStr::new("parser-pack"),
+            OsStr::new("update"),
+            OsStr::new("--archive"),
+            replacement_archive.as_os_str(),
+        ],
+    )?;
+    require_json_bool(&idempotent_update, &["changed"], false)?;
+    let disabled = projectatlas_json(
+        &repo,
+        &host_state,
+        &[OsStr::new("parser-pack"), OsStr::new("disable")],
+    )?;
+    require_json_string(&disabled, &["operation"], "disable")?;
+    if selection.exists() {
+        return Err(io::Error::other("parser-pack disable retained project selection").into());
+    }
+    projectatlas_json(&repo, &host_state, &[OsStr::new("scan")])?;
+    let disabled_store = AtlasStore::open_read_only(&db)?;
+    if disabled_store
+        .load_node_by_path("src/main.awk")?
+        .is_none_or(|node| node.node.language.is_some())
+        || disabled_store
+            .load_source_parse_metadata("src/main.awk")?
+            .is_some()
+    {
+        return Err(io::Error::other(
+            "disabled optional pack retained catalog language or parse metadata",
+        )
+        .into());
+    }
+    drop(disabled_store);
+
+    let removed = projectatlas_json(
+        &repo,
+        &host_state,
+        &[OsStr::new("parser-pack"), OsStr::new("remove")],
+    )?;
+    require_json_string(&removed, &["operation"], "remove")?;
+    if logical_pack_root.exists() {
+        return Err(io::Error::other("parser-pack removal retained the logical pack root").into());
+    }
+    let removed_again = projectatlas_json(
+        &repo,
+        &host_state,
+        &[OsStr::new("parser-pack"), OsStr::new("remove")],
+    )?;
+    require_json_bool(&removed_again, &["changed"], false)?;
+    if selection.exists() {
+        return Err(io::Error::other("parser-pack removal retained project selection").into());
+    }
     Ok(())
 }
 
@@ -236,6 +785,311 @@ fn settings_reports_content_free_telemetry_without_recording() -> Result<(), Box
         .into());
     }
     let settings: Value = serde_json::from_slice(&output.stdout)?;
+    let language_registry = settings
+        .get("language_registry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("settings omitted language registry state"))?;
+    for field in [
+        "registry_version",
+        "accepted_set_version",
+        "detection_policy_version",
+    ] {
+        if language_registry
+            .get(field)
+            .and_then(Value::as_u64)
+            .is_none()
+        {
+            return Err(io::Error::other(format!(
+                "settings language registry omitted numeric field {field:?}"
+            ))
+            .into());
+        }
+    }
+    for field in [
+        "registry_digest",
+        "accepted_set_digest",
+        "semantic_provider_digest",
+    ] {
+        if language_registry
+            .get(field)
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            return Err(io::Error::other(format!(
+                "settings language registry omitted digest field {field:?}"
+            ))
+            .into());
+        }
+    }
+    let capability_counts = language_registry
+        .get("counts")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("settings omitted language capability counts"))?;
+    let accepted = capability_counts
+        .get("accepted")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| io::Error::other("accepted language count was not numeric"))?;
+    let built_in = capability_counts
+        .get("built_in")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| io::Error::other("built-in language count was not numeric"))?;
+    let optional_candidates = capability_counts
+        .get("optional_candidates")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| io::Error::other("optional language count was not numeric"))?;
+    if built_in + optional_candidates != accepted {
+        return Err(io::Error::other(
+            "built-in plus optional language rows did not reconcile with accepted rows",
+        )
+        .into());
+    }
+    if language_registry.get("capabilities").is_some() {
+        return Err(io::Error::other(
+            "default settings embedded the complete language capability matrix",
+        )
+        .into());
+    }
+    if output.stdout.len() > 64_000 {
+        return Err(io::Error::other(format!(
+            "default JSON settings response was not compact: {} bytes",
+            output.stdout.len()
+        ))
+        .into());
+    }
+    let optional_catalog = language_registry
+        .get("optional_catalog")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("settings omitted optional catalog provenance"))?;
+    for field in ["name", "version", "revision", "metadata_license"] {
+        if optional_catalog
+            .get(field)
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            return Err(
+                io::Error::other(format!("settings optional catalog omitted {field:?}")).into(),
+            );
+        }
+    }
+    for axis in ["detected", "parsed", "symbols", "semantic", "benchmarked"] {
+        let levels = capability_counts
+            .get(axis)
+            .and_then(Value::as_object)
+            .ok_or_else(|| io::Error::other(format!("missing language axis {axis:?}")))?;
+        let total = ["unavailable", "fallback", "supported"]
+            .into_iter()
+            .map(|level| {
+                levels
+                    .get(level)
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default()
+            })
+            .sum::<u64>();
+        if total != accepted {
+            return Err(io::Error::other(format!(
+                "language axis {axis:?} total {total} did not match accepted rows {accepted}"
+            ))
+            .into());
+        }
+    }
+    if settings
+        .get("semantic_relation_contract_digest")
+        .and_then(Value::as_str)
+        .is_none_or(|digest| digest.len() != 64)
+    {
+        return Err(io::Error::other(
+            "settings omitted the bounded semantic relation contract digest",
+        )
+        .into());
+    }
+    let search = settings
+        .get("search")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("settings omitted typed search readiness"))?;
+    if search.get("default_mode").and_then(Value::as_str) != Some("lexical")
+        || search
+            .get("lexical")
+            .and_then(|value| value.get("state"))
+            .and_then(Value::as_str)
+            != Some("ready")
+        || search
+            .get("lexical")
+            .and_then(|value| value.get("source"))
+            .and_then(Value::as_str)
+            != Some("persisted_text")
+        || search
+            .get("lexical")
+            .and_then(|value| value.get("exact_verification"))
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return Err(io::Error::other("settings misstated lexical search readiness").into());
+    }
+    for mode in ["fts", "semantic", "hybrid"] {
+        if search
+            .get(mode)
+            .and_then(|value| value.get("state"))
+            .and_then(Value::as_str)
+            != Some("unavailable")
+        {
+            return Err(io::Error::other(format!(
+                "settings overstated unavailable search mode {mode:?}"
+            ))
+            .into());
+        }
+    }
+    let optional_parser_pack = settings
+        .get("optional_parser_pack")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("settings omitted optional parser lifecycle"))?;
+    if optional_parser_pack
+        .get("compiled")
+        .and_then(Value::as_bool)
+        != Some(true)
+        || optional_parser_pack
+            .get("lifecycle")
+            .and_then(|value| value.get("state"))
+            .and_then(Value::as_str)
+            .is_none()
+    {
+        return Err(
+            io::Error::other("settings omitted compiled optional parser lifecycle truth").into(),
+        );
+    }
+    let database = settings
+        .get("database")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("settings omitted database diagnostics"))?;
+    let schema = database
+        .get("schema")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("settings omitted schema compatibility"))?;
+    if schema.get("compatibility").and_then(Value::as_str) != Some("current")
+        || schema.get("runtime_version").and_then(Value::as_i64)
+            != schema.get("stored_version").and_then(Value::as_i64)
+        || schema.get("migration_required").and_then(Value::as_bool) != Some(false)
+        || schema.get("migration_supported").and_then(Value::as_bool) != Some(true)
+        || schema
+            .get("migration_steps_remaining")
+            .and_then(Value::as_u64)
+            != Some(0)
+    {
+        return Err(io::Error::other("settings misstated current schema/migration state").into());
+    }
+    let sqlite = database
+        .get("sqlite")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("settings omitted linked SQLite identity"))?;
+    let compile_options = sqlite
+        .get("compile_options")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("settings omitted SQLite compile-option identity"))?;
+    if sqlite
+        .get("version")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+        || sqlite
+            .get("version_number")
+            .and_then(Value::as_i64)
+            .is_none()
+        || compile_options
+            .get("count")
+            .and_then(Value::as_u64)
+            .is_none_or(|count| count == 0)
+        || compile_options
+            .get("digest")
+            .and_then(Value::as_str)
+            .is_none_or(|digest| digest.len() != 64)
+        || compile_options.len() != 2
+    {
+        return Err(io::Error::other("settings emitted an invalid SQLite identity").into());
+    }
+    if database.get("filesystem").and_then(Value::as_str) != Some("supported_local") {
+        return Err(
+            io::Error::other("settings did not report the validated local filesystem").into(),
+        );
+    }
+    let operating_profile = database
+        .get("operating_profile")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("settings omitted the SQLite operating profile"))?;
+    for field in [
+        "required_journal_mode",
+        "observed_journal_mode",
+        "required_synchronous_mode",
+        "observed_synchronous_mode",
+    ] {
+        if operating_profile
+            .get(field)
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            return Err(
+                io::Error::other(format!("settings operating profile omitted {field:?}")).into(),
+            );
+        }
+    }
+    let publication = database
+        .get("publication")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("settings omitted active publication state"))?;
+    if publication.get("state").and_then(Value::as_str) != Some("complete")
+        || publication.get("generation").is_none()
+        || publication
+            .get("contract_fingerprint_state")
+            .and_then(Value::as_str)
+            != Some("valid")
+        || publication
+            .get("contract_fingerprint")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Err(io::Error::other("settings misstated active publication state").into());
+    }
+    let coverage = database
+        .get("coverage")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("settings omitted bounded coverage state"))?;
+    if coverage.get("returned").and_then(Value::as_u64).is_none()
+        || coverage.get("inspected").and_then(Value::as_u64).is_none()
+        || coverage.get("truncated").and_then(Value::as_bool).is_none()
+        || coverage
+            .get("total_state")
+            .and_then(Value::as_str)
+            .is_none()
+        || coverage.get("next_call").and_then(Value::as_str) != Some("atlas_file_summary")
+    {
+        return Err(io::Error::other("settings omitted bounded actionable coverage truth").into());
+    }
+    let diagnostics_text = serde_json::to_string(&serde_json::json!({
+        "database": database,
+        "language_registry": language_registry,
+        "semantic_relation_contract_digest": settings["semantic_relation_contract_digest"],
+        "search": search,
+        "optional_parser_pack": optional_parser_pack,
+    }))?;
+    let repo_sentinel = repo.to_string_lossy().into_owned();
+    for forbidden_value in [
+        SESSION_SENTINEL,
+        QUERY_SENTINEL,
+        SOURCE_SENTINEL,
+        repo_sentinel.as_str(),
+    ] {
+        if diagnostics_text.contains(forbidden_value) {
+            return Err(io::Error::other(format!(
+                "settings diagnostics exposed private value {forbidden_value:?}"
+            ))
+            .into());
+        }
+    }
+    for forbidden_field in ["mount_point", "device", "probe_path", "environment"] {
+        if diagnostics_text.contains(forbidden_field) {
+            return Err(io::Error::other(format!(
+                "settings diagnostics exposed forbidden field {forbidden_field:?}"
+            ))
+            .into());
+        }
+    }
     let telemetry = settings
         .get("telemetry")
         .ok_or_else(|| io::Error::other("settings omitted telemetry retention state"))?;
@@ -411,7 +1265,6 @@ fn settings_reports_content_free_telemetry_without_recording() -> Result<(), Box
             .into());
         }
     }
-    let repo_sentinel = repo.to_string_lossy().into_owned();
     for forbidden_value in [
         SESSION_SENTINEL,
         QUERY_SENTINEL,
@@ -431,6 +1284,169 @@ fn settings_reports_content_free_telemetry_without_recording() -> Result<(), Box
         connection.query_row("SELECT COUNT(*) FROM usage_instances", [], |row| row.get(0))?;
     if instances_after != instances_before {
         return Err(io::Error::other("settings recorded telemetry for its own read").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn settings_rejects_untrusted_publication_with_retained_text() -> Result<(), Box<dyn Error>> {
+    const PRIVATE_FINGERPRINT_SENTINEL: &str = "private-publication-fingerprint-sentinel";
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn retained_text() {}\n",
+    )?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("init")
+        .assert()
+        .success();
+
+    let db_path = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let connection = Connection::open(&db_path)?;
+    connection.execute(
+        "UPDATE metadata SET value = ?1 WHERE key = 'index_publication_fingerprint'",
+        [PRIVATE_FINGERPRINT_SENTINEL],
+    )?;
+    drop(connection);
+
+    let invalid_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "settings"])
+        .output()?;
+    if !invalid_output.status.success() {
+        return Err(io::Error::other(format!(
+            "settings failed for invalid publication metadata: {}",
+            String::from_utf8_lossy(&invalid_output.stderr)
+        ))
+        .into());
+    }
+    let invalid: Value = serde_json::from_slice(&invalid_output.stdout)?;
+    if invalid_output
+        .stdout
+        .windows(PRIVATE_FINGERPRINT_SENTINEL.len())
+        .any(|window| window == PRIVATE_FINGERPRINT_SENTINEL.as_bytes())
+        || invalid["database"]["publication"]["contract_fingerprint_state"] != "invalid"
+        || !invalid["database"]["publication"]["contract_fingerprint"].is_null()
+        || !invalid["database"]["coverage"].is_null()
+        || invalid["search"]["lexical"]["state"] != "unavailable"
+        || !invalid["index"].is_null()
+        || !invalid["telemetry"].is_null()
+    {
+        return Err(
+            io::Error::other("settings exposed or trusted invalid publication metadata").into(),
+        );
+    }
+
+    let connection = Connection::open(&db_path)?;
+    connection.execute(
+        "DELETE FROM metadata
+          WHERE key IN (
+              'index_publication_state',
+              'index_publication_fingerprint',
+              'index_publication_generation'
+          )",
+        [],
+    )?;
+    let retained_text_rows: i64 =
+        connection.query_row("SELECT COUNT(*) FROM file_texts", [], |row| row.get(0))?;
+    drop(connection);
+    if retained_text_rows == 0 {
+        return Err(io::Error::other("fixture did not retain indexed text rows").into());
+    }
+
+    let missing_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "settings"])
+        .output()?;
+    if !missing_output.status.success() {
+        return Err(io::Error::other(format!(
+            "settings failed for missing publication metadata: {}",
+            String::from_utf8_lossy(&missing_output.stderr)
+        ))
+        .into());
+    }
+    let missing: Value = serde_json::from_slice(&missing_output.stdout)?;
+    if !missing["database"]["publication"].is_null()
+        || missing["search"]["lexical"]["state"] != "unavailable"
+        || missing["index"]["indexed_text_files"].as_i64() != Some(retained_text_rows)
+    {
+        return Err(io::Error::other(
+            "settings trusted retained text without an active publication",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn settings_reports_supported_predecessor_without_migration() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    let db_path = atlas_dir.join("projectatlas.db");
+    let connection = Connection::open(&db_path)?;
+    connection.execute_batch(include_str!(
+        "../../projectatlas-db/tests/fixtures/released-schema-8.sql"
+    ))?;
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES ('schema_version', '8')",
+        [],
+    )?;
+    let project_root = repo.to_string_lossy().into_owned();
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES ('project_root', ?1)",
+        [project_root],
+    )?;
+    drop(connection);
+    let bytes_before = fs::read(&db_path)?;
+
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json", "settings"])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "settings failed for a supported predecessor: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let settings: Value = serde_json::from_slice(&output.stdout)?;
+    let schema = settings
+        .get("database")
+        .and_then(|value| value.get("schema"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("predecessor settings omitted schema state"))?;
+    if schema.get("stored_version").and_then(Value::as_i64) != Some(8)
+        || schema.get("compatibility").and_then(Value::as_str) != Some("supported_predecessor")
+        || schema.get("migration_required").and_then(Value::as_bool) != Some(true)
+        || schema.get("migration_supported").and_then(Value::as_bool) != Some(true)
+        || schema
+            .get("migration_steps_remaining")
+            .and_then(Value::as_u64)
+            != Some(5)
+        || !settings.get("index").is_some_and(Value::is_null)
+        || !settings.get("telemetry").is_some_and(Value::is_null)
+    {
+        return Err(io::Error::other("settings misstated the supported predecessor").into());
+    }
+    if settings
+        .get("search")
+        .and_then(|value| value.get("lexical"))
+        .and_then(|value| value.get("state"))
+        .and_then(Value::as_str)
+        != Some("unavailable")
+    {
+        return Err(io::Error::other("predecessor settings overstated lexical readiness").into());
+    }
+    if fs::read(&db_path)? != bytes_before {
+        return Err(
+            io::Error::other("settings migrated or mutated the predecessor database").into(),
+        );
     }
     Ok(())
 }
@@ -695,7 +1711,7 @@ fn init_preserves_flat_config_and_uses_it_for_first_scan() -> Result<(), Box<dyn
     fs::create_dir_all(repo.join(IGNORED_FIXTURE_DIR))?;
     fs::write(repo.join(SRC_DIR_NAME).join("lib.rs"), "pub fn kept() {}\n")?;
     fs::write(
-        repo.join(IGNORED_FIXTURE_DIR).join("hidden.rs"),
+        repo.join(IGNORED_FIXTURE_DIR).join(HIDDEN_RS_FILE_NAME),
         "pub fn hidden() {}\n",
     )?;
     let flat_config_path = repo.join("projectatlas.toml");
@@ -1615,7 +2631,6 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     let release_workflow = fs::read_to_string(workflow_dir.join("release.yml"))?;
     let auto_release_workflow = fs::read_to_string(workflow_dir.join("03-auto-release.yml"))?;
     let ci_workflow = fs::read_to_string(workflow_dir.join("ci.yml"))?;
-    let docs_workflow = fs::read_to_string(workflow_dir.join("04-docs.yml"))?;
     let dependabot = fs::read_to_string(workspace_root.join(".github").join("dependabot.yml"))?;
     let deny = fs::read_to_string(workspace_root.join("deny.toml"))?;
     let hook = fs::read_to_string(
@@ -1723,13 +2738,23 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         }
     }
 
-    for (name, workflow) in [
-        ("release.yml", &release_workflow),
-        ("03-auto-release.yml", &auto_release_workflow),
-        ("ci.yml", &ci_workflow),
-        ("04-docs.yml", &docs_workflow),
-    ] {
-        assert_actions_are_sha_pinned(name, workflow)?;
+    let mut workflow_paths = fs::read_dir(&workflow_dir)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    workflow_paths.sort_unstable();
+    for path in workflow_paths {
+        let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+            continue;
+        };
+        if extension != "yml" && extension != "yaml" {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| io::Error::other("workflow filename must be UTF-8"))?;
+        let workflow = fs::read_to_string(&path)?;
+        assert_actions_are_sha_pinned(name, &workflow)?;
     }
 
     let dependabot_documents = YamlLoader::load_from_str(&dependabot)?;
@@ -7247,7 +8272,7 @@ fn structural_summaries_cover_declarative_files_and_projectatlas_inputs()
 }
 
 #[test]
-fn scan_indexes_every_supported_language_extension() -> Result<(), Box<dyn Error>> {
+fn default_scan_indexes_complete_accepted_core_surface() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     let fixture_root = repo.join("all");
@@ -7869,6 +8894,860 @@ fn normal_reads_do_not_serve_offline_stale_index_state() -> Result<(), Box<dyn E
         exercise_normal_read_freshness(&repo, &db, with_git_metadata)?;
     }
     Ok(())
+}
+
+#[test]
+fn dependency_aware_refresh_re_resolves_unchanged_inbound_callers() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let db = temp.path().join("dependency-refresh.db");
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"dependency-refresh\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "mod caller;\nmod target;\n",
+    )?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("caller.rs"),
+        "pub fn caller() { target(); }\n",
+    )?;
+    let target = repo.join(SRC_DIR_NAME).join("target.rs");
+    let duplicate = repo.join(SRC_DIR_NAME).join("duplicate.rs");
+    fs::write(&target, "pub fn target() {}\n")?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+    assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Resolved)?;
+
+    fs::write(&duplicate, "pub fn target() {}\n")?;
+    refresh_summary_once(&repo, &db, "src/caller.rs")?;
+    assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Ambiguous(2))?;
+
+    fs::remove_file(&duplicate)?;
+    refresh_summary_once(&repo, &db, "src/caller.rs")?;
+    assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Resolved)?;
+
+    fs::write(&target, "pub fn renamed() {}\n")?;
+    refresh_summary_once(&repo, &db, "src/caller.rs")?;
+    assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Unresolved)?;
+
+    fs::write(&duplicate, "pub fn target() {}\n")?;
+    refresh_summary_once(&repo, &db, "src/caller.rs")?;
+    assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Resolved)?;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ExpectedCallResolution {
+    Resolved,
+    Ambiguous(u32),
+    Unresolved,
+}
+
+fn refresh_summary_once(repo: &Path, db: &Path, file: &str) -> Result<(), Box<dyn Error>> {
+    let before = AtlasStore::open(db)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("publication missing before dependency refresh"))?;
+    let _summary = json_summary_command(repo, db, file)?;
+    let after = AtlasStore::open(db)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("publication missing after dependency refresh"))?;
+    let expected = before
+        .generation
+        .checked_next()
+        .ok_or_else(|| io::Error::other("dependency refresh generation overflow"))?;
+    if after.generation != expected {
+        return Err(io::Error::other(format!(
+            "dependency-aware refresh advanced from {} to {} instead of {}",
+            before.generation, after.generation, expected
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn assert_caller_call_resolution(
+    db: &Path,
+    caller_path: &str,
+    expected: ExpectedCallResolution,
+) -> Result<(), Box<dyn Error>> {
+    let store = AtlasStore::open(db)?;
+    let project = store
+        .project_instance_id()?
+        .ok_or_else(|| io::Error::other("dependency refresh project identity missing"))?;
+    let caller_path = RepositoryNodePath::new(Path::new(caller_path))?;
+    let caller_entities = store.repository_graph_entities_by_path(project, &caller_path, 100)?;
+    let call_relations = store.repository_graph_relations(
+        RepositoryGraphRelationQuery::Family {
+            relation: GraphRelationKind::Legacy(RelationKind::Calls),
+        },
+        100,
+    )?;
+    let matching = call_relations
+        .rows
+        .iter()
+        .filter(|relation| {
+            caller_entities
+                .rows
+                .iter()
+                .any(|entity| entity.key() == relation.source())
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(io::Error::other(format!(
+            "expected one caller relation, found {}",
+            matching.len()
+        ))
+        .into());
+    }
+    let matches = match (expected, matching[0].resolution()) {
+        (ExpectedCallResolution::Resolved, RelationResolution::Resolved { .. })
+        | (ExpectedCallResolution::Unresolved, RelationResolution::Unresolved { .. }) => true,
+        (
+            ExpectedCallResolution::Ambiguous(expected_candidates),
+            RelationResolution::Ambiguous { candidates, .. },
+        ) => candidates.get() == expected_candidates,
+        _ => false,
+    };
+    if !matches {
+        return Err(io::Error::other(format!(
+            "unexpected caller resolution: {:?}; {}",
+            matching[0].resolution(),
+            graph_resolution_debug(db)?
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn graph_resolution_debug(db: &Path) -> Result<String, Box<dyn Error>> {
+    let connection = Connection::open(db)?;
+    let mut statement = connection.prepare(
+        "SELECT 'export', export.owner_path, key.canonical_identity
+           FROM graph_entity_exports AS export
+           JOIN graph_resolution_keys AS key
+             ON key.project_instance_id = export.project_instance_id
+            AND key.resolution_domain = export.resolution_domain
+            AND key.key_digest = export.key_digest
+          UNION ALL
+         SELECT 'dependency', dependency.owner_path, key.canonical_identity
+           FROM graph_relation_dependencies AS dependency
+           JOIN graph_resolution_keys AS key
+             ON key.project_instance_id = dependency.project_instance_id
+            AND key.resolution_domain = dependency.resolution_domain
+            AND key.key_digest = dependency.key_digest
+          ORDER BY 1, 2, 3",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(format!("resolution bindings: {rows:?}"))
+}
+
+#[test]
+fn incremental_refreshes_converge_with_clean_scan_results() -> Result<(), Box<dyn Error>> {
+    const CONFIG: &str = "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n";
+    const CHANGED_CONFIG: &str = "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\ntext_index_max_bytes = 8192\n";
+
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let db = temp.path().join("incremental-convergence.db");
+    fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(repo.join(TESTS_DIR_NAME))?;
+    fs::create_dir_all(repo.join(IGNORED_DIR_NAME))?;
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"convergence\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "mod alpha;\npub fn entry() { alpha::answer(); }\n",
+    )?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join(ALPHA_RS_FILE_NAME),
+        "pub fn answer() -> u32 { 1 }\n",
+    )?;
+    fs::write(
+        repo.join(IGNORED_DIR_NAME).join(HIDDEN_RS_FILE_NAME),
+        "pub fn hidden() {}\n",
+    )?;
+    fs::write(repo.join(".gitignore"), ".projectatlas/\nignored/\n")?;
+    let config = repo.join(ATLAS_DIR_NAME).join("config.toml");
+    fs::write(&config, CONFIG)?;
+
+    run_scan(&repo, &db)?;
+    assert_clean_scan_convergence(&repo, &db, temp.path(), "initial")?;
+
+    let created = repo.join(SRC_DIR_NAME).join(CREATED_RS_FILE_NAME);
+    fs::write(&created, "pub fn created() -> u32 { 2 }\n")?;
+    let _created_summary = json_summary_command(&repo, &db, "src/created.rs")?;
+    assert_clean_scan_convergence(&repo, &db, temp.path(), "create")?;
+
+    fs::write(
+        &created,
+        "pub fn created() -> u32 { helper() }\nfn helper() -> u32 { 3 }\n",
+    )?;
+    run_watch_once(&repo, &db)?;
+    assert_clean_scan_convergence(&repo, &db, temp.path(), "modify")?;
+
+    let moved = repo.join(TESTS_DIR_NAME).join(CREATED_RS_FILE_NAME);
+    fs::rename(&created, &moved)?;
+    let moved_files = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["files", "--file-pattern", "tests/*.rs"])
+        .output()?;
+    if !moved_files.status.success()
+        || !String::from_utf8_lossy(&moved_files.stdout).contains("tests/created.rs")
+    {
+        return Err(io::Error::other(format!(
+            "normal read did not reconcile the move: {}",
+            String::from_utf8_lossy(&moved_files.stderr)
+        ))
+        .into());
+    }
+    assert_clean_scan_convergence(&repo, &db, temp.path(), "move")?;
+
+    let renamed = repo.join(TESTS_DIR_NAME).join("renamed.rs");
+    fs::rename(&moved, &renamed)?;
+    run_watch_once(&repo, &db)?;
+    assert_clean_scan_convergence(&repo, &db, temp.path(), "rename")?;
+
+    fs::remove_file(repo.join(SRC_DIR_NAME).join(ALPHA_RS_FILE_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn entry() {}\n",
+    )?;
+    run_watch_once(&repo, &db)?;
+    assert_clean_scan_convergence(&repo, &db, temp.path(), "delete")?;
+
+    fs::write(
+        repo.join(".gitignore"),
+        ".projectatlas/\nignored/\ntests/\n",
+    )?;
+    run_watch_once(&repo, &db)?;
+    assert_clean_scan_convergence(&repo, &db, temp.path(), "ignore")?;
+
+    fs::write(repo.join(".gitignore"), ".projectatlas/\nignored/\n")?;
+    run_watch_once(&repo, &db)?;
+    assert_clean_scan_convergence(&repo, &db, temp.path(), "unignore")?;
+
+    let python = repo.join(TESTS_DIR_NAME).join("renamed.py");
+    fs::rename(&renamed, &python)?;
+    fs::write(
+        &python,
+        "def renamed():\n    return helper()\n\ndef helper():\n    return 3\n",
+    )?;
+    fs::write(&config, CHANGED_CONFIG)?;
+    let stale_read = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json"])
+        .arg("--db")
+        .arg(&db)
+        .args(["summary", "tests/renamed.py"])
+        .output()?;
+    if stale_read.status.success()
+        || !String::from_utf8_lossy(&stale_read.stderr).contains("policy_drift")
+    {
+        return Err(io::Error::other(format!(
+            "parser/configuration change did not require a full refresh: {}",
+            String::from_utf8_lossy(&stale_read.stderr)
+        ))
+        .into());
+    }
+    run_scan(&repo, &db)?;
+    assert_clean_scan_convergence(&repo, &db, temp.path(), "parser-config")?;
+
+    let before_failed_refresh = AtlasStore::open_read_only(&db)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("publication missing before failed refresh"))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn entry() {}\npub fn after_retry() {}\n",
+    )?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["watch", ".", "--once", "--timeout-seconds", "0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("index work deadline was reached"));
+    let after_failed_refresh = AtlasStore::open_read_only(&db)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("publication missing after failed refresh"))?;
+    if after_failed_refresh != before_failed_refresh {
+        return Err(
+            io::Error::other("failed watcher work changed the complete publication").into(),
+        );
+    }
+    run_watch_once(&repo, &db)?;
+    assert_clean_scan_convergence(&repo, &db, temp.path(), "retry")?;
+
+    let generation_before_dirty_noop = AtlasStore::open_read_only(&db)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("publication missing before dirty no-op"))?
+        .generation;
+    let current_source = repo.join(SRC_DIR_NAME).join("lib.rs");
+    let unchanged = fs::read(&current_source)?;
+    fs::write(&current_source, unchanged)?;
+    let dirty_report = run_watch_once_report(&repo, &db)?;
+    let generation_after_dirty_noop = AtlasStore::open_read_only(&db)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("publication missing after dirty no-op"))?
+        .generation;
+    if generation_after_dirty_noop != generation_before_dirty_noop {
+        return Err(io::Error::other(format!(
+            "unchanged dirty source advanced the generation from {generation_before_dirty_noop} to {generation_after_dirty_noop}; report={dirty_report}"
+        ))
+        .into());
+    }
+    assert_clean_scan_convergence(&repo, &db, temp.path(), "dirty-noop")?;
+
+    let repeated_report = run_watch_once_report(&repo, &db)?;
+    let generation_after_repeated_noop = AtlasStore::open_read_only(&db)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("publication missing after repeated no-op"))?
+        .generation;
+    if generation_after_repeated_noop != generation_after_dirty_noop {
+        return Err(io::Error::other(format!(
+            "repeated no-change watch advanced the generation from {generation_after_dirty_noop} to {generation_after_repeated_noop}; dirty={dirty_report}; repeated={repeated_report}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct DerivedResultSnapshot {
+    nodes: Vec<String>,
+    texts: Vec<IndexedFileText>,
+    parsers: Vec<String>,
+    symbols: Vec<CodeSymbol>,
+    symbol_relations: Vec<SymbolRelation>,
+    graph_entities: BTreeSet<String>,
+    graph_relations: BTreeSet<String>,
+    graph_occurrences: BTreeSet<String>,
+    graph_coverage: BTreeSet<String>,
+    search_symbol_summaries: Vec<String>,
+    resolution_keys: Vec<String>,
+    entity_exports: Vec<String>,
+    relation_dependencies: Vec<String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct InternalDerivedSnapshot {
+    search_symbol_summaries: Vec<String>,
+    resolution_keys: Vec<String>,
+    entity_exports: Vec<String>,
+    relation_dependencies: Vec<String>,
+}
+
+fn run_scan(repo: &Path, db: &Path) -> Result<(), Box<dyn Error>> {
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .arg("--db")
+        .arg(db)
+        .args(["scan", "."])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "scan failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn run_watch_once(repo: &Path, db: &Path) -> Result<(), Box<dyn Error>> {
+    let _report = run_watch_once_report(repo, db)?;
+    Ok(())
+}
+
+fn run_watch_once_report(repo: &Path, db: &Path) -> Result<String, Box<dyn Error>> {
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .arg("--db")
+        .arg(db)
+        .args(["watch", ".", "--once"])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "watch --once failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+fn assert_clean_scan_convergence(
+    repo: &Path,
+    incremental_db: &Path,
+    scratch: &Path,
+    checkpoint: &str,
+) -> Result<(), Box<dyn Error>> {
+    let clean_db = scratch.join(format!("clean-{checkpoint}.db"));
+    run_scan(repo, &clean_db)?;
+    let incremental = derived_result_snapshot(incremental_db)?;
+    let clean = derived_result_snapshot(&clean_db)?;
+    if incremental != clean {
+        return Err(io::Error::other(format!(
+            "incremental results diverged from clean scan at {checkpoint}:\nincremental={incremental:#?}\nclean={clean:#?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn derived_result_snapshot(db: &Path) -> Result<DerivedResultSnapshot, Box<dyn Error>> {
+    const GRAPH_ROW_LIMIT: u32 = 10_000;
+    const GRAPH_OCCURRENCE_LIMIT: u32 = 1_024;
+    const RELATION_FAMILIES: [GraphRelationKind; 10] = [
+        GraphRelationKind::Legacy(RelationKind::Contains),
+        GraphRelationKind::Legacy(RelationKind::Imports),
+        GraphRelationKind::Legacy(RelationKind::Calls),
+        GraphRelationKind::Legacy(RelationKind::DependsOn),
+        GraphRelationKind::Extended(ExtendedRelationKind::References),
+        GraphRelationKind::Extended(ExtendedRelationKind::Tests),
+        GraphRelationKind::Extended(ExtendedRelationKind::RoutesTo),
+        GraphRelationKind::Extended(ExtendedRelationKind::Configures),
+        GraphRelationKind::Extended(ExtendedRelationKind::Reads),
+        GraphRelationKind::Extended(ExtendedRelationKind::Writes),
+    ];
+
+    let store = AtlasStore::open_read_only(db)?;
+    let publication = store
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("convergence publication missing"))?;
+    let project = store
+        .project_instance_id()?
+        .ok_or_else(|| io::Error::other("convergence project identity missing"))?;
+    let indexed_nodes = store.load_nodes()?;
+    let mut nodes = Vec::with_capacity(indexed_nodes.len());
+    let mut parsers = Vec::new();
+    let mut graph_entities = BTreeSet::new();
+    let mut graph_coverage = BTreeSet::new();
+    let project_coverage =
+        store.repository_graph_coverage(project, &CoverageScope::Project, GRAPH_ROW_LIMIT)?;
+    if project_coverage.truncated {
+        return Err(io::Error::other("project coverage snapshot was truncated").into());
+    }
+    for coverage in project_coverage.rows {
+        if coverage.generation() != publication.generation {
+            return Err(io::Error::other("project coverage used a mixed generation").into());
+        }
+        graph_coverage.insert(coverage_semantics(&coverage)?);
+    }
+    for indexed in &indexed_nodes {
+        nodes.push(serde_json::to_string(&serde_json::json!({
+            "path": indexed.node.path,
+            "kind": indexed.node.kind,
+            "parent_path": indexed.node.parent_path,
+            "extension": indexed.node.extension,
+            "language": indexed.node.language,
+            "size_bytes": indexed.node.size_bytes,
+            "content_hash": indexed.node.content_hash,
+            "summary": indexed.summary,
+        }))?);
+        if let Some(metadata) = store.load_source_parse_metadata(&indexed.node.path)? {
+            parsers.push(serde_json::to_string(&metadata)?);
+        }
+        let path = RepositoryNodePath::new(Path::new(&indexed.node.path))?;
+        let entities = store.repository_graph_entities_by_path(project, &path, GRAPH_ROW_LIMIT)?;
+        if entities.truncated {
+            return Err(io::Error::other("entity snapshot was truncated").into());
+        }
+        for entity in entities.rows {
+            if entity.generation() != publication.generation {
+                return Err(io::Error::other("entity snapshot used a mixed generation").into());
+            }
+            graph_entities.insert(serde_json::to_string(entity.selector())?);
+        }
+        let path_coverage = store.repository_graph_coverage(
+            project,
+            &CoverageScope::Path { path },
+            GRAPH_ROW_LIMIT,
+        )?;
+        if path_coverage.truncated {
+            return Err(io::Error::other("path coverage snapshot was truncated").into());
+        }
+        for coverage in path_coverage.rows {
+            if coverage.generation() != publication.generation {
+                return Err(io::Error::other("path coverage used a mixed generation").into());
+            }
+            graph_coverage.insert(coverage_semantics(&coverage)?);
+        }
+    }
+
+    let mut graph_relations = BTreeSet::new();
+    let mut graph_occurrences = BTreeSet::new();
+    for family in RELATION_FAMILIES {
+        let relations = store.repository_graph_relations(
+            RepositoryGraphRelationQuery::Family { relation: family },
+            GRAPH_ROW_LIMIT,
+        )?;
+        if relations.truncated {
+            return Err(io::Error::other("relation snapshot was truncated").into());
+        }
+        for relation in relations.rows {
+            if relation.generation() != publication.generation {
+                return Err(io::Error::other("relation snapshot used a mixed generation").into());
+            }
+            let source = store
+                .repository_graph_entity(relation.source())?
+                .ok_or_else(|| io::Error::other("relation source entity missing"))?;
+            graph_entities.insert(serde_json::to_string(source.selector())?);
+            let semantics = relation_semantics(source.selector(), &relation)?;
+            graph_relations.insert(semantics.clone());
+            let occurrences =
+                store.repository_graph_occurrences(&relation, GRAPH_OCCURRENCE_LIMIT)?;
+            if occurrences.truncated {
+                return Err(io::Error::other("occurrence snapshot was truncated").into());
+            }
+            for occurrence in occurrences.rows {
+                if occurrence.generation() != publication.generation {
+                    return Err(
+                        io::Error::other("occurrence snapshot used a mixed generation").into(),
+                    );
+                }
+                let span = occurrence.span();
+                graph_occurrences.insert(serde_json::to_string(&serde_json::json!({
+                    "relation": semantics,
+                    "file": occurrence.file().as_str(),
+                    "start_line": span.start_line(),
+                    "start_column": span.start_column(),
+                    "end_line": span.end_line(),
+                    "end_column": span.end_column(),
+                }))?);
+            }
+        }
+    }
+    nodes.sort();
+    parsers.sort();
+    let graph_row_limit = usize::try_from(GRAPH_ROW_LIMIT)?;
+    let symbols = store.load_symbols(None, None, graph_row_limit)?;
+    if symbols.len() == graph_row_limit {
+        return Err(io::Error::other("symbol snapshot reached its row ceiling").into());
+    }
+    let symbol_relations = store.load_symbol_relations(None, None, graph_row_limit)?;
+    if symbol_relations.len() == graph_row_limit {
+        return Err(io::Error::other("symbol-relation snapshot reached its row ceiling").into());
+    }
+    let project_hex = project.as_hex();
+    let internal = internal_derived_snapshot(db, &project_hex)?;
+    Ok(DerivedResultSnapshot {
+        nodes,
+        texts: store.load_file_texts_for_search(None, true)?,
+        parsers,
+        symbols,
+        symbol_relations,
+        graph_entities,
+        graph_relations,
+        graph_occurrences,
+        graph_coverage,
+        search_symbol_summaries: internal.search_symbol_summaries,
+        resolution_keys: internal.resolution_keys,
+        entity_exports: internal.entity_exports,
+        relation_dependencies: internal.relation_dependencies,
+    })
+}
+
+fn internal_derived_snapshot(
+    db: &Path,
+    project_hex: &str,
+) -> Result<InternalDerivedSnapshot, Box<dyn Error>> {
+    const ROW_LIMIT: usize = 4_096;
+    const NORMALIZED_PROJECT: &str = "00000000000000000000000000000000";
+
+    let connection = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let sql_limit = i64::try_from(ROW_LIMIT + 1)?;
+    let search_symbol_summaries = {
+        let mut statement = connection.prepare(
+            "SELECT node.path, summary.summary_level, summary.subject, summary.summary
+               FROM summaries AS summary
+               JOIN nodes AS node ON node.id = summary.node_id
+              WHERE node.exists_now = 1
+                AND summary.summary_level = 'search'
+                AND summary.subject = 'symbols'
+              ORDER BY node.path
+              LIMIT ?1",
+        )?;
+        let rows = statement.query_map([sql_limit], |row| {
+            Ok(serde_json::json!({
+                "path": row.get::<_, String>(0)?,
+                "summary_level": row.get::<_, String>(1)?,
+                "subject": row.get::<_, String>(2)?,
+                "summary": row.get::<_, Option<String>>(3)?,
+            })
+            .to_string())
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    require_snapshot_below_limit(
+        &search_symbol_summaries,
+        ROW_LIMIT,
+        "search symbol summaries",
+    )?;
+
+    let mut resolution_keys = Vec::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT project_instance_id, resolution_domain, key_digest, canonical_identity
+               FROM graph_resolution_keys
+              ORDER BY resolution_domain, canonical_identity
+              LIMIT ?1",
+        )?;
+        let mut rows = statement.query([sql_limit])?;
+        while let Some(row) = rows.next()? {
+            require_selected_project(row.get::<_, Vec<u8>>(0)?, project_hex)?;
+            let domain = row.get::<_, String>(1)?;
+            let digest = row.get::<_, Vec<u8>>(2)?;
+            let canonical = row.get::<_, String>(3)?;
+            require_canonical_digest("resolution key", &digest, &canonical)?;
+            let normalized =
+                normalize_project_witness(&canonical, project_hex, NORMALIZED_PROJECT)?;
+            resolution_keys.push(
+                serde_json::json!({
+                    "project": NORMALIZED_PROJECT,
+                    "resolution_domain": domain,
+                    "key_digest": blake3::hash(normalized.as_bytes()).to_hex().to_string(),
+                    "canonical_identity": normalized,
+                })
+                .to_string(),
+            );
+        }
+    }
+    require_snapshot_below_limit(&resolution_keys, ROW_LIMIT, "resolution keys")?;
+
+    let mut entity_exports = Vec::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT export.project_instance_id, export.entity_key, export.owner_path,
+                    export.resolution_domain, export.key_digest,
+                    entity.canonical_identity, resolution.canonical_identity
+               FROM graph_entity_exports AS export
+               JOIN graph_entities AS entity
+                 ON entity.project_instance_id = export.project_instance_id
+                AND entity.entity_key = export.entity_key
+               JOIN graph_resolution_keys AS resolution
+                 ON resolution.project_instance_id = export.project_instance_id
+                AND resolution.resolution_domain = export.resolution_domain
+                AND resolution.key_digest = export.key_digest
+              ORDER BY export.owner_path, entity.canonical_identity,
+                       export.resolution_domain, resolution.canonical_identity
+              LIMIT ?1",
+        )?;
+        let mut rows = statement.query([sql_limit])?;
+        while let Some(row) = rows.next()? {
+            require_selected_project(row.get::<_, Vec<u8>>(0)?, project_hex)?;
+            let entity_digest = row.get::<_, Vec<u8>>(1)?;
+            let owner_path = row.get::<_, String>(2)?;
+            let domain = row.get::<_, String>(3)?;
+            let resolution_digest = row.get::<_, Vec<u8>>(4)?;
+            let entity_canonical = row.get::<_, String>(5)?;
+            let resolution_canonical = row.get::<_, String>(6)?;
+            require_canonical_digest("export entity", &entity_digest, &entity_canonical)?;
+            require_canonical_digest(
+                "export resolution key",
+                &resolution_digest,
+                &resolution_canonical,
+            )?;
+            let entity =
+                normalize_project_witness(&entity_canonical, project_hex, NORMALIZED_PROJECT)?;
+            let resolution =
+                normalize_project_witness(&resolution_canonical, project_hex, NORMALIZED_PROJECT)?;
+            entity_exports.push(
+                serde_json::json!({
+                    "project": NORMALIZED_PROJECT,
+                    "owner_path": owner_path,
+                    "entity_key": blake3::hash(entity.as_bytes()).to_hex().to_string(),
+                    "entity_canonical_identity": entity,
+                    "resolution_domain": domain,
+                    "key_digest": blake3::hash(resolution.as_bytes()).to_hex().to_string(),
+                    "resolution_canonical_identity": resolution,
+                })
+                .to_string(),
+            );
+        }
+    }
+    require_snapshot_below_limit(&entity_exports, ROW_LIMIT, "entity exports")?;
+
+    let mut relation_dependencies = Vec::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT dependency.project_instance_id, dependency.relation_key,
+                    dependency.owner_path, dependency.resolution_domain,
+                    dependency.key_digest, relation.canonical_identity,
+                    resolution.canonical_identity
+               FROM graph_relation_dependencies AS dependency
+               JOIN graph_relations AS relation
+                 ON relation.project_instance_id = dependency.project_instance_id
+                AND relation.relation_key = dependency.relation_key
+               JOIN graph_resolution_keys AS resolution
+                 ON resolution.project_instance_id = dependency.project_instance_id
+                AND resolution.resolution_domain = dependency.resolution_domain
+                AND resolution.key_digest = dependency.key_digest
+              ORDER BY dependency.owner_path, relation.canonical_identity,
+                       dependency.resolution_domain, resolution.canonical_identity
+              LIMIT ?1",
+        )?;
+        let mut rows = statement.query([sql_limit])?;
+        while let Some(row) = rows.next()? {
+            require_selected_project(row.get::<_, Vec<u8>>(0)?, project_hex)?;
+            let relation_digest = row.get::<_, Vec<u8>>(1)?;
+            let owner_path = row.get::<_, String>(2)?;
+            let domain = row.get::<_, String>(3)?;
+            let resolution_digest = row.get::<_, Vec<u8>>(4)?;
+            let relation_canonical = row.get::<_, String>(5)?;
+            let resolution_canonical = row.get::<_, String>(6)?;
+            require_canonical_digest("dependency relation", &relation_digest, &relation_canonical)?;
+            require_canonical_digest(
+                "dependency resolution key",
+                &resolution_digest,
+                &resolution_canonical,
+            )?;
+            let relation =
+                normalize_project_witness(&relation_canonical, project_hex, NORMALIZED_PROJECT)?;
+            let resolution =
+                normalize_project_witness(&resolution_canonical, project_hex, NORMALIZED_PROJECT)?;
+            relation_dependencies.push(
+                serde_json::json!({
+                    "project": NORMALIZED_PROJECT,
+                    "owner_path": owner_path,
+                    "relation_key": blake3::hash(relation.as_bytes()).to_hex().to_string(),
+                    "relation_canonical_identity": relation,
+                    "resolution_domain": domain,
+                    "key_digest": blake3::hash(resolution.as_bytes()).to_hex().to_string(),
+                    "resolution_canonical_identity": resolution,
+                })
+                .to_string(),
+            );
+        }
+    }
+    require_snapshot_below_limit(&relation_dependencies, ROW_LIMIT, "relation dependencies")?;
+    Ok(InternalDerivedSnapshot {
+        search_symbol_summaries,
+        resolution_keys,
+        entity_exports,
+        relation_dependencies,
+    })
+}
+
+fn require_snapshot_below_limit<T>(
+    rows: &[T],
+    limit: usize,
+    label: &str,
+) -> Result<(), Box<dyn Error>> {
+    if rows.len() > limit {
+        return Err(io::Error::other(format!("{label} snapshot exceeded its row ceiling")).into());
+    }
+    Ok(())
+}
+
+fn require_selected_project(project: Vec<u8>, project_hex: &str) -> Result<(), Box<dyn Error>> {
+    let mut actual = String::with_capacity(project.len() * 2);
+    for byte in project {
+        write!(&mut actual, "{byte:02x}")?;
+    }
+    if actual != project_hex {
+        return Err(io::Error::other("internal graph row belongs to another project").into());
+    }
+    Ok(())
+}
+
+fn require_canonical_digest(
+    label: &str,
+    digest: &[u8],
+    canonical: &str,
+) -> Result<(), Box<dyn Error>> {
+    if digest != blake3::hash(canonical.as_bytes()).as_bytes() {
+        return Err(io::Error::other(format!("{label} digest does not match its witness")).into());
+    }
+    Ok(())
+}
+
+fn normalize_project_witness(
+    canonical: &str,
+    project_hex: &str,
+    normalized_project: &str,
+) -> Result<String, Box<dyn Error>> {
+    if project_hex.len() != normalized_project.len() {
+        return Err(io::Error::other("normalized project identity changed field length").into());
+    }
+    let project_field = format!("|{}:{project_hex}", project_hex.len());
+    if !canonical.contains(&project_field) {
+        return Err(
+            io::Error::other("canonical graph witness omitted its project identity").into(),
+        );
+    }
+    let normalized_field = format!("|{}:{normalized_project}", normalized_project.len());
+    Ok(canonical.replace(&project_field, &normalized_field))
+}
+
+fn relation_semantics(
+    source: &projectatlas_core::graph::EntitySelector,
+    relation: &projectatlas_core::graph::LogicalRelation,
+) -> Result<String, Box<dyn Error>> {
+    let resolution = match relation.resolution() {
+        RelationResolution::Resolved { selector, .. } => {
+            serde_json::json!({"status": "resolved", "selector": selector})
+        }
+        RelationResolution::Ambiguous {
+            reference,
+            candidates,
+        } => serde_json::json!({
+            "status": "ambiguous",
+            "reference": reference.as_str(),
+            "candidates": candidates.get(),
+        }),
+        RelationResolution::Unresolved { reference } => serde_json::json!({
+            "status": "unresolved",
+            "reference": reference.as_str(),
+        }),
+        RelationResolution::External { external, .. } => {
+            serde_json::json!({"status": "external", "external": external})
+        }
+    };
+    Ok(serde_json::to_string(&serde_json::json!({
+        "source": source,
+        "kind": relation.kind(),
+        "resolution": resolution,
+        "confidence": relation.confidence(),
+        "completeness": relation.completeness(),
+    }))?)
+}
+
+fn coverage_semantics(
+    coverage: &projectatlas_core::graph::CoverageRecord,
+) -> Result<String, Box<dyn Error>> {
+    Ok(serde_json::to_string(&serde_json::json!({
+        "scope": coverage.scope(),
+        "relation": coverage.relation(),
+        "state": coverage.state(),
+        "total": coverage.total(),
+        "covered": coverage.covered(),
+        "omitted": coverage.omitted(),
+        "reason": coverage.reason().map(projectatlas_core::graph::GraphIdentityText::as_str),
+        "reached_limit": coverage.reached_limit(),
+    }))?)
 }
 
 /// Exercise the same local-source freshness contract with and without Git metadata.
@@ -8518,7 +10397,8 @@ fn watch_once_preserves_unchanged_deep_summary_and_text_index() -> Result<(), Bo
         .args(["watch", ".", "--once"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("unchanged: 1"));
+        .stdout(predicate::str::contains("parsed: 0"))
+        .stdout(predicate::str::contains("unchanged: 0"));
 
     let after = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -8639,7 +10519,7 @@ fn watch_once_skips_unchanged_empty_native_parse() -> Result<(), Box<dyn Error>>
         .assert()
         .success()
         .stdout(predicate::str::contains("parsed: 0"))
-        .stdout(predicate::str::contains("unchanged: 1"));
+        .stdout(predicate::str::contains("unchanged: 0"));
 
     let after = json_summary_command(&repo, &db, "src/empty.rs")?;
     require_json_string(&after, &["parser_kind"], "tree-sitter-symbol-graph")?;
@@ -8687,7 +10567,8 @@ fn watch_once_preserves_manifest_symbol_summary() -> Result<(), Box<dyn Error>> 
         .args(["watch", ".", "--once"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("unchanged: 1"));
+        .stdout(predicate::str::contains("parsed: 0"))
+        .stdout(predicate::str::contains("unchanged: 0"));
 
     let after = json_summary_command(&repo, &db, "Cargo.toml")?;
     require_json_string(&after, &["parser_kind"], "manifest-symbol-graph")?;
@@ -9317,7 +11198,8 @@ fn agent_purpose_and_health_resolution_gate_flow() -> Result<(), Box<dyn Error>>
         .arg("overview")
         .assert()
         .success()
-        .stdout(predicate::str::contains("stale_purposes: 1"));
+        .stdout(predicate::str::contains("stale_purposes: 0"))
+        .stdout(predicate::str::contains("approved_purposes: 4"));
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -9326,7 +11208,7 @@ fn agent_purpose_and_health_resolution_gate_flow() -> Result<(), Box<dyn Error>>
         .arg("health-check")
         .assert()
         .success()
-        .stdout(predicate::str::contains("stale-purpose:src/a.rs:"));
+        .stdout(predicate::str::contains("stale-purpose:src/a.rs:").not());
 
     Ok(())
 }
@@ -10235,7 +12117,7 @@ fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), 
         repo.join(SRC_DIR_NAME).join("detail.rs"),
         "// Purpose: Rust implementation detail for purpose lint strictness tests.\npub fn detail_changed() {}\n",
     )?;
-    let stale_low = Command::cargo_bin("projectatlas")?
+    let changed_low = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .arg("--config")
         .arg(&config)
@@ -10243,24 +12125,39 @@ fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), 
         .arg(&db)
         .args(["lint", "--purpose-level", "low"])
         .output()?;
-    if stale_low.status.success() {
-        return Err(
-            io::Error::other("low purpose lint missed an offline stale high-impact file").into(),
-        );
-    }
-    let stale_low_stderr = String::from_utf8(stale_low.stderr)?;
-    if !stale_low_stderr.contains("[stale-purpose] Cargo.toml:") {
+    if !changed_low.status.success() {
         return Err(io::Error::other(format!(
-            "low purpose lint missed stale high-impact file:\n{stale_low_stderr}"
+            "low purpose lint invalidated an accepted purpose after an ordinary source change:\n{}",
+            String::from_utf8_lossy(&changed_low.stderr)
         ))
         .into());
     }
-    if stale_low_stderr.contains("src/detail.rs") {
+    let changed_low_stderr = String::from_utf8(changed_low.stderr)?;
+    if changed_low_stderr.contains("[stale-purpose]") {
         return Err(io::Error::other(format!(
-            "low purpose lint included low-value stale source file:\n{stale_low_stderr}"
+            "ordinary source changes produced stale-purpose findings:\n{changed_low_stderr}"
         ))
         .into());
     }
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--config")
+        .arg(&config)
+        .arg("--db")
+        .arg(&db)
+        .args(["lint", "--purpose-level", "strict"])
+        .assert()
+        .success();
+
+    let changed_manifest = json_summary_command(&repo, &db, "Cargo.toml")?;
+    require_json_string(
+        &changed_manifest,
+        &["file_purpose"],
+        "Agent-reviewed Rust manifest purpose",
+    )?;
+    require_json_string(&changed_manifest, &["file_purpose_source"], "agent")?;
+    require_json_bool(&changed_manifest, &["file_purpose_agent_reviewed"], true)?;
 
     Ok(())
 }
@@ -11150,7 +13047,14 @@ fn serve_release_assets(
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut rendered = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        rendered.push(char::from(LOWER_HEX[usize::from(byte >> 4)]));
+        rendered.push(char::from(LOWER_HEX[usize::from(byte & 0x0f)]));
+    }
+    rendered
 }
 
 fn write_executable_script(path: &Path, script: &str) -> Result<(), Box<dyn Error>> {
@@ -11370,6 +13274,188 @@ fn mcp_command_and_args(
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((std::path::PathBuf::from(command), args))
+}
+
+/// Run one successful normal CLI command and decode its JSON result.
+#[cfg(feature = "optional-parser-supervisor")]
+fn projectatlas_json(
+    repo: &Path,
+    host_state: &Path,
+    arguments: &[&OsStr],
+) -> Result<Value, Box<dyn Error>> {
+    let output = Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .env("HOME", host_state.join(PARSER_PACK_TEST_HOME_DIR))
+        .env(
+            "LOCALAPPDATA",
+            host_state.join(PARSER_PACK_TEST_LOCAL_APP_DATA_DIR),
+        )
+        .env(
+            "XDG_DATA_HOME",
+            host_state.join(PARSER_PACK_TEST_XDG_DATA_DIR),
+        )
+        .arg("--format")
+        .arg("json")
+        .args(arguments)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "projectatlas command failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    serde_json::from_slice(&output.stdout).map_err(Into::into)
+}
+
+/// Repack a verified archive after adding one semantically inert manifest whitespace byte.
+#[cfg(feature = "optional-parser-supervisor")]
+fn derive_whitespace_distinct_parser_archive(
+    source: &Path,
+    destination: &Path,
+) -> Result<String, Box<dyn Error>> {
+    const ARCHIVE_ROOT: &str = "projectatlas-broad-parser";
+    const ARTIFACT_MANIFEST: &str = "artifact-manifest.json";
+    const TAR_FRAMING_ALLOWANCE_BYTES: u64 = 1024 * 1024;
+
+    let source_metadata = fs::symlink_metadata(source)?;
+    if !source_metadata.file_type().is_file()
+        || source_metadata.len() == 0
+        || source_metadata.len() > OPTIONAL_PARSER_PACK_MAX_ARCHIVE_BYTES
+    {
+        return Err(
+            io::Error::other("verified source archive is not a bounded regular file").into(),
+        );
+    }
+    if destination.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "replacement parser archive already exists",
+        )
+        .into());
+    }
+
+    let decoder = zstd::Decoder::new(fs::File::open(source)?)?;
+    let maximum_tar_bytes = OPTIONAL_PARSER_PACK_MAX_EXPANDED_BYTES
+        .checked_add(TAR_FRAMING_ALLOWANCE_BYTES)
+        .ok_or_else(|| io::Error::other("replacement archive framing bound overflowed"))?;
+    let mut input = decoder.take(maximum_tar_bytes);
+    let mut source_archive = tar::Archive::new(&mut input);
+    let mut encoder = zstd::Encoder::new(fs::File::create(destination)?, 9)?;
+    encoder.include_checksum(true)?;
+    let mut destination_archive = tar::Builder::new(encoder);
+    let prefix = format!("{ARCHIVE_ROOT}/");
+    let mut previous_path: Option<String> = None;
+    let mut expanded_bytes = 0u64;
+    let mut entries_seen = 0usize;
+    let mut replacement_artifact = None;
+
+    for entry in source_archive.entries()? {
+        let mut entry = entry?;
+        entries_seen = entries_seen
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("replacement archive entry count overflowed"))?;
+        if entries_seen > OPTIONAL_PARSER_PACK_MAX_FILE_ENTRIES.saturating_add(1)
+            || !entry.header().entry_type().is_file()
+        {
+            return Err(io::Error::other(
+                "verified source archive has an invalid bounded regular-file inventory",
+            )
+            .into());
+        }
+        let archive_path = std::str::from_utf8(entry.path_bytes().as_ref())?.to_owned();
+        let relative = PackRelativePath::new(
+            archive_path
+                .strip_prefix(&prefix)
+                .ok_or_else(|| io::Error::other("verified archive entry is outside pack root"))?,
+        )?;
+        if previous_path
+            .as_ref()
+            .is_some_and(|previous| previous.as_str() >= relative.as_str())
+        {
+            return Err(io::Error::other(
+                "verified source archive entries are not strictly path-sorted",
+            )
+            .into());
+        }
+        previous_path = Some(relative.as_str().to_owned());
+
+        let source_bytes = entry.header().size()?;
+        if source_bytes == 0 || source_bytes > OPTIONAL_PARSER_PACK_MAX_FILE_BYTES {
+            return Err(io::Error::other("verified archive entry exceeds its byte bound").into());
+        }
+        let mode = entry.header().mode()?;
+        if entry.header().uid()? != 0 || entry.header().gid()? != 0 || entry.header().mtime()? != 0
+        {
+            return Err(
+                io::Error::other("verified archive entry metadata is not canonical").into(),
+            );
+        }
+
+        let mut header = tar::Header::new_ustar();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_mode(mode);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        if relative.as_str() == ARTIFACT_MANIFEST {
+            let maximum_manifest_bytes = u64::try_from(OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES)?;
+            if source_bytes >= maximum_manifest_bytes {
+                return Err(io::Error::other(
+                    "artifact manifest has no room for deterministic whitespace",
+                )
+                .into());
+            }
+            let mut manifest = Vec::with_capacity(usize::try_from(source_bytes)? + 1);
+            entry
+                .by_ref()
+                .take(source_bytes.saturating_add(1))
+                .read_to_end(&mut manifest)?;
+            if u64::try_from(manifest.len())? != source_bytes {
+                return Err(
+                    io::Error::other("artifact manifest size differs from tar header").into(),
+                );
+            }
+            let semantics: Value = serde_json::from_slice(&manifest)?;
+            manifest.push(b' ');
+            if serde_json::from_slice::<Value>(&manifest)? != semantics {
+                return Err(io::Error::other("manifest whitespace changed JSON semantics").into());
+            }
+            header.set_size(u64::try_from(manifest.len())?);
+            header.set_cksum();
+            destination_archive.append_data(&mut header, archive_path, manifest.as_slice())?;
+            expanded_bytes = expanded_bytes
+                .checked_add(u64::try_from(manifest.len())?)
+                .ok_or_else(|| io::Error::other("replacement archive byte count overflowed"))?;
+            replacement_artifact = Some(blake3::hash(&manifest).to_hex().to_string());
+        } else {
+            header.set_size(source_bytes);
+            header.set_cksum();
+            destination_archive.append_data(&mut header, archive_path, &mut entry)?;
+            expanded_bytes = expanded_bytes
+                .checked_add(source_bytes)
+                .ok_or_else(|| io::Error::other("replacement archive byte count overflowed"))?;
+        }
+        if expanded_bytes > OPTIONAL_PARSER_PACK_MAX_EXPANDED_BYTES {
+            return Err(
+                io::Error::other("replacement archive exceeds its expanded-byte bound").into(),
+            );
+        }
+    }
+    destination_archive.finish()?;
+    let encoder = destination_archive.into_inner()?;
+    let output = encoder.finish()?;
+    output.sync_all()?;
+    let output_metadata = fs::symlink_metadata(destination)?;
+    if !output_metadata.file_type().is_file()
+        || output_metadata.len() == 0
+        || output_metadata.len() > OPTIONAL_PARSER_PACK_MAX_ARCHIVE_BYTES
+    {
+        return Err(io::Error::other("replacement archive is not a bounded regular file").into());
+    }
+    replacement_artifact
+        .ok_or_else(|| io::Error::other("verified archive omitted artifact-manifest.json").into())
 }
 
 /// Read a `JSON` file from disk.

@@ -1,6 +1,15 @@
 //! Purpose: Coordinate shared `ProjectAtlas` CLI and MCP runtime workflows.
 //! Shared runtime orchestration for the `ProjectAtlas` CLI and MCP adapters.
 
+mod graph_projection;
+#[cfg(feature = "optional-parser-supervisor")]
+mod optional_parser_runtime;
+mod source_observation;
+
+pub(crate) use source_observation::{
+    SourceObservationRegistry, VerifiedReadOutcome, VerifiedReadStamp,
+};
+
 use crate::atlas_map::{
     self, init_project_with_config, load_atlas_config, load_atlas_config_for_root,
     load_atlas_config_from_text,
@@ -13,16 +22,25 @@ use crate::{
 };
 use blake3::Hasher;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+#[cfg(feature = "optional-parser-supervisor")]
+use projectatlas_cli::optional_parser_lifecycle::{
+    OPTIONAL_PARSER_PACK_SELECTION_POLICY_PATH, OptionalParserPackLifecycle,
+    OptionalParserPackLifecycleReport, OptionalParserPackProjectSelection,
+};
 use projectatlas_core::health::{
     CATEGORY_DUPLICATE_PURPOSE, CATEGORY_MISSING_PURPOSE, CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
     CATEGORY_REPEATED_TEMPORARY_FOLDER, CATEGORY_STALE_PURPOSE, CATEGORY_SUGGESTED_PURPOSE_REVIEW,
     Severity,
 };
 use projectatlas_core::language::{
-    BROAD_SOURCE_EXTENSIONS, LANGUAGE_SPECS, LanguageParserSupport, language_spec,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION, LANGUAGE_CAPABILITY_REGISTRY_VERSION,
+    LanguageRegistryReport, SymbolParserOwner, accepted_language_capability_digest,
+    language_capability, language_registry_digest, language_registry_report,
 };
 use projectatlas_core::outline::estimate_tokens;
-use projectatlas_core::symbols::{RelationKind, SymbolGraph, SymbolKind};
+use projectatlas_core::symbols::{
+    ParserKind, RelationKind, SourceParseMetadata, SymbolGraph, SymbolKind,
+};
 use projectatlas_core::telemetry::{
     TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_BASELINE_SELECTED_CANDIDATES,
     TOKEN_BUCKET_NAVIGATION_AVOIDANCE, TOKEN_CONFIDENCE_INFERRED, TOKEN_CONFIDENCE_POLICY_ESTIMATE,
@@ -36,20 +54,23 @@ use projectatlas_core::{
     purpose_review_signal, repo_path_to_native, validated_repo_file_key, validated_repo_node_key,
 };
 use projectatlas_db::{
-    AtlasStore, HealthFindingsPage, HealthQuery, HealthScope, IndexPublicationGuard,
-    IndexPublicationState, IndexedFileText, TelemetryRetentionState, read_project_root_read_only,
+    AtlasStore, DatabasePublicationContractState, DatabasePublicationReport,
+    DatabaseSchemaCompatibility, DatabaseSettingsReport, HealthFindingsPage, HealthQuery,
+    HealthScope, IndexPublication, IndexPublicationGuard, IndexPublicationState, IndexedFileText,
+    TelemetryRetentionState, database_settings_report, read_project_root_read_only,
     validate_database_location,
 };
 use projectatlas_fs::{
     FsError, ScanLimits, ScanOptions, gitignore_excludes_path, scan_path_controlled, scan_repo,
-    scan_repo_controlled,
+    scan_repo_controlled, scan_repo_controlled_with_work,
 };
 use projectatlas_service::{
     FilePathMatcher, NextStepReport, build_next_report, load_ranked_file_nodes_with_reasons,
     load_ranked_folder_nodes_with_reasons,
 };
-use projectatlas_symbols::extract_symbol_graph_controlled;
+use projectatlas_symbols::{extract_symbol_graph_controlled, semantic_resolution_contract_digest};
 use rayon::ThreadPoolBuilder;
+#[cfg(not(feature = "optional-parser-supervisor"))]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -59,7 +80,9 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -83,6 +106,7 @@ const PUBLICATION_PATH_BATCH_SIZE: usize = 128;
 /// Maximum persisted source texts applied between publication cancellation checks.
 const PUBLICATION_TEXT_BATCH_SIZE: usize = 32;
 /// Maximum symbol parse results retained before sequential persistence.
+#[cfg(not(feature = "optional-parser-supervisor"))]
 const SYMBOL_PARSE_BATCH_SIZE: usize = 64;
 /// Maximum symbol candidates accepted by one publication.
 const MAX_SYMBOL_PARSE_JOBS: usize = 100_000;
@@ -90,6 +114,8 @@ const MAX_SYMBOL_PARSE_JOBS: usize = 100_000;
 const MAX_INCREMENTAL_CHANGED_PATHS: usize = 100_000;
 /// Maximum source bytes accepted by one incremental watcher publication.
 const MAX_INCREMENTAL_SOURCE_BYTES: u64 = 1024 * 1024 * 1024;
+/// Maximum native watcher events buffered before continuity becomes uncertain.
+const WATCH_EVENT_QUEUE_CAPACITY: usize = 1_024;
 /// Maximum indexing workers regardless of a larger caller request.
 pub(crate) const INDEX_WORKER_SAFE_CEILING: usize = 32;
 /// Chunk size used by cancellation-aware bounded source reads.
@@ -122,8 +148,8 @@ const BUILTIN_PROJECTATLAS_PURPOSES: &[(&str, &str)] = &[
         "Replay agent-reviewed ProjectAtlas purpose records into the local SQLite index.",
     ),
 ];
-/// Project-local files whose edits can change source-selection policy.
-const INDEX_POLICY_PATHS: &[&str] = &[".projectatlas/config.toml", "projectatlas.toml"];
+/// Core project-local files whose edits can change source-selection policy.
+const CORE_INDEX_POLICY_PATHS: &[&str] = &[".projectatlas/config.toml", "projectatlas.toml"];
 
 /// Resolved scan runtime policy shared by CLI and MCP adapters.
 pub(crate) struct ScanRuntimePlan {
@@ -141,6 +167,9 @@ pub(crate) struct ScanRuntimePlan {
     pub(crate) text_options: TextIndexOptions,
     /// Explicit text-index limit supplied by the caller, if any.
     text_index_max_bytes_override: Option<u64>,
+    /// Content-free optional parser selection bound into derived publication identity.
+    #[cfg(feature = "optional-parser-supervisor")]
+    optional_parser_selection: OptionalParserPackProjectSelection,
 }
 
 /// Deterministic purpose-import rows and the inputs that produced them.
@@ -196,7 +225,7 @@ const NORMAL_READ_REFRESH_MAX_PATHS: usize = 64;
 /// Maximum current source bytes a normal read may reconcile before answering.
 const NORMAL_READ_REFRESH_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// Explicit version of the built-in derived-index projection contract.
-const INDEX_DERIVATION_CONTRACT_VERSION: &str = "1";
+const INDEX_DERIVATION_CONTRACT_VERSION: &str = "2";
 
 /// Closed state returned when an index-backed read cannot proceed safely.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -220,6 +249,8 @@ pub(crate) enum IndexRefreshReason {
     PathsChanged,
     /// Parser, source-selection, or indexing policy drifted.
     PolicyDrift,
+    /// Dependency-aware incremental refresh exceeded its aggregate safe closure.
+    DependencyClosureLimit,
 }
 
 /// Scope required to recover a stale index safely.
@@ -238,6 +269,35 @@ struct IndexFreshnessDelta {
     report: IndexRefreshRequired,
     /// Complete native path set used for a safe affected-path publication.
     paths: HashSet<PathBuf>,
+}
+
+/// Measured work performed by one exact source-freshness verification.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SourceVerificationWork {
+    /// Repository entries inspected by the exact filesystem scan.
+    pub(crate) filesystem_entries: u64,
+    /// Current source bytes hashed by the exact filesystem scan.
+    pub(crate) filesystem_bytes: u64,
+    /// `SQLite` read statements owned directly by freshness verification.
+    pub(crate) sqlite_read_statements: u64,
+    /// Indexed nodes decoded for exact current-versus-durable comparison.
+    pub(crate) decoded_nodes: u64,
+}
+
+/// Exact freshness assessment plus its measured source/database work.
+struct IndexFreshnessAssessment {
+    /// Complete source delta, when current source differs from the index.
+    delta: Option<IndexFreshnessDelta>,
+    /// Work consumed to establish the assessment.
+    work: SourceVerificationWork,
+}
+
+/// Current read snapshot established through exact source verification.
+pub(crate) struct ExactFreshIndexRead {
+    /// Root-bound complete `SQLite` read snapshot.
+    pub(crate) store: AtlasStore,
+    /// Work consumed before this snapshot could be called current.
+    pub(crate) work: SourceVerificationWork,
 }
 
 /// Closed reason why current local source could not be verified.
@@ -312,6 +372,11 @@ impl fmt::Display for IndexRefreshRequired {
                 "refresh_required: derived index policy differs from the current project configuration; run `projectatlas watch --once` or `atlas_watch_once` before retrying",
             );
         }
+        if self.reason == IndexRefreshReason::DependencyClosureLimit {
+            return formatter.write_str(
+                "refresh_required: the dependency-aware incremental closure exceeded its safe limit; run a complete `projectatlas scan` or `atlas_scan` before retrying",
+            );
+        }
         write!(
             formatter,
             "refresh_required: {} indexed path(s) differ from current local source; run `projectatlas watch --once` or `atlas_watch_once` before retrying",
@@ -373,13 +438,26 @@ pub(crate) fn open_fresh_atlas_store_for_project_controlled(
     config_path: Option<&Path>,
     control: &IndexWorkControl,
 ) -> Result<AtlasStore, CliError> {
+    Ok(
+        open_exact_fresh_atlas_store_for_project_controlled(db_path, root, config_path, control)?
+            .store,
+    )
+}
+
+/// Open a current snapshot and retain exact freshness work for epoch accounting.
+pub(crate) fn open_exact_fresh_atlas_store_for_project_controlled(
+    db_path: &Path,
+    root: &Path,
+    config_path: Option<&Path>,
+    control: &IndexWorkControl,
+) -> Result<ExactFreshIndexRead, CliError> {
     let bounded_control = bounded_index_work_control(control);
     let control = &bounded_control;
     let store = open_atlas_store_read_only_for_project(db_path, root)?;
     let plan = ScanRuntimePlan::for_path_controlled(config_path, root, None, control)
         .map_err(|source| publication_input_error(root, source))?;
-    let delta = match detect_index_freshness_controlled(&store, &plan, control) {
-        Ok(delta) => delta,
+    let assessment = match detect_index_freshness_controlled(&store, &plan, control) {
+        Ok(assessment) => assessment,
         Err(CliError::VerificationIncomplete(report))
             if report.reason == IndexVerificationReason::PublicationContractMismatch =>
         {
@@ -389,8 +467,9 @@ pub(crate) fn open_fresh_atlas_store_for_project_controlled(
         }
         Err(error) => return Err(error),
     };
-    let Some(delta) = delta else {
-        return Ok(store);
+    let mut work = assessment.work;
+    let Some(delta) = assessment.delta else {
+        return Ok(ExactFreshIndexRead { store, work });
     };
     if delta.report.scope != IndexRefreshScope::Incremental {
         return Err(CliError::RefreshRequired(Box::new(delta.report)));
@@ -421,8 +500,10 @@ pub(crate) fn open_fresh_atlas_store_for_project_controlled(
 
     let store = open_atlas_store_read_only_for_project(db_path, &plan.root)?;
     verify_index_project_root(&store, &plan.root)?;
+    work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
     verify_index_publication(&store, &plan)?;
-    Ok(store)
+    work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
+    Ok(ExactFreshIndexRead { store, work })
 }
 
 /// Distinguish optional repair contention from database-integrity failures.
@@ -452,7 +533,7 @@ fn detect_index_freshness(
     plan: &ScanRuntimePlan,
 ) -> Result<Option<IndexFreshnessDelta>, CliError> {
     let control = standalone_index_work_control();
-    detect_index_freshness_controlled(store, plan, &control)
+    Ok(detect_index_freshness_controlled(store, plan, &control)?.delta)
 }
 
 /// Detect the complete local-source delta under one cooperative work boundary.
@@ -460,26 +541,33 @@ fn detect_index_freshness_controlled(
     store: &AtlasStore,
     plan: &ScanRuntimePlan,
     control: &IndexWorkControl,
-) -> Result<Option<IndexFreshnessDelta>, CliError> {
+) -> Result<IndexFreshnessAssessment, CliError> {
+    let mut work = SourceVerificationWork::default();
     verify_index_project_root(store, &plan.root)?;
+    work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
     verify_index_publication(store, plan)?;
-    let current_nodes = scan_repo_controlled(
+    work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
+    let scan = scan_repo_controlled_with_work(
         &plan.root,
         &plan.scan_options,
         ScanLimits::default(),
         control,
     )
     .map_err(|source| source_inspection_error(&plan.root, source))?;
+    work.filesystem_entries = scan.work.entries;
+    work.filesystem_bytes = scan.work.source_bytes;
+    let current_nodes = scan.nodes;
     let indexed_nodes = store
         .load_nodes()?
         .into_iter()
         .map(|indexed| indexed.node)
         .collect::<Vec<_>>();
-    Ok(source_node_delta(
-        &plan.root,
-        &current_nodes,
-        &indexed_nodes,
-    ))
+    work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
+    work.decoded_nodes = u64::try_from(indexed_nodes.len()).unwrap_or(u64::MAX);
+    Ok(IndexFreshnessAssessment {
+        delta: source_node_delta(&plan.root, &current_nodes, &indexed_nodes),
+        work,
+    })
 }
 
 /// Compare a current exact scan with the source-derived nodes being validated.
@@ -662,10 +750,26 @@ fn verify_index_publication(store: &AtlasStore, plan: &ScanRuntimePlan) -> Resul
     Ok(())
 }
 
+/// Return whether symbol reuse and incremental publication share the current derivation contract.
+fn publication_contract_matches(
+    store: &AtlasStore,
+    plan: &ScanRuntimePlan,
+) -> Result<bool, CliError> {
+    let Some(publication) = store.index_publication()? else {
+        return Ok(false);
+    };
+    Ok(publication.state == IndexPublicationState::Complete
+        && publication.generation != IndexGeneration::ZERO
+        && publication.contract_fingerprint.as_deref()
+            == Some(plan.publication_contract_fingerprint().as_str()))
+}
+
 /// Hash the parser registry and source-selection policy that own derived rows.
 fn index_derivation_fingerprint(
     scan_options: &ScanOptions,
     text_options: TextIndexOptions,
+    #[cfg(feature = "optional-parser-supervisor")]
+    optional_parser_selection: &OptionalParserPackProjectSelection,
 ) -> String {
     let mut hasher = Hasher::new();
     hash_index_contract_value(
@@ -673,22 +777,31 @@ fn index_derivation_fingerprint(
         "contract_version",
         INDEX_DERIVATION_CONTRACT_VERSION,
     );
-    for spec in LANGUAGE_SPECS {
-        hash_index_contract_value(&mut hasher, "language", spec.language);
-        hash_index_contract_value(
-            &mut hasher,
-            "parser_support",
-            match spec.parser_support {
-                LanguageParserSupport::Native => "native",
-                LanguageParserSupport::Manifest => "manifest",
-                LanguageParserSupport::Structural => "structural",
-                LanguageParserSupport::Fallback => "fallback",
-            },
-        );
-    }
-    for extension in BROAD_SOURCE_EXTENSIONS {
-        hash_index_contract_value(&mut hasher, "source_extension", extension);
-    }
+    hash_index_contract_value(
+        &mut hasher,
+        "language_registry_version",
+        &LANGUAGE_CAPABILITY_REGISTRY_VERSION.to_string(),
+    );
+    hash_index_contract_value(
+        &mut hasher,
+        "accepted_language_set_version",
+        &ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION.to_string(),
+    );
+    hash_index_contract_value(
+        &mut hasher,
+        "language_registry_digest",
+        &language_registry_digest(),
+    );
+    hash_index_contract_value(
+        &mut hasher,
+        "accepted_language_set_digest",
+        &accepted_language_capability_digest(),
+    );
+    hash_index_contract_value(
+        &mut hasher,
+        "semantic_resolution_contract_digest",
+        &semantic_resolution_contract_digest(),
+    );
     for value in &scan_options.exclude_dir_names {
         hash_index_contract_value(&mut hasher, "exclude_dir_name", value);
     }
@@ -698,10 +811,22 @@ fn index_derivation_fingerprint(
     for value in &scan_options.exclude_path_prefixes {
         hash_index_contract_value(&mut hasher, "exclude_path_prefix", value);
     }
+    for (selector, language) in &scan_options.language_overrides {
+        hash_index_contract_value(&mut hasher, "language_override_selector", selector);
+        hash_index_contract_value(&mut hasher, "language_override_target", language);
+    }
     hash_index_contract_value(
         &mut hasher,
         "text_index_max_bytes",
         &text_options.max_bytes.to_string(),
+    );
+    #[cfg(feature = "optional-parser-supervisor")]
+    hash_index_contract_value(
+        &mut hasher,
+        "optional_parser_selection",
+        optional_parser_selection
+            .selection_key()
+            .map_or("inactive", |selection| selection.as_str()),
     );
     hasher.finalize().to_hex().to_string()
 }
@@ -1107,6 +1232,16 @@ impl ScanRuntimePlan {
             atlas_map::AtlasMapConfig::scan_options,
         );
         let text_options = text_index_options(config.as_ref(), text_index_max_bytes);
+        #[cfg(feature = "optional-parser-supervisor")]
+        let optional_parser_selection =
+            OptionalParserPackLifecycle::new(&root, None)?.derive_project_selection()?;
+        #[cfg(feature = "optional-parser-supervisor")]
+        let scan_options = {
+            let mut scan_options = scan_options;
+            scan_options.admit_optional_languages =
+                optional_parser_selection.selection_key().is_some();
+            scan_options
+        };
         Ok(Self {
             root,
             config,
@@ -1115,6 +1250,8 @@ impl ScanRuntimePlan {
             scan_options,
             text_options,
             text_index_max_bytes_override: text_index_max_bytes,
+            #[cfg(feature = "optional-parser-supervisor")]
+            optional_parser_selection,
         })
     }
 
@@ -1153,7 +1290,12 @@ impl ScanRuntimePlan {
     /// not become project compatibility state that later reads must repeat.
     fn publication_contract_fingerprint(&self) -> String {
         let configured_text_options = text_index_options(self.config.as_ref(), None);
-        index_derivation_fingerprint(&self.scan_options, configured_text_options)
+        index_derivation_fingerprint(
+            &self.scan_options,
+            configured_text_options,
+            #[cfg(feature = "optional-parser-supervisor")]
+            &self.optional_parser_selection,
+        )
     }
 
     /// Capture every purpose input from one existing controlled repository scan.
@@ -1808,6 +1950,8 @@ fn stage_full_index_publication(
     let symbols = stage_symbols_for_nodes_with_limits(
         store,
         &plan.root,
+        #[cfg(feature = "optional-parser-supervisor")]
+        &plan.optional_parser_selection,
         &nodes,
         symbol_options,
         previous_hashes.as_ref(),
@@ -1815,6 +1959,13 @@ fn stage_full_index_publication(
         &protected_purpose_paths,
         control,
         symbol_limits,
+    )?;
+    let graph = graph_projection::stage_full_repository_graph(
+        store,
+        base_generation,
+        &nodes,
+        &symbols,
+        control,
     )?;
     let structural_summaries = stage_structural_summaries_for_nodes_controlled(
         store,
@@ -1827,6 +1978,7 @@ fn stage_full_index_publication(
     enforce_publication_staging_budget(
         retained_before_symbols
             .saturating_add(symbols.retained_bytes)
+            .saturating_add(graph.retained_bytes())
             .saturating_add(structural_summaries.retained_bytes),
     )?;
     Ok(IndexPublicationBatch {
@@ -1838,6 +1990,7 @@ fn stage_full_index_publication(
         text_paths,
         text,
         symbols,
+        graph,
         structural_summaries,
     })
 }
@@ -2009,6 +2162,7 @@ fn publish_index_batch(
         text_paths,
         text,
         symbols,
+        graph,
         structural_summaries,
     } = batch;
     let mut publication =
@@ -2048,6 +2202,7 @@ fn publish_index_batch(
         |snapshot| apply_purpose_import_snapshot(&publication, &indexed_nodes, &snapshot, control),
     )?;
     apply_symbol_build_stage(&mut publication, &symbols, control)?;
+    graph.apply(&mut publication, control)?;
     apply_structural_summary_stage(&mut publication, &structural_summaries, control)?;
     complete_index_publication(publication, control)?;
     Ok(IndexPublicationOutcome {
@@ -2173,6 +2328,8 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
     let staged = stage_symbols_for_nodes_with_limits(
         store,
         &plan.root,
+        #[cfg(feature = "optional-parser-supervisor")]
+        &plan.optional_parser_selection,
         &nodes,
         symbol_options,
         previous_hashes,
@@ -2181,14 +2338,24 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
         control,
         symbol_limits,
     )?;
+    let graph = graph_projection::stage_full_repository_graph(
+        store,
+        base_generation,
+        &nodes,
+        &staged,
+        control,
+    )?;
     enforce_publication_staging_budget(
-        retained_before_symbols.saturating_add(staged.retained_bytes),
+        retained_before_symbols
+            .saturating_add(staged.retained_bytes)
+            .saturating_add(graph.retained_bytes()),
     )?;
     revalidate_staged_publication_inputs_controlled(plan, &nodes, None, control)?;
     control.check(IndexWorkStage::Publication)?;
     let mut publication =
         store.begin_index_projection_refresh_from(&contract_fingerprint, base_generation)?;
     apply_symbol_build_stage(&mut publication, &staged, control)?;
+    graph.apply(&mut publication, control)?;
     complete_index_publication(publication, control)?;
     Ok(staged.report)
 }
@@ -3034,6 +3201,8 @@ struct IndexPublicationBatch {
     text: TextIndexRefresh,
     /// Prepared symbol graph, summary, and suggestion mutations.
     symbols: SymbolBuildStage,
+    /// Prepared normalized repository graph and canonical resolution-key mutation.
+    graph: graph_projection::StagedRepositoryGraph,
     /// Prepared structural-summary and suggestion mutations.
     structural_summaries: StructuralSummaryStage,
 }
@@ -3229,6 +3398,74 @@ pub(crate) struct SettingsReport {
     pub(crate) index: Option<SettingsIndexStats>,
     /// Content-free telemetry retention and maintenance state, when the index exists.
     pub(crate) telemetry: Option<TelemetryRetentionState>,
+    /// Read-only schema, publication, coverage, and `SQLite` operating diagnostics.
+    pub(crate) database: DatabaseSettingsReport,
+    /// Content-free language capability registry identity and derived counts.
+    pub(crate) language_registry: LanguageRegistryReport,
+    /// Digest of the currently implemented provider-backed relation contract.
+    pub(crate) semantic_relation_contract_digest: String,
+    /// Typed search-mode readiness without an implicit index build.
+    pub(crate) search: SettingsSearchReport,
+    /// Content-free optional parser-pack lifecycle state.
+    pub(crate) optional_parser_pack: OptionalParserSettingsReport,
+}
+
+/// Readiness of one settings capability.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SettingsCapabilityState {
+    /// The capability has usable persisted state.
+    Ready,
+    /// The capability is implemented but the selected index has no rows yet.
+    Empty,
+    /// The capability is not available in the current runtime/index combination.
+    Unavailable,
+}
+
+/// Typed settings projection for one search mode.
+#[derive(Debug, Serialize)]
+pub(crate) struct SettingsSearchModeReport {
+    /// Current readiness.
+    pub(crate) state: SettingsCapabilityState,
+}
+
+/// Typed lexical-search settings projection.
+#[derive(Debug, Serialize)]
+pub(crate) struct SettingsLexicalSearchReport {
+    /// Current readiness.
+    pub(crate) state: SettingsCapabilityState,
+    /// Authoritative source searched by the correctness path.
+    pub(crate) source: &'static str,
+    /// Whether returned candidates are verified against persisted exact text.
+    pub(crate) exact_verification: bool,
+}
+
+/// Content-free readiness for supported and planned search modes.
+#[derive(Debug, Serialize)]
+pub(crate) struct SettingsSearchReport {
+    /// Compatible default when no explicit mode is supplied.
+    pub(crate) default_mode: &'static str,
+    /// Deterministic persisted-text search.
+    pub(crate) lexical: SettingsLexicalSearchReport,
+    /// Optional FTS candidate acceleration.
+    pub(crate) fts: SettingsSearchModeReport,
+    /// Optional semantic retrieval.
+    pub(crate) semantic: SettingsSearchModeReport,
+    /// Optional lexical-complete hybrid retrieval.
+    pub(crate) hybrid: SettingsSearchModeReport,
+}
+
+/// Optional parser state present in both feature-enabled and default-core-only builds.
+#[derive(Debug, Serialize)]
+pub(crate) struct OptionalParserSettingsReport {
+    /// Whether the supervised optional-parser lifecycle is compiled into this binary.
+    pub(crate) compiled: bool,
+    /// Bounded lifecycle metadata when the supervisor feature is present.
+    #[cfg(feature = "optional-parser-supervisor")]
+    pub(crate) lifecycle: OptionalParserPackLifecycleReport,
+    /// Honest state for a binary compiled without the optional lifecycle.
+    #[cfg(not(feature = "optional-parser-supervisor"))]
+    pub(crate) state: &'static str,
 }
 
 /// Filesystem status for a diagnostic path.
@@ -3316,15 +3553,25 @@ pub(crate) fn build_settings_report(
     let cache_dir = absolute_db
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let (index, telemetry) = if absolute_db.exists() {
-        let store = AtlasStore::open_read_only(&absolute_db)?;
-        (
-            Some(settings_index_stats(&store)?),
-            Some(store.telemetry_retention_state()?),
-        )
-    } else {
-        (None, None)
-    };
+    let database = database_settings_report(&absolute_db)?;
+    let (index, telemetry) =
+        if database.schema.compatibility == DatabaseSchemaCompatibility::Current {
+            let store = AtlasStore::open_read_only(&absolute_db)?;
+            let snapshot_publication = store.index_publication()?;
+            if settings_publication_matches(
+                database.publication.as_ref(),
+                snapshot_publication.as_ref(),
+            ) {
+                (
+                    Some(settings_index_stats(&store)?),
+                    Some(store.telemetry_retention_state()?),
+                )
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
     let repo_root = normalize_display_path(&config.root);
     let db_project_root = index
         .as_ref()
@@ -3346,6 +3593,43 @@ pub(crate) fn build_settings_report(
         "db-path-or-cwd"
     }
     .to_string();
+    let lexical_publication_ready = database.publication.as_ref().is_some_and(|publication| {
+        publication.state == IndexPublicationState::Complete
+            && publication.generation != IndexGeneration::ZERO
+            && publication.contract_fingerprint_state == DatabasePublicationContractState::Valid
+    });
+    let lexical_state = match (lexical_publication_ready, index.as_ref()) {
+        (true, Some(stats)) if stats.indexed_text_files == 0 => SettingsCapabilityState::Empty,
+        (true, Some(_)) => SettingsCapabilityState::Ready,
+        _ => SettingsCapabilityState::Unavailable,
+    };
+    let search = SettingsSearchReport {
+        default_mode: "lexical",
+        lexical: SettingsLexicalSearchReport {
+            state: lexical_state,
+            source: "persisted_text",
+            exact_verification: true,
+        },
+        fts: SettingsSearchModeReport {
+            state: SettingsCapabilityState::Unavailable,
+        },
+        semantic: SettingsSearchModeReport {
+            state: SettingsCapabilityState::Unavailable,
+        },
+        hybrid: SettingsSearchModeReport {
+            state: SettingsCapabilityState::Unavailable,
+        },
+    };
+    #[cfg(feature = "optional-parser-supervisor")]
+    let optional_parser_pack = OptionalParserSettingsReport {
+        compiled: true,
+        lifecycle: OptionalParserPackLifecycle::new(&config.root, None)?.status()?,
+    };
+    #[cfg(not(feature = "optional-parser-supervisor"))]
+    let optional_parser_pack = OptionalParserSettingsReport {
+        compiled: false,
+        state: "compiled_unavailable",
+    };
     Ok(SettingsReport {
         cache_dir: path_status(&cache_dir)?,
         db: path_status(&absolute_db)?,
@@ -3367,7 +3651,38 @@ pub(crate) fn build_settings_report(
         watcher: watcher_status_report(false),
         index,
         telemetry,
+        database,
+        language_registry: language_registry_report(),
+        semantic_relation_contract_digest: semantic_resolution_contract_digest(),
+        search,
+        optional_parser_pack,
     })
+}
+
+/// Reject mixed settings projections when publication changed between read snapshots.
+fn settings_publication_matches(
+    diagnostic: Option<&DatabasePublicationReport>,
+    snapshot: Option<&IndexPublication>,
+) -> bool {
+    match (diagnostic, snapshot) {
+        (None, None) => true,
+        (Some(diagnostic), Some(snapshot))
+            if diagnostic.state == snapshot.state
+                && diagnostic.generation == snapshot.generation =>
+        {
+            match diagnostic.contract_fingerprint_state {
+                DatabasePublicationContractState::Missing => {
+                    snapshot.contract_fingerprint.is_none()
+                }
+                DatabasePublicationContractState::Valid => {
+                    diagnostic.contract_fingerprint.as_deref()
+                        == snapshot.contract_fingerprint.as_deref()
+                }
+                DatabasePublicationContractState::Invalid => false,
+            }
+        }
+        _ => false,
+    }
 }
 
 /// Build index statistics for settings diagnostics.
@@ -3770,6 +4085,8 @@ pub(crate) struct SymbolParseSuccess {
     pub(crate) path: String,
     /// Extracted symbol graph.
     graph: SymbolGraph,
+    /// File-level parser kept independent from fact-level parser provenance.
+    source_parser: ParserKind,
     /// Observed one-line source summary.
     summary: String,
     /// Optional generated purpose suggestion.
@@ -3871,9 +4188,14 @@ fn build_symbols_for_paths_with_limits(
             .map(|indexed| indexed.node)
             .collect::<Vec<_>>()
     };
+    #[cfg(feature = "optional-parser-supervisor")]
+    let optional_parser_selection =
+        OptionalParserPackLifecycle::new(root, None)?.derive_project_selection()?;
     let staged = stage_symbols_for_nodes_with_limits(
         store,
         root,
+        #[cfg(feature = "optional-parser-supervisor")]
+        &optional_parser_selection,
         &nodes,
         options,
         previous_hashes,
@@ -3891,6 +4213,8 @@ fn build_symbols_for_paths_with_limits(
 fn stage_symbols_for_nodes_with_limits(
     store: &AtlasStore,
     root: &Path,
+    #[cfg(feature = "optional-parser-supervisor")]
+    optional_parser_selection: &OptionalParserPackProjectSelection,
     nodes: &[Node],
     options: &SymbolBuildOptions,
     previous_hashes: Option<&HashMap<String, String>>,
@@ -3900,6 +4224,10 @@ fn stage_symbols_for_nodes_with_limits(
     limits: SymbolPublicationLimits,
 ) -> Result<SymbolBuildStage, CliError> {
     control.check(IndexWorkStage::SymbolParsing)?;
+    #[cfg(feature = "optional-parser-supervisor")]
+    let admit_optional_languages = optional_parser_selection.selection_key().is_some();
+    #[cfg(not(feature = "optional-parser-supervisor"))]
+    let admit_optional_languages = false;
     let root = root.canonicalize().map_err(|source| CliError::Io {
         path: root.to_path_buf(),
         source,
@@ -3908,7 +4236,13 @@ fn stage_symbols_for_nodes_with_limits(
         .iter()
         .filter(|node| node.kind == NodeKind::File)
         .filter(|node| target_paths.is_none_or(|paths| paths.contains(&node.path)))
-        .filter(|node| is_symbol_candidate(&node.path, node.language.as_deref()))
+        .filter(|node| {
+            is_symbol_candidate_for_admission(
+                &node.path,
+                node.language.as_deref(),
+                admit_optional_languages,
+            )
+        })
         .map(|node| node.path.clone())
         .collect::<Vec<_>>();
     candidate_paths.sort();
@@ -3939,7 +4273,13 @@ fn stage_symbols_for_nodes_with_limits(
         .iter()
         .filter(|node| node.kind == NodeKind::File)
         .filter(|node| target_paths.is_none_or(|paths| paths.contains(&node.path)))
-        .filter(|node| is_symbol_candidate(&node.path, node.language.as_deref()))
+        .filter(|node| {
+            is_symbol_candidate_for_admission(
+                &node.path,
+                node.language.as_deref(),
+                admit_optional_languages,
+            )
+        })
     {
         control.check(IndexWorkStage::SymbolParsing)?;
         report.candidates += 1;
@@ -4003,61 +4343,69 @@ fn stage_symbols_for_nodes_with_limits(
             .map_err(|source| {
                 CliError::InvalidInput(format!("symbol worker pool failed: {source}"))
             })?;
-        for batch in jobs.chunks(SYMBOL_PARSE_BATCH_SIZE) {
-            control.check(IndexWorkStage::SymbolParsing)?;
-            for outcome in parse_symbol_jobs_controlled(&pool, batch, options, control)? {
-                match outcome {
-                    SymbolParseOutcome::Parsed(parsed) => {
-                        let next_symbols = checked_symbol_publication_usage(
-                            report.symbols as u64,
-                            parsed.graph.symbols.len() as u64,
-                            limits.symbol_rows,
-                            IndexWorkResource::SymbolRows,
-                        )?;
-                        let next_relations = checked_symbol_publication_usage(
-                            report.relations as u64,
-                            parsed.graph.relations.len() as u64,
-                            limits.relation_rows,
-                            IndexWorkResource::RelationRows,
-                        )?;
-                        let next_output_bytes = checked_symbol_publication_usage(
-                            output_bytes,
-                            symbol_parse_output_bytes(&parsed),
-                            limits.output_bytes,
-                            IndexWorkResource::OutputBytes,
-                        )?;
-                        report.summaries += 1;
-                        if parsed.purpose_suggestion.is_some() {
-                            report.purpose_suggestions += 1;
-                        }
-                        report.parsed += 1;
-                        report.symbols = next_symbols as usize;
-                        report.relations = next_relations as usize;
-                        output_bytes = next_output_bytes;
-                        changes.push(SymbolProjectionChange::Parsed(parsed));
+        #[cfg(feature = "optional-parser-supervisor")]
+        let outcomes = optional_parser_runtime::parse_symbol_jobs_controlled(
+            &root,
+            optional_parser_selection,
+            &pool,
+            &jobs,
+            options,
+            control,
+        )?;
+        #[cfg(not(feature = "optional-parser-supervisor"))]
+        let outcomes = parse_symbol_job_batches_controlled(&pool, &jobs, options, control)?;
+        for outcome in outcomes {
+            match outcome {
+                SymbolParseOutcome::Parsed(parsed) => {
+                    let next_symbols = checked_symbol_publication_usage(
+                        report.symbols as u64,
+                        parsed.graph.symbols.len() as u64,
+                        limits.symbol_rows,
+                        IndexWorkResource::SymbolRows,
+                    )?;
+                    let next_relations = checked_symbol_publication_usage(
+                        report.relations as u64,
+                        parsed.graph.relations.len() as u64,
+                        limits.relation_rows,
+                        IndexWorkResource::RelationRows,
+                    )?;
+                    let next_output_bytes = checked_symbol_publication_usage(
+                        output_bytes,
+                        symbol_parse_output_bytes(&parsed),
+                        limits.output_bytes,
+                        IndexWorkResource::OutputBytes,
+                    )?;
+                    report.summaries += 1;
+                    if parsed.purpose_suggestion.is_some() {
+                        report.purpose_suggestions += 1;
                     }
-                    SymbolParseOutcome::BinaryOrNonUtf8 { path } => {
-                        let language = nodes
-                            .iter()
-                            .find(|node| node.path == path)
-                            .and_then(|node| node.language.clone());
-                        output_bytes = checked_symbol_publication_usage(
-                            output_bytes,
-                            path.len() as u64 + language.as_ref().map_or(0, String::len) as u64,
-                            limits.output_bytes,
-                            IndexWorkResource::OutputBytes,
-                        )?;
-                        changes.push(SymbolProjectionChange::Clear { path, language });
-                        report.binary_or_non_utf8 += 1;
-                    }
-                    SymbolParseOutcome::SourceChanged { path } => {
-                        return Err(source_changed_during_derivation(&root, &path));
-                    }
-                    SymbolParseOutcome::Io { path, source } => {
-                        return Err(CliError::Io { path, source });
-                    }
-                    SymbolParseOutcome::IndexWork(failure) => return Err(failure.into()),
+                    report.parsed += 1;
+                    report.symbols = next_symbols as usize;
+                    report.relations = next_relations as usize;
+                    output_bytes = next_output_bytes;
+                    changes.push(SymbolProjectionChange::Parsed(parsed));
                 }
+                SymbolParseOutcome::BinaryOrNonUtf8 { path } => {
+                    let language = nodes
+                        .iter()
+                        .find(|node| node.path == path)
+                        .and_then(|node| node.language.clone());
+                    output_bytes = checked_symbol_publication_usage(
+                        output_bytes,
+                        path.len() as u64 + language.as_ref().map_or(0, String::len) as u64,
+                        limits.output_bytes,
+                        IndexWorkResource::OutputBytes,
+                    )?;
+                    changes.push(SymbolProjectionChange::Clear { path, language });
+                    report.binary_or_non_utf8 += 1;
+                }
+                SymbolParseOutcome::SourceChanged { path } => {
+                    return Err(source_changed_during_derivation(&root, &path));
+                }
+                SymbolParseOutcome::Io { path, source } => {
+                    return Err(CliError::Io { path, source });
+                }
+                SymbolParseOutcome::IndexWork(failure) => return Err(failure.into()),
             }
         }
     }
@@ -4067,6 +4415,22 @@ fn stage_symbols_for_nodes_with_limits(
         changes,
         retained_bytes: output_bytes,
     })
+}
+
+/// Parse all built-in symbol jobs in bounded Rayon batches.
+#[cfg(not(feature = "optional-parser-supervisor"))]
+fn parse_symbol_job_batches_controlled(
+    pool: &rayon::ThreadPool,
+    jobs: &[SymbolParseJob],
+    options: &SymbolBuildOptions,
+    control: &IndexWorkControl,
+) -> Result<Vec<SymbolParseOutcome>, CliError> {
+    let mut outcomes = Vec::with_capacity(jobs.len());
+    for batch in jobs.chunks(SYMBOL_PARSE_BATCH_SIZE) {
+        control.check(IndexWorkStage::SymbolParsing)?;
+        outcomes.extend(parse_symbol_jobs_controlled(pool, batch, options, control)?);
+    }
+    Ok(outcomes)
 }
 
 /// Apply prepared symbol mutations inside the parent publication transaction.
@@ -4083,7 +4447,9 @@ fn apply_symbol_build_stage(
                 if let Some(suggestion) = parsed.purpose_suggestion.as_deref() {
                     store.set_suggested_purpose(&parsed.path, suggestion)?;
                 }
-                store.replace_symbol_graph(&parsed.graph)?;
+                let mut metadata = SourceParseMetadata::from_graph(&parsed.graph);
+                metadata.parser = parsed.source_parser;
+                store.replace_symbol_graph_with_metadata(&parsed.graph, &metadata)?;
             }
             SymbolProjectionChange::Clear { path, language } => {
                 clear_skipped_symbol_index(store, path, language.as_deref())?;
@@ -4095,6 +4461,7 @@ fn apply_symbol_build_stage(
 }
 
 /// Parse one bounded symbol batch under the shared work boundary.
+#[cfg(not(feature = "optional-parser-supervisor"))]
 fn parse_symbol_jobs_controlled(
     pool: &rayon::ThreadPool,
     jobs: &[SymbolParseJob],
@@ -4189,6 +4556,19 @@ fn parse_symbol_job_controlled(
     if let Err(failure) = control.check(IndexWorkStage::SymbolParsing) {
         return SymbolParseOutcome::IndexWork(failure);
     }
+    let content = match admit_symbol_job_source(job, options, control) {
+        Ok(content) => content,
+        Err(outcome) => return *outcome,
+    };
+    parse_admitted_symbol_job(job, &content, None, options, control)
+}
+
+/// Read, bound, hash-check, and decode one source exactly once for symbol staging.
+fn admit_symbol_job_source(
+    job: &SymbolParseJob,
+    options: &SymbolBuildOptions,
+    control: &IndexWorkControl,
+) -> Result<String, Box<SymbolParseOutcome>> {
     let bytes = match read_source_bytes_controlled(
         &job.native_path,
         options.max_bytes,
@@ -4197,50 +4577,61 @@ fn parse_symbol_job_controlled(
     ) {
         Ok(bytes) => bytes,
         Err(SourceReadFailure::Io(source)) => {
-            return SymbolParseOutcome::Io {
+            return Err(Box::new(SymbolParseOutcome::Io {
                 path: job.native_path.clone(),
                 source,
-            };
+            }));
         }
         Err(SourceReadFailure::IndexWork(failure)) => {
-            return SymbolParseOutcome::IndexWork(failure);
+            return Err(Box::new(SymbolParseOutcome::IndexWork(failure)));
         }
         Err(SourceReadFailure::LimitExceeded { observed }) => {
-            return SymbolParseOutcome::IndexWork(IndexWorkFailure::resource_limit(
-                IndexWorkStage::SymbolParsing,
-                IndexWorkResource::SourceBytes,
-                options.max_bytes,
-                observed,
-            ));
+            return Err(Box::new(SymbolParseOutcome::IndexWork(
+                IndexWorkFailure::resource_limit(
+                    IndexWorkStage::SymbolParsing,
+                    IndexWorkResource::SourceBytes,
+                    options.max_bytes,
+                    observed,
+                ),
+            )));
         }
     };
     if let Err(failure) = control.check(IndexWorkStage::SymbolParsing) {
-        return SymbolParseOutcome::IndexWork(failure);
+        return Err(Box::new(SymbolParseOutcome::IndexWork(failure)));
     }
     if blake3::hash(&bytes).to_hex().as_str() != job.expected_content_hash {
-        return SymbolParseOutcome::SourceChanged {
+        return Err(Box::new(SymbolParseOutcome::SourceChanged {
             path: job.path.clone(),
-        };
+        }));
     }
     let Ok(content) = String::from_utf8(bytes) else {
-        return SymbolParseOutcome::BinaryOrNonUtf8 {
+        return Err(Box::new(SymbolParseOutcome::BinaryOrNonUtf8 {
             path: job.path.clone(),
-        };
+        }));
     };
+    Ok(content)
+}
+
+/// Extract conservative facts from admitted source and retain independent source provenance.
+fn parse_admitted_symbol_job(
+    job: &SymbolParseJob,
+    content: &str,
+    source_parser: Option<ParserKind>,
+    options: &SymbolBuildOptions,
+    control: &IndexWorkControl,
+) -> SymbolParseOutcome {
     if options.is_timed_out(control.started_at()) {
         return SymbolParseOutcome::IndexWork(IndexWorkFailure::DeadlineExceeded {
             stage: IndexWorkStage::SymbolParsing,
         });
     }
-    let graph = match extract_symbol_graph_controlled(
-        &job.path,
-        job.language.as_deref(),
-        &content,
-        control,
-    ) {
-        Ok(graph) => graph,
-        Err(failure) => return SymbolParseOutcome::IndexWork(failure),
-    };
+    let graph =
+        match extract_symbol_graph_controlled(&job.path, job.language.as_deref(), content, control)
+        {
+            Ok(graph) => graph,
+            Err(failure) => return SymbolParseOutcome::IndexWork(failure),
+        };
+    let source_parser = source_parser.unwrap_or(graph.parser);
     let summary = summarize_symbol_graph(&graph, job.fallback_summary.as_deref());
     let purpose_suggestion = job
         .purpose_needs_suggestion
@@ -4248,6 +4639,7 @@ fn parse_symbol_job_controlled(
     SymbolParseOutcome::Parsed(SymbolParseSuccess {
         path: job.path.clone(),
         graph,
+        source_parser,
         summary,
         purpose_suggestion,
     })
@@ -4681,21 +5073,36 @@ fn summary_between<'a>(summary: &'a str, start: &str, end: &str) -> Option<&'a s
 
 /// Return whether a language should be parsed for symbols.
 pub(crate) fn is_symbol_candidate(path: &str, language: Option<&str>) -> bool {
-    if path.ends_with("Cargo.toml")
-        || path.ends_with("Cargo.lock")
-        || matches!(language, Some("cargo-manifest" | "cargo-lock"))
+    let Some(language) = language else {
+        return path.ends_with("Cargo.toml")
+            || path.ends_with("Cargo.lock")
+            || Path::new(path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    ["vue", "ps1", "psm1", "psd1"]
+                        .iter()
+                        .any(|expected| extension.eq_ignore_ascii_case(expected))
+                });
+    };
+    language_capability(language)
+        .is_none_or(|capability| capability.symbol_parser != SymbolParserOwner::Unavailable)
+}
+
+/// Apply the project-selected optional-language boundary to symbol work admission.
+fn is_symbol_candidate_for_admission(
+    path: &str,
+    language: Option<&str>,
+    admit_optional_languages: bool,
+) -> bool {
+    if !admit_optional_languages
+        && language
+            .and_then(language_capability)
+            .is_some_and(|capability| capability.optional_pack.is_some())
     {
-        return true;
+        return false;
     }
-    if matches!(language, Some("vue")) {
-        return true;
-    }
-    language.is_some_and(|language| {
-        !matches!(
-            language_spec(language).map(|spec| spec.parser_support),
-            Some(LanguageParserSupport::Structural)
-        )
-    })
+    is_symbol_candidate(path, language)
 }
 
 /// Clear stale symbol output while preserving structural summaries when present.
@@ -4920,11 +5327,19 @@ pub(crate) fn run_notify_watch_loop(
             path: current_plan.root.clone(),
             source,
         })?;
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
+    let continuity_lost = Arc::new(AtomicBool::new(false));
+    let callback_continuity_lost = Arc::clone(&continuity_lost);
     let mut watcher = RecommendedWatcher::new(
         move |result: notify::Result<Event>| {
-            if sender.send(result).is_err() {
-                // Receiver shutdown means the command is exiting.
+            match sender.try_send(result) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_result)) => {
+                    callback_continuity_lost.store(true, Ordering::Release);
+                }
+                Err(TrySendError::Disconnected(_result)) => {
+                    // Receiver shutdown means the command is exiting.
+                }
             }
         },
         Config::default(),
@@ -4938,8 +5353,13 @@ pub(crate) fn run_notify_watch_loop(
     let mut last_refresh = refresh_index(store, &current_plan, symbol_options)?;
     cycles += 1;
     while max_cycles == 0 || cycles < max_cycles {
-        let changes =
-            wait_for_index_event(&receiver, &watch_root, debounce, &current_plan.scan_options)?;
+        let changes = wait_for_index_event_with_continuity(
+            &receiver,
+            &watch_root,
+            debounce,
+            &current_plan.scan_options,
+            &continuity_lost,
+        )?;
         if changes.has_changes() {
             current_plan = plan.reload()?;
             last_refresh =
@@ -4958,12 +5378,13 @@ pub(crate) fn run_notify_watch_loop(
     })
 }
 
-/// Wait for a debounced batch of relevant filesystem events.
-pub(crate) fn wait_for_index_event(
+/// Wait for one bounded event batch and preserve local queue-overflow uncertainty.
+fn wait_for_index_event_with_continuity(
     receiver: &mpsc::Receiver<notify::Result<Event>>,
     root: &Path,
     debounce: Duration,
     scan_options: &ScanOptions,
+    continuity_lost: &AtomicBool,
 ) -> Result<WatchChangeSet, CliError> {
     let mut changes = notify_result_changes(
         root,
@@ -4984,6 +5405,9 @@ pub(crate) fn wait_for_index_event(
                 ));
             }
         }
+    }
+    if continuity_lost.swap(false, Ordering::AcqRel) {
+        changes.requires_full_scan = true;
     }
     Ok(changes)
 }
@@ -5007,12 +5431,25 @@ pub(crate) fn notify_event_changes(
     if !event_kind_affects_index(event.kind) {
         return WatchChangeSet::default();
     }
-    let mut changes = WatchChangeSet::default();
+    let mut changes = WatchChangeSet {
+        requires_full_scan: event.need_rescan(),
+        paths: HashSet::new(),
+    };
     for path in &event.paths {
+        let candidate = absolute_watch_path(root, path);
+        if watch_path_requires_full_scan(root, &candidate) {
+            changes.requires_full_scan = true;
+            changes.paths.insert(candidate);
+            continue;
+        }
         let Some(index_path) = normalized_watch_index_path(root, path, scan_options) else {
             continue;
         };
-        if watch_path_requires_full_scan(root, &index_path) {
+        if matches!(
+            event.kind,
+            EventKind::Modify(notify::event::ModifyKind::Name(_))
+        ) || watch_path_requires_full_scan(root, &index_path)
+        {
             changes.requires_full_scan = true;
         }
         changes.paths.insert(index_path);
@@ -5140,8 +5577,27 @@ pub(crate) fn watch_path_requires_full_scan(root: &Path, path: &Path) -> bool {
         return true;
     }
     path.is_dir()
-        || relative.rsplit('/').next() == Some(".gitignore")
-        || INDEX_POLICY_PATHS.contains(&relative.as_str())
+        || matches!(relative.rsplit('/').next(), Some(".gitignore" | ".ignore"))
+        || relative == ".git"
+        || relative.ends_with("/.git")
+        || relative == ".git/info/exclude"
+        || relative.ends_with("/.git/info/exclude")
+        || index_policy_path(relative.as_str())
+}
+
+/// Return whether one repository-relative path owns derived-index policy.
+fn index_policy_path(relative: &str) -> bool {
+    CORE_INDEX_POLICY_PATHS.contains(&relative)
+        || cfg!(feature = "optional-parser-supervisor") && {
+            #[cfg(feature = "optional-parser-supervisor")]
+            {
+                relative == OPTIONAL_PARSER_PACK_SELECTION_POLICY_PATH
+            }
+            #[cfg(not(feature = "optional-parser-supervisor"))]
+            {
+                false
+            }
+        }
 }
 
 /// Run the portable polling watcher fallback loop.
@@ -5203,19 +5659,71 @@ pub(crate) fn refresh_index_controlled(
 ) -> Result<IndexRefreshReport, CliError> {
     let bounded_control = bounded_index_work_control(control);
     let control = &bounded_control;
-    let batch = stage_full_index_publication(store, plan, symbol_options, true, false, control)?;
+    let reuse_unchanged_symbols = publication_contract_matches(store, plan)?;
+    let batch = stage_full_index_publication(
+        store,
+        plan,
+        symbol_options,
+        reuse_unchanged_symbols,
+        false,
+        control,
+    )?;
     revalidate_staged_publication_inputs_controlled(
         plan,
         batch.nodes.expected_nodes(),
         None,
         control,
     )?;
+    if staged_full_refresh_is_unchanged(store, &batch)? {
+        return Ok(empty_index_refresh_report(plan.text_options));
+    }
     let outcome = publish_index_batch(store, batch, control)?;
     Ok(IndexRefreshReport {
         text_index: outcome.text_index,
         structural_summaries: outcome.structural_summaries,
         symbols: outcome.symbols,
     })
+}
+
+/// Return whether one fully staged watcher refresh matches complete durable state.
+fn staged_full_refresh_is_unchanged(
+    store: &AtlasStore,
+    batch: &IndexPublicationBatch,
+) -> Result<bool, CliError> {
+    let NodePublicationBatch::Full { nodes: expected } = &batch.nodes else {
+        return Ok(false);
+    };
+    if batch.purpose_import.is_some() {
+        return Ok(false);
+    }
+    let Some(publication) = store.index_publication()? else {
+        return Ok(false);
+    };
+    if publication.state != IndexPublicationState::Complete
+        || publication.generation != batch.base_generation
+        || publication.contract_fingerprint.as_deref() != Some(batch.contract_fingerprint.as_str())
+    {
+        return Ok(false);
+    }
+    let current = store
+        .load_nodes()?
+        .into_iter()
+        .map(|indexed| indexed.node)
+        .collect::<Vec<_>>();
+    Ok(current.len() == expected.len()
+        && current
+            .iter()
+            .zip(expected)
+            .all(|(current, expected)| same_indexed_source(current, expected)))
+}
+
+/// Build the stable report for a verified watcher no-op.
+fn empty_index_refresh_report(text_options: TextIndexOptions) -> IndexRefreshReport {
+    IndexRefreshReport {
+        text_index: empty_text_index_report(text_options),
+        structural_summaries: StructuralSummaryReport::default(),
+        symbols: empty_symbol_build_report(),
+    }
 }
 
 /// Refresh filesystem and symbol state for a debounced event batch.
@@ -5240,7 +5748,7 @@ pub(crate) fn refresh_index_for_changes_controlled(
     let bounded_control = bounded_index_work_control(control);
     let control = &bounded_control;
     control.check(IndexWorkStage::RepositoryTraversal)?;
-    if changes.requires_full_scan {
+    if changes.requires_full_scan || !publication_contract_matches(store, plan)? {
         return refresh_index_controlled(store, plan, symbol_options, control);
     }
     if changes.paths.len() > MAX_INCREMENTAL_CHANGED_PATHS {
@@ -5338,6 +5846,19 @@ pub(crate) fn refresh_index_for_changes_controlled(
                 .map(|node| (path.clone(), (*node).clone()))
         })
         .collect::<HashMap<_, _>>();
+    if absent_paths.iter().any(|path| {
+        existing_nodes
+            .get(path)
+            .is_some_and(|node| node.kind == NodeKind::Folder)
+    }) {
+        return refresh_index_controlled(store, plan, symbol_options, control);
+    }
+    let direct_graph_paths = nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::File)
+        .map(|node| node.path.clone())
+        .chain(absent_paths.iter().cloned())
+        .collect::<BTreeSet<_>>();
     nodes.retain(|node| {
         existing_nodes
             .get(&node.path)
@@ -5346,11 +5867,7 @@ pub(crate) fn refresh_index_for_changes_controlled(
     absent_paths.retain(|path| existing_nodes.contains_key(path));
     if nodes.is_empty() && absent_paths.is_empty() {
         revalidate_staged_publication_inputs_controlled(plan, &baseline_nodes, None, control)?;
-        return Ok(IndexRefreshReport {
-            text_index: empty_text_index_report(plan.text_options),
-            structural_summaries: StructuralSummaryReport::default(),
-            symbols: empty_symbol_build_report(),
-        });
+        return Ok(empty_index_refresh_report(plan.text_options));
     }
     drop(existing_nodes);
     drop(baseline_by_path);
@@ -5382,6 +5899,8 @@ pub(crate) fn refresh_index_for_changes_controlled(
     let symbols = stage_symbols_for_nodes_with_limits(
         store,
         root,
+        #[cfg(feature = "optional-parser-supervisor")]
+        &plan.optional_parser_selection,
         &nodes,
         symbol_options,
         Some(&previous_hashes),
@@ -5389,6 +5908,15 @@ pub(crate) fn refresh_index_for_changes_controlled(
         &protected_purpose_paths,
         control,
         symbol_limits,
+    )?;
+    let graph = graph_projection::stage_incremental_repository_graph(
+        store,
+        root,
+        base_generation,
+        &expected_nodes,
+        &direct_graph_paths.into_iter().collect::<Vec<_>>(),
+        &symbols,
+        control,
     )?;
     let structural_summaries = stage_structural_summaries_for_nodes_controlled(
         store,
@@ -5401,6 +5929,7 @@ pub(crate) fn refresh_index_for_changes_controlled(
     enforce_publication_staging_budget(
         retained_before_symbols
             .saturating_add(symbols.retained_bytes)
+            .saturating_add(graph.retained_bytes())
             .saturating_add(structural_summaries.retained_bytes),
     )?;
     let batch = IndexPublicationBatch {
@@ -5416,6 +5945,7 @@ pub(crate) fn refresh_index_for_changes_controlled(
         text_paths,
         text,
         symbols,
+        graph,
         structural_summaries,
     };
     revalidate_staged_publication_inputs_controlled(
@@ -6047,8 +6577,100 @@ pub(crate) fn purpose_header_candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use projectatlas_core::graph::{GraphRelationKind, RelationResolution, RepositoryNodePath};
+    use projectatlas_db::RepositoryGraphRelationQuery;
     use std::error::Error;
     use std::fmt::Debug;
+
+    #[test]
+    fn settings_publication_identity_rejects_mixed_snapshots() {
+        let fingerprint = "a".repeat(64);
+        let diagnostic = DatabasePublicationReport {
+            state: IndexPublicationState::Complete,
+            contract_fingerprint: Some(fingerprint.clone()),
+            contract_fingerprint_state: DatabasePublicationContractState::Valid,
+            generation: IndexGeneration::new(4),
+        };
+        let matching = IndexPublication {
+            state: IndexPublicationState::Complete,
+            contract_fingerprint: Some(fingerprint),
+            generation: IndexGeneration::new(4),
+        };
+        assert!(settings_publication_matches(
+            Some(&diagnostic),
+            Some(&matching)
+        ));
+
+        let next_generation = IndexPublication {
+            generation: IndexGeneration::new(5),
+            ..matching.clone()
+        };
+        assert!(!settings_publication_matches(
+            Some(&diagnostic),
+            Some(&next_generation)
+        ));
+
+        let invalid = DatabasePublicationReport {
+            contract_fingerprint: None,
+            contract_fingerprint_state: DatabasePublicationContractState::Invalid,
+            ..diagnostic
+        };
+        assert!(!settings_publication_matches(
+            Some(&invalid),
+            Some(&matching)
+        ));
+    }
+
+    #[test]
+    fn supplied_language_controls_symbol_candidate_owner() {
+        for path in ["Cargo.toml", "src/App.vue", "scripts/Get-Atlas.ps1"] {
+            assert!(!is_symbol_candidate(path, Some("toon")), "{path}");
+        }
+        assert!(is_symbol_candidate("data/report.toon", Some("rust")));
+        assert!(is_symbol_candidate(
+            "data/report.toon",
+            Some("cargo-manifest")
+        ));
+        assert!(is_symbol_candidate("data/report.toon", Some("vue")));
+        assert!(is_symbol_candidate("data/report.toon", Some("powershell")));
+        assert!(!is_symbol_candidate("data/report.toon", Some("toon")));
+    }
+
+    #[test]
+    fn optional_catalog_symbol_work_requires_effective_admission() {
+        assert!(is_symbol_candidate("scripts/report.awk", Some("awk")));
+        assert!(!is_symbol_candidate_for_admission(
+            "scripts/report.awk",
+            Some("awk"),
+            false,
+        ));
+        assert!(is_symbol_candidate_for_admission(
+            "scripts/report.awk",
+            Some("awk"),
+            true,
+        ));
+        assert!(is_symbol_candidate_for_admission(
+            "src/lib.rs",
+            Some("rust"),
+            false,
+        ));
+    }
+
+    #[test]
+    fn missing_language_preserves_specialized_symbol_candidate_inference() {
+        for path in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "src/App.vue",
+            "src/App.VUE",
+            "scripts/Get-Atlas.ps1",
+            "scripts/Atlas.psm1",
+            "scripts/Atlas.psd1",
+        ] {
+            assert!(is_symbol_candidate(path, None), "{path}");
+        }
+        assert!(!is_symbol_candidate("data/report.toon", None));
+    }
 
     #[test]
     fn rejected_database_location_does_not_create_or_change_database() -> Result<(), Box<dyn Error>>
@@ -6568,6 +7190,8 @@ mod tests {
         let clear_result = stage_symbols_for_nodes_with_limits(
             &store,
             temp.path(),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &OptionalParserPackProjectSelection::Inactive,
             std::slice::from_ref(&oversized_node),
             &clear_options,
             None,
@@ -6592,6 +7216,8 @@ mod tests {
         let clear_stage = stage_symbols_for_nodes_with_limits(
             &store,
             temp.path(),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &OptionalParserPackProjectSelection::Inactive,
             std::slice::from_ref(&oversized_node),
             &clear_options,
             None,
@@ -6667,6 +7293,7 @@ mod tests {
         let nodes = scan_repo(&plan.root, &plan.scan_options)?;
         let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
         let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(&plan.root)?;
         run_scan_pipeline(&mut store, &plan, &symbol_options)?;
         let publication_before = store
             .index_publication()?
@@ -6981,7 +7608,7 @@ mod tests {
         let plan = ScanRuntimePlan::for_path(None, temp.path(), None)?;
         let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
         let db_path = config_dir.join("projectatlas.db");
-        let mut store = AtlasStore::open(&db_path)?;
+        let mut store = open_atlas_store_for_project(&db_path, &plan.root)?;
         run_scan_pipeline(&mut store, &plan, &symbol_options)?;
         let control = standalone_index_work_control();
         let generation_before_contention = store
@@ -7086,7 +7713,7 @@ mod tests {
                 .ok_or_else(|| io::Error::other("test generation overflowed"))?,
             "single generation advance after contention retry",
         )?;
-        let mut competing_store = AtlasStore::open(&db_path)?;
+        let mut competing_store = open_atlas_store_for_project(&db_path, &plan.root)?;
         let competing_publication = competing_store
             .begin_index_projection_refresh_from(&contract_fingerprint, initial_generation)?;
         competing_publication.set_node_summary("lib.rs", "winning projection")?;
@@ -7259,7 +7886,10 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         )?;
         let import_plan =
             ScanRuntimePlan::for_path(Some(&external_config_path), &import_repo, Some(1))?;
-        let mut import_store = AtlasStore::open(&import_atlas_dir.join("projectatlas.db"))?;
+        let mut import_store = open_atlas_store_for_project(
+            &import_atlas_dir.join("projectatlas.db"),
+            &import_plan.root,
+        )?;
         run_scan_pipeline(&mut import_store, &import_plan, &symbol_options)?;
         verify_index_freshness(&import_store, &import_repo, Some(&external_config_path))?;
         let normal_import_plan =
@@ -7335,8 +7965,194 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         Ok(())
     }
 
+    #[cfg(feature = "optional-parser-supervisor")]
     #[test]
-    fn unchanged_events_do_not_advance_publication_generation() -> Result<(), Box<dyn Error>> {
+    fn optional_parser_selection_changes_derivation_and_preserves_prior_generation_on_failure()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let atlas_dir = temp.path().join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let source_path = temp.path().join("main.awk");
+        fs::write(&source_path, "BEGIN { print \"atlas\" }\n")?;
+        let inactive_plan = ScanRuntimePlan::for_path(None, temp.path(), Some(1_024))?;
+        let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let db_path = atlas_dir.join("projectatlas.db");
+        let mut store = open_atlas_store_for_project(&db_path, &inactive_plan.root)?;
+        run_scan_pipeline(&mut store, &inactive_plan, &symbol_options)?;
+        if inactive_plan.scan_options.admit_optional_languages {
+            return Err(io::Error::other(
+                "inactive optional pack admitted catalog languages into the scan policy",
+            )
+            .into());
+        }
+        let inactive_optional = store
+            .load_node_by_path("main.awk")?
+            .ok_or_else(|| io::Error::other("inactive optional source node missing"))?;
+        if inactive_optional.node.language.is_some() {
+            return Err(io::Error::other(
+                "inactive optional extension received a catalog language assignment",
+            )
+            .into());
+        }
+        let before = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("initial publication missing"))?;
+
+        let selection_path = temp.path().join(repo_path_to_native(
+            OPTIONAL_PARSER_PACK_SELECTION_POLICY_PATH,
+        ));
+        fs::write(
+            &selection_path,
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "pack_id": "broad-parser",
+                "selected": {
+                    "projectatlas_version": "0.4.0",
+                    "artifact": "a".repeat(64),
+                }
+            }))?,
+        )?;
+        let selected_plan = ScanRuntimePlan::for_path(None, temp.path(), Some(1_024))?;
+        if !selected_plan.scan_options.admit_optional_languages {
+            return Err(io::Error::other(
+                "selected optional pack did not enable catalog language admission",
+            )
+            .into());
+        }
+        if inactive_plan.publication_contract_fingerprint()
+            == selected_plan.publication_contract_fingerprint()
+        {
+            return Err(io::Error::other(
+                "optional parser selection did not change the derivation contract",
+            )
+            .into());
+        }
+        if publication_contract_matches(&store, &selected_plan)? {
+            return Err(io::Error::other(
+                "selected optional artifact unexpectedly matched the inactive publication",
+            )
+            .into());
+        }
+        if !watch_path_requires_full_scan(temp.path(), &selection_path) {
+            return Err(io::Error::other(
+                "optional parser selection event did not require a full refresh",
+            )
+            .into());
+        }
+
+        let mut changes = WatchChangeSet::default();
+        changes.paths.insert(source_path);
+        let result =
+            refresh_index_for_changes(&mut store, &selected_plan, &changes, &symbol_options);
+        if !matches!(result, Err(CliError::ParserPack(_))) {
+            return Err(io::Error::other(
+                "missing selected artifact did not fail before publication",
+            )
+            .into());
+        }
+        require_eq(
+            &store
+                .index_publication()?
+                .ok_or_else(|| io::Error::other("publication disappeared after failure"))?
+                .generation,
+            &before.generation,
+            "generation after selected optional artifact failure",
+        )?;
+
+        fs::remove_file(selection_path)?;
+        let disabled_plan = selected_plan.reload()?;
+        if disabled_plan.scan_options.admit_optional_languages {
+            return Err(io::Error::other(
+                "disabled optional pack retained catalog language admission",
+            )
+            .into());
+        }
+        require_eq(
+            &disabled_plan.publication_contract_fingerprint(),
+            &inactive_plan.publication_contract_fingerprint(),
+            "disabled optional parser derivation contract",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn symbol_projection_refresh_republishes_normalized_graph_at_one_generation()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let atlas_dir = temp.path().join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        fs::write(
+            temp.path().join("lib.rs"),
+            "pub fn caller() { target(); }\npub fn target() {}\n",
+        )?;
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), Some(1_024))?;
+        let mut store =
+            open_atlas_store_for_project(&atlas_dir.join("projectatlas.db"), &plan.root)?;
+        refresh_index(
+            &mut store,
+            &plan,
+            &SymbolBuildOptions::new(1_024, Some(1), None),
+        )?;
+        let before = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("initial publication missing"))?;
+        let relation_query = RepositoryGraphRelationQuery::Family {
+            relation: GraphRelationKind::Legacy(RelationKind::Calls),
+        };
+        require_eq(
+            &store
+                .repository_graph_relations(relation_query.clone(), 10)?
+                .rows
+                .len(),
+            &1,
+            "initial normalized call relation",
+        )?;
+
+        run_symbol_build_pipeline(
+            &mut store,
+            &plan,
+            &SymbolBuildOptions::new(1, Some(1), None),
+            None,
+        )?;
+
+        let after = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("symbol publication missing"))?;
+        require_eq(
+            &after.generation,
+            &before
+                .generation
+                .checked_next()
+                .ok_or_else(|| io::Error::other("publication generation overflowed"))?,
+            "symbol and graph publication generation",
+        )?;
+        require_eq(
+            &store
+                .repository_graph_relations(relation_query, 10)?
+                .rows
+                .len(),
+            &0,
+            "cleared symbol relation projection",
+        )?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("project identity missing"))?;
+        let path = RepositoryNodePath::new(Path::new("lib.rs"))?;
+        let entities = store.repository_graph_entities_by_path(project, &path, 10)?;
+        require_eq(
+            &entities
+                .rows
+                .iter()
+                .all(|entity| entity.generation() == after.generation),
+            &true,
+            "symbol refresh normalized graph generation",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn unchanged_full_and_incremental_refreshes_do_not_advance_generation()
+    -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let atlas_dir = temp.path().join(".projectatlas");
         fs::create_dir_all(&atlas_dir)?;
@@ -7344,13 +8160,38 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         fs::write(&source_path, "fn stable() {}\n")?;
         let plan = ScanRuntimePlan::for_path(None, temp.path(), Some(1_024))?;
         let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
-        let mut store = AtlasStore::open(&atlas_dir.join("projectatlas.db"))?;
+        let mut store =
+            open_atlas_store_for_project(&atlas_dir.join("projectatlas.db"), &plan.root)?;
         refresh_index(&mut store, &plan, &symbol_options)?;
         let normal_read_plan = ScanRuntimePlan::for_path(None, temp.path(), None)?;
         verify_index_publication(&store, &normal_read_plan)?;
         let before = store
             .index_publication()?
             .ok_or_else(|| io::Error::other("initial publication missing"))?;
+        let full_report = refresh_index(&mut store, &plan, &symbol_options)?;
+        let after_full = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("publication missing after full no-op refresh"))?;
+        require_eq(
+            &after_full.generation,
+            &before.generation,
+            "full no-op publication generation",
+        )?;
+        require_eq(
+            &full_report.text_index.candidates,
+            &0,
+            "full no-op text candidates",
+        )?;
+        require_eq(
+            &full_report.structural_summaries.candidates,
+            &0,
+            "full no-op summary candidates",
+        )?;
+        require_eq(
+            &full_report.symbols.candidates,
+            &0,
+            "full no-op symbol candidates",
+        )?;
         let mut changes = WatchChangeSet::default();
         changes.paths.insert(source_path);
 
@@ -7393,7 +8234,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         let plan = ScanRuntimePlan::for_path(None, temp.path(), Some(1_024))?;
         let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
         let db_path = atlas_dir.join("projectatlas.db");
-        let mut store = AtlasStore::open(&db_path)?;
+        let mut store = open_atlas_store_for_project(&db_path, &plan.root)?;
         refresh_index(&mut store, &plan, &symbol_options)?;
         let before = store
             .index_publication()?
@@ -7407,7 +8248,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             reviewed_reserved_purpose,
             PurposeSource::Agent,
         )?;
-        let old_reader = AtlasStore::open_read_only(&db_path)?;
+        let old_reader = open_atlas_store_read_only_for_project(&db_path, &plan.root)?;
         require_eq(
             &old_reader
                 .index_publication()?
@@ -7448,6 +8289,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             text_paths,
             text,
             symbols: _,
+            graph: _,
             structural_summaries: _,
         } = staged_batch;
         let mut staged =
@@ -7590,8 +8432,8 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         )?;
         require_eq(
             &reserved.purpose.status,
-            &PurposeStatus::Stale,
-            "stale reviewed built-in purpose state",
+            &PurposeStatus::Approved,
+            "reviewed built-in purpose state",
         )?;
         require_eq(
             &old_reader
@@ -7608,7 +8450,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             &Some(old_text.content),
             "old reader remains on prior source text",
         )?;
-        let new_reader = AtlasStore::open_read_only(&db_path)?;
+        let new_reader = open_atlas_store_read_only_for_project(&db_path, &plan.root)?;
         require_eq(
             &new_reader
                 .index_publication()?
@@ -7626,6 +8468,170 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         )?;
         new_reader.finish_index_read_snapshot()?;
         old_reader.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn one_sided_notify_rename_events_require_full_verification() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let old_path = temp.path().join("old.rs");
+        let new_path = temp.path().join("new.rs");
+        for (mode, path) in [
+            (notify::event::RenameMode::From, old_path),
+            (notify::event::RenameMode::To, new_path),
+        ] {
+            let event =
+                Event::new(EventKind::Modify(notify::event::ModifyKind::Name(mode))).add_path(path);
+            let changes = notify_event_changes(temp.path(), &ScanOptions::default(), &event);
+            require_eq(
+                &changes.requires_full_scan,
+                &true,
+                "one-sided rename full verification",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn notify_rescan_and_ignored_policy_events_require_full_verification()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        fs::create_dir_all(temp.path().join(".projectatlas"))?;
+        fs::write(temp.path().join(".gitignore"), ".projectatlas/\n")?;
+        let config = temp.path().join(".projectatlas/config.toml");
+        fs::write(&config, "[project]\nroot = \".\"\n")?;
+        let config_event = Event::new(EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )))
+        .add_path(config.clone());
+        let config_changes =
+            notify_event_changes(temp.path(), &ScanOptions::default(), &config_event);
+        require_eq(
+            &config_changes.requires_full_scan,
+            &true,
+            "ignored ProjectAtlas config full verification",
+        )?;
+        require_eq(
+            &config_changes.paths.contains(&config),
+            &true,
+            "ignored ProjectAtlas config event path",
+        )?;
+
+        let rescan_event = Event::new(EventKind::Any).set_flag(notify::event::Flag::Rescan);
+        let rescan_changes =
+            notify_event_changes(temp.path(), &ScanOptions::default(), &rescan_event);
+        require_eq(
+            &rescan_changes.requires_full_scan,
+            &true,
+            "backend rescan flag full verification",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn directory_only_deletion_re_resolves_external_inbound_callers() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let atlas_dir = temp.path().join(".projectatlas");
+        let source_dir = temp.path().join("src");
+        let removed_dir = source_dir.join("removed");
+        fs::create_dir_all(&atlas_dir)?;
+        fs::create_dir_all(&removed_dir)?;
+        fs::write(
+            source_dir.join("caller.rs"),
+            "pub fn caller() { target(); }\n",
+        )?;
+        fs::write(removed_dir.join("target.rs"), "pub fn target() {}\n")?;
+
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), Some(1_024))?;
+        let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let mut store =
+            open_atlas_store_for_project(&atlas_dir.join("projectatlas.db"), &plan.root)?;
+        refresh_index(&mut store, &plan, &symbol_options)?;
+        let before = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("initial publication missing"))?;
+        require_caller_resolution(
+            &store,
+            "src/caller.rs",
+            |resolution| matches!(resolution, RelationResolution::Resolved { .. }),
+            "initial caller resolution",
+        )?;
+
+        fs::remove_dir_all(&removed_dir)?;
+        let mut changes = WatchChangeSet::default();
+        changes.paths.insert(removed_dir);
+        refresh_index_for_changes(&mut store, &plan, &changes, &symbol_options)?;
+
+        let after = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("replacement publication missing"))?;
+        require_eq(
+            &after.generation,
+            &before
+                .generation
+                .checked_next()
+                .ok_or_else(|| io::Error::other("test generation overflowed"))?,
+            "directory deletion generation",
+        )?;
+        require_eq(
+            &store.load_node_by_path("src/removed/target.rs")?.is_none(),
+            &true,
+            "deleted descendant node",
+        )?;
+        require_eq(
+            &store
+                .load_symbols(Some("src/removed/target.rs"), Some("target"), 10)?
+                .is_empty(),
+            &true,
+            "deleted descendant symbol",
+        )?;
+        require_caller_resolution(
+            &store,
+            "src/caller.rs",
+            |resolution| matches!(resolution, RelationResolution::Unresolved { .. }),
+            "caller resolution after directory deletion",
+        )?;
+        Ok(())
+    }
+
+    fn require_caller_resolution(
+        store: &AtlasStore,
+        caller_path: &str,
+        expected: impl FnOnce(&RelationResolution) -> bool,
+        label: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("project identity missing"))?;
+        let caller_path = RepositoryNodePath::new(Path::new(caller_path))?;
+        let caller_entities =
+            store.repository_graph_entities_by_path(project, &caller_path, 100)?;
+        let relations = store.repository_graph_relations(
+            RepositoryGraphRelationQuery::Family {
+                relation: GraphRelationKind::Legacy(RelationKind::Calls),
+            },
+            100,
+        )?;
+        let mut matching = relations.rows.iter().filter(|relation| {
+            caller_entities
+                .rows
+                .iter()
+                .any(|entity| entity.key() == relation.source())
+        });
+        let relation = matching
+            .next()
+            .ok_or_else(|| io::Error::other(format!("{label}: caller relation missing")))?;
+        if matching.next().is_some() {
+            return Err(io::Error::other(format!("{label}: multiple caller relations")).into());
+        }
+        if !expected(relation.resolution()) {
+            return Err(io::Error::other(format!(
+                "{label}: unexpected resolution {:?}",
+                relation.resolution()
+            ))
+            .into());
+        }
         Ok(())
     }
 

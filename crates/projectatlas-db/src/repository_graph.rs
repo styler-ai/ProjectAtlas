@@ -7,15 +7,17 @@ use crate::project_identity::{
 };
 use projectatlas_core::IndexGeneration;
 use projectatlas_core::graph::{
-    Completeness, ConfidenceClass, CoverageRecord, CoverageScope, CoverageState, EntitySelector,
-    ExtendedRelationKind, ExternalSelector, GraphEntity, GraphEntityKey, GraphIdentityText,
-    GraphLimitKind, GraphLimits, GraphRelationKind, LogicalRelation, PackageSelector,
-    ProjectInstanceId, RelationOccurrence, RelationResolution, RepositoryFilePath,
-    RepositoryNodePath, SourceSpan, SymbolSelector,
+    CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
+    CoverageState, EntityResolutionKey, EntitySelector, ExtendedRelationKind, ExternalSelector,
+    GraphEntity, GraphEntityKey, GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind,
+    LogicalRelation, PackageSelector, ProjectInstanceId, RelationDependencyKey, RelationOccurrence,
+    RelationResolution, RepositoryFilePath, RepositoryNodePath, ResolutionKeyDomain, SourceSpan,
+    SymbolSelector,
 };
 use projectatlas_core::symbols::{RelationKind, SymbolKind};
-use rusqlite::{Connection, OptionalExtension, Row, params};
-use std::collections::{HashMap, HashSet};
+use rusqlite::types::Value;
+use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::path::Path;
 
@@ -26,6 +28,40 @@ pub struct RepositoryGraphPage<T> {
     pub rows: Vec<T>,
     /// Whether at least one additional validated row exists.
     pub truncated: bool,
+}
+
+/// Conservative persisted footprint owned by exact affected source paths.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepositoryAffectedSourceFootprint {
+    /// Existing persisted rows, including a conservative resolution-witness allowance.
+    pub rows: u64,
+    /// UTF-8, BLOB, and fixed-width scalar bytes represented by those rows.
+    pub retained_bytes: u64,
+    /// Whether `rows` reached the caller's `LIMIT + 1` overflow sentinel.
+    pub truncated: bool,
+}
+
+/// One persisted export candidate paired with the canonical key that selected it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryResolutionCandidate {
+    /// Exact canonical key exported by the entity.
+    key: CanonicalResolutionKey,
+    /// Typed entity that currently exports the key.
+    entity: GraphEntity,
+}
+
+impl RepositoryResolutionCandidate {
+    /// Borrow the canonical key that selected this candidate.
+    #[must_use]
+    pub const fn key(&self) -> &CanonicalResolutionKey {
+        &self.key
+    }
+
+    /// Borrow the typed export candidate.
+    #[must_use]
+    pub const fn entity(&self) -> &GraphEntity {
+        &self.entity
+    }
 }
 
 /// Closed relation lookup shapes owned by normalized graph storage.
@@ -208,6 +244,282 @@ impl AtlasStore {
             ])?)?
         };
         page_from_raw(raw, limit, |row| entity_from_row(row, project, generation))
+    }
+
+    /// Load bounded graph entities that export one exact canonical resolution key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid limits, a project mismatch, a conflicting
+    /// canonical witness, corrupt graph rows, or `SQLite` failure.
+    pub fn repository_resolution_candidates(
+        &self,
+        key: &CanonicalResolutionKey,
+        limit: u32,
+    ) -> DbResult<RepositoryGraphPage<GraphEntity>> {
+        let limit_plus_one = validated_limit_plus_one(
+            limit,
+            GraphLimits::MAX_ROWS,
+            "resolution candidates must be nonzero and within the product ceiling",
+        )?;
+        let Some(generation) = self.repository_graph_generation()? else {
+            return Ok(empty_page());
+        };
+        if !verify_project_identity(&self.connection, key.project())? {
+            return Ok(empty_page());
+        }
+        if !validate_persisted_resolution_key(&self.connection, key)? {
+            return Ok(empty_page());
+        }
+        let raw = {
+            let mut statement = self.connection.prepare_cached(
+                "SELECT entity.entity_key, entity.project_instance_id,
+                        entity.canonical_identity, entity.entity_kind,
+                        entity.repository_path, entity.package_manager,
+                        entity.package_name, entity.manifest_path,
+                        entity.symbol_name, entity.symbol_kind,
+                        entity.symbol_parent, entity.symbol_signature,
+                        entity.external_system, entity.external_identity
+                   FROM graph_entity_exports AS export
+                        INDEXED BY idx_graph_entity_exports_key
+                   JOIN graph_entities AS entity
+                     ON entity.project_instance_id = export.project_instance_id
+                    AND entity.entity_key = export.entity_key
+                  WHERE export.project_instance_id = ?1
+                    AND export.resolution_domain = ?2
+                    AND export.key_digest = ?3
+                  ORDER BY export.entity_key
+                  LIMIT ?4",
+            )?;
+            collect_entity_rows(statement.query(params![
+                &key.project().as_bytes()[..],
+                key.domain().as_str(),
+                &key.digest_bytes()[..],
+                limit_plus_one,
+            ])?)?
+        };
+        page_from_raw(raw, limit, |row| {
+            entity_from_row(row, key.project(), generation)
+        })
+    }
+
+    /// Load bounded export candidates for a canonical-key batch in one set-oriented pass.
+    ///
+    /// Results retain the selecting key so callers can resolve several relation
+    /// occurrences without issuing one query per dependency key. Duplicate input
+    /// keys and duplicate candidate bindings are returned once in stable order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid limits, mixed projects, a conflicting
+    /// canonical witness, corrupt graph rows, or `SQLite` failure. A terminal row
+    /// conversion failure rejects the complete operation rather than returning a
+    /// partial candidate set.
+    pub fn repository_resolution_candidates_for_keys(
+        &self,
+        project: ProjectInstanceId,
+        keys: &[CanonicalResolutionKey],
+        limit: u32,
+    ) -> DbResult<RepositoryGraphPage<RepositoryResolutionCandidate>> {
+        validated_limit_plus_one(
+            limit,
+            GraphLimits::MAX_ROWS,
+            "resolution candidates must be nonzero and within the product ceiling",
+        )?;
+        let Some(generation) = self.repository_graph_generation()? else {
+            return Ok(empty_page());
+        };
+        if !verify_project_identity(&self.connection, project)? {
+            return Ok(empty_page());
+        }
+        let keys = normalized_resolution_keys(project, keys)?;
+        validate_persisted_resolution_keys(&self.connection, &keys)?;
+        let mut candidates = Vec::new();
+        for chunk in keys.chunks(RESOLUTION_KEYS_PER_QUERY) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let values_clause = resolution_values_clause(chunk.len(), 4);
+            let sql = format!(
+                "WITH requested(project_instance_id, resolution_domain, key_digest, canonical_identity)
+                      AS (VALUES {values_clause})
+                 SELECT entity.entity_key, entity.project_instance_id,
+                        entity.canonical_identity, entity.entity_kind,
+                        entity.repository_path, entity.package_manager,
+                        entity.package_name, entity.manifest_path,
+                        entity.symbol_name, entity.symbol_kind,
+                        entity.symbol_parent, entity.symbol_signature,
+                        entity.external_system, entity.external_identity,
+                        stored.project_instance_id, stored.resolution_domain,
+                        stored.key_digest, stored.canonical_identity
+                   FROM requested
+                   JOIN graph_resolution_keys AS stored
+                     ON stored.project_instance_id = requested.project_instance_id
+                    AND stored.resolution_domain = requested.resolution_domain
+                    AND stored.key_digest = requested.key_digest
+                    AND stored.canonical_identity = requested.canonical_identity
+                   JOIN graph_entity_exports AS export
+                        INDEXED BY idx_graph_entity_exports_key
+                     ON export.project_instance_id = stored.project_instance_id
+                    AND export.resolution_domain = stored.resolution_domain
+                    AND export.key_digest = stored.key_digest
+                   JOIN graph_entities AS entity
+                     ON entity.project_instance_id = export.project_instance_id
+                    AND entity.entity_key = export.entity_key
+                  ORDER BY stored.resolution_domain, stored.key_digest, export.entity_key
+                  LIMIT ?"
+            );
+            let mut values = resolution_key_values(chunk, true);
+            values.push(Value::Integer(i64::from(limit) + 1));
+            let mut statement = self.connection.prepare(&sql)?;
+            let mut rows = statement.query(params_from_iter(values.iter()))?;
+            while let Some(row) = rows.next()? {
+                let entity = entity_from_row(entity_row(row)?, project, generation)?;
+                let key_project = project_from_blob(
+                    "graph_resolution_keys.project_instance_id",
+                    row.get::<_, Vec<u8>>(14)?,
+                )?;
+                require_project(project, key_project)?;
+                let domain_text = row.get::<_, String>(15)?;
+                let domain = ResolutionKeyDomain::try_from(domain_text.as_str())?;
+                let digest = fixed_bytes::<32>(
+                    "graph_resolution_keys.key_digest",
+                    row.get::<_, Vec<u8>>(16)?,
+                )?;
+                let key = CanonicalResolutionKey::from_persisted(
+                    key_project,
+                    domain,
+                    digest,
+                    row.get(17)?,
+                )?;
+                candidates.push(RepositoryResolutionCandidate { key, entity });
+            }
+            if candidates.len() > limit as usize {
+                break;
+            }
+        }
+        candidates.sort_by(|left, right| {
+            left.key
+                .cmp(&right.key)
+                .then_with(|| left.entity.key().digest().cmp(right.entity.key().digest()))
+                .then_with(|| {
+                    left.entity
+                        .key()
+                        .canonical_identity()
+                        .cmp(right.entity.key().canonical_identity())
+                })
+        });
+        candidates.dedup_by(|left, right| {
+            left.key == right.key && left.entity.key() == right.entity.key()
+        });
+        let truncated = candidates.len() > limit as usize;
+        candidates.truncate(limit as usize);
+        Ok(RepositoryGraphPage {
+            rows: candidates,
+            truncated,
+        })
+    }
+
+    /// Load bounded canonical export keys previously owned by exact source paths.
+    ///
+    /// The result is deduplicated and sorted by canonical key identity so callers
+    /// can union it deterministically with newly staged exports.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid paths or limits, project mismatch, corrupt
+    /// persisted keys, canonical witness collisions, or `SQLite` failure.
+    pub fn repository_export_keys_for_paths(
+        &self,
+        project: ProjectInstanceId,
+        paths: &[String],
+        limit: u32,
+    ) -> DbResult<RepositoryGraphPage<CanonicalResolutionKey>> {
+        validated_limit_plus_one(
+            limit,
+            GraphLimits::MAX_ROWS,
+            "resolution export keys must be nonzero and within the product ceiling",
+        )?;
+        if self.repository_graph_generation()?.is_none()
+            || !verify_project_identity(&self.connection, project)?
+        {
+            return Ok(empty_page());
+        }
+        let paths = normalized_file_paths(paths)?;
+        let keys = resolution_keys_for_owner_paths(
+            &self.connection,
+            project,
+            &paths,
+            ResolutionOwner::EntityExports,
+            Some(limit),
+        )?;
+        Ok(page_from_ordered_set(keys, limit))
+    }
+
+    /// Find the bounded distinct source paths that depend on canonical keys.
+    ///
+    /// `truncated` is set from aggregate `LIMIT + 1` handling. Callers must
+    /// escalate to a full refresh before opening a publication transaction when
+    /// it is true.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid limits, mixed projects, canonical witness
+    /// collisions, invalid persisted paths, or `SQLite` failure. No mutation is
+    /// performed.
+    pub fn repository_affected_source_paths(
+        &self,
+        project: ProjectInstanceId,
+        keys: &[CanonicalResolutionKey],
+        limit: u32,
+    ) -> DbResult<RepositoryGraphPage<RepositoryFilePath>> {
+        validated_limit_plus_one(
+            limit,
+            GraphLimits::MAX_ROWS,
+            "affected source paths must be nonzero and within the product ceiling",
+        )?;
+        if self.repository_graph_generation()?.is_none()
+            || !verify_project_identity(&self.connection, project)?
+        {
+            return Ok(empty_page());
+        }
+        let keys = normalized_resolution_keys(project, keys)?;
+        validate_persisted_resolution_keys(&self.connection, &keys)?;
+        let paths = affected_source_paths(&self.connection, &keys, limit)?;
+        Ok(page_from_ordered_set(paths, limit))
+    }
+
+    /// Account the persisted closure owned by exact affected source paths.
+    ///
+    /// Resolution witnesses are conservatively counted once per retained export
+    /// or dependency binding. Callers must require a full refresh when
+    /// `truncated` is true; in that case `rows` is the `limit + 1` lower bound
+    /// and `retained_bytes` covers only that bounded prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid paths or limits, corrupt persisted rows,
+    /// unavailable owned indexes, or any `SQLite` preparation, iteration, or
+    /// conversion failure. An unavailable graph returns an empty footprint;
+    /// a differently bound graph returns the typed project-mismatch error.
+    pub fn repository_affected_source_footprint(
+        &self,
+        project: ProjectInstanceId,
+        paths: &[String],
+        limit: u32,
+    ) -> DbResult<RepositoryAffectedSourceFootprint> {
+        let limit_plus_one = validated_limit_plus_one(
+            limit,
+            GraphLimits::MAX_ROWS,
+            "affected source footprint rows must be nonzero and within the product ceiling",
+        )?;
+        if self.repository_graph_generation()?.is_none()
+            || !verify_project_identity(&self.connection, project)?
+        {
+            return Ok(empty_affected_source_footprint());
+        }
+        let paths = normalized_file_paths(paths)?;
+        affected_source_footprint(&self.connection, project, &paths, limit_plus_one)
     }
 
     /// Load a bounded page of logical relations through one indexed query shape.
@@ -466,6 +778,35 @@ impl IndexPublicationGuard<'_> {
         occurrences: &[RelationOccurrence],
         coverage: &[CoverageRecord],
     ) -> DbResult<()> {
+        self.replace_repository_graph_with_resolution_keys(
+            project,
+            entities,
+            relations,
+            occurrences,
+            coverage,
+            &[],
+            &[],
+        )
+    }
+
+    /// Replace the complete graph and canonical resolution-key projection atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when graph or key records do not belong to the pending
+    /// generation and selected project, a stable-key collision is detected, an
+    /// owner has no exact source path, or `SQLite` fails.
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_repository_graph_with_resolution_keys(
+        &mut self,
+        project: ProjectInstanceId,
+        entities: &[GraphEntity],
+        relations: &[LogicalRelation],
+        occurrences: &[RelationOccurrence],
+        coverage: &[CoverageRecord],
+        entity_exports: &[EntityResolutionKey],
+        relation_dependencies: &[RelationDependencyKey],
+    ) -> DbResult<()> {
         let generation = self.pending_graph_generation()?;
         validate_graph_batch(
             project,
@@ -475,8 +816,10 @@ impl IndexPublicationGuard<'_> {
             occurrences,
             coverage,
         )?;
+        validate_resolution_key_batch(project, entity_exports, relation_dependencies)?;
         let savepoint = self.store.connection.savepoint()?;
         require_bound_project_identity(&savepoint, project)?;
+        savepoint.execute("DELETE FROM graph_resolution_keys", [])?;
         savepoint.execute("DELETE FROM graph_coverage", [])?;
         savepoint.execute("DELETE FROM graph_relations", [])?;
         savepoint.execute("DELETE FROM graph_entities", [])?;
@@ -488,6 +831,7 @@ impl IndexPublicationGuard<'_> {
             occurrences,
             coverage,
         )?;
+        insert_resolution_key_batch(&savepoint, project, entity_exports, relation_dependencies)?;
         set_graph_generation(&savepoint, generation)?;
         savepoint.commit()?;
         Ok(())
@@ -512,6 +856,37 @@ impl IndexPublicationGuard<'_> {
         occurrences: &[RelationOccurrence],
         coverage: &[CoverageRecord],
     ) -> DbResult<()> {
+        self.replace_repository_graph_for_paths_with_resolution_keys(
+            project,
+            affected_paths,
+            entities,
+            relations,
+            occurrences,
+            coverage,
+            &[],
+            &[],
+        )
+    }
+
+    /// Replace one affected graph closure and its canonical resolution keys atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when graph or key records do not belong to the pending
+    /// generation and selected project, a stable-key collision is detected, an
+    /// owner has no exact source path, or `SQLite` fails.
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_repository_graph_for_paths_with_resolution_keys(
+        &mut self,
+        project: ProjectInstanceId,
+        affected_paths: &[String],
+        entities: &[GraphEntity],
+        relations: &[LogicalRelation],
+        occurrences: &[RelationOccurrence],
+        coverage: &[CoverageRecord],
+        entity_exports: &[EntityResolutionKey],
+        relation_dependencies: &[RelationDependencyKey],
+    ) -> DbResult<()> {
         let generation = self.pending_graph_generation()?;
         validate_graph_batch(
             project,
@@ -521,6 +896,7 @@ impl IndexPublicationGuard<'_> {
             occurrences,
             coverage,
         )?;
+        validate_resolution_key_batch(project, entity_exports, relation_dependencies)?;
         let affected_paths = affected_paths
             .iter()
             .map(|path| RepositoryNodePath::new(Path::new(path)))
@@ -528,6 +904,7 @@ impl IndexPublicationGuard<'_> {
         let savepoint = self.store.connection.savepoint()?;
         require_bound_project_identity(&savepoint, project)?;
         if affected_paths.iter().any(|path| path.as_str() == ".") {
+            savepoint.execute("DELETE FROM graph_resolution_keys", [])?;
             savepoint.execute("DELETE FROM graph_coverage", [])?;
             savepoint.execute("DELETE FROM graph_relations", [])?;
             savepoint.execute("DELETE FROM graph_entities", [])?;
@@ -539,10 +916,23 @@ impl IndexPublicationGuard<'_> {
                 occurrences,
                 coverage,
             )?;
+            insert_resolution_key_batch(
+                &savepoint,
+                project,
+                entity_exports,
+                relation_dependencies,
+            )?;
             set_graph_generation(&savepoint, generation)?;
             savepoint.commit()?;
             return Ok(());
         }
+        let touched_keys = resolution_keys_for_owner_paths(
+            &savepoint,
+            project,
+            &affected_paths,
+            ResolutionOwner::Both,
+            None,
+        )?;
         let mut orphan_candidates = affected_external_candidates(&savepoint, &affected_paths)?;
         invalidate_repository_graph_paths(&savepoint, &affected_paths, &mut orphan_candidates)?;
         insert_graph_batch(
@@ -553,12 +943,14 @@ impl IndexPublicationGuard<'_> {
             occurrences,
             coverage,
         )?;
+        insert_resolution_key_batch(&savepoint, project, entity_exports, relation_dependencies)?;
         for entity in entities {
             if matches!(entity.selector(), EntitySelector::External { .. }) {
                 orphan_candidates.insert(entity.key().digest_bytes()?);
             }
         }
         remove_orphan_external_candidates(&savepoint, &orphan_candidates)?;
+        remove_touched_orphan_resolution_keys(&savepoint, &touched_keys)?;
         set_graph_generation(&savepoint, generation)?;
         savepoint.commit()?;
         Ok(())
@@ -570,6 +962,714 @@ impl IndexPublicationGuard<'_> {
             .checked_next()
             .ok_or(DbError::PublicationGenerationOverflow)
     }
+}
+
+/// Conservative key count that stays below `SQLite`'s legacy bind ceiling.
+const RESOLUTION_KEYS_PER_QUERY: usize = 200;
+/// Conservative path count that stays below `SQLite`'s legacy bind ceiling.
+const RESOLUTION_PATHS_PER_QUERY: usize = 400;
+
+/// Closed owner projections that retain canonical resolution keys.
+#[derive(Clone, Copy)]
+enum ResolutionOwner {
+    /// Entity-export bindings only.
+    EntityExports,
+    /// Both binding families, used for touched-key garbage collection.
+    Both,
+}
+
+impl ResolutionOwner {
+    /// Return the owner tables and their path-first access indexes.
+    fn tables(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::EntityExports => &[("graph_entity_exports", "idx_graph_entity_exports_owner")],
+            Self::Both => &[
+                ("graph_entity_exports", "idx_graph_entity_exports_owner"),
+                (
+                    "graph_relation_dependencies",
+                    "idx_graph_relation_dependencies_owner",
+                ),
+            ],
+        }
+    }
+}
+
+/// Validate and deduplicate exact source paths before querying owner bindings.
+fn normalized_file_paths(paths: &[String]) -> DbResult<Vec<RepositoryNodePath>> {
+    let mut normalized = BTreeSet::new();
+    for path in paths {
+        let file = RepositoryFilePath::new(Path::new(path))?;
+        normalized.insert(RepositoryNodePath::new(Path::new(file.as_str()))?);
+    }
+    Ok(normalized.into_iter().collect())
+}
+
+/// Validate project ownership and deduplicate canonical keys deterministically.
+fn normalized_resolution_keys(
+    project: ProjectInstanceId,
+    keys: &[CanonicalResolutionKey],
+) -> DbResult<Vec<CanonicalResolutionKey>> {
+    let mut normalized = BTreeSet::new();
+    for key in keys {
+        if key.project() != project {
+            return Err(DbError::GraphProjectIdentityMismatch {
+                expected: project.to_string(),
+                found: key.project().to_string(),
+            });
+        }
+        normalized.insert(key.clone());
+    }
+    Ok(normalized.into_iter().collect())
+}
+
+/// Convert a sorted unique set into one `LIMIT + 1` page.
+fn page_from_ordered_set<T: Ord>(rows: BTreeSet<T>, limit: u32) -> RepositoryGraphPage<T> {
+    let truncated = rows.len() > limit as usize;
+    RepositoryGraphPage {
+        rows: rows.into_iter().take(limit as usize).collect(),
+        truncated,
+    }
+}
+
+/// Load and validate canonical keys retained by path-owned graph projections.
+fn resolution_keys_for_owner_paths(
+    connection: &Connection,
+    project: ProjectInstanceId,
+    paths: &[RepositoryNodePath],
+    owners: ResolutionOwner,
+    limit: Option<u32>,
+) -> DbResult<BTreeSet<CanonicalResolutionKey>> {
+    let mut keys = BTreeSet::new();
+    for (table, index) in owners.tables() {
+        for chunk in paths.chunks(RESOLUTION_PATHS_PER_QUERY) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let limit_clause = limit.map_or("", |_| " LIMIT ?");
+            let sql = format!(
+                "SELECT DISTINCT resolution.project_instance_id,
+                        resolution.resolution_domain, resolution.key_digest,
+                        resolution.canonical_identity
+                   FROM {table} AS owner INDEXED BY {index}
+                   JOIN graph_resolution_keys AS resolution
+                     ON resolution.project_instance_id = owner.project_instance_id
+                    AND resolution.resolution_domain = owner.resolution_domain
+                    AND resolution.key_digest = owner.key_digest
+                  WHERE owner.project_instance_id = ?
+                    AND owner.owner_path IN ({placeholders})
+                  ORDER BY resolution.resolution_domain, resolution.key_digest{limit_clause}"
+            );
+            let mut values = Vec::with_capacity(chunk.len() + 2);
+            values.push(Value::Blob(project.as_bytes().to_vec()));
+            values.extend(
+                chunk
+                    .iter()
+                    .map(|path| Value::Text(path.as_str().to_string())),
+            );
+            if let Some(limit) = limit {
+                values.push(Value::Integer(i64::from(limit) + 1));
+            }
+            let mut statement = connection.prepare(&sql)?;
+            let mut rows = statement.query(params_from_iter(values.iter()))?;
+            while let Some(row) = rows.next()? {
+                keys.insert(resolution_key_from_row(row, project)?);
+            }
+            if limit.is_some_and(|limit| keys.len() > limit as usize) {
+                return Ok(keys);
+            }
+        }
+    }
+    Ok(keys)
+}
+
+/// Reconstruct one canonical key row without accepting malformed persisted data.
+fn resolution_key_from_row(
+    row: &Row<'_>,
+    expected_project: ProjectInstanceId,
+) -> DbResult<CanonicalResolutionKey> {
+    let project = project_from_blob(
+        "graph_resolution_keys.project_instance_id",
+        row.get::<_, Vec<u8>>(0)?,
+    )?;
+    require_project(expected_project, project)?;
+    let domain_text = row.get::<_, String>(1)?;
+    let domain = ResolutionKeyDomain::try_from(domain_text.as_str())?;
+    let digest = fixed_bytes::<32>(
+        "graph_resolution_keys.key_digest",
+        row.get::<_, Vec<u8>>(2)?,
+    )?;
+    Ok(CanonicalResolutionKey::from_persisted(
+        project,
+        domain,
+        digest,
+        row.get(3)?,
+    )?)
+}
+
+/// Validate one requested key against any retained canonical witness.
+fn validate_persisted_resolution_key(
+    connection: &Connection,
+    key: &CanonicalResolutionKey,
+) -> DbResult<bool> {
+    let stored = connection
+        .query_row(
+            "SELECT canonical_identity
+               FROM graph_resolution_keys
+              WHERE project_instance_id = ?1
+                AND resolution_domain = ?2
+                AND key_digest = ?3",
+            params![
+                &key.project().as_bytes()[..],
+                key.domain().as_str(),
+                &key.digest_bytes()[..],
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(stored) = stored else {
+        return Ok(false);
+    };
+    if stored != key.canonical_identity() {
+        return Err(DbError::ResolutionKeyCollision {
+            domain: key.domain().as_str(),
+            digest: key.digest_bytes(),
+        });
+    }
+    CanonicalResolutionKey::from_persisted(
+        key.project(),
+        key.domain(),
+        key.digest_bytes(),
+        stored,
+    )?;
+    Ok(true)
+}
+
+/// Validate all retained witnesses for a key batch without per-key queries.
+fn validate_persisted_resolution_keys(
+    connection: &Connection,
+    keys: &[CanonicalResolutionKey],
+) -> DbResult<()> {
+    for chunk in keys.chunks(RESOLUTION_KEYS_PER_QUERY) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let values_clause = resolution_values_clause(chunk.len(), 4);
+        let sql = format!(
+            "WITH requested(project_instance_id, resolution_domain, key_digest, canonical_identity)
+                  AS (VALUES {values_clause})
+             SELECT requested.resolution_domain, requested.key_digest,
+                    requested.canonical_identity, stored.canonical_identity
+               FROM requested
+               JOIN graph_resolution_keys AS stored
+                 ON stored.project_instance_id = requested.project_instance_id
+                AND stored.resolution_domain = requested.resolution_domain
+                AND stored.key_digest = requested.key_digest
+              ORDER BY requested.resolution_domain, requested.key_digest"
+        );
+        let values = resolution_key_values(chunk, true);
+        let mut statement = connection.prepare(&sql)?;
+        let mut rows = statement.query(params_from_iter(values.iter()))?;
+        while let Some(row) = rows.next()? {
+            let domain_text = row.get::<_, String>(0)?;
+            let domain = ResolutionKeyDomain::try_from(domain_text.as_str())?;
+            let digest = fixed_bytes::<32>(
+                "graph_resolution_keys.key_digest",
+                row.get::<_, Vec<u8>>(1)?,
+            )?;
+            let requested = row.get::<_, String>(2)?;
+            let stored = row.get::<_, String>(3)?;
+            if requested != stored {
+                return Err(DbError::ResolutionKeyCollision {
+                    domain: domain.as_str(),
+                    digest,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Return distinct ordered dependency-owning paths for a bounded key set.
+fn affected_source_paths(
+    connection: &Connection,
+    keys: &[CanonicalResolutionKey],
+    limit: u32,
+) -> DbResult<BTreeSet<RepositoryFilePath>> {
+    let mut paths = BTreeSet::new();
+    for chunk in keys.chunks(RESOLUTION_KEYS_PER_QUERY) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let values_clause = resolution_values_clause(chunk.len(), 4);
+        let sql = format!(
+            "WITH requested(project_instance_id, resolution_domain, key_digest, canonical_identity)
+                  AS (VALUES {values_clause})
+             SELECT DISTINCT dependency.owner_path
+               FROM requested
+               JOIN graph_resolution_keys AS stored
+                 ON stored.project_instance_id = requested.project_instance_id
+                AND stored.resolution_domain = requested.resolution_domain
+                AND stored.key_digest = requested.key_digest
+                AND stored.canonical_identity = requested.canonical_identity
+               JOIN graph_relation_dependencies AS dependency
+                    INDEXED BY idx_graph_relation_dependencies_key
+                 ON dependency.project_instance_id = stored.project_instance_id
+                AND dependency.resolution_domain = stored.resolution_domain
+                AND dependency.key_digest = stored.key_digest
+              ORDER BY dependency.owner_path
+              LIMIT ?"
+        );
+        let mut values = resolution_key_values(chunk, true);
+        values.push(Value::Integer(i64::from(limit) + 1));
+        let mut statement = connection.prepare(&sql)?;
+        let mut rows = statement.query(params_from_iter(values.iter()))?;
+        while let Some(row) = rows.next()? {
+            paths.insert(RepositoryFilePath::new(Path::new(
+                &row.get::<_, String>(0)?,
+            ))?);
+        }
+        if paths.len() > limit as usize {
+            return Ok(paths);
+        }
+    }
+    Ok(paths)
+}
+
+/// Account one exact-path closure through bounded index-owned branches.
+fn affected_source_footprint(
+    connection: &Connection,
+    project: ProjectInstanceId,
+    paths: &[RepositoryNodePath],
+    limit_plus_one: i64,
+) -> DbResult<RepositoryAffectedSourceFootprint> {
+    let maximum_rows = u64::try_from(limit_plus_one).map_err(|source| DbError::InvalidCount {
+        field: "affected_source_footprint.limit_plus_one",
+        value: limit_plus_one,
+        source,
+    })?;
+    let mut footprint = empty_affected_source_footprint();
+    for chunk in paths.chunks(RESOLUTION_PATHS_PER_QUERY) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let remaining = maximum_rows.saturating_sub(footprint.rows);
+        if remaining == 0 {
+            footprint.truncated = true;
+            break;
+        }
+        let sql = affected_source_footprint_sql(chunk.len());
+        let mut values = Vec::with_capacity(chunk.len() + 2);
+        values.push(Value::Blob(project.as_bytes().to_vec()));
+        values.extend(
+            chunk
+                .iter()
+                .map(|path| Value::Text(path.as_str().to_string())),
+        );
+        values.push(Value::Integer(i64::try_from(remaining).map_err(
+            |source| DbError::InvalidCount {
+                field: "affected_source_footprint.remaining_rows",
+                value: i64::MAX,
+                source,
+            },
+        )?));
+        let mut statement = connection.prepare(&sql)?;
+        let mut rows = statement.query(params_from_iter(values.iter()))?;
+        while let Some(row) = rows.next()? {
+            let bytes = nonnegative_u64(
+                "affected_source_footprint.retained_bytes",
+                row.get::<_, i64>(0)?,
+            )?;
+            footprint.rows = footprint.rows.saturating_add(1);
+            footprint.retained_bytes = footprint.retained_bytes.saturating_add(bytes);
+        }
+        if footprint.rows >= maximum_rows {
+            footprint.truncated = true;
+            break;
+        }
+    }
+    Ok(footprint)
+}
+
+/// Build one bounded union of exact-path footprint branches.
+fn affected_source_footprint_sql(path_count: usize) -> String {
+    let requested = vec!["(?)"; path_count].join(",");
+    format!(
+        "WITH selected_project(project_instance_id) AS (VALUES (?)),
+              requested(path) AS (VALUES {requested})
+         SELECT retained_bytes
+           FROM (
+             SELECT length(CAST(metadata.path AS BLOB))
+                    + coalesce(length(CAST(metadata.language AS BLOB)), 0)
+                    + length(CAST(metadata.source_parser AS BLOB))
+                    + length(CAST(metadata.fact_parser AS BLOB)) + 16
+                    + length(CAST(metadata.updated_at AS BLOB)) AS retained_bytes
+               FROM requested
+               JOIN source_parse_metadata AS metadata
+                    INDEXED BY sqlite_autoindex_source_parse_metadata_1
+                 ON metadata.path = requested.path
+             UNION ALL
+             SELECT 32 + length(CAST(symbol.path AS BLOB))
+                    + coalesce(length(CAST(symbol.language AS BLOB)), 0)
+                    + length(CAST(symbol.name AS BLOB))
+                    + length(CAST(symbol.kind AS BLOB))
+                    + length(CAST(symbol.signature AS BLOB))
+                    + coalesce(length(CAST(symbol.documentation AS BLOB)), 0)
+                    + coalesce(length(CAST(symbol.parent AS BLOB)), 0)
+                    + length(CAST(symbol.parser AS BLOB))
+                    + coalesce(length(CAST(symbol.detail AS BLOB)), 0)
+                    + length(CAST(symbol.created_at AS BLOB))
+                    + length(CAST(symbol.updated_at AS BLOB))
+               FROM requested
+               JOIN symbols AS symbol INDEXED BY idx_symbols_path
+                 ON symbol.path = requested.path
+             UNION ALL
+             SELECT 16 + length(CAST(symbol_relation.path AS BLOB))
+                    + length(CAST(symbol_relation.source_name AS BLOB))
+                    + length(CAST(symbol_relation.target_name AS BLOB))
+                    + length(CAST(symbol_relation.kind AS BLOB))
+                    + length(CAST(symbol_relation.context AS BLOB))
+                    + length(CAST(symbol_relation.parser AS BLOB))
+                    + length(CAST(symbol_relation.created_at AS BLOB))
+               FROM requested
+               JOIN symbol_relations AS symbol_relation INDEXED BY idx_symbol_relations_path
+                 ON symbol_relation.path = requested.path
+             UNION ALL
+             SELECT 48 + length(CAST(entity.canonical_identity AS BLOB))
+                    + length(CAST(entity.entity_kind AS BLOB))
+                    + coalesce(length(CAST(entity.repository_path AS BLOB)), 0)
+                    + coalesce(length(CAST(entity.package_manager AS BLOB)), 0)
+                    + coalesce(length(CAST(entity.package_name AS BLOB)), 0)
+                    + coalesce(length(CAST(entity.manifest_path AS BLOB)), 0)
+                    + coalesce(length(CAST(entity.symbol_name AS BLOB)), 0)
+                    + coalesce(length(CAST(entity.symbol_kind AS BLOB)), 0)
+                    + coalesce(length(CAST(entity.symbol_parent AS BLOB)), 0)
+                    + coalesce(length(CAST(entity.symbol_signature AS BLOB)), 0)
+                    + coalesce(length(CAST(entity.external_system AS BLOB)), 0)
+                    + coalesce(length(CAST(entity.external_identity AS BLOB)), 0)
+               FROM requested
+               JOIN graph_entities AS entity INDEXED BY idx_graph_entities_path
+                 ON entity.repository_path = requested.path
+               JOIN selected_project
+                 ON selected_project.project_instance_id = entity.project_instance_id
+             UNION ALL
+             SELECT 48 + length(CAST(entity.canonical_identity AS BLOB))
+                    + length(CAST(entity.entity_kind AS BLOB))
+                    + coalesce(length(CAST(entity.repository_path AS BLOB)), 0)
+                    + coalesce(length(CAST(entity.package_manager AS BLOB)), 0)
+                    + coalesce(length(CAST(entity.package_name AS BLOB)), 0)
+                    + coalesce(length(CAST(entity.manifest_path AS BLOB)), 0)
+                    + coalesce(length(CAST(entity.symbol_name AS BLOB)), 0)
+                    + coalesce(length(CAST(entity.symbol_kind AS BLOB)), 0)
+                    + coalesce(length(CAST(entity.symbol_parent AS BLOB)), 0)
+                    + coalesce(length(CAST(entity.symbol_signature AS BLOB)), 0)
+                    + coalesce(length(CAST(entity.external_system AS BLOB)), 0)
+                    + coalesce(length(CAST(entity.external_identity AS BLOB)), 0)
+               FROM requested
+               JOIN graph_entities AS entity INDEXED BY idx_graph_entities_manifest_path
+                 ON entity.manifest_path = requested.path
+               JOIN selected_project
+                 ON selected_project.project_instance_id = entity.project_instance_id
+             UNION ALL
+             SELECT 80 + length(CAST(relation.canonical_identity AS BLOB))
+                    + length(CAST(relation.relation_scope AS BLOB))
+                    + length(CAST(relation.relation_kind AS BLOB))
+                    + length(CAST(relation.resolution_status AS BLOB))
+                    + coalesce(length(relation.target_entity_key), 0)
+                    + coalesce(length(CAST(relation.reference_text AS BLOB)), 0)
+                    + CASE WHEN relation.candidate_count IS NULL THEN 0 ELSE 8 END
+                    + length(CAST(relation.confidence AS BLOB))
+                    + length(CAST(relation.completeness AS BLOB))
+               FROM requested
+               JOIN graph_entities AS entity INDEXED BY idx_graph_entities_path
+                 ON entity.repository_path = requested.path
+               JOIN selected_project
+                 ON selected_project.project_instance_id = entity.project_instance_id
+               JOIN graph_relations AS relation INDEXED BY idx_graph_relations_source_kind
+                 ON relation.source_entity_key = entity.entity_key
+                AND relation.project_instance_id = selected_project.project_instance_id
+             UNION ALL
+             SELECT 80 + length(CAST(relation.canonical_identity AS BLOB))
+                    + length(CAST(relation.relation_scope AS BLOB))
+                    + length(CAST(relation.relation_kind AS BLOB))
+                    + length(CAST(relation.resolution_status AS BLOB))
+                    + coalesce(length(relation.target_entity_key), 0)
+                    + coalesce(length(CAST(relation.reference_text AS BLOB)), 0)
+                    + CASE WHEN relation.candidate_count IS NULL THEN 0 ELSE 8 END
+                    + length(CAST(relation.confidence AS BLOB))
+                    + length(CAST(relation.completeness AS BLOB))
+               FROM requested
+               JOIN graph_entities AS entity INDEXED BY idx_graph_entities_manifest_path
+                 ON entity.manifest_path = requested.path
+               JOIN selected_project
+                 ON selected_project.project_instance_id = entity.project_instance_id
+               JOIN graph_relations AS relation INDEXED BY idx_graph_relations_source_kind
+                 ON relation.source_entity_key = entity.entity_key
+                AND relation.project_instance_id = selected_project.project_instance_id
+             UNION ALL
+             SELECT 72 + length(CAST(occurrence.file_path AS BLOB))
+               FROM requested
+               JOIN graph_relation_occurrences AS occurrence
+                    INDEXED BY idx_graph_occurrences_file_span
+                 ON occurrence.file_path = requested.path
+             UNION ALL
+             SELECT 48 + length(CAST(coverage.scope_kind AS BLOB))
+                    + coalesce(length(CAST(coverage.scope_path AS BLOB)), 0)
+                    + coalesce(length(CAST(coverage.relation_scope AS BLOB)), 0)
+                    + coalesce(length(CAST(coverage.relation_kind AS BLOB)), 0)
+                    + length(CAST(coverage.state AS BLOB))
+                    + coalesce(length(CAST(coverage.reason AS BLOB)), 0)
+                    + coalesce(length(CAST(coverage.reached_limit AS BLOB)), 0)
+               FROM requested
+               JOIN graph_coverage AS coverage INDEXED BY idx_graph_coverage_path
+                 ON coverage.scope_path = requested.path
+               JOIN selected_project
+                 ON selected_project.project_instance_id = coverage.project_instance_id
+             UNION ALL
+             SELECT 80 + length(CAST(export.owner_path AS BLOB))
+                    + length(CAST(export.resolution_domain AS BLOB))
+               FROM requested
+               JOIN graph_entity_exports AS export INDEXED BY idx_graph_entity_exports_owner
+                 ON export.owner_path = requested.path
+               JOIN selected_project
+                 ON selected_project.project_instance_id = export.project_instance_id
+             UNION ALL
+             SELECT length(witness.project_instance_id)
+                    + length(CAST(witness.resolution_domain AS BLOB))
+                    + length(witness.key_digest)
+                    + length(CAST(witness.canonical_identity AS BLOB))
+               FROM requested
+               JOIN graph_entity_exports AS export INDEXED BY idx_graph_entity_exports_owner
+                 ON export.owner_path = requested.path
+               JOIN selected_project
+                 ON selected_project.project_instance_id = export.project_instance_id
+               LEFT JOIN graph_resolution_keys AS witness
+                 ON witness.project_instance_id = export.project_instance_id
+                AND witness.resolution_domain = export.resolution_domain
+                AND witness.key_digest = export.key_digest
+             UNION ALL
+             SELECT 80 + length(CAST(dependency.owner_path AS BLOB))
+                    + length(CAST(dependency.resolution_domain AS BLOB))
+               FROM requested
+               JOIN graph_relation_dependencies AS dependency
+                    INDEXED BY idx_graph_relation_dependencies_owner
+                 ON dependency.owner_path = requested.path
+               JOIN selected_project
+                 ON selected_project.project_instance_id = dependency.project_instance_id
+             UNION ALL
+             SELECT length(witness.project_instance_id)
+                    + length(CAST(witness.resolution_domain AS BLOB))
+                    + length(witness.key_digest)
+                    + length(CAST(witness.canonical_identity AS BLOB))
+               FROM requested
+               JOIN graph_relation_dependencies AS dependency
+                    INDEXED BY idx_graph_relation_dependencies_owner
+                 ON dependency.owner_path = requested.path
+               JOIN selected_project
+                 ON selected_project.project_instance_id = dependency.project_instance_id
+               LEFT JOIN graph_resolution_keys AS witness
+                 ON witness.project_instance_id = dependency.project_instance_id
+                AND witness.resolution_domain = dependency.resolution_domain
+                AND witness.key_digest = dependency.key_digest
+           )
+          LIMIT ?"
+    )
+}
+
+/// Build an anonymous `VALUES` clause with fixed columns per row.
+fn resolution_values_clause(rows: usize, columns: usize) -> String {
+    let row = format!("({})", vec!["?"; columns].join(","));
+    vec![row; rows].join(",")
+}
+
+/// Bind one canonical-key batch in the same order as its `VALUES` rows.
+fn resolution_key_values(keys: &[CanonicalResolutionKey], witness: bool) -> Vec<Value> {
+    let columns = if witness { 4 } else { 3 };
+    let mut values = Vec::with_capacity(keys.len() * columns);
+    for key in keys {
+        values.push(Value::Blob(key.project().as_bytes().to_vec()));
+        values.push(Value::Text(key.domain().as_str().to_string()));
+        values.push(Value::Blob(key.digest_bytes().to_vec()));
+        if witness {
+            values.push(Value::Text(key.canonical_identity().to_string()));
+        }
+    }
+    values
+}
+
+/// Validate graph-owner bindings before acquiring the savepoint.
+fn validate_resolution_key_batch(
+    project: ProjectInstanceId,
+    entity_exports: &[EntityResolutionKey],
+    relation_dependencies: &[RelationDependencyKey],
+) -> DbResult<()> {
+    let foreign = entity_exports.iter().find_map(|binding| {
+        (binding.entity().project() != project || binding.key().project() != project)
+            .then(|| binding.key().project())
+    });
+    let foreign = foreign.or_else(|| {
+        relation_dependencies.iter().find_map(|binding| {
+            (binding.relation().project() != project || binding.key().project() != project)
+                .then(|| binding.key().project())
+        })
+    });
+    if let Some(found) = foreign {
+        return Err(DbError::GraphProjectIdentityMismatch {
+            expected: project.to_string(),
+            found: found.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Insert a validated resolution-key projection through prepared owner statements.
+fn insert_resolution_key_batch(
+    connection: &Connection,
+    project: ProjectInstanceId,
+    entity_exports: &[EntityResolutionKey],
+    relation_dependencies: &[RelationDependencyKey],
+) -> DbResult<()> {
+    let mut insert_key = connection.prepare_cached(
+        "INSERT INTO graph_resolution_keys(
+             project_instance_id, resolution_domain, key_digest, canonical_identity
+         ) VALUES(?1, ?2, ?3, ?4)
+         ON CONFLICT(project_instance_id, resolution_domain, key_digest)
+         DO UPDATE SET canonical_identity = excluded.canonical_identity
+         WHERE graph_resolution_keys.canonical_identity = excluded.canonical_identity",
+    )?;
+    let mut insert_export = connection.prepare_cached(
+        "INSERT INTO graph_entity_exports(
+             project_instance_id, entity_key, owner_path, resolution_domain, key_digest
+         )
+         SELECT entity.project_instance_id, entity.entity_key,
+                CASE entity.entity_kind
+                    WHEN 'file' THEN entity.repository_path
+                    WHEN 'symbol' THEN entity.repository_path
+                    WHEN 'package' THEN entity.manifest_path
+                END,
+                ?3, ?4
+           FROM graph_entities AS entity
+          WHERE entity.project_instance_id = ?1 AND entity.entity_key = ?2
+            AND entity.entity_kind IN ('file', 'symbol', 'package')
+         ON CONFLICT(project_instance_id, entity_key, resolution_domain, key_digest)
+         DO UPDATE SET owner_path = excluded.owner_path",
+    )?;
+    let mut insert_dependency = connection.prepare_cached(
+        "INSERT INTO graph_relation_dependencies(
+             project_instance_id, relation_key, owner_path, resolution_domain, key_digest
+         )
+         SELECT relation.project_instance_id, relation.relation_key,
+                CASE source.entity_kind
+                    WHEN 'file' THEN source.repository_path
+                    WHEN 'symbol' THEN source.repository_path
+                    WHEN 'package' THEN source.manifest_path
+                END,
+                ?3, ?4
+           FROM graph_relations AS relation
+           JOIN graph_entities AS source
+             ON source.project_instance_id = relation.project_instance_id
+            AND source.entity_key = relation.source_entity_key
+          WHERE relation.project_instance_id = ?1 AND relation.relation_key = ?2
+            AND source.entity_kind IN ('file', 'symbol', 'package')
+         ON CONFLICT(project_instance_id, relation_key, resolution_domain, key_digest)
+         DO UPDATE SET owner_path = excluded.owner_path",
+    )?;
+
+    for binding in entity_exports {
+        insert_resolution_key(&mut insert_key, binding.key())?;
+        let key = binding.key();
+        let inserted = insert_export.execute(params![
+            &project.as_bytes()[..],
+            &binding.entity().digest_bytes()?[..],
+            key.domain().as_str(),
+            &key.digest_bytes()[..],
+        ])?;
+        if inserted != 1 {
+            return Err(DbError::GraphRowShape {
+                table: "graph_entity_exports",
+                reason: "export keys require a local file, symbol, or package owner",
+            });
+        }
+    }
+    for binding in relation_dependencies {
+        insert_resolution_key(&mut insert_key, binding.key())?;
+        let key = binding.key();
+        let inserted = insert_dependency.execute(params![
+            &project.as_bytes()[..],
+            &binding.relation().digest_bytes()?[..],
+            key.domain().as_str(),
+            &key.digest_bytes()[..],
+        ])?;
+        if inserted != 1 {
+            return Err(DbError::GraphRowShape {
+                table: "graph_relation_dependencies",
+                reason: "dependency keys require a local file, symbol, or package source",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Insert one key witness, rejecting equal digests with different material.
+fn insert_resolution_key(
+    statement: &mut rusqlite::CachedStatement<'_>,
+    key: &CanonicalResolutionKey,
+) -> DbResult<()> {
+    let inserted = statement.execute(params![
+        &key.project().as_bytes()[..],
+        key.domain().as_str(),
+        &key.digest_bytes()[..],
+        key.canonical_identity(),
+    ])?;
+    if inserted == 0 {
+        return Err(DbError::ResolutionKeyCollision {
+            domain: key.domain().as_str(),
+            digest: key.digest_bytes(),
+        });
+    }
+    Ok(())
+}
+
+/// Delete only touched witness rows left without either owner family.
+fn remove_touched_orphan_resolution_keys(
+    connection: &Connection,
+    keys: &BTreeSet<CanonicalResolutionKey>,
+) -> DbResult<()> {
+    let keys = keys.iter().cloned().collect::<Vec<_>>();
+    for chunk in keys.chunks(RESOLUTION_KEYS_PER_QUERY) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let values_clause = resolution_values_clause(chunk.len(), 3);
+        let sql = format!(
+            "WITH touched(project_instance_id, resolution_domain, key_digest)
+                  AS (VALUES {values_clause})
+             DELETE FROM graph_resolution_keys
+              WHERE rowid IN (
+                    SELECT stored.rowid
+                      FROM graph_resolution_keys AS stored
+                      JOIN touched
+                        ON touched.project_instance_id = stored.project_instance_id
+                       AND touched.resolution_domain = stored.resolution_domain
+                       AND touched.key_digest = stored.key_digest
+                     WHERE NOT EXISTS (
+                               SELECT 1 FROM graph_entity_exports AS export
+                                WHERE export.project_instance_id = stored.project_instance_id
+                                  AND export.resolution_domain = stored.resolution_domain
+                                  AND export.key_digest = stored.key_digest
+                           )
+                       AND NOT EXISTS (
+                               SELECT 1 FROM graph_relation_dependencies AS dependency
+                                WHERE dependency.project_instance_id = stored.project_instance_id
+                                  AND dependency.resolution_domain = stored.resolution_domain
+                                  AND dependency.key_digest = stored.key_digest
+                           )
+              )"
+        );
+        let values = resolution_key_values(chunk, false);
+        connection.execute(&sql, params_from_iter(values.iter()))?;
+    }
+    Ok(())
 }
 
 /// Collect external entities whose relation to an affected local entity may vanish.
@@ -1722,6 +2822,15 @@ fn empty_page<T>() -> RepositoryGraphPage<T> {
     }
 }
 
+/// Return an empty footprint when no complete selected graph is available.
+const fn empty_affected_source_footprint() -> RepositoryAffectedSourceFootprint {
+    RepositoryAffectedSourceFootprint {
+        rows: 0,
+        retained_bytes: 0,
+        truncated: false,
+    }
+}
+
 /// Validate and convert a requested page size into `LIMIT + 1`.
 fn validated_limit_plus_one(limit: u32, ceiling: u32, reason: &'static str) -> DbResult<i64> {
     if limit == 0 || limit > ceiling {
@@ -1958,7 +3067,7 @@ const fn coverage_state_name(state: CoverageState) -> &'static str {
 }
 
 /// Parse one normalized coverage lifecycle spelling.
-fn parse_coverage_state(value: &str) -> DbResult<CoverageState> {
+pub(crate) fn parse_coverage_state(value: &str) -> DbResult<CoverageState> {
     match value {
         "complete" => Ok(CoverageState::Complete),
         "partial" => Ok(CoverageState::Partial),
@@ -1985,7 +3094,7 @@ const fn limit_kind_name(limit: GraphLimitKind) -> &'static str {
 }
 
 /// Parse one normalized reached-limit spelling.
-fn parse_limit_kind(value: &str) -> DbResult<GraphLimitKind> {
+pub(crate) fn parse_limit_kind(value: &str) -> DbResult<GraphLimitKind> {
     match value {
         "rows" => Ok(GraphLimitKind::Rows),
         "occurrences" => Ok(GraphLimitKind::Occurrences),
@@ -2002,7 +3111,7 @@ fn parse_limit_kind(value: &str) -> DbResult<GraphLimitKind> {
 mod tests {
     use super::*;
     use crate::IndexedFileText;
-    use projectatlas_core::symbols::{ParserKind, SymbolGraph, SymbolRelation};
+    use projectatlas_core::symbols::{CodeSymbol, ParserKind, SymbolGraph, SymbolRelation};
     use projectatlas_core::{Node, NodeKind};
     use std::error::Error;
     use std::fmt::Debug;
@@ -2021,6 +3130,18 @@ mod tests {
         occurrences: Vec<RelationOccurrence>,
         /// Every coverage lifecycle state.
         coverage: Vec<CoverageRecord>,
+    }
+
+    /// Canonical keys used by export, ambiguity, and unresolved dependency tests.
+    struct ResolutionFixture {
+        /// Published typed graph.
+        graph: GraphFixture,
+        /// Key exported by the fixture symbol and consumed by a resolved relation.
+        resolved: CanonicalResolutionKey,
+        /// Key consumed by an ambiguous relation.
+        ambiguous: CanonicalResolutionKey,
+        /// Key consumed by an unresolved relation.
+        unresolved: CanonicalResolutionKey,
     }
 
     /// Build one complete typed graph for the selected generation.
@@ -2191,6 +3312,122 @@ mod tests {
             occurrences,
             coverage,
         })
+    }
+
+    /// Construct one project-qualified declaration resolution key.
+    fn declaration_key(
+        project: ProjectInstanceId,
+        identity: &str,
+        relation: GraphRelationKind,
+    ) -> Result<CanonicalResolutionKey, Box<dyn Error>> {
+        Ok(CanonicalResolutionKey::new(
+            project,
+            ResolutionKeyDomain::Declaration,
+            &GraphIdentityText::new("tree-sitter")?,
+            &GraphIdentityText::new("rust")?,
+            None,
+            Some(&GraphIdentityText::new("crate")?),
+            Some(relation),
+            &GraphIdentityText::new(identity)?,
+        ))
+    }
+
+    /// Publish one graph with duplicate-safe export and all dependency states.
+    fn publish_resolution_fixture(
+        store: &mut AtlasStore,
+        fingerprint: &str,
+    ) -> Result<ResolutionFixture, Box<dyn Error>> {
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("bound fixture identity is missing"))?;
+        let graph = graph_fixture(project, IndexGeneration::new(1))?;
+        let resolved = declaration_key(
+            project,
+            "verifyToken",
+            GraphRelationKind::Legacy(RelationKind::Calls),
+        )?;
+        let ambiguous = declaration_key(
+            project,
+            "Session",
+            GraphRelationKind::Extended(ExtendedRelationKind::References),
+        )?;
+        let unresolved = declaration_key(
+            project,
+            "AUTH_KEY",
+            GraphRelationKind::Extended(ExtendedRelationKind::Configures),
+        )?;
+        let export = EntityResolutionKey::new(graph.entities[4].key().clone(), resolved.clone())?;
+        let exports = vec![export.clone(), export];
+        let dependencies = vec![
+            RelationDependencyKey::new(graph.relations[0].key().clone(), resolved.clone())?,
+            RelationDependencyKey::new(graph.relations[1].key().clone(), ambiguous.clone())?,
+            RelationDependencyKey::new(graph.relations[2].key().clone(), unresolved.clone())?,
+        ];
+        let mut publication = store.begin_index_publication(fingerprint)?;
+        publication.begin_scan_replacement()?;
+        publication.upsert_scan_node_batch(&[
+            graph_node(".", NodeKind::Folder, None),
+            graph_node("src", NodeKind::Folder, Some(".")),
+            graph_node("src/Äuth.rs", NodeKind::File, Some("src")),
+            graph_node("Cargo.toml", NodeKind::File, Some(".")),
+        ])?;
+        publication.finish_scan_replacement()?;
+        publication.replace_repository_graph_with_resolution_keys(
+            graph.project,
+            &graph.entities,
+            &graph.relations,
+            &graph.occurrences,
+            &graph.coverage,
+            &exports,
+            &dependencies,
+        )?;
+        publication.complete()?;
+        Ok(ResolutionFixture {
+            graph,
+            resolved,
+            ambiguous,
+            unresolved,
+        })
+    }
+
+    /// Replace one source-owned parser graph with a requested symbol degree.
+    fn replace_fixture_symbol_rows(
+        store: &mut AtlasStore,
+        path: &str,
+        symbol_count: usize,
+    ) -> Result<(), Box<dyn Error>> {
+        let symbols = (0..symbol_count)
+            .map(|index| CodeSymbol {
+                path: path.to_string(),
+                language: Some("rust".to_string()),
+                name: format!("symbol_{index}"),
+                kind: SymbolKind::Function,
+                signature: format!("fn symbol_{index}()"),
+                exported: index == 0,
+                documentation: None,
+                line_start: index + 1,
+                line_end: index + 1,
+                parent: None,
+                parser: ParserKind::TreeSitter,
+                detail: Some("function_item".to_string()),
+            })
+            .collect();
+        store.replace_symbol_graph(&SymbolGraph {
+            path: path.to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols,
+            relations: vec![SymbolRelation {
+                path: path.to_string(),
+                source_name: "symbol_0".to_string(),
+                target_name: "dependency".to_string(),
+                kind: RelationKind::Calls,
+                line: 1,
+                context: "dependency()".to_string(),
+                parser: ParserKind::TreeSitter,
+            }],
+        })?;
+        Ok(())
     }
 
     /// Construct one non-complete project-wide coverage row.
@@ -2396,6 +3633,63 @@ mod tests {
                   LIMIT 11",
                 &["idx_graph_coverage_scope_order"],
             ),
+            (
+                "resolution witness lookup",
+                "EXPLAIN QUERY PLAN
+                 SELECT canonical_identity FROM graph_resolution_keys
+                  WHERE project_instance_id = zeroblob(16)
+                    AND resolution_domain = 'declaration'
+                    AND key_digest = zeroblob(32)",
+                &["sqlite_autoindex_graph_resolution_keys_1"],
+            ),
+            (
+                "resolution export lookup",
+                "EXPLAIN QUERY PLAN
+                 SELECT entity_key FROM graph_entity_exports
+                  WHERE project_instance_id = zeroblob(16)
+                    AND resolution_domain = 'declaration'
+                    AND key_digest = zeroblob(32)
+                  ORDER BY entity_key",
+                &["idx_graph_entity_exports_key"],
+            ),
+            (
+                "resolution export owner lookup",
+                "EXPLAIN QUERY PLAN
+                 SELECT resolution_domain, key_digest, entity_key
+                   FROM graph_entity_exports
+                  WHERE project_instance_id = zeroblob(16)
+                    AND owner_path = 'src/Äuth.rs'
+                  ORDER BY resolution_domain, key_digest, entity_key",
+                &["idx_graph_entity_exports_owner"],
+            ),
+            (
+                "resolution dependency lookup",
+                "EXPLAIN QUERY PLAN
+                 SELECT owner_path, relation_key FROM graph_relation_dependencies
+                  WHERE project_instance_id = zeroblob(16)
+                    AND resolution_domain = 'declaration'
+                    AND key_digest = zeroblob(32)
+                  ORDER BY owner_path, relation_key",
+                &["idx_graph_relation_dependencies_key"],
+            ),
+            (
+                "resolution dependency owner lookup",
+                "EXPLAIN QUERY PLAN
+                 SELECT resolution_domain, key_digest, relation_key
+                   FROM graph_relation_dependencies
+                  WHERE project_instance_id = zeroblob(16)
+                    AND owner_path = 'src/Äuth.rs'
+                  ORDER BY resolution_domain, key_digest, relation_key",
+                &["idx_graph_relation_dependencies_owner"],
+            ),
+            (
+                "relation composite integrity lookup",
+                "EXPLAIN QUERY PLAN
+                 SELECT relation_key FROM graph_relations
+                  WHERE project_instance_id = zeroblob(16)
+                    AND relation_key = zeroblob(32)",
+                &["idx_graph_relations_project_key"],
+            ),
         ];
 
         for (context, sql, required_indexes) in cases {
@@ -2473,6 +3767,672 @@ mod tests {
         )?;
         publication.complete()?;
         Ok(fixture)
+    }
+
+    #[test]
+    fn resolution_keys_round_trip_reopen_and_preserve_all_dependency_states()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("resolution-round-trip");
+        let atlas_dir = project_root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let db_path = atlas_dir.join("projectatlas.db");
+        let mut writer = AtlasStore::open_for_project(&db_path, &project_root)?;
+        let fixture = publish_resolution_fixture(&mut writer, "resolution-round-trip")?;
+        assert_query_indexes(&writer)?;
+
+        let counts = writer.connection.query_row(
+            "SELECT
+                 (SELECT COUNT(*) FROM graph_resolution_keys),
+                 (SELECT COUNT(*) FROM graph_entity_exports),
+                 (SELECT COUNT(*) FROM graph_relation_dependencies)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        require_eq(&counts, &(3, 1, 3), "deduplicated resolution-key rows")?;
+        let states = writer
+            .connection
+            .prepare(
+                "SELECT relation.resolution_status, COUNT(*)
+                   FROM graph_relation_dependencies AS dependency
+                   JOIN graph_relations AS relation
+                     ON relation.project_instance_id = dependency.project_instance_id
+                    AND relation.relation_key = dependency.relation_key
+                  GROUP BY relation.resolution_status
+                  ORDER BY relation.resolution_status",
+            )?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        require_eq(
+            &states,
+            &vec![
+                ("ambiguous".to_string(), 1),
+                ("resolved".to_string(), 1),
+                ("unresolved".to_string(), 1),
+            ],
+            "dependency resolution states",
+        )?;
+        drop(writer);
+
+        let reader = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+        let exports = reader.repository_export_keys_for_paths(
+            fixture.graph.project,
+            &["src/Äuth.rs".to_string()],
+            10,
+        )?;
+        require_eq(&exports.truncated, &false, "export key truncation")?;
+        require_eq(
+            &exports.rows,
+            &vec![fixture.resolved.clone()],
+            "export key round trip",
+        )?;
+        let candidates = reader.repository_resolution_candidates(&fixture.resolved, 10)?;
+        require_eq(&candidates.truncated, &false, "candidate truncation")?;
+        require_eq(
+            &candidates.rows,
+            &vec![fixture.graph.entities[4].clone()],
+            "candidate export round trip",
+        )?;
+        let batch_candidates = reader.repository_resolution_candidates_for_keys(
+            fixture.graph.project,
+            &[
+                fixture.unresolved.clone(),
+                fixture.resolved.clone(),
+                fixture.ambiguous.clone(),
+                fixture.resolved.clone(),
+            ],
+            10,
+        )?;
+        require_eq(
+            &batch_candidates.truncated,
+            &false,
+            "batch candidate truncation",
+        )?;
+        require_eq(
+            &batch_candidates.rows.len(),
+            &1,
+            "batch candidate deduplication",
+        )?;
+        require_eq(
+            batch_candidates.rows[0].key(),
+            &fixture.resolved,
+            "batch candidate selecting key",
+        )?;
+        require_eq(
+            batch_candidates.rows[0].entity(),
+            &fixture.graph.entities[4],
+            "batch candidate entity",
+        )?;
+        let affected = reader.repository_affected_source_paths(
+            fixture.graph.project,
+            &[
+                fixture.resolved.clone(),
+                fixture.resolved,
+                fixture.ambiguous,
+                fixture.unresolved,
+            ],
+            10,
+        )?;
+        require_eq(&affected.truncated, &false, "affected path truncation")?;
+        require_eq(
+            &affected.rows,
+            &vec![RepositoryFilePath::new(Path::new("src/Äuth.rs"))?],
+            "resolved ambiguous and unresolved dependency owners",
+        )?;
+        reader.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn high_degree_dependency_closure_is_unique_and_reports_overflow_before_mutation()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("high-degree-resolution");
+        fs::create_dir_all(&project_root)?;
+        let db_path = project_root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&db_path, &project_root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("bound identity is missing"))?;
+        let generation = IndexGeneration::new(1);
+        let dependency_key = declaration_key(
+            project,
+            "sharedTarget",
+            GraphRelationKind::Extended(ExtendedRelationKind::References),
+        )?;
+        let mut nodes = vec![
+            graph_node(".", NodeKind::Folder, None),
+            graph_node("src", NodeKind::Folder, Some(".")),
+        ];
+        let mut entities = Vec::new();
+        let mut relations = Vec::new();
+        let mut dependencies = Vec::new();
+        for index in 0..5 {
+            let path = format!("src/caller-{index}.rs");
+            nodes.push(graph_node(&path, NodeKind::File, Some("src")));
+            let entity = GraphEntity::new(
+                project,
+                EntitySelector::File {
+                    path: RepositoryFilePath::new(Path::new(&path))?,
+                },
+                generation,
+            )?;
+            let relation = LogicalRelation::new(
+                &entity,
+                GraphRelationKind::Extended(ExtendedRelationKind::References),
+                RelationResolution::Unresolved {
+                    reference: GraphIdentityText::new("sharedTarget")?,
+                },
+                ConfidenceClass::High,
+                Completeness::Complete,
+                generation,
+            )?;
+            dependencies.push(RelationDependencyKey::new(
+                relation.key().clone(),
+                dependency_key.clone(),
+            )?);
+            entities.push(entity);
+            relations.push(relation);
+        }
+        dependencies.push(dependencies[0].clone());
+        let mut publication = store.begin_index_publication("high-degree-resolution")?;
+        publication.begin_scan_replacement()?;
+        publication.upsert_scan_node_batch(&nodes)?;
+        publication.finish_scan_replacement()?;
+        publication.replace_repository_graph_with_resolution_keys(
+            project,
+            &entities,
+            &relations,
+            &[],
+            &[],
+            &[],
+            &dependencies,
+        )?;
+        publication.complete()?;
+
+        let before = store.index_publication()?;
+        let bounded = store.repository_affected_source_paths(
+            project,
+            std::slice::from_ref(&dependency_key),
+            2,
+        )?;
+        require_eq(&bounded.rows.len(), &2, "bounded affected path count")?;
+        require_eq(&bounded.truncated, &true, "bounded affected path overflow")?;
+        require_eq(
+            &store.index_publication()?,
+            &before,
+            "overflow lookup mutated publication state",
+        )?;
+        let complete = store.repository_affected_source_paths(project, &[dependency_key], 10)?;
+        require_eq(&complete.rows.len(), &5, "complete affected path count")?;
+        require_eq(
+            &complete.truncated,
+            &false,
+            "complete affected path overflow",
+        )?;
+        let unique = complete.rows.iter().collect::<BTreeSet<_>>();
+        require_eq(&unique.len(), &5, "affected paths are unique")?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_source_footprint_accounts_exact_owned_rows_and_uses_path_indexes()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("affected-source-footprint");
+        fs::create_dir_all(&project_root)?;
+        let db_path = project_root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&db_path, &project_root)?;
+        let fixture = publish_resolution_fixture(&mut store, "affected-source-footprint")?;
+        replace_fixture_symbol_rows(&mut store, "src/Äuth.rs", 1)?;
+        store.connection.execute(
+            "INSERT INTO graph_coverage(
+                 project_instance_id, scope_kind, scope_path, relation_scope,
+                 relation_kind, state, total, covered, omitted, reason, reached_limit
+             ) VALUES(?1, 'path', 'src/Äuth.rs', NULL, NULL,
+                      'complete', 1, 1, 0, NULL, NULL)",
+            [&fixture.graph.project.as_bytes()[..]],
+        )?;
+
+        let mut paths = (0..=RESOLUTION_PATHS_PER_QUERY)
+            .map(|index| format!("missing/{index:04}.rs"))
+            .collect::<Vec<_>>();
+        paths.extend(["src/Äuth.rs".to_string(), "src/Äuth.rs".to_string()]);
+        let footprint =
+            store.repository_affected_source_footprint(fixture.graph.project, &paths, 100)?;
+        require_eq(&footprint.rows, &20, "exact affected persisted rows")?;
+        require(
+            footprint.retained_bytes > footprint.rows,
+            "affected footprint omitted decoded bytes",
+        )?;
+        require_eq(&footprint.truncated, &false, "exact footprint truncation")?;
+
+        let sql = format!("EXPLAIN QUERY PLAN {}", affected_source_footprint_sql(1));
+        let values = [
+            Value::Blob(fixture.graph.project.as_bytes().to_vec()),
+            Value::Text("src/Äuth.rs".to_string()),
+            Value::Integer(101),
+        ];
+        let mut statement = store.connection.prepare(&sql)?;
+        let details = statement
+            .query_map(params_from_iter(values.iter()), |row| {
+                row.get::<_, String>(3)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for index in [
+            "sqlite_autoindex_source_parse_metadata_1",
+            "idx_symbols_path",
+            "idx_symbol_relations_path",
+            "idx_graph_entities_path",
+            "idx_graph_entities_manifest_path",
+            "idx_graph_relations_source_kind",
+            "idx_graph_occurrences_file_span",
+            "idx_graph_coverage_path",
+            "idx_graph_entity_exports_owner",
+            "idx_graph_relation_dependencies_owner",
+            "sqlite_autoindex_graph_resolution_keys_1",
+        ] {
+            require(
+                details.iter().any(|detail| detail.contains(index)),
+                &format!("affected footprint missed {index}; plan was {details:?}"),
+            )?;
+        }
+        require(
+            details.iter().all(|detail| !detail.contains("SCAN graph_")),
+            &format!("affected footprint scanned graph storage: {details:?}"),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_source_footprint_reports_high_degree_overflow_before_mutation()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("affected-source-degree");
+        fs::create_dir_all(&project_root)?;
+        let db_path = project_root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&db_path, &project_root)?;
+        let fixture = publish_resolution_fixture(&mut store, "affected-source-degree")?;
+        replace_fixture_symbol_rows(&mut store, "src/Äuth.rs", 25)?;
+        let before = store.index_publication()?;
+
+        let bounded = store.repository_affected_source_footprint(
+            fixture.graph.project,
+            &["src/Äuth.rs".to_string()],
+            5,
+        )?;
+        require_eq(&bounded.rows, &6, "footprint limit plus one sentinel")?;
+        require_eq(&bounded.truncated, &true, "high-degree footprint overflow")?;
+        require(
+            bounded.retained_bytes > 0,
+            "bounded footprint lost retained bytes",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &before,
+            "footprint overflow mutated publication",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_source_footprint_validates_inputs_identity_and_graph_availability()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let selected_root = temp.path().join("selected");
+        let other_root = temp.path().join("other");
+        fs::create_dir_all(&selected_root)?;
+        fs::create_dir_all(&other_root)?;
+        let mut selected =
+            AtlasStore::open_for_project(&selected_root.join("projectatlas.db"), &selected_root)?;
+        let fixture = publish_resolution_fixture(&mut selected, "footprint-validation")?;
+        let other = AtlasStore::open_for_project(&other_root.join("projectatlas.db"), &other_root)?;
+        let other_project = other
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("other bound identity is missing"))?;
+
+        let invalid_limit = require_db_error(
+            selected.repository_affected_source_footprint(
+                fixture.graph.project,
+                &["src/Äuth.rs".to_string()],
+                0,
+            ),
+            "zero footprint limit was accepted",
+        )?;
+        require(
+            matches!(invalid_limit, DbError::GraphContract(_)),
+            &format!("invalid footprint limit returned {invalid_limit}"),
+        )?;
+        let invalid_path = require_db_error(
+            selected.repository_affected_source_footprint(
+                fixture.graph.project,
+                &["../outside.rs".to_string()],
+                10,
+            ),
+            "escaping footprint path was accepted",
+        )?;
+        require(
+            matches!(invalid_path, DbError::GraphContract(_)),
+            &format!("invalid footprint path returned {invalid_path}"),
+        )?;
+        let mismatched = require_db_error(
+            selected.repository_affected_source_footprint(
+                other_project,
+                &["src/Äuth.rs".to_string()],
+                10,
+            ),
+            "mismatched project footprint was accepted",
+        )?;
+        require(
+            matches!(mismatched, DbError::GraphProjectIdentityMismatch { .. }),
+            &format!("mismatched footprint returned {mismatched}"),
+        )?;
+        require_eq(
+            &other.repository_affected_source_footprint(
+                other_project,
+                &["src/Äuth.rs".to_string()],
+                10,
+            )?,
+            &empty_affected_source_footprint(),
+            "unpublished graph footprint",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_source_footprint_rejects_missing_resolution_witnesses() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("affected-source-corruption");
+        fs::create_dir_all(&project_root)?;
+        let db_path = project_root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&db_path, &project_root)?;
+        let fixture = publish_resolution_fixture(&mut store, "affected-source-corruption")?;
+        store
+            .connection
+            .execute_batch("PRAGMA foreign_keys = OFF")?;
+        store.connection.execute(
+            "DELETE FROM graph_resolution_keys
+              WHERE project_instance_id = ?1
+                AND resolution_domain = ?2
+                AND key_digest = ?3",
+            params![
+                &fixture.graph.project.as_bytes()[..],
+                fixture.resolved.domain().as_str(),
+                &fixture.resolved.digest_bytes()[..],
+            ],
+        )?;
+        let error = require_db_error(
+            store.repository_affected_source_footprint(
+                fixture.graph.project,
+                &["src/Äuth.rs".to_string()],
+                100,
+            ),
+            "missing resolution witness returned a partial footprint",
+        )?;
+        require(
+            matches!(error, DbError::Sqlite(_)),
+            &format!("missing witness returned the wrong error: {error}"),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn resolution_key_failures_roll_back_and_owner_foreign_keys_cascade()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("resolution-failures");
+        fs::create_dir_all(&project_root)?;
+        let db_path = project_root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&db_path, &project_root)?;
+        let fixture = publish_resolution_fixture(&mut store, "resolution-failures")?;
+        let before_publication = store.index_publication()?;
+        let before_counts = store.connection.query_row(
+            "SELECT
+                 (SELECT COUNT(*) FROM graph_resolution_keys),
+                 (SELECT COUNT(*) FROM graph_entity_exports),
+                 (SELECT COUNT(*) FROM graph_relation_dependencies)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+
+        let replacement = graph_fixture(fixture.graph.project, IndexGeneration::new(2))?;
+        let invalid_export = EntityResolutionKey::new(
+            replacement.entities[0].key().clone(),
+            fixture.resolved.clone(),
+        )?;
+        {
+            let mut publication = store.begin_index_publication("resolution-failures")?;
+            let error = require_db_error(
+                publication.replace_repository_graph_with_resolution_keys(
+                    replacement.project,
+                    &replacement.entities,
+                    &replacement.relations,
+                    &replacement.occurrences,
+                    &replacement.coverage,
+                    &[invalid_export],
+                    &[],
+                ),
+                "source-less export owner unexpectedly published",
+            )?;
+            require(
+                matches!(error, DbError::GraphRowShape { .. }),
+                &format!("invalid export owner returned the wrong error: {error}"),
+            )?;
+        }
+        require_eq(
+            &store.index_publication()?,
+            &before_publication,
+            "failed key publication generation",
+        )?;
+        let after_counts = store.connection.query_row(
+            "SELECT
+                 (SELECT COUNT(*) FROM graph_resolution_keys),
+                 (SELECT COUNT(*) FROM graph_entity_exports),
+                 (SELECT COUNT(*) FROM graph_relation_dependencies)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        require_eq(
+            &after_counts,
+            &before_counts,
+            "failed key publication durable rows",
+        )?;
+        require_eq(
+            &store
+                .repository_resolution_candidates(&fixture.resolved, 10)?
+                .rows,
+            &vec![fixture.graph.entities[4].clone()],
+            "failed key publication previous candidates",
+        )?;
+
+        store.connection.execute(
+            "UPDATE graph_resolution_keys
+                SET canonical_identity = 'conflicting collision witness'
+              WHERE project_instance_id = ?1
+                AND resolution_domain = ?2
+                AND key_digest = ?3",
+            params![
+                &fixture.graph.project.as_bytes()[..],
+                fixture.resolved.domain().as_str(),
+                &fixture.resolved.digest_bytes()[..],
+            ],
+        )?;
+        let collision = require_db_error(
+            store.repository_resolution_candidates(&fixture.resolved, 10),
+            "conflicting resolution witness was accepted",
+        )?;
+        require(
+            matches!(collision, DbError::ResolutionKeyCollision { .. }),
+            &format!("conflicting witness returned the wrong error: {collision}"),
+        )?;
+        let corrupt_page = require_db_error(
+            store.repository_export_keys_for_paths(
+                fixture.graph.project,
+                &["src/Äuth.rs".to_string()],
+                10,
+            ),
+            "corrupt witness returned a partial key page",
+        )?;
+        require(
+            matches!(corrupt_page, DbError::GraphContract(_)),
+            &format!("corrupt witness returned the wrong page error: {corrupt_page}"),
+        )?;
+        store.connection.execute(
+            "UPDATE graph_resolution_keys
+                SET canonical_identity = ?1
+              WHERE project_instance_id = ?2
+                AND resolution_domain = ?3
+                AND key_digest = ?4",
+            params![
+                fixture.resolved.canonical_identity(),
+                &fixture.graph.project.as_bytes()[..],
+                fixture.resolved.domain().as_str(),
+                &fixture.resolved.digest_bytes()[..],
+            ],
+        )?;
+
+        let relation_digest = fixture.graph.relations[2].key().digest_bytes()?;
+        store.connection.execute(
+            "DELETE FROM graph_relations
+              WHERE project_instance_id = ?1 AND relation_key = ?2",
+            params![&fixture.graph.project.as_bytes()[..], &relation_digest[..]],
+        )?;
+        let remaining_dependencies = store.connection.query_row(
+            "SELECT COUNT(*) FROM graph_relation_dependencies",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &remaining_dependencies,
+            &(before_counts.2 - 1),
+            "relation-owner dependency cascade",
+        )?;
+        let entity_digest = fixture.graph.entities[4].key().digest_bytes()?;
+        store.connection.execute(
+            "DELETE FROM graph_entities
+              WHERE project_instance_id = ?1 AND entity_key = ?2",
+            params![&fixture.graph.project.as_bytes()[..], &entity_digest[..]],
+        )?;
+        let remaining_exports =
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM graph_entity_exports", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        require_eq(&remaining_exports, &0, "entity-owner export cascade")?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_replacement_swaps_resolution_keys_and_collects_only_touched_orphans()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("resolution-replacement");
+        fs::create_dir_all(&project_root)?;
+        let db_path = project_root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&db_path, &project_root)?;
+        let first = publish_resolution_fixture(&mut store, "resolution-replacement")?;
+        let replacement = graph_fixture(first.graph.project, IndexGeneration::new(2))?;
+        let renamed = declaration_key(
+            first.graph.project,
+            "verifySession",
+            GraphRelationKind::Legacy(RelationKind::Calls),
+        )?;
+        let exports = vec![EntityResolutionKey::new(
+            replacement.entities[4].key().clone(),
+            renamed.clone(),
+        )?];
+        let dependencies = vec![
+            RelationDependencyKey::new(replacement.relations[0].key().clone(), renamed.clone())?,
+            RelationDependencyKey::new(
+                replacement.relations[1].key().clone(),
+                first.ambiguous.clone(),
+            )?,
+            RelationDependencyKey::new(
+                replacement.relations[2].key().clone(),
+                first.unresolved.clone(),
+            )?,
+        ];
+        let mut publication = store.begin_index_publication("resolution-replacement")?;
+        publication.replace_repository_graph_for_paths_with_resolution_keys(
+            replacement.project,
+            &["src/Äuth.rs".to_string()],
+            &replacement.entities,
+            &replacement.relations,
+            &replacement.occurrences,
+            &replacement.coverage,
+            &exports,
+            &dependencies,
+        )?;
+        publication.complete()?;
+
+        require_eq(
+            &store
+                .repository_resolution_candidates(&first.resolved, 10)?
+                .rows
+                .len(),
+            &0,
+            "removed export candidates",
+        )?;
+        require_eq(
+            &store
+                .repository_affected_source_paths(
+                    first.graph.project,
+                    std::slice::from_ref(&first.resolved),
+                    10,
+                )?
+                .rows
+                .len(),
+            &0,
+            "removed dependency owners",
+        )?;
+        require_eq(
+            &store.repository_resolution_candidates(&renamed, 10)?.rows,
+            &vec![replacement.entities[4].clone()],
+            "renamed export candidates",
+        )?;
+        let exports = store.repository_export_keys_for_paths(
+            first.graph.project,
+            &["src/Äuth.rs".to_string()],
+            10,
+        )?;
+        require_eq(&exports.rows, &vec![renamed], "replacement export keys")?;
+        let registry_rows = store.connection.query_row(
+            "SELECT COUNT(*) FROM graph_resolution_keys",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&registry_rows, &3, "touched orphan witness cleanup")?;
+        require_eq(
+            &store
+                .index_publication()?
+                .ok_or_else(|| io::Error::other("replacement publication is missing"))?
+                .generation,
+            &IndexGeneration::new(2),
+            "replacement generation",
+        )?;
+        Ok(())
     }
 
     #[test]

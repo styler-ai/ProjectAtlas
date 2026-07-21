@@ -12,6 +12,8 @@ use thiserror::Error;
 const ENTITY_KEY_DOMAIN: &str = "projectatlas.graph.entity.v1";
 /// Canonical identity namespace for logical repository relationships.
 const RELATION_KEY_DOMAIN: &str = "projectatlas.graph.relation.v1";
+/// Canonical identity namespace for repository resolution keys.
+const RESOLUTION_KEY_DOMAIN: &str = "projectatlas.graph.resolution.v1";
 /// Largest accepted identity component in bytes.
 const MAX_IDENTITY_BYTES: usize = 4_096;
 
@@ -36,6 +38,9 @@ pub enum GraphContractError {
     /// A persisted stable key digest did not match its canonical identity.
     #[error("stable graph key digest does not match its canonical identity")]
     InvalidStableKeyDigest,
+    /// A persisted canonical resolution-key domain was not supported.
+    #[error("unsupported canonical resolution-key domain")]
+    InvalidResolutionKeyDomain,
     /// Two distinct canonical identities claimed the same compact key.
     #[error("stable graph key collision for digest {digest}")]
     StableKeyCollision {
@@ -45,6 +50,9 @@ pub enum GraphContractError {
     /// A persisted entity key did not retain its project-qualified prefix.
     #[error("stable entity key is not qualified by its declared project")]
     ProjectQualificationMismatch,
+    /// A canonical resolution key and its graph owner belonged to different projects.
+    #[error("canonical resolution key belongs to a different project than its graph owner")]
+    ResolutionKeyOwnerMismatch,
     /// A resolved relationship crossed project identity without federation.
     #[error("resolved graph relation target belongs to another project")]
     CrossProjectRelation,
@@ -1092,6 +1100,283 @@ impl LogicalRelationKey {
     }
 }
 
+/// Closed target-identity families used by canonical resolution keys.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionKeyDomain {
+    /// A declaration, value, type, or other named source symbol.
+    Declaration,
+    /// A source module, namespace, or importable file identity.
+    Module,
+    /// A package or manifest dependency identity.
+    Package,
+}
+
+impl ResolutionKeyDomain {
+    /// Return the stable `SQLite` and wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Declaration => "declaration",
+            Self::Module => "module",
+            Self::Package => "package",
+        }
+    }
+}
+
+impl TryFrom<&str> for ResolutionKeyDomain {
+    type Error = GraphContractError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "declaration" => Ok(Self::Declaration),
+            "module" => Ok(Self::Module),
+            "package" => Ok(Self::Package),
+            _ => Err(GraphContractError::InvalidResolutionKeyDomain),
+        }
+    }
+}
+
+/// Project-qualified canonical identity used for export and dependency resolution.
+///
+/// The fixed digest is the indexed hot-path value. The canonical identity remains
+/// alongside it as the collision witness and includes every identity-affecting
+/// provider, language, package, scope, relation-family, and target field.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(
+    try_from = "CanonicalResolutionKeyWire",
+    into = "CanonicalResolutionKeyWire"
+)]
+pub struct CanonicalResolutionKey {
+    /// Project instance whose resolver namespace owns this key.
+    project: ProjectInstanceId,
+    /// Closed resolver family.
+    domain: ResolutionKeyDomain,
+    /// Fixed compact key used by `SQLite` indexes.
+    digest: [u8; 32],
+    /// Canonical collision witness.
+    canonical_identity: String,
+}
+
+impl CanonicalResolutionKey {
+    /// Construct a deterministic canonical resolution key.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn new(
+        project: ProjectInstanceId,
+        domain: ResolutionKeyDomain,
+        provider: &GraphIdentityText,
+        language: &GraphIdentityText,
+        package: Option<&GraphIdentityText>,
+        scope: Option<&GraphIdentityText>,
+        relation: Option<GraphRelationKind>,
+        identity: &GraphIdentityText,
+    ) -> Self {
+        let mut canonical_identity = resolution_project_prefix(project, domain);
+        append_canonical_field(&mut canonical_identity, provider.as_str());
+        append_canonical_field(&mut canonical_identity, language.as_str());
+        append_optional_canonical_field(&mut canonical_identity, package);
+        append_optional_canonical_field(&mut canonical_identity, scope);
+        append_optional_raw_canonical_field(
+            &mut canonical_identity,
+            relation.map(GraphRelationKind::canonical_name),
+        );
+        append_canonical_field(&mut canonical_identity, identity.as_str());
+        let digest = *blake3::hash(canonical_identity.as_bytes()).as_bytes();
+        Self {
+            project,
+            domain,
+            digest,
+            canonical_identity,
+        }
+    }
+
+    /// Reconstruct and validate persisted canonical key material.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the witness is not qualified by the declared project
+    /// and domain or its digest does not match.
+    pub fn from_persisted(
+        project: ProjectInstanceId,
+        domain: ResolutionKeyDomain,
+        digest: [u8; 32],
+        canonical_identity: String,
+    ) -> Result<Self, GraphContractError> {
+        let prefix = resolution_project_prefix(project, domain);
+        if !has_canonical_prefix(&canonical_identity, &prefix) {
+            return Err(GraphContractError::ProjectQualificationMismatch);
+        }
+        if *blake3::hash(canonical_identity.as_bytes()).as_bytes() != digest {
+            return Err(GraphContractError::InvalidStableKeyDigest);
+        }
+        Ok(Self {
+            project,
+            domain,
+            digest,
+            canonical_identity,
+        })
+    }
+
+    /// Return the owning project instance.
+    #[must_use]
+    pub const fn project(&self) -> ProjectInstanceId {
+        self.project
+    }
+
+    /// Return the closed resolver domain.
+    #[must_use]
+    pub const fn domain(&self) -> ResolutionKeyDomain {
+        self.domain
+    }
+
+    /// Return the fixed compact digest used by normalized persistence.
+    #[must_use]
+    pub const fn digest_bytes(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    /// Borrow the canonical collision witness.
+    #[must_use]
+    pub fn canonical_identity(&self) -> &str {
+        &self.canonical_identity
+    }
+
+    /// Compare compact keys without silently accepting a digest collision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphContractError::StableKeyCollision`] when equal compact keys
+    /// retain different canonical material.
+    pub fn reconcile(&self, other: &Self) -> Result<bool, GraphContractError> {
+        if self.project != other.project || self.domain != other.domain {
+            return Ok(false);
+        }
+        if self.digest != other.digest {
+            return Ok(false);
+        }
+        if self.canonical_identity != other.canonical_identity {
+            return Err(GraphContractError::StableKeyCollision {
+                digest: encode_hex(&self.digest),
+            });
+        }
+        Ok(true)
+    }
+}
+
+/// Validated serialized canonical resolution-key representation.
+#[derive(Deserialize, Serialize)]
+struct CanonicalResolutionKeyWire {
+    /// Owning project instance.
+    project: ProjectInstanceId,
+    /// Closed resolver family.
+    domain: ResolutionKeyDomain,
+    /// Fixed compact digest.
+    digest: [u8; 32],
+    /// Canonical collision witness.
+    canonical_identity: String,
+}
+
+impl TryFrom<CanonicalResolutionKeyWire> for CanonicalResolutionKey {
+    type Error = GraphContractError;
+
+    fn try_from(value: CanonicalResolutionKeyWire) -> Result<Self, Self::Error> {
+        Self::from_persisted(
+            value.project,
+            value.domain,
+            value.digest,
+            value.canonical_identity,
+        )
+    }
+}
+
+impl From<CanonicalResolutionKey> for CanonicalResolutionKeyWire {
+    fn from(value: CanonicalResolutionKey) -> Self {
+        Self {
+            project: value.project,
+            domain: value.domain,
+            digest: value.digest,
+            canonical_identity: value.canonical_identity,
+        }
+    }
+}
+
+/// One exported canonical key bound to its owning graph entity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct EntityResolutionKey {
+    /// Entity that exports the canonical identity.
+    entity: GraphEntityKey,
+    /// Canonical resolver identity exported by the entity.
+    key: CanonicalResolutionKey,
+}
+
+impl EntityResolutionKey {
+    /// Bind one canonical key to its exported entity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the entity and key belong to different projects.
+    pub fn new(
+        entity: GraphEntityKey,
+        key: CanonicalResolutionKey,
+    ) -> Result<Self, GraphContractError> {
+        if entity.project() != key.project() {
+            return Err(GraphContractError::ResolutionKeyOwnerMismatch);
+        }
+        Ok(Self { entity, key })
+    }
+
+    /// Borrow the owning entity key.
+    #[must_use]
+    pub const fn entity(&self) -> &GraphEntityKey {
+        &self.entity
+    }
+
+    /// Borrow the canonical resolver key.
+    #[must_use]
+    pub const fn key(&self) -> &CanonicalResolutionKey {
+        &self.key
+    }
+}
+
+/// One canonical dependency identity bound to its owning logical relation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RelationDependencyKey {
+    /// Logical relation that depends on the canonical identity.
+    relation: LogicalRelationKey,
+    /// Canonical identity used to select candidate exports.
+    key: CanonicalResolutionKey,
+}
+
+impl RelationDependencyKey {
+    /// Bind one dependency identity to its logical relation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the relation and key belong to different projects.
+    pub fn new(
+        relation: LogicalRelationKey,
+        key: CanonicalResolutionKey,
+    ) -> Result<Self, GraphContractError> {
+        if relation.project() != key.project() {
+            return Err(GraphContractError::ResolutionKeyOwnerMismatch);
+        }
+        Ok(Self { relation, key })
+    }
+
+    /// Borrow the owning logical-relation key.
+    #[must_use]
+    pub const fn relation(&self) -> &LogicalRelationKey {
+        &self.relation
+    }
+
+    /// Borrow the canonical resolver key.
+    #[must_use]
+    pub const fn key(&self) -> &CanonicalResolutionKey {
+        &self.key
+    }
+}
+
 /// One deduplicated source-kind-target relationship at a complete generation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct LogicalRelation {
@@ -1635,6 +1920,13 @@ fn relation_project_prefix(project: ProjectInstanceId) -> String {
     project_canonical_prefix(RELATION_KEY_DOMAIN, project)
 }
 
+/// Return the canonical prefix required for one resolution key.
+fn resolution_project_prefix(project: ProjectInstanceId, domain: ResolutionKeyDomain) -> String {
+    let mut canonical = project_canonical_prefix(RESOLUTION_KEY_DOMAIN, project);
+    append_canonical_field(&mut canonical, domain.as_str());
+    canonical
+}
+
 /// Return whether canonical material continues after one complete field prefix.
 fn has_canonical_prefix(canonical: &str, prefix: &str) -> bool {
     canonical
@@ -1697,6 +1989,17 @@ fn append_optional_canonical_field(canonical: &mut String, value: Option<&GraphI
     }
 }
 
+/// Append optional validated contract text without conflating absent and empty values.
+fn append_optional_raw_canonical_field(canonical: &mut String, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            append_canonical_field(canonical, "some");
+            append_canonical_field(canonical, value);
+        }
+        None => append_canonical_field(canonical, "none"),
+    }
+}
+
 /// Encode bytes as lowercase hexadecimal without another dependency.
 fn encode_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -1721,12 +2024,13 @@ const fn decode_hex(value: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Completeness, ConfidenceClass, CoverageRecord, CoverageScope, CoverageState,
-        EntitySelector, ExtendedRelationKind, ExternalSelector, GraphContractError, GraphEntity,
-        GraphEntityKey, GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind,
-        LogicalRelation, PackageSelector, ProjectInstanceId, RelationOccurrence,
-        RelationResolution, RepositoryFilePath, RepositoryNodePath, ReusableTargetSelector,
-        SourceSpan, StableKey, SymbolSelector,
+        CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
+        CoverageState, EntityResolutionKey, EntitySelector, ExtendedRelationKind, ExternalSelector,
+        GraphContractError, GraphEntity, GraphEntityKey, GraphIdentityText, GraphLimitKind,
+        GraphLimits, GraphRelationKind, LogicalRelation, PackageSelector, ProjectInstanceId,
+        RelationDependencyKey, RelationOccurrence, RelationResolution, RepositoryFilePath,
+        RepositoryNodePath, ResolutionKeyDomain, ReusableTargetSelector, SourceSpan, StableKey,
+        SymbolSelector,
     };
     use crate::IndexGeneration;
     use crate::symbols::{RelationKind, SymbolKind};
@@ -1851,6 +2155,264 @@ mod tests {
         require(
             serde_json::from_value::<GraphEntityKey>(serialized).is_err(),
             "tampered stable-key material was accepted",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_resolution_keys_are_stable_qualified_and_collision_checked()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let provider = GraphIdentityText::new("tree-sitter")?;
+        let language = GraphIdentityText::new("rust")?;
+        let package = GraphIdentityText::new("auth")?;
+        let scope = GraphIdentityText::new("crate")?;
+        let identity = GraphIdentityText::new("répond")?;
+        let key = CanonicalResolutionKey::new(
+            project()?,
+            ResolutionKeyDomain::Declaration,
+            &provider,
+            &language,
+            Some(&package),
+            Some(&scope),
+            Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+            &identity,
+        );
+        let repeated = CanonicalResolutionKey::new(
+            project()?,
+            ResolutionKeyDomain::Declaration,
+            &provider,
+            &language,
+            Some(&package),
+            Some(&scope),
+            Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+            &identity,
+        );
+        require(
+            key.reconcile(&repeated)?,
+            "equal canonical resolver input changed identity",
+        )?;
+        require(
+            key.digest_bytes() == *blake3::hash(key.canonical_identity().as_bytes()).as_bytes(),
+            "fixed resolver digest did not match its collision witness",
+        )?;
+        let persisted = CanonicalResolutionKey::from_persisted(
+            key.project(),
+            key.domain(),
+            key.digest_bytes(),
+            key.canonical_identity().to_string(),
+        )?;
+        require(
+            key.reconcile(&persisted)?,
+            "validated persisted resolver key changed identity",
+        )?;
+
+        let other_project = ProjectInstanceId::try_from("10112233445566778899aabbccddeeff")?;
+        let case_distinct = GraphIdentityText::new("Répond")?;
+        let variants = [
+            CanonicalResolutionKey::new(
+                other_project,
+                ResolutionKeyDomain::Declaration,
+                &provider,
+                &language,
+                Some(&package),
+                Some(&scope),
+                Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+                &identity,
+            ),
+            CanonicalResolutionKey::new(
+                project()?,
+                ResolutionKeyDomain::Module,
+                &provider,
+                &language,
+                Some(&package),
+                Some(&scope),
+                Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+                &identity,
+            ),
+            CanonicalResolutionKey::new(
+                project()?,
+                ResolutionKeyDomain::Declaration,
+                &GraphIdentityText::new("manifest")?,
+                &language,
+                Some(&package),
+                Some(&scope),
+                Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+                &identity,
+            ),
+            CanonicalResolutionKey::new(
+                project()?,
+                ResolutionKeyDomain::Declaration,
+                &provider,
+                &GraphIdentityText::new("typescript")?,
+                Some(&package),
+                Some(&scope),
+                Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+                &identity,
+            ),
+            CanonicalResolutionKey::new(
+                project()?,
+                ResolutionKeyDomain::Declaration,
+                &provider,
+                &language,
+                Some(&GraphIdentityText::new("billing")?),
+                Some(&scope),
+                Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+                &identity,
+            ),
+            CanonicalResolutionKey::new(
+                project()?,
+                ResolutionKeyDomain::Declaration,
+                &provider,
+                &language,
+                Some(&package),
+                Some(&GraphIdentityText::new("module")?),
+                Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+                &identity,
+            ),
+            CanonicalResolutionKey::new(
+                project()?,
+                ResolutionKeyDomain::Declaration,
+                &provider,
+                &language,
+                Some(&package),
+                Some(&scope),
+                Some(GraphRelationKind::Legacy(RelationKind::Imports)),
+                &identity,
+            ),
+            CanonicalResolutionKey::new(
+                project()?,
+                ResolutionKeyDomain::Declaration,
+                &provider,
+                &language,
+                Some(&package),
+                Some(&scope),
+                Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+                &case_distinct,
+            ),
+        ];
+        for variant in variants {
+            require(
+                !key.reconcile(&variant)?,
+                "identity-affecting resolver dimension was ignored",
+            )?;
+        }
+        require(
+            matches!(
+                ResolutionKeyDomain::try_from("declaration"),
+                Ok(ResolutionKeyDomain::Declaration)
+            ) && ResolutionKeyDomain::try_from("unknown").is_err(),
+            "closed resolver-domain persistence accepted an unsupported value",
+        )?;
+
+        let conflicting = CanonicalResolutionKey {
+            canonical_identity: "different canonical identity".to_string(),
+            ..key
+        };
+        require(
+            matches!(
+                key.reconcile(&conflicting),
+                Err(GraphContractError::StableKeyCollision { .. })
+            ),
+            "equal resolver digest with a different witness did not fail closed",
+        )?;
+        let mut serialized = serde_json::to_value(&key)?;
+        serialized["canonical_identity"] = serde_json::json!("tampered");
+        require(
+            serde_json::from_value::<CanonicalResolutionKey>(serialized).is_err(),
+            "tampered persisted resolver key was accepted",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn resolution_key_bindings_preserve_dependency_identity_across_states()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let generation = IndexGeneration::new(7);
+        let source = GraphEntity::new(
+            project()?,
+            EntitySelector::Symbol {
+                symbol: symbol_selector("src/caller.rs")?,
+            },
+            generation,
+        )?;
+        let target = GraphEntity::new(
+            project()?,
+            EntitySelector::Symbol {
+                symbol: symbol_selector("src/service.rs")?,
+            },
+            generation,
+        )?;
+        let dependency = CanonicalResolutionKey::new(
+            project()?,
+            ResolutionKeyDomain::Declaration,
+            &GraphIdentityText::new("tree-sitter")?,
+            &GraphIdentityText::new("rust")?,
+            None,
+            None,
+            Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+            &GraphIdentityText::new("répond")?,
+        );
+        let export = EntityResolutionKey::new(target.key().clone(), dependency.clone())?;
+        require(
+            export.key().reconcile(&dependency)?,
+            "export binding changed its canonical resolver identity",
+        )?;
+
+        let relations = [
+            LogicalRelation::new(
+                &source,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                RelationResolution::resolved(&target)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?,
+            LogicalRelation::new(
+                &source,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                RelationResolution::Ambiguous {
+                    reference: GraphIdentityText::new("répond")?,
+                    candidates: NonZeroU32::new(2).ok_or("nonzero candidate fixture")?,
+                },
+                ConfidenceClass::High,
+                Completeness::Complete,
+                generation,
+            )?,
+            LogicalRelation::new(
+                &source,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                RelationResolution::Unresolved {
+                    reference: GraphIdentityText::new("répond")?,
+                },
+                ConfidenceClass::Low,
+                Completeness::Complete,
+                generation,
+            )?,
+        ];
+        for relation in relations {
+            let binding = RelationDependencyKey::new(relation.key().clone(), dependency.clone())?;
+            require(
+                binding.key().reconcile(&dependency)?,
+                "resolution state changed the retained dependency identity",
+            )?;
+        }
+
+        let foreign = CanonicalResolutionKey::new(
+            ProjectInstanceId::try_from("10112233445566778899aabbccddeeff")?,
+            ResolutionKeyDomain::Declaration,
+            &GraphIdentityText::new("tree-sitter")?,
+            &GraphIdentityText::new("rust")?,
+            None,
+            None,
+            Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+            &GraphIdentityText::new("répond")?,
+        );
+        require(
+            matches!(
+                EntityResolutionKey::new(target.key().clone(), foreign),
+                Err(GraphContractError::ResolutionKeyOwnerMismatch)
+            ),
+            "cross-project resolver binding was accepted",
         )?;
         Ok(())
     }

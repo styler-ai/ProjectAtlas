@@ -11,20 +11,20 @@ use crate::runtime::run_scan_pipeline;
 use crate::runtime::{
     DEFAULT_HEALTH_LIMIT, INDEX_WORKER_SAFE_CEILING, IndexProjectMismatch, IndexRefreshRequired,
     IndexVerificationIncomplete, InitBootstrapOptions, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES,
-    PurposeLintLevel, PurposeReviewRequest, ScanRuntimePlan, SymbolBuildOptions,
-    UsageRuntimeInstance, build_settings_report, byte_count_to_tokens, canonical_project_root,
+    PurposeLintLevel, PurposeReviewRequest, ScanRuntimePlan, SourceObservationRegistry,
+    SymbolBuildOptions, UsageRuntimeInstance, VerifiedReadOutcome, VerifiedReadStamp,
+    build_settings_report, byte_count_to_tokens, canonical_project_root,
     config_root_mismatch_error, default_mcp_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     index_work_control, init_config_path, lint_database_if_present, next_step_report,
     next_step_report_payload, normalized_folder_filter, open_atlas_store_for_project,
-    open_atlas_store_read_only_for_project, open_fresh_atlas_store_for_project,
-    purpose_curation_page, ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons,
-    read_indexed_file_content, record_directory_walk_usage_estimate, record_usage_estimate,
-    record_usage_text, render_health_page, render_purpose_curation_page,
-    render_purpose_review_report, reset_index_files, review_purposes, run_init_bootstrap,
-    run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
-    run_symbol_build_pipeline_controlled, strip_legacy_purpose, telemetry_disabled,
-    validated_indexed_file_key, watcher_status_report,
+    open_atlas_store_read_only_for_project, purpose_curation_page, ranked_file_nodes_with_reasons,
+    ranked_folder_nodes_with_reasons, read_indexed_file_content,
+    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
+    render_health_page, render_purpose_curation_page, render_purpose_review_report,
+    reset_index_files, review_purposes, run_init_bootstrap, run_scan_pipeline_controlled,
+    run_single_watch_refresh_controlled, run_symbol_build_pipeline_controlled,
+    strip_legacy_purpose, telemetry_disabled, validated_indexed_file_key, watcher_status_report,
 };
 use crate::token_tui::{
     TokenDashboardTheme, render_token_dashboard_plain_with_theme,
@@ -63,7 +63,8 @@ use projectatlas_service::{
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::schemars;
-use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
+use rmcp::service::RequestContext;
+use rmcp::{RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs;
@@ -209,6 +210,16 @@ const PROJECTATLAS_CONFIG_FILE_NAME: &str = "config.toml";
 const PROJECTATLAS_FLAT_CONFIG_FILE_NAME: &str = "projectatlas.toml";
 /// Maximum distinct project bindings whose MCP telemetry can be sealed at shutdown.
 const MCP_TELEMETRY_PROJECT_BINDING_LIMIT: usize = 64;
+/// Hard ceiling for the default agent-facing settings diagnostic.
+const MCP_SETTINGS_RESPONSE_MAX_BYTES: usize = 64_000;
+/// Prefix for an oversized settings-response diagnostic.
+const MCP_SETTINGS_RESPONSE_LIMIT_PREFIX: &str = "settings response requires ";
+/// Separator for the observed and permitted settings-response byte counts.
+const MCP_SETTINGS_RESPONSE_LIMIT_SEPARATOR: &str = " bytes, exceeding the ";
+/// Suffix for an oversized settings-response diagnostic.
+const MCP_SETTINGS_RESPONSE_LIMIT_SUFFIX: &str = "-byte diagnostic limit";
+/// Maximum generation/filter token baselines retained by one MCP process.
+const MCP_SOURCE_TOKEN_BASELINE_LIMIT: usize = 128;
 /// Default MCP config server key.
 const MCP_DEFAULT_CONFIG_SERVER_NAME: &str = "projectatlas";
 /// Missing-index recovery guidance for MCP tools.
@@ -222,6 +233,11 @@ const OUTSIDE_SELECTED_PROJECT_GUIDANCE: &str = "pass project_path or call atlas
 const CURRENT_DIR_ALIAS: &str = ".";
 /// `ProjectAtlas` MCP server display name.
 const MCP_SERVER_NAME: &str = "ProjectAtlas";
+/// Request-local MCP cancellation monitor thread name.
+const MCP_CANCELLATION_MONITOR_THREAD_NAME: &str = "projectatlas-mcp-cancel";
+/// Prefix for cancellation-monitor startup failures.
+const MCP_CANCELLATION_MONITOR_START_ERROR_PREFIX: &str =
+    "MCP request cancellation monitor could not start: ";
 /// MCP error lock-poison message.
 const MCP_PROJECT_STATE_LOCK_POISONED: &str = "MCP project state lock poisoned";
 /// Prefix used only if structured MCP error serialization fails.
@@ -909,7 +925,7 @@ struct McpProjectState {
 }
 
 /// Exact root/database/project identity where this MCP process recorded telemetry.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
 struct McpUsageProjectBinding {
     /// Canonical selected repository root.
     root: PathBuf,
@@ -917,6 +933,85 @@ struct McpUsageProjectBinding {
     db_path: PathBuf,
     /// Project identity captured by the already-open selected store.
     project_instance_id: ProjectInstanceId,
+}
+
+/// One bounded broad-source token baseline keyed to a complete generation.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct McpSourceTokenBaselineKey {
+    /// Exact project binding whose source files supplied the baseline.
+    binding: McpUsageProjectBinding,
+    /// Complete publication generation represented by the baseline.
+    generation: projectatlas_core::IndexGeneration,
+    /// Optional repository folder filter applied to the baseline.
+    folder: Option<String>,
+    /// Optional repository file-pattern filter applied to the baseline.
+    file_pattern: Option<String>,
+}
+
+/// Deferred telemetry payload recorded only after a verified result is accepted.
+#[derive(Debug)]
+struct McpUsageIntent {
+    /// Stable MCP event family.
+    command: &'static str,
+    /// Optional selected path or filter.
+    path: Option<String>,
+    /// Optional caller query.
+    query: Option<String>,
+    /// Baseline used by the existing usage accounting contract.
+    baseline: McpUsageBaseline,
+}
+
+/// Existing telemetry baseline variants retained across verified-read acceptance.
+#[derive(Debug)]
+enum McpUsageBaseline {
+    /// Modeled selected-candidate token count.
+    Estimate(usize),
+    /// Modeled avoided directory-walk token count.
+    DirectoryWalk(usize),
+    /// Exact source text replaced by the accepted response.
+    Text(String),
+}
+
+impl McpUsageIntent {
+    /// Defer one selected-candidate token estimate until result acceptance.
+    fn estimate(
+        command: &'static str,
+        path: Option<String>,
+        query: Option<String>,
+        baseline_tokens: usize,
+    ) -> Self {
+        Self {
+            command,
+            path,
+            query,
+            baseline: McpUsageBaseline::Estimate(baseline_tokens),
+        }
+    }
+
+    /// Defer one avoided directory-walk estimate until result acceptance.
+    fn directory_walk(
+        command: &'static str,
+        path: Option<String>,
+        query: Option<String>,
+        baseline_tokens: usize,
+    ) -> Self {
+        Self {
+            command,
+            path,
+            query,
+            baseline: McpUsageBaseline::DirectoryWalk(baseline_tokens),
+        }
+    }
+
+    /// Defer one exact source-text replacement event until result acceptance.
+    fn text(command: &'static str, path: Option<String>, baseline_text: String) -> Self {
+        Self {
+            command,
+            path,
+            query: None,
+            baseline: McpUsageBaseline::Text(baseline_text),
+        }
+    }
 }
 
 impl McpUsageProjectBinding {
@@ -945,6 +1040,8 @@ struct McpUsageProjectRuntime {
 struct McpUsageRuntime {
     /// Distinct selected-project identities owned by this MCP process.
     entries: Vec<McpUsageProjectRuntime>,
+    /// Bounded modeled baselines reused without decoding every indexed file per call.
+    source_token_baselines: VecDeque<(McpSourceTokenBaselineKey, usize)>,
 }
 
 impl McpUsageRuntime {
@@ -972,6 +1069,28 @@ impl McpUsageRuntime {
     /// Clone the bounded project/runtime set before shutdown database I/O.
     fn snapshot(&self) -> Vec<McpUsageProjectRuntime> {
         self.entries.clone()
+    }
+
+    /// Return a cached generation-bound broad-source token baseline.
+    fn source_token_baseline(&self, key: &McpSourceTokenBaselineKey) -> Option<usize> {
+        self.source_token_baselines
+            .iter()
+            .find_map(|(candidate, value)| (candidate == key).then_some(*value))
+    }
+
+    /// Retain one baseline without allowing arbitrary filter keys to grow memory.
+    fn insert_source_token_baseline(&mut self, key: McpSourceTokenBaselineKey, value: usize) {
+        if let Some(index) = self
+            .source_token_baselines
+            .iter()
+            .position(|(candidate, _value)| candidate == &key)
+        {
+            let _removed = self.source_token_baselines.remove(index);
+        }
+        while self.source_token_baselines.len() >= MCP_SOURCE_TOKEN_BASELINE_LIMIT {
+            let _removed = self.source_token_baselines.pop_front();
+        }
+        self.source_token_baselines.push_back((key, value));
     }
 }
 
@@ -1698,8 +1817,94 @@ pub(crate) struct ProjectAtlasMcpServer {
     background_resources: McpBackgroundResourceEnvelope,
     /// Monotonic session-local task identifier source.
     next_task_sequence: Arc<AtomicU64>,
+    /// Bounded per-project source observers and verified read epochs.
+    source_observations: Arc<SourceObservationRegistry>,
     /// Official RMCP tool router.
     tool_router: ToolRouter<Self>,
+}
+
+/// Bridge one RMCP request cancellation token into synchronous index work.
+struct McpRequestCancellationBridge {
+    /// Signal used to stop the request-local cancellation monitor.
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    /// Join handle for the bounded request-local monitor thread.
+    monitor: Option<thread::JoinHandle<()>>,
+    /// Owned RMCP request context retained for the final cancellation check.
+    context: Option<RequestContext<RoleServer>>,
+}
+
+impl McpRequestCancellationBridge {
+    /// Start a request-local monitor from one owned RMCP context.
+    fn start(
+        context: RequestContext<RoleServer>,
+        control: &IndexWorkControl,
+    ) -> Result<Self, CliError> {
+        let token = context.ct.clone();
+        Self::start_with_probe_and_context(move || token.is_cancelled(), control, Some(context))
+    }
+
+    /// Start a cancellation monitor from a deterministic probe for tests.
+    #[cfg(test)]
+    fn start_with_probe<P>(probe: P, control: &IndexWorkControl) -> Result<Self, CliError>
+    where
+        P: Fn() -> bool + Send + 'static,
+    {
+        Self::start_with_probe_and_context(probe, control, None)
+    }
+
+    /// Start a cancellation monitor and retain its owning request context.
+    fn start_with_probe_and_context<P>(
+        probe: P,
+        control: &IndexWorkControl,
+        context: Option<RequestContext<RoleServer>>,
+    ) -> Result<Self, CliError>
+    where
+        P: Fn() -> bool + Send + 'static,
+    {
+        if probe() {
+            control.cancel();
+        }
+        let observed_control = control.clone();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let monitor_stop = Arc::clone(&stop);
+        let monitor = thread::Builder::new()
+            .name(MCP_CANCELLATION_MONITOR_THREAD_NAME.to_string())
+            .spawn(move || {
+                while !monitor_stop.load(Ordering::Acquire) {
+                    if probe() {
+                        observed_control.cancel();
+                        break;
+                    }
+                    thread::sleep(std::time::Duration::from_millis(5));
+                }
+            })
+            .map_err(|source| {
+                let mut message = MCP_CANCELLATION_MONITOR_START_ERROR_PREFIX.to_string();
+                message.push_str(&source.to_string());
+                CliError::InvalidInput(message)
+            })?;
+        Ok(Self {
+            stop,
+            monitor: Some(monitor),
+            context,
+        })
+    }
+
+    /// Return whether RMCP canceled the owning request.
+    fn is_cancelled(&self) -> bool {
+        self.context
+            .as_ref()
+            .is_some_and(|context| context.ct.is_cancelled())
+    }
+}
+
+impl Drop for McpRequestCancellationBridge {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(monitor) = self.monitor.take() {
+            drop(monitor.join());
+        }
+    }
 }
 
 impl ProjectAtlasMcpServer {
@@ -1721,6 +1926,7 @@ impl ProjectAtlasMcpServer {
             task_registry: Arc::new(RwLock::new(McpTaskRegistry::new())),
             background_resources: McpBackgroundResourceEnvelope::for_host(),
             next_task_sequence: Arc::new(AtomicU64::new(1)),
+            source_observations: Arc::new(SourceObservationRegistry::default()),
             tool_router: Self::tool_router(),
         }
     }
@@ -1737,16 +1943,100 @@ impl ProjectAtlasMcpServer {
         open_atlas_store_read_only_for_project(&state.db_path, &state.root)
     }
 
-    /// Open and verify the durable index before a normal MCP read.
-    fn open_fresh_store(state: &McpProjectState) -> Result<AtlasStore, CliError> {
+    /// Run one normal MCP query inside the verified source-epoch boundary.
+    #[cfg(test)]
+    fn with_fresh_store<T, F>(
+        &self,
+        state: &McpProjectState,
+        query: F,
+    ) -> Result<VerifiedReadOutcome<T>, CliError>
+    where
+        F: FnMut(&AtlasStore, VerifiedReadStamp) -> Result<T, CliError>,
+    {
+        self.with_fresh_store_for_request(state, None, query)
+    }
+
+    /// Run one verified query with optional RMCP request cancellation bridging.
+    fn with_fresh_store_for_request<T, F>(
+        &self,
+        state: &McpProjectState,
+        context: Option<RequestContext<RoleServer>>,
+        query: F,
+    ) -> Result<VerifiedReadOutcome<T>, CliError>
+    where
+        F: FnMut(&AtlasStore, VerifiedReadStamp) -> Result<T, CliError>,
+    {
         if !state.db_path.is_file() {
-            return Self::open_read_store(state);
+            return Err(CliError::InvalidInput(format!(
+                "ProjectAtlas index '{}' is missing for selected project root '{}'; {MISSING_INDEX_GUIDANCE}",
+                state.db_path.display(),
+                state.root.display()
+            )));
         }
-        open_fresh_atlas_store_for_project(
+        let control =
+            index_work_control(&SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None));
+        let bridge = context
+            .map(|context| McpRequestCancellationBridge::start(context, &control))
+            .transpose()?;
+        let result = self.source_observations.with_verified_read(
             &state.db_path,
             &state.root,
             state.config_path.as_deref(),
-        )
+            &control,
+            query,
+        );
+        if bridge
+            .as_ref()
+            .is_some_and(McpRequestCancellationBridge::is_cancelled)
+        {
+            control.cancel();
+        }
+        drop(bridge);
+        result
+    }
+
+    /// Run one rendered MCP query with request cancellation bridged into index work.
+    fn with_fresh_string_for_request<F>(
+        &self,
+        state: &McpProjectState,
+        context: Option<RequestContext<RoleServer>>,
+        mut query: F,
+    ) -> Result<String, CliError>
+    where
+        F: FnMut(&AtlasStore, VerifiedReadStamp) -> Result<String, CliError>,
+    {
+        self.with_fresh_string_and_usage_for_request(state, context, |store, stamp| {
+            Ok((query(store, stamp)?, None))
+        })
+    }
+
+    /// Record optional usage only after source and `SQLite` result acceptance succeeds.
+    fn with_fresh_string_and_usage_for_request<F>(
+        &self,
+        state: &McpProjectState,
+        context: Option<RequestContext<RoleServer>>,
+        query: F,
+    ) -> Result<String, CliError>
+    where
+        F: FnMut(
+            &AtlasStore,
+            VerifiedReadStamp,
+        ) -> Result<(String, Option<McpUsageIntent>), CliError>,
+    {
+        let outcome = self.with_fresh_store_for_request(state, context, query)?;
+        let stamp = outcome.stamp.clone();
+        let (value, usage) = outcome.value;
+        let output_bytes = value.len();
+        let outcome = VerifiedReadOutcome {
+            value,
+            stamp,
+            work: outcome.work,
+        }
+        .with_output_bytes(output_bytes);
+        if let Some(usage) = usage {
+            self.record_accepted_usage(state, &outcome.stamp, &usage, &outcome.value);
+        }
+        Ok(outcome.value)
     }
 
     /// Open the durable index for mutation.
@@ -1810,6 +2100,96 @@ impl ProjectAtlasMcpServer {
         }
         *usage_instance = next_instance;
         drop(record(next_instance));
+    }
+
+    /// Best-effort telemetry for one result whose source epoch has already been accepted.
+    fn record_accepted_usage(
+        &self,
+        state: &McpProjectState,
+        stamp: &VerifiedReadStamp,
+        intent: &McpUsageIntent,
+        output: &str,
+    ) {
+        if !Self::telemetry_enabled() {
+            return;
+        }
+        let Ok(store) = Self::open_read_store(state) else {
+            return;
+        };
+        let Ok(binding) = store.captured_project_binding() else {
+            return;
+        };
+        if binding.project_instance_id != stamp.project_instance_id {
+            return;
+        }
+        self.record_usage_for_state(state, &store, |usage_instance| match &intent.baseline {
+            McpUsageBaseline::Estimate(baseline_tokens) => record_usage_estimate(
+                &store,
+                Some(usage_instance),
+                &self.session,
+                intent.command,
+                intent.path.clone(),
+                intent.query.clone(),
+                *baseline_tokens,
+                output,
+            ),
+            McpUsageBaseline::DirectoryWalk(baseline_tokens) => {
+                record_directory_walk_usage_estimate(
+                    &store,
+                    Some(usage_instance),
+                    &self.session,
+                    intent.command,
+                    intent.path.clone(),
+                    intent.query.clone(),
+                    *baseline_tokens,
+                    output,
+                )
+            }
+            McpUsageBaseline::Text(baseline_text) => record_usage_text(
+                &store,
+                Some(usage_instance),
+                &self.session,
+                intent.command,
+                intent.path.clone(),
+                intent.query.clone(),
+                baseline_text,
+                output,
+            ),
+        });
+    }
+
+    /// Reuse an optional broad-source telemetry baseline within one complete generation.
+    fn estimated_source_tokens_cached(
+        &self,
+        state: &McpProjectState,
+        store: &AtlasStore,
+        stamp: &VerifiedReadStamp,
+        folder: Option<&str>,
+        file_pattern: Option<&str>,
+    ) -> Result<usize, CliError> {
+        let key = McpSourceTokenBaselineKey {
+            binding: McpUsageProjectBinding {
+                root: state.root.clone(),
+                db_path: state.db_path.clone(),
+                project_instance_id: stamp.project_instance_id,
+            },
+            generation: stamp.generation,
+            folder: folder.map(ToOwned::to_owned),
+            file_pattern: file_pattern.map(ToOwned::to_owned),
+        };
+        if let Some(value) = self
+            .usage_runtime
+            .lock()
+            .ok()
+            .and_then(|runtime| runtime.source_token_baseline(&key))
+        {
+            return Ok(value);
+        }
+        let value = estimated_source_tokens_for_indexed_files(store, folder, file_pattern)?;
+        if let Ok(mut runtime) = self.usage_runtime.lock() {
+            runtime.insert_source_token_baseline(key, value);
+        }
+        Ok(value)
     }
 
     /// Best-effort seal each selected project's current identity at shutdown.
@@ -1998,12 +2378,21 @@ impl ProjectAtlasMcpServer {
             OutputFormat::Toon,
         )?;
         let capabilities = self.session_capabilities(state, report.text_index_max_bytes);
-        Self::encode_two_named_payloads(
+        let rendered = Self::encode_two_named_payloads(
             MCP_PAYLOAD_SETTINGS,
             &report,
             MCP_PAYLOAD_SESSION_CAPABILITIES,
             &capabilities,
-        )
+        )?;
+        if rendered.len() > MCP_SETTINGS_RESPONSE_MAX_BYTES {
+            let mut message = MCP_SETTINGS_RESPONSE_LIMIT_PREFIX.to_string();
+            message.push_str(&rendered.len().to_string());
+            message.push_str(MCP_SETTINGS_RESPONSE_LIMIT_SEPARATOR);
+            message.push_str(&MCP_SETTINGS_RESPONSE_MAX_BYTES.to_string());
+            message.push_str(MCP_SETTINGS_RESPONSE_LIMIT_SUFFIX);
+            return Err(CliError::InvalidInput(message));
+        }
+        Ok(rendered)
     }
 
     /// Build the selected-project capability row.
@@ -2052,6 +2441,7 @@ impl ProjectAtlasMcpServer {
     fn build_session_brief(
         &self,
         params: AtlasSessionBriefParams,
+        context: Option<RequestContext<RoleServer>>,
     ) -> Result<McpSessionBrief, CliError> {
         let selected_project_path = params.project_path.clone();
         let state = self.state_for_project_path(selected_project_path.clone())?;
@@ -2083,52 +2473,52 @@ impl ProjectAtlasMcpServer {
                 },
             });
         }
-        let store = Self::open_fresh_store(&state)?;
-        let overview = store.overview()?;
-        let folder_rows =
-            ranked_folder_nodes_with_reasons(&store, &query, folder_limit.saturating_add(1))?;
-        let file_rows = ranked_file_nodes_with_reasons(
-            &store,
-            &query,
-            None,
-            None,
-            file_limit.saturating_add(1),
-            false,
-        )?;
-        let blockers = Self::brief_blockers(&store, blocker_limit)?;
-        let folders_truncated = folder_rows.len() > folder_limit;
-        let files_truncated = file_rows.len() > file_limit;
-        let brief = McpSessionBrief {
-            project,
-            policy: self.brief_policy(),
-            overview: Some(overview),
-            folders: folder_rows
-                .into_iter()
-                .take(folder_limit)
-                .map(Self::brief_candidate)
-                .collect(),
-            files: file_rows
-                .into_iter()
-                .take(file_limit)
-                .map(Self::brief_candidate)
-                .collect(),
-            recommendations: Self::indexed_project_recommendations(
+        let outcome = self.with_fresh_store_for_request(&state, context, |store, _stamp| {
+            let overview = store.overview()?;
+            let folder_rows =
+                ranked_folder_nodes_with_reasons(store, &query, folder_limit.saturating_add(1))?;
+            let file_rows = ranked_file_nodes_with_reasons(
+                store,
                 &query,
-                blockers.total,
-                blocker_limit,
-                selected_project_path,
-            ),
-            blockers,
-            limits: McpBriefLimits {
-                folder_limit,
-                file_limit,
-                blocker_limit,
-                folders_truncated,
-                files_truncated,
-            },
-        };
-        store.finish_index_read_snapshot()?;
-        Ok(brief)
+                None,
+                None,
+                file_limit.saturating_add(1),
+                false,
+            )?;
+            let blockers = Self::brief_blockers(store, blocker_limit)?;
+            let folders_truncated = folder_rows.len() > folder_limit;
+            let files_truncated = file_rows.len() > file_limit;
+            Ok(McpSessionBrief {
+                project: Self::selected_project_capability(&state),
+                policy: self.brief_policy(),
+                overview: Some(overview),
+                folders: folder_rows
+                    .into_iter()
+                    .take(folder_limit)
+                    .map(Self::brief_candidate)
+                    .collect(),
+                files: file_rows
+                    .into_iter()
+                    .take(file_limit)
+                    .map(Self::brief_candidate)
+                    .collect(),
+                recommendations: Self::indexed_project_recommendations(
+                    &query,
+                    blockers.total,
+                    blocker_limit,
+                    selected_project_path.clone(),
+                ),
+                blockers,
+                limits: McpBriefLimits {
+                    folder_limit,
+                    file_limit,
+                    blocker_limit,
+                    folders_truncated,
+                    files_truncated,
+                },
+            })
+        })?;
+        Ok(outcome.value)
     }
 
     /// Build brief policy fields.
@@ -3777,36 +4167,44 @@ impl ProjectAtlasMcpServer {
         })())
     }
 
+    /// Render one verified overview response with optional request cancellation.
+    fn atlas_overview_response(
+        &self,
+        params: AtlasProjectParams,
+        context: Option<RequestContext<RoleServer>>,
+    ) -> String {
+        Self::as_mcp_text((|| {
+            let state = self.state_for_project_path(params.project_path)?;
+            self.with_fresh_string_and_usage_for_request(&state, context, |store, stamp| {
+                let overview = store.overview()?;
+                let toon = render_overview(&overview);
+                let usage = Self::telemetry_enabled()
+                    .then(|| self.estimated_source_tokens_cached(&state, store, &stamp, None, None))
+                    .and_then(Result::ok)
+                    .map(|baseline_tokens| {
+                        McpUsageIntent::directory_walk(
+                            MCP_EVENT_ATLAS_OVERVIEW,
+                            None,
+                            None,
+                            baseline_tokens,
+                        )
+                    });
+                Ok((toon, usage))
+            })
+        })())
+    }
+
     /// Return the indexed repository overview.
     #[tool(
         name = "atlas_overview",
         description = "Return a compact TOON overview of indexed files, folders, and purpose coverage."
     )]
-    fn atlas_overview(&self, Parameters(params): Parameters<AtlasProjectParams>) -> String {
-        Self::as_mcp_text((|| {
-            let state = self.state_for_project_path(params.project_path)?;
-            let store = Self::open_fresh_store(&state)?;
-            let overview = store.overview()?;
-            let toon = render_overview(&overview);
-            if Self::telemetry_enabled()
-                && let Ok(baseline_tokens) =
-                    estimated_source_tokens_for_indexed_files(&store, None, None)
-            {
-                self.record_usage_for_state(&state, &store, |usage_instance| {
-                    record_directory_walk_usage_estimate(
-                        &store,
-                        Some(usage_instance),
-                        &self.session,
-                        MCP_EVENT_ATLAS_OVERVIEW,
-                        None,
-                        None,
-                        baseline_tokens,
-                        &toon,
-                    )
-                });
-            }
-            Ok(toon)
-        })())
+    fn atlas_overview(
+        &self,
+        Parameters(params): Parameters<AtlasProjectParams>,
+        context: RequestContext<RoleServer>,
+    ) -> String {
+        self.atlas_overview_response(params, Some(context))
     }
 
     /// Rank folders before an agent chooses a work area.
@@ -3814,32 +4212,31 @@ impl ProjectAtlasMcpServer {
         name = "atlas_folders",
         description = "Rank repository folders by query and purpose so agents choose a work area before opening files."
     )]
-    fn atlas_folders(&self, Parameters(params): Parameters<AtlasQueryParams>) -> String {
+    fn atlas_folders(
+        &self,
+        Parameters(params): Parameters<AtlasQueryParams>,
+        context: RequestContext<RoleServer>,
+    ) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
-            let store = Self::open_fresh_store(&state)?;
             let query = Self::query_or_empty(params.query);
-            let selected =
-                ranked_folder_nodes_with_reasons(&store, &query, params.limit.unwrap_or(10))?;
-            let toon = render_ranked_nodes(NODE_LABEL_FOLDERS, &selected);
-            if Self::telemetry_enabled()
-                && let Ok(baseline_tokens) =
-                    estimated_source_tokens_for_indexed_files(&store, None, None)
-            {
-                self.record_usage_for_state(&state, &store, |usage_instance| {
-                    record_directory_walk_usage_estimate(
-                        &store,
-                        Some(usage_instance),
-                        &self.session,
-                        MCP_EVENT_ATLAS_FOLDERS,
-                        None,
-                        Some(query.clone()),
-                        baseline_tokens,
-                        &toon,
-                    )
-                });
-            }
-            Ok(toon)
+            self.with_fresh_string_and_usage_for_request(&state, Some(context), |store, stamp| {
+                let selected =
+                    ranked_folder_nodes_with_reasons(store, &query, params.limit.unwrap_or(10))?;
+                let toon = render_ranked_nodes(NODE_LABEL_FOLDERS, &selected);
+                let usage = Self::telemetry_enabled()
+                    .then(|| self.estimated_source_tokens_cached(&state, store, &stamp, None, None))
+                    .and_then(Result::ok)
+                    .map(|baseline_tokens| {
+                        McpUsageIntent::directory_walk(
+                            MCP_EVENT_ATLAS_FOLDERS,
+                            None,
+                            Some(query.clone()),
+                            baseline_tokens,
+                        )
+                    });
+                Ok((toon, usage))
+            })
         })())
     }
 
@@ -3848,7 +4245,11 @@ impl ProjectAtlasMcpServer {
         name = "atlas_files",
         description = "Rank repository files by query, purpose, optional folder, and optional indexed text fallback before an agent opens source."
     )]
-    fn atlas_files(&self, Parameters(params): Parameters<AtlasFilesParams>) -> String {
+    fn atlas_files(
+        &self,
+        Parameters(params): Parameters<AtlasFilesParams>,
+        context: RequestContext<RoleServer>,
+    ) -> String {
         Self::as_mcp_text((|| {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let (state, folder_filter, routed_project) = self.state_and_optional_folder_filter(
@@ -3856,43 +4257,45 @@ impl ProjectAtlasMcpServer {
                 params.folder.as_deref(),
                 nearest_project,
             )?;
-            let store = Self::open_fresh_store(&state)?;
             let query = Self::query_or_empty(params.query);
-            let selected = ranked_file_nodes_with_reasons(
-                &store,
-                &query,
-                folder_filter.as_deref(),
-                params.file_pattern.as_deref(),
-                params.limit.unwrap_or(10),
-                params.include_content.unwrap_or(false),
-            )?;
-            let toon = Self::with_selected_project_audit(
-                &state,
-                routed_project,
-                render_ranked_nodes(NODE_LABEL_FILES, &selected),
-            )?;
-            if Self::telemetry_enabled()
-                && let Ok(baseline_tokens) = estimated_source_tokens_for_indexed_files(
-                    &store,
+            self.with_fresh_string_and_usage_for_request(&state, Some(context), |store, stamp| {
+                let selected = ranked_file_nodes_with_reasons(
+                    store,
+                    &query,
                     folder_filter.as_deref(),
                     params.file_pattern.as_deref(),
-                )
-            {
-                let path = params.file_pattern.or(folder_filter);
-                self.record_usage_for_state(&state, &store, |usage_instance| {
-                    record_usage_estimate(
-                        &store,
-                        Some(usage_instance),
-                        &self.session,
-                        MCP_EVENT_ATLAS_FILES,
-                        path.clone(),
-                        Some(query.clone()),
-                        baseline_tokens,
-                        &toon,
-                    )
-                });
-            }
-            Ok(toon)
+                    params.limit.unwrap_or(10),
+                    params.include_content.unwrap_or(false),
+                )?;
+                let toon = Self::with_selected_project_audit(
+                    &state,
+                    routed_project,
+                    render_ranked_nodes(NODE_LABEL_FILES, &selected),
+                )?;
+                let usage = Self::telemetry_enabled()
+                    .then(|| {
+                        self.estimated_source_tokens_cached(
+                            &state,
+                            store,
+                            &stamp,
+                            folder_filter.as_deref(),
+                            params.file_pattern.as_deref(),
+                        )
+                    })
+                    .and_then(Result::ok)
+                    .map(|baseline_tokens| {
+                        McpUsageIntent::estimate(
+                            MCP_EVENT_ATLAS_FILES,
+                            params
+                                .file_pattern
+                                .clone()
+                                .or_else(|| folder_filter.clone()),
+                            Some(query.clone()),
+                            baseline_tokens,
+                        )
+                    });
+                Ok((toon, usage))
+            })
         })())
     }
 
@@ -3901,32 +4304,31 @@ impl ProjectAtlasMcpServer {
         name = "atlas_next",
         description = "Recommend top indexed folders/files with reasons and deterministic follow-up commands for a task query."
     )]
-    fn atlas_next(&self, Parameters(params): Parameters<AtlasQueryParams>) -> String {
+    fn atlas_next(
+        &self,
+        Parameters(params): Parameters<AtlasQueryParams>,
+        context: RequestContext<RoleServer>,
+    ) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
-            let store = Self::open_fresh_store(&state)?;
             let query = Self::query_or_empty(params.query);
-            let report = next_step_report(&store, &query, params.limit)?;
-            let payload = next_step_report_payload(&report);
-            let toon = Self::encode_named_payload(MCP_PAYLOAD_NEXT, &payload)?;
-            if Self::telemetry_enabled()
-                && let Ok(baseline_tokens) =
-                    estimated_source_tokens_for_indexed_files(&store, None, None)
-            {
-                self.record_usage_for_state(&state, &store, |usage_instance| {
-                    record_directory_walk_usage_estimate(
-                        &store,
-                        Some(usage_instance),
-                        &self.session,
-                        MCP_EVENT_ATLAS_NEXT,
-                        None,
-                        Some(query.clone()),
-                        baseline_tokens,
-                        &toon,
-                    )
-                });
-            }
-            Ok(toon)
+            self.with_fresh_string_and_usage_for_request(&state, Some(context), |store, stamp| {
+                let report = next_step_report(store, &query, params.limit)?;
+                let payload = next_step_report_payload(&report);
+                let toon = Self::encode_named_payload(MCP_PAYLOAD_NEXT, &payload)?;
+                let usage = Self::telemetry_enabled()
+                    .then(|| self.estimated_source_tokens_cached(&state, store, &stamp, None, None))
+                    .and_then(Result::ok)
+                    .map(|baseline_tokens| {
+                        McpUsageIntent::directory_walk(
+                            MCP_EVENT_ATLAS_NEXT,
+                            None,
+                            Some(query.clone()),
+                            baseline_tokens,
+                        )
+                    });
+                Ok((toon, usage))
+            })
         })())
     }
 
@@ -3935,7 +4337,11 @@ impl ProjectAtlasMcpServer {
         name = "atlas_outline",
         description = "Return compact TOON outline and preview context for a selected file."
     )]
-    fn atlas_outline(&self, Parameters(params): Parameters<AtlasOutlineParams>) -> String {
+    fn atlas_outline(
+        &self,
+        Parameters(params): Parameters<AtlasOutlineParams>,
+        context: RequestContext<RoleServer>,
+    ) -> String {
         Self::as_mcp_text((|| {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let resolved = self.state_and_file_key(
@@ -3944,31 +4350,64 @@ impl ProjectAtlasMcpServer {
                 nearest_project,
             )?;
             let state = resolved.state;
-            let store = Self::open_fresh_store(&state)?;
-            let file_key = validated_indexed_file_key(&store, Path::new(&resolved.key))?;
-            let content = read_indexed_file_content(&store, &file_key)?;
-            let language = store
-                .load_node_by_path(&file_key)?
-                .and_then(|node| node.node.language);
-            let outline = build_outline(&file_key, language, &content, params.lines.unwrap_or(12));
-            let toon = Self::with_selected_project_audit(
-                &state,
-                resolved.routed_project,
-                render_outline(&outline),
-            )?;
-            self.record_usage_for_state(&state, &store, |usage_instance| {
-                record_usage_text(
-                    &store,
-                    Some(usage_instance),
-                    &self.session,
+            self.with_fresh_string_and_usage_for_request(&state, Some(context), |store, _stamp| {
+                let file_key = validated_indexed_file_key(store, Path::new(&resolved.key))?;
+                let content = read_indexed_file_content(store, &file_key)?;
+                let language = store
+                    .load_node_by_path(&file_key)?
+                    .and_then(|node| node.node.language);
+                let outline =
+                    build_outline(&file_key, language, &content, params.lines.unwrap_or(12));
+                let toon = Self::with_selected_project_audit(
+                    &state,
+                    resolved.routed_project,
+                    render_outline(&outline),
+                )?;
+                let usage = Some(McpUsageIntent::text(
                     MCP_EVENT_ATLAS_OUTLINE,
-                    Some(file_key.clone()),
-                    None,
+                    Some(file_key),
+                    content,
+                ));
+                Ok((toon, usage))
+            })
+        })())
+    }
+
+    /// Render one verified structured file-summary response.
+    fn atlas_file_summary_response(
+        &self,
+        params: &AtlasFileSummaryParams,
+        context: Option<RequestContext<RoleServer>>,
+    ) -> String {
+        Self::as_mcp_text((|| {
+            let nearest_project = self.nearest_project_enabled(params.nearest_project);
+            let resolved = self.state_and_file_key(
+                params.project_path.as_deref(),
+                &params.file,
+                nearest_project,
+            )?;
+            let state = resolved.state;
+            self.with_fresh_string_and_usage_for_request(&state, context, |store, _stamp| {
+                let file_key = validated_indexed_file_key(store, Path::new(&resolved.key))?;
+                let content = read_indexed_file_content(store, &file_key)?;
+                let report = build_file_summary_from_source(
+                    store,
+                    Path::new(&file_key),
+                    params.limit.unwrap_or(DEFAULT_FILE_SUMMARY_LIMIT),
                     &content,
-                    &toon,
-                )
-            });
-            Ok(toon)
+                )?;
+                let toon = Self::with_selected_project_audit(
+                    &state,
+                    resolved.routed_project,
+                    render_file_summary(&report),
+                )?;
+                let usage = Some(McpUsageIntent::text(
+                    MCP_EVENT_ATLAS_FILE_SUMMARY,
+                    Some(report.file_path),
+                    content,
+                ));
+                Ok((toon, usage))
+            })
         })())
     }
 
@@ -3977,43 +4416,12 @@ impl ProjectAtlasMcpServer {
         name = "atlas_file_summary",
         description = "Return structured TOON file intelligence: file purpose, content summary, imports, symbols, line ranges, and calls."
     )]
-    fn atlas_file_summary(&self, Parameters(params): Parameters<AtlasFileSummaryParams>) -> String {
-        Self::as_mcp_text((|| {
-            let nearest_project = self.nearest_project_enabled(params.nearest_project);
-            let resolved = self.state_and_file_key(
-                params.project_path.as_deref(),
-                &params.file,
-                nearest_project,
-            )?;
-            let state = resolved.state;
-            let store = Self::open_fresh_store(&state)?;
-            let file_key = validated_indexed_file_key(&store, Path::new(&resolved.key))?;
-            let content = read_indexed_file_content(&store, &file_key)?;
-            let report = build_file_summary_from_source(
-                &store,
-                Path::new(&file_key),
-                params.limit.unwrap_or(DEFAULT_FILE_SUMMARY_LIMIT),
-                &content,
-            )?;
-            let toon = Self::with_selected_project_audit(
-                &state,
-                resolved.routed_project,
-                render_file_summary(&report),
-            )?;
-            self.record_usage_for_state(&state, &store, |usage_instance| {
-                record_usage_text(
-                    &store,
-                    Some(usage_instance),
-                    &self.session,
-                    MCP_EVENT_ATLAS_FILE_SUMMARY,
-                    Some(report.file_path.clone()),
-                    None,
-                    &content,
-                    &toon,
-                )
-            });
-            Ok(toon)
-        })())
+    fn atlas_file_summary(
+        &self,
+        Parameters(params): Parameters<AtlasFileSummaryParams>,
+        context: RequestContext<RoleServer>,
+    ) -> String {
+        self.atlas_file_summary_response(&params, Some(context))
     }
 
     /// Search selected indexed files with optional context lines.
@@ -4021,35 +4429,34 @@ impl ProjectAtlasMcpServer {
         name = "atlas_search",
         description = "Search indexed files with literal, regex, or fuzzy matching, file filters, pagination, and TOON results."
     )]
-    fn atlas_search(&self, Parameters(params): Parameters<AtlasSearchParams>) -> String {
+    fn atlas_search(
+        &self,
+        Parameters(params): Parameters<AtlasSearchParams>,
+        context: RequestContext<RoleServer>,
+    ) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path.clone())?;
-            let store = Self::open_fresh_store(&state)?;
-            let report = search_indexed_files(
-                &store,
-                &params.pattern,
-                params.regex.unwrap_or(false),
-                params.fuzzy.unwrap_or(false),
-                params.case_sensitive.unwrap_or(false),
-                params.file_pattern.as_deref(),
-                params.context_lines.unwrap_or(0),
-                params.start_index.unwrap_or(0),
-                params.limit.unwrap_or(20),
-            )?;
-            let toon = render_search_report(&report);
-            self.record_usage_for_state(&state, &store, |usage_instance| {
-                record_usage_estimate(
-                    &store,
-                    Some(usage_instance),
-                    &self.session,
+            self.with_fresh_string_and_usage_for_request(&state, Some(context), |store, _stamp| {
+                let report = search_indexed_files(
+                    store,
+                    &params.pattern,
+                    params.regex.unwrap_or(false),
+                    params.fuzzy.unwrap_or(false),
+                    params.case_sensitive.unwrap_or(false),
+                    params.file_pattern.as_deref(),
+                    params.context_lines.unwrap_or(0),
+                    params.start_index.unwrap_or(0),
+                    params.limit.unwrap_or(20),
+                )?;
+                let toon = render_search_report(&report);
+                let usage = Some(McpUsageIntent::estimate(
                     MCP_EVENT_ATLAS_SEARCH,
                     params.file_pattern.clone(),
                     Some(params.pattern.clone()),
                     byte_count_to_tokens(report.searched_bytes),
-                    &toon,
-                )
-            });
-            Ok(toon)
+                ));
+                Ok((toon, usage))
+            })
         })())
     }
 
@@ -4058,7 +4465,11 @@ impl ProjectAtlasMcpServer {
         name = "atlas_slice",
         description = "Return exact source for a selected line range or indexed symbol, after folder/file orientation."
     )]
-    fn atlas_slice(&self, Parameters(params): Parameters<AtlasSliceParams>) -> String {
+    fn atlas_slice(
+        &self,
+        Parameters(params): Parameters<AtlasSliceParams>,
+        context: RequestContext<RoleServer>,
+    ) -> String {
         Self::as_mcp_text((|| {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let resolved = self.state_and_file_key(
@@ -4067,60 +4478,54 @@ impl ProjectAtlasMcpServer {
                 nearest_project,
             )?;
             let state = resolved.state;
-            let store = Self::open_fresh_store(&state)?;
-            let file_key = validated_indexed_file_key(&store, Path::new(&resolved.key))?;
-            let file = PathBuf::from(&file_key);
-            let content = read_indexed_file_content(&store, &file_key)?;
-            let report = if let Some(symbol) = params.symbol {
-                read_symbol_slice_from_source(
-                    &store,
-                    &file,
-                    &SymbolSliceSelector {
-                        name: &symbol,
-                        parent: params.symbol_parent.as_deref(),
-                        kind: params.symbol_kind.as_deref(),
-                        line: params.symbol_line,
-                    },
-                    &content,
-                )?
-            } else {
-                if params.symbol_parent.is_some()
-                    || params.symbol_kind.is_some()
-                    || params.symbol_line.is_some()
-                {
-                    return Err(CliError::InvalidInput(
-                        SYMBOL_DISAMBIGUATOR_WITHOUT_SYMBOL_ERROR.to_string(),
-                    ));
-                }
-                let start_line = params
-                    .start_line
-                    .ok_or_else(|| CliError::InvalidInput(START_LINE_REQUIRED_ERROR.to_string()))?;
-                read_indexed_code_slice_from_source(
-                    &store,
-                    &file,
-                    start_line,
-                    params.end_line,
-                    &content,
-                )?
-            };
-            let toon = Self::with_selected_project_audit(
-                &state,
-                resolved.routed_project,
-                render_code_slice(&report),
-            )?;
-            self.record_usage_for_state(&state, &store, |usage_instance| {
-                record_usage_text(
-                    &store,
-                    Some(usage_instance),
-                    &self.session,
+            self.with_fresh_string_and_usage_for_request(&state, Some(context), |store, _stamp| {
+                let file_key = validated_indexed_file_key(store, Path::new(&resolved.key))?;
+                let file = PathBuf::from(&file_key);
+                let content = read_indexed_file_content(store, &file_key)?;
+                let report = if let Some(symbol) = params.symbol.as_ref() {
+                    read_symbol_slice_from_source(
+                        store,
+                        &file,
+                        &SymbolSliceSelector {
+                            name: symbol,
+                            parent: params.symbol_parent.as_deref(),
+                            kind: params.symbol_kind.as_deref(),
+                            line: params.symbol_line,
+                        },
+                        &content,
+                    )?
+                } else {
+                    if params.symbol_parent.is_some()
+                        || params.symbol_kind.is_some()
+                        || params.symbol_line.is_some()
+                    {
+                        return Err(CliError::InvalidInput(
+                            SYMBOL_DISAMBIGUATOR_WITHOUT_SYMBOL_ERROR.to_string(),
+                        ));
+                    }
+                    let start_line = params.start_line.ok_or_else(|| {
+                        CliError::InvalidInput(START_LINE_REQUIRED_ERROR.to_string())
+                    })?;
+                    read_indexed_code_slice_from_source(
+                        store,
+                        &file,
+                        start_line,
+                        params.end_line,
+                        &content,
+                    )?
+                };
+                let toon = Self::with_selected_project_audit(
+                    &state,
+                    resolved.routed_project,
+                    render_code_slice(&report),
+                )?;
+                let usage = Some(McpUsageIntent::text(
                     MCP_EVENT_ATLAS_SLICE,
-                    Some(report.path.clone()),
-                    None,
-                    &content,
-                    &toon,
-                )
-            });
-            Ok(toon)
+                    Some(report.path),
+                    content,
+                ));
+                Ok((toon, usage))
+            })
         })())
     }
 
@@ -4183,12 +4588,12 @@ impl ProjectAtlasMcpServer {
         })())
     }
 
-    /// List indexed symbols.
-    #[tool(
-        name = "atlas_symbols",
-        description = "List indexed symbols by optional file and query as compact TOON."
-    )]
-    fn atlas_symbols(&self, Parameters(params): Parameters<AtlasSymbolsParams>) -> String {
+    /// Render one verified symbol-list response.
+    fn atlas_symbols_response(
+        &self,
+        params: &AtlasSymbolsParams,
+        context: Option<RequestContext<RoleServer>>,
+    ) -> String {
         Self::as_mcp_text((|| {
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let (state, file, routed_project) = self.state_and_optional_file_key(
@@ -4196,41 +4601,101 @@ impl ProjectAtlasMcpServer {
                 params.file.as_deref(),
                 nearest_project,
             )?;
-            let store = Self::open_fresh_store(&state)?;
-            let file = file
-                .as_deref()
-                .map(|path| validated_indexed_file_key(&store, Path::new(path)))
-                .transpose()?;
-            let symbols = store.load_symbols(
-                file.as_deref(),
-                params.query.as_deref(),
-                params.limit.unwrap_or(50),
+            self.with_fresh_string_and_usage_for_request(&state, context, |store, _stamp| {
+                let file = file
+                    .as_deref()
+                    .map(|path| validated_indexed_file_key(store, Path::new(path)))
+                    .transpose()?;
+                let symbols = store.load_symbols(
+                    file.as_deref(),
+                    params.query.as_deref(),
+                    params.limit.unwrap_or(50),
+                )?;
+                let toon = Self::with_selected_project_audit(
+                    &state,
+                    routed_project,
+                    render_symbols(&symbols),
+                )?;
+                let usage = Self::telemetry_enabled()
+                    .then(|| {
+                        estimated_source_tokens_for_paths(
+                            store,
+                            symbols.iter().map(|symbol| symbol.path.as_str()),
+                        )
+                    })
+                    .and_then(Result::ok)
+                    .map(|baseline_tokens| {
+                        McpUsageIntent::estimate(
+                            MCP_EVENT_ATLAS_SYMBOLS,
+                            file.clone(),
+                            params.query.clone(),
+                            baseline_tokens,
+                        )
+                    });
+                Ok((toon, usage))
+            })
+        })())
+    }
+
+    /// List indexed symbols.
+    #[tool(
+        name = "atlas_symbols",
+        description = "List indexed symbols by optional file and query as compact TOON."
+    )]
+    fn atlas_symbols(
+        &self,
+        Parameters(params): Parameters<AtlasSymbolsParams>,
+        context: RequestContext<RoleServer>,
+    ) -> String {
+        self.atlas_symbols_response(&params, Some(context))
+    }
+
+    /// Render one verified legacy symbol-relation response.
+    fn atlas_symbol_relations_response(
+        &self,
+        params: &AtlasSymbolsParams,
+        context: Option<RequestContext<RoleServer>>,
+    ) -> String {
+        Self::as_mcp_text((|| {
+            let nearest_project = self.nearest_project_enabled(params.nearest_project);
+            let (state, file, routed_project) = self.state_and_optional_file_key(
+                params.project_path.as_deref(),
+                params.file.as_deref(),
+                nearest_project,
             )?;
-            let toon = Self::with_selected_project_audit(
-                &state,
-                routed_project,
-                render_symbols(&symbols),
-            )?;
-            if Self::telemetry_enabled()
-                && let Ok(baseline_tokens) = estimated_source_tokens_for_paths(
-                    &store,
-                    symbols.iter().map(|symbol| symbol.path.as_str()),
-                )
-            {
-                self.record_usage_for_state(&state, &store, |usage_instance| {
-                    record_usage_estimate(
-                        &store,
-                        Some(usage_instance),
-                        &self.session,
-                        MCP_EVENT_ATLAS_SYMBOLS,
-                        file.clone(),
-                        params.query.clone(),
-                        baseline_tokens,
-                        &toon,
-                    )
-                });
-            }
-            Ok(toon)
+            self.with_fresh_string_and_usage_for_request(&state, context, |store, _stamp| {
+                let file = file
+                    .as_deref()
+                    .map(|path| validated_indexed_file_key(store, Path::new(path)))
+                    .transpose()?;
+                let relations = store.load_symbol_relations(
+                    file.as_deref(),
+                    params.query.as_deref(),
+                    params.limit.unwrap_or(50),
+                )?;
+                let toon = Self::with_selected_project_audit(
+                    &state,
+                    routed_project,
+                    render_symbol_relations(&relations),
+                )?;
+                let usage = Self::telemetry_enabled()
+                    .then(|| {
+                        estimated_source_tokens_for_paths(
+                            store,
+                            relations.iter().map(|relation| relation.path.as_str()),
+                        )
+                    })
+                    .and_then(Result::ok)
+                    .map(|baseline_tokens| {
+                        McpUsageIntent::estimate(
+                            MCP_EVENT_ATLAS_SYMBOL_RELATIONS,
+                            file.clone(),
+                            params.query.clone(),
+                            baseline_tokens,
+                        )
+                    });
+                Ok((toon, usage))
+            })
         })())
     }
 
@@ -4239,50 +4704,12 @@ impl ProjectAtlasMcpServer {
         name = "atlas_symbol_relations",
         description = "List imports, calls, dependencies, and containment edges as compact TOON."
     )]
-    fn atlas_symbol_relations(&self, Parameters(params): Parameters<AtlasSymbolsParams>) -> String {
-        Self::as_mcp_text((|| {
-            let nearest_project = self.nearest_project_enabled(params.nearest_project);
-            let (state, file, routed_project) = self.state_and_optional_file_key(
-                params.project_path.as_deref(),
-                params.file.as_deref(),
-                nearest_project,
-            )?;
-            let store = Self::open_fresh_store(&state)?;
-            let file = file
-                .as_deref()
-                .map(|path| validated_indexed_file_key(&store, Path::new(path)))
-                .transpose()?;
-            let relations = store.load_symbol_relations(
-                file.as_deref(),
-                params.query.as_deref(),
-                params.limit.unwrap_or(50),
-            )?;
-            let toon = Self::with_selected_project_audit(
-                &state,
-                routed_project,
-                render_symbol_relations(&relations),
-            )?;
-            if Self::telemetry_enabled()
-                && let Ok(baseline_tokens) = estimated_source_tokens_for_paths(
-                    &store,
-                    relations.iter().map(|relation| relation.path.as_str()),
-                )
-            {
-                self.record_usage_for_state(&state, &store, |usage_instance| {
-                    record_usage_estimate(
-                        &store,
-                        Some(usage_instance),
-                        &self.session,
-                        MCP_EVENT_ATLAS_SYMBOL_RELATIONS,
-                        file.clone(),
-                        params.query.clone(),
-                        baseline_tokens,
-                        &toon,
-                    )
-                });
-            }
-            Ok(toon)
-        })())
+    fn atlas_symbol_relations(
+        &self,
+        Parameters(params): Parameters<AtlasSymbolsParams>,
+        context: RequestContext<RoleServer>,
+    ) -> String {
+        self.atlas_symbol_relations_response(&params, Some(context))
     }
 
     /// Return structural health findings.
@@ -4290,36 +4717,35 @@ impl ProjectAtlasMcpServer {
         name = "atlas_health",
         description = "Return a bounded ProjectAtlas structural health page with optional category, severity, and path-prefix filters."
     )]
-    fn atlas_health(&self, Parameters(params): Parameters<AtlasHealthParams>) -> String {
+    fn atlas_health(
+        &self,
+        Parameters(params): Parameters<AtlasHealthParams>,
+        context: RequestContext<RoleServer>,
+    ) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path.clone())?;
-            let store = Self::open_fresh_store(&state)?;
             let scope = if params.source_only.unwrap_or(false) {
                 HealthScope::source_only()
             } else {
                 HealthScope::all()
             };
             let query = health_query_from_params(&params, scope)?;
-            let page = store.unresolved_health_findings_page_current(&query)?;
-            let toon = render_health_page(&page, &query);
-            if Self::telemetry_enabled()
-                && let Ok(baseline_tokens) =
-                    estimated_source_tokens_for_indexed_files(&store, None, None)
-            {
-                self.record_usage_for_state(&state, &store, |usage_instance| {
-                    record_directory_walk_usage_estimate(
-                        &store,
-                        Some(usage_instance),
-                        &self.session,
-                        MCP_EVENT_ATLAS_HEALTH,
-                        None,
-                        None,
-                        baseline_tokens,
-                        &toon,
-                    )
-                });
-            }
-            Ok(toon)
+            self.with_fresh_string_and_usage_for_request(&state, Some(context), |store, stamp| {
+                let page = store.unresolved_health_findings_page_current(&query)?;
+                let toon = render_health_page(&page, &query);
+                let usage = Self::telemetry_enabled()
+                    .then(|| self.estimated_source_tokens_cached(&state, store, &stamp, None, None))
+                    .and_then(Result::ok)
+                    .map(|baseline_tokens| {
+                        McpUsageIntent::directory_walk(
+                            MCP_EVENT_ATLAS_HEALTH,
+                            None,
+                            None,
+                            baseline_tokens,
+                        )
+                    });
+                Ok((toon, usage))
+            })
         })())
     }
 
@@ -4437,16 +4863,19 @@ impl ProjectAtlasMcpServer {
         name = "atlas_parity_report",
         description = "Return a ProjectAtlas repository-intelligence parity gate report for release and agent-runtime readiness."
     )]
-    fn atlas_parity_report(&self, Parameters(params): Parameters<AtlasParityParams>) -> String {
+    fn atlas_parity_report(
+        &self,
+        Parameters(params): Parameters<AtlasParityParams>,
+        context: RequestContext<RoleServer>,
+    ) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path)?;
-            let store = Self::open_fresh_store(&state)?;
             let profile = params
                 .profile
                 .unwrap_or_else(|| crate::REPOSITORY_INTELLIGENCE_PROFILE.to_string());
-            Ok(render_parity_report(&build_parity_report(
-                &store, &profile,
-            )?))
+            self.with_fresh_string_for_request(&state, Some(context), |store, _stamp| {
+                Ok(render_parity_report(&build_parity_report(store, &profile)?))
+            })
         })())
     }
 
@@ -4628,9 +5057,10 @@ impl ProjectAtlasMcpServer {
     fn atlas_session_brief(
         &self,
         Parameters(params): Parameters<AtlasSessionBriefParams>,
+        context: RequestContext<RoleServer>,
     ) -> String {
         Self::as_mcp_text((|| {
-            let brief = self.build_session_brief(params)?;
+            let brief = self.build_session_brief(params, Some(context))?;
             Self::encode_named_payload(MCP_PAYLOAD_SESSION_BRIEF, &brief)
         })())
     }
@@ -4664,31 +5094,30 @@ impl ProjectAtlasMcpServer {
         name = "atlas_purpose_queue",
         description = "Return a bounded folder-first queue of ProjectAtlas paths that need agent purpose curation."
     )]
-    fn atlas_purpose_queue(&self, Parameters(params): Parameters<AtlasHealthParams>) -> String {
+    fn atlas_purpose_queue(
+        &self,
+        Parameters(params): Parameters<AtlasHealthParams>,
+        context: RequestContext<RoleServer>,
+    ) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path.clone())?;
-            let store = Self::open_fresh_store(&state)?;
             let query = health_query_from_params(&params, purpose_queue_scope(&params))?;
-            let page = purpose_curation_page(&store, &query)?;
-            let toon = render_purpose_curation_page(&page);
-            if Self::telemetry_enabled()
-                && let Ok(baseline_tokens) =
-                    estimated_source_tokens_for_indexed_files(&store, None, None)
-            {
-                self.record_usage_for_state(&state, &store, |usage_instance| {
-                    record_directory_walk_usage_estimate(
-                        &store,
-                        Some(usage_instance),
-                        &self.session,
-                        MCP_EVENT_ATLAS_PURPOSE_QUEUE,
-                        None,
-                        None,
-                        baseline_tokens,
-                        &toon,
-                    )
-                });
-            }
-            Ok(toon)
+            self.with_fresh_string_and_usage_for_request(&state, Some(context), |store, stamp| {
+                let page = purpose_curation_page(store, &query)?;
+                let toon = render_purpose_curation_page(&page);
+                let usage = Self::telemetry_enabled()
+                    .then(|| self.estimated_source_tokens_cached(&state, store, &stamp, None, None))
+                    .and_then(Result::ok)
+                    .map(|baseline_tokens| {
+                        McpUsageIntent::directory_walk(
+                            MCP_EVENT_ATLAS_PURPOSE_QUEUE,
+                            None,
+                            None,
+                            baseline_tokens,
+                        )
+                    });
+                Ok((toon, usage))
+            })
         })())
     }
 
@@ -4722,15 +5151,11 @@ impl ProjectAtlasMcpServer {
     fn atlas_purpose_review(
         &self,
         Parameters(params): Parameters<AtlasPurposeReviewParams>,
+        context: RequestContext<RoleServer>,
     ) -> String {
         Self::as_mcp_text((|| {
             let apply = params.apply.unwrap_or(false);
             let state = self.state_for_project_path(params.project_path)?;
-            let store = if apply {
-                Self::open_existing_mut_store(&state)?
-            } else {
-                Self::open_fresh_store(&state)?
-            };
             let requests = params
                 .items
                 .into_iter()
@@ -4740,8 +5165,15 @@ impl ProjectAtlasMcpServer {
                     confirm_existing: item.confirm_existing.unwrap_or(false),
                 })
                 .collect::<Vec<_>>();
-            let report = review_purposes(&store, &requests, apply)?;
-            Ok(render_purpose_review_report(&report))
+            if apply {
+                let store = Self::open_existing_mut_store(&state)?;
+                let report = review_purposes(&store, &requests, true)?;
+                return Ok(render_purpose_review_report(&report));
+            }
+            self.with_fresh_string_for_request(&state, Some(context), |store, _stamp| {
+                let report = review_purposes(store, &requests, false)?;
+                Ok(render_purpose_review_report(&report))
+            })
         })())
     }
 }
@@ -4778,6 +5210,8 @@ fn bounded_task_error(error: &CliError) -> String {
 mod tests {
     use super::*;
     use crate::atlas_map::init_project_with_config;
+    use notify::{Event, EventKind, event::ModifyKind};
+    use projectatlas_core::{IndexCancellation, IndexWorkStage};
     use std::fs;
     use std::io;
     use std::time::Duration;
@@ -4862,6 +5296,37 @@ mod tests {
         require(
             restarted_identity != first_identity,
             "a separately constructed MCP server reused the prior runtime identity",
+        )
+    }
+
+    #[test]
+    fn mcp_request_cancellation_bridge_reaches_index_work() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = Arc::clone(&cancellation);
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let bridge = McpRequestCancellationBridge::start_with_probe(
+            move || observed.load(Ordering::Acquire),
+            &control,
+        )?;
+
+        cancellation.store(true, Ordering::Release);
+        let mut canceled = false;
+        for _attempt in 0..100 {
+            if matches!(
+                control.check(IndexWorkStage::Publication),
+                Err(IndexWorkFailure::Cancelled { .. })
+            ) {
+                canceled = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        drop(bridge);
+
+        require(
+            canceled,
+            "RMCP cancellation probe did not reach the shared index work control",
         )
     }
 
@@ -5164,7 +5629,8 @@ mod tests {
             "shared-label".to_string(),
             false,
         );
-        let result = server.atlas_overview(Parameters(AtlasProjectParams { project_path: None }));
+        let result =
+            server.atlas_overview_response(AtlasProjectParams { project_path: None }, None);
         connection.execute_batch("ROLLBACK")?;
 
         if result.contains("overview:") && result.contains("files:") {
@@ -5200,7 +5666,7 @@ mod tests {
         drop(store);
 
         let call_overview = |server: &ProjectAtlasMcpServer| {
-            server.atlas_overview(Parameters(AtlasProjectParams { project_path: None }))
+            server.atlas_overview_response(AtlasProjectParams { project_path: None }, None)
         };
         let first = ProjectAtlasMcpServer::new(
             db_path.clone(),
@@ -5260,6 +5726,94 @@ mod tests {
         )
     }
 
+    #[test]
+    fn mcp_records_usage_only_for_the_accepted_verified_attempt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if telemetry_disabled() {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        let source = repo.join("src").join("lib.rs");
+        fs::create_dir_all(
+            source
+                .parent()
+                .ok_or_else(|| io::Error::other("missing parent"))?,
+        )?;
+        let original = "pub fn original() {}\n";
+        let revised = "pub fn revised() {}\n";
+        fs::write(&source, original)?;
+        let config_path = repo.join(".projectatlas").join("config.toml");
+        init_project_with_config(&repo, Some(&config_path))?;
+        let db_path = repo.join(".projectatlas").join("projectatlas.db");
+        let plan = ScanRuntimePlan::for_path(Some(&config_path), &repo, None)?;
+        let mut store = open_atlas_store_for_project(&db_path, &repo)?;
+        run_scan_pipeline(
+            &mut store,
+            &plan,
+            &SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, Some(1), Some(30)),
+        )?;
+        drop(store);
+        let state = McpProjectState {
+            root: repo.clone(),
+            db_path: db_path.clone(),
+            config_path: Some(config_path.clone()),
+        };
+        let server = ProjectAtlasMcpServer::new(
+            db_path.clone(),
+            Some(config_path.clone()),
+            "accepted-attempt".to_string(),
+            false,
+        );
+        let mut attempts = 0_u64;
+
+        let response =
+            server.with_fresh_string_and_usage_for_request(&state, None, |store, _stamp| {
+                attempts = attempts.saturating_add(1);
+                let hash = store
+                    .load_node_by_path("src/lib.rs")?
+                    .and_then(|node| node.node.content_hash)
+                    .ok_or_else(|| CliError::InvalidInput("source hash missing".to_string()))?;
+                if attempts == 1 {
+                    fs::write(&source, revised).map_err(|source_error| CliError::Io {
+                        path: source.clone(),
+                        source: source_error,
+                    })?;
+                    server.source_observations.inject_test_event(
+                        &db_path,
+                        &repo,
+                        Some(&config_path),
+                        Event::new(EventKind::Modify(ModifyKind::Any)).add_path(source.clone()),
+                    )?;
+                }
+                Ok((
+                    hash,
+                    Some(McpUsageIntent::estimate(
+                        MCP_EVENT_ATLAS_OVERVIEW,
+                        None,
+                        None,
+                        1,
+                    )),
+                ))
+            })?;
+
+        require(
+            attempts >= 2,
+            "mid-query source edit did not retry the query",
+        )?;
+        require(
+            response == blake3::hash(revised.as_bytes()).to_hex().to_string(),
+            "MCP returned the provisional pre-edit result",
+        )?;
+        let connection = rusqlite::Connection::open(db_path)?;
+        let events: i64 =
+            connection.query_row("SELECT COUNT(*) FROM usage_events", [], |row| row.get(0))?;
+        require(
+            events == 1,
+            "MCP telemetry recorded a discarded provisional attempt",
+        )
+    }
+
     /// Wait for one admitted task to reach a terminal state.
     fn wait_for_background_task(
         server: &ProjectAtlasMcpServer,
@@ -5312,20 +5866,26 @@ mod tests {
         project_path: &str,
         expected_symbol: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let overview = server.atlas_overview(Parameters(AtlasProjectParams {
-            project_path: Some(project_path.to_string()),
-        }));
+        let overview = server.atlas_overview_response(
+            AtlasProjectParams {
+                project_path: Some(project_path.to_string()),
+            },
+            None,
+        );
         require(
             overview.contains("overview:"),
             "agent overview did not read the published index",
         )?;
 
-        let summary = server.atlas_file_summary(Parameters(AtlasFileSummaryParams {
-            project_path: Some(project_path.to_string()),
-            file: "src/lib.rs".to_string(),
-            nearest_project: Some(false),
-            limit: Some(25),
-        }));
+        let summary = server.atlas_file_summary_response(
+            &AtlasFileSummaryParams {
+                project_path: Some(project_path.to_string()),
+                file: "src/lib.rs".to_string(),
+                nearest_project: Some(false),
+                limit: Some(25),
+            },
+            None,
+        );
         require(
             summary.contains("file_summary:")
                 && summary.contains("src/lib.rs")
@@ -5333,25 +5893,31 @@ mod tests {
             "agent file summary omitted published source facts",
         )?;
 
-        let symbols = server.atlas_symbols(Parameters(AtlasSymbolsParams {
-            project_path: Some(project_path.to_string()),
-            file: Some("src/lib.rs".to_string()),
-            nearest_project: Some(false),
-            query: None,
-            limit: Some(50),
-        }));
+        let symbols = server.atlas_symbols_response(
+            &AtlasSymbolsParams {
+                project_path: Some(project_path.to_string()),
+                file: Some("src/lib.rs".to_string()),
+                nearest_project: Some(false),
+                query: None,
+                limit: Some(50),
+            },
+            None,
+        );
         require(
             symbols.contains("symbols[") && symbols.contains(expected_symbol),
             "agent symbol read omitted published parser output",
         )?;
 
-        let relations = server.atlas_symbol_relations(Parameters(AtlasSymbolsParams {
-            project_path: Some(project_path.to_string()),
-            file: Some("src/lib.rs".to_string()),
-            nearest_project: Some(false),
-            query: None,
-            limit: Some(50),
-        }));
+        let relations = server.atlas_symbol_relations_response(
+            &AtlasSymbolsParams {
+                project_path: Some(project_path.to_string()),
+                file: Some("src/lib.rs".to_string()),
+                nearest_project: Some(false),
+                query: None,
+                limit: Some(50),
+            },
+            None,
+        );
         require(
             relations.contains("relations[") && relations.contains(expected_symbol),
             "agent relation read omitted published graph output",
@@ -5546,13 +6112,16 @@ mod tests {
         let db_path = repo.join(".projectatlas").join("projectatlas.db");
         let server = ProjectAtlasMcpServer::new(db_path, None, "mcp-test".to_string(), false);
 
-        let brief = server.build_session_brief(AtlasSessionBriefParams {
-            project_path: None,
-            query: Some("startup".to_string()),
-            folder_limit: None,
-            file_limit: None,
-            blocker_limit: None,
-        })?;
+        let brief = server.build_session_brief(
+            AtlasSessionBriefParams {
+                project_path: None,
+                query: Some("startup".to_string()),
+                folder_limit: None,
+                file_limit: None,
+                blocker_limit: None,
+            },
+            None,
+        )?;
 
         require(
             brief.project.index_status == McpIndexStatus::Missing,
@@ -5632,13 +6201,16 @@ mod tests {
         drop(store);
 
         let server = ProjectAtlasMcpServer::new(db_path, None, "mcp-test".to_string(), false);
-        let brief = server.build_session_brief(AtlasSessionBriefParams {
-            project_path: None,
-            query: Some("hiddenNeedle".to_string()),
-            folder_limit: Some(5),
-            file_limit: Some(5),
-            blocker_limit: Some(5),
-        })?;
+        let brief = server.build_session_brief(
+            AtlasSessionBriefParams {
+                project_path: None,
+                query: Some("hiddenNeedle".to_string()),
+                folder_limit: Some(5),
+                file_limit: Some(5),
+                blocker_limit: Some(5),
+            },
+            None,
+        )?;
 
         require(
             brief.files.is_empty(),
@@ -5668,6 +6240,26 @@ mod tests {
         require(
             disabled_text.contains("path_scope: selected_project"),
             "disabled nearest-project policy was not typed",
+        )?;
+        require(
+            disabled_text.contains("language_registry:")
+                && disabled_text.contains("accepted_set_digest:")
+                && disabled_text.contains("semantic_provider_digest:")
+                && disabled_text.contains("semantic_relation_contract_digest:")
+                && disabled_text.contains("benchmarked:")
+                && !disabled_text.contains("accepted_minimum:")
+                && !disabled_text.contains("provenance_source:")
+                && disabled_text.contains("optional_catalog:")
+                && disabled_text.contains("database:")
+                && disabled_text.contains("compile_options:")
+                && disabled_text.contains("search:")
+                && disabled_text.contains("default_mode: lexical")
+                && disabled_text.contains("optional_parser_pack:"),
+            "settings did not project compact shared language registry truth",
+        )?;
+        require(
+            disabled_text.len() <= MCP_SETTINGS_RESPONSE_MAX_BYTES,
+            "settings exceeded its agent-facing output bound",
         )?;
         let enabled_text = enabled.render_settings_with_capabilities(&enabled_state)?;
         require(
@@ -6105,6 +6697,160 @@ mod tests {
             "synchronous watch adapter did not return its completed report",
         )?;
         require_agent_index_reads(&server, &project_path, "fourth")?;
+        Ok(())
+    }
+
+    #[test]
+    fn long_lived_mcp_query_families_reuse_one_verified_epoch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const LARGE_UNRELATED_SOURCE_FILES: usize = 256;
+        const MAX_MEASURED_QUERY_OUTPUT_BYTES: usize = 64 * 1_024;
+        const MAX_MEASURED_QUERY_ELAPSED: Duration = Duration::from_secs(30);
+
+        let measure = |unrelated_source_files: usize| {
+            let temp = tempfile::tempdir()?;
+            let repo = temp.path().join("repo");
+            let source_dir = repo.join("src");
+            fs::create_dir_all(&source_dir)?;
+            fs::write(
+                source_dir.join("lib.rs"),
+                "pub fn first() { second(); }\nfn second() {}\n",
+            )?;
+            for index in 0..unrelated_source_files {
+                fs::write(
+                    source_dir.join(format!("unrelated_{index:03}.rs")),
+                    format!("pub fn unrelated_{index:03}() {{}}\n"),
+                )?;
+            }
+            let config_path = repo.join(".projectatlas").join("config.toml");
+            init_project_with_config(&repo, Some(&config_path))?;
+            let db_path = repo.join(".projectatlas").join("projectatlas.db");
+            let mut writer = open_atlas_store_for_project(&db_path, &repo)?;
+            let plan = ScanRuntimePlan::for_path(None, &repo, None)?;
+            run_scan_pipeline(
+                &mut writer,
+                &plan,
+                &SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, Some(1), None),
+            )?;
+            drop(writer);
+
+            let server = ProjectAtlasMcpServer::new(
+                db_path.clone(),
+                None,
+                "verified-epoch-test".to_string(),
+                false,
+            );
+            let state = McpProjectState {
+                root: repo,
+                db_path,
+                config_path: None,
+            };
+            let first = server.with_fresh_store(&state, |store, _stamp| Ok(store.overview()?))?;
+            require(
+                first.work.exact_verifications >= 1,
+                "first long-lived MCP read did not establish exact source truth",
+            )?;
+            require(
+                first.work.filesystem_entries > u64::try_from(unrelated_source_files)?,
+                "scale fixture did not exercise its complete repository source set",
+            )?;
+            let expected_stamp = first.stamp;
+
+            let folder = server.with_fresh_store(&state, |store, _stamp| {
+                Ok(render_ranked_nodes(
+                    NODE_LABEL_FOLDERS,
+                    &ranked_folder_nodes_with_reasons(store, "", 4)?,
+                ))
+            })?;
+            let folder_output_bytes = folder.value.len();
+            let folder = folder.with_output_bytes(folder_output_bytes);
+            let files = server.with_fresh_store(&state, |store, _stamp| {
+                Ok(render_ranked_nodes(
+                    NODE_LABEL_FILES,
+                    &ranked_file_nodes_with_reasons(store, "", Some("src"), None, 4, false)?,
+                ))
+            })?;
+            let files_output_bytes = files.value.len();
+            let files = files.with_output_bytes(files_output_bytes);
+            let summary = server.with_fresh_store(&state, |store, _stamp| {
+                let content = read_indexed_file_content(store, "src/lib.rs")?;
+                let report = build_file_summary_from_source(
+                    store,
+                    Path::new("src/lib.rs"),
+                    DEFAULT_FILE_SUMMARY_LIMIT,
+                    &content,
+                )?;
+                Ok(render_file_summary(&report))
+            })?;
+            let summary_output_bytes = summary.value.len();
+            let summary = summary.with_output_bytes(summary_output_bytes);
+            let relations = server.with_fresh_store(&state, |store, _stamp| {
+                Ok(render_symbol_relations(&store.load_symbol_relations(
+                    Some("src/lib.rs"),
+                    None,
+                    8,
+                )?))
+            })?;
+            let relation_output_bytes = relations.value.len();
+            let relations = relations.with_output_bytes(relation_output_bytes);
+
+            let mut measurements = Vec::new();
+            for (family, outcome) in [
+                ("folder", folder),
+                ("file", files),
+                ("summary", summary),
+                ("relation", relations),
+            ] {
+                require(
+                    outcome.stamp == expected_stamp,
+                    &format!("{family} call did not remain bound to the verified epoch"),
+                )?;
+                require(
+                    outcome.work.exact_verifications == 0
+                        && outcome.work.filesystem_entries == 0
+                        && outcome.work.filesystem_bytes == 0
+                        && outcome.work.decoded_nodes == 0,
+                    &format!("{family} call repeated repository-sized freshness work"),
+                )?;
+                require(
+                    outcome.work.sqlite_read_statements == 1,
+                    &format!("{family} freshness check used unexpected SQLite work"),
+                )?;
+                require(
+                    outcome.work.output_bytes == u64::try_from(outcome.value.len())?,
+                    &format!("{family} call did not record its accepted rendered bytes"),
+                )?;
+                require(
+                    outcome.value.len() <= MAX_MEASURED_QUERY_OUTPUT_BYTES,
+                    &format!("{family} call exceeded the focused output bound"),
+                )?;
+                require(
+                    !outcome.work.elapsed.is_zero()
+                        && outcome.work.elapsed <= MAX_MEASURED_QUERY_ELAPSED,
+                    &format!("{family} call did not retain a bounded elapsed measurement"),
+                )?;
+                measurements.push((family, outcome.work));
+            }
+            Ok::<_, Box<dyn std::error::Error>>(measurements)
+        };
+
+        let small = measure(0)?;
+        let large = measure(LARGE_UNRELATED_SOURCE_FILES)?;
+        for ((small_family, small_work), (large_family, large_work)) in small.into_iter().zip(large)
+        {
+            require(
+                small_family == large_family,
+                "small and large query measurements used different families",
+            )?;
+            require(
+                small_work.exact_verifications == large_work.exact_verifications
+                    && small_work.filesystem_entries == large_work.filesystem_entries
+                    && small_work.filesystem_bytes == large_work.filesystem_bytes
+                    && small_work.sqlite_read_statements == large_work.sqlite_read_statements
+                    && small_work.decoded_nodes == large_work.decoded_nodes,
+                &format!("{small_family} warm freshness work changed with repository scale"),
+            )?;
+        }
         Ok(())
     }
 

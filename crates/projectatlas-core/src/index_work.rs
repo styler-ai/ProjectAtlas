@@ -282,6 +282,12 @@ impl IndexWorkControl {
         self.cancellation.cancel();
     }
 
+    /// Borrow the exact cancellation signal shared by every operation worker.
+    #[must_use]
+    pub const fn cancellation(&self) -> &IndexCancellation {
+        &self.cancellation
+    }
+
     /// Check cancellation and deadline state at one typed work stage.
     ///
     /// # Errors
@@ -314,6 +320,7 @@ mod tests {
         let worker = control.clone();
         assert_eq!(worker.started_at(), control.started_at());
         assert_eq!(worker.worker_ceiling(), None);
+        assert!(!control.cancellation().is_cancelled());
 
         let worker_bounded = worker.with_worker_ceiling(4);
         let tighter_worker_bound = worker_bounded.with_worker_ceiling(2);
@@ -326,6 +333,7 @@ mod tests {
             Some(2)
         );
         cancellation.cancel();
+        assert!(control.cancellation().is_cancelled());
         assert_eq!(
             worker.check(IndexWorkStage::SourceHash),
             Err(IndexWorkFailure::Cancelled {

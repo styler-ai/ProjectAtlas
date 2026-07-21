@@ -13,6 +13,7 @@ use projectatlas_core::{
     IndexedNode, NodeKind, RankedNode, repo_path_to_native, validated_repo_file_key,
 };
 use projectatlas_db::{AtlasStore, CapturedProjectBinding, DbError, IndexedFileText};
+use projectatlas_symbols::module_aliases_for_path;
 use regex::RegexBuilder;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -1888,66 +1889,6 @@ fn symbol_target_aliases(symbol: &CodeSymbol) -> Vec<String> {
     let mut values = aliases.into_iter().collect::<Vec<_>>();
     values.sort();
     values
-}
-
-/// Return module aliases inferred from a normalized repository path.
-fn module_aliases_for_path(path: &str) -> Vec<String> {
-    let mut aliases = HashSet::new();
-    for stem in source_stems_for_path(path) {
-        let mut components = stem
-            .split('/')
-            .filter(|component| !component.is_empty())
-            .collect::<Vec<_>>();
-        if components
-            .first()
-            .is_some_and(|component| *component == "src")
-        {
-            components.remove(0);
-        }
-        if components.last().is_some_and(|component| {
-            matches!(*component, "lib" | "main" | "mod" | "index" | "__init__")
-        }) {
-            components.pop();
-        }
-        if components.is_empty() {
-            continue;
-        }
-        aliases.insert(components.join("::"));
-        aliases.insert(components.join("."));
-        if let Some(last) = components.last() {
-            aliases.insert((*last).to_string());
-        }
-    }
-    let mut values = aliases.into_iter().collect::<Vec<_>>();
-    values.sort();
-    values
-}
-
-/// Return source path stems, including package-entry aliases.
-fn source_stems_for_path(path: &str) -> Vec<String> {
-    let stem = strip_known_source_extension(path);
-    let mut stems = vec![stem.clone()];
-    if let Some((parent, entry_name)) = stem.rsplit_once('/')
-        && matches!(entry_name, "index" | "__init__" | "mod")
-    {
-        stems.push(parent.to_string());
-    }
-    stems.sort();
-    stems.dedup();
-    stems
-}
-
-/// Strip common source extensions while preserving dotted directory names.
-fn strip_known_source_extension(path: &str) -> String {
-    for extension in [
-        ".d.ts", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs",
-    ] {
-        if let Some(stem) = path.strip_suffix(extension) {
-            return stem.to_string();
-        }
-    }
-    path.rsplit_once('.')
-        .map_or_else(|| path.to_string(), |(stem, _extension)| stem.to_string())
 }
 
 /// Build a stable identity key for a summarized symbol row.

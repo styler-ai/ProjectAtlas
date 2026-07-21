@@ -4,6 +4,8 @@ pub mod graph;
 pub mod health;
 pub mod index_work;
 pub mod language;
+pub mod optional_parser_pack;
+pub mod optional_parser_protocol;
 pub mod outline;
 pub mod symbols;
 pub mod telemetry;
@@ -126,7 +128,10 @@ pub enum PurposeStatus {
     Suggested,
     /// A purpose has been explicitly approved.
     Approved,
-    /// The node changed enough that the purpose should be reviewed.
+    /// A legacy or explicitly flagged accepted purpose awaits explicit review.
+    ///
+    /// Normal source, hash, summary, symbol, and graph changes never create
+    /// this state or demote an approved purpose.
     Stale,
 }
 
@@ -561,12 +566,7 @@ pub fn normalized_parent(path: &str) -> Option<String> {
 /// Return a normalized extension for indexing.
 #[must_use]
 pub fn normalized_extension(path: &Path) -> Option<String> {
-    let file_name = path.file_name()?.to_string_lossy();
-    if file_name.ends_with(".d.ts") {
-        return Some(".d.ts".to_string());
-    }
-    path.extension()
-        .map(|extension| format!(".{}", extension.to_string_lossy().to_lowercase()))
+    language::normalized_language_extension(path)
 }
 
 #[cfg(test)]

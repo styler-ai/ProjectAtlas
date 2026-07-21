@@ -204,6 +204,9 @@ fn apply_root_transition(
                 (identity, identity_changed)
             }
             ProjectRootTransition::Detach => {
+                store
+                    .connection
+                    .execute("DELETE FROM graph_resolution_keys", [])?;
                 store.connection.execute("DELETE FROM graph_coverage", [])?;
                 store
                     .connection
@@ -438,9 +441,10 @@ mod tests {
     use super::*;
     use crate::HealthResolution;
     use projectatlas_core::graph::{
-        Completeness, ConfidenceClass, CoverageRecord, CoverageScope, CoverageState,
-        EntitySelector, GraphEntity, GraphRelationKind, LogicalRelation, RelationOccurrence,
-        RelationResolution, RepositoryFilePath, SourceSpan,
+        CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
+        CoverageState, EntityResolutionKey, EntitySelector, GraphEntity, GraphIdentityText,
+        GraphRelationKind, LogicalRelation, RelationDependencyKey, RelationOccurrence,
+        RelationResolution, RepositoryFilePath, ResolutionKeyDomain, SourceSpan,
     };
     use projectatlas_core::symbols::RelationKind;
     use projectatlas_core::telemetry::usage_from_estimates;
@@ -564,7 +568,7 @@ mod tests {
         assert_authored_state(&rejected_store)?;
         assert_usage_report(&rejected_store, true)?;
         assert_runtime_scope(&rejected_store, source_identity, 1, 0, 1)?;
-        assert_graph_counts(&rejected_store, (2, 1, 1, 1))?;
+        assert_graph_counts(&rejected_store, [2, 1, 1, 1, 1, 1, 1])?;
         require(
             rejected_store.index_publication()?.is_some(),
             "rejected transition invalidated publication",
@@ -744,7 +748,7 @@ mod tests {
         assert_authored_state(&detached_store)?;
         assert_usage_report(&detached_store, false)?;
         assert_runtime_scope(&detached_store, source_identity, 0, 1, 0)?;
-        assert_graph_counts(&detached_store, (0, 0, 0, 0))?;
+        assert_graph_counts(&detached_store, [0, 0, 0, 0, 0, 0, 0])?;
         require(
             detached_store.index_publication()?.is_none(),
             "detach retained publication",
@@ -759,7 +763,7 @@ mod tests {
         assert_authored_state(&source_store)?;
         assert_usage_report(&source_store, true)?;
         assert_runtime_scope(&source_store, source_identity, 1, 0, 1)?;
-        assert_graph_counts(&source_store, (2, 1, 1, 1))?;
+        assert_graph_counts(&source_store, [2, 1, 1, 1, 1, 1, 1])?;
         drop(source_store);
 
         let mut rollback_store = AtlasStore::open(&rollback_db)?;
@@ -795,7 +799,7 @@ mod tests {
         assert_authored_state(&rollback_store)?;
         assert_usage_report(&rollback_store, true)?;
         assert_runtime_scope(&rollback_store, source_identity, 1, 0, 1)?;
-        assert_graph_counts(&rollback_store, (2, 1, 1, 1))?;
+        assert_graph_counts(&rollback_store, [2, 1, 1, 1, 1, 1, 1])?;
         require(
             rollback_store.index_publication()?.is_some(),
             "rollback invalidated prior publication",
@@ -824,7 +828,7 @@ mod tests {
         assert_authored_state(&moved_store)?;
         assert_usage_report(&moved_store, true)?;
         assert_runtime_scope(&moved_store, source_identity, 1, 0, 1)?;
-        assert_graph_counts(&moved_store, (2, 1, 1, 1))?;
+        assert_graph_counts(&moved_store, [2, 1, 1, 1, 1, 1, 1])?;
         require(
             moved_store.index_publication()?.is_none(),
             "move retained publication",
@@ -922,7 +926,7 @@ mod tests {
         assert_authored_state(&detached_store)?;
         assert_usage_report(&detached_store, false)?;
         assert_runtime_scope(&detached_store, initial.project_instance_id, 0, 1, 0)?;
-        assert_graph_counts(&detached_store, (0, 0, 0, 0))?;
+        assert_graph_counts(&detached_store, [0, 0, 0, 0, 0, 0, 0])?;
         require(
             detached_store.index_publication()?.is_none(),
             "stale writes restored invalidated publication state",
@@ -1065,9 +1069,11 @@ mod tests {
             generation,
         )?;
         let relation = LogicalRelation::new(
-            &project_entity,
-            GraphRelationKind::Legacy(RelationKind::Contains),
-            RelationResolution::resolved(&file_entity)?,
+            &file_entity,
+            GraphRelationKind::Legacy(RelationKind::DependsOn),
+            RelationResolution::Unresolved {
+                reference: GraphIdentityText::new("src/lib.rs")?,
+            },
             ConfidenceClass::Exact,
             Completeness::Complete,
             generation,
@@ -1088,13 +1094,29 @@ mod tests {
             None,
             None,
         )?;
+        let resolution_key = CanonicalResolutionKey::new(
+            project,
+            ResolutionKeyDomain::Declaration,
+            &GraphIdentityText::new("identity-transition")?,
+            &GraphIdentityText::new("rust")?,
+            None,
+            None,
+            Some(GraphRelationKind::Legacy(RelationKind::DependsOn)),
+            &GraphIdentityText::new("src/lib.rs")?,
+        );
+        let entity_export =
+            EntityResolutionKey::new(file_entity.key().clone(), resolution_key.clone())?;
+        let relation_dependency =
+            RelationDependencyKey::new(relation.key().clone(), resolution_key)?;
         let mut publication = store.begin_index_publication("identity-transition")?;
-        publication.replace_repository_graph(
+        publication.replace_repository_graph_with_resolution_keys(
             project,
             &[project_entity, file_entity],
             &[relation],
             &[occurrence],
             &[coverage],
+            &[entity_export],
+            &[relation_dependency],
         )?;
         publication.complete()?;
         Ok(())
@@ -1265,16 +1287,16 @@ mod tests {
         require_eq(&fs::read(database_path)?, &expected.to_vec(), label)
     }
 
-    fn assert_graph_counts(
-        store: &AtlasStore,
-        expected: (i64, i64, i64, i64),
-    ) -> Result<(), Box<dyn Error>> {
+    fn assert_graph_counts(store: &AtlasStore, expected: [i64; 7]) -> Result<(), Box<dyn Error>> {
         let mut counts = Vec::new();
         for table in [
             "graph_entities",
             "graph_relations",
             "graph_relation_occurrences",
             "graph_coverage",
+            "graph_resolution_keys",
+            "graph_entity_exports",
+            "graph_relation_dependencies",
         ] {
             counts.push(store.connection.query_row(
                 &format!("SELECT COUNT(*) FROM {table}"),
@@ -1282,8 +1304,17 @@ mod tests {
                 |row| row.get::<_, i64>(0),
             )?);
         }
-        let expected = vec![expected.0, expected.1, expected.2, expected.3];
-        require_eq(&counts, &expected, "graph row counts")?;
+        require_eq(&counts, &expected.to_vec(), "graph row counts")?;
+        let quick_check = store
+            .connection
+            .query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0))?;
+        require_eq(&quick_check, &"ok".to_string(), "database integrity")?;
+        let foreign_key_failures = store.connection.query_row(
+            "SELECT COUNT(*) FROM pragma_foreign_key_check",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&foreign_key_failures, &0, "foreign key integrity")?;
         Ok(())
     }
 }

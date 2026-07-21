@@ -12,22 +12,10 @@ map_path = ".projectatlas/projectatlas.toon"
 nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
 
 [scan]
+# Shortened documentation example. `projectatlas init` writes the complete
+# registry-derived default; see docs/language-support.md for every rule.
 source_extensions = [
-  ".py", ".pyw", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".d.ts", ".java",
-  ".c", ".cpp", ".h", ".hpp", ".cxx", ".cc", ".hxx", ".hh", ".cs", ".go",
-  ".m", ".mm", ".rb", ".php", ".swift", ".kt", ".kts", ".rs", ".scala",
-  ".sh", ".bash", ".zsh", ".ps1", ".psm1", ".psd1", ".bat", ".cmd", ".r",
-  ".pl", ".pm", ".lua", ".dart", ".hs", ".ml", ".mli", ".fs", ".fsx",
-  ".clj", ".cljs", ".vim", ".zig", ".zon", ".html", ".htm", ".css", ".scss",
-  ".sass", ".less", ".stylus", ".styl", ".md", ".mdx", ".json", ".jsonc",
-  ".xml", ".yml", ".yaml", ".toml", ".toon", ".txt", ".ini", ".cfg", ".conf", ".vue",
-  ".svelte", ".astro", ".jsp", ".jspx", ".jspf", ".tag", ".tagx", ".gsp",
-  ".properties", ".gradle", ".groovy", ".proto", ".hbs", ".handlebars", ".ejs",
-  ".pug", ".ftl", ".mustache", ".liquid", ".erb", ".sql", ".ddl", ".dml",
-  ".mysql", ".postgresql", ".psql", ".sqlite", ".mssql", ".oracle", ".ora",
-  ".db2", ".proc", ".procedure", ".func", ".function", ".view", ".trigger",
-  ".index", ".migration", ".seed", ".fixture", ".schema", ".cql", ".cypher",
-  ".sparql", ".gql", ".liquibase", ".flyway"
+  ".rs", ".py", ".js", ".ts", ".tsx", ".java", ".go", ".toml"
 ]
 exclude_dir_names = [".git", ".projectatlas", ".venv", "__pycache__", "node_modules", "dist", "build", "target"]
 exclude_dir_suffixes = [".egg-info"]
@@ -35,6 +23,10 @@ exclude_path_prefixes = []
 non_source_path_prefixes = []
 max_scan_lines = 80
 text_index_max_bytes = 2000000
+
+[scan.language_overrides]
+# ".m" = "objective-c"
+# "BUILD" = "makefile"
 
 [purpose]
 default_style = "javadoc"
@@ -54,7 +46,83 @@ asset_allowed_prefixes = []
 asset_extensions = [".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".ico", ".pdf", ".ttf", ".woff", ".woff2"]
 ```
 
-`projectatlas init` writes the Rust configuration template. Adjust `scan.source_extensions` only when a project needs a narrower or broader compatibility-map surface.
+`projectatlas init` writes the complete accepted default-core source-extension
+set, not the shortened example above. That default preserves the 0.3.26 scan
+surface and does not silently admit data-like optional-catalog extensions when
+the broad parser pack is absent. Existing explicit lists remain explicit on
+upgrade. Adjust `scan.source_extensions` only when a project needs a narrower or
+broader compatibility-map surface; the verified optional-pack lifecycle supplies
+its accepted additional scan rules while enabled. The generated
+[language support matrix](language-support.md) is the authoritative detector and
+capability inventory.
+
+`projectatlas settings` and MCP `atlas_settings` expose the same compact,
+content-free diagnostics. The report includes schema/migration compatibility,
+the active complete publication generation, linked SQLite and compile-option
+identity, the validated filesystem and WAL/synchronous/busy/checkpoint/statistics
+profile, a bounded actionable non-complete coverage sample, typed lexical/FTS/
+semantic/hybrid search readiness, the optional-parser lifecycle, and separate
+language-registry, accepted-set, semantic-provider, and current semantic-relation
+contract digests. Settings is read-only: it does not migrate, scan source, build
+an index, load parser assets, or record telemetry. It does not inline the complete
+per-language matrix; use the generated matrix when every row is required. Lexical
+readiness requires one complete nonzero publication with a validated contract
+fingerprint; invalid persisted fingerprint text is omitted and reported as invalid
+rather than reproduced through the diagnostic surface.
+
+### Optional broad parser pack
+
+The default core remains self-contained. Normal startup, scanning, configuration,
+and MCP use do not download, install, open, hash, or start optional parser-pack
+assets. A project opts in only through the explicit lifecycle commands:
+
+```powershell
+projectatlas parser-pack verify --archive <completed-pack.tar.zst>
+projectatlas parser-pack install --archive <completed-pack.tar.zst>
+projectatlas parser-pack enable --artifact <artifact-manifest-blake3>
+projectatlas parser-pack update --archive <completed-pack.tar.zst>
+projectatlas parser-pack status
+projectatlas parser-pack disable
+projectatlas parser-pack remove
+```
+
+`verify` inspects a completed archive without installing it. `install` publishes
+one immutable versioned slot but does not select it. `enable` writes the exact
+selected slot to `.projectatlas/optional-parser-pack.json` for the current
+project. `update` first verifies the currently selected slot, stages and verifies
+the replacement, then atomically changes the project selection while retaining
+the previous exact slot as rollback metadata. `disable` removes only the
+project-local selection. `remove` disables the current project and removes every
+slot owned by this parser-pack ID from the current user's parser-pack store; it is
+idempotent and retains any slot whose platform-profile cleanup or filesystem
+removal fails so the operation can be retried safely.
+
+The user store is `%LOCALAPPDATA%\ProjectAtlas\parser-packs` on Windows,
+`$XDG_DATA_HOME/projectatlas/parser-packs` (or
+`$HOME/.local/share/projectatlas/parser-packs`) on Linux, and
+`$HOME/Library/Application Support/ProjectAtlas/parser-packs` on macOS. The
+hidden `--storage-root` option exists only for controlled verification and test
+isolation; ordinary users should keep the platform default.
+
+Windows x86-64 and Linux x86-64 require their accepted containment adapters.
+Other hosts return a typed `unsupported_containment` error before archive, state,
+or storage access; `disable`, `remove`, and content-free `status` remain available
+for cleanup and diagnosis. A present project selection is admitted only after its
+direct `.projectatlas` parent, immutable slot, manifests, digests, inventory, and
+supervisor contract all verify. Lifecycle cleanup never follows a product-owned
+symlink or junction leaf. As with other same-user local package managers, this
+protects the stable lifecycle-owned tree and accidental or stale links; it is not
+a defense against a concurrently malicious process running as the same user and
+replacing filesystem entries during an operation.
+
+`scan.language_overrides` maps one exact filename or dot-prefixed extension to an accepted canonical language ID
+or compatibility alias. Exact filename selectors are case-sensitive; extension selectors are normalized to lower
+case and the longest matching compound extension wins. Targets are validated against the versioned language
+registry, so an unknown language or selector containing a path separator fails configuration loading instead of
+silently changing parser behavior. Selection precedence is explicit override, built-in exact filename, longest
+compound extension, ordinary extension, then a bounded content/dialect rule. The bounded content prefix is retained
+from the scanner's existing exact hash read rather than opening every file a second time. Override changes are part
+of the publication-contract fingerprint and therefore require normal derived refresh before indexed reads continue.
 
 `project.purpose_filename` is intentionally omitted from new configs. ProjectAtlas still accepts the key as a
 legacy migration override and otherwise uses `.purpose` internally only while importing old folder-purpose files

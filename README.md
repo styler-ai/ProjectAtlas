@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.3.26"><img alt="release" src="https://img.shields.io/badge/release-v0.3.26-blue"></a>
+  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.0"><img alt="release" src="https://img.shields.io/badge/release-v0.4.0-blue"></a>
   <img alt="rust" src="https://img.shields.io/badge/Rust-2024-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
@@ -27,7 +27,7 @@ No required `.purpose` files. No source-header tax. No hosted index. The project
 ## Quickstart
 
 ```bash
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.26
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.4.0
 codex plugin add projectatlas --marketplace projectatlas
 ```
 
@@ -46,7 +46,7 @@ correctly keeps that pinned ref. In that case, replace only the dedicated `style
 
 ```bash
 codex plugin marketplace remove projectatlas
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.3.26
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.4.0
 ```
 
 Then tell Codex: "Use ProjectAtlas for this repo."
@@ -180,7 +180,7 @@ Most users can stop at the plugin install. The CLI is here for local debugging, 
 Only need the CLI yourself? Install it from the released tag:
 
 ```bash
-cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.3.26 projectatlas-cli --locked
+cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.4.0 projectatlas-cli --locked
 ```
 
 From this checkout:
@@ -307,7 +307,7 @@ ProjectAtlas scans with `.gitignore` awareness, hashes files with BLAKE3, stores
 
 ## Release Quality
 
-`v0.3.26` ships through the full release matrix:
+`v0.4.0` ships through the full release matrix:
 
 - Rust format, check, clippy, dependency policy, tests, doctests, and rustdoc.
 - ProjectAtlas scan, parity, database-backed purpose lint, and health checks.
@@ -338,6 +338,7 @@ skills/                   standalone agent skill snippets
 - Core model crate docs: https://styler-ai.github.io/ProjectAtlas/projectatlas_core/
 - `docs/agent-integration.md`
 - `docs/configuration.md`
+- `docs/language-support.md`
 - `docs/workflow.md`
 - `docs/structural-summaries.md`
 - `docs/benchmarks/large-application-token-savings.md`

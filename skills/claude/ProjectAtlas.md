@@ -40,7 +40,7 @@ repository overview to folder, file, compressed outline, and exact source only w
 10. Run `projectatlas health-check` before cleanup/refactor decisions.
 11. Open full source only for selected files or exact slices.
 12. Run `projectatlas token` when token-savings reporting is requested; use `projectatlas token --view tui` only for a human terminal dashboard.
-13. Correct wrong, stale, vague, or generic purposes opportunistically with `atlas_purpose_set` or `projectatlas purpose set` after inspecting enough context. Purpose entries live in SQLite and are preserved across scans; changed approved files become stale instead of losing curated purpose text.
+13. Correct a wrong, vague, generic, inconsistent, or genuinely repurposed accepted purpose explicitly with `atlas_purpose_set` or `projectatlas purpose set` after inspecting enough context. Purpose entries live in SQLite and remain approved across source/hash/summary/symbol/graph changes. Absent paths leave their purposes dormant, exact-path reappearance restores them, and renames do not transfer approval automatically.
 
 Token savings estimate avoided wrong-folder exploration, wrong-file opens, and unnecessary full-code reads caused by the atlas-first workflow. Agent and MCP surfaces should stay structured by default; the TUI dashboard is explicit terminal UI with "Without PA", "With PA", and "Saved" comparison bars.
 

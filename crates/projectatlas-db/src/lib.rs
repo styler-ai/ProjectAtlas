@@ -1,13 +1,24 @@
 //! Purpose: Persist `ProjectAtlas` 3 indexes in `SQLite`.
 
+mod diagnostics;
 mod project_identity;
 mod repository_graph;
 mod schema;
 mod sqlite_profile;
 mod telemetry;
 
+pub use diagnostics::{
+    DatabaseCoverageSample, DatabaseCoverageSummary, DatabaseCoverageTotalState,
+    DatabaseFilesystemSupport, DatabaseOperatingProfileReport, DatabasePublicationContractState,
+    DatabasePublicationReport, DatabaseSchemaCompatibility, DatabaseSchemaReport,
+    DatabaseSettingsReport, SqliteCompileOptionsIdentity, SqliteRuntimeReport,
+    database_settings_report,
+};
 pub use project_identity::{ProjectRootTransition, ProjectRootTransitionResult};
-pub use repository_graph::{RepositoryGraphPage, RepositoryGraphRelationQuery};
+pub use repository_graph::{
+    RepositoryAffectedSourceFootprint, RepositoryGraphPage, RepositoryGraphRelationQuery,
+    RepositoryResolutionCandidate,
+};
 pub use sqlite_profile::validate_database_location;
 pub use telemetry::{
     PlannerStatisticsPolicy, PlannerStatisticsState, SpillCleanupState, TelemetryCheckpointState,
@@ -46,7 +57,7 @@ use rusqlite::{
 };
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::{ParseIntError, TryFromIntError};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
@@ -158,6 +169,22 @@ pub enum DbError {
         table: &'static str,
         /// Stable shape diagnostic.
         reason: &'static str,
+    },
+    /// Persisted per-file symbol rows do not match their owning parser metadata.
+    #[error("invalid persisted symbol graph for {path:?}: {reason}")]
+    SymbolGraphRowShape {
+        /// Repository path whose persisted graph is inconsistent.
+        path: String,
+        /// Stable shape diagnostic.
+        reason: &'static str,
+    },
+    /// Equal scoped resolution digests retained different canonical witnesses.
+    #[error("resolution-key collision in {domain} for digest {digest:?}")]
+    ResolutionKeyCollision {
+        /// Closed resolution domain containing the conflict.
+        domain: &'static str,
+        /// Fixed digest shared by conflicting witnesses.
+        digest: [u8; 32],
     },
     /// A normalized binary graph field has the wrong width.
     #[error("invalid {field} blob length {found}; expected {expected}")]
@@ -1653,6 +1680,32 @@ impl AtlasStore {
     /// Returns an error if persistence fails.
     pub fn replace_symbol_graph(&mut self, graph: &SymbolGraph) -> DbResult<()> {
         let metadata = SourceParseMetadata::from_graph(graph);
+        self.replace_symbol_graph_with_metadata(graph, &metadata)
+    }
+
+    /// Replace one file's symbol graph while preserving independent source parse metadata.
+    ///
+    /// This permits a grammar-backed source parse to coexist with conservative fallback
+    /// symbol and relationship facts without relabeling those facts as grammar-native.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if metadata identity/counts differ from the graph or persistence fails.
+    pub fn replace_symbol_graph_with_metadata(
+        &mut self,
+        graph: &SymbolGraph,
+        metadata: &SourceParseMetadata,
+    ) -> DbResult<()> {
+        if metadata.path != graph.path
+            || metadata.language != graph.language
+            || metadata.symbol_count != graph.symbols.len()
+            || metadata.relation_count != graph.relations.len()
+        {
+            return Err(DbError::SymbolGraphRowShape {
+                path: graph.path.clone(),
+                reason: "source parse metadata identity or fact counts differ from the graph",
+            });
+        }
         let savepoint = self.validated_savepoint()?;
         let node_id = {
             let mut delete_symbols =
@@ -1667,15 +1720,17 @@ impl AtlasStore {
                 INSERT INTO source_parse_metadata(
                     path,
                     language,
-                    parser,
+                    source_parser,
+                    fact_parser,
                     symbol_count,
                     relation_count,
                     updated_at
                 )
-                VALUES(?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
+                VALUES(?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP)
                 ON CONFLICT(path) DO UPDATE SET
                     language = excluded.language,
-                    parser = excluded.parser,
+                    source_parser = excluded.source_parser,
+                    fact_parser = excluded.fact_parser,
                     symbol_count = excluded.symbol_count,
                     relation_count = excluded.relation_count,
                     updated_at = CURRENT_TIMESTAMP
@@ -1685,6 +1740,7 @@ impl AtlasStore {
                 metadata.path,
                 metadata.language.as_deref(),
                 metadata.parser.to_string(),
+                graph.parser.to_string(),
                 usize_to_i64(metadata.symbol_count),
                 usize_to_i64(metadata.relation_count),
             ])?;
@@ -2533,6 +2589,126 @@ impl AtlasStore {
         Ok(parsers)
     }
 
+    /// Reconstruct persisted symbol graphs for exact repository paths in bounded batches.
+    ///
+    /// Paths without parser metadata are omitted. Any selected symbol or relation
+    /// without matching metadata, or any metadata count mismatch, fails the whole
+    /// operation instead of returning a partial graph set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for `SQLite` failures, invalid persisted counts or enums,
+    /// and inconsistent symbol-graph rows.
+    pub fn load_symbol_graphs_for_paths(&self, paths: &[String]) -> DbResult<Vec<SymbolGraph>> {
+        const PATHS_PER_QUERY: usize = 900;
+
+        let mut paths = paths.to_vec();
+        paths.sort();
+        paths.dedup();
+        let mut graphs = Vec::with_capacity(paths.len());
+        for chunk in paths.chunks(PATHS_PER_QUERY) {
+            let placeholders = numbered_placeholders(1, chunk.len());
+            let metadata_sql = format!(
+                "SELECT path, language, source_parser, fact_parser, symbol_count, relation_count
+                   FROM source_parse_metadata
+                  WHERE path IN ({placeholders})
+                  ORDER BY path"
+            );
+            let mut metadata_statement = self.connection.prepare(&metadata_sql)?;
+            let metadata_rows =
+                metadata_statement.query_map(params_from_iter(chunk.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                })?;
+            let mut staged = BTreeMap::new();
+            for row in metadata_rows {
+                let (path, language, source_parser, fact_parser, symbol_count, relation_count) =
+                    row?;
+                staged.insert(
+                    path.clone(),
+                    (
+                        SourceParseMetadata {
+                            path,
+                            language,
+                            parser: ParserKind::from_db(&source_parser),
+                            symbol_count: count_to_usize(
+                                "source_parse_metadata.symbol_count",
+                                symbol_count,
+                            )?,
+                            relation_count: count_to_usize(
+                                "source_parse_metadata.relation_count",
+                                relation_count,
+                            )?,
+                        },
+                        ParserKind::from_db(&fact_parser),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                );
+            }
+
+            let symbol_sql = format!(
+                "SELECT path, language, name, kind, signature, line_start, line_end,
+                        parent, parser, detail, exported, documentation
+                   FROM symbols
+                  WHERE path IN ({placeholders})
+                  ORDER BY path, line_start, line_end, name, kind"
+            );
+            for symbol in self.query_symbols(&symbol_sql, params_from_iter(chunk.iter()))? {
+                let path = symbol.path.clone();
+                let Some((_, _, symbols, _)) = staged.get_mut(&path) else {
+                    return Err(DbError::SymbolGraphRowShape {
+                        path,
+                        reason: "symbol rows require matching parser metadata",
+                    });
+                };
+                symbols.push(symbol);
+            }
+
+            let relation_sql = format!(
+                "SELECT path, source_name, target_name, kind, line, context, parser
+                   FROM symbol_relations
+                  WHERE path IN ({placeholders})
+                  ORDER BY path, line, source_name, target_name, kind"
+            );
+            for relation in self.query_relations(&relation_sql, params_from_iter(chunk.iter()))? {
+                let path = relation.path.clone();
+                let Some((_, _, _, relations)) = staged.get_mut(&path) else {
+                    return Err(DbError::SymbolGraphRowShape {
+                        path,
+                        reason: "relation rows require matching parser metadata",
+                    });
+                };
+                relations.push(relation);
+            }
+
+            for (path, (metadata, fact_parser, symbols, relations)) in staged {
+                if metadata.symbol_count != symbols.len()
+                    || metadata.relation_count != relations.len()
+                {
+                    return Err(DbError::SymbolGraphRowShape {
+                        path,
+                        reason: "parser metadata counts do not match persisted rows",
+                    });
+                }
+                graphs.push(SymbolGraph {
+                    path: metadata.path,
+                    language: metadata.language,
+                    parser: fact_parser,
+                    symbols,
+                    relations,
+                });
+            }
+        }
+        Ok(graphs)
+    }
+
     /// Load file-level parser metadata for one path.
     ///
     /// # Errors
@@ -2542,7 +2718,7 @@ impl AtlasStore {
         self.connection
             .query_row(
                 "
-                SELECT path, language, parser, symbol_count, relation_count
+                SELECT path, language, source_parser, symbol_count, relation_count
                 FROM source_parse_metadata
                 WHERE path = ?1
                 ",
@@ -4566,10 +4742,9 @@ fn delete_absent_scan_projections(connection: &Connection) -> DbResult<()> {
 fn upsert_nodes(connection: &Connection, nodes: &[Node]) -> DbResult<()> {
     let mut select_existing = connection.prepare_cached(
         "
-        SELECT n.content_hash, p.status
-        FROM nodes n
-        LEFT JOIN purposes p ON p.node_id = n.id
-        WHERE n.path = ?1
+        SELECT content_hash
+        FROM nodes
+        WHERE path = ?1
         ",
     )?;
     let mut upsert_node = connection.prepare_cached(
@@ -4606,33 +4781,16 @@ fn upsert_nodes(connection: &Connection, nodes: &[Node]) -> DbResult<()> {
             updated_at = CURRENT_TIMESTAMP
         ",
     )?;
-    let mut mark_purpose_stale = connection.prepare_cached(
-        "
-        UPDATE purposes
-        SET status = 'stale',
-            updated_at = CURRENT_TIMESTAMP
-        WHERE node_id = ?1
-        ",
-    )?;
-
     for node in nodes {
         let existing = select_existing
-            .query_row([&node.path], |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                ))
-            })
+            .query_row([&node.path], |row| row.get::<_, Option<String>>(0))
             .optional()?;
-        let content_changed = existing.as_ref().is_some_and(|(old_hash, _)| {
+        let content_changed = existing.as_ref().is_some_and(|old_hash| {
             node.kind == NodeKind::File
                 && old_hash.is_some()
                 && node.content_hash.is_some()
                 && old_hash != &node.content_hash
         });
-        let should_mark_stale = content_changed
-            && existing.as_ref().and_then(|(_, status)| status.as_deref())
-                == Some(PurposeStatus::Approved.as_str());
         upsert_node.execute(params![
             node.path,
             node.kind.to_string(),
@@ -4650,9 +4808,6 @@ fn upsert_nodes(connection: &Connection, nodes: &[Node]) -> DbResult<()> {
             generate_node_summary(node),
             content_changed
         ])?;
-        if should_mark_stale {
-            mark_purpose_stale.execute([node_id])?;
-        }
     }
     Ok(())
 }
@@ -6840,7 +6995,7 @@ mod tests {
     }
 
     #[test]
-    fn approved_purpose_becomes_stale_when_file_hash_changes() -> Result<(), Box<dyn Error>> {
+    fn approved_purpose_survives_incremental_file_hash_changes() -> Result<(), Box<dyn Error>> {
         let mut store = AtlasStore::in_memory()?;
         store.replace_scan(&[test_file_node("src/main.rs", "hash-a")])?;
         store.set_purpose(
@@ -6852,11 +7007,16 @@ mod tests {
 
         let node = store
             .load_node_by_path("src/main.rs")?
-            .ok_or_else(|| io::Error::other("stale node missing"))?;
+            .ok_or_else(|| io::Error::other("changed node missing"))?;
         require_eq(
             &node.purpose.status,
-            &PurposeStatus::Stale,
+            &PurposeStatus::Approved,
             "changed approved file purpose status",
+        )?;
+        require_eq(
+            &node.purpose.agent_reviewed(),
+            &true,
+            "changed approved file remains agent reviewed",
         )?;
         Ok(())
     }
@@ -7468,6 +7628,14 @@ mod tests {
             "Reviewed Cargo manifest.",
             PurposeSource::Agent,
         )?;
+        store.connection.execute(
+            "UPDATE purposes
+                SET status = 'stale'
+              WHERE node_id IN (
+                  SELECT id FROM nodes WHERE path IN ('src/helper.rs', 'Cargo.toml')
+              )",
+            [],
+        )?;
         store.replace_scan(&[
             test_file_node("src/helper.rs", "hash-b"),
             test_file_node("Cargo.toml", "hash-cargo-new"),
@@ -7586,7 +7754,7 @@ mod tests {
         store.connection.execute(
             "
             UPDATE purposes
-            SET source = 'human'
+            SET source = 'human', status = 'stale'
             WHERE node_id = (SELECT id FROM nodes WHERE path = 'src/helper.rs')
             ",
             [],
@@ -7626,6 +7794,12 @@ mod tests {
             "src/imported.rs",
             "Imported helper implementation.",
             PurposeSource::Imported,
+        )?;
+        store.connection.execute(
+            "UPDATE purposes
+                SET status = 'stale'
+              WHERE node_id = (SELECT id FROM nodes WHERE path = 'src/imported.rs')",
+            [],
         )?;
         store.replace_scan(&[
             test_file_node("src/imported.rs", "hash-b"),
@@ -7954,13 +8128,70 @@ mod tests {
         )?;
         require_eq(
             &changed.purpose.status,
-            &PurposeStatus::Stale,
-            "changed file purpose becomes stale",
+            &PurposeStatus::Approved,
+            "changed file purpose stays approved",
         )?;
 
         store.replace_scan(&[test_folder_node("."), test_folder_node("src")])?;
         let removed = store.load_nodes_by_paths(&["src/main.rs".to_string()])?;
         require_eq(&removed.is_empty(), &true, "removed file is inactive")?;
+
+        let dormant = store.connection.query_row(
+            "SELECT n.exists_now, p.purpose, p.status
+               FROM nodes AS n
+               JOIN purposes AS p ON p.node_id = n.id
+              WHERE n.path = 'src/main.rs'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        require_eq(
+            &dormant,
+            &(
+                0,
+                Some("Agent-reviewed Rust entry point".to_string()),
+                PurposeStatus::Approved.as_str().to_string(),
+            ),
+            "removed file keeps a dormant approved purpose",
+        )?;
+
+        store.replace_scan(&[
+            test_folder_node("."),
+            test_folder_node("src"),
+            test_file_node("src/renamed.rs", "hash-b"),
+        ])?;
+        let renamed = store
+            .load_node_by_path("src/renamed.rs")?
+            .ok_or_else(|| io::Error::other("renamed path missing"))?;
+        require_eq(
+            &renamed.purpose.status,
+            &PurposeStatus::Missing,
+            "rename does not transfer approval",
+        )?;
+
+        store.replace_scan(&[
+            test_folder_node("."),
+            test_folder_node("src"),
+            test_file_node("src/main.rs", "hash-c"),
+        ])?;
+        let reactivated = store
+            .load_node_by_path("src/main.rs")?
+            .ok_or_else(|| io::Error::other("reactivated path missing"))?;
+        require_eq(
+            &reactivated.purpose.purpose,
+            &Some("Agent-reviewed Rust entry point".to_string()),
+            "exact-path reactivation restores the dormant purpose",
+        )?;
+        require_eq(
+            &reactivated.purpose.status,
+            &PurposeStatus::Approved,
+            "exact-path reactivation restores approval",
+        )?;
         Ok(())
     }
 
@@ -8189,13 +8420,13 @@ mod tests {
         let nodes = store.load_nodes()?;
         require_eq(
             &nodes[0].purpose.status,
-            &PurposeStatus::Stale,
-            "changed reviewed purpose becomes stale",
+            &PurposeStatus::Approved,
+            "changed reviewed purpose stays approved",
         )?;
         require_eq(
             &nodes[0].purpose.agent_reviewed(),
-            &false,
-            "stale purpose is not agent reviewed",
+            &true,
+            "changed approved purpose remains agent reviewed",
         )?;
         Ok(())
     }
@@ -8282,6 +8513,227 @@ mod tests {
             &Some("Run the application.".to_string()),
             "documentation metadata",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_source_parse_and_fact_parser_provenance_independently()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let database = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open(&database)?;
+        let graph = SymbolGraph {
+            path: "src/optional.lang".to_string(),
+            language: Some("optional-language".to_string()),
+            parser: ParserKind::Fallback,
+            symbols: vec![CodeSymbol {
+                path: "src/optional.lang".to_string(),
+                language: Some("optional-language".to_string()),
+                name: "entry".to_string(),
+                kind: SymbolKind::Function,
+                signature: "entry()".to_string(),
+                exported: false,
+                documentation: None,
+                line_start: 1,
+                line_end: 1,
+                parent: None,
+                parser: ParserKind::Fallback,
+                detail: None,
+            }],
+            relations: vec![SymbolRelation {
+                path: "src/optional.lang".to_string(),
+                source_name: "entry".to_string(),
+                target_name: "helper".to_string(),
+                kind: RelationKind::Calls,
+                line: 1,
+                context: "entry()".to_string(),
+                parser: ParserKind::Fallback,
+            }],
+        };
+        let metadata = SourceParseMetadata {
+            path: graph.path.clone(),
+            language: graph.language.clone(),
+            parser: ParserKind::TreeSitter,
+            symbol_count: graph.symbols.len(),
+            relation_count: graph.relations.len(),
+        };
+
+        store.replace_symbol_graph_with_metadata(&graph, &metadata)?;
+
+        let stored_metadata = store
+            .load_source_parse_metadata(&graph.path)?
+            .ok_or_else(|| io::Error::other("missing independent source parse metadata"))?;
+        let symbols = store.load_symbols(Some(&graph.path), Some("entry"), 10)?;
+        let relations = store.load_symbol_relations(Some(&graph.path), Some("helper"), 10)?;
+        require_eq(
+            &stored_metadata.parser,
+            &ParserKind::TreeSitter,
+            "grammar-backed source parser",
+        )?;
+        require_eq(
+            &symbols[0].parser,
+            &ParserKind::Fallback,
+            "fallback symbol provenance",
+        )?;
+        require_eq(
+            &relations[0].parser,
+            &ParserKind::Fallback,
+            "fallback relation provenance",
+        )?;
+
+        let invalid_metadata = SourceParseMetadata {
+            symbol_count: 0,
+            ..metadata
+        };
+        let Err(error) = store.replace_symbol_graph_with_metadata(&graph, &invalid_metadata) else {
+            return Err(io::Error::other("mismatched explicit metadata was accepted").into());
+        };
+        if !matches!(error, DbError::SymbolGraphRowShape { .. }) {
+            return Err(io::Error::other(format!(
+                "mismatched explicit metadata returned the wrong error: {error}"
+            ))
+            .into());
+        }
+
+        let empty_graph = SymbolGraph {
+            path: "src/empty.optional".to_string(),
+            language: Some("optional-language".to_string()),
+            parser: ParserKind::Fallback,
+            symbols: Vec::new(),
+            relations: Vec::new(),
+        };
+        let empty_metadata = SourceParseMetadata {
+            path: empty_graph.path.clone(),
+            language: empty_graph.language.clone(),
+            parser: ParserKind::TreeSitter,
+            symbol_count: 0,
+            relation_count: 0,
+        };
+        store.replace_symbol_graph_with_metadata(&empty_graph, &empty_metadata)?;
+        drop(store);
+
+        let reader = AtlasStore::open_read_only(&database)?;
+        let reopened_metadata = reader
+            .load_source_parse_metadata(&graph.path)?
+            .ok_or_else(|| io::Error::other("missing reopened source parse metadata"))?;
+        let reopened_graphs =
+            reader.load_symbol_graphs_for_paths(&[graph.path.clone(), empty_graph.path.clone()])?;
+        require_eq(
+            &reopened_metadata.parser,
+            &ParserKind::TreeSitter,
+            "reopened source parser provenance",
+        )?;
+        require_eq(
+            &reopened_graphs,
+            &vec![empty_graph, graph],
+            "reopened fact graph provenance",
+        )?;
+        reader.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn reconstructs_exact_symbol_graph_batches_from_disk_and_fails_closed()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open(&db_path)?;
+        store.replace_scan(&[
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("src/b.rs", "hash-b"),
+        ])?;
+        let graph = SymbolGraph {
+            path: "src/a.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![CodeSymbol {
+                path: "src/a.rs".to_string(),
+                language: Some("rust".to_string()),
+                name: "owner".to_string(),
+                kind: SymbolKind::Function,
+                signature: "fn owner()".to_string(),
+                exported: true,
+                documentation: None,
+                line_start: 1,
+                line_end: 2,
+                parent: None,
+                parser: ParserKind::TreeSitter,
+                detail: Some("function_item".to_string()),
+            }],
+            relations: vec![SymbolRelation {
+                path: "src/a.rs".to_string(),
+                source_name: "owner".to_string(),
+                target_name: "dependency".to_string(),
+                kind: RelationKind::Calls,
+                line: 2,
+                context: "dependency()".to_string(),
+                parser: ParserKind::TreeSitter,
+            }],
+        };
+        store.replace_symbol_graph(&graph)?;
+        let empty_graph = SymbolGraph {
+            path: "src/b.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: Vec::new(),
+            relations: Vec::new(),
+        };
+        store.replace_symbol_graph(&empty_graph)?;
+        drop(store);
+
+        let reader = AtlasStore::open_read_only(&db_path)?;
+        let loaded = reader.load_symbol_graphs_for_paths(&[
+            "src/b.rs".to_string(),
+            "src/a.rs".to_string(),
+            "src/a.rs".to_string(),
+            "src/missing.rs".to_string(),
+        ])?;
+        require_eq(
+            &loaded,
+            &vec![graph, empty_graph],
+            "batched symbol graph round trip",
+        )?;
+        for (table, expected_index) in [
+            (
+                "source_parse_metadata",
+                "sqlite_autoindex_source_parse_metadata_1",
+            ),
+            ("symbols", "idx_symbols_path"),
+            ("symbol_relations", "idx_symbol_relations_path"),
+        ] {
+            let sql = format!(
+                "EXPLAIN QUERY PLAN SELECT path FROM {table}
+                  WHERE path IN ('src/a.rs', 'src/b.rs')"
+            );
+            let mut statement = reader.connection.prepare(&sql)?;
+            let plan = statement
+                .query_map([], |row| row.get::<_, String>(3))?
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\n");
+            if !plan.contains(expected_index) {
+                return Err(io::Error::other(format!(
+                    "{table} batch lookup missed {expected_index}: {plan}"
+                ))
+                .into());
+            }
+        }
+        reader.finish_index_read_snapshot()?;
+        drop(reader);
+
+        let writer = AtlasStore::open(&db_path)?;
+        writer.connection.execute(
+            "UPDATE source_parse_metadata SET symbol_count = 2 WHERE path = 'src/a.rs'",
+            [],
+        )?;
+        let Err(error) = writer.load_symbol_graphs_for_paths(&["src/a.rs".to_string()]) else {
+            return Err(io::Error::other("metadata count corruption was accepted").into());
+        };
+        if !matches!(error, DbError::SymbolGraphRowShape { .. }) {
+            return Err(io::Error::other(format!(
+                "metadata count corruption returned the wrong error: {error}"
+            ))
+            .into());
+        }
         Ok(())
     }
 

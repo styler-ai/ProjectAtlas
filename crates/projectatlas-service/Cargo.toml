@@ -9,6 +9,7 @@ homepage.workspace = true
 [dependencies]
 projectatlas-core.workspace = true
 projectatlas-db.workspace = true
+projectatlas-symbols.workspace = true
 globset.workspace = true
 regex.workspace = true
 serde.workspace = true

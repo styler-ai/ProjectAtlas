@@ -2,7 +2,7 @@
 
 ## Status
 
-This document defines the required agent-navigation contract for ProjectAtlas 0.4.0. ProjectAtlas 0.3.26 provides the baseline workflow described below; graph enrichment, automatic read freshness, direct relationship jumps, and the compact MCP surface remain target behavior until issue #308 is complete.
+This document defines the required agent-navigation contract for ProjectAtlas 0.4.0. ProjectAtlas 0.3.26 provides the baseline workflow described below. Automatic read freshness and the initial normalized graph publication are current v0.4 implementation behavior; richer graph enrichment, direct relationship navigation, and final agent evaluation remain target behavior until issue #308 is complete. Version 0.4 preserves the complete compatible MCP inventory. Any later compact/default inventory or breaking rationalization belongs to post-v0.4 issue #310.
 
 ## Product Goal
 
@@ -48,9 +48,9 @@ The stages answer different questions:
 | Trust | How much of this result is safe to rely on? | Parser kind, resolution state, coverage, limits, and truncation |
 | Slice | What exact implementation must I inspect? | Verbatim current source for one bounded line or symbol range |
 
-Folder purposes should be curated broadly because they drive the highest-value narrowing step. File purposes should remain selective and focus on public APIs, runtime behavior, build/configuration, tests, commands, adapters, migrations, and other high-impact files. Generated purpose suggestions are not reviewed truth. A meaningful responsibility change makes a reviewed purpose stale instead of silently overwriting it.
+Folder purposes should be curated broadly because they drive the highest-value narrowing step. File purposes should remain selective and focus on public APIs, runtime behavior, build/configuration, tests, commands, adapters, migrations, and other high-impact files. ProjectAtlas preserves the 0.3.26 distinction: deterministic or heuristic text is generated/suggested and is not reviewed truth; an agent-approved purpose is durable authored responsibility state. Source, summary, symbol, graph, scan, and watcher changes never invalidate it automatically. A main agent, reviewer, explicitly assigned curator, or user can still correct an accepted purpose through the purpose APIs when it is wrong or the path was genuinely repurposed.
 
-When purposes are missing or stale, ProjectAtlas reports that state and falls back deterministically to path, current content, symbols, and graph context. It must not pretend a suggestion is authoritative.
+When an accepted purpose is missing, ProjectAtlas reports generated/suggested or missing state and falls back deterministically to path, current content, symbols, and graph context. It must not pretend a suggestion is authoritative. Deleted or excluded paths are absent from navigation while their path-owned accepted purpose remains dormant; a rename does not transfer approval automatically.
 
 ### Initial Task Discovery
 
@@ -84,7 +84,7 @@ anchor, with purpose projected onto every local target:
 flowchart TB
     Anchor[Current file or symbol anchor]
     Graph[(Freshness-checked current graph generation)]
-    Purposes[(Owning file or folder purpose metadata:<br/>approved, stale, missing, or unavailable)]
+    Purposes[(Owning file or folder purpose metadata:<br/>approved, suggested, missing, or unavailable)]
     Connections[Ranked inbound and outbound connections]
     Targets[Target rows:<br/>relation and reason<br/>selector and span<br/>owning file or folder purpose plus state<br/>coverage and trust]
     Summary[Target summary]
@@ -142,7 +142,7 @@ Successful curation is silent in the main conversation: no per-file progress, ap
 
 The default background scope is `low`: all folders plus task-relevant/high-impact files. `medium` means every source file must be reviewed. `strict` means every indexed file and folder must be reviewed. Medium and strict are explicit expensive choices and are never started implicitly.
 
-The curator receives queue rows plus bounded file summary, graph role, outline, or exact source context. It never browses the whole repository without a bounded assignment, never edits source, and never edits SQLite directly. Purposes written through ProjectAtlas APIs are agent-approved and can be corrected later by any agent that finds them wrong, stale, vague, or generic.
+The curator receives queue rows plus bounded file summary, graph role, outline, or exact source context. It never browses the whole repository without a bounded assignment, never edits source, and never edits SQLite directly. Purposes written through ProjectAtlas APIs are agent-approved and can be corrected later by any agent that finds them wrong, vague, generic, inconsistent, or genuinely repurposed; source changes alone never trigger a correction.
 
 ## What Repository-Wide Graph Intelligence Adds
 
@@ -254,11 +254,11 @@ API route
 → integration test
 ```
 
-Every local step carries its relationship, exact file/symbol selector, authoritative owning-purpose projection and review/stale state, source span, resolution, confidence, coverage, and generation. Paths are node-simple, deterministic, and constrained by row, node, edge, depth, time, memory, output, and cancellation budgets.
+Every local step carries its relationship, exact file/symbol selector, authoritative accepted owning-purpose projection and approval/provenance state, source span, resolution, confidence, coverage, and generation. Paths are node-simple, deterministic, and constrained by row, node, edge, depth, time, memory, output, and cancellation budgets. A multi-page result whose membership, ranking, or hydration depends on purpose also binds the authored-purpose revision.
 
 ## Freshness Contract
 
-The watcher is a latency optimization, not the freshness authority. Every normal index-backed read performs a lightweight comparison between persisted fingerprints and the current local source/configuration state.
+The watcher is a latency optimization, not the freshness authority. A new long-lived MCP runtime activates bounded root and policy observation before its first exact post-start verification, reconciles any buffered events, and binds a process-local verified epoch to the selected project identity and complete SQLite generation. Later unchanged reads reuse that epoch after a constant freshness snapshot check without another whole-tree walk or full node-table decode. Relevant events, observer overflow/gap/disconnection, root or policy uncertainty, cancellation, and changes racing a query invalidate the epoch. A one-shot CLI process performs its own exact first verification because it cannot inherit process-local observation state.
 
 The response must do one of two things:
 
@@ -278,32 +278,17 @@ The contract covers:
 - non-Git directories;
 - transient path, permission, encoding, or root uncertainty;
 - re-resolution of inbound dependents after exported identities change;
-- no repeated publication for unchanged dirty state.
+- no repeated publication for unchanged dirty state;
+- no repository-sized freshness work on later unchanged healthy-epoch calls;
+- cancellation or observer uncertainty cannot leave an older epoch reusable.
 
-## Streamlined MCP Surface
+## Compatible MCP Surface With Streamlined Behavior
 
-ProjectAtlas 0.3.26 registers 40 MCP tools and its complete `tools/list` response is about 29 KB before any source answer. Version 0.4 keeps every old route available through an explicit full compatibility surface while installer-generated agent configurations advertise a compact surface.
+ProjectAtlas 0.4 preserves the complete 0.3.26 MCP inventory, names, request schemas, defaults, and compatible payload behavior. Repository graph construction, freshness, purpose-plus-connection enrichment, direct relation navigation, and next-call guidance improve automatically behind those calls.
 
-The initial compact agent surface is:
+Issue #308 does not classify, hide, consolidate, or remove public tools. It records the packaged v0.4 inventory and discovery measurements as the baseline for issue #310, which separately owns any post-v0.4 compact/default selection or breaking rationalization.
 
-```text
-atlas_init
-atlas_scan
-atlas_session_brief
-atlas_folders
-atlas_files
-atlas_search
-atlas_file_summary
-atlas_slice
-atlas_symbols
-atlas_symbol_relations
-atlas_health
-atlas_purpose_queue
-atlas_purpose_set
-atlas_purpose_review
-```
-
-The full surface preserves all 0.3.26 names, request schemas, defaults, and payload compatibility. Deprecated routes delegate to the same service implementation. A closed `agent | full` MCP surface selection is sufficient; ProjectAtlas does not need a dynamic tool plugin system or one ambiguous administration mega-tool.
+No graph orchestration call is added to compensate for richer internals. The existing routes remain typed responsibility-owned operations; ProjectAtlas does not need a dynamic tool plugin system or one ambiguous administration mega-tool.
 
 The normal already-indexed coding workflow should be three calls:
 
@@ -318,7 +303,7 @@ Optional branches are:
 - `atlas_search` when the identifier or text is uncertain;
 - `atlas_symbol_relations` when callers, impact, architecture, or a path is material;
 - `atlas_folders` then `atlas_files` only when the brief cannot confidently choose the work area;
-- purpose queue/set/review when navigation exposes missing or stale intent.
+- purpose queue/set/review for missing/suggested intent or an explicit correction of accepted intent.
 
 `atlas_session_brief` must not recommend rerunning folder/file ranking it already performed. Its next call should be a ready-to-use summary, search, relation, or exact-slice request.
 

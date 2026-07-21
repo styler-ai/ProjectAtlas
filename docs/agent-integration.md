@@ -32,7 +32,7 @@ Purpose completion loop:
 6. Rerun health/lint.
 7. Continue until the database has complete reviewed folder purposes, selected high-value file purposes, and the deep index is current.
 
-For planned folder and file purpose creation or correction, including initial creation and broad refreshes, delegate the work to a low-reasoning subagent when the host supports subagents. The delegated task should receive bounded ProjectAtlas queue rows, summaries, outlines, or exact snippets, not an instruction to browse the whole repository. The subagent may write purposes through `atlas_purpose_set`, `atlas_purpose_review`, `projectatlas purpose set`, or `projectatlas purpose review`, then report changed paths and commands. A purpose written by an agent or subagent through those ProjectAtlas APIs is agent-approved and does not need a second approval pass. If any agent notices a wrong, stale, vague, or generic purpose during normal work, correct it along the way with the same ProjectAtlas APIs. Agents and subagents must not edit SQLite directly.
+For planned folder and file purpose creation or correction, including initial creation and broad refreshes, delegate the work to a low-reasoning subagent when the host supports subagents. The delegated task should receive bounded ProjectAtlas queue rows, summaries, outlines, or exact snippets, not an instruction to browse the whole repository. The subagent may write purposes through `atlas_purpose_set`, `atlas_purpose_review`, `projectatlas purpose set`, or `projectatlas purpose review`, then report changed paths and commands. A purpose written by an agent or subagent through those ProjectAtlas APIs is agent-approved and does not need a second approval pass. If any agent notices a wrong, vague, generic, inconsistent, or genuinely repurposed accepted purpose during normal work, correct it explicitly with the same ProjectAtlas APIs. Source changes alone never demote or invalidate accepted purposes. Agents and subagents must not edit SQLite directly.
 
 `atlas_purpose_queue` and `projectatlas purpose queue` default to all folders and high-impact files. Low-priority source files stay out of the default queue so agents are not pushed through every file in a large repository. Pass `projectatlas purpose queue --include-low-priority-files` or MCP `include_low_priority_files: true` only for explicit broad file-purpose cleanup. Use `projectatlas purpose queue --include-assets`, MCP `include_assets: true`, raw `atlas_health`, or bare `projectatlas health-check` only when intentionally curating assets or generated outputs; non-source files should usually inherit purpose from an approved asset root instead of becoming one-by-one queue noise.
 Queue metadata includes `folder_scope` and `file_scope`; agents should use those fields to understand whether files are limited to high-impact entries, all source files, or asset-inclusive mode.
@@ -105,7 +105,12 @@ index availability, overview counts when present, bounded ranked folder/file can
 blockers, and typed next-call recommendations without scanning, writing telemetry, or reading source
 content. `atlas_settings` includes an additive `mcp_session` capability block with nearest-project
 startup policy, selected DB/config roots, path scope, telemetry mode, scan policy, runtime identity,
-and no-secret guarantees. `atlas_task_status` and `atlas_task_cancel` expose the bounded MCP
+and no-secret guarantees. The same settings response includes content-free language registry and
+accepted-set versions, digests, the complete per-row detector/owner/tier/provenance matrix, pinned
+optional-catalog identity, and independently derived detected, parsed, symbol, semantic, and
+benchmarked counts; aliases and extensions never inflate those capability totals, and catalog
+membership never implies an installed or accepted grammar. `atlas_task_status`
+and `atlas_task_cancel` expose the bounded MCP
 task-progress contract; scan, watch, search, summary, slice, and CLI commands remain synchronous in
 this release.
 
