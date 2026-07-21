@@ -119,14 +119,28 @@ try {
         Require `
             ($probeSource.Contains('$ExpectedSessionId') -and
                 $probeSource.Contains('S-1-16-8192') -and
+                $probeSource.Contains('$principal.IsInRole($expectedSecurityIdentifier)') -and
                 $probeSource.Contains('$synchronizeJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(') -and
                 $probeSource.Contains('$modifyJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(')) `
-            "Construction boundary probe did not classify session, integrity, and individual jobserver rights."
+            "Construction boundary probe did not classify SID membership, session, integrity, and individual jobserver rights."
         Require `
             ($wrapperAst.Extent.Text.Contains('26 { "jobserver-synchronize-access" }') -and
                 $wrapperAst.Extent.Text.Contains('28 { "jobserver-modify-access" }') -and
-                $wrapperAst.Extent.Text.Contains('33 { "jobserver-combined-access" }')) `
+                $wrapperAst.Extent.Text.Contains('33 { "jobserver-combined-access" }') -and
+                $wrapperAst.Extent.Text.Contains('37 { "target-sid-membership-query" }') -and
+                $wrapperAst.Extent.Text.Contains('38 { "target-sid-not-effective" }')) `
             "Construction boundary probe did not retain distinct jobserver access diagnostics."
+
+        $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $currentPrincipal = [System.Security.Principal.WindowsPrincipal]::new($currentIdentity)
+        Require `
+            $currentPrincipal.IsInRole($currentIdentity.User) `
+            "Current user SID was not effective in its access token."
+        Require `
+            (-not $currentPrincipal.IsInRole(
+                [System.Security.Principal.SecurityIdentifier]::new('S-1-0-0')
+            )) `
+            "Null SID unexpectedly participated in the access token."
 
         $cleanupDefinitions = @($wrapperAst.FindAll(
             {

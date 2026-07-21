@@ -1860,6 +1860,17 @@ if ($identity.User.Value -ne $ExpectedSid -or
     $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
     exit 21
 }
+try {
+    $expectedSecurityIdentifier =
+        [System.Security.Principal.SecurityIdentifier]::new($ExpectedSid)
+    $targetSidEffective = $principal.IsInRole($expectedSecurityIdentifier)
+}
+catch {
+    exit 37
+}
+if (-not $targetSidEffective) {
+    exit 38
+}
 if ([System.Diagnostics.Process]::GetCurrentProcess().SessionId -ne $ExpectedSessionId) {
     exit 30
 }
@@ -2013,6 +2024,8 @@ exit 0
             34 { "jobserver-combined-open" }
             35 { "jobserver-token" }
             36 { "rustc-jobserver" }
+            37 { "target-sid-membership-query" }
+            38 { "target-sid-not-effective" }
             default { "unexpected-exit-$probeExitCode" }
         }
         throw "Construction principal boundary probe failed at $probeFailure."
