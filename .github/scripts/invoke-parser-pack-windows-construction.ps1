@@ -329,19 +329,30 @@ function Remove-PrincipalAcl {
         throw "Construction ACL cleanup rejects reparse-point substitution."
     }
     $acl = Get-Acl -LiteralPath $item.FullName
-    $rules = @($acl.GetAccessRules(
-        $true,
-        $false,
-        [System.Security.Principal.SecurityIdentifier]
-    ) | Where-Object { $_.IdentityReference -eq $Sid })
-    foreach ($rule in $rules) {
-        $acl.RemoveAccessRuleSpecific($rule)
-    }
+    $acl.PurgeAccessRules($Sid)
     Set-Acl -LiteralPath $item.FullName -AclObject $acl
+}
+
+function Assert-PrincipalAclAbsent {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [System.Security.Principal.SecurityIdentifier]$Sid
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+    $item = Get-Item -LiteralPath $Path -Force
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Construction ACL verification rejects reparse-point substitution."
+    }
     $remaining = @(
         (Get-Acl -LiteralPath $item.FullName).GetAccessRules(
             $true,
-            $false,
+            $true,
             [System.Security.Principal.SecurityIdentifier]
         ) | Where-Object { $_.IdentityReference -eq $Sid }
     )
@@ -442,6 +453,14 @@ function Invoke-Cleanup {
         }
         catch {
             $cleanupErrors.Add("remove-acl")
+        }
+    }
+    foreach ($path in @($state.acl_paths)) {
+        try {
+            Assert-PrincipalAclAbsent -Path ([string]$path) -Sid $sid
+        }
+        catch {
+            $cleanupErrors.Add("verify-acl")
         }
     }
 

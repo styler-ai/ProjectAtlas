@@ -324,31 +324,123 @@ try {
             )) `
             "Null SID unexpectedly participated in the access token."
 
-        $cleanupDefinitions = @($wrapperAst.FindAll(
-            {
-                param($node)
-                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-                    $node.Name -eq "Remove-PrincipalAcl"
-            },
-            $true
-        ))
-        Require ($cleanupDefinitions.Count -eq 1) "Expected one Remove-PrincipalAcl definition."
-        Invoke-Expression $cleanupDefinitions[0].Extent.Text
+        foreach ($cleanupFunctionName in @(
+            "Remove-PrincipalAcl",
+            "Assert-PrincipalAclAbsent"
+        )) {
+            $cleanupDefinitions = @($wrapperAst.FindAll(
+                {
+                    param($node)
+                    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                        $node.Name -eq $cleanupFunctionName
+                },
+                $true
+            ))
+            Require ($cleanupDefinitions.Count -eq 1) "Expected one $cleanupFunctionName definition."
+            Invoke-Expression $cleanupDefinitions[0].Extent.Text
+        }
+        Require `
+            ($wrapperAst.Extent.Text.Contains('$acl.PurgeAccessRules($Sid)') -and
+                $wrapperAst.Extent.Text -match 'GetAccessRules\(\s*\$true,\s*\$true,' -and
+                -not $wrapperAst.Extent.Text.Contains('$acl.RemoveAccessRuleSpecific($rule)')) `
+            "Construction ACL cleanup did not retain platform purge plus effective post-verification."
 
-        $aclFixture = [System.IO.Path]::Combine($testRoot, "acl-fixture.txt")
-        [System.IO.File]::WriteAllText($aclFixture, "fixture")
+        $aclFixture = [System.IO.Path]::Combine($testRoot, "acl-fixture")
+        [System.IO.Directory]::CreateDirectory($aclFixture) | Out-Null
+        $aclChildFixture = [System.IO.Path]::Combine($aclFixture, "child.txt")
+        [System.IO.File]::WriteAllText($aclChildFixture, "fixture")
         $fixtureSid = [System.Security.Principal.SecurityIdentifier]::new(
             "S-1-5-21-3141592653-2718281828-1618033988-424242"
+        )
+        $unrelatedFixtureSid = [System.Security.Principal.SecurityIdentifier]::new(
+            "S-1-5-21-3141592653-2718281828-1618033988-424243"
         )
         $fixtureAcl = Get-Acl -LiteralPath $aclFixture
         $fixtureAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
             $fixtureSid,
+            [System.Security.AccessControl.FileSystemRights]::Write,
+            [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                [System.Security.AccessControl.InheritanceFlags]::ObjectInherit,
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Deny
+        ))
+        $fixtureAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $fixtureSid,
             [System.Security.AccessControl.FileSystemRights]::ReadAndExecute,
+            [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                [System.Security.AccessControl.InheritanceFlags]::ObjectInherit,
+            [System.Security.AccessControl.PropagationFlags]::None,
             [System.Security.AccessControl.AccessControlType]::Allow
         ))
         Set-Acl -LiteralPath $aclFixture -AclObject $fixtureAcl
+        $childFixtureAcl = Get-Acl -LiteralPath $aclChildFixture
+        $childFixtureAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $fixtureSid,
+            [System.Security.AccessControl.FileSystemRights]::WriteData,
+            [System.Security.AccessControl.AccessControlType]::Deny
+        ))
+        $childFixtureAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $fixtureSid,
+            [System.Security.AccessControl.FileSystemRights]::Read,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        ))
+        $childFixtureAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $unrelatedFixtureSid,
+            [System.Security.AccessControl.FileSystemRights]::Read,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        ))
+        Set-Acl -LiteralPath $aclChildFixture -AclObject $childFixtureAcl
+        $unrelatedRulesBefore = @(
+            (Get-Acl -LiteralPath $aclChildFixture).GetAccessRules(
+                $true,
+                $true,
+                [System.Security.Principal.SecurityIdentifier]
+            ) | Where-Object { $_.IdentityReference -eq $unrelatedFixtureSid }
+        )
+        Require `
+            ($unrelatedRulesBefore.Count -eq 1) `
+            "Construction ACL fixture did not retain one unrelated principal rule."
+        $unrelatedRuleBefore = $unrelatedRulesBefore[0]
+        Require `
+            (@(
+                (Get-Acl -LiteralPath $aclChildFixture).GetAccessRules(
+                    $true,
+                    $true,
+                    [System.Security.Principal.SecurityIdentifier]
+                ) | Where-Object { $_.IdentityReference -eq $fixtureSid }
+            ).Count -ge 4) `
+            "Construction ACL fixture did not contain explicit and inherited target rules."
+
+        Remove-PrincipalAcl -Path $aclChildFixture -Sid $fixtureSid
         Remove-PrincipalAcl -Path $aclFixture -Sid $fixtureSid
+        Assert-PrincipalAclAbsent -Path $aclFixture -Sid $fixtureSid
+        Assert-PrincipalAclAbsent -Path $aclChildFixture -Sid $fixtureSid
+        $unrelatedRules = @(
+            (Get-Acl -LiteralPath $aclChildFixture).GetAccessRules(
+                $true,
+                $true,
+                [System.Security.Principal.SecurityIdentifier]
+            ) | Where-Object { $_.IdentityReference -eq $unrelatedFixtureSid }
+        )
+        Require `
+            ($unrelatedRules.Count -eq 1 -and
+                $unrelatedRules[0].IdentityReference -eq
+                    $unrelatedRuleBefore.IdentityReference -and
+                $unrelatedRules[0].FileSystemRights -eq
+                    $unrelatedRuleBefore.FileSystemRights -and
+                $unrelatedRules[0].AccessControlType -eq
+                    $unrelatedRuleBefore.AccessControlType -and
+                $unrelatedRules[0].IsInherited -eq
+                    $unrelatedRuleBefore.IsInherited -and
+                $unrelatedRules[0].InheritanceFlags -eq
+                    $unrelatedRuleBefore.InheritanceFlags -and
+                $unrelatedRules[0].PropagationFlags -eq
+                    $unrelatedRuleBefore.PropagationFlags) `
+            "Construction ACL cleanup removed an unrelated principal."
+        Remove-PrincipalAcl -Path $aclChildFixture -Sid $fixtureSid
         Remove-PrincipalAcl -Path $aclFixture -Sid $fixtureSid
+        Assert-PrincipalAclAbsent -Path $aclFixture -Sid $fixtureSid
+        Assert-PrincipalAclAbsent -Path $aclChildFixture -Sid $fixtureSid
 
         foreach ($functionName in @(
             "New-ConstructionJobserverSecurity",

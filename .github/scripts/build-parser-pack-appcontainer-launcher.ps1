@@ -192,7 +192,8 @@ namespace ProjectAtlas.Release
         private enum AdmissionScenario
         {
             Normal,
-            FailBeforeJobAssignment
+            FailBeforeJobAssignment,
+            FailBeforeJobAssignmentAndContainmentCleanup
         }
 
         private sealed class AdmissionReceipt
@@ -201,6 +202,12 @@ namespace ProjectAtlas.Release
             internal bool TerminationAttempted { get; set; }
             internal uint WaitResult { get; set; }
             internal bool Reaped { get; set; }
+            internal bool JobHandleOwned { get; set; }
+            internal bool JobHandleClosed { get; set; }
+            internal bool ProcessHandleOwned { get; set; }
+            internal bool ProcessHandleClosed { get; set; }
+            internal bool ThreadHandleOwned { get; set; }
+            internal bool ThreadHandleClosed { get; set; }
         }
 
         private sealed class Profile : IDisposable
@@ -574,7 +581,8 @@ namespace ProjectAtlas.Release
             List<AclSnapshot> snapshots = new List<AclSnapshot>();
             SecurityIdentifier launchUserSid = CurrentUserSid("launch-user");
             Profile profile = null;
-            bool cleanupFailed = false;
+            Exception operationFailure = null;
+            int operationResult = 0;
             try
             {
                 profile = CreateProfile();
@@ -600,7 +608,7 @@ namespace ProjectAtlas.Release
                         snapshots);
                 }
                 uint timeoutMilliseconds = checked((uint)configuration.TimeoutSeconds * 1000U);
-                return LaunchCore(
+                operationResult = LaunchCore(
                     profile.Name,
                     executable,
                     configuration.Arguments.ToArray(),
@@ -610,28 +618,55 @@ namespace ProjectAtlas.Release
                     admissionScenario,
                     admissionReceipt);
             }
-            finally
+            catch (Exception failure)
             {
-                if (!RestoreAcls(snapshots))
+                operationFailure = failure;
+            }
+
+            ContainmentFailure cleanupFailure = null;
+            if (!RestoreAcls(snapshots))
+            {
+                cleanupFailure = new ContainmentFailure("containment-cleanup");
+            }
+            if (profile != null)
+            {
+                try
                 {
-                    cleanupFailed = true;
+                    profile.Dispose();
                 }
-                if (profile != null)
+                catch (ContainmentFailure failure)
                 {
-                    try
+                    if (cleanupFailure == null)
                     {
-                        profile.Dispose();
-                    }
-                    catch
-                    {
-                        cleanupFailed = true;
+                        cleanupFailure = failure;
                     }
                 }
-                if (cleanupFailed)
+                catch
                 {
-                    throw new ContainmentFailure("containment-cleanup");
+                    if (cleanupFailure == null)
+                    {
+                        cleanupFailure = new ContainmentFailure("containment-cleanup");
+                    }
                 }
             }
+            if (admissionScenario == AdmissionScenario.FailBeforeJobAssignmentAndContainmentCleanup
+                && cleanupFailure == null)
+            {
+                cleanupFailure = new ContainmentFailure("containment-cleanup");
+            }
+            if (operationFailure != null)
+            {
+                if (cleanupFailure != null)
+                {
+                    throw ComposeLaunchFailures(operationFailure, cleanupFailure);
+                }
+                ExceptionDispatchInfo.Capture(operationFailure).Throw();
+            }
+            if (cleanupFailure != null)
+            {
+                throw cleanupFailure;
+            }
+            return operationResult;
         }
 
         private static void ValidateConfiguration(LaunchConfiguration configuration)
@@ -1277,7 +1312,7 @@ namespace ProjectAtlas.Release
                 {
                     admissionReceipt.ProcessId = checked((int)process.ProcessId);
                 }
-                if (admissionScenario == AdmissionScenario.FailBeforeJobAssignment)
+                if (admissionScenario != AdmissionScenario.Normal)
                 {
                     throw new ContainmentFailure("self-test-before-job-assignment");
                 }
@@ -1393,15 +1428,48 @@ namespace ProjectAtlas.Release
                 {
                     if (job != IntPtr.Zero)
                     {
-                        CloseHandle(job);
+                        bool closed = CloseHandle(job);
+                        if (admissionReceipt != null)
+                        {
+                            admissionReceipt.JobHandleOwned = true;
+                            admissionReceipt.JobHandleClosed = closed;
+                        }
+                        if (!closed && processCleanupFailure == null)
+                        {
+                            processCleanupFailure = Win32Failure(
+                                "close-containment-job",
+                                Marshal.GetLastWin32Error());
+                        }
                     }
                     if (process.Thread != IntPtr.Zero)
                     {
-                        CloseHandle(process.Thread);
+                        bool closed = CloseHandle(process.Thread);
+                        if (admissionReceipt != null)
+                        {
+                            admissionReceipt.ThreadHandleOwned = true;
+                            admissionReceipt.ThreadHandleClosed = closed;
+                        }
+                        if (!closed && processCleanupFailure == null)
+                        {
+                            processCleanupFailure = Win32Failure(
+                                "close-contained-thread",
+                                Marshal.GetLastWin32Error());
+                        }
                     }
                     if (process.Process != IntPtr.Zero)
                     {
-                        CloseHandle(process.Process);
+                        bool closed = CloseHandle(process.Process);
+                        if (admissionReceipt != null)
+                        {
+                            admissionReceipt.ProcessHandleOwned = true;
+                            admissionReceipt.ProcessHandleClosed = closed;
+                        }
+                        if (!closed && processCleanupFailure == null)
+                        {
+                            processCleanupFailure = Win32Failure(
+                                "close-contained-process",
+                                Marshal.GetLastWin32Error());
+                        }
                     }
                 }
                 if (environmentBlock != IntPtr.Zero)
@@ -1766,9 +1834,14 @@ namespace ProjectAtlas.Release
                 if (failedAdmissionReceipt.ProcessId <= 0
                     || !failedAdmissionReceipt.TerminationAttempted
                     || failedAdmissionReceipt.WaitResult != WaitObject0
-                    || !failedAdmissionReceipt.Reaped)
+                    || !failedAdmissionReceipt.Reaped
+                    || failedAdmissionReceipt.JobHandleOwned
+                    || !failedAdmissionReceipt.ProcessHandleOwned
+                    || !failedAdmissionReceipt.ProcessHandleClosed
+                    || !failedAdmissionReceipt.ThreadHandleOwned
+                    || !failedAdmissionReceipt.ThreadHandleClosed)
                 {
-                    throw new ContainmentFailure("unreaped-failed-admission");
+                    throw new ContainmentFailure("incomplete-failed-admission-cleanup");
                 }
                 try
                 {
@@ -1776,6 +1849,40 @@ namespace ProjectAtlas.Release
                         failedAdmissionReceipt.ProcessId))
                     {
                         throw new ContainmentFailure("failed-admission-process-survived");
+                    }
+                }
+                catch (ArgumentException)
+                {
+                }
+
+                AdmissionReceipt combinedFailureReceipt = new AdmissionReceipt();
+                RequireContainmentFailure(
+                    delegate
+                    {
+                        LaunchContained(
+                            failedAdmission,
+                            AdmissionScenario.FailBeforeJobAssignmentAndContainmentCleanup,
+                            combinedFailureReceipt);
+                    },
+                    "self-test-before-job-assignment-with-cleanup-containment-cleanup");
+                if (combinedFailureReceipt.ProcessId <= 0
+                    || !combinedFailureReceipt.TerminationAttempted
+                    || combinedFailureReceipt.WaitResult != WaitObject0
+                    || !combinedFailureReceipt.Reaped
+                    || combinedFailureReceipt.JobHandleOwned
+                    || !combinedFailureReceipt.ProcessHandleOwned
+                    || !combinedFailureReceipt.ProcessHandleClosed
+                    || !combinedFailureReceipt.ThreadHandleOwned
+                    || !combinedFailureReceipt.ThreadHandleClosed)
+                {
+                    throw new ContainmentFailure("incomplete-combined-failure-cleanup");
+                }
+                try
+                {
+                    using (Process unexpectedProcess = Process.GetProcessById(
+                        combinedFailureReceipt.ProcessId))
+                    {
+                        throw new ContainmentFailure("combined-failure-process-survived");
                     }
                 }
                 catch (ArgumentException)
