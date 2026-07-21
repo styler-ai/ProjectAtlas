@@ -169,6 +169,182 @@ jobs:
             -RunSelfTest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Diagnose hosted contained compiler execution
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $launcher = Join-Path $env:RUNNER_TEMP "parser-pack-appcontainer/launcher.exe"
+          $toolchainRoot = '${{ steps.identity.outputs.toolchain_root }}'
+          $toolchainBin = Join-Path $toolchainRoot "bin"
+          $rustcSource = Join-Path $toolchainBin "rustc.exe"
+          $pwshPath = '${{ steps.identity.outputs.pwsh_path }}'
+          $pwshRoot = Split-Path -Parent $pwshPath
+          $probeRoot = Join-Path $env:RUNNER_TEMP "parser-pack-compiler-probe"
+          [System.IO.Directory]::CreateDirectory($probeRoot) | Out-Null
+          $boundedPath = @(
+            $toolchainBin,
+            (Join-Path $env:SystemRoot "System32"),
+            $env:SystemRoot
+          ) -join ';'
+          $runtimeDlls = @(
+            Get-ChildItem -LiteralPath $toolchainBin -Filter "*.dll" -File |
+              Sort-Object Name |
+              ForEach-Object { $_.FullName }
+          )
+
+          function Invoke-ContainedCompilerProbe {
+            param(
+              [Parameter(Mandatory)] [string] $Role,
+              [Parameter(Mandatory)] [string] $Executable,
+              [Parameter(Mandatory)] [string] $Compiler,
+              [Parameter(Mandatory)] [bool] $ThroughPowerShell
+            )
+
+            $arguments = @(
+              "launch",
+              "--executable", $Executable,
+              "--working-directory", $probeRoot,
+              "--temp-directory", $probeRoot,
+              "--timeout-seconds", "60",
+              "--read-root", $toolchainRoot
+            )
+            if ($ThroughPowerShell) {
+              $arguments += @("--read-root", $pwshRoot)
+            }
+            foreach ($executeFile in @($Compiler) + $runtimeDlls) {
+              $arguments += @("--execute-file", $executeFile)
+            }
+            $arguments += @(
+              "--write-root", $probeRoot,
+              "--environment", "PATH=$boundedPath"
+            )
+            if ($ThroughPowerShell) {
+              $arguments += @("--environment", "RUSTC=$Compiler")
+            }
+            $arguments += "--"
+            if ($ThroughPowerShell) {
+              $arguments += @(
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command", '$ErrorActionPreference = "Stop"; $global:LASTEXITCODE = 125; try { & $env:RUSTC -vV *> $null } catch { exit 125 }; exit $LASTEXITCODE'
+              )
+            }
+            else {
+              $arguments += "-vV"
+            }
+
+            $exitCode = 126
+            try {
+              & $launcher @arguments *> $null
+              if ($null -ne $LASTEXITCODE) {
+                $exitCode = [int]$LASTEXITCODE
+              }
+            }
+            catch {
+              $exitCode = 126
+            }
+            Write-Host "[contained-rustc-probe] role=$Role exit=$exitCode"
+            return [int]$exitCode
+          }
+
+          $originalDirectExit = Invoke-ContainedCompilerProbe `
+            -Role "original-direct" `
+            -Executable $rustcSource `
+            -Compiler $rustcSource `
+            -ThroughPowerShell $false
+          $originalPowerShellExit = Invoke-ContainedCompilerProbe `
+            -Role "original-powershell-child" `
+            -Executable $pwshPath `
+            -Compiler $rustcSource `
+            -ThroughPowerShell $true
+
+          $containedRustc = Join-Path $toolchainBin (
+            "projectatlas-parser-pack-rustc-{0}.exe" -f [Guid]::NewGuid().ToString("N")
+          )
+          $containedRustcCanonical = $null
+          $containedRustcParentValidated = $false
+          $containedRustcCreated = $false
+          $containedRustcFailure = $null
+          $containedRustcCleanupFailed = $false
+          $containedRustcStage = "validate"
+          try {
+            $sourceItem = Get-Item -LiteralPath $rustcSource -Force
+            $toolchainBinCanonical = [System.IO.Path]::GetFullPath($toolchainBin).TrimEnd('\')
+            $containedRustcCanonical = [System.IO.Path]::GetFullPath($containedRustc)
+            if ($sourceItem.PSIsContainer -or
+                (($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) -or
+                [System.IO.Path]::GetDirectoryName($containedRustcCanonical) -ne $toolchainBinCanonical -or
+                [System.IO.File]::Exists($containedRustcCanonical) -or
+                [System.IO.Directory]::Exists($containedRustcCanonical)) {
+              throw "invalid-contained-rustc"
+            }
+            $containedRustcParentValidated = $true
+
+            $containedRustcStage = "copy"
+            [System.IO.File]::Copy($sourceItem.FullName, $containedRustcCanonical, $false)
+            $containedRustcCreated = $true
+
+            $containedRustcStage = "verify"
+            $containedItem = Get-Item -LiteralPath $containedRustcCanonical -Force
+            if ($containedItem.PSIsContainer -or
+                (($containedItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) -or
+                $containedItem.Length -ne $sourceItem.Length -or
+                (Get-FileHash -LiteralPath $containedItem.FullName -Algorithm SHA256).Hash -ne
+                  (Get-FileHash -LiteralPath $sourceItem.FullName -Algorithm SHA256).Hash) {
+              throw "invalid-contained-rustc-copy"
+            }
+
+            $containedRustcStage = "direct-probe"
+            $copyDirectExit = Invoke-ContainedCompilerProbe `
+              -Role "copy-direct" `
+              -Executable $containedRustcCanonical `
+              -Compiler $containedRustcCanonical `
+              -ThroughPowerShell $false
+            $containedRustcStage = "powershell-child-probe"
+            $copyPowerShellExit = Invoke-ContainedCompilerProbe `
+              -Role "copy-powershell-child" `
+              -Executable $pwshPath `
+              -Compiler $containedRustcCanonical `
+              -ThroughPowerShell $true
+          }
+          catch {
+            $containedRustcFailure = "contained-rustc-$containedRustcStage-failed"
+          }
+          finally {
+            if ($containedRustcParentValidated -and
+                ($containedRustcCreated -or
+                 [System.IO.File]::Exists($containedRustcCanonical) -or
+                 [System.IO.Directory]::Exists($containedRustcCanonical))) {
+              try {
+                [System.IO.File]::Delete($containedRustcCanonical)
+                if ([System.IO.File]::Exists($containedRustcCanonical) -or
+                    [System.IO.Directory]::Exists($containedRustcCanonical)) {
+                  $containedRustcCleanupFailed = $true
+                }
+              }
+              catch {
+                $containedRustcCleanupFailed = $true
+              }
+            }
+          }
+          if ($containedRustcCleanupFailed) {
+            throw "contained-rustc-cleanup-failed"
+          }
+          if ($null -ne $containedRustcFailure) {
+            throw $containedRustcFailure
+          }
+          if ($null -eq $originalDirectExit -or
+              $null -eq $originalPowerShellExit -or
+              $null -eq $copyDirectExit -or
+              $null -eq $copyPowerShellExit) {
+            throw "contained-rustc-probe-incomplete"
+          }
+
+          throw "contained-rustc-probe-complete"
+
       - name: Construct inside Linux network namespace
         if: runner.os == 'Linux'
         shell: bash
