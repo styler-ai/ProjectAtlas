@@ -105,9 +105,99 @@ function Invoke-Checked {
         [string]$Role
     )
 
-    & $Executable @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Role failed with exit code $LASTEXITCODE."
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $Executable
+    $startInfo.UseShellExecute = $false
+    foreach ($argument in $Arguments) {
+        $startInfo.ArgumentList.Add($argument)
+    }
+    $process = $null
+    try {
+        $process = [System.Diagnostics.Process]::Start($startInfo)
+        $process.WaitForExit()
+        $commandExitCode = $process.ExitCode
+    }
+    catch {
+        try {
+            Write-ConstructionStatus `
+                -Stage $script:constructionStage `
+                -State "failed" `
+                -ExitCode 1
+        }
+        catch {
+            # The parent rejects missing or malformed status and never emits
+            # exception text from inside the contained process.
+        }
+        throw "$Role failed to start or wait."
+    }
+    finally {
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
+    }
+    if ($commandExitCode -ne 0) {
+        try {
+            Write-ConstructionStatus `
+                -Stage $script:constructionStage `
+                -State "failed" `
+                -ExitCode $commandExitCode
+        }
+        catch {
+            # The parent rejects missing or malformed status and never emits
+            # exception text from inside the contained process.
+        }
+        throw "$Role failed with exit code $commandExitCode."
+    }
+}
+
+function Write-ConstructionStatus {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet(
+            "validate-inputs",
+            "network-denial-canaries",
+            "output-preparation",
+            "optional-parser-worker-build",
+            "artifact-assembler-build",
+            "release-verifier-build",
+            "runtime-containment-broker-build",
+            "artifact-input-validation",
+            "artifact-assembly-a",
+            "archive-creation-a",
+            "artifact-assembly-b",
+            "archive-creation-b",
+            "deterministic-archive-comparison",
+            "publication"
+        )]
+        [string]$Stage,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("running", "failed")]
+        [string]$State,
+
+        [Nullable[int]]$ExitCode
+    )
+
+    if (($State -eq "running" -and $null -ne $ExitCode) -or
+        ($State -eq "failed" -and ($null -eq $ExitCode -or $ExitCode -eq 0))) {
+        throw "Construction status has an invalid exit-code state."
+    }
+    $status = [ordered]@{
+        schema_version = 1
+        stage = $Stage
+        state = $State
+        exit_code = if ($null -eq $ExitCode) { $null } else { [int]$ExitCode }
+    }
+    $json = ($status | ConvertTo-Json -Compress) + "`n"
+    $encoding = [System.Text.UTF8Encoding]::new($false)
+    if ($encoding.GetByteCount($json) -gt 1024) {
+        throw "Construction status exceeds its byte bound."
+    }
+    $temporaryPath = "$script:constructionStatusPath.tmp"
+    [System.IO.File]::WriteAllText($temporaryPath, $json, $encoding)
+    [System.IO.File]::Move($temporaryPath, $script:constructionStatusPath, $true)
+    if ($State -eq "failed") {
+        $script:constructionFailureRecorded = $true
     }
 }
 
@@ -132,6 +222,33 @@ foreach ($forbiddenVariable in @("TSLP_LANGUAGES", "TSLP_ALLOW_FAILED_GRAMMARS")
 $source = Get-CanonicalDirectory -Path $SourceRoot -Role "SourceRoot"
 $inputs = Get-CanonicalDirectory -Path $InputDirectory -Role "InputDirectory"
 $output = Get-CanonicalDirectory -Path $OutputDirectory -Role "OutputDirectory"
+$script:constructionStatusPath = [System.IO.Path]::Combine(
+    $output,
+    "construction-status.json"
+)
+$script:constructionStage = "validate-inputs"
+$script:constructionFailureRecorded = $false
+trap {
+    if (-not $script:constructionFailureRecorded) {
+        $failureExitCode = 1
+        $lastNativeExit = Get-Variable -Name LASTEXITCODE -ValueOnly -ErrorAction SilentlyContinue
+        if ($null -ne $lastNativeExit -and $lastNativeExit -gt 0) {
+            $failureExitCode = [int]$lastNativeExit
+        }
+        try {
+            Write-ConstructionStatus `
+                -Stage $script:constructionStage `
+                -State "failed" `
+                -ExitCode $failureExitCode
+        }
+        catch {
+            # The parent treats a missing or malformed marker as a generic
+            # contained-construction failure and never emits exception text.
+        }
+    }
+    exit 1
+}
+Write-ConstructionStatus -Stage $script:constructionStage -State "running"
 $networkCheck = Get-RegularFile `
     -Path ([System.IO.Path]::Combine(
         $source,
@@ -142,6 +259,8 @@ $networkCheck = Get-RegularFile `
     -Role "network boundary checker"
 $processPath = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
 $pwsh = Get-RegularFile -Path $processPath -Role "PowerShell runtime"
+$script:constructionStage = "network-denial-canaries"
+Write-ConstructionStatus -Stage $script:constructionStage -State "running"
 Invoke-Checked `
     -Executable $pwsh `
     -Arguments @(
@@ -160,6 +279,8 @@ $cargo = Get-RegularFile -Path $cargoCommand.Source -Role "Cargo executable"
 $buildDirectory = [System.IO.Path]::Combine($output, "build")
 $workingDirectory = [System.IO.Path]::Combine($output, "work")
 $publishDirectory = [System.IO.Path]::Combine($output, "publish")
+$script:constructionStage = "output-preparation"
+Write-ConstructionStatus -Stage $script:constructionStage -State "running"
 foreach ($directory in @($buildDirectory, $workingDirectory, $publishDirectory)) {
     if ([System.IO.Directory]::Exists($directory) -or [System.IO.File]::Exists($directory)) {
         throw "Contained construction output already exists: $directory"
@@ -194,7 +315,6 @@ try {
         $workerBuildArguments += @(
             "--",
             "-Clink-arg=-Wl,--push-state,--no-as-needed",
-            "-Clink-arg=-lc",
             "-Clink-arg=-lgcc_s",
             "-Clink-arg=-lm",
             "-Clink-arg=-lstdc++",
@@ -203,10 +323,14 @@ try {
             "-Clink-arg=-Wl,-z,relro"
         )
     }
+    $script:constructionStage = "optional-parser-worker-build"
+    Write-ConstructionStatus -Stage $script:constructionStage -State "running"
     Invoke-Checked `
         -Executable $cargo `
         -Arguments $workerBuildArguments `
         -Role "optional parser worker build"
+    $script:constructionStage = "artifact-assembler-build"
+    Write-ConstructionStatus -Stage $script:constructionStage -State "running"
     Invoke-Checked `
         -Executable $cargo `
         -Arguments @(
@@ -220,6 +344,8 @@ try {
             "assemble_optional_parser_artifact"
         ) `
         -Role "parser-pack artifact assembler build"
+    $script:constructionStage = "release-verifier-build"
+    Write-ConstructionStatus -Stage $script:constructionStage -State "running"
     Invoke-Checked `
         -Executable $cargo `
         -Arguments @(
@@ -237,6 +363,8 @@ try {
         -Role "parser-pack release verifier build"
 
     if ($Target -eq "x86_64-pc-windows-msvc") {
+        $script:constructionStage = "runtime-containment-broker-build"
+        Write-ConstructionStatus -Stage $script:constructionStage -State "running"
         $brokerBuilder = Get-RegularFile `
             -Path ([System.IO.Path]::Combine(
                 $source,
@@ -315,6 +443,8 @@ $releaseTool = Get-RegularFile `
     )) `
     -Role "built release verifier"
 
+$script:constructionStage = "artifact-input-validation"
+Write-ConstructionStatus -Stage $script:constructionStage -State "running"
 $contextPath = [System.IO.Path]::Combine($workingDirectory, "assembly-context.json")
 $context = [ordered]@{
     candidate = [ordered]@{
@@ -408,6 +538,9 @@ $archives = @(
     [System.IO.Path]::Combine($workingDirectory, "archive-b.tar.zst")
 )
 for ($index = 0; $index -lt 2; $index += 1) {
+    $assemblyStage = if ($index -eq 0) { "artifact-assembly-a" } else { "artifact-assembly-b" }
+    $script:constructionStage = $assemblyStage
+    Write-ConstructionStatus -Stage $script:constructionStage -State "running"
     Invoke-Checked `
         -Executable $assembler `
         -Arguments @(
@@ -426,6 +559,9 @@ for ($index = 0; $index -lt 2; $index += 1) {
             $stagedDirectories[$index]
         ) `
         -Role "artifact assembly $index"
+    $archiveStage = if ($index -eq 0) { "archive-creation-a" } else { "archive-creation-b" }
+    $script:constructionStage = $archiveStage
+    Write-ConstructionStatus -Stage $script:constructionStage -State "running"
     Invoke-Checked `
         -Executable $releaseTool `
         -Arguments @(
@@ -436,6 +572,8 @@ for ($index = 0; $index -lt 2; $index += 1) {
         -Role "deterministic archive creation $index"
 }
 
+$script:constructionStage = "deterministic-archive-comparison"
+Write-ConstructionStatus -Stage $script:constructionStage -State "running"
 $archiveA = Get-Item -LiteralPath $archives[0] -Force
 $archiveB = Get-Item -LiteralPath $archives[1] -Force
 $archiveAHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archiveA.FullName).Hash.ToLowerInvariant()
@@ -444,6 +582,8 @@ if ($archiveA.Length -ne $archiveB.Length -or $archiveAHash -ne $archiveBHash) {
     throw "Independent parser-pack assembly did not produce byte-identical archives."
 }
 
+$script:constructionStage = "publication"
+Write-ConstructionStatus -Stage $script:constructionStage -State "running"
 $publishedArchive = [System.IO.Path]::Combine(
     $publishDirectory,
     "projectatlas-broad-parser-$Target.tar.zst"
@@ -473,6 +613,7 @@ $publishedNetworkCheck = [System.IO.Path]::Combine(
 )
 [System.IO.File]::Copy($acceptedManifest, $publishedManifest, $false)
 [System.IO.File]::Copy($networkCheck, $publishedNetworkCheck, $false)
+[System.IO.File]::Delete($script:constructionStatusPath)
 
 [pscustomobject]@{
     target = $Target

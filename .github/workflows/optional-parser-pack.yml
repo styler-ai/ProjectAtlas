@@ -291,7 +291,64 @@ jobs:
             "-ResolverAddress", "${{ steps.network.outputs.resolver_address }}"
           )
           & $launcher @launcherArguments
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $containedExitCode = $LASTEXITCODE
+          if ($containedExitCode -ne 0) {
+            $validatedStage = $null
+            $validatedExitCode = $null
+            try {
+              $statusPath = Join-Path $output "construction-status.json"
+              $statusItem = Get-Item -LiteralPath $statusPath -Force
+              if ($statusItem.PSIsContainer -or
+                  (($statusItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) -or
+                  $statusItem.Length -le 0 -or
+                  $statusItem.Length -gt 1024) {
+                throw "invalid-status-file"
+              }
+              $status = [System.IO.File]::ReadAllText($statusItem.FullName) |
+                ConvertFrom-Json -Depth 4
+              if ($status -isnot [pscustomobject]) {
+                throw "invalid-status-shape"
+              }
+              $actualKeys = @($status.PSObject.Properties.Name | Sort-Object)
+              $expectedKeys = @("exit_code", "schema_version", "stage", "state")
+              if (Compare-Object -ReferenceObject $expectedKeys -DifferenceObject $actualKeys) {
+                throw "invalid-status-keys"
+              }
+              $allowedStages = @(
+                "validate-inputs",
+                "network-denial-canaries",
+                "output-preparation",
+                "optional-parser-worker-build",
+                "artifact-assembler-build",
+                "release-verifier-build",
+                "runtime-containment-broker-build",
+                "artifact-input-validation",
+                "artifact-assembly-a",
+                "archive-creation-a",
+                "artifact-assembly-b",
+                "archive-creation-b",
+                "deterministic-archive-comparison",
+                "publication"
+              )
+              $integerTypes = @([int], [long])
+              if ($integerTypes -notcontains $status.schema_version.GetType() -or
+                  $status.schema_version -ne 1 -or
+                  $status.state -ne "failed" -or
+                  $allowedStages -notcontains $status.stage -or
+                  $integerTypes -notcontains $status.exit_code.GetType() -or
+                  $status.exit_code -eq 0 -or
+                  $status.exit_code -lt [int]::MinValue -or
+                  $status.exit_code -gt [int]::MaxValue) {
+                throw "invalid-status-values"
+              }
+              $validatedStage = [string]$status.stage
+              $validatedExitCode = [int]$status.exit_code
+            }
+            catch {
+              throw "Contained construction failed without a valid bounded status record."
+            }
+            throw "Contained construction failed at $validatedStage with exit code $validatedExitCode."
+          }
 
           $publish = Join-Path $output "publish"
           $publishedLauncher = Join-Path $publish "parser-pack-appcontainer-launcher.exe"
