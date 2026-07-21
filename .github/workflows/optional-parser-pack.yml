@@ -213,6 +213,149 @@ jobs:
               ForEach-Object { $_.FullName }
           )
 
+          $programFilesX86 = [System.Environment]::GetFolderPath(
+            [System.Environment+SpecialFolder]::ProgramFilesX86
+          )
+          $vswhere = Join-Path $programFilesX86 "Microsoft Visual Studio/Installer/vswhere.exe"
+          $vsInstall = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($vsInstall)) {
+            throw "Visual Studio C++ toolchain was not found."
+          }
+          Import-Module (Join-Path $vsInstall "Common7/Tools/Microsoft.VisualStudio.DevShell.dll")
+          Enter-VsDevShell -VsInstallPath $vsInstall -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=x64" | Out-Null
+
+          $processCanarySource = Join-Path $probeRoot "contained-process-canary.rs"
+          $processCanary = Join-Path $probeRoot "contained-process-canary.exe"
+          $processCanaryCode = @'
+          use std::env;
+          use std::io;
+          use std::process::{Command, ExitCode, ExitStatus, Stdio};
+
+          fn classify(result: io::Result<ExitStatus>) -> ExitCode {
+              match result {
+                  Ok(status) if status.success() => ExitCode::SUCCESS,
+                  Ok(_) => ExitCode::from(102),
+                  Err(error) if error.raw_os_error() == Some(5) => ExitCode::from(105),
+                  Err(_) => ExitCode::from(106),
+              }
+          }
+
+          fn main() -> ExitCode {
+              let mut arguments = env::args_os();
+              let _program = arguments.next();
+              let Some(mode) = arguments.next() else {
+                  return ExitCode::from(64);
+              };
+              if arguments.next().is_some() {
+                  return ExitCode::from(64);
+              }
+              let Some(rustc) = env::var_os("RUSTC") else {
+                  return ExitCode::from(64);
+              };
+
+              let mut command = Command::new(rustc);
+              command
+                  .arg("-vV")
+                  .env_remove("MODE")
+                  .stdout(Stdio::piped())
+                  .stderr(Stdio::piped());
+              match mode.to_str() {
+                  Some("null") => {
+                      command.stdin(Stdio::null());
+                  }
+                  Some("pipe") => {
+                      command.stdin(Stdio::piped());
+                  }
+                  _ => return ExitCode::from(64),
+              }
+
+              classify(command.output().map(|output| output.status))
+          }
+          '@
+          [System.IO.File]::WriteAllText(
+            $processCanarySource,
+            $processCanaryCode,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          $processCanaryCompileExit = 126
+          try {
+            & $rustcSource `
+              --edition=2024 `
+              -C debuginfo=0 `
+              -o $processCanary `
+              $processCanarySource `
+              *> $null
+            if ($null -ne $LASTEXITCODE) {
+              $processCanaryCompileExit = [int]$LASTEXITCODE
+            }
+          }
+          catch {
+            $processCanaryCompileExit = 126
+          }
+          if ($processCanaryCompileExit -ne 0) {
+            throw "contained-process-canary-compile-failed"
+          }
+          $processCanaryItem = Get-Item -LiteralPath $processCanary -Force
+          if ($processCanaryItem.PSIsContainer -or
+              (($processCanaryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) -or
+              $processCanaryItem.Length -le 0) {
+            throw "invalid-contained-process-canary"
+          }
+
+          function Invoke-ContainedStdioProbe {
+            param(
+              [Parameter(Mandatory)] [string] $Role,
+              [Parameter(Mandatory)] [string] $Mode
+            )
+
+            $arguments = @(
+              "launch",
+              "--executable", $pwshPath,
+              "--working-directory", $probeRoot,
+              "--temp-directory", $probeRoot,
+              "--timeout-seconds", "60",
+              "--read-root", $toolchainRoot,
+              "--read-root", $pwshRoot,
+              "--write-root", $probeRoot,
+              "--execute-file", $processCanary,
+              "--execute-file", $rustcSource
+            )
+            foreach ($runtimeDll in $runtimeDlls) {
+              $arguments += @("--execute-file", $runtimeDll)
+            }
+            $arguments += @(
+              "--environment", "PATH=$boundedPath",
+              "--environment", "CANARY=$processCanary",
+              "--environment", "MODE=$Mode",
+              "--environment", "RUSTC=$rustcSource",
+              "--",
+              "-NoLogo",
+              "-NoProfile",
+              "-NonInteractive",
+              "-Command", '$ErrorActionPreference = "Stop"; $global:LASTEXITCODE = 125; try { & $env:CANARY $env:MODE *> $null } catch { exit 125 }; exit $LASTEXITCODE'
+            )
+
+            $exitCode = 126
+            try {
+              & $launcher @arguments *> $null
+              if ($null -ne $LASTEXITCODE) {
+                $exitCode = [int]$LASTEXITCODE
+              }
+            }
+            catch {
+              $exitCode = 126
+            }
+            Write-Host "[contained-stdio-probe] role=$Role exit=$exitCode"
+            return [int]$exitCode
+          }
+
+          $nullStdinExit = Invoke-ContainedStdioProbe `
+            -Role "rust-output-null-stdin" `
+            -Mode "null"
+          $pipedStdinExit = Invoke-ContainedStdioProbe `
+            -Role "rust-output-piped-stdin" `
+            -Mode "pipe"
+
           function Invoke-ContainedCompilerProbe {
             param(
               [Parameter(Mandatory)] [string] $Role,
@@ -395,6 +538,8 @@ jobs:
             throw $containedRustcFailure
           }
           if ($null -eq $originalDirectExit -or
+              $null -eq $nullStdinExit -or
+              $null -eq $pipedStdinExit -or
               $null -eq $originalPowerShellExit -or
               $null -eq $originalCargoExit -or
               $null -eq $copyDirectExit -or
