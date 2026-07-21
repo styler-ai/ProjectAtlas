@@ -620,6 +620,7 @@ using System.Text;
 
 public static class ProjectAtlasConstructionProcess
 {
+    private const uint LogonWithProfile = 0x00000001;
     private const uint CreateSuspended = 0x00000004;
     private const uint CreateNoWindow = 0x08000000;
     private const uint CreateUnicodeEnvironment = 0x00000400;
@@ -1185,7 +1186,7 @@ public static class ProjectAtlasConstructionProcess
                     username,
                     ".",
                     passwordPointer,
-                    0,
+                    LogonWithProfile,
                     executable,
                     commandLine,
                     flags,

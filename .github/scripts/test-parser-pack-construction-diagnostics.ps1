@@ -97,6 +97,10 @@ try {
         ))
         Require ($nativeSourceAssignments.Count -eq 1) "Expected one native adapter source assignment."
         Invoke-Expression $nativeSourceAssignments[0].Extent.Text
+        Require `
+            ($nativeSource.Contains('private const uint LogonWithProfile = 0x00000001;') -and
+                [regex]::Matches($nativeSource, '\bLogonWithProfile\b').Count -eq 2) `
+            "Windows construction adapter did not load the disposable principal profile."
         if (-not ('ProjectAtlasConstructionProcess' -as [type])) {
             Add-Type -TypeDefinition $nativeSource -Language CSharp
         }
