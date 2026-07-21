@@ -140,7 +140,7 @@ pub enum OptionalParserPackLifecycleError {
     OperationAndCleanup {
         /// Original typed lifecycle failure.
         operation: Box<Self>,
-        /// Typed termination, reap, or drain failure.
+        /// Typed mandatory cleanup failure.
         cleanup: Box<Self>,
     },
 }
@@ -150,6 +150,24 @@ impl OptionalParserPackLifecycleError {
     #[must_use]
     pub const fn is_unsupported_containment(&self) -> bool {
         matches!(self, Self::UnsupportedContainment { .. })
+    }
+}
+
+/// Preserve both a lifecycle operation failure and its mandatory cleanup failure.
+fn finish_with_cleanup<T>(
+    operation: Result<T, OptionalParserPackLifecycleError>,
+    cleanup: Result<(), OptionalParserPackLifecycleError>,
+) -> Result<T, OptionalParserPackLifecycleError> {
+    match (operation, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(operation), Ok(())) => Err(operation),
+        (Ok(_), Err(cleanup)) => Err(cleanup),
+        (Err(operation), Err(cleanup)) => {
+            Err(OptionalParserPackLifecycleError::OperationAndCleanup {
+                operation: Box::new(operation),
+                cleanup: Box::new(cleanup),
+            })
+        }
     }
 }
 
@@ -231,6 +249,77 @@ pub struct OptionalParserPackLifecycleReport {
     pub artifact: Option<OptionalParserPackSlotReport>,
     /// Whether this command changed durable lifecycle state.
     pub changed: bool,
+}
+
+/// Owns cleanup of an artifact profile created from a temporary pack root.
+///
+/// Callers must either hold the parser-pack lifecycle's exclusive lease or run
+/// on an isolated host where no installed copy of the same artifact can be in
+/// use. Normal control flow must call [`Self::cleanup`]; `Drop` is only a
+/// best-effort fallback for unwinding or a forgotten terminal action.
+#[must_use = "temporary parser artifact profiles require cleanup or installed-slot transfer"]
+pub struct TemporaryParserArtifactProfile {
+    /// Extracted pack root containing the exact cleanup broker and manifest.
+    pack_root: PathBuf,
+    /// Identity of the exact artifact manifest that owns the profile.
+    artifact: ParserArtifactIdentity,
+    /// Whether cleanup ownership has not been completed or transferred.
+    cleanup_pending: bool,
+}
+
+impl TemporaryParserArtifactProfile {
+    /// Arm cleanup ownership from an already verified parser artifact authority.
+    ///
+    /// The caller must hold the lifecycle's exclusive pack lease or run on an
+    /// isolated verifier host before allowing packaged code to execute.
+    pub fn for_verified_supervisor(supervisor: &OptionalParserSupervisor) -> Self {
+        Self {
+            pack_root: supervisor.pack_root().to_path_buf(),
+            artifact: supervisor.artifact_identity().clone(),
+            cleanup_pending: true,
+        }
+    }
+
+    /// Build a cleanup owner for focused lifecycle state tests.
+    #[cfg(test)]
+    fn new(pack_root: impl Into<PathBuf>, artifact: ParserArtifactIdentity) -> Self {
+        Self {
+            pack_root: pack_root.into(),
+            artifact,
+            cleanup_pending: true,
+        }
+    }
+
+    /// Perform the one explicit fallible artifact-profile cleanup attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed lifecycle error when the exact broker cannot validate or
+    /// remove its artifact-scoped profile and access-control entries.
+    pub fn cleanup(mut self) -> Result<(), OptionalParserPackLifecycleError> {
+        self.cleanup_pending_profile()
+    }
+
+    /// Transfer cleanup ownership to the newly published immutable slot.
+    fn transfer_to_installed_slot(&mut self) {
+        self.cleanup_pending = false;
+    }
+
+    /// Run cleanup at most once while the temporary pack root still exists.
+    fn cleanup_pending_profile(&mut self) -> Result<(), OptionalParserPackLifecycleError> {
+        if !self.cleanup_pending {
+            return Ok(());
+        }
+        cleanup_platform_profile(&self.pack_root, &self.artifact)?;
+        self.cleanup_pending = false;
+        Ok(())
+    }
+}
+
+impl Drop for TemporaryParserArtifactProfile {
+    fn drop(&mut self) {
+        drop(self.cleanup_pending_profile());
+    }
 }
 
 /// Concrete owner of project selection and user-owned immutable pack slots.
@@ -411,10 +500,13 @@ impl OptionalParserPackLifecycle {
         archive: &Path,
     ) -> Result<OptionalParserPackLifecycleReport, OptionalParserPackLifecycleError> {
         let platform = self.require_supported()?;
+        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+        let _lease = self.acquire_pack_lease(OptionalParserPackLeaseMode::Exclusive)?;
         #[cfg(test)]
         self.fail_admission_if_injected(archive)?;
         let verified = Self::verify_archive(archive, platform, None)?;
         let artifact = verified.slot_report(false);
+        verified.cleanup_profile()?;
         Ok(self.report(OptionalParserPackOperation::Verify, false, Some(artifact)))
     }
 
@@ -637,48 +729,60 @@ impl OptionalParserPackLifecycle {
         self.fail_admission_if_injected(archive)?;
         self.ensure_storage_roots()?;
         let versions_root = self.versions_root()?;
-        let verified = Self::verify_archive(archive, platform, Some(&versions_root))?;
+        let mut verified = Self::verify_archive(archive, platform, Some(&versions_root))?;
         let slot = verified.slot_identity();
-        ensure_direct_directory(
-            &versions_root,
-            &versions_root.join(&slot.projectatlas_version),
-        )?;
-        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-        if windows_slot_cleanup_in_progress(
-            &versions_root.join(&slot.projectatlas_version),
-            &slot.artifact,
-        )? {
-            return Err(invalid_data(
-                "the selected parser-pack artifact still has a cleanup tombstone",
-            ));
-        }
-        let destination = self.slot_path(&slot)?;
-        if self.slot_path_is_real(&slot)? {
-            self.open_verified_installed_slot(&slot)?;
-            return Ok((slot, false));
-        }
-        if fs::symlink_metadata(&destination).is_ok() {
-            return Err(invalid_data(
-                "immutable slot path is occupied by a non-directory entry",
-            ));
-        }
-        seal_immutable_tree(&verified.pack_root)?;
-        match fs::rename(&verified.pack_root, &destination) {
-            Ok(()) => Ok((slot, true)),
-            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
-                make_tree_writable(&verified.pack_root)?;
+        let operation = (|| {
+            ensure_direct_directory(
+                &versions_root,
+                &versions_root.join(&slot.projectatlas_version),
+            )?;
+            #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+            if windows_slot_cleanup_in_progress(
+                &versions_root.join(&slot.projectatlas_version),
+                &slot.artifact,
+            )? {
+                return Err(invalid_data(
+                    "the selected parser-pack artifact still has a cleanup tombstone",
+                ));
+            }
+            let destination = self.slot_path(&slot)?;
+            if self.slot_path_is_real(&slot)? {
                 self.open_verified_installed_slot(&slot)?;
-                Ok((slot, false))
+                return Ok((slot.clone(), false));
             }
-            Err(source) => {
-                let _cleanup = make_tree_writable(&verified.pack_root);
-                Err(io_error(
-                    "publish immutable parser-pack slot",
-                    destination,
-                    source,
-                ))
+            if fs::symlink_metadata(&destination).is_ok() {
+                return Err(invalid_data(
+                    "immutable slot path is occupied by a non-directory entry",
+                ));
             }
-        }
+            if let Err(operation) = seal_immutable_tree(&verified.pack_root) {
+                return finish_with_cleanup(
+                    Err(operation),
+                    make_tree_writable(&verified.pack_root),
+                );
+            }
+            match fs::rename(&verified.pack_root, &destination) {
+                Ok(()) => {
+                    verified.transfer_profile_to_installed_slot();
+                    Ok((slot.clone(), true))
+                }
+                Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                    make_tree_writable(&verified.pack_root)?;
+                    self.open_verified_installed_slot(&slot)?;
+                    Ok((slot.clone(), false))
+                }
+                Err(source) => finish_with_cleanup(
+                    Err(io_error(
+                        "publish immutable parser-pack slot",
+                        destination,
+                        source,
+                    )),
+                    make_tree_writable(&verified.pack_root),
+                ),
+            }
+        })();
+        let cleanup = verified.cleanup_profile();
+        finish_with_cleanup(operation, cleanup)
     }
 
     /// Validate a local completed archive into a temporary directory.
@@ -711,19 +815,34 @@ impl OptionalParserPackLifecycle {
         }
         require_archive_name(archive, platform)?;
         validate_observed_inventory(&extracted.observed, &artifact)?;
+        let projectatlas_version = artifact.projectatlas_version;
         let supervisor = OptionalParserSupervisor::open(&extracted.pack_root)?;
-        admit_optional_parser_artifact(supervisor, &logical)?;
-        let after = sha256_file(archive, OPTIONAL_PARSER_PACK_MAX_ARCHIVE_BYTES)?;
+        let artifact_identity = supervisor.artifact_identity().clone();
+        let temporary_profile =
+            TemporaryParserArtifactProfile::for_verified_supervisor(&supervisor);
+        if let Err(error) = admit_optional_parser_artifact(supervisor, &logical) {
+            return finish_with_cleanup(Err(error.into()), temporary_profile.cleanup());
+        }
+        let after = match sha256_file(archive, OPTIONAL_PARSER_PACK_MAX_ARCHIVE_BYTES) {
+            Ok(after) => after,
+            Err(operation) => {
+                return finish_with_cleanup(Err(operation), temporary_profile.cleanup());
+            }
+        };
         if before != after {
-            return Err(invalid_data(
-                "completed archive changed during verification",
-            ));
+            return finish_with_cleanup(
+                Err(invalid_data(
+                    "completed archive changed during verification",
+                )),
+                temporary_profile.cleanup(),
+            );
         }
         Ok(VerifiedArchive {
+            temporary_profile,
             _directory: extracted.directory,
             pack_root: extracted.pack_root,
-            artifact: ParserArtifactIdentity::for_bytes(&artifact_bytes),
-            projectatlas_version: artifact.projectatlas_version,
+            artifact: artifact_identity,
+            projectatlas_version,
         })
     }
 
@@ -1307,6 +1426,9 @@ impl PackSlotIdentity {
 
 /// Verified extracted artifact kept alive until it is discarded or atomically published.
 struct VerifiedArchive {
+    /// Armed cleanup owner, declared before the temporary directory so fallback
+    /// cleanup runs while the exact broker and manifest still exist.
+    temporary_profile: TemporaryParserArtifactProfile,
     /// Temporary directory whose drop cleans an unpublished extraction.
     _directory: TempDir,
     /// Canonical extracted artifact root.
@@ -1330,6 +1452,23 @@ impl VerifiedArchive {
     fn slot_report(&self, present: bool) -> OptionalParserPackSlotReport {
         self.slot_identity().report(present)
     }
+
+    /// Complete temporary profile cleanup before the extraction is discarded.
+    fn cleanup_profile(self) -> Result<(), OptionalParserPackLifecycleError> {
+        let Self {
+            temporary_profile,
+            _directory: directory,
+            ..
+        } = self;
+        let result = temporary_profile.cleanup();
+        drop(directory);
+        result
+    }
+
+    /// Make the immutable installed slot the sole remaining profile owner.
+    fn transfer_profile_to_installed_slot(&mut self) {
+        self.temporary_profile.transfer_to_installed_slot();
+    }
 }
 
 /// One exact extracted file observation.
@@ -1351,15 +1490,14 @@ struct ExtractedArchive {
 }
 
 /// Closed cleanup state for one lifecycle-owned slot or tombstone entry.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InstalledSlotCleanupState {
     /// Canonical deterministic installed slot awaiting an atomic removal transition.
     Installed,
     /// Unique tombstone whose artifact profile still requires idempotent cleanup.
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     ProfilePending,
     /// Unique tombstone whose profile is already cleaned and only deletion remains.
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     ProfileCleaned,
 }
 
@@ -1367,14 +1505,17 @@ enum InstalledSlotCleanupState {
 #[derive(Clone, Debug)]
 struct InstalledSlotPath {
     /// Direct version directory name, retained even when stale.
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     projectatlas_version: String,
     /// Canonical artifact identity parsed from the slot or tombstone name.
     artifact: String,
     /// Exact lifecycle-owned direct slot or tombstone container.
     entry_root: PathBuf,
     /// Exact pack root while artifact/profile verification remains necessary.
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     pack_root: Option<PathBuf>,
     /// Current closed cleanup transition state.
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     state: InstalledSlotCleanupState,
 }
 
@@ -1816,7 +1957,7 @@ fn installed_slot_paths(
         {
             continue;
         }
-        let version_name = version
+        let projectatlas_version_name = version
             .file_name()
             .into_string()
             .map_err(|_name| invalid_data("parser-pack version directory is not UTF-8"))?;
@@ -1846,7 +1987,7 @@ fn installed_slot_paths(
             if let Some((state, artifact)) = parse_windows_tombstone_name(&entry_name) {
                 let entry_root = slot.path();
                 slots.push(InstalledSlotPath {
-                    projectatlas_version: version_name.clone(),
+                    projectatlas_version: projectatlas_version_name.clone(),
                     artifact,
                     pack_root: (state == InstalledSlotCleanupState::ProfilePending)
                         .then(|| entry_root.clone()),
@@ -1857,13 +1998,18 @@ fn installed_slot_paths(
             }
             let entry_root = slot.path();
             slots.push(InstalledSlotPath {
-                projectatlas_version: version_name.clone(),
+                #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+                projectatlas_version: projectatlas_version_name.clone(),
                 artifact: entry_name,
+                #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
                 pack_root: Some(entry_root.clone()),
                 entry_root,
+                #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
                 state: InstalledSlotCleanupState::Installed,
             });
         }
+        #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+        drop(projectatlas_version_name);
     }
     Ok(slots)
 }
@@ -2073,6 +2219,15 @@ fn cleanup_platform_profile(
         WINDOWS_PROFILE_CLEANUP_TIMEOUT,
         WINDOWS_PROFILE_CLEANUP_REAP_TIMEOUT,
     )
+}
+
+/// Non-Windows hosts have no durable artifact profile to remove.
+#[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+fn cleanup_platform_profile(
+    _root: &Path,
+    _artifact: &ParserArtifactIdentity,
+) -> Result<(), OptionalParserPackLifecycleError> {
+    Ok(())
 }
 
 /// Own one cleanup child through bounded operation, termination, reap, and pipe drain.
@@ -2890,6 +3045,45 @@ mod tests {
         PackSlotIdentity {
             projectatlas_version: OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION.to_owned(),
             artifact: std::iter::repeat_n(byte, 64).collect(),
+        }
+    }
+
+    #[test]
+    fn installed_slot_transfer_disarms_temporary_profile_cleanup() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let mut profile = TemporaryParserArtifactProfile::new(
+            directory.path(),
+            ParserArtifactIdentity::for_bytes(b"artifact-manifest"),
+        );
+        profile.transfer_to_installed_slot();
+        require(
+            !profile.cleanup_pending,
+            "installed-slot transfer retained temporary cleanup ownership",
+        )?;
+        profile.cleanup()?;
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_operation_and_cleanup_failures_are_both_retained() -> TestResult {
+        let error = require_lifecycle_error(
+            finish_with_cleanup::<()>(
+                Err(invalid_data("operation failed")),
+                Err(invalid_data("cleanup failed")),
+            ),
+            "dual lifecycle failure was accepted",
+        )?;
+        match error {
+            OptionalParserPackLifecycleError::OperationAndCleanup { operation, cleanup } => {
+                require(
+                    operation.to_string().contains("operation failed")
+                        && cleanup.to_string().contains("cleanup failed"),
+                    "dual lifecycle failure lost one typed cause",
+                )
+            }
+            other => Err(Box::new(io::Error::other(format!(
+                "dual lifecycle failure returned the wrong variant: {other}"
+            )))),
         }
     }
 

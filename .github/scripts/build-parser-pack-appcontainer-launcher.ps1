@@ -793,6 +793,57 @@ namespace ProjectAtlas.Release
             }
         }
 
+        private static string CaptureAclContract(string path, string stage)
+        {
+            DirectorySecurity security = new DirectoryInfo(path)
+                .GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
+            if (!security.AreAccessRulesCanonical)
+            {
+                throw new ContainmentFailure(stage + "-noncanonical-acl");
+            }
+            SecurityIdentifier owner = security.GetOwner(typeof(SecurityIdentifier))
+                as SecurityIdentifier;
+            if (owner == null)
+            {
+                throw new ContainmentFailure(stage + "-missing-owner");
+            }
+            RawSecurityDescriptor descriptor = new RawSecurityDescriptor(
+                security.GetSecurityDescriptorBinaryForm(),
+                0);
+            List<string> rules = new List<string>();
+            AuthorizationRuleCollection accessRules = security.GetAccessRules(
+                true,
+                true,
+                typeof(SecurityIdentifier));
+            foreach (AuthorizationRule authorizationRule in accessRules)
+            {
+                FileSystemAccessRule rule = authorizationRule as FileSystemAccessRule;
+                SecurityIdentifier identity = authorizationRule.IdentityReference
+                    as SecurityIdentifier;
+                if (rule == null || identity == null)
+                {
+                    throw new ContainmentFailure(stage + "-invalid-access-rule");
+                }
+                rules.Add(String.Join("|", new string[]
+                {
+                    identity.Value,
+                    unchecked((uint)rule.FileSystemRights).ToString("X8", CultureInfo.InvariantCulture),
+                    rule.AccessControlType.ToString(),
+                    rule.InheritanceFlags.ToString(),
+                    rule.PropagationFlags.ToString(),
+                    rule.IsInherited ? "inherited" : "explicit"
+                }));
+            }
+            rules.Sort(StringComparer.Ordinal);
+            return String.Join("\n", new string[]
+            {
+                owner.Value,
+                unchecked((uint)descriptor.ControlFlags).ToString("X8", CultureInfo.InvariantCulture),
+                security.AreAccessRulesProtected ? "protected" : "inherited",
+                String.Join("\n", rules.ToArray())
+            });
+        }
+
         private static void GrantRoot(
             string path,
             SecurityIdentifier sid,
@@ -1152,12 +1203,8 @@ namespace ProjectAtlas.Release
                 File.WriteAllText(forbiddenMarker, "forbidden-marker");
                 string quotedArgument = "argument with spaces and \\\"quotes\\\"";
                 string dnsResolver = GetDnsResolver();
-                byte[] readAclBefore = new DirectoryInfo(readRoot)
-                    .GetAccessControl(AccessControlSections.Access)
-                    .GetSecurityDescriptorBinaryForm();
-                byte[] writeAclBefore = new DirectoryInfo(writeRoot)
-                    .GetAccessControl(AccessControlSections.Access)
-                    .GetSecurityDescriptorBinaryForm();
+                string readAclBefore = CaptureAclContract(readRoot, "read-before");
+                string writeAclBefore = CaptureAclContract(writeRoot, "write-before");
 
                 string[] baselineArguments = new string[]
                 {
@@ -1232,14 +1279,10 @@ namespace ProjectAtlas.Release
                 {
                     throw new ContainmentFailure("descendant-cleanup-canary");
                 }
-                byte[] readAclAfter = new DirectoryInfo(readRoot)
-                    .GetAccessControl(AccessControlSections.Access)
-                    .GetSecurityDescriptorBinaryForm();
-                byte[] writeAclAfter = new DirectoryInfo(writeRoot)
-                    .GetAccessControl(AccessControlSections.Access)
-                    .GetSecurityDescriptorBinaryForm();
-                if (!StructuralComparisons.StructuralEqualityComparer.Equals(readAclBefore, readAclAfter)
-                    || !StructuralComparisons.StructuralEqualityComparer.Equals(writeAclBefore, writeAclAfter))
+                string readAclAfter = CaptureAclContract(readRoot, "read-after");
+                string writeAclAfter = CaptureAclContract(writeRoot, "write-after");
+                if (!String.Equals(readAclBefore, readAclAfter, StringComparison.Ordinal)
+                    || !String.Equals(writeAclBefore, writeAclAfter, StringComparison.Ordinal))
                 {
                     throw new ContainmentFailure("acl-restoration-canary");
                 }
@@ -1602,6 +1645,13 @@ try {
 catch {
     if ($mayDeleteOutput -and $null -ne $fullOutputPath -and [System.IO.File]::Exists($fullOutputPath)) {
         [System.IO.File]::Delete($fullOutputPath)
+    }
+    $detail = ($_.Exception.Message -replace '[\r\n]+', ' ').Trim()
+    if ($detail.Length -gt 512) {
+        $detail = $detail.Substring(0, 512)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($detail)) {
+        [Console]::Error.WriteLine("[appcontainer-builder] detail=$detail")
     }
     Write-BuildFailure -Stage 'compile-or-smoke'
 }

@@ -172,7 +172,11 @@ jobs:
           set -euo pipefail
           toolchain_root='${{ steps.identity.outputs.toolchain_root }}'
           pwsh_path='${{ steps.identity.outputs.pwsh_path }}'
-          unshare --user --map-root-user --net -- \
+          setpriv_path="$(command -v setpriv)"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          sudo --non-interactive unshare --net -- \
+            "$setpriv_path" --no-new-privs --reuid="$runner_uid" --regid="$runner_gid" --clear-groups \
             /usr/bin/env -i \
               HOME="$RUNNER_TEMP/parser-pack-contained-home" \
               CARGO_HOME="$RUNNER_TEMP/parser-pack-cargo-home" \
@@ -430,7 +434,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          unshare --user --map-root-user --net -- \
+          setpriv_path="$(command -v setpriv)"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          sudo --non-interactive unshare --net -- \
+            "$setpriv_path" --no-new-privs --reuid="$runner_uid" --regid="$runner_gid" --clear-groups \
             /usr/bin/env -i \
               HOME="$RUNNER_TEMP/parser-pack-verify-home" \
               TMPDIR="$RUNNER_TEMP/parser-pack-verify-temp" \
@@ -498,7 +506,11 @@ jobs:
           output="$RUNNER_TEMP/parser-pack-verify-output"
           temp="$RUNNER_TEMP/parser-pack-verify-temp"
           cd "$output"
-          unshare --user --map-root-user --net -- \
+          setpriv_path="$(command -v setpriv)"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          sudo --non-interactive unshare --net -- \
+            "$setpriv_path" --no-new-privs --reuid="$runner_uid" --regid="$runner_gid" --clear-groups \
             /usr/bin/env -i \
               HOME="$RUNNER_TEMP/parser-pack-verify-home" \
               TMPDIR="$temp" \
@@ -507,7 +519,7 @@ jobs:
               "$download/runner-context.json" \
               "$output/platform-proof-${{ matrix.target }}.json"
 
-      - name: Verify archive inside Windows AppContainer
+      - name: Verify archive through production Windows containment
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -515,22 +527,53 @@ jobs:
           $download = Join-Path $env:RUNNER_TEMP "parser-pack-download"
           $output = Join-Path $env:RUNNER_TEMP "parser-pack-verify-output"
           $temp = Join-Path $env:RUNNER_TEMP "parser-pack-verify-temp"
-          $launcher = Join-Path $download "parser-pack-appcontainer-launcher.exe"
           $verifier = Join-Path $download "optional_parser_pack_release.exe"
-          & $launcher launch `
-            --executable $verifier `
-            --working-directory $output `
-            --temp-directory $temp `
-            --timeout-seconds 1800 `
-            --read-root $download `
-            --write-root $output `
-            --write-root $temp `
-            -- `
-            verify `
-            (Join-Path $download "projectatlas-broad-parser-${{ matrix.target }}.tar.zst") `
-            (Join-Path $download "runner-context.json") `
+          $start = [System.Diagnostics.ProcessStartInfo]::new()
+          $start.FileName = $verifier
+          $start.WorkingDirectory = $output
+          $start.UseShellExecute = $false
+          $start.CreateNoWindow = $true
+          $start.RedirectStandardOutput = $true
+          $start.RedirectStandardError = $true
+          $start.Environment.Clear()
+          $start.Environment["SystemRoot"] = $env:SystemRoot
+          $start.Environment["WINDIR"] = $env:WINDIR
+          $start.Environment["TEMP"] = $temp
+          $start.Environment["TMP"] = $temp
+          foreach ($argument in @(
+            "verify",
+            (Join-Path $download "projectatlas-broad-parser-${{ matrix.target }}.tar.zst"),
+            (Join-Path $download "runner-context.json"),
             (Join-Path $output "platform-proof-${{ matrix.target }}.json")
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          )) {
+            $start.ArgumentList.Add($argument)
+          }
+          $process = [System.Diagnostics.Process]::new()
+          $process.StartInfo = $start
+          try {
+            if (-not $process.Start()) {
+              throw "Fresh-runner verifier did not start."
+            }
+            $stdout = $process.StandardOutput.ReadToEndAsync()
+            $stderr = $process.StandardError.ReadToEndAsync()
+            if (-not $process.WaitForExit(1800000)) {
+              $process.Kill($true)
+              if (-not $process.WaitForExit(5000)) {
+                throw "Fresh-runner verifier could not be reaped within 5 seconds after termination."
+              }
+              throw "Fresh-runner verifier exceeded its 1800-second deadline."
+            }
+            $stdoutText = $stdout.GetAwaiter().GetResult()
+            $stderrText = $stderr.GetAwaiter().GetResult()
+            if (-not [string]::IsNullOrWhiteSpace($stdoutText)) { Write-Host $stdoutText.TrimEnd() }
+            if (-not [string]::IsNullOrWhiteSpace($stderrText)) { Write-Host $stderrText.TrimEnd() }
+            if ($process.ExitCode -ne 0) {
+              throw "Fresh-runner verifier failed with exit code $($process.ExitCode)."
+            }
+          }
+          finally {
+            $process.Dispose()
+          }
 
       - name: Upload fresh platform proof
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

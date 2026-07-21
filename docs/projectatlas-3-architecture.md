@@ -1553,6 +1553,17 @@ with a per-grammar deadline and one aggregate admission deadline. Any artifact,
 fixture, protocol, deadline, containment, or cleanup failure leaves the prior
 lifecycle selection byte-for-byte unchanged.
 
+On Windows, a temporary admission explicitly owns the artifact-global AppContainer
+profile and its pack-root grant. Verify-only and every pre-publication failure make
+one bounded explicit cleanup attempt while the extraction and exact broker still
+exist; a failed attempt fails the operation and receives one best-effort retry during
+unwind. A successful atomic slot rename transfers cleanup ownership immediately to
+the installed lifecycle. The exclusive pack lease prevents temporary verification
+from deleting the same profile while an installed worker is active. The fresh release
+verifier uses the same owner on its isolated host and writes no proof before cleanup
+succeeds. `Drop` never turns cleanup failure into success; normal control flow reports
+it and retains both typed causes when the operation also failed.
+
 The OS adapter establishes the boundary before grammar loading. It clears and
 allowlists environment plus inherited handles, allows read-only access only to
 immutable pack artifacts and exact unavoidable loader/runtime state, denies repository

@@ -24,9 +24,15 @@ An absent parser/semantic pack SHALL contribute no runtime initialization, netwo
 
 Every installed pack SHALL bind pinned provenance, digest, license, ABI/runtime compatibility, and accepted capability rows. Normal use SHALL be offline and SHALL run through a supervised out-of-process boundary or a capability-denied WASM/native boundary with no repository-code execution, shell/build/compiler execution, or network capability. Hard time, progress-aware no-progress, process-tree memory, output, and cancellation limits SHALL apply. Pack crash, timeout, invalid output, or containment failure SHALL leave the MCP process responsive and SHALL NOT publish, invalidate, or damage the active structural generation.
 
+Temporary native-pack verification SHALL own an explicit bounded cleanup attempt for any artifact-scoped platform profile and filesystem grant created after packaged code may execute. A successful atomic immutable-slot publication SHALL transfer that ownership to the installed lifecycle without an intervening fallible step. Verification SHALL serialize against installed execution when the platform profile identity is artifact-global, and an operation failure plus cleanup failure SHALL retain both typed causes. A failed explicit cleanup SHALL fail the operation and permit one best-effort unwind retry while the exact broker and extraction still exist; it SHALL NOT be reported as successful cleanup or proof publication.
+
 #### Scenario: Pack violates a resource or capability boundary
 - **WHEN** a pack crashes, hangs, exceeds a limit, requests a forbidden capability, or returns invalid output
 - **THEN** the pack operation fails with bounded diagnostics while built-in navigation and the active structural generation remain available
+
+#### Scenario: Temporary native-pack verification finishes or fails
+- **WHEN** verification creates an artifact-scoped platform profile but does not publish a new immutable slot
+- **THEN** ProjectAtlas makes the exact bounded cleanup attempt before discarding the extraction, publishes no proof or slot when cleanup fails, retries once during unwind while the exact broker remains available, and retains both failures when verification and cleanup fail
 
 ### Requirement: Semantic And Hybrid Retrieval Are Evaluated And Explainable
 

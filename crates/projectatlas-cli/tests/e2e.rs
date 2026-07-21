@@ -392,8 +392,24 @@ fn optional_parser_pack_real_archive_normal_runtime_lifecycle() -> Result<(), Bo
     )?;
     let artifact = json_string_at(&verified, &["artifact", "artifact"])?.to_owned();
     require_json_string(&verified, &["operation"], "verify")?;
-    if storage.exists() || selection.exists() {
+    if logical_pack_root.exists() || selection.exists() {
         return Err(io::Error::other("parser-pack verification mutated installed state").into());
+    }
+    #[cfg(windows)]
+    {
+        let entries = fs::read_dir(&storage)?.collect::<Result<Vec<_>, _>>()?;
+        if entries.len() != 1 || !entries[0].file_type()?.is_file() {
+            return Err(io::Error::other(
+                "parser-pack verification retained state beyond its stable coordination lease",
+            )
+            .into());
+        }
+    }
+    #[cfg(not(windows))]
+    if storage.exists() {
+        return Err(
+            io::Error::other("parser-pack verification created unsupported host state").into(),
+        );
     }
 
     let installed = projectatlas_json(

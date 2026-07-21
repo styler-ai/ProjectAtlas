@@ -1,5 +1,8 @@
 //! Seal, verify, and aggregate release evidence for the optional parser pack.
 
+use projectatlas_cli::optional_parser_lifecycle::{
+    OptionalParserPackLifecycleError, TemporaryParserArtifactProfile,
+};
 use projectatlas_cli::parser_supervisor::{
     OptionalParserSupervisor, admit_optional_parser_artifact, probe_optional_parser_memory_boundary,
 };
@@ -43,6 +46,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tar::{Builder as TarBuilder, EntryType, Header};
 use tempfile::NamedTempFile;
+use thiserror::Error;
 
 /// Canonical directory enclosing every completed archive payload.
 const ARCHIVE_ROOT: &str = "projectatlas-broad-parser";
@@ -82,6 +86,35 @@ const WORKER_MODE: u32 = 0o755;
 
 /// Outer release-tool result boundary.
 type ToolResult<T> = Result<T, Box<dyn Error>>;
+
+/// A release verification failed and mandatory temporary-profile cleanup also failed.
+#[derive(Debug, Error)]
+#[error(
+    "optional parser-pack release verification failed and temporary profile cleanup also failed: operation: {operation}; cleanup: {cleanup}"
+)]
+struct ReleaseOperationAndCleanupError {
+    /// Original release verification failure.
+    #[source]
+    operation: Box<dyn Error>,
+    /// Typed artifact-profile cleanup failure.
+    cleanup: OptionalParserPackLifecycleError,
+}
+
+/// Preserve both release verification and temporary-profile cleanup failures.
+fn finish_release_cleanup<T>(
+    operation: ToolResult<T>,
+    cleanup: Result<(), OptionalParserPackLifecycleError>,
+) -> ToolResult<T> {
+    match (operation, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(operation), Ok(())) => Err(operation),
+        (Ok(_), Err(cleanup)) => Err(Box::new(cleanup)),
+        (Err(operation), Err(cleanup)) => Err(Box::new(ReleaseOperationAndCleanupError {
+            operation,
+            cleanup,
+        })),
+    }
+}
 
 /// Closed release operation selected at the process boundary.
 enum ReleaseCommand {
@@ -554,51 +587,49 @@ fn verify_archive(archive: &Path, runner_context: &Path, proof: &Path) -> ToolRe
     let platform = artifact.platform;
     // Reject a dirty or incompletely isolated runner before executing packaged code.
     runner.validate(platform)?;
-    verify_packaged_grammars(&extracted.pack_root, &logical)?;
-    let memory = probe_optional_parser_memory_boundary(&extracted.pack_root, &logical)?;
-    let grammars = logical
-        .grammars()
-        .iter()
-        .map(|grammar| ParserPackGrammarProbe {
-            language_id: grammar.language_id.clone(),
-            worker_probe_passed: true,
-        })
-        .collect();
+    let supervisor = OptionalParserSupervisor::open(&extracted.pack_root)?;
+    let temporary_profile = TemporaryParserArtifactProfile::for_verified_supervisor(&supervisor);
+    let verification = (|| -> ToolResult<OptionalParserPackPlatformProof> {
+        admit_optional_parser_artifact(supervisor, &logical)?;
+        let memory = probe_optional_parser_memory_boundary(&extracted.pack_root, &logical)?;
+        let grammars = logical
+            .grammars()
+            .iter()
+            .map(|grammar| ParserPackGrammarProbe {
+                language_id: grammar.language_id.clone(),
+                worker_probe_passed: true,
+            })
+            .collect();
 
-    let artifact_observed = require_observed(&extracted.observed, ARTIFACT_MANIFEST_FILE_NAME)?;
-    let accepted_observed = require_observed(&extracted.observed, ACCEPTED_MANIFEST_FILE_NAME)?;
-    let fixture_observed = require_observed(&extracted.observed, FIXTURE_CORPUS_FILE_NAME)?;
-    let audit_observed = require_observed(&extracted.observed, NATIVE_AUDIT_REPORT_FILE_NAME)?;
-    let platform_proof = OptionalParserPackPlatformProof {
-        schema_version: OPTIONAL_PARSER_PACK_PLATFORM_PROOF_SCHEMA_VERSION,
-        pack_id: logical.pack_id().to_owned(),
-        platform,
-        candidate: artifact.candidate,
-        archive_name,
-        archive_sha256,
-        archive_bytes,
-        expanded_bytes: extracted.expanded_bytes,
-        artifact_manifest_sha256: artifact_observed.sha256.clone(),
-        accepted_manifest_sha256: accepted_observed.sha256.clone(),
-        capability_set_digest: logical.capability_set_digest().clone(),
-        fixture_corpus_sha256: fixture_observed.sha256.clone(),
-        native_audit_report_sha256: audit_observed.sha256.clone(),
-        runner,
-        grammars,
-        memory,
-    };
-    // Bind every successful exact-host probe into the immutable receipt.
-    platform_proof.validate(&logical)?;
+        let artifact_observed = require_observed(&extracted.observed, ARTIFACT_MANIFEST_FILE_NAME)?;
+        let accepted_observed = require_observed(&extracted.observed, ACCEPTED_MANIFEST_FILE_NAME)?;
+        let fixture_observed = require_observed(&extracted.observed, FIXTURE_CORPUS_FILE_NAME)?;
+        let audit_observed = require_observed(&extracted.observed, NATIVE_AUDIT_REPORT_FILE_NAME)?;
+        let platform_proof = OptionalParserPackPlatformProof {
+            schema_version: OPTIONAL_PARSER_PACK_PLATFORM_PROOF_SCHEMA_VERSION,
+            pack_id: logical.pack_id().to_owned(),
+            platform,
+            candidate: artifact.candidate,
+            archive_name,
+            archive_sha256,
+            archive_bytes,
+            expanded_bytes: extracted.expanded_bytes,
+            artifact_manifest_sha256: artifact_observed.sha256.clone(),
+            accepted_manifest_sha256: accepted_observed.sha256.clone(),
+            capability_set_digest: logical.capability_set_digest().clone(),
+            fixture_corpus_sha256: fixture_observed.sha256.clone(),
+            native_audit_report_sha256: audit_observed.sha256.clone(),
+            runner,
+            grammars,
+            memory,
+        };
+        // Bind every successful exact-host probe before mandatory cleanup.
+        platform_proof.validate(&logical)?;
+        Ok(platform_proof)
+    })();
+    let platform_proof = finish_release_cleanup(verification, temporary_profile.cleanup())?;
+    // Publish no proof unless mandatory temporary-profile cleanup also passed.
     write_new_json(proof, &platform_proof)
-}
-
-/// Verify every accepted positive and negative fixture through the production supervisor.
-fn verify_packaged_grammars(
-    pack_root: &Path,
-    logical: &OptionalParserPackManifest,
-) -> ToolResult<()> {
-    let supervisor = OptionalParserSupervisor::open(pack_root)?;
-    admit_optional_parser_artifact(supervisor, logical).map_err(Into::into)
 }
 
 /// Aggregate the complete platform proof set after independent logical validation.
@@ -1496,6 +1527,31 @@ mod tests {
         } else {
             Err(invalid(message))
         }
+    }
+
+    #[test]
+    fn release_operation_and_profile_cleanup_failures_are_both_retained() -> ToolResult<()> {
+        let result = finish_release_cleanup::<()>(
+            Err(invalid("verification failed")),
+            Err(OptionalParserPackLifecycleError::InvalidData {
+                reason: "cleanup failed".to_owned(),
+            }),
+        );
+        let error = match result {
+            Ok(()) => return Err(invalid("dual release failure was accepted")),
+            Err(error) => error,
+        };
+        let combined = error
+            .downcast_ref::<ReleaseOperationAndCleanupError>()
+            .ok_or_else(|| invalid("dual release failure lost its typed wrapper"))?;
+        require(
+            combined
+                .operation
+                .to_string()
+                .contains("verification failed")
+                && combined.cleanup.to_string().contains("cleanup failed"),
+            "dual release failure lost one typed cause",
+        )
     }
 
     /// Return the physical egress-denial mechanism required by one platform.

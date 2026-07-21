@@ -1245,7 +1245,7 @@ impl LinuxMemoryMonitor {
 
     /// Stop and join exactly once, returning any terminal observation.
     fn stop(&mut self) -> Result<Option<LinuxMemoryMonitorEvent>, ParserSupervisorError> {
-        drop(self.stop.try_send(()));
+        let _ = self.stop.try_send(());
         if let Some(handle) = self.handle.take() {
             handle
                 .join()
@@ -2820,6 +2820,12 @@ impl OptionalParserSupervisor {
     #[must_use]
     pub(crate) const fn artifact_identity(&self) -> &ParserArtifactIdentity {
         &self.launch.artifact
+    }
+
+    /// Borrow the canonical root bound to this verified launch authority.
+    #[must_use]
+    pub(crate) fn pack_root(&self) -> &Path {
+        &self.pack_root
     }
 
     /// Return whether the verified artifact accepts one canonical language identity.

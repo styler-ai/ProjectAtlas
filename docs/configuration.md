@@ -86,8 +86,17 @@ projectatlas parser-pack disable
 projectatlas parser-pack remove
 ```
 
-`verify` inspects a completed archive without installing it. `install` publishes
-one immutable versioned slot but does not select it. `enable` writes the exact
+`verify` inspects a completed archive without installing it. On Windows it holds
+the pack lifecycle lease while packaged fixtures run, then removes the temporary
+artifact profile and access grant before returning; cleanup failure makes verification
+fail. The user store may retain only the stable coordination lease file; verification
+creates no logical pack root, slot, or project selection. `install` publishes one
+immutable versioned slot but does not select it. A
+successful atomic slot publication transfers profile-cleanup ownership to that slot;
+every failed or reused temporary publication makes one explicit bounded cleanup
+attempt before its extraction is discarded. If that attempt fails, the operation
+fails, publishes no slot or proof, and makes one best-effort retry during unwind
+while the exact broker and extraction still exist. `enable` writes the exact
 selected slot to `.projectatlas/optional-parser-pack.json` for the current
 project. `update` first verifies the currently selected slot, stages and verifies
 the replacement, then atomically changes the project selection while retaining

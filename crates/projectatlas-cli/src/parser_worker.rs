@@ -524,7 +524,14 @@ fn is_runtime_library_basename(value: &str) -> bool {
 /// Render one exact lowercase SHA-256 digest.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len().saturating_mul(2));
+    for byte in digest {
+        encoded.push(char::from(LOWER_HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(LOWER_HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 /// Select one exact grammar from the validated executable-relative logical manifest.
