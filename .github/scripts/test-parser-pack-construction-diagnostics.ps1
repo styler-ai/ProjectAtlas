@@ -112,6 +112,70 @@ try {
         Set-Acl -LiteralPath $aclFixture -AclObject $fixtureAcl
         Remove-PrincipalAcl -Path $aclFixture -Sid $fixtureSid
         Remove-PrincipalAcl -Path $aclFixture -Sid $fixtureSid
+
+        foreach ($functionName in @(
+            "New-ConstructionJobserverSecurity",
+            "New-ConstructionJobserver"
+        )) {
+            $jobserverDefinitions = @($wrapperAst.FindAll(
+                {
+                    param($node)
+                    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                        $node.Name -eq $functionName
+                },
+                $true
+            ))
+            Require ($jobserverDefinitions.Count -eq 1) "Expected one $functionName definition."
+            Invoke-Expression $jobserverDefinitions[0].Extent.Text
+        }
+
+        $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $jobserverRights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
+            [System.Security.AccessControl.SemaphoreRights]::Modify
+        $jobserverSecurity = New-ConstructionJobserverSecurity -Sid $currentSid
+        $jobserverRules = @($jobserverSecurity.GetAccessRules(
+            $true,
+            $false,
+            [System.Security.Principal.SecurityIdentifier]
+        ))
+        Require $jobserverSecurity.AreAccessRulesProtected "Construction jobserver DACL was not protected."
+        Require ($jobserverRules.Count -eq 1) "Construction jobserver DACL was not target-only."
+        Require `
+            ($jobserverRules[0].IdentityReference -eq $currentSid -and
+                $jobserverRules[0].SemaphoreRights -eq $jobserverRights -and
+                $jobserverRules[0].AccessControlType -eq
+                    [System.Security.AccessControl.AccessControlType]::Allow) `
+            "Construction jobserver DACL did not grant the exact target rights."
+        $jobserverName = "Local\ProjectAtlasJobserverTest-$([guid]::NewGuid().ToString('N'))"
+        $jobserver = New-ConstructionJobserver -Sid $currentSid -Name $jobserverName
+        $openedJobserver = $null
+        try {
+            $openedJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(
+                $jobserverName,
+                $jobserverRights
+            )
+            Require ($openedJobserver.WaitOne(0)) "Construction jobserver did not expose one token."
+            Require `
+                ($openedJobserver.Release() -eq 0) `
+                "Construction jobserver did not restore its token."
+            $collisionRejected = $false
+            try {
+                $unexpectedJobserver = New-ConstructionJobserver `
+                    -Sid $currentSid `
+                    -Name $jobserverName
+                $unexpectedJobserver.Dispose()
+            }
+            catch {
+                $collisionRejected = $true
+            }
+            Require $collisionRejected "Construction jobserver accepted a live-name collision."
+        }
+        finally {
+            if ($null -ne $openedJobserver) {
+                $openedJobserver.Dispose()
+            }
+            $jobserver.Dispose()
+        }
     }
     $Target = "x86_64-pc-windows-msvc"
     $commandDiagnosticTailBytes = 24 * 1024

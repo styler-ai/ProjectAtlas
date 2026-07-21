@@ -1178,6 +1178,56 @@ function New-EnvironmentBlock {
     return $block
 }
 
+function New-ConstructionJobserverSecurity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Security.Principal.SecurityIdentifier]$Sid
+    )
+
+    $security = [System.Security.AccessControl.SemaphoreSecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    $rights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
+        [System.Security.AccessControl.SemaphoreRights]::Modify
+    $security.AddAccessRule(
+        [System.Security.AccessControl.SemaphoreAccessRule]::new(
+            $Sid,
+            $rights,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        )
+    )
+    return $security
+}
+
+function New-ConstructionJobserver {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Security.Principal.SecurityIdentifier]$Sid,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $security = New-ConstructionJobserverSecurity -Sid $Sid
+    $createdNew = $false
+    try {
+        $semaphore = [System.Threading.SemaphoreAcl]::Create(
+            1,
+            1,
+            $Name,
+            [ref]$createdNew,
+            $security
+        )
+    }
+    catch {
+        throw "Construction jobserver could not be created."
+    }
+    if (-not $createdNew) {
+        $semaphore.Dispose()
+        throw "Construction jobserver name was not unique."
+    }
+    return $semaphore
+}
+
 function Invoke-AsConstructionPrincipal {
     param(
         [Parameter(Mandatory = $true)]
@@ -1313,7 +1363,7 @@ function Write-BoundedConstructionFailure {
         $privateValues = @(
             $source, $inputs, $vendor, $output, $cargo, $temporary, $constructionHome,
             $toolchain, $pwshRoot, $vcTools, $windowsSdk,
-            $Username, $Sid, $FirewallRule
+            $Username, $Sid, $FirewallRule, $script:constructionJobserverName
         ) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
             Sort-Object { ([string]$_).Length } -Descending -Unique
         foreach ($privateValue in $privateValues) {
@@ -1366,6 +1416,8 @@ $state = @{
 Write-ProtectedState -State $state
 
 $operationError = $null
+$script:constructionJobserver = $null
+$script:constructionJobserverName = $null
 try {
     $account = New-LocalUser `
         -Name $script:constructionUsername `
@@ -1439,6 +1491,10 @@ try {
     foreach ($directory in @($appData, $localAppData)) {
         [System.IO.Directory]::CreateDirectory($directory) | Out-Null
     }
+    $script:constructionJobserverName = "Local\ProjectAtlasParserPack-$randomHex"
+    $script:constructionJobserver = New-ConstructionJobserver `
+        -Sid $sid `
+        -Name $script:constructionJobserverName
     $environment = @{
         SystemRoot = $env:SystemRoot
         WINDIR = $env:WINDIR
@@ -1458,6 +1514,7 @@ try {
         CARGO_HOME = $cargo
         CARGO_NET_OFFLINE = "true"
         CARGO_INCREMENTAL = "0"
+        CARGO_MAKEFLAGS = "-j --jobserver-fds=$($script:constructionJobserverName) --jobserver-auth=$($script:constructionJobserverName)"
         CARGO_TERM_COLOR = "never"
         TSLP_OFFLINE = "1"
         HOME = $constructionHome
@@ -1542,6 +1599,24 @@ foreach ($entry in [Environment]::GetEnvironmentVariables().Keys) {
         exit 23
     }
 }
+$rustcStart = [System.Diagnostics.ProcessStartInfo]::new()
+$rustcStart.FileName = $env:RUSTC
+$rustcStart.UseShellExecute = $false
+$rustcStart.CreateNoWindow = $true
+$rustcStart.RedirectStandardOutput = $true
+$rustcStart.RedirectStandardError = $true
+$rustcStart.ArgumentList.Add("--print")
+$rustcStart.ArgumentList.Add("cfg")
+$rustc = [System.Diagnostics.Process]::Start($rustcStart)
+$rustcOutput = $rustc.StandardOutput.ReadToEnd()
+$rustcError = $rustc.StandardError.ReadToEnd()
+$rustc.WaitForExit()
+if ($rustc.ExitCode -ne 0 -or
+    -not [string]::IsNullOrEmpty($rustcError) -or
+    $rustcOutput -notmatch '(?m)^target_os="windows"$') {
+    exit 24
+}
+$rustc.Dispose()
 exit 0
 '@
     [System.IO.File]::WriteAllText($probePath, $probeSource, [System.Text.UTF8Encoding]::new($false))
@@ -1605,6 +1680,25 @@ finally {
             $operationError = [System.AggregateException]::new(
                 "Parser-pack construction and mandatory cleanup both failed.",
                 @($operationError.Exception, $_.Exception)
+            )
+        }
+    }
+    try {
+        if ($null -ne $script:constructionJobserver) {
+            $script:constructionJobserver.Dispose()
+        }
+    }
+    catch {
+        $jobserverCleanupError = [System.InvalidOperationException]::new(
+            "Construction jobserver cleanup failed."
+        )
+        if ($null -eq $operationError) {
+            $operationError = $jobserverCleanupError
+        }
+        else {
+            $operationError = [System.AggregateException]::new(
+                "Parser-pack construction cleanup retained more than one failure.",
+                @($operationError.Exception, $jobserverCleanupError)
             )
         }
     }
