@@ -149,7 +149,9 @@ function Write-ProtectedState {
         }
         Set-Acl -LiteralPath $temporaryState -AclObject $fileAcl
         if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
-            [System.IO.File]::Replace($temporaryState, $StatePath, $null, $true)
+            # Both paths share the protected state directory, so the overwrite move
+            # atomically replaces the journal without a PowerShell-coerced backup path.
+            [System.IO.File]::Move($temporaryState, $StatePath, $true)
         }
         else {
             [System.IO.File]::Move($temporaryState, $StatePath)
