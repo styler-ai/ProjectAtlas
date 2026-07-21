@@ -209,6 +209,125 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          function Get-RuleRightsMask {
+            param(
+              [Parameter(Mandatory)] $Rules,
+              [Parameter(Mandatory)] [System.Security.Principal.SecurityIdentifier] $Sid,
+              [Parameter(Mandatory)] [System.Security.AccessControl.AccessControlType] $Type
+            )
+            [int64]$mask = 0
+            foreach ($rule in $Rules) {
+              if ($rule.AccessControlType -eq $Type -and $rule.IdentityReference -eq $Sid) {
+                $mask = $mask -bor [int64]$rule.FileSystemRights
+              }
+            }
+            return "0x{0:x}" -f $mask
+          }
+
+          function Write-ContainedFileSecuritySummary {
+            param(
+              [Parameter(Mandatory)] [string] $Role,
+              [Parameter(Mandatory)] [string] $Path
+            )
+            try {
+              $item = Get-Item -LiteralPath $Path -Force
+              if ($item.PSIsContainer -or
+                  (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+                throw "unsafe-file"
+              }
+              $acl = Get-Acl -LiteralPath $item.FullName
+              $rules = @($acl.GetAccessRules(
+                $true,
+                $true,
+                [System.Security.Principal.SecurityIdentifier]
+              ))
+              $accessSddl = $acl.GetSecurityDescriptorSddlForm(
+                [System.Security.AccessControl.AccessControlSections]::Access
+              )
+              $sha256 = [System.Security.Cryptography.SHA256]::Create()
+              try {
+                $aclDigest = [System.Convert]::ToHexString(
+                  $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($accessSddl))
+                ).ToLowerInvariant()
+              }
+              finally {
+                $sha256.Dispose()
+              }
+              $principals = [ordered]@{
+                everyone = [System.Security.Principal.SecurityIdentifier]::new("S-1-1-0")
+                all_packages = [System.Security.Principal.SecurityIdentifier]::new("S-1-15-2-1")
+                restricted_packages = [System.Security.Principal.SecurityIdentifier]::new("S-1-15-2-2")
+                launch_user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+              }
+              $parts = [System.Collections.Generic.List[string]]::new()
+              foreach ($entry in $principals.GetEnumerator()) {
+                $allow = Get-RuleRightsMask `
+                  -Rules $rules `
+                  -Sid $entry.Value `
+                  -Type ([System.Security.AccessControl.AccessControlType]::Allow)
+                $deny = Get-RuleRightsMask `
+                  -Rules $rules `
+                  -Sid $entry.Value `
+                  -Type ([System.Security.AccessControl.AccessControlType]::Deny)
+                $parts.Add("$($entry.Key)_allow=$allow")
+                $parts.Add("$($entry.Key)_deny=$deny")
+              }
+              $zoneIdentifier = $null -ne (Get-Item `
+                -LiteralPath $item.FullName `
+                -Stream "Zone.Identifier" `
+                -ErrorAction SilentlyContinue)
+              $signature = (Get-AuthenticodeSignature -LiteralPath $item.FullName).Status
+              $explicitAllow = @($rules | Where-Object {
+                -not $_.IsInherited -and $_.AccessControlType -eq "Allow"
+              }).Count
+              $explicitDeny = @($rules | Where-Object {
+                -not $_.IsInherited -and $_.AccessControlType -eq "Deny"
+              }).Count
+              $inheritedAllow = @($rules | Where-Object {
+                $_.IsInherited -and $_.AccessControlType -eq "Allow"
+              }).Count
+              $inheritedDeny = @($rules | Where-Object {
+                $_.IsInherited -and $_.AccessControlType -eq "Deny"
+              }).Count
+              Write-Host (
+                "[contained-security] role=$Role attributes=$([int]$item.Attributes) " +
+                "acl_protected=$($acl.AreAccessRulesProtected.ToString().ToLowerInvariant()) " +
+                "acl_digest=$aclDigest explicit_allow=$explicitAllow explicit_deny=$explicitDeny " +
+                "inherited_allow=$inheritedAllow inherited_deny=$inheritedDeny " +
+                "zone_identifier=$($zoneIdentifier.ToString().ToLowerInvariant()) " +
+                "signature=$signature $($parts -join ' ')"
+              )
+            }
+            catch {
+              Write-Host "[contained-security] role=$Role state=unavailable"
+            }
+          }
+
+          function Write-ContainedPolicyEventSummary {
+            param(
+              [Parameter(Mandatory)] [string] $Role,
+              [Parameter(Mandatory)] [string] $LogName,
+              [Parameter(Mandatory)] [datetime] $StartTime
+            )
+            try {
+              $events = @(Get-WinEvent `
+                -FilterHashtable @{ LogName = $LogName; StartTime = $StartTime } `
+                -MaxEvents 128 `
+                -ErrorAction Stop)
+              $counts = @(
+                $events |
+                  Group-Object Id |
+                  Sort-Object { [int]$_.Name } |
+                  ForEach-Object { "$($_.Name):$($_.Count)" }
+              )
+              $summary = if ($counts.Count -eq 0) { "none" } else { $counts -join "," }
+              Write-Host "[contained-security] role=$Role event_ids=$summary"
+            }
+            catch {
+              Write-Host "[contained-security] role=$Role state=unavailable"
+            }
+          }
+
           $programFilesX86 = [System.Environment]::GetFolderPath(
             [System.Environment+SpecialFolder]::ProgramFilesX86
           )
@@ -309,9 +428,27 @@ jobs:
             "-NetworkIsolation", "${{ matrix.isolation }}",
             "-ResolverAddress", "${{ steps.network.outputs.resolver_address }}"
           )
+          $constructionStartedAt = Get-Date
           & $launcher @launcherArguments
           $containedExitCode = $LASTEXITCODE
           if ($containedExitCode -ne 0) {
+            Write-ContainedFileSecuritySummary `
+              -Role "cargo" `
+              -Path (Join-Path $toolchainBin "cargo.exe")
+            for ($index = 0; $index -lt $toolchainExecuteFiles.Count; $index++) {
+              $role = if ($index -eq 0) { "rustc" } else { "runtime-dll-$($index - 1)" }
+              Write-ContainedFileSecuritySummary `
+                -Role $role `
+                -Path $toolchainExecuteFiles[$index]
+            }
+            Write-ContainedPolicyEventSummary `
+              -Role "applocker" `
+              -LogName "Microsoft-Windows-AppLocker/EXE and DLL" `
+              -StartTime $constructionStartedAt
+            Write-ContainedPolicyEventSummary `
+              -Role "code-integrity" `
+              -LogName "Microsoft-Windows-CodeIntegrity/Operational" `
+              -StartTime $constructionStartedAt
             $validatedStage = $null
             $validatedExitCode = $null
             try {
