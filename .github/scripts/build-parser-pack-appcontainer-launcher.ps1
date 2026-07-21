@@ -204,14 +204,15 @@ namespace ProjectAtlas.Release
 
         private sealed class AclSnapshot
         {
-            internal AclSnapshot(string path, string sddl)
+            // Preserve the exact descriptor; equivalent SDDL can reorder ACE text.
+            internal AclSnapshot(string path, byte[] descriptor)
             {
                 Path = path;
-                Sddl = sddl;
+                Descriptor = descriptor;
             }
 
             internal string Path { get; private set; }
-            internal string Sddl { get; private set; }
+            internal byte[] Descriptor { get; private set; }
         }
 
         [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
@@ -800,8 +801,8 @@ namespace ProjectAtlas.Release
         {
             DirectoryInfo directory = new DirectoryInfo(path);
             DirectorySecurity security = directory.GetAccessControl(AccessControlSections.Access);
-            string sddl = security.GetSecurityDescriptorSddlForm(AccessControlSections.Access);
-            snapshots.Add(new AclSnapshot(path, sddl));
+            byte[] descriptor = security.GetSecurityDescriptorBinaryForm();
+            snapshots.Add(new AclSnapshot(path, descriptor));
             FileSystemAccessRule rule = new FileSystemAccessRule(
                 sid,
                 rights,
@@ -827,7 +828,9 @@ namespace ProjectAtlas.Release
                     AclSnapshot snapshot = snapshots[index];
                     DirectoryInfo directory = new DirectoryInfo(snapshot.Path);
                     DirectorySecurity security = directory.GetAccessControl(AccessControlSections.Access);
-                    security.SetSecurityDescriptorSddlForm(snapshot.Sddl, AccessControlSections.Access);
+                    security.SetSecurityDescriptorBinaryForm(
+                        snapshot.Descriptor,
+                        AccessControlSections.Access);
                     directory.SetAccessControl(security);
                 }
                 catch
@@ -1149,12 +1152,12 @@ namespace ProjectAtlas.Release
                 File.WriteAllText(forbiddenMarker, "forbidden-marker");
                 string quotedArgument = "argument with spaces and \\\"quotes\\\"";
                 string dnsResolver = GetDnsResolver();
-                string readAclBefore = new DirectoryInfo(readRoot)
+                byte[] readAclBefore = new DirectoryInfo(readRoot)
                     .GetAccessControl(AccessControlSections.Access)
-                    .GetSecurityDescriptorSddlForm(AccessControlSections.Access);
-                string writeAclBefore = new DirectoryInfo(writeRoot)
+                    .GetSecurityDescriptorBinaryForm();
+                byte[] writeAclBefore = new DirectoryInfo(writeRoot)
                     .GetAccessControl(AccessControlSections.Access)
-                    .GetSecurityDescriptorSddlForm(AccessControlSections.Access);
+                    .GetSecurityDescriptorBinaryForm();
 
                 string[] baselineArguments = new string[]
                 {
@@ -1229,13 +1232,14 @@ namespace ProjectAtlas.Release
                 {
                     throw new ContainmentFailure("descendant-cleanup-canary");
                 }
-                string readAclAfter = new DirectoryInfo(readRoot)
+                byte[] readAclAfter = new DirectoryInfo(readRoot)
                     .GetAccessControl(AccessControlSections.Access)
-                    .GetSecurityDescriptorSddlForm(AccessControlSections.Access);
-                string writeAclAfter = new DirectoryInfo(writeRoot)
+                    .GetSecurityDescriptorBinaryForm();
+                byte[] writeAclAfter = new DirectoryInfo(writeRoot)
                     .GetAccessControl(AccessControlSections.Access)
-                    .GetSecurityDescriptorSddlForm(AccessControlSections.Access);
-                if (readAclBefore != readAclAfter || writeAclBefore != writeAclAfter)
+                    .GetSecurityDescriptorBinaryForm();
+                if (!StructuralComparisons.StructuralEqualityComparer.Equals(readAclBefore, readAclAfter)
+                    || !StructuralComparisons.StructuralEqualityComparer.Equals(writeAclBefore, writeAclAfter))
                 {
                     throw new ContainmentFailure("acl-restoration-canary");
                 }

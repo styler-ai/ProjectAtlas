@@ -2438,14 +2438,16 @@ fn require_direct_lease_file(
     path: &Path,
     metadata: &fs::Metadata,
 ) -> Result<(), OptionalParserPackLifecycleError> {
-    let mut indirect = metadata.file_type().is_symlink();
     #[cfg(windows)]
-    {
+    let indirect = {
         use std::os::windows::fs::MetadataExt as _;
 
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        indirect |= metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-    }
+        metadata.file_type().is_symlink()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    };
+    #[cfg(not(windows))]
+    let indirect = metadata.file_type().is_symlink();
     if indirect || !metadata.file_type().is_file() {
         return Err(invalid_data(format!(
             "optional parser-pack lifecycle lease is not a direct regular file: {}",

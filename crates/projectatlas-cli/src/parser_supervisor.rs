@@ -24,19 +24,18 @@ use projectatlas_core::optional_parser_pack::{
     all(target_os = "windows", target_arch = "x86_64")
 ))]
 use projectatlas_core::optional_parser_pack::{ParserPackMemoryControl, ParserPackVerifiedControl};
+#[cfg(windows)]
+use projectatlas_core::optional_parser_protocol::PARSER_WINDOWS_BROKER_MEMORY_LIMIT_EXIT_CODE;
 use projectatlas_core::optional_parser_protocol::{
     PARSER_FRAME_HEADER_BYTES, PARSER_MAX_NODE_COUNT, PARSER_MAX_OUTPUT_BYTES,
     PARSER_MAX_STDERR_BYTES, PARSER_MAX_TREE_DEPTH, PARSER_SESSION_ENTROPY_BYTES,
-    ParserArtifactIdentity, ParserCompletionEvidence, ParserContainmentKind, ParserControl,
-    ParserFailureCode, ParserFrame, ParserFrameHeader, ParserFrameKind, ParserLanguageIdentity,
-    ParserProgress, ParserProgressDisposition, ParserProtocolError, ParserRequest,
-    ParserRequestIdentity, ParserRequestLimits, ParserSessionIdentity, ParserSessionOpen,
-    ParserSourceIdentity, decode_parser_completion_for_request, decode_parser_failure_for_request,
+    PARSER_WINDOWS_BROKER_ADMISSION_RECORD, ParserArtifactIdentity, ParserCompletionEvidence,
+    ParserContainmentKind, ParserControl, ParserFailureCode, ParserFrame, ParserFrameHeader,
+    ParserFrameKind, ParserLanguageIdentity, ParserProgress, ParserProgressDisposition,
+    ParserProtocolError, ParserRequest, ParserRequestIdentity, ParserRequestLimits,
+    ParserSessionIdentity, ParserSessionOpen, ParserSourceIdentity,
+    decode_parser_completion_for_request, decode_parser_failure_for_request,
     decode_parser_progress_for_request, decode_parser_ready_for_launch, encode_parser_control,
-};
-#[cfg(windows)]
-use projectatlas_core::optional_parser_protocol::{
-    PARSER_WINDOWS_BROKER_ADMISSION_RECORD, PARSER_WINDOWS_BROKER_MEMORY_LIMIT_EXIT_CODE,
 };
 use projectatlas_core::optional_parser_protocol::{
     PARSER_WORKER_JOB_MEMORY_BYTES, PARSER_WORKER_PROCESS_MEMORY_BYTES,
@@ -533,6 +532,8 @@ impl VerifiedParserPackLaunch {
                 reason: "accepted capability manifest does not match its artifact payload row",
             });
         }
+        #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+        let _ = containment_broker;
 
         Ok(Self {
             pack_root,

@@ -27,8 +27,10 @@ function Assert-Ipv4Address {
     $parsed = $null
     if (-not [System.Net.IPAddress]::TryParse($Value, [ref]$parsed) -or
         $parsed.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork -or
-        [System.Net.IPAddress]::IsLoopback($parsed)) {
-        throw "ResolverAddress must be one non-loopback IPv4 address."
+        $parsed.Equals([System.Net.IPAddress]::Any) -or
+        $parsed.Equals([System.Net.IPAddress]::None) -or
+        $parsed.Equals([System.Net.IPAddress]::Broadcast)) {
+        throw "ResolverAddress must be one usable IPv4 address."
     }
     return $parsed
 }
@@ -122,7 +124,8 @@ function Test-HttpsRequest {
 }
 
 function Find-ReachableResolver {
-    $candidates = foreach ($networkInterface in
+    $candidates = @(
+        foreach ($networkInterface in
         [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
         if ($networkInterface.OperationalStatus -ne
             [System.Net.NetworkInformation.OperationalStatus]::Up -or
@@ -131,14 +134,27 @@ function Find-ReachableResolver {
             continue
         }
         foreach ($address in $networkInterface.GetIPProperties().DnsAddresses) {
-            if ($address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and
-                -not [System.Net.IPAddress]::IsLoopback($address)) {
+            if ($address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
                 $address.ToString()
             }
         }
-    }
+        }
+        # Hosted Linux may expose its resolver only through resolv.conf.
+        if (Test-Path -LiteralPath "/etc/resolv.conf" -PathType Leaf) {
+            foreach ($line in Get-Content -LiteralPath "/etc/resolv.conf") {
+                if ($line -match '^\s*nameserver\s+([0-9]+(?:\.[0-9]+){3})(?:\s|$)') {
+                    $Matches[1]
+                }
+            }
+        }
+    )
     foreach ($candidate in @($candidates | Sort-Object -Unique)) {
-        $parsed = Assert-Ipv4Address -Value $candidate
+        try {
+            $parsed = Assert-Ipv4Address -Value $candidate
+        }
+        catch {
+            continue
+        }
         if (Test-DnsQuery -Resolver $parsed) {
             return $candidate
         }
