@@ -98,11 +98,122 @@ try {
         Require ($nativeSourceAssignments.Count -eq 1) "Expected one native adapter source assignment."
         Invoke-Expression $nativeSourceAssignments[0].Extent.Text
         Require `
-            ($nativeSource.Contains('private const uint LogonWithProfile = 0x00000001;') -and
-                [regex]::Matches($nativeSource, '\bLogonWithProfile\b').Count -eq 2) `
-            "Windows construction adapter did not load the disposable principal profile."
+            (-not $nativeSource.Contains('LogonWithProfile') -and
+                $nativeSource -match 'passwordPointer,\s*0,\s*executable,') `
+            "Windows construction adapter did not retain zero process logon flags."
         if (-not ('ProjectAtlasConstructionProcess' -as [type])) {
             Add-Type -TypeDefinition $nativeSource -Language CSharp
+        }
+
+        $objectDirectorySourceAssignments = @($wrapperAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    $node.Left.Extent.Text -eq '$objectDirectoryProbeSource'
+            },
+            $true
+        ))
+        Require `
+            ($objectDirectorySourceAssignments.Count -eq 1) `
+            "Expected one object directory probe source assignment."
+        Invoke-Expression $objectDirectorySourceAssignments[0].Extent.Text
+        Require `
+            ($objectDirectoryProbeSource.Contains(
+                'private const string BaseNamedObjectsPath = @"\BaseNamedObjects";'
+            ) -and
+                [regex]::Matches(
+                    $objectDirectoryProbeSource,
+                    [regex]::Escape('\BaseNamedObjects')
+                ).Count -eq 1 -and
+                $objectDirectoryProbeSource.Contains(
+                    'private const uint DirectoryTraverse = 0x00000002;'
+                )) `
+            "Object directory probe did not retain its exact path and traverse-only access."
+        Require `
+            ($objectDirectoryProbeSource.Contains('NativeLibrary.TryLoad(') -and
+                $objectDirectoryProbeSource.Contains('NativeLibrary.TryGetExport(') -and
+                $objectDirectoryProbeSource.Contains('NativeLibrary.Free(') -and
+                $objectDirectoryProbeSource.Contains('CloseHandle(directoryHandle)') -and
+                [regex]::Matches(
+                    $objectDirectoryProbeSource,
+                    'Marshal\.FreeHGlobal\('
+                ).Count -eq 2) `
+            "Object directory probe did not retain dynamic loading and bounded cleanup."
+        foreach ($forbiddenProbeText in @(
+            'NtQueryDirectoryObject',
+            'DirectoryQuery',
+            'DirectoryCreateObject',
+            'DirectoryCreateSubdirectory',
+            'DirectoryAllAccess',
+            'GetTokenInformation',
+            'NtQueryInformationToken',
+            'OpenSemaphore',
+            'SemaphoreAcl',
+            '\Sessions\',
+            'Console.Write',
+            'status.ToString',
+            'String.Format'
+        )) {
+            Require `
+                (-not $objectDirectoryProbeSource.Contains($forbiddenProbeText)) `
+                "Object directory probe retained forbidden capability text."
+        }
+        if (-not ('ProjectAtlasObjectDirectoryProbe' -as [type])) {
+            Add-Type -TypeDefinition $objectDirectoryProbeSource -Language CSharp
+        }
+        Require `
+            (([enum]::GetNames([ProjectAtlasObjectDirectoryProbeResult]) -join ',') -eq
+                'Accessible,AccessDenied,NotFound,Unavailable,Unexpected') `
+            "Object directory probe result domain was not closed."
+        Require `
+            ([ProjectAtlasObjectDirectoryProbe]::ProbeGlobalBaseNamedObjects() -eq
+                [ProjectAtlasObjectDirectoryProbeResult]::Accessible) `
+            "Current Windows principal could not traverse the global object directory."
+        $probeProcess = [System.Diagnostics.Process]::GetCurrentProcess()
+        [ProjectAtlasObjectDirectoryProbe]::ProbeGlobalBaseNamedObjects() | Out-Null
+        $handleCountBefore = $probeProcess.HandleCount
+        foreach ($probeIteration in 1..32) {
+            Require `
+                ([ProjectAtlasObjectDirectoryProbe]::ProbeGlobalBaseNamedObjects() -eq
+                    [ProjectAtlasObjectDirectoryProbeResult]::Accessible) `
+                "Repeated object directory probe did not remain accessible."
+        }
+        $handleCountAfter = $probeProcess.HandleCount
+        Require `
+            ($handleCountAfter -eq $handleCountBefore) `
+            "Object directory probe leaked a process handle."
+        $classifier = [ProjectAtlasObjectDirectoryProbe].GetMethod(
+            'ClassifyStatus',
+            [System.Reflection.BindingFlags]'NonPublic,Static'
+        )
+        Require ($null -ne $classifier) "Object directory probe classifier was missing."
+        $statusAccessDenied = [System.BitConverter]::ToInt32(
+            [System.BitConverter]::GetBytes([Convert]::ToUInt32('C0000022', 16)),
+            0
+        )
+        $statusObjectNameNotFound = [System.BitConverter]::ToInt32(
+            [System.BitConverter]::GetBytes([Convert]::ToUInt32('C0000034', 16)),
+            0
+        )
+        $statusObjectPathNotFound = [System.BitConverter]::ToInt32(
+            [System.BitConverter]::GetBytes([Convert]::ToUInt32('C000003A', 16)),
+            0
+        )
+        foreach ($classifierCase in @(
+            @{ status = 0; handle = [IntPtr]::new(1); expected = 'Accessible' },
+            @{ status = $statusAccessDenied; handle = [IntPtr]::Zero; expected = 'AccessDenied' },
+            @{ status = $statusObjectNameNotFound; handle = [IntPtr]::Zero; expected = 'NotFound' },
+            @{ status = $statusObjectPathNotFound; handle = [IntPtr]::Zero; expected = 'NotFound' },
+            @{ status = 0; handle = [IntPtr]::Zero; expected = 'Unexpected' },
+            @{ status = 1; handle = [IntPtr]::Zero; expected = 'Unexpected' }
+        )) {
+            $classified = $classifier.Invoke(
+                $null,
+                [object[]]@([int]$classifierCase.status, [IntPtr]$classifierCase.handle)
+            )
+            Require `
+                ([string]$classified -eq $classifierCase.expected) `
+                "Object directory probe classifier returned the wrong closed result."
         }
 
         $probeSourceAssignments = @($wrapperAst.FindAll(
@@ -132,8 +243,43 @@ try {
                 $wrapperAst.Extent.Text.Contains('28 { "jobserver-modify-access" }') -and
                 $wrapperAst.Extent.Text.Contains('33 { "jobserver-combined-access" }') -and
                 $wrapperAst.Extent.Text.Contains('37 { "target-sid-membership-query" }') -and
-                $wrapperAst.Extent.Text.Contains('38 { "target-sid-not-effective" }')) `
+                $wrapperAst.Extent.Text.Contains('38 { "target-sid-not-effective" }') -and
+                $wrapperAst.Extent.Text.Contains('39 { "global-object-directory-traverse-access" }') -and
+                $wrapperAst.Extent.Text.Contains('40 { "global-object-directory-traverse-missing" }') -and
+                $wrapperAst.Extent.Text.Contains('41 { "global-object-directory-probe-unavailable" }') -and
+                $wrapperAst.Extent.Text.Contains('42 { "global-object-directory-traverse-open" }')) `
             "Construction boundary probe did not retain distinct jobserver access diagnostics."
+        $wrapperText = $wrapperAst.Extent.Text
+        $parentProbeIndex = $wrapperText.IndexOf(
+            '[ProjectAtlasObjectDirectoryProbe]::ProbeGlobalBaseNamedObjects()',
+            [System.StringComparison]::Ordinal
+        )
+        $accountCreationIndex = $wrapperText.IndexOf(
+            '$account = New-LocalUser',
+            [System.StringComparison]::Ordinal
+        )
+        Require `
+            ($parentProbeIndex -ge 0 -and
+                $accountCreationIndex -gt $parentProbeIndex -and
+                $wrapperText.Contains('"parent-global-object-directory-traverse-access"') -and
+                $wrapperText.Contains('"parent-global-object-directory-traverse-missing"') -and
+                $wrapperText.Contains('"parent-global-object-directory-probe-unavailable"') -and
+                $wrapperText.Contains('"parent-global-object-directory-traverse-open"') -and
+                $wrapperText.Contains('-Role "object directory boundary probe"')) `
+            "Parent object directory probe was not fail-closed before account creation."
+        $childProbeIndex = $probeSource.IndexOf(
+            '[ProjectAtlasObjectDirectoryProbe]::ProbeGlobalBaseNamedObjects()',
+            [System.StringComparison]::Ordinal
+        )
+        $firstJobserverOpenIndex = $probeSource.IndexOf(
+            '[System.Threading.SemaphoreAcl]::OpenExisting(',
+            [System.StringComparison]::Ordinal
+        )
+        Require `
+            ($probeSource.Contains('Add-Type -Path $objectDirectoryProbe.FullName') -and
+                $childProbeIndex -ge 0 -and
+                $firstJobserverOpenIndex -gt $childProbeIndex) `
+            "Child object directory probe did not precede managed jobserver access."
 
         $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
         $currentPrincipal = [System.Security.Principal.WindowsPrincipal]::new($currentIdentity)

@@ -609,6 +609,147 @@ foreach ($requiredEnvironment in @("INCLUDE", "LIB", "LIBPATH")) {
     }
 }
 
+$objectDirectoryProbeSource = @'
+using System;
+using System.Runtime.InteropServices;
+
+public enum ProjectAtlasObjectDirectoryProbeResult
+{
+    Accessible,
+    AccessDenied,
+    NotFound,
+    Unavailable,
+    Unexpected
+}
+
+public static class ProjectAtlasObjectDirectoryProbe
+{
+    private const string BaseNamedObjectsPath = @"\BaseNamedObjects";
+    private const uint DirectoryTraverse = 0x00000002;
+    private const int StatusSuccess = 0;
+    private const int StatusAccessDenied = unchecked((int)0xC0000022);
+    private const int StatusObjectNameNotFound = unchecked((int)0xC0000034);
+    private const int StatusObjectPathNotFound = unchecked((int)0xC000003A);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct UnicodeString
+    {
+        public ushort Length;
+        public ushort MaximumLength;
+        public IntPtr Buffer;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ObjectAttributes
+    {
+        public uint Length;
+        public IntPtr RootDirectory;
+        public IntPtr ObjectName;
+        public uint Attributes;
+        public IntPtr SecurityDescriptor;
+        public IntPtr SecurityQualityOfService;
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    private delegate int NtOpenDirectoryObjectDelegate(
+        out IntPtr directoryHandle,
+        uint desiredAccess,
+        ref ObjectAttributes objectAttributes);
+
+    [DllImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    public static ProjectAtlasObjectDirectoryProbeResult ProbeGlobalBaseNamedObjects()
+    {
+        IntPtr module = IntPtr.Zero;
+        IntPtr pathBuffer = IntPtr.Zero;
+        IntPtr unicodeStringPointer = IntPtr.Zero;
+        IntPtr directoryHandle = IntPtr.Zero;
+        try
+        {
+            IntPtr export;
+            if (!NativeLibrary.TryLoad("ntdll.dll", out module) ||
+                !NativeLibrary.TryGetExport(module, "NtOpenDirectoryObject", out export))
+            {
+                return ProjectAtlasObjectDirectoryProbeResult.Unavailable;
+            }
+
+            pathBuffer = Marshal.StringToHGlobalUni(BaseNamedObjectsPath);
+            var objectName = new UnicodeString
+            {
+                Length = checked((ushort)(BaseNamedObjectsPath.Length * sizeof(char))),
+                MaximumLength = checked((ushort)((BaseNamedObjectsPath.Length + 1) * sizeof(char))),
+                Buffer = pathBuffer
+            };
+            unicodeStringPointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeString)));
+            Marshal.StructureToPtr(objectName, unicodeStringPointer, false);
+            var objectAttributes = new ObjectAttributes
+            {
+                Length = checked((uint)Marshal.SizeOf(typeof(ObjectAttributes))),
+                RootDirectory = IntPtr.Zero,
+                ObjectName = unicodeStringPointer,
+                Attributes = 0,
+                SecurityDescriptor = IntPtr.Zero,
+                SecurityQualityOfService = IntPtr.Zero
+            };
+            var openDirectory = (NtOpenDirectoryObjectDelegate)Marshal.GetDelegateForFunctionPointer(
+                export,
+                typeof(NtOpenDirectoryObjectDelegate));
+            int status = openDirectory(
+                out directoryHandle,
+                DirectoryTraverse,
+                ref objectAttributes);
+            return ClassifyStatus(status, directoryHandle);
+        }
+        catch
+        {
+            return ProjectAtlasObjectDirectoryProbeResult.Unexpected;
+        }
+        finally
+        {
+            if (directoryHandle != IntPtr.Zero)
+            {
+                CloseHandle(directoryHandle);
+            }
+            if (unicodeStringPointer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(unicodeStringPointer);
+            }
+            if (pathBuffer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(pathBuffer);
+            }
+            if (module != IntPtr.Zero)
+            {
+                NativeLibrary.Free(module);
+            }
+        }
+    }
+
+    private static ProjectAtlasObjectDirectoryProbeResult ClassifyStatus(
+        int status,
+        IntPtr directoryHandle)
+    {
+        if (status == StatusSuccess)
+        {
+            return directoryHandle != IntPtr.Zero
+                ? ProjectAtlasObjectDirectoryProbeResult.Accessible
+                : ProjectAtlasObjectDirectoryProbeResult.Unexpected;
+        }
+        if (status == StatusAccessDenied)
+        {
+            return ProjectAtlasObjectDirectoryProbeResult.AccessDenied;
+        }
+        if (status == StatusObjectNameNotFound || status == StatusObjectPathNotFound)
+        {
+            return ProjectAtlasObjectDirectoryProbeResult.NotFound;
+        }
+        return ProjectAtlasObjectDirectoryProbeResult.Unexpected;
+    }
+}
+'@
+
 $nativeSource = @'
 using System;
 using System.ComponentModel;
@@ -620,7 +761,6 @@ using System.Text;
 
 public static class ProjectAtlasConstructionProcess
 {
-    private const uint LogonWithProfile = 0x00000001;
     private const uint CreateSuspended = 0x00000004;
     private const uint CreateNoWindow = 0x08000000;
     private const uint CreateUnicodeEnvironment = 0x00000400;
@@ -1186,7 +1326,7 @@ public static class ProjectAtlasConstructionProcess
                     username,
                     ".",
                     passwordPointer,
-                    LogonWithProfile,
+                    0,
                     executable,
                     commandLine,
                     flags,
@@ -1359,7 +1499,38 @@ public static class ProjectAtlasConstructionProcess
     }
 }
 '@
+Add-Type -TypeDefinition $objectDirectoryProbeSource -Language CSharp
 Add-Type -TypeDefinition $nativeSource -Language CSharp
+
+$parentObjectDirectoryProbe =
+    [ProjectAtlasObjectDirectoryProbe]::ProbeGlobalBaseNamedObjects()
+if ($parentObjectDirectoryProbe -ne
+    [ProjectAtlasObjectDirectoryProbeResult]::Accessible) {
+    $parentProbeFailure = switch ($parentObjectDirectoryProbe) {
+        ([ProjectAtlasObjectDirectoryProbeResult]::AccessDenied) {
+            "parent-global-object-directory-traverse-access"
+        }
+        ([ProjectAtlasObjectDirectoryProbeResult]::NotFound) {
+            "parent-global-object-directory-traverse-missing"
+        }
+        ([ProjectAtlasObjectDirectoryProbeResult]::Unavailable) {
+            "parent-global-object-directory-probe-unavailable"
+        }
+        default {
+            "parent-global-object-directory-traverse-open"
+        }
+    }
+    throw "Windows construction preflight failed at $parentProbeFailure."
+}
+$objectDirectoryProbePath = Join-Path $temporary "object-directory-probe.cs"
+[System.IO.File]::WriteAllText(
+    $objectDirectoryProbePath,
+    $objectDirectoryProbeSource,
+    [System.Text.UTF8Encoding]::new($false)
+)
+$objectDirectoryProbePath = Get-RegularFile `
+    -Path $objectDirectoryProbePath `
+    -Role "object directory boundary probe"
 
 function Add-PrincipalAcl {
     param(
@@ -1852,7 +2023,8 @@ try {
 param(
     [Parameter(Mandatory = $true)][string]$ExpectedSid,
     [Parameter(Mandatory = $true)][int]$ExpectedSessionId,
-    [Parameter(Mandatory = $true)][string]$JobserverName
+    [Parameter(Mandatory = $true)][string]$JobserverName,
+    [Parameter(Mandatory = $true)][string]$ObjectDirectoryProbePath
 )
 $ErrorActionPreference = "Stop"
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -1914,6 +2086,27 @@ foreach ($entry in [Environment]::GetEnvironmentVariables().Keys) {
 $expectedCargoMakeflags = "-j --jobserver-fds=$JobserverName --jobserver-auth=$JobserverName"
 if ([string]$env:CARGO_MAKEFLAGS -cne $expectedCargoMakeflags) {
     exit 24
+}
+try {
+    $objectDirectoryProbe = Get-Item -LiteralPath $ObjectDirectoryProbePath -Force
+    if ($objectDirectoryProbe.PSIsContainer -or
+        (($objectDirectoryProbe.Attributes -band
+            [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        exit 41
+    }
+    Add-Type -Path $objectDirectoryProbe.FullName -ErrorAction Stop
+    $objectDirectoryProbeResult =
+        [ProjectAtlasObjectDirectoryProbe]::ProbeGlobalBaseNamedObjects()
+}
+catch {
+    exit 41
+}
+switch ($objectDirectoryProbeResult) {
+    ([ProjectAtlasObjectDirectoryProbeResult]::Accessible) { break }
+    ([ProjectAtlasObjectDirectoryProbeResult]::AccessDenied) { exit 39 }
+    ([ProjectAtlasObjectDirectoryProbeResult]::NotFound) { exit 40 }
+    ([ProjectAtlasObjectDirectoryProbeResult]::Unavailable) { exit 41 }
+    default { exit 42 }
 }
 $synchronizeJobserver = $null
 try {
@@ -2004,7 +2197,8 @@ exit 0
         "-File", $probePath,
         "-ExpectedSid", $sid.Value,
         "-ExpectedSessionId", [System.Diagnostics.Process]::GetCurrentProcess().SessionId,
-        "-JobserverName", $script:constructionJobserverName
+        "-JobserverName", $script:constructionJobserverName,
+        "-ObjectDirectoryProbePath", $objectDirectoryProbePath
     )
     $probeExitCode = Invoke-AsConstructionPrincipal -Arguments $probeArguments -CommandTimeoutSeconds 30
     if ($probeExitCode -ne 0) {
@@ -2027,6 +2221,10 @@ exit 0
             36 { "rustc-jobserver" }
             37 { "target-sid-membership-query" }
             38 { "target-sid-not-effective" }
+            39 { "global-object-directory-traverse-access" }
+            40 { "global-object-directory-traverse-missing" }
+            41 { "global-object-directory-probe-unavailable" }
+            42 { "global-object-directory-traverse-open" }
             default { "unexpected-exit-$probeExitCode" }
         }
         throw "Construction principal boundary probe failed at $probeFailure."
