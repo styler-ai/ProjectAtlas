@@ -922,10 +922,17 @@ impl OptionalParserPackLifecycle {
         &self,
         slot: &InstalledSlotPath,
     ) -> Result<bool, OptionalParserPackLifecycleError> {
-        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-        {
-            if self.platform == Some(PackPlatform::WindowsX86_64) {
+        if self.platform == Some(PackPlatform::WindowsX86_64) {
+            #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+            {
                 return Self::remove_windows_slot(slot);
+            }
+            #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+            {
+                return Err(OptionalParserPackLifecycleError::UnsupportedContainment {
+                    os: env::consts::OS,
+                    architecture: env::consts::ARCH,
+                });
             }
         }
         remove_tree_if_present(&slot.entry_root)
@@ -2223,6 +2230,9 @@ fn cleanup_platform_profile(
 
 /// Non-Windows hosts have no durable artifact profile to remove.
 #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+// Keep one fallible cross-platform cleanup contract for the RAII owner; only
+// the Windows implementation can fail because only Windows creates a profile.
+#[allow(clippy::unnecessary_wraps)]
 fn cleanup_platform_profile(
     _root: &Path,
     _artifact: &ParserArtifactIdentity,
@@ -2864,8 +2874,8 @@ fn verify_path_immutable(
     use std::os::unix::fs::PermissionsExt as _;
     if metadata.permissions().mode() & 0o222 != 0 {
         return Err(invalid_data(format!(
-            "installed parser-pack entry {:?} is writable",
-            path.file_name().unwrap_or_default()
+            "installed parser-pack entry {} is writable",
+            path.file_name().unwrap_or_default().display()
         )));
     }
     Ok(())
@@ -2957,10 +2967,10 @@ fn default_storage_root() -> Result<PathBuf, OptionalParserPackLifecycleError> {
                 .join("projectatlas")
                 .join("parser-packs"));
         }
-        return env::var_os("HOME")
+        env::var_os("HOME")
             .map(PathBuf::from)
             .map(|root| root.join(".local/share/projectatlas/parser-packs"))
-            .ok_or(OptionalParserPackLifecycleError::StorageRootUnavailable);
+            .ok_or(OptionalParserPackLifecycleError::StorageRootUnavailable)
     }
     #[cfg(not(any(unix, windows)))]
     Err(OptionalParserPackLifecycleError::StorageRootUnavailable)

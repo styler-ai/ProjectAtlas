@@ -1245,7 +1245,7 @@ impl LinuxMemoryMonitor {
 
     /// Stop and join exactly once, returning any terminal observation.
     fn stop(&mut self) -> Result<Option<LinuxMemoryMonitorEvent>, ParserSupervisorError> {
-        let _ = self.stop.try_send(());
+        drop(self.stop.try_send(()));
         if let Some(handle) = self.handle.take() {
             handle
                 .join()

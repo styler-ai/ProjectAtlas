@@ -1481,6 +1481,12 @@ fn read_bounded(path: &Path, maximum: usize) -> ToolResult<Vec<u8>> {
 
 /// Verify one exact-byte file against its adjacent digest sidecar.
 fn verify_sidecar(path: &Path, bytes: &[u8]) -> ToolResult<()> {
+    if bytes.contains(&b'\r') {
+        return Err(invalid(format!(
+            "sidecar-bound JSON must use canonical LF line endings: {}",
+            path.display()
+        )));
+    }
     let sidecar = sidecar_path(path);
     let sidecar_bytes = read_bounded(&sidecar, 256)?;
     let sidecar_text = std::str::from_utf8(&sidecar_bytes)?;
@@ -3011,6 +3017,22 @@ fn invalid(message: impl Into<String>) -> Box<dyn Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reject a self-consistent digest pair whose JSON bytes are not canonical.
+    #[test]
+    fn sidecar_bound_json_rejects_carriage_returns() -> ToolResult<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("authority.json");
+        let bytes = b"{\r\n  \"schema_version\": 1\r\n}\r\n";
+        fs::write(&path, bytes)?;
+        fs::write(
+            sidecar_path(&path),
+            format!("{}  authority.json\n", sha256_bytes(bytes)),
+        )?;
+
+        assert!(verify_sidecar(&path, bytes).is_err());
+        Ok(())
+    }
 
     /// Accept only the exact pinned root exception and flat native files.
     #[test]

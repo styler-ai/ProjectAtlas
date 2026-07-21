@@ -204,15 +204,54 @@ namespace ProjectAtlas.Release
 
         private sealed class AclSnapshot
         {
-            // Preserve the exact descriptor; equivalent SDDL can reorder ACE text.
-            internal AclSnapshot(string path, byte[] descriptor)
+            // Preserve the binary DACL for restoration and its effective contract for verification.
+            internal AclSnapshot(string path, byte[] descriptor, AclContract contract)
             {
                 Path = path;
                 Descriptor = descriptor;
+                Contract = contract;
             }
 
             internal string Path { get; private set; }
             internal byte[] Descriptor { get; private set; }
+            internal AclContract Contract { get; private set; }
+        }
+
+        private sealed class AclContract
+        {
+            internal AclContract(string owner, bool daclPresent, bool protectedRules, string rules)
+            {
+                Owner = owner;
+                DaclPresent = daclPresent;
+                ProtectedRules = protectedRules;
+                Rules = rules;
+            }
+
+            private string Owner { get; set; }
+            private bool DaclPresent { get; set; }
+            private bool ProtectedRules { get; set; }
+            private string Rules { get; set; }
+
+            internal string Difference(AclContract other)
+            {
+                if (!String.Equals(Owner, other.Owner, StringComparison.Ordinal))
+                {
+                    return "owner";
+                }
+                if (DaclPresent != other.DaclPresent)
+                {
+                    return "dacl-presence";
+                }
+                if (ProtectedRules != other.ProtectedRules)
+                {
+                    return "protection";
+                }
+                if (!String.Equals(Rules, other.Rules, StringComparison.Ordinal))
+                {
+                    return "rules";
+                }
+                return null;
+            }
         }
 
         [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
@@ -793,7 +832,7 @@ namespace ProjectAtlas.Release
             }
         }
 
-        private static string CaptureAclContract(string path, string stage)
+        private static AclContract CaptureAclContract(string path, string stage)
         {
             DirectorySecurity security = new DirectoryInfo(path)
                 .GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
@@ -810,6 +849,7 @@ namespace ProjectAtlas.Release
             RawSecurityDescriptor descriptor = new RawSecurityDescriptor(
                 security.GetSecurityDescriptorBinaryForm(),
                 0);
+            bool daclPresent = (descriptor.ControlFlags & ControlFlags.DiscretionaryAclPresent) != 0;
             List<string> rules = new List<string>();
             AuthorizationRuleCollection accessRules = security.GetAccessRules(
                 true,
@@ -835,13 +875,15 @@ namespace ProjectAtlas.Release
                 }));
             }
             rules.Sort(StringComparer.Ordinal);
-            return String.Join("\n", new string[]
-            {
+            // Windows may normalize auto-inheritance/defaulted/self-relative
+            // descriptor metadata when the same DACL is persisted. The stable
+            // cleanup contract is the owner, DACL presence, protection state,
+            // canonicality, and the complete effective ACE set.
+            return new AclContract(
                 owner.Value,
-                unchecked((uint)descriptor.ControlFlags).ToString("X8", CultureInfo.InvariantCulture),
-                security.AreAccessRulesProtected ? "protected" : "inherited",
-                String.Join("\n", rules.ToArray())
-            });
+                daclPresent,
+                security.AreAccessRulesProtected,
+                String.Join("\n", rules.ToArray()));
         }
 
         private static void GrantRoot(
@@ -853,7 +895,8 @@ namespace ProjectAtlas.Release
             DirectoryInfo directory = new DirectoryInfo(path);
             DirectorySecurity security = directory.GetAccessControl(AccessControlSections.Access);
             byte[] descriptor = security.GetSecurityDescriptorBinaryForm();
-            snapshots.Add(new AclSnapshot(path, descriptor));
+            AclContract contract = CaptureAclContract(path, "grant-root-before");
+            snapshots.Add(new AclSnapshot(path, descriptor, contract));
             FileSystemAccessRule rule = new FileSystemAccessRule(
                 sid,
                 rights,
@@ -883,9 +926,23 @@ namespace ProjectAtlas.Release
                         snapshot.Descriptor,
                         AccessControlSections.Access);
                     directory.SetAccessControl(security);
+                    string difference = snapshot.Contract.Difference(
+                        CaptureAclContract(snapshot.Path, "restore-root-after"));
+                    if (difference != null)
+                    {
+                        if (restored)
+                        {
+                            WriteFailure("restore-root-" + difference, null);
+                        }
+                        restored = false;
+                    }
                 }
                 catch
                 {
+                    if (restored)
+                    {
+                        WriteFailure("restore-root-operation", null);
+                    }
                     restored = false;
                 }
             }
@@ -1190,6 +1247,11 @@ namespace ProjectAtlas.Release
             Directory.CreateDirectory(forbiddenRoot);
             try
             {
+                DirectoryInfo protectedDirectory = new DirectoryInfo(readRoot);
+                DirectorySecurity protectedSecurity = protectedDirectory.GetAccessControl(
+                    AccessControlSections.Access);
+                protectedSecurity.SetAccessRuleProtection(true, true);
+                protectedDirectory.SetAccessControl(protectedSecurity);
                 Environment.SetEnvironmentVariable(selfTestSecretName, "self-test-sensitive-value");
                 string sourceExecutable = Process.GetCurrentProcess().MainModule.FileName;
                 string canaryExecutable = Path.Combine(readRoot, "projectatlas-appcontainer-canary.exe");
@@ -1203,8 +1265,8 @@ namespace ProjectAtlas.Release
                 File.WriteAllText(forbiddenMarker, "forbidden-marker");
                 string quotedArgument = "argument with spaces and \\\"quotes\\\"";
                 string dnsResolver = GetDnsResolver();
-                string readAclBefore = CaptureAclContract(readRoot, "read-before");
-                string writeAclBefore = CaptureAclContract(writeRoot, "write-before");
+                AclContract readAclBefore = CaptureAclContract(readRoot, "read-before");
+                AclContract writeAclBefore = CaptureAclContract(writeRoot, "write-before");
 
                 string[] baselineArguments = new string[]
                 {
@@ -1279,12 +1341,16 @@ namespace ProjectAtlas.Release
                 {
                     throw new ContainmentFailure("descendant-cleanup-canary");
                 }
-                string readAclAfter = CaptureAclContract(readRoot, "read-after");
-                string writeAclAfter = CaptureAclContract(writeRoot, "write-after");
-                if (!String.Equals(readAclBefore, readAclAfter, StringComparison.Ordinal)
-                    || !String.Equals(writeAclBefore, writeAclAfter, StringComparison.Ordinal))
+                AclContract readAclAfter = CaptureAclContract(readRoot, "read-after");
+                AclContract writeAclAfter = CaptureAclContract(writeRoot, "write-after");
+                string readDifference = readAclBefore.Difference(readAclAfter);
+                string writeDifference = writeAclBefore.Difference(writeAclAfter);
+                if (readDifference != null || writeDifference != null)
                 {
-                    throw new ContainmentFailure("acl-restoration-canary");
+                    string difference = readDifference == null
+                        ? "write-" + writeDifference
+                        : "read-" + readDifference;
+                    throw new ContainmentFailure("acl-restoration-" + difference);
                 }
             }
             finally
