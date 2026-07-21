@@ -311,6 +311,7 @@ function Write-ConstructionStatus {
     [System.IO.File]::Move($temporaryPath, $script:constructionStatusPath, $true)
     if ($State -eq "failed") {
         $script:constructionFailureRecorded = $true
+        $script:constructionFailureExitCode = [int]$ExitCode
     }
 }
 
@@ -345,6 +346,7 @@ $script:constructionDiagnosticPath = [System.IO.Path]::Combine(
 )
 $script:constructionStage = "validate-inputs"
 $script:constructionFailureRecorded = $false
+$script:constructionFailureExitCode = 1
 trap {
     if (-not $script:constructionFailureRecorded) {
         $failureExitCode = 1
@@ -363,7 +365,7 @@ trap {
             # contained-construction failure and never emits exception text.
         }
     }
-    exit 1
+    exit $script:constructionFailureExitCode
 }
 Write-ConstructionStatus -Stage $script:constructionStage -State "running"
 $networkCheck = Get-RegularFile `

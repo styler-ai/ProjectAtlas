@@ -338,11 +338,13 @@ function Remove-PrincipalAcl {
         $acl.RemoveAccessRuleSpecific($rule)
     }
     Set-Acl -LiteralPath $item.FullName -AclObject $acl
-    $remaining = @(Get-Acl -LiteralPath $item.FullName).GetAccessRules(
-        $true,
-        $false,
-        [System.Security.Principal.SecurityIdentifier]
-    ) | Where-Object { $_.IdentityReference -eq $Sid }
+    $remaining = @(
+        (Get-Acl -LiteralPath $item.FullName).GetAccessRules(
+            $true,
+            $false,
+            [System.Security.Principal.SecurityIdentifier]
+        ) | Where-Object { $_.IdentityReference -eq $Sid }
+    )
     if ($remaining.Count -ne 0) {
         throw "Construction principal ACL cleanup could not be verified."
     }

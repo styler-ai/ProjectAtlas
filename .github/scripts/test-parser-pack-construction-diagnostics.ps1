@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$ProductionScript = (Join-Path $PSScriptRoot "run-parser-pack-contained-construction.ps1")
+    [string]$ProductionScript = (Join-Path $PSScriptRoot "run-parser-pack-contained-construction.ps1"),
+    [string]$WindowsWrapper = (Join-Path $PSScriptRoot "invoke-parser-pack-windows-construction.ps1")
 )
 
 Set-StrictMode -Version Latest
@@ -77,6 +78,41 @@ try {
     $output = [System.IO.Directory]::CreateDirectory(
         [System.IO.Path]::Combine($testRoot, "output")
     ).FullName
+    if ($env:OS -eq "Windows_NT") {
+        $wrapperTokens = $null
+        $wrapperParseErrors = $null
+        $wrapperAst = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Get-Item -LiteralPath $WindowsWrapper -Force).FullName,
+            [ref]$wrapperTokens,
+            [ref]$wrapperParseErrors
+        )
+        Require ($wrapperParseErrors.Count -eq 0) "Windows construction wrapper did not parse."
+        $cleanupDefinitions = @($wrapperAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -eq "Remove-PrincipalAcl"
+            },
+            $true
+        ))
+        Require ($cleanupDefinitions.Count -eq 1) "Expected one Remove-PrincipalAcl definition."
+        Invoke-Expression $cleanupDefinitions[0].Extent.Text
+
+        $aclFixture = [System.IO.Path]::Combine($testRoot, "acl-fixture.txt")
+        [System.IO.File]::WriteAllText($aclFixture, "fixture")
+        $fixtureSid = [System.Security.Principal.SecurityIdentifier]::new(
+            "S-1-5-21-3141592653-2718281828-1618033988-424242"
+        )
+        $fixtureAcl = Get-Acl -LiteralPath $aclFixture
+        $fixtureAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $fixtureSid,
+            [System.Security.AccessControl.FileSystemRights]::ReadAndExecute,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        ))
+        Set-Acl -LiteralPath $aclFixture -AclObject $fixtureAcl
+        Remove-PrincipalAcl -Path $aclFixture -Sid $fixtureSid
+        Remove-PrincipalAcl -Path $aclFixture -Sid $fixtureSid
+    }
     $Target = "x86_64-pc-windows-msvc"
     $commandDiagnosticTailBytes = 24 * 1024
     $constructionDiagnosticMaxBytes = 64 * 1024
@@ -90,6 +126,7 @@ try {
     )
     $script:constructionStage = "optional-parser-worker-build"
     $script:constructionFailureRecorded = $false
+    $script:constructionFailureExitCode = 1
     $pwsh = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
 
     Invoke-Checked `
@@ -141,7 +178,8 @@ exit 7
     Require `
         ($status.stage -eq "optional-parser-worker-build" -and
             $status.state -eq "failed" -and
-            $status.exit_code -eq 7) `
+            $status.exit_code -eq 7 -and
+            $script:constructionFailureExitCode -eq 7) `
         "Failure diagnostic changed the authoritative status record."
     Write-Output "Parser-pack construction diagnostic self-test passed."
 }
