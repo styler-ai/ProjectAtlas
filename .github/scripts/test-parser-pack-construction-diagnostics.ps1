@@ -388,6 +388,7 @@ try {
         $openedJobserver = $null
         $daclReader = $null
         $deniedJobserver = $null
+        $accessCheckProcess = $null
         try {
             Require `
                 ([ProjectAtlasConstructionProcess]::HasMediumMandatoryLabel(
@@ -412,7 +413,8 @@ try {
             Require `
                 ($openedJobserver.Release() -eq 0) `
                 "Construction jobserver did not restore its token."
-            $currentProcessHandle = [System.Diagnostics.Process]::GetCurrentProcess().Handle
+            $accessCheckProcess = [System.Diagnostics.Process]::GetCurrentProcess()
+            $currentProcessHandle = $accessCheckProcess.Handle
             Require `
                 ([ProjectAtlasConstructionProcess]::EvaluateJobserverSynchronizeAccess(
                     $currentProcessHandle,
@@ -470,7 +472,6 @@ try {
                 $currentProcessHandle,
                 $jobserver.SafeWaitHandle
             ) | Out-Null
-            $accessCheckProcess = [System.Diagnostics.Process]::GetCurrentProcess()
             $accessCheckHandleCountBefore = $accessCheckProcess.HandleCount
             foreach ($accessCheckIteration in 1..32) {
                 Require `
@@ -511,6 +512,9 @@ try {
             }
             if ($null -ne $deniedJobserver) {
                 $deniedJobserver.Dispose()
+            }
+            if ($null -ne $accessCheckProcess) {
+                $accessCheckProcess.Dispose()
             }
             $jobserver.Dispose()
         }
