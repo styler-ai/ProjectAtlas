@@ -56,6 +56,8 @@ $targetIsolation = @{
 $sourceRevisionPattern = '\A[0-9a-f]{40}\z'
 $sha256Pattern = '\A[0-9a-f]{64}\z'
 $rustcReleasePattern = '\A[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?\z'
+$commandDiagnosticTailBytes = 24 * 1024
+$constructionDiagnosticMaxBytes = 64 * 1024
 
 function Get-CanonicalDirectory {
     param(
@@ -93,6 +95,34 @@ function Get-RegularFile {
     return $item.FullName
 }
 
+function Add-BoundedDiagnosticTail {
+    param(
+        [Parameter(Mandatory = $true)]
+        [byte[]]$Tail,
+
+        [Parameter(Mandatory = $true)]
+        [int]$CurrentLength,
+
+        [Parameter(Mandatory = $true)]
+        [byte[]]$Chunk,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Count
+    )
+
+    if ($Count -ge $Tail.Length) {
+        [System.Array]::Copy($Chunk, $Count - $Tail.Length, $Tail, 0, $Tail.Length)
+        return $Tail.Length
+    }
+    $overflow = [Math]::Max(0, ($CurrentLength + $Count) - $Tail.Length)
+    $retained = $CurrentLength - $overflow
+    if ($retained -gt 0 -and $overflow -gt 0) {
+        [System.Array]::Copy($Tail, $overflow, $Tail, 0, $retained)
+    }
+    [System.Array]::Copy($Chunk, 0, $Tail, $retained, $Count)
+    return $retained + $Count
+}
+
 function Invoke-Checked {
     param(
         [Parameter(Mandatory = $true)]
@@ -108,12 +138,80 @@ function Invoke-Checked {
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $Executable
     $startInfo.UseShellExecute = $false
+    $captureDiagnostic = $Target -eq "x86_64-pc-windows-msvc"
+    $startInfo.RedirectStandardOutput = $captureDiagnostic
+    $startInfo.RedirectStandardError = $captureDiagnostic
     foreach ($argument in $Arguments) {
         $startInfo.ArgumentList.Add($argument)
     }
-    $process = $null
+    $stdoutTail = [byte[]]::new($commandDiagnosticTailBytes)
+    $stderrTail = [byte[]]::new($commandDiagnosticTailBytes)
+    $stdoutLength = 0
+    $stderrLength = 0
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
     try {
-        $process = [System.Diagnostics.Process]::Start($startInfo)
+        if (-not $process.Start()) {
+            throw "process-start"
+        }
+        if ($captureDiagnostic) {
+            $stdoutBuffer = [byte[]]::new(4096)
+            $stderrBuffer = [byte[]]::new(4096)
+            $stdoutRead = $process.StandardOutput.BaseStream.ReadAsync(
+                $stdoutBuffer,
+                0,
+                $stdoutBuffer.Length
+            )
+            $stderrRead = $process.StandardError.BaseStream.ReadAsync(
+                $stderrBuffer,
+                0,
+                $stderrBuffer.Length
+            )
+            while ($null -ne $stdoutRead -or $null -ne $stderrRead) {
+                $readCompleted = $false
+                if ($null -ne $stdoutRead -and $stdoutRead.IsCompleted) {
+                    $count = $stdoutRead.GetAwaiter().GetResult()
+                    if ($count -eq 0) {
+                        $stdoutRead = $null
+                    }
+                    else {
+                        $stdoutLength = Add-BoundedDiagnosticTail `
+                            -Tail $stdoutTail `
+                            -CurrentLength $stdoutLength `
+                            -Chunk $stdoutBuffer `
+                            -Count $count
+                        $stdoutRead = $process.StandardOutput.BaseStream.ReadAsync(
+                            $stdoutBuffer,
+                            0,
+                            $stdoutBuffer.Length
+                        )
+                    }
+                    $readCompleted = $true
+                }
+                if ($null -ne $stderrRead -and $stderrRead.IsCompleted) {
+                    $count = $stderrRead.GetAwaiter().GetResult()
+                    if ($count -eq 0) {
+                        $stderrRead = $null
+                    }
+                    else {
+                        $stderrLength = Add-BoundedDiagnosticTail `
+                            -Tail $stderrTail `
+                            -CurrentLength $stderrLength `
+                            -Chunk $stderrBuffer `
+                            -Count $count
+                        $stderrRead = $process.StandardError.BaseStream.ReadAsync(
+                            $stderrBuffer,
+                            0,
+                            $stderrBuffer.Length
+                        )
+                    }
+                    $readCompleted = $true
+                }
+                if (-not $readCompleted) {
+                    Start-Sleep -Milliseconds 5
+                }
+            }
+        }
         $process.WaitForExit()
         $commandExitCode = $process.ExitCode
     }
@@ -131,11 +229,26 @@ function Invoke-Checked {
         throw "$Role failed to start or wait."
     }
     finally {
-        if ($null -ne $process) {
-            $process.Dispose()
-        }
+        $process.Dispose()
     }
     if ($commandExitCode -ne 0) {
+        if ($captureDiagnostic) {
+            $ascii = [System.Text.Encoding]::ASCII
+            $stdout = $ascii.GetString($stdoutTail, 0, $stdoutLength)
+            $stderr = $ascii.GetString($stderrTail, 0, $stderrLength)
+            $diagnostic = "role: $Role`nstdout tail:`n$stdout`nstderr tail:`n$stderr`n"
+            foreach ($root in @($source, $inputs, $output)) {
+                $diagnostic = $diagnostic.Replace($root, "<contained-root>")
+            }
+            $diagnosticBytes = [System.Text.UTF8Encoding]::new($false).GetBytes($diagnostic)
+            if ($diagnosticBytes.Length -gt $constructionDiagnosticMaxBytes) {
+                throw "Bounded construction diagnostic exceeded its byte limit."
+            }
+            [System.IO.File]::WriteAllBytes(
+                $script:constructionDiagnosticPath,
+                $diagnosticBytes
+            )
+        }
         try {
             Write-ConstructionStatus `
                 -Stage $script:constructionStage `
@@ -225,6 +338,10 @@ $output = Get-CanonicalDirectory -Path $OutputDirectory -Role "OutputDirectory"
 $script:constructionStatusPath = [System.IO.Path]::Combine(
     $output,
     "construction-status.json"
+)
+$script:constructionDiagnosticPath = [System.IO.Path]::Combine(
+    $output,
+    "construction-diagnostic.txt"
 )
 $script:constructionStage = "validate-inputs"
 $script:constructionFailureRecorded = $false
@@ -526,11 +643,17 @@ $stagedDirectories = @(
     [System.IO.Path]::Combine($workingDirectory, "staged-a"),
     [System.IO.Path]::Combine($workingDirectory, "staged-b")
 )
+$archiveDirectories = @(
+    [System.IO.Path]::Combine($workingDirectory, "archive-a"),
+    [System.IO.Path]::Combine($workingDirectory, "archive-b")
+)
+$archiveName = "projectatlas-broad-parser-$Target.tar.zst"
 $archives = @(
-    [System.IO.Path]::Combine($workingDirectory, "archive-a.tar.zst"),
-    [System.IO.Path]::Combine($workingDirectory, "archive-b.tar.zst")
+    [System.IO.Path]::Combine($archiveDirectories[0], $archiveName),
+    [System.IO.Path]::Combine($archiveDirectories[1], $archiveName)
 )
 for ($index = 0; $index -lt 2; $index += 1) {
+    [System.IO.Directory]::CreateDirectory($archiveDirectories[$index]) | Out-Null
     $assemblyStage = if ($index -eq 0) { "artifact-assembly-a" } else { "artifact-assembly-b" }
     $script:constructionStage = $assemblyStage
     Write-ConstructionStatus -Stage $script:constructionStage -State "running"

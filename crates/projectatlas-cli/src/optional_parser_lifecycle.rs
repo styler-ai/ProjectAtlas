@@ -625,7 +625,22 @@ impl OptionalParserPackLifecycle {
     pub fn remove(
         &self,
     ) -> Result<OptionalParserPackLifecycleReport, OptionalParserPackLifecycleError> {
-        let _pack_lease = self.acquire_pack_lease(OptionalParserPackLeaseMode::Exclusive)?;
+        let acquire_pack_lease = if self.platform.is_none() {
+            let storage_root = self.storage_root()?;
+            match direct_directory_state(storage_root)? {
+                DirectDirectoryState::Missing => false,
+                DirectDirectoryState::Real => !matches!(
+                    direct_directory_state(&storage_root.join(OPTIONAL_PARSER_PACK_ID))?,
+                    DirectDirectoryState::Missing
+                ),
+                DirectDirectoryState::Unsafe => true,
+            }
+        } else {
+            true
+        };
+        let _pack_lease = acquire_pack_lease
+            .then(|| self.acquire_pack_lease(OptionalParserPackLeaseMode::Exclusive))
+            .transpose()?;
         let _selection_lease = self
             .selection_mutation_needed()?
             .then(|| self.acquire_selection_mutation_lease())
@@ -3502,6 +3517,43 @@ mod tests {
         require(
             !lifecycle.remove()?.changed,
             "second remove was not idempotent",
+        )
+    }
+
+    #[test]
+    fn unsupported_remove_does_not_create_absent_storage() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let project = root.path().join("project");
+        let storage = root.path().join("storage");
+        let source = project.join("src/lib.rs");
+        let selection = project.join(OPTIONAL_PARSER_PACK_SELECTION_POLICY_PATH);
+        fs::create_dir_all(
+            selection
+                .parent()
+                .ok_or_else(|| io::Error::other("selection parent missing"))?,
+        )?;
+        fs::create_dir_all(
+            source
+                .parent()
+                .ok_or_else(|| io::Error::other("source parent missing"))?,
+        )?;
+        fs::write(&source, b"source must survive")?;
+        fs::write(&selection, b"stale")?;
+        let lifecycle = OptionalParserPackLifecycle::for_test(project, storage.clone(), None);
+
+        require(
+            lifecycle.remove()?.changed,
+            "first remove did not delete stale selection",
+        )?;
+        require(!selection.exists(), "stale selection survived remove")?;
+        require(!storage.exists(), "remove created absent storage")?;
+        require(
+            !lifecycle.remove()?.changed,
+            "second remove was not idempotent",
+        )?;
+        require(
+            fs::read(&source)? == b"source must survive",
+            "unsupported remove touched source",
         )
     }
 

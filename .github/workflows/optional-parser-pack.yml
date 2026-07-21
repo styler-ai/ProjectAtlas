@@ -113,6 +113,10 @@ jobs:
           "toolchain_root=$toolchainRoot" >> $env:GITHUB_OUTPUT
           "pwsh_path=$pwshPath" >> $env:GITHUB_OUTPUT
 
+      - name: Test bounded construction diagnostics
+        shell: pwsh
+        run: pwsh -NoProfile -File .github/scripts/test-parser-pack-construction-diagnostics.ps1
+
       - name: Prove baseline network reachability
         id: network
         shell: pwsh
@@ -344,6 +348,46 @@ jobs:
               }
               $validatedStage = [string]$status.stage
               $validatedExitCode = [int]$status.exit_code
+
+              $diagnosticPath = Join-Path $output "construction-diagnostic.txt"
+              if (Test-Path -LiteralPath $diagnosticPath) {
+                $diagnosticItem = Get-Item -LiteralPath $diagnosticPath -Force
+                if ($diagnosticItem.PSIsContainer -or
+                    (($diagnosticItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) -or
+                    $diagnosticItem.Length -le 0 -or
+                    $diagnosticItem.Length -gt (64 * 1024)) {
+                  throw "invalid-diagnostic-file"
+                }
+                $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+                $diagnostic = [System.IO.File]::ReadAllText($diagnosticItem.FullName, $strictUtf8)
+                if ($diagnostic -match '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]') {
+                  throw "invalid-diagnostic-content"
+                }
+                foreach ($privatePath in @(
+                  $env:RUNNER_TEMP,
+                  $source,
+                  $inputs,
+                  $vendor,
+                  $output,
+                  $cargoHome,
+                  $containedTemp,
+                  $containedHome,
+                  $toolchainRoot,
+                  $pwshRoot,
+                  $vcTools,
+                  $windowsSdk
+                )) {
+                  if (-not [string]::IsNullOrWhiteSpace($privatePath)) {
+                    $diagnostic = $diagnostic.Replace($privatePath, "<runner-path>")
+                  }
+                }
+                foreach ($line in [System.Text.RegularExpressions.Regex]::Split(
+                  $diagnostic,
+                  "\r\n|\n|\r"
+                )) {
+                  Write-Host "[contained-construction] $line"
+                }
+              }
             }
             catch {
               throw "Contained construction failed without a valid bounded status record."

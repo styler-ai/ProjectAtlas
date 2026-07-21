@@ -912,7 +912,7 @@ impl AtlasStore {
             return operation(&self.connection);
         }
         let transaction =
-            rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)?;
+            rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let result = schema::validate_active_binding(
             &transaction,
             self.validated_project_root.as_deref(),
@@ -6007,6 +6007,56 @@ mod tests {
         new_reader.finish_index_read_snapshot()?;
         old_reader.finish_index_read_snapshot()?;
         Ok(())
+    }
+
+    #[test]
+    fn authored_write_waits_for_the_existing_writer_before_validation() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let db_path = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&db_path, &root)?;
+        store.replace_scan(&[test_file_node("src/lib.rs", "initial")])?;
+
+        let blocking_writer = Connection::open(&db_path)?;
+        blocking_writer.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+        blocking_writer.execute_batch("BEGIN IMMEDIATE")?;
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            blocking_writer.execute_batch("ROLLBACK")
+        });
+
+        let started = Instant::now();
+        store.set_purpose(
+            "src/lib.rs",
+            "Own the library source.",
+            PurposeSource::Agent,
+        )?;
+        let elapsed = started.elapsed();
+        release
+            .join()
+            .map_err(|_panic| io::Error::other("blocking writer thread panicked"))??;
+
+        require_eq(
+            &(elapsed >= Duration::from_millis(50)),
+            &true,
+            "authored write waited for the existing writer",
+        )?;
+        require_eq(
+            &(elapsed < SQLITE_BUSY_TIMEOUT),
+            &true,
+            "authored write stayed within the ordinary busy timeout",
+        )?;
+        require_eq(
+            &store
+                .load_node_by_path("src/lib.rs")?
+                .ok_or_else(|| io::Error::other("purpose node missing"))?
+                .purpose
+                .purpose,
+            &Some("Own the library source.".to_string()),
+            "purpose after bounded writer contention",
+        )
     }
 
     #[test]
