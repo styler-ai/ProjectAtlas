@@ -7,11 +7,12 @@ mod structural;
 mod token_tui;
 
 use atlas_map::{
-    IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report, init_gitignore,
-    init_project_with_config, lint_map, list_ignore_entries, load_atlas_config,
+    AtlasMapConfig, IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report,
+    init_gitignore, init_project_with_config, lint_map, list_ignore_entries, load_atlas_config,
     remove_ignore_entry, write_map,
 };
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 #[cfg(feature = "optional-parser-supervisor")]
 use projectatlas_cli::optional_parser_lifecycle::{
     OptionalParserPackLifecycle, OptionalParserPackLifecycleError,
@@ -465,6 +466,9 @@ struct Cli {
     /// Path to the `SQLite` index file.
     #[arg(long, default_value = DEFAULT_DB_PATH)]
     db: PathBuf,
+    /// Whether the database path came from the command line rather than the default.
+    #[arg(skip)]
+    database_path_is_explicit: bool,
     /// Response format to emit.
     #[arg(long, value_enum, default_value_t = OutputFormat::Toon)]
     format: OutputFormat,
@@ -1026,7 +1030,7 @@ enum SymbolsCommand {
 
 /// Parse arguments, execute the command, and convert failures to process exit.
 fn main() {
-    let cli = Cli::parse();
+    let cli = parse_cli();
     if let Err(error) = run(&cli) {
         let rendered =
             render_cli_error(cli.format, &error).unwrap_or_else(|_| format!("error: {error}\n"));
@@ -1035,6 +1039,24 @@ fn main() {
         }
         std::process::exit(1);
     }
+}
+
+/// Parse CLI arguments while retaining whether `--db` was explicitly selected.
+fn parse_cli() -> Cli {
+    let matches = Cli::command().get_matches();
+    let database_path_is_explicit = matches.value_source("db") == Some(ValueSource::CommandLine);
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    cli.database_path_is_explicit = database_path_is_explicit;
+    cli
+}
+
+/// Load map and lint config with an explicit CLI database override when present.
+fn load_cli_atlas_config(cli: &Cli) -> Result<AtlasMapConfig, CliError> {
+    let config = load_atlas_config(cli.config.as_deref())?;
+    if cli.database_path_is_explicit {
+        return Ok(config.with_database_path(&cli.db));
+    }
+    Ok(config)
 }
 
 /// Execute the selected CLI command.
@@ -1088,7 +1110,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 write_stderr("Skipping ProjectAtlas map update in CI.\n")?;
                 return Ok(());
             }
-            let config = load_atlas_config(cli.config.as_deref())?;
+            let config = load_cli_atlas_config(cli)?;
             write_map(&config, *json)?;
         }
         Command::Scan {
@@ -1487,7 +1509,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             }
         },
         Command::Config { print: _ } => {
-            let config = load_atlas_config(cli.config.as_deref())?;
+            let config = load_cli_atlas_config(cli)?;
             let report = effective_config_report(&config);
             print_output(
                 cli.format,
@@ -1653,7 +1675,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             report_untracked,
             strict_untracked,
         } => {
-            let config = load_atlas_config(cli.config.as_deref())?;
+            let config = load_cli_atlas_config(cli)?;
             let (mut report, mut exit_code) = lint_map(
                 &config,
                 LintOptions {

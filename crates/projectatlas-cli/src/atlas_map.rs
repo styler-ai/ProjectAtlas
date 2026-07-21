@@ -282,6 +282,12 @@ pub(crate) struct AtlasMapConfig {
 }
 
 impl AtlasMapConfig {
+    /// Bind database-backed map and lint work to the selected runtime database.
+    pub(crate) fn with_database_path(mut self, database_path: &Path) -> Self {
+        self.db_path = database_path.to_path_buf();
+        self
+    }
+
     /// Return scanner options derived from the normalized project config.
     pub(crate) fn scan_options(&self) -> ScanOptions {
         ScanOptions {

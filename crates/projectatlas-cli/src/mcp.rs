@@ -2216,10 +2216,14 @@ impl ProjectAtlasMcpServer {
 
     /// Load effective atlas config for the selected state.
     fn load_config_for_state(state: &McpProjectState) -> Result<AtlasMapConfig, CliError> {
-        state.config_path.as_deref().map_or_else(
-            || load_atlas_config_for_root(&state.root).map_err(CliError::from),
-            |config_path| load_atlas_config(Some(config_path)).map_err(CliError::from),
-        )
+        state
+            .config_path
+            .as_deref()
+            .map_or_else(
+                || load_atlas_config_for_root(&state.root).map_err(CliError::from),
+                |config_path| load_atlas_config(Some(config_path)).map_err(CliError::from),
+            )
+            .map(|config| config.with_database_path(&state.db_path))
     }
 
     /// Return the selected project root used by admin-style MCP calls.

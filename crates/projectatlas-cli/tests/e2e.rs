@@ -5035,6 +5035,164 @@ fn bare_relative_projectatlas_config_path_drives_scan_map_and_lint() -> Result<(
 }
 
 #[test]
+fn explicit_database_binding_is_used_by_cli_and_mcp_admin_surfaces() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    let config_path = atlas_dir.join("config.toml");
+    let selected_database = temp.path().join("selected-projectatlas.db");
+    let canonical_database = atlas_dir.join("projectatlas.db");
+    let canonical_sentinel = b"protected canonical database sentinel";
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        &config_path,
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\", \"node_modules\"]\n",
+    )?;
+    fs::write(
+        atlas_dir.join("projectatlas-nonsource-files.toon"),
+        "nonsource_files[]:\n",
+    )?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("main.rs"),
+        "pub fn selected_database_marker() {}\n",
+    )?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&selected_database)
+        .arg("--config")
+        .arg(&config_path)
+        .args(["scan", "."])
+        .assert()
+        .success();
+    if canonical_database.exists() {
+        return Err(io::Error::other("explicit scan created the canonical database").into());
+    }
+    fs::write(&canonical_database, canonical_sentinel)?;
+
+    let default_config_output = Command::cargo_bin("projectatlas")?
+        .current_dir(temp.path())
+        .arg("--format")
+        .arg("json")
+        .arg("--config")
+        .arg(&config_path)
+        .args(["config", "--print"])
+        .output()?;
+    if !default_config_output.status.success() {
+        return Err(io::Error::other(format!(
+            "config-root database resolution failed: {}",
+            String::from_utf8_lossy(&default_config_output.stderr)
+        ))
+        .into());
+    }
+    let default_config_json: Value = serde_json::from_slice(&default_config_output.stdout)?;
+    require_json_string(
+        &default_config_json,
+        &["db_path"],
+        canonical_database.to_string_lossy().as_ref(),
+    )?;
+
+    let config_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&selected_database)
+        .arg("--config")
+        .arg(&config_path)
+        .args(["config", "--print"])
+        .output()?;
+    if !config_output.status.success() {
+        return Err(io::Error::other(format!(
+            "config --print rejected the selected database: {}",
+            String::from_utf8_lossy(&config_output.stderr)
+        ))
+        .into());
+    }
+    let config_json: Value = serde_json::from_slice(&config_output.stdout)?;
+    require_json_string(
+        &config_json,
+        &["db_path"],
+        selected_database.to_string_lossy().as_ref(),
+    )?;
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&selected_database)
+        .arg("--config")
+        .arg(&config_path)
+        .args(["map", "--force"])
+        .assert()
+        .success();
+    let map = fs::read_to_string(atlas_dir.join("projectatlas.toon"))?;
+    if !map.contains("src/main.rs") {
+        return Err(io::Error::other("selected-database map omitted indexed source").into());
+    }
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&selected_database)
+        .arg("--config")
+        .arg(&config_path)
+        .args(["lint", "--report-untracked", "--purpose-level", "low"])
+        .assert()
+        .success();
+
+    let mcp_config = mcp_config_for_harness(&repo, &selected_database, "mcp-json")?;
+    let (mcp_command, mcp_args) = mcp_command_and_args(&mcp_config)?;
+    let mcp_output = run_mcp_stdio(
+        &mcp_command,
+        temp.path(),
+        &mcp_args,
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-e2e","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_config","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_map","arguments":{"force":true}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_lint","arguments":{"report_untracked":true,"purpose_level":"low"}}}"#,
+        ],
+    )?;
+    let mcp_config_text = mcp_tool_text(&mcp_output, 2)?;
+    let selected_database_toon = selected_database.to_string_lossy().replace('\\', "\\\\");
+    if !mcp_config_text.contains(&selected_database_toon) {
+        return Err(io::Error::other(format!(
+            "MCP config did not report the selected database: {mcp_config_text}"
+        ))
+        .into());
+    }
+    let mcp_map_text = mcp_tool_text(&mcp_output, 3)?;
+    if !mcp_map_text.contains("written: true") {
+        return Err(io::Error::other(format!(
+            "MCP map did not use the selected database: {mcp_map_text}"
+        ))
+        .into());
+    }
+    let mcp_lint_text = mcp_tool_text(&mcp_output, 4)?;
+    if !mcp_lint_text.contains("ok: true") {
+        return Err(io::Error::other(format!(
+            "MCP lint did not use the selected database: {mcp_lint_text}"
+        ))
+        .into());
+    }
+
+    if fs::read(&canonical_database)? != canonical_sentinel {
+        return Err(io::Error::other("admin surfaces mutated the canonical database").into());
+    }
+    for suffix in ["-wal", "-shm", "-journal"] {
+        if sqlite_sidecar_path(&canonical_database, suffix).exists() {
+            return Err(io::Error::other(format!(
+                "admin surfaces created canonical database sidecar {suffix}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
