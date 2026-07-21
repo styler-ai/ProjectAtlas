@@ -176,7 +176,7 @@ try {
                 $jobserverRules[0].AccessControlType -eq
                     [System.Security.AccessControl.AccessControlType]::Allow) `
             "Construction jobserver DACL did not grant the exact target rights."
-        $jobserverName = "Local\ProjectAtlasJobserverTest-$([guid]::NewGuid().ToString('N'))"
+        $jobserverName = "Global\ProjectAtlasJobserverTest-$([guid]::NewGuid().ToString('N'))"
         $jobserver = New-ConstructionJobserver -Sid $currentSid -Name $jobserverName
         $openedJobserver = $null
         try {

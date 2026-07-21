@@ -1660,7 +1660,7 @@ try {
     foreach ($directory in @($appData, $localAppData)) {
         [System.IO.Directory]::CreateDirectory($directory) | Out-Null
     }
-    $script:constructionJobserverName = "Local\ProjectAtlasParserPack-$randomHex"
+    $script:constructionJobserverName = "Global\ProjectAtlasParserPack-$randomHex"
     $script:constructionJobserver = New-ConstructionJobserver `
         -Sid $sid `
         -Name $script:constructionJobserverName
