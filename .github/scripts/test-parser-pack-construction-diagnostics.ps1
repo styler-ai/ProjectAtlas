@@ -116,6 +116,17 @@ try {
                 $probeSource.Contains('$expectedCargoMakeflags') -and
                 -not $probeSource.Contains('StandardOutput.ReadToEnd()')) `
             "Construction boundary probe did not drain both streams asynchronously or verify jobserver transport."
+        Require `
+            ($probeSource.Contains('$ExpectedSessionId') -and
+                $probeSource.Contains('S-1-16-8192') -and
+                $probeSource.Contains('$synchronizeJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(') -and
+                $probeSource.Contains('$modifyJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(')) `
+            "Construction boundary probe did not classify session, integrity, and individual jobserver rights."
+        Require `
+            ($wrapperAst.Extent.Text.Contains('26 { "jobserver-synchronize-access" }') -and
+                $wrapperAst.Extent.Text.Contains('28 { "jobserver-modify-access" }') -and
+                $wrapperAst.Extent.Text.Contains('33 { "jobserver-combined-access" }')) `
+            "Construction boundary probe did not retain distinct jobserver access diagnostics."
 
         $cleanupDefinitions = @($wrapperAst.FindAll(
             {
@@ -185,6 +196,12 @@ try {
                     $jobserver.SafeWaitHandle
                 )) `
                 "Construction jobserver did not retain its medium mandatory label."
+            Require `
+                ([ProjectAtlasConstructionProcess]::HasExpectedJobserverDacl(
+                    $jobserver.SafeWaitHandle,
+                    $currentSid.Value
+                )) `
+                "Construction jobserver did not retain its target-only DACL."
             $openedJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(
                 $jobserverName,
                 $jobserverRights

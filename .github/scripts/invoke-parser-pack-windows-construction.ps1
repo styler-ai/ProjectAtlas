@@ -632,6 +632,7 @@ public static class ProjectAtlasConstructionProcess
     private const uint DesktopAllAccess = 0x000F01FF;
     private const uint SddlRevision1 = 1;
     private const int SeKernelObject = 6;
+    private const uint DaclSecurityInformation = 0x00000004;
     private const uint LabelSecurityInformation = 0x00000010;
 
     public static uint LastTotalProcesses { get; private set; }
@@ -775,6 +776,17 @@ public static class ProjectAtlasConstructionProcess
         IntPtr owner,
         IntPtr group,
         IntPtr dacl,
+        out IntPtr sacl,
+        out IntPtr securityDescriptor);
+
+    [DllImport("advapi32.dll", EntryPoint = "GetSecurityInfo")]
+    private static extern uint GetSecurityInfoForDacl(
+        SafeWaitHandle handle,
+        int objectType,
+        uint securityInfo,
+        out IntPtr owner,
+        out IntPtr group,
+        out IntPtr dacl,
         out IntPtr sacl,
         out IntPtr securityDescriptor);
 
@@ -970,6 +982,65 @@ public static class ProjectAtlasConstructionProcess
             return string.Equals(
                 Marshal.PtrToStringUni(stringSecurityDescriptor),
                 "S:(ML;;NW;;;ME)",
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (stringSecurityDescriptor != IntPtr.Zero)
+            {
+                LocalFree(stringSecurityDescriptor);
+            }
+            if (securityDescriptor != IntPtr.Zero)
+            {
+                LocalFree(securityDescriptor);
+            }
+        }
+    }
+
+    public static bool HasExpectedJobserverDacl(SafeWaitHandle handle, string principalSid)
+    {
+        if (handle == null || handle.IsInvalid || handle.IsClosed)
+        {
+            throw new ArgumentException("read-jobserver-dacl", nameof(handle));
+        }
+
+        IntPtr securityDescriptor = IntPtr.Zero;
+        IntPtr stringSecurityDescriptor = IntPtr.Zero;
+        try
+        {
+            IntPtr owner;
+            IntPtr group;
+            IntPtr dacl;
+            IntPtr sacl;
+            uint result = GetSecurityInfoForDacl(
+                handle,
+                SeKernelObject,
+                DaclSecurityInformation,
+                out owner,
+                out group,
+                out dacl,
+                out sacl,
+                out securityDescriptor);
+            if (result != 0)
+            {
+                throw new Win32Exception(unchecked((int)result), "read-jobserver-dacl");
+            }
+            if (dacl == IntPtr.Zero || securityDescriptor == IntPtr.Zero)
+            {
+                return false;
+            }
+            if (!ConvertSecurityDescriptorToStringSecurityDescriptor(
+                securityDescriptor,
+                SddlRevision1,
+                DaclSecurityInformation,
+                out stringSecurityDescriptor,
+                IntPtr.Zero))
+            {
+                throw Failure("format-jobserver-dacl");
+            }
+            return string.Equals(
+                Marshal.PtrToStringUni(stringSecurityDescriptor),
+                "D:P(A;;0x100002;;;" + principalSid + ")",
                 StringComparison.Ordinal);
         }
         finally
@@ -1389,10 +1460,16 @@ function New-ConstructionJobserver {
         )) {
             throw "Construction jobserver integrity label could not be verified."
         }
+        if (-not [ProjectAtlasConstructionProcess]::HasExpectedJobserverDacl(
+            $semaphore.SafeWaitHandle,
+            $Sid.Value
+        )) {
+            throw "Construction jobserver DACL could not be verified."
+        }
     }
     catch {
         $semaphore.Dispose()
-        throw "Construction jobserver integrity label could not be applied."
+        throw "Construction jobserver security could not be applied or verified."
     }
     return $semaphore
 }
@@ -1741,6 +1818,7 @@ try {
     $probeSource = @'
 param(
     [Parameter(Mandatory = $true)][string]$ExpectedSid,
+    [Parameter(Mandatory = $true)][int]$ExpectedSessionId,
     [Parameter(Mandatory = $true)][string]$JobserverName
 )
 $ErrorActionPreference = "Stop"
@@ -1749,6 +1827,24 @@ $principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
 if ($identity.User.Value -ne $ExpectedSid -or
     $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
     exit 21
+}
+if ([System.Diagnostics.Process]::GetCurrentProcess().SessionId -ne $ExpectedSessionId) {
+    exit 30
+}
+$groupRows = @(
+    whoami.exe /groups /fo csv /nh |
+        ConvertFrom-Csv -Header Name, Type, Sid, Attributes
+)
+if ($LASTEXITCODE -ne 0) { exit 31 }
+$integritySids = @($groupRows | Where-Object { $_.Sid -like 'S-1-16-*' })
+if ($integritySids.Count -ne 1 -or
+    [string]$integritySids[0].Sid -notin @(
+        'S-1-16-8192',
+        'S-1-16-8448',
+        'S-1-16-12288',
+        'S-1-16-16384'
+    )) {
+    exit 32
 }
 $handle = [System.IO.File]::Open(
     "\\.\NUL",
@@ -1775,6 +1871,40 @@ $expectedCargoMakeflags = "-j --jobserver-fds=$JobserverName --jobserver-auth=$J
 if ([string]$env:CARGO_MAKEFLAGS -cne $expectedCargoMakeflags) {
     exit 24
 }
+$synchronizeJobserver = $null
+try {
+    $synchronizeJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(
+        $JobserverName,
+        [System.Security.AccessControl.SemaphoreRights]::Synchronize
+    )
+}
+catch [System.Threading.WaitHandleCannotBeOpenedException] {
+    exit 25
+}
+catch [System.UnauthorizedAccessException] {
+    exit 26
+}
+catch {
+    exit 27
+}
+$synchronizeJobserver.Dispose()
+$modifyJobserver = $null
+try {
+    $modifyJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(
+        $JobserverName,
+        [System.Security.AccessControl.SemaphoreRights]::Modify
+    )
+}
+catch [System.Threading.WaitHandleCannotBeOpenedException] {
+    exit 25
+}
+catch [System.UnauthorizedAccessException] {
+    exit 28
+}
+catch {
+    exit 29
+}
+$modifyJobserver.Dispose()
 $jobserverRights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
     [System.Security.AccessControl.SemaphoreRights]::Modify
 $inheritedJobserver = $null
@@ -1788,14 +1918,14 @@ catch [System.Threading.WaitHandleCannotBeOpenedException] {
     exit 25
 }
 catch [System.UnauthorizedAccessException] {
-    exit 26
+    exit 33
 }
 catch {
-    exit 27
+    exit 34
 }
 try {
     if (-not $inheritedJobserver.WaitOne(0) -or $inheritedJobserver.Release() -ne 0) {
-        exit 28
+        exit 35
     }
 }
 finally {
@@ -1820,7 +1950,7 @@ $rustc.Dispose()
 if ($rustcExitCode -ne 0 -or
     -not [string]::IsNullOrEmpty($rustcError) -or
     $rustcOutput -notmatch '(?m)^target_os="windows"\r?$') {
-    exit 29
+    exit 36
 }
 exit 0
 '@
@@ -1829,6 +1959,7 @@ exit 0
         "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
         "-File", $probePath,
         "-ExpectedSid", $sid.Value,
+        "-ExpectedSessionId", [System.Diagnostics.Process]::GetCurrentProcess().SessionId,
         "-JobserverName", $script:constructionJobserverName
     )
     $probeExitCode = Invoke-AsConstructionPrincipal -Arguments $probeArguments -CommandTimeoutSeconds 30
@@ -1839,10 +1970,17 @@ exit 0
             23 { "environment" }
             24 { "environment-jobserver" }
             25 { "jobserver-missing" }
-            26 { "jobserver-access" }
-            27 { "jobserver-open" }
-            28 { "jobserver-token" }
-            29 { "rustc-jobserver" }
+            26 { "jobserver-synchronize-access" }
+            27 { "jobserver-synchronize-open" }
+            28 { "jobserver-modify-access" }
+            29 { "jobserver-modify-open" }
+            30 { "session" }
+            31 { "integrity-query" }
+            32 { "integrity" }
+            33 { "jobserver-combined-access" }
+            34 { "jobserver-combined-open" }
+            35 { "jobserver-token" }
+            36 { "rustc-jobserver" }
             default { "unexpected-exit-$probeExitCode" }
         }
         throw "Construction principal boundary probe failed at $probeFailure."
