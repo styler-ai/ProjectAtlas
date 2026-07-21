@@ -250,6 +250,15 @@ jobs:
             }
           }
 
+          # Rustup may install protected/non-inheriting ACLs on both rustc and its adjacent
+          # runtime DLLs. Admit only that bounded loader closure, not the whole toolchain tree.
+          $toolchainExecuteFiles = @(
+            (Join-Path $toolchainBin "rustc.exe")
+            Get-ChildItem -LiteralPath $toolchainBin -Filter "*.dll" -File |
+              Sort-Object Name |
+              ForEach-Object { $_.FullName }
+          )
+
           $launcherArguments = @(
             "launch",
             "--executable", $pwshPath,
@@ -262,8 +271,12 @@ jobs:
             "--read-root", $pwshRoot,
             "--read-root", $toolchainRoot,
             "--read-root", $vcTools,
-            "--read-root", $windowsSdk,
-            "--execute-file", (Join-Path $toolchainBin "rustc.exe"),
+            "--read-root", $windowsSdk
+          )
+          foreach ($toolchainExecuteFile in $toolchainExecuteFiles) {
+            $launcherArguments += @("--execute-file", $toolchainExecuteFile)
+          }
+          $launcherArguments += @(
             "--write-root", $output,
             "--write-root", $cargoHome,
             "--write-root", $containedTemp,
