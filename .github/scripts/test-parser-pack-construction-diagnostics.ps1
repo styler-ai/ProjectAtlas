@@ -190,15 +190,20 @@ try {
         $jobserverName = "Global\ProjectAtlasJobserverTest-$([guid]::NewGuid().ToString('N'))"
         $jobserver = New-ConstructionJobserver -Sid $currentSid -Name $jobserverName
         $openedJobserver = $null
+        $daclReader = $null
         try {
             Require `
                 ([ProjectAtlasConstructionProcess]::HasMediumMandatoryLabel(
                     $jobserver.SafeWaitHandle
                 )) `
                 "Construction jobserver did not retain its medium mandatory label."
+            $daclReader = [System.Threading.SemaphoreAcl]::OpenExisting(
+                $jobserverName,
+                [System.Security.AccessControl.SemaphoreRights]::ReadPermissions
+            )
             Require `
                 ([ProjectAtlasConstructionProcess]::HasExpectedJobserverDacl(
-                    $jobserver.SafeWaitHandle,
+                    $daclReader.SafeWaitHandle,
                     $currentSid.Value
                 )) `
                 "Construction jobserver did not retain its target-only DACL."
@@ -223,6 +228,9 @@ try {
             Require $collisionRejected "Construction jobserver accepted a live-name collision."
         }
         finally {
+            if ($null -ne $daclReader) {
+                $daclReader.Dispose()
+            }
             if ($null -ne $openedJobserver) {
                 $openedJobserver.Dispose()
             }

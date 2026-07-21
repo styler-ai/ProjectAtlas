@@ -1038,10 +1038,26 @@ public static class ProjectAtlasConstructionProcess
             {
                 throw Failure("format-jobserver-dacl");
             }
-            return string.Equals(
-                Marshal.PtrToStringUni(stringSecurityDescriptor),
-                "D:P(A;;0x100002;;;" + principalSid + ")",
-                StringComparison.Ordinal);
+            string sddl = Marshal.PtrToStringUni(stringSecurityDescriptor);
+            if (string.IsNullOrEmpty(sddl))
+            {
+                return false;
+            }
+            var descriptor = new System.Security.AccessControl.RawSecurityDescriptor(sddl);
+            var parsedDacl = descriptor.DiscretionaryAcl;
+            if ((descriptor.ControlFlags &
+                    System.Security.AccessControl.ControlFlags.DiscretionaryAclProtected) == 0 ||
+                parsedDacl == null || parsedDacl.Count != 1)
+            {
+                return false;
+            }
+            var ace = parsedDacl[0] as System.Security.AccessControl.CommonAce;
+            var expectedSid = new System.Security.Principal.SecurityIdentifier(principalSid);
+            return ace != null &&
+                ace.AceQualifier == System.Security.AccessControl.AceQualifier.AccessAllowed &&
+                ace.AceFlags == System.Security.AccessControl.AceFlags.None &&
+                ace.AccessMask == 0x00100002 &&
+                expectedSid.Equals(ace.SecurityIdentifier);
         }
         finally
         {
@@ -1460,8 +1476,19 @@ function New-ConstructionJobserver {
         )) {
             throw "Construction jobserver integrity label could not be verified."
         }
+    }
+    catch {
+        $semaphore.Dispose()
+        throw "Construction jobserver integrity label could not be applied or verified."
+    }
+    $daclReader = $null
+    try {
+        $daclReader = [System.Threading.SemaphoreAcl]::OpenExisting(
+            $name,
+            [System.Security.AccessControl.SemaphoreRights]::ReadPermissions
+        )
         if (-not [ProjectAtlasConstructionProcess]::HasExpectedJobserverDacl(
-            $semaphore.SafeWaitHandle,
+            $daclReader.SafeWaitHandle,
             $Sid.Value
         )) {
             throw "Construction jobserver DACL could not be verified."
@@ -1469,7 +1496,12 @@ function New-ConstructionJobserver {
     }
     catch {
         $semaphore.Dispose()
-        throw "Construction jobserver security could not be applied or verified."
+        throw "Construction jobserver DACL could not be read or verified."
+    }
+    finally {
+        if ($null -ne $daclReader) {
+            $daclReader.Dispose()
+        }
     }
     return $semaphore
 }
