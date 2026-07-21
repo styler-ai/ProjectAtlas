@@ -769,6 +769,84 @@ public static class ProjectAtlasObjectDirectoryProbe
 }
 '@
 
+$tokenRestrictionProbeSource = @'
+using System;
+using Microsoft.Win32.SafeHandles;
+using System.Runtime.InteropServices;
+
+public enum ProjectAtlasCurrentProcessTokenRestrictionResult
+{
+    Unrestricted,
+    Restricted,
+    TokenUnavailable,
+    EvaluationUnavailable
+}
+
+public static class ProjectAtlasCurrentProcessTokenRestrictionProbe
+{
+    private const uint TokenQuery = 0x00000008;
+    private const int ErrorSuccess = 0;
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll")]
+    private static extern void SetLastError(uint errorCode);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool OpenProcessToken(
+        IntPtr processHandle,
+        uint desiredAccess,
+        out SafeAccessTokenHandle tokenHandle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsTokenRestricted(SafeAccessTokenHandle tokenHandle);
+
+    public static ProjectAtlasCurrentProcessTokenRestrictionResult
+        ProbeCurrentProcessTokenRestriction()
+    {
+        SafeAccessTokenHandle tokenHandle;
+        if (!OpenProcessToken(GetCurrentProcess(), TokenQuery, out tokenHandle) ||
+            tokenHandle == null || tokenHandle.IsInvalid)
+        {
+            if (tokenHandle != null)
+            {
+                tokenHandle.Dispose();
+            }
+            return ClassifyResult(false, false, ErrorSuccess);
+        }
+
+        using (tokenHandle)
+        {
+            SetLastError(ErrorSuccess);
+            bool restricted = IsTokenRestricted(tokenHandle);
+            int error = Marshal.GetLastWin32Error();
+            return ClassifyResult(true, restricted, error);
+        }
+    }
+
+    private static ProjectAtlasCurrentProcessTokenRestrictionResult ClassifyResult(
+        bool tokenOpened,
+        bool restricted,
+        int error)
+    {
+        if (!tokenOpened)
+        {
+            return ProjectAtlasCurrentProcessTokenRestrictionResult.TokenUnavailable;
+        }
+        if (restricted)
+        {
+            return ProjectAtlasCurrentProcessTokenRestrictionResult.Restricted;
+        }
+        return error == ErrorSuccess
+            ? ProjectAtlasCurrentProcessTokenRestrictionResult.Unrestricted
+            : ProjectAtlasCurrentProcessTokenRestrictionResult.EvaluationUnavailable;
+    }
+}
+'@
+
 $nativeSource = @'
 using System;
 using System.ComponentModel;
@@ -777,17 +855,6 @@ using Microsoft.Win32.SafeHandles;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
-
-public enum ProjectAtlasJobserverSynchronizeAccessCheckResult
-{
-    NotRequested,
-    Granted,
-    Denied,
-    ProcessTokenUnavailable,
-    IdentificationTokenUnavailable,
-    SecurityDescriptorUnavailable,
-    EvaluationUnavailable
-}
 
 public static class ProjectAtlasConstructionProcess
 {
@@ -803,18 +870,10 @@ public static class ProjectAtlasConstructionProcess
     private const uint DesktopAllAccess = 0x000F01FF;
     private const uint SddlRevision1 = 1;
     private const int SeKernelObject = 6;
-    private const uint OwnerSecurityInformation = 0x00000001;
-    private const uint GroupSecurityInformation = 0x00000002;
     private const uint DaclSecurityInformation = 0x00000004;
     private const uint LabelSecurityInformation = 0x00000010;
-    private const uint TokenDuplicate = 0x00000002;
-    private const uint TokenQuery = 0x00000008;
-    private const int SecurityIdentification = 1;
-    private const uint Synchronize = 0x00100000;
 
     public static uint LastTotalProcesses { get; private set; }
-    public static ProjectAtlasJobserverSynchronizeAccessCheckResult
-        LastJobserverSynchronizeAccessCheck { get; private set; }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct SecurityAttributes
@@ -906,37 +965,6 @@ public static class ProjectAtlasConstructionProcess
         public uint TotalTerminatedProcesses;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct GenericMapping
-    {
-        public uint GenericRead;
-        public uint GenericWrite;
-        public uint GenericExecute;
-        public uint GenericAll;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Luid
-    {
-        public uint LowPart;
-        public int HighPart;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct LuidAndAttributes
-    {
-        public Luid Luid;
-        public uint Attributes;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct PrivilegeSet
-    {
-        public uint PrivilegeCount;
-        public uint Control;
-        public LuidAndAttributes Privilege;
-    }
-
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CreateProcessWithLogonW(
@@ -951,32 +979,6 @@ public static class ProjectAtlasConstructionProcess
         string currentDirectory,
         ref StartupInfo startupInfo,
         out ProcessInformation processInformation);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool OpenProcessToken(
-        IntPtr processHandle,
-        uint desiredAccess,
-        out SafeAccessTokenHandle tokenHandle);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool DuplicateToken(
-        SafeAccessTokenHandle existingToken,
-        int impersonationLevel,
-        out SafeAccessTokenHandle duplicateToken);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool AccessCheck(
-        IntPtr securityDescriptor,
-        SafeAccessTokenHandle clientToken,
-        uint desiredAccess,
-        ref GenericMapping genericMapping,
-        ref PrivilegeSet privilegeSet,
-        ref uint privilegeSetLength,
-        out uint grantedAccess,
-        [MarshalAs(UnmanagedType.Bool)] out bool accessStatus);
 
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -1308,89 +1310,6 @@ public static class ProjectAtlasConstructionProcess
         }
     }
 
-    public static ProjectAtlasJobserverSynchronizeAccessCheckResult
-        EvaluateJobserverSynchronizeAccess(IntPtr processHandle, SafeWaitHandle jobserverHandle)
-    {
-        SafeAccessTokenHandle processToken;
-        if (!OpenProcessToken(processHandle, TokenQuery | TokenDuplicate, out processToken))
-        {
-            return ProjectAtlasJobserverSynchronizeAccessCheckResult.ProcessTokenUnavailable;
-        }
-
-        using (processToken)
-        {
-            SafeAccessTokenHandle identificationToken;
-            if (!DuplicateToken(processToken, SecurityIdentification, out identificationToken))
-            {
-                return ProjectAtlasJobserverSynchronizeAccessCheckResult.IdentificationTokenUnavailable;
-            }
-
-            using (identificationToken)
-            {
-                if (jobserverHandle == null || jobserverHandle.IsInvalid || jobserverHandle.IsClosed)
-                {
-                    return ProjectAtlasJobserverSynchronizeAccessCheckResult.SecurityDescriptorUnavailable;
-                }
-
-                IntPtr securityDescriptor = IntPtr.Zero;
-                try
-                {
-                    IntPtr sacl;
-                    uint securityInformation = OwnerSecurityInformation |
-                        GroupSecurityInformation |
-                        DaclSecurityInformation |
-                        LabelSecurityInformation;
-                    if (GetSecurityInfo(
-                            jobserverHandle,
-                            SeKernelObject,
-                            securityInformation,
-                            IntPtr.Zero,
-                            IntPtr.Zero,
-                            IntPtr.Zero,
-                            out sacl,
-                            out securityDescriptor) != 0 || securityDescriptor == IntPtr.Zero)
-                    {
-                        return ProjectAtlasJobserverSynchronizeAccessCheckResult.SecurityDescriptorUnavailable;
-                    }
-
-                    GenericMapping mapping = new GenericMapping
-                    {
-                        GenericRead = 0x00020000,
-                        GenericWrite = 0x00020002,
-                        GenericExecute = 0x00120000,
-                        GenericAll = 0x001F0003
-                    };
-                    PrivilegeSet privileges = new PrivilegeSet();
-                    uint privilegeLength = (uint)Marshal.SizeOf<PrivilegeSet>();
-                    uint grantedAccess;
-                    bool accessStatus;
-                    if (!AccessCheck(
-                            securityDescriptor,
-                            identificationToken,
-                            Synchronize,
-                            ref mapping,
-                            ref privileges,
-                            ref privilegeLength,
-                            out grantedAccess,
-                            out accessStatus))
-                    {
-                        return ProjectAtlasJobserverSynchronizeAccessCheckResult.EvaluationUnavailable;
-                    }
-                    return accessStatus && (grantedAccess & Synchronize) == Synchronize
-                        ? ProjectAtlasJobserverSynchronizeAccessCheckResult.Granted
-                        : ProjectAtlasJobserverSynchronizeAccessCheckResult.Denied;
-                }
-                finally
-                {
-                    if (securityDescriptor != IntPtr.Zero)
-                    {
-                        LocalFree(securityDescriptor);
-                    }
-                }
-            }
-        }
-    }
-
     public static int Run(
         string username,
         string principalSid,
@@ -1399,13 +1318,9 @@ public static class ProjectAtlasConstructionProcess
         string[] arguments,
         string workingDirectory,
         string environmentBlock,
-        bool evaluateJobserverSynchronizeAccess,
-        SafeWaitHandle jobserverHandle,
         int timeoutSeconds)
     {
         LastTotalProcesses = 0;
-        LastJobserverSynchronizeAccessCheck =
-            ProjectAtlasJobserverSynchronizeAccessCheckResult.NotRequested;
         IntPtr job = IntPtr.Zero;
         IntPtr environment = IntPtr.Zero;
         IntPtr securityDescriptor = IntPtr.Zero;
@@ -1533,12 +1448,6 @@ public static class ProjectAtlasConstructionProcess
                 throw new Win32Exception(createError, "create-process");
             }
             processCreated = true;
-            if (evaluateJobserverSynchronizeAccess)
-            {
-                LastJobserverSynchronizeAccessCheck = EvaluateJobserverSynchronizeAccess(
-                    process.Process,
-                    jobserverHandle);
-            }
             if (!AssignProcessToJobObject(job, process.Process))
             {
                 throw Failure("assign-job");
@@ -1688,6 +1597,7 @@ public static class ProjectAtlasConstructionProcess
 }
 '@
 Add-Type -TypeDefinition $objectDirectoryProbeSource -Language CSharp
+Add-Type -TypeDefinition $tokenRestrictionProbeSource -Language CSharp
 Add-Type -TypeDefinition $nativeSource -Language CSharp
 
 $parentObjectDirectoryProbe =
@@ -1719,6 +1629,15 @@ $objectDirectoryProbePath = Join-Path $temporary "object-directory-probe.cs"
 $objectDirectoryProbePath = Get-RegularFile `
     -Path $objectDirectoryProbePath `
     -Role "object directory boundary probe"
+$tokenRestrictionProbePath = Join-Path $temporary "token-restriction-probe.cs"
+[System.IO.File]::WriteAllText(
+    $tokenRestrictionProbePath,
+    $tokenRestrictionProbeSource,
+    [System.Text.UTF8Encoding]::new($false)
+)
+$tokenRestrictionProbePath = Get-RegularFile `
+    -Path $tokenRestrictionProbePath `
+    -Role "token restriction boundary probe"
 
 function Add-PrincipalAcl {
     param(
@@ -1872,11 +1791,7 @@ function Invoke-AsConstructionPrincipal {
         [string[]]$Arguments,
 
         [Parameter(Mandatory = $true)]
-        [int]$CommandTimeoutSeconds,
-
-        [switch]$EvaluateJobserverSynchronizeAccess,
-
-        [Microsoft.Win32.SafeHandles.SafeWaitHandle]$JobserverHandle
+        [int]$CommandTimeoutSeconds
     )
 
     return [ProjectAtlasConstructionProcess]::Run(
@@ -1887,8 +1802,6 @@ function Invoke-AsConstructionPrincipal {
         $Arguments,
         $source,
         $script:constructionEnvironment,
-        [bool]$EvaluateJobserverSynchronizeAccess,
-        $JobserverHandle,
         $CommandTimeoutSeconds
     )
 }
@@ -2218,7 +2131,8 @@ param(
     [Parameter(Mandatory = $true)][string]$ExpectedSid,
     [Parameter(Mandatory = $true)][int]$ExpectedSessionId,
     [Parameter(Mandatory = $true)][string]$JobserverName,
-    [Parameter(Mandatory = $true)][string]$ObjectDirectoryProbePath
+    [Parameter(Mandatory = $true)][string]$ObjectDirectoryProbePath,
+    [Parameter(Mandatory = $true)][string]$TokenRestrictionProbePath
 )
 $ErrorActionPreference = "Stop"
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -2302,6 +2216,21 @@ switch ($objectDirectoryProbeResult) {
     ([ProjectAtlasObjectDirectoryProbeResult]::Unavailable) { exit 41 }
     default { exit 42 }
 }
+try {
+    $tokenRestrictionProbe = Get-Item -LiteralPath $TokenRestrictionProbePath -Force
+    if ($tokenRestrictionProbe.PSIsContainer -or
+        (($tokenRestrictionProbe.Attributes -band
+            [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw "invalid-token-restriction-probe"
+    }
+    Add-Type -Path $tokenRestrictionProbe.FullName -ErrorAction Stop
+    $tokenRestrictionResult = [string](
+        [ProjectAtlasCurrentProcessTokenRestrictionProbe]::ProbeCurrentProcessTokenRestriction()
+    )
+}
+catch {
+    $tokenRestrictionResult = "EvaluationUnavailable"
+}
 $synchronizeJobserver = $null
 try {
     $synchronizeJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(
@@ -2313,7 +2242,12 @@ catch [System.Threading.WaitHandleCannotBeOpenedException] {
     exit 25
 }
 catch [System.UnauthorizedAccessException] {
-    exit 26
+    switch ($tokenRestrictionResult) {
+        "Restricted" { exit 43 }
+        "Unrestricted" { exit 44 }
+        "TokenUnavailable" { exit 45 }
+        default { exit 46 }
+    }
 }
 catch {
     exit 27
@@ -2392,13 +2326,12 @@ exit 0
         "-ExpectedSid", $sid.Value,
         "-ExpectedSessionId", [System.Diagnostics.Process]::GetCurrentProcess().SessionId,
         "-JobserverName", $script:constructionJobserverName,
-        "-ObjectDirectoryProbePath", $objectDirectoryProbePath
+        "-ObjectDirectoryProbePath", $objectDirectoryProbePath,
+        "-TokenRestrictionProbePath", $tokenRestrictionProbePath
     )
     $probeExitCode = Invoke-AsConstructionPrincipal `
         -Arguments $probeArguments `
-        -CommandTimeoutSeconds 30 `
-        -EvaluateJobserverSynchronizeAccess `
-        -JobserverHandle $script:constructionJobserver.SafeWaitHandle
+        -CommandTimeoutSeconds 30
     if ($probeExitCode -ne 0) {
         $probeFailure = switch ($probeExitCode) {
             21 { "identity" }
@@ -2406,26 +2339,6 @@ exit 0
             23 { "environment" }
             24 { "environment-jobserver" }
             25 { "jobserver-missing" }
-            26 {
-                switch ([ProjectAtlasConstructionProcess]::LastJobserverSynchronizeAccessCheck) {
-                    ([ProjectAtlasJobserverSynchronizeAccessCheckResult]::Granted) {
-                        "jobserver-synchronize-open-denied-after-accesscheck-grant"
-                    }
-                    ([ProjectAtlasJobserverSynchronizeAccessCheckResult]::Denied) {
-                        "jobserver-synchronize-accesscheck-denied"
-                    }
-                    ([ProjectAtlasJobserverSynchronizeAccessCheckResult]::ProcessTokenUnavailable) {
-                        "jobserver-synchronize-accesscheck-process-token"
-                    }
-                    ([ProjectAtlasJobserverSynchronizeAccessCheckResult]::IdentificationTokenUnavailable) {
-                        "jobserver-synchronize-accesscheck-identification-token"
-                    }
-                    ([ProjectAtlasJobserverSynchronizeAccessCheckResult]::SecurityDescriptorUnavailable) {
-                        "jobserver-synchronize-accesscheck-descriptor"
-                    }
-                    default { "jobserver-synchronize-accesscheck-unavailable" }
-                }
-            }
             27 { "jobserver-synchronize-open" }
             28 { "jobserver-modify-access" }
             29 { "jobserver-modify-open" }
@@ -2442,6 +2355,10 @@ exit 0
             40 { "global-object-directory-traverse-missing" }
             41 { "global-object-directory-probe-unavailable" }
             42 { "global-object-directory-traverse-open" }
+            43 { "jobserver-synchronize-open-denied-restricted-token" }
+            44 { "jobserver-synchronize-open-denied-unrestricted-token" }
+            45 { "target-token-query-unavailable" }
+            46 { "target-token-restriction-evaluation-unavailable" }
             default { "unexpected-exit-$probeExitCode" }
         }
         throw "Construction principal boundary probe failed at $probeFailure."
