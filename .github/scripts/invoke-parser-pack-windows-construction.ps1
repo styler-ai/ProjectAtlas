@@ -573,7 +573,7 @@ $vendor = Get-CanonicalDirectory -Path $VendorDirectory -Role "VendorDirectory"
 $output = Get-CanonicalDirectory -Path $OutputDirectory -Role "OutputDirectory"
 $cargo = Get-CanonicalDirectory -Path $CargoHome -Role "CargoHome"
 $temporary = Get-CanonicalDirectory -Path $TemporaryDirectory -Role "TemporaryDirectory"
-$home = Get-CanonicalDirectory -Path $HomeDirectory -Role "HomeDirectory"
+$constructionHome = Get-CanonicalDirectory -Path $HomeDirectory -Role "HomeDirectory"
 $toolchain = Get-CanonicalDirectory -Path $ToolchainRoot -Role "ToolchainRoot"
 $pwsh = Get-RegularFile -Path $PwshPath -Role "PowerShell runtime"
 $pwshRoot = Get-CanonicalDirectory -Path (Split-Path -Parent $pwsh) -Role "PowerShell root"
@@ -1307,7 +1307,7 @@ function Write-BoundedConstructionFailure {
             throw "Contained construction diagnostic contains forbidden control bytes."
         }
         $privateValues = @(
-            $source, $inputs, $vendor, $output, $cargo, $temporary, $home,
+            $source, $inputs, $vendor, $output, $cargo, $temporary, $constructionHome,
             $toolchain, $pwshRoot, $vcTools, $windowsSdk,
             $Username, $Sid, $FirewallRule
         ) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
@@ -1391,7 +1391,7 @@ try {
         throw "Construction account did not receive ordinary local-user membership."
     }
     $readRoots = @($source, $inputs, $vendor, $pwshRoot, $toolchain, $vcTools, $windowsSdk)
-    $writeRoots = @($output, $cargo, $temporary, $home)
+    $writeRoots = @($output, $cargo, $temporary, $constructionHome)
     $aclPaths = [System.Collections.Generic.List[string]]::new()
     foreach ($path in $readRoots) {
         $aclPaths.Add($path)
@@ -1430,8 +1430,8 @@ try {
         (Join-Path $env:SystemRoot "System32"),
         $env:SystemRoot
     ) -join ';'
-    $appData = Join-Path $home "AppData/Roaming"
-    $localAppData = Join-Path $home "AppData/Local"
+    $appData = Join-Path $constructionHome "AppData/Roaming"
+    $localAppData = Join-Path $constructionHome "AppData/Local"
     foreach ($directory in @($appData, $localAppData)) {
         [System.IO.Directory]::CreateDirectory($directory) | Out-Null
     }
@@ -1456,8 +1456,8 @@ try {
         CARGO_INCREMENTAL = "0"
         CARGO_TERM_COLOR = "never"
         TSLP_OFFLINE = "1"
-        HOME = $home
-        USERPROFILE = $home
+        HOME = $constructionHome
+        USERPROFILE = $constructionHome
         APPDATA = $appData
         LOCALAPPDATA = $localAppData
         TEMP = $temporary
