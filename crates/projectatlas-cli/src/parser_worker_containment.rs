@@ -750,16 +750,13 @@ fn observe_runtime_mappings(
 /// Require exactly the process main thread before installing seccomp.
 fn observe_single_thread() -> Result<(), ParserWorkerContainmentError> {
     let mut observed = 0_usize;
-    let expected = process::id().to_string();
     for entry in fs::read_dir("/proc/self/task")
         .map_err(|source| ParserWorkerContainmentError::InspectThreadState { source })?
     {
         let entry =
             entry.map_err(|source| ParserWorkerContainmentError::InspectThreadState { source })?;
         let identity = entry.file_name();
-        if identity.to_str().is_some_and(|value| value == expected) {
-            observed = observed.saturating_add(1);
-        } else if identity
+        if identity
             .to_str()
             .is_some_and(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
         {
@@ -879,7 +876,7 @@ fn process_status_capability(
         .filter(|value| !value.is_empty())
         .ok_or(ParserWorkerContainmentError::InvalidProcessIdentity { field })?;
     u128::from_str_radix(value, 16)
-        .map_err(|_| ParserWorkerContainmentError::InvalidProcessIdentity { field })
+        .map_err(|_source| ParserWorkerContainmentError::InvalidProcessIdentity { field })
 }
 
 /// Parse one exact real/effective/saved/filesystem identity tuple from procfs.
@@ -1274,7 +1271,7 @@ mod tests {
 
     /// Keep each denied syscall in one closed family and compile the fixed filter.
     #[test]
-    fn seccomp_policy_is_complete_and_unique() -> Result<(), Box<dyn std::error::Error>> {
+    fn seccomp_policy_is_complete_and_unique() {
         let family_total = PROCESS_AND_EXEC_SYSCALLS.len()
             + NETWORK_SYSCALLS.len()
             + NAMESPACE_SYSCALLS.len()
@@ -1343,16 +1340,22 @@ mod tests {
                 libc::SYS_mq_getsetattr,
             ]
         );
+    }
 
+    /// Compile the fixed syscall-denial policy for the accepted architecture.
+    #[test]
+    fn seccomp_policy_compiles() -> Result<(), Box<dyn std::error::Error>> {
         let target = accepted_target_architecture()?;
         let filter = SeccompFilter::new(
-            policy,
+            seccomp_policy(),
             SeccompAction::Allow,
             SeccompAction::KillProcess,
             target,
         )?;
         let program: BpfProgram = filter.try_into()?;
-        assert!(!program.is_empty());
+        if program.is_empty() {
+            return Err(std::io::Error::other("compiled seccomp policy is empty").into());
+        }
         Ok(())
     }
 }
