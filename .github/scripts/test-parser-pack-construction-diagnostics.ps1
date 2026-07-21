@@ -104,6 +104,33 @@ try {
         if (-not ('ProjectAtlasConstructionProcess' -as [type])) {
             Add-Type -TypeDefinition $nativeSource -Language CSharp
         }
+        Require `
+            (([enum]::GetNames([ProjectAtlasJobserverSynchronizeAccessCheckResult]) -join ',') -eq
+                'NotRequested,Granted,Denied,ProcessTokenUnavailable,IdentificationTokenUnavailable,SecurityDescriptorUnavailable,EvaluationUnavailable') `
+            "Jobserver synchronization access-check result domain was not closed."
+        Require `
+            ($nativeSource.Contains('TokenQuery | TokenDuplicate') -and
+                $nativeSource.Contains('DuplicateToken(processToken, SecurityIdentification') -and
+                $nativeSource.Contains('jobserverHandle,') -and
+                $nativeSource.Contains('OwnerSecurityInformation |') -and
+                $nativeSource.Contains('GroupSecurityInformation |') -and
+                $nativeSource.Contains('DaclSecurityInformation |') -and
+                $nativeSource.Contains('LabelSecurityInformation;') -and
+                $nativeSource.Contains('Synchronize,') -and
+                $nativeSource.Contains('LocalFree(securityDescriptor)')) `
+            "Jobserver synchronization access check did not retain its exact token, descriptor, right, and cleanup boundary."
+        foreach ($forbiddenAccessCheckText in @(
+            'DuplicateTokenEx',
+            'ImpersonateLoggedOnUser',
+            'OpenSemaphore',
+            'MapGenericMask',
+            'MaximumAllowed',
+            'TokenAdjustPrivileges'
+        )) {
+            Require `
+                (-not $nativeSource.Contains($forbiddenAccessCheckText)) `
+                "Jobserver synchronization access check retained forbidden capability text."
+        }
 
         $objectDirectorySourceAssignments = @($wrapperAst.FindAll(
             {
@@ -239,7 +266,12 @@ try {
                 $probeSource.Contains('$modifyJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(')) `
             "Construction boundary probe did not classify SID membership, session, integrity, and individual jobserver rights."
         Require `
-            ($wrapperAst.Extent.Text.Contains('26 { "jobserver-synchronize-access" }') -and
+            ($wrapperAst.Extent.Text.Contains('"jobserver-synchronize-open-denied-after-accesscheck-grant"') -and
+                $wrapperAst.Extent.Text.Contains('"jobserver-synchronize-accesscheck-denied"') -and
+                $wrapperAst.Extent.Text.Contains('"jobserver-synchronize-accesscheck-process-token"') -and
+                $wrapperAst.Extent.Text.Contains('"jobserver-synchronize-accesscheck-identification-token"') -and
+                $wrapperAst.Extent.Text.Contains('"jobserver-synchronize-accesscheck-descriptor"') -and
+                $wrapperAst.Extent.Text.Contains('"jobserver-synchronize-accesscheck-unavailable"') -and
                 $wrapperAst.Extent.Text.Contains('28 { "jobserver-modify-access" }') -and
                 $wrapperAst.Extent.Text.Contains('33 { "jobserver-combined-access" }') -and
                 $wrapperAst.Extent.Text.Contains('37 { "target-sid-membership-query" }') -and
@@ -355,6 +387,7 @@ try {
         $jobserver = New-ConstructionJobserver -Sid $currentSid -Name $jobserverName
         $openedJobserver = $null
         $daclReader = $null
+        $deniedJobserver = $null
         try {
             Require `
                 ([ProjectAtlasConstructionProcess]::HasMediumMandatoryLabel(
@@ -379,6 +412,84 @@ try {
             Require `
                 ($openedJobserver.Release() -eq 0) `
                 "Construction jobserver did not restore its token."
+            $currentProcessHandle = [System.Diagnostics.Process]::GetCurrentProcess().Handle
+            Require `
+                ([ProjectAtlasConstructionProcess]::EvaluateJobserverSynchronizeAccess(
+                    $currentProcessHandle,
+                    $jobserver.SafeWaitHandle
+                ) -eq [ProjectAtlasJobserverSynchronizeAccessCheckResult]::Granted) `
+                "Live current-user jobserver synchronization access was not granted."
+
+            $deniedJobserverSecurity = [System.Security.AccessControl.SemaphoreSecurity]::new()
+            $deniedJobserverSecurity.SetAccessRuleProtection($true, $false)
+            $deniedJobserverSecurity.AddAccessRule(
+                [System.Security.AccessControl.SemaphoreAccessRule]::new(
+                    $fixtureSid,
+                    [System.Security.AccessControl.SemaphoreRights]::Synchronize,
+                    [System.Security.AccessControl.AccessControlType]::Allow
+                )
+            )
+            $deniedJobserverName =
+                "Global\ProjectAtlasJobserverDeniedTest-$([guid]::NewGuid().ToString('N'))"
+            $deniedJobserverCreated = $false
+            $deniedJobserver = [System.Threading.SemaphoreAcl]::Create(
+                1,
+                1,
+                $deniedJobserverName,
+                [ref]$deniedJobserverCreated,
+                $deniedJobserverSecurity
+            )
+            Require $deniedJobserverCreated "Denied jobserver fixture collided with a live name."
+            Require `
+                ([ProjectAtlasConstructionProcess]::EvaluateJobserverSynchronizeAccess(
+                    $currentProcessHandle,
+                    $deniedJobserver.SafeWaitHandle
+                ) -eq [ProjectAtlasJobserverSynchronizeAccessCheckResult]::Denied) `
+                "Unrelated-SID jobserver synchronization access was not denied."
+            Require `
+                ([ProjectAtlasConstructionProcess]::EvaluateJobserverSynchronizeAccess(
+                    [IntPtr]::Zero,
+                    $jobserver.SafeWaitHandle
+                ) -eq [ProjectAtlasJobserverSynchronizeAccessCheckResult]::ProcessTokenUnavailable) `
+                "Invalid process handle did not fail at token acquisition."
+            $invalidJobserverHandle =
+                [Microsoft.Win32.SafeHandles.SafeWaitHandle]::new([IntPtr]::Zero, $false)
+            try {
+                Require `
+                    ([ProjectAtlasConstructionProcess]::EvaluateJobserverSynchronizeAccess(
+                        $currentProcessHandle,
+                        $invalidJobserverHandle
+                    ) -eq [ProjectAtlasJobserverSynchronizeAccessCheckResult]::SecurityDescriptorUnavailable) `
+                    "Invalid jobserver handle did not fail at descriptor acquisition."
+            }
+            finally {
+                $invalidJobserverHandle.Dispose()
+            }
+
+            [ProjectAtlasConstructionProcess]::EvaluateJobserverSynchronizeAccess(
+                $currentProcessHandle,
+                $jobserver.SafeWaitHandle
+            ) | Out-Null
+            $accessCheckProcess = [System.Diagnostics.Process]::GetCurrentProcess()
+            $accessCheckHandleCountBefore = $accessCheckProcess.HandleCount
+            foreach ($accessCheckIteration in 1..32) {
+                Require `
+                    ([ProjectAtlasConstructionProcess]::EvaluateJobserverSynchronizeAccess(
+                        $currentProcessHandle,
+                        $jobserver.SafeWaitHandle
+                    ) -eq [ProjectAtlasJobserverSynchronizeAccessCheckResult]::Granted) `
+                    "Repeated current-user synchronization access was not granted."
+                Require `
+                    ([ProjectAtlasConstructionProcess]::EvaluateJobserverSynchronizeAccess(
+                        $currentProcessHandle,
+                        $deniedJobserver.SafeWaitHandle
+                    ) -eq [ProjectAtlasJobserverSynchronizeAccessCheckResult]::Denied) `
+                    "Repeated unrelated-SID synchronization access was not denied."
+            }
+            $accessCheckHandleCountAfter = $accessCheckProcess.HandleCount
+            Require `
+                ($accessCheckHandleCountAfter -eq $accessCheckHandleCountBefore) `
+                "Jobserver synchronization access check leaked a native handle."
             $collisionRejected = $false
             try {
                 $unexpectedJobserver = New-ConstructionJobserver `
@@ -397,6 +508,9 @@ try {
             }
             if ($null -ne $openedJobserver) {
                 $openedJobserver.Dispose()
+            }
+            if ($null -ne $deniedJobserver) {
+                $deniedJobserver.Dispose()
             }
             $jobserver.Dispose()
         }
