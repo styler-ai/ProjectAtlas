@@ -1570,7 +1570,10 @@ try {
     }
     $probePath = Join-Path $temporary "construction-boundary-probe.ps1"
     $probeSource = @'
-param([Parameter(Mandatory = $true)][string]$ExpectedSid)
+param(
+    [Parameter(Mandatory = $true)][string]$ExpectedSid,
+    [Parameter(Mandatory = $true)][string]$JobserverName
+)
 $ErrorActionPreference = "Stop"
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
@@ -1599,6 +1602,32 @@ foreach ($entry in [Environment]::GetEnvironmentVariables().Keys) {
         exit 23
     }
 }
+$jobserverRights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
+    [System.Security.AccessControl.SemaphoreRights]::Modify
+$inheritedJobserver = $null
+try {
+    $inheritedJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(
+        $JobserverName,
+        $jobserverRights
+    )
+}
+catch [System.Threading.WaitHandleCannotBeOpenedException] {
+    exit 24
+}
+catch [System.UnauthorizedAccessException] {
+    exit 25
+}
+catch {
+    exit 26
+}
+try {
+    if (-not $inheritedJobserver.WaitOne(0) -or $inheritedJobserver.Release() -ne 0) {
+        exit 27
+    }
+}
+finally {
+    $inheritedJobserver.Dispose()
+}
 $rustcStart = [System.Diagnostics.ProcessStartInfo]::new()
 $rustcStart.FileName = $env:RUSTC
 $rustcStart.UseShellExecute = $false
@@ -1614,7 +1643,7 @@ $rustc.WaitForExit()
 if ($rustc.ExitCode -ne 0 -or
     -not [string]::IsNullOrEmpty($rustcError) -or
     $rustcOutput -notmatch '(?m)^target_os="windows"$') {
-    exit 24
+    exit 28
 }
 $rustc.Dispose()
 exit 0
@@ -1623,12 +1652,26 @@ exit 0
     $probeArguments = @(
         "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
         "-File", $probePath,
-        "-ExpectedSid", $sid.Value
+        "-ExpectedSid", $sid.Value,
+        "-JobserverName", $script:constructionJobserverName
     )
     $probeExitCode = Invoke-AsConstructionPrincipal -Arguments $probeArguments -CommandTimeoutSeconds 30
-    if ($probeExitCode -ne 0 -or
-        [ProjectAtlasConstructionProcess]::LastTotalProcesses -lt 3) {
-        throw "Construction principal failed its identity, NUL, descendant, or environment probe."
+    if ($probeExitCode -ne 0) {
+        $probeFailure = switch ($probeExitCode) {
+            21 { "identity" }
+            22 { "descendant" }
+            23 { "environment" }
+            24 { "jobserver-missing" }
+            25 { "jobserver-access" }
+            26 { "jobserver-open" }
+            27 { "jobserver-token" }
+            28 { "rustc-jobserver" }
+            default { "unexpected-exit" }
+        }
+        throw "Construction principal boundary probe failed at $probeFailure."
+    }
+    if ([ProjectAtlasConstructionProcess]::LastTotalProcesses -lt 3) {
+        throw "Construction principal boundary probe did not contain its descendant process tree."
     }
 
     $constructionArguments = @(
