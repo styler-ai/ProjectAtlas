@@ -23,6 +23,22 @@ if [ "${1:-}" ]; then
 else
   project_root=$(pwd -P)
 fi
+atlas_dir="$project_root/.projectatlas"
+if [ -L "$atlas_dir" ] || [ -h "$atlas_dir" ]; then
+  printf '%s\n' "ProjectAtlas project state directory must not be a symlink: $atlas_dir" >&2
+  exit 1
+fi
+if [ -e "$atlas_dir" ] && [ ! -d "$atlas_dir" ]; then
+  printf '%s\n' "ProjectAtlas project state path must be a directory: $atlas_dir" >&2
+  exit 1
+fi
+if [ -d "$atlas_dir" ]; then
+  atlas_dir_canonical=$(CDPATH= cd -- "$atlas_dir" && pwd -P)
+  if [ "$atlas_dir_canonical" != "$atlas_dir" ]; then
+    printf '%s\n' "ProjectAtlas project state directory escaped the canonical project root: $atlas_dir" >&2
+    exit 1
+  fi
+fi
 if [ -n "$runtime_override" ]; then
   runtime_dir=$(CDPATH= cd -- "$(dirname -- "$runtime_override")" && pwd -P)
   runtime_override="$runtime_dir/$(basename -- "$runtime_override")"
@@ -729,8 +745,6 @@ else
       exit 1
     }
     installed_bin="$HOME/.local/bin/projectatlas"
-  elif command -v cargo >/dev/null 2>&1 && [ -f "$project_root/crates/projectatlas-cli/Cargo.toml" ]; then
-    (cd "$project_root" && cargo install --path crates/projectatlas-cli --locked --force)
   elif install_release_binary; then
     installed_bin="$HOME/.local/bin/projectatlas"
   elif command -v cargo >/dev/null 2>&1; then
@@ -762,8 +776,20 @@ confirm_bare_projectatlas_resolution "$projectatlas_bin"
 quarantine_known_stale_projectatlas_shims "$projectatlas_bin"
 warn_path_shadow "$projectatlas_bin"
 
-atlas_dir="$project_root/.projectatlas"
+if [ -L "$atlas_dir" ] || [ -h "$atlas_dir" ]; then
+  printf '%s\n' "ProjectAtlas project state directory must not be a symlink: $atlas_dir" >&2
+  exit 1
+fi
+if [ -e "$atlas_dir" ] && [ ! -d "$atlas_dir" ]; then
+  printf '%s\n' "ProjectAtlas project state path must be a directory: $atlas_dir" >&2
+  exit 1
+fi
 mkdir -p "$atlas_dir"
+atlas_dir_canonical=$(CDPATH= cd -- "$atlas_dir" && pwd -P)
+if [ "$atlas_dir_canonical" != "$atlas_dir" ]; then
+  printf '%s\n' "ProjectAtlas project state directory escaped the canonical project root: $atlas_dir" >&2
+  exit 1
+fi
 mcp_config_path="$atlas_dir/projectatlas.mcp.json"
 claude_mcp_config_path="$atlas_dir/projectatlas.claude.mcp.json"
 opencode_config_path="$atlas_dir/projectatlas.opencode.json"
