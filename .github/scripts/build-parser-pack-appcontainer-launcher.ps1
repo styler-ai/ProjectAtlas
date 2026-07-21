@@ -548,6 +548,7 @@ namespace ProjectAtlas.Release
 
             Dictionary<string, string> environment = BuildSafeEnvironment(configuration.Environment, tempDirectory);
             List<AclSnapshot> snapshots = new List<AclSnapshot>();
+            SecurityIdentifier launchUserSid = CurrentUserSid("launch-user");
             Profile profile = null;
             bool cleanupFailed = false;
             try
@@ -570,6 +571,7 @@ namespace ProjectAtlas.Release
                     GrantFile(
                         executeFile,
                         profile.Sid,
+                        launchUserSid,
                         FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize,
                         snapshots);
                 }
@@ -1020,7 +1022,8 @@ namespace ProjectAtlas.Release
 
         private static void GrantFile(
             string path,
-            SecurityIdentifier sid,
+            SecurityIdentifier packageSid,
+            SecurityIdentifier userSid,
             FileSystemRights rights,
             List<AclSnapshot> snapshots)
         {
@@ -1029,14 +1032,30 @@ namespace ProjectAtlas.Release
             byte[] descriptor = security.GetSecurityDescriptorBinaryForm();
             AclContract contract = CaptureFileAclContract(path, "grant-file-before");
             snapshots.Add(new AclSnapshot(path, false, descriptor, contract));
-            FileSystemAccessRule rule = new FileSystemAccessRule(sid, rights, AccessControlType.Allow);
-            bool modified;
-            security.ModifyAccessRule(AccessControlModification.Add, rule, out modified);
-            if (!modified)
-            {
-                throw new ContainmentFailure("grant-file-access");
-            }
+            security.AddAccessRule(new FileSystemAccessRule(
+                packageSid,
+                rights,
+                AccessControlType.Allow));
+            // AppContainer resource access is the intersection of the normal user/group grant
+            // and the package-SID grant. Protected or non-inheriting files may lack the former.
+            security.AddAccessRule(new FileSystemAccessRule(
+                userSid,
+                rights,
+                AccessControlType.Allow));
             file.SetAccessControl(security);
+        }
+
+        private static SecurityIdentifier CurrentUserSid(string stage)
+        {
+            using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
+            {
+                SecurityIdentifier user = identity.User;
+                if (user == null)
+                {
+                    throw new ContainmentFailure(stage);
+                }
+                return user;
+            }
         }
 
         private static bool RestoreAcls(List<AclSnapshot> snapshots)
@@ -1459,11 +1478,7 @@ namespace ProjectAtlas.Release
                 string sourceExecutable = Process.GetCurrentProcess().MainModule.FileName;
                 string canaryExecutable = Path.Combine(readRoot, "projectatlas-appcontainer-canary.exe");
                 File.Copy(sourceExecutable, canaryExecutable, false);
-                SecurityIdentifier currentUser = WindowsIdentity.GetCurrent().User;
-                if (currentUser == null)
-                {
-                    throw new ContainmentFailure("self-test-current-user");
-                }
+                SecurityIdentifier currentUser = CurrentUserSid("self-test-current-user");
                 FileInfo canaryFile = new FileInfo(canaryExecutable);
                 FileSecurity canarySecurity = canaryFile.GetAccessControl(AccessControlSections.Access);
                 canarySecurity.SetAccessRuleProtection(true, false);
@@ -1472,6 +1487,19 @@ namespace ProjectAtlas.Release
                     FileSystemRights.FullControl,
                     AccessControlType.Allow));
                 canaryFile.SetAccessControl(canarySecurity);
+                string dualPrincipalExecutable = Path.Combine(
+                    readRoot,
+                    "projectatlas-appcontainer-dual-principal-canary.exe");
+                File.Copy(sourceExecutable, dualPrincipalExecutable, false);
+                FileInfo dualPrincipalFile = new FileInfo(dualPrincipalExecutable);
+                FileSecurity dualPrincipalSecurity = dualPrincipalFile.GetAccessControl(
+                    AccessControlSections.Access);
+                dualPrincipalSecurity.SetAccessRuleProtection(true, false);
+                dualPrincipalSecurity.AddAccessRule(new FileSystemAccessRule(
+                    currentUser,
+                    FileSystemRights.ReadPermissions | FileSystemRights.ChangePermissions,
+                    AccessControlType.Allow));
+                dualPrincipalFile.SetAccessControl(dualPrincipalSecurity);
                 string readMarker = Path.Combine(readRoot, "allowed-read.txt");
                 string writeMarker = Path.Combine(writeRoot, "allowed-write.txt");
                 string forbiddenMarker = Path.Combine(forbiddenRoot, "forbidden-read.txt");
@@ -1484,6 +1512,9 @@ namespace ProjectAtlas.Release
                 AclContract readAclBefore = CaptureAclContract(readRoot, "read-before");
                 AclContract writeAclBefore = CaptureAclContract(writeRoot, "write-before");
                 AclContract canaryAclBefore = CaptureFileAclContract(canaryExecutable, "canary-before");
+                AclContract dualPrincipalAclBefore = CaptureFileAclContract(
+                    dualPrincipalExecutable,
+                    "dual-principal-before");
 
                 string[] baselineArguments = new string[]
                 {
@@ -1520,6 +1551,23 @@ namespace ProjectAtlas.Release
                     throw new ContainmentFailure(
                         "contained-canary",
                         "exit=" + containedExit.ToString(CultureInfo.InvariantCulture));
+                }
+
+                LaunchConfiguration dualPrincipal = new LaunchConfiguration();
+                dualPrincipal.Executable = dualPrincipalExecutable;
+                dualPrincipal.WorkingDirectory = writeRoot;
+                dualPrincipal.TempDirectory = writeRoot;
+                dualPrincipal.TimeoutSeconds = 30;
+                dualPrincipal.ReadOnlyRoots.Add(readRoot);
+                dualPrincipal.ReadWriteRoots.Add(writeRoot);
+                dualPrincipal.ExecuteFiles.Add(dualPrincipalExecutable);
+                dualPrincipal.Arguments.AddRange(new string[] { "canary", "sleep", "1" });
+                int dualPrincipalExit = LaunchContained(dualPrincipal);
+                if (dualPrincipalExit != 0)
+                {
+                    throw new ContainmentFailure(
+                        "dual-principal-canary",
+                        "exit=" + dualPrincipalExit.ToString(CultureInfo.InvariantCulture));
                 }
 
                 LaunchConfiguration timeout = new LaunchConfiguration();
@@ -1646,16 +1694,26 @@ namespace ProjectAtlas.Release
                 AclContract readAclAfter = CaptureAclContract(readRoot, "read-after");
                 AclContract writeAclAfter = CaptureAclContract(writeRoot, "write-after");
                 AclContract canaryAclAfter = CaptureFileAclContract(canaryExecutable, "canary-after");
+                AclContract dualPrincipalAclAfter = CaptureFileAclContract(
+                    dualPrincipalExecutable,
+                    "dual-principal-after");
                 string readDifference = readAclBefore.Difference(readAclAfter);
                 string writeDifference = writeAclBefore.Difference(writeAclAfter);
                 string canaryDifference = canaryAclBefore.Difference(canaryAclAfter);
-                if (readDifference != null || writeDifference != null || canaryDifference != null)
+                string dualPrincipalDifference = dualPrincipalAclBefore.Difference(
+                    dualPrincipalAclAfter);
+                if (readDifference != null
+                    || writeDifference != null
+                    || canaryDifference != null
+                    || dualPrincipalDifference != null)
                 {
                     string difference = readDifference != null
                         ? "read-" + readDifference
                         : writeDifference != null
                             ? "write-" + writeDifference
-                            : "execute-file-" + canaryDifference;
+                            : canaryDifference != null
+                                ? "execute-file-" + canaryDifference
+                                : "dual-principal-" + dualPrincipalDifference;
                     throw new ContainmentFailure("acl-restoration-" + difference);
                 }
             }
