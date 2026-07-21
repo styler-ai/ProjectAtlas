@@ -1654,7 +1654,13 @@ target remains justified or a measured ceiling requires the split decision to be
 reopened.
 
 Construction after dependency and asset acquisition is physically network-denied in
-addition to Cargo and dependency offline flags. When no pack is installed, default
+addition to Cargo and dependency offline flags. Linux construction runs in a network
+namespace. Windows construction runs as a disposable non-administrator principal
+under an exact SID-scoped outbound Windows Firewall block; its full-trust process is
+created suspended, assigned before resume to a no-breakaway kill-on-close Job, and
+cleaned by exact SID. This is the construction egress and lifecycle boundary. Fresh
+verification and normal untrusted grammar execution retain the stronger artifact-
+bound AppContainer/LPAC boundary described above. When no pack is installed, default
 core does not download, compile, link, initialize, or pay binary/startup/resident-
 memory cost for optional grammars, and all accepted 0.3.26 behavior remains
 available. Version 0.4 does not add a generic multi-pack framework; a split is
@@ -1685,7 +1691,11 @@ flowchart TB
     Worker[Target worker with zero embedded grammars] --> Construct
     LinuxRuntime[Exact eager Linux runtime DSO set] --> Construct
     WinBroker[Artifact-bound Windows containment broker] --> Construct
-    Accepted --> Construct
+    Accepted --> Boundary{Construction egress boundary}
+    Boundary --> LinuxBoundary[Linux network namespace]
+    Boundary --> WindowsBoundary[Windows principal firewall plus Job]
+    LinuxBoundary --> Construct
+    WindowsBoundary --> Construct
     Construct --> Artifact[Immutable target artifact plus payload manifest]
     Artifact --> Fresh[Fresh verifier: archive digest, bounded extraction, native audit]
     Fresh --> Admission[Shared supervisor admits all 150 positive and negative fixture pairs]

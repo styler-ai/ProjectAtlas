@@ -1554,8 +1554,22 @@ mod tests {
         )
     }
 
-    /// Return the physical egress-denial mechanism required by one platform.
-    fn test_network_denial(platform: PackPlatform) -> ParserPackNetworkDenial {
+    /// Return the construction egress-denial mechanism required by one platform.
+    fn test_construction_network_denial(platform: PackPlatform) -> ParserPackNetworkDenial {
+        let mechanism = match platform {
+            PackPlatform::LinuxX86_64 => ParserPackNetworkIsolation::LinuxNetworkNamespace,
+            PackPlatform::WindowsX86_64 => ParserPackNetworkIsolation::WindowsPrincipalFirewall,
+        };
+        ParserPackNetworkDenial {
+            mechanism,
+            dns_denied: true,
+            direct_tcp_denied: true,
+            https_denied: true,
+        }
+    }
+
+    /// Return the fresh-verification egress-denial mechanism required by one platform.
+    fn test_fresh_runner_network_denial(platform: PackPlatform) -> ParserPackNetworkDenial {
         let mechanism = match platform {
             PackPlatform::LinuxX86_64 => ParserPackNetworkIsolation::LinuxNetworkNamespace,
             PackPlatform::WindowsX86_64 => ParserPackNetworkIsolation::WindowsAppContainer,
@@ -1614,7 +1628,7 @@ mod tests {
                 zero_embedded_grammars: ParserPackVerifiedControl::Verified,
                 language_selector_absent: ParserPackVerifiedControl::Verified,
                 failed_grammar_override_absent: ParserPackVerifiedControl::Verified,
-                network_denial: test_network_denial(TEST_PLATFORM),
+                network_denial: test_construction_network_denial(TEST_PLATFORM),
             },
             native_audit: ParserPackNativeAudit {
                 policy_sha256: Sha256Digest::new("9".repeat(64))?,
@@ -1676,7 +1690,7 @@ mod tests {
                 build_tools_not_invoked: ParserPackVerifiedControl::Verified,
                 working_directory_outside_pack: ParserPackVerifiedControl::Verified,
                 ambient_library_paths_cleared: ParserPackVerifiedControl::Verified,
-                network_denial: test_network_denial(platform),
+                network_denial: test_fresh_runner_network_denial(platform),
             },
             grammars: logical
                 .grammars()

@@ -578,13 +578,23 @@ pub struct ParserPackCandidateIdentity {
 pub enum ParserPackNetworkIsolation {
     /// Linux network namespace or container with no network device route.
     LinuxNetworkNamespace,
-    /// Windows zero-capability `AppContainer` inherited by every construction child.
+    /// Windows Firewall denial scoped to a disposable construction principal.
+    WindowsPrincipalFirewall,
+    /// Windows zero-capability `AppContainer` used by fresh verification and runtime containment.
     WindowsAppContainer,
 }
 
 impl ParserPackNetworkIsolation {
-    /// Return the one accepted mechanism for a required target.
-    const fn for_platform(platform: PackPlatform) -> Self {
+    /// Return the accepted offline-construction mechanism for a required target.
+    const fn for_construction(platform: PackPlatform) -> Self {
+        match platform {
+            PackPlatform::LinuxX86_64 => Self::LinuxNetworkNamespace,
+            PackPlatform::WindowsX86_64 => Self::WindowsPrincipalFirewall,
+        }
+    }
+
+    /// Return the accepted fresh-verification mechanism for a required target.
+    const fn for_fresh_runner(platform: PackPlatform) -> Self {
         match platform {
             PackPlatform::LinuxX86_64 => Self::LinuxNetworkNamespace,
             PackPlatform::WindowsX86_64 => Self::WindowsAppContainer,
@@ -1904,15 +1914,19 @@ fn validate_offline_construction(
     construction: &ParserPackOfflineConstruction,
     platform: PackPlatform,
 ) -> Result<(), OptionalParserPackManifestError> {
-    validate_network_denial(&construction.network_denial, platform)
+    validate_network_denial(
+        &construction.network_denial,
+        platform,
+        ParserPackNetworkIsolation::for_construction(platform),
+    )
 }
 
 /// Validate physical isolation method and all three egress canaries.
 fn validate_network_denial(
     denial: &ParserPackNetworkDenial,
     platform: PackPlatform,
+    expected: ParserPackNetworkIsolation,
 ) -> Result<(), OptionalParserPackManifestError> {
-    let expected = ParserPackNetworkIsolation::for_platform(platform);
     if denial.mechanism != expected {
         return Err(invalid_field(
             platform.as_str(),
@@ -2116,7 +2130,11 @@ fn validate_fresh_runner(
     runner: &ParserPackFreshRunner,
     platform: PackPlatform,
 ) -> Result<(), OptionalParserPackManifestError> {
-    validate_network_denial(&runner.network_denial, platform)
+    validate_network_denial(
+        &runner.network_denial,
+        platform,
+        ParserPackNetworkIsolation::for_fresh_runner(platform),
+    )
 }
 
 /// Validate exact sorted grammar probes and their declared success.
@@ -2866,9 +2884,18 @@ mod tests {
         .map_err(Into::into)
     }
 
-    fn test_network_denial(platform: PackPlatform) -> ParserPackNetworkDenial {
+    fn test_construction_network_denial(platform: PackPlatform) -> ParserPackNetworkDenial {
         ParserPackNetworkDenial {
-            mechanism: ParserPackNetworkIsolation::for_platform(platform),
+            mechanism: ParserPackNetworkIsolation::for_construction(platform),
+            dns_denied: true,
+            direct_tcp_denied: true,
+            https_denied: true,
+        }
+    }
+
+    fn test_fresh_runner_network_denial(platform: PackPlatform) -> ParserPackNetworkDenial {
+        ParserPackNetworkDenial {
+            mechanism: ParserPackNetworkIsolation::for_fresh_runner(platform),
             dns_denied: true,
             direct_tcp_denied: true,
             https_denied: true,
@@ -2979,7 +3006,7 @@ mod tests {
                 zero_embedded_grammars: ParserPackVerifiedControl::Verified,
                 language_selector_absent: ParserPackVerifiedControl::Verified,
                 failed_grammar_override_absent: ParserPackVerifiedControl::Verified,
-                network_denial: test_network_denial(platform),
+                network_denial: test_construction_network_denial(platform),
             },
             native_audit: ParserPackNativeAudit {
                 policy_sha256: Sha256Digest::new(format!("{:064x}", 25))?,
@@ -3023,7 +3050,7 @@ mod tests {
                 build_tools_not_invoked: ParserPackVerifiedControl::Verified,
                 working_directory_outside_pack: ParserPackVerifiedControl::Verified,
                 ambient_library_paths_cleared: ParserPackVerifiedControl::Verified,
-                network_denial: test_network_denial(platform),
+                network_denial: test_fresh_runner_network_denial(platform),
             },
             grammars: logical
                 .grammars()
@@ -3311,6 +3338,27 @@ mod tests {
             "artifact did not retain the exact accepted grammar count",
         )?;
 
+        let mut wrong_construction_isolation = artifact.clone();
+        wrong_construction_isolation
+            .construction
+            .network_denial
+            .mechanism = ParserPackNetworkIsolation::WindowsAppContainer;
+        require(
+            wrong_construction_isolation.validate(&logical).is_err(),
+            "Windows construction accepted its fresh-verification isolation mechanism",
+        )?;
+        let mut cross_platform_construction_isolation = artifact.clone();
+        cross_platform_construction_isolation
+            .construction
+            .network_denial
+            .mechanism = ParserPackNetworkIsolation::LinuxNetworkNamespace;
+        require(
+            cross_platform_construction_isolation
+                .validate(&logical)
+                .is_err(),
+            "Windows construction accepted a Linux network namespace",
+        )?;
+
         let mut recursive_manifest = artifact.clone();
         let worker = recursive_manifest
             .files
@@ -3369,6 +3417,17 @@ mod tests {
     fn linux_artifact_rejects_a_windows_containment_broker() -> Result<(), Box<dyn Error>> {
         let logical = test_manifest()?;
         let mut artifact = test_artifact(&logical, PackPlatform::LinuxX86_64)?;
+        for mechanism in [
+            ParserPackNetworkIsolation::WindowsPrincipalFirewall,
+            ParserPackNetworkIsolation::WindowsAppContainer,
+        ] {
+            let mut wrong_isolation = artifact.clone();
+            wrong_isolation.construction.network_denial.mechanism = mechanism;
+            require(
+                wrong_isolation.validate(&logical).is_err(),
+                "Linux construction accepted a Windows isolation mechanism",
+            )?;
+        }
         require(
             artifact
                 .files
@@ -3412,6 +3471,39 @@ mod tests {
             platforms,
         };
         aggregate.validate(&logical)?;
+
+        let mut wrong_fresh_isolation = aggregate.clone();
+        wrong_fresh_isolation.platforms[1]
+            .runner
+            .network_denial
+            .mechanism = ParserPackNetworkIsolation::WindowsPrincipalFirewall;
+        require(
+            wrong_fresh_isolation.validate(&logical).is_err(),
+            "Windows fresh verification accepted its construction isolation mechanism",
+        )?;
+        let mut cross_platform_fresh_isolation = aggregate.clone();
+        cross_platform_fresh_isolation.platforms[1]
+            .runner
+            .network_denial
+            .mechanism = ParserPackNetworkIsolation::LinuxNetworkNamespace;
+        require(
+            cross_platform_fresh_isolation.validate(&logical).is_err(),
+            "Windows fresh verification accepted a Linux network namespace",
+        )?;
+        for mechanism in [
+            ParserPackNetworkIsolation::WindowsPrincipalFirewall,
+            ParserPackNetworkIsolation::WindowsAppContainer,
+        ] {
+            let mut linux_wrong_isolation = aggregate.clone();
+            linux_wrong_isolation.platforms[0]
+                .runner
+                .network_denial
+                .mechanism = mechanism;
+            require(
+                linux_wrong_isolation.validate(&logical).is_err(),
+                "Linux fresh verification accepted a Windows isolation mechanism",
+            )?;
+        }
 
         let mut failed_probe = aggregate.clone();
         failed_probe.platforms[0].grammars[0].worker_probe_passed = false;

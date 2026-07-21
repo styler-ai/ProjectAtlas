@@ -37,7 +37,7 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidateSet(
         "linux-network-namespace",
-        "windows-app-container"
+        "windows-principal-firewall"
     )]
     [string]$NetworkIsolation,
 
@@ -51,7 +51,7 @@ $ProgressPreference = "SilentlyContinue"
 
 $targetIsolation = @{
     "x86_64-unknown-linux-gnu" = "linux-network-namespace"
-    "x86_64-pc-windows-msvc" = "windows-app-container"
+    "x86_64-pc-windows-msvc" = "windows-principal-firewall"
 }
 $sourceRevisionPattern = '\A[0-9a-f]{40}\z'
 $sha256Pattern = '\A[0-9a-f]{64}\z'
