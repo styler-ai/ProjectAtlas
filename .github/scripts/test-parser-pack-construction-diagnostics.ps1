@@ -751,7 +751,7 @@ try {
                 -not $nativeSource.Contains('AdjustTokenPrivileges') -and
                 -not $nativeSource.Contains('EntryPoint = "CreateProcessWithLogonW"') -and
                 -not $nativeSource.Contains('EntryPoint = "CreateProcessAsUserW"') -and
-                -not $nativeSource.Contains('CreateBreakawayFromJob = 0x01000000;') -and
+                $nativeSource.Contains('CreateBreakawayFromJob = 0x01000000;') -and
                 $nativeSource.Contains('JobObjectLimitBreakawayOk = 0x00000800;') -and
                 $nativeSource.Contains('JobObjectLimitSilentBreakawayOk = 0x00001000;') -and
                 $nativeSource.Contains('construction-broker-job-required') -and
@@ -909,7 +909,9 @@ try {
                 $jobAssignmentIndex -gt $admissionFailureIndex -and
                 $admissionCleanupIndex -gt $jobAssignmentIndex -and
                 $tokenCloseIndex -gt $admissionCleanupIndex -and
-                $nativeSource.Contains('return CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;') -and
+                $nativeSource.Contains('uint flags = CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;') -and
+                $nativeSource.Contains('return flags | CreateBreakawayFromJob;') -and
+                $nativeSource.Contains('return flags;') -and
                 $nativeSource.Contains('ValidateCurrentBrokerJob(brokerJobName);') -and
                 $nativeSource.Contains('process.Process,') -and
                 $nativeSource.Contains('limits.BasicLimitInformation.LimitFlags != expectedFlags') -and

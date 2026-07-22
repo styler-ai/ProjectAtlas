@@ -226,11 +226,13 @@ function Assert-ProductionRecoveryContracts {
             $retainedJobInjectionIndex -gt $tokenValidationIndex -and
             $inheritedJobCheckIndex -gt $retainedJobInjectionIndex -and
             $ownJobAssignmentIndex -gt $inheritedJobCheckIndex -and
-            $nativeText.Contains('return CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;') -and
+            $nativeText.Contains('uint flags = CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;') -and
+            $nativeText.Contains('return flags | CreateBreakawayFromJob;') -and
+            $nativeText.Contains('return flags;') -and
             $nativeText.Contains('EntryPoint = "LogonUserW"') -and
             $nativeText.Contains('EntryPoint = "CreateProcessWithTokenW"') -and
             -not $nativeText.Contains('EntryPoint = "CreateProcessWithLogonW"') -and
-            -not $nativeText.Contains('CreateBreakawayFromJob = 0x01000000;') -and
+            $nativeText.Contains('CreateBreakawayFromJob = 0x01000000;') -and
             $nativeText.Contains('ValidateCurrentBrokerJob(brokerJobName);') -and
             $nativeText.Contains('limits.BasicLimitInformation.LimitFlags != expectedFlags') -and
             $nativeText.Contains('JobObjectLimitKillOnJobClose | JobObjectLimitBreakawayOk') -and
