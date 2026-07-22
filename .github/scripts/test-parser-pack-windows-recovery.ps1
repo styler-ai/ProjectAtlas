@@ -1538,6 +1538,8 @@ function Assert-AdmissionReceipt {
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ProcessHandleClosed) -and
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ThreadHandleOwned) -and
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ThreadHandleClosed) -and
+            [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name LogonTokenHandleOwned) -and
+            [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name LogonTokenHandleClosed) -and
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ConstructionTokenHandleOwned) -and
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ConstructionTokenHandleClosed)) `
         "Construction admission recovery receipt was incomplete."
@@ -1627,12 +1629,12 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
         Require `
             ($invalidCredentialFailure -is [System.ComponentModel.Win32Exception] -and
                 $invalidCredentialFailure.NativeErrorCode -eq 1326 -and
-                $invalidCredentialFailure.Message -match '^create-process' -and
+                $invalidCredentialFailure.Message -match '^logon-construction-principal' -and
                 [int](Get-ReflectedReceiptValue `
                     -ReceiptType $receiptType `
                     -Receipt $invalidReceipt `
                     -Name ProcessId) -eq 0) `
-            "Construction alternate-logon process creation did not fail closed for invalid credentials."
+            "Construction principal authentication did not fail closed for invalid credentials."
         Invoke-ExactSidProcessAudit -Sid $identity.Sid -Expectation absent
     }
     finally {
