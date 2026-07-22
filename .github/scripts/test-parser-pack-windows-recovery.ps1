@@ -2902,6 +2902,12 @@ try {
         )) {
         throw [System.InvalidOperationException]::new('construction-principal-sid-mismatch')
     }
+    $probeStage = 'ambient-environment'
+    if (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS) {
+        throw [System.InvalidOperationException]::new('ambient-cargo-makeflags')
+    }
+
+    $probeStage = 'identity'
     if ($null -eq $actualIdentity.Owner -or
         -not [string]::Equals(
             $actualIdentity.Owner.Value,
@@ -2909,11 +2915,6 @@ try {
             [System.StringComparison]::Ordinal
         )) {
         throw [System.InvalidOperationException]::new('construction-token-owner-sid-mismatch')
-    }
-
-    $probeStage = 'ambient-environment'
-    if (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS) {
-        throw [System.InvalidOperationException]::new('ambient-cargo-makeflags')
     }
 
     $probeStage = 'native-semaphore-create'
