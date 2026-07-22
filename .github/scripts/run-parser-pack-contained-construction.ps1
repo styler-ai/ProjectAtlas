@@ -291,6 +291,7 @@ function Write-ConstructionStatus {
             "validate-inputs",
             "network-denial-canaries",
             "output-preparation",
+            "cargo-jobserver-bootstrap",
             "optional-parser-worker-build",
             "artifact-assembler-build",
             "release-verifier-build",
@@ -336,6 +337,159 @@ function Write-ConstructionStatus {
     }
 }
 
+function New-ContainedCargoJobserver {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Security.Principal.SecurityIdentifier]$Sid,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
+        [string]$Name
+    )
+
+    $security = [System.Security.AccessControl.SemaphoreSecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    $rights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
+        [System.Security.AccessControl.SemaphoreRights]::Modify
+    $security.AddAccessRule(
+        [System.Security.AccessControl.SemaphoreAccessRule]::new(
+            $Sid,
+            $rights,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        )
+    )
+
+    $createdNew = $false
+    try {
+        $semaphore = [System.Threading.SemaphoreAcl]::Create(
+            1,
+            1,
+            $Name,
+            [ref]$createdNew,
+            $security
+        )
+    }
+    catch {
+        throw "Contained Cargo jobserver could not be created."
+    }
+    if (-not $createdNew) {
+        $semaphore.Dispose()
+        throw "Contained Cargo jobserver name was not unique."
+    }
+    return $semaphore
+}
+
+function Invoke-ContainedCargoJobserverCanary {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Pwsh,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [System.Security.Principal.SecurityIdentifier]$Sid,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $canarySource = @'
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
+    [string]$Name,
+
+    [Parameter(Mandatory = $true)]
+    [string]$ExpectedSid
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+if ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne $ExpectedSid) {
+    exit 31
+}
+$nativeSource = @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class ProjectAtlasCargoJobserverCanary
+{
+    private const uint SynchronizeAndModify = 0x00100002;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true,
+        EntryPoint = "OpenSemaphoreW")]
+    private static extern IntPtr OpenSemaphore(
+        uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    public static void OpenAndClose(string name)
+    {
+        IntPtr handle = OpenSemaphore(SynchronizeAndModify, false, name);
+        if (handle == IntPtr.Zero)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "open-contained-cargo-jobserver");
+        }
+        if (!CloseHandle(handle))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "close-contained-cargo-jobserver");
+        }
+    }
+}
+"@
+Add-Type -TypeDefinition $nativeSource -Language CSharp
+[ProjectAtlasCargoJobserverCanary]::OpenAndClose($Name)
+exit 0
+'@
+    if ([System.IO.File]::Exists($Path) -or [System.IO.Directory]::Exists($Path)) {
+        throw "Contained Cargo jobserver canary path already exists."
+    }
+    [System.IO.File]::WriteAllText(
+        $Path,
+        $canarySource,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    try {
+        Invoke-Checked `
+            -Executable $Pwsh `
+            -Arguments @(
+                "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-File", $Path,
+                "-Name", $Name,
+                "-ExpectedSid", $Sid.Value
+            ) `
+            -Role "contained Cargo jobserver descendant canary"
+    }
+    finally {
+        if ([System.IO.File]::Exists($Path)) {
+            [System.IO.File]::Delete($Path)
+        }
+    }
+}
+
+function Close-ContainedCargoJobserver {
+    if ($null -ne $script:constructionJobserver) {
+        $script:constructionJobserver.Dispose()
+        $script:constructionJobserver = $null
+    }
+    if ($Target -eq "x86_64-pc-windows-msvc") {
+        Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS -ErrorAction SilentlyContinue
+    }
+    if (-not [string]::IsNullOrEmpty([string]$script:constructionJobserverCanaryPath) -and
+        [System.IO.File]::Exists($script:constructionJobserverCanaryPath)) {
+        [System.IO.File]::Delete($script:constructionJobserverCanaryPath)
+    }
+    $script:constructionJobserverCanaryPath = $null
+}
+
 function Assert-CargoConstructionEnvironment {
     param(
         [Parameter(Mandatory = $true)]
@@ -343,12 +497,9 @@ function Assert-CargoConstructionEnvironment {
     )
 
     if ($Target -eq "x86_64-pc-windows-msvc") {
-        $jobserverPattern =
-            '\A-j --jobserver-fds=(Local\\ProjectAtlasParserPack-[0-9a-f]{32}) ' +
-            '--jobserver-auth=\1\z'
         if ([string]$env:CARGO_BUILD_JOBS -cne "1" -or
-            [string]$env:CARGO_MAKEFLAGS -cnotmatch $jobserverPattern) {
-            throw "Windows construction requires its owned one-token Cargo jobserver."
+            (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS)) {
+            throw "Windows construction must create its Cargo jobserver inside the contained child."
         }
     }
 }
@@ -386,7 +537,16 @@ $script:constructionDiagnosticPath = [System.IO.Path]::Combine(
 $script:constructionStage = "validate-inputs"
 $script:constructionFailureRecorded = $false
 $script:constructionFailureExitCode = 1
+$script:constructionJobserver = $null
+$script:constructionJobserverName = $null
+$script:constructionJobserverCanaryPath = $null
 trap {
+    try {
+        Close-ContainedCargoJobserver
+    }
+    catch {
+        # Process teardown still closes the exact process-owned semaphore handle.
+    }
     if (-not $script:constructionFailureRecorded) {
         $failureExitCode = 1
         $lastNativeExit = Get-Variable -Name LASTEXITCODE -ValueOnly -ErrorAction SilentlyContinue
@@ -444,6 +604,29 @@ foreach ($directory in @($buildDirectory, $workingDirectory, $publishDirectory))
         throw "Contained construction output already exists: $directory"
     }
     [System.IO.Directory]::CreateDirectory($directory) | Out-Null
+}
+
+if ($Target -eq "x86_64-pc-windows-msvc") {
+    $script:constructionStage = "cargo-jobserver-bootstrap"
+    Write-ConstructionStatus -Stage $script:constructionStage -State "running"
+    $constructionSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $script:constructionJobserverName =
+        "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+    $script:constructionJobserver = New-ContainedCargoJobserver `
+        -Sid $constructionSid `
+        -Name $script:constructionJobserverName
+    $env:CARGO_MAKEFLAGS =
+        "-j --jobserver-fds=$($script:constructionJobserverName) --jobserver-auth=$($script:constructionJobserverName)"
+    $script:constructionJobserverCanaryPath = [System.IO.Path]::Combine(
+        $workingDirectory,
+        "cargo-jobserver-canary.ps1"
+    )
+    Invoke-ContainedCargoJobserverCanary `
+        -Pwsh $pwsh `
+        -Name $script:constructionJobserverName `
+        -Sid $constructionSid `
+        -Path $script:constructionJobserverCanaryPath
+    $script:constructionJobserverCanaryPath = $null
 }
 
 $env:CARGO_NET_OFFLINE = "true"
@@ -770,6 +953,7 @@ $publishedNetworkCheck = [System.IO.Path]::Combine(
 )
 [System.IO.File]::Copy($acceptedManifest, $publishedManifest, $false)
 [System.IO.File]::Copy($networkCheck, $publishedNetworkCheck, $false)
+Close-ContainedCargoJobserver
 [System.IO.File]::Delete($script:constructionStatusPath)
 
 [pscustomobject]@{

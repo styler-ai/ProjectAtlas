@@ -110,14 +110,12 @@ try {
             }
             catch {
                 $rejected = $_.Exception.Message -eq
-                    'Windows construction requires its owned one-token Cargo jobserver.'
+                    'Windows construction must create its Cargo jobserver inside the contained child.'
             }
             Require $rejected "Windows construction accepted an invalid Cargo environment."
         }
         $env:CARGO_BUILD_JOBS = '1'
-        $ownedJobserverName = "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
-        $env:CARGO_MAKEFLAGS =
-            "-j --jobserver-fds=$ownedJobserverName --jobserver-auth=$ownedJobserverName"
+        Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS -ErrorAction SilentlyContinue
         Assert-CargoConstructionEnvironment -Target 'x86_64-pc-windows-msvc'
         Remove-Item -LiteralPath Env:CARGO_BUILD_JOBS -ErrorAction SilentlyContinue
         Assert-CargoConstructionEnvironment -Target 'x86_64-unknown-linux-gnu'
@@ -248,14 +246,18 @@ try {
                 'CARGO_BUILD_JOBS = "1"'
             ).Count -eq 1 -and
                 $productionText.Contains('[string]$env:CARGO_BUILD_JOBS -cne "1"') -and
-                $productionText.Contains(
-                    '[string]$env:CARGO_MAKEFLAGS -cnotmatch $jobserverPattern'
-                ) -and
-                $wrapperText.Contains('CreateConstructionJobserver(') -and
-                $wrapperText.Contains('AddConstructionJobserverEnvironment(') -and
-                -not $productionText.Contains('SemaphoreAcl') -and
-                -not $productionText.Contains('Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS')) `
-            "Windows construction did not use its token-bound one-worker jobserver."
+                $productionText.Contains('New-ContainedCargoJobserver') -and
+                $productionText.Contains('Invoke-ContainedCargoJobserverCanary') -and
+                $productionText.Contains('EntryPoint = "OpenSemaphoreW"') -and
+                $productionText.Contains('SynchronizeAndModify = 0x00100002') -and
+                $productionText.Contains('$env:CARGO_MAKEFLAGS =') -and
+                $productionText.Contains('Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS') -and
+                -not $wrapperText.Contains('CreateConstructionJobserver(') -and
+                -not $wrapperText.Contains('AddConstructionJobserverEnvironment(') -and
+                -not $wrapperText.Contains('EntryPoint = "CreateSemaphoreExW"') -and
+                $wrapperText.Contains('Add-ConstructionObjectDirectoryPrincipalAccess') -and
+                $wrapperText.Contains('Assert-ConstructionObjectDirectoryPrincipalAbsent')) `
+            "Windows construction did not use its child-owned one-worker jobserver and exact namespace grant."
         Require `
             ($wrapperText.Contains('ValidateConstructionToken(') -and
                 $wrapperText.Contains('RequiredIntegritySid = "S-1-16-8192";') -and
@@ -278,7 +280,6 @@ try {
         Require `
             ($nativeSource.Contains('EntryPoint = "LogonUserW"') -and
                 $nativeSource.Contains('EntryPoint = "CreateProcessWithTokenW"') -and
-                $nativeSource.Contains('EntryPoint = "CreateSemaphoreExW"') -and
                 $nativeSource.Contains('private static extern bool OpenProcessToken(') -and
                 -not $nativeSource.Contains('SeDebugPrivilege') -and
                 -not $nativeSource.Contains('AdjustTokenPrivileges') -and
@@ -304,11 +305,9 @@ try {
                 ) -and
                 $nativeSource.Contains('logon-construction-principal') -and
                 $nativeSource.Contains('create-process-with-construction-token') -and
-                $nativeSource.Contains(
-                    '"D:P(A;;0x00100002;;;" + principalSid + ")"'
-                ) -and
-                $nativeSource.Contains('S:(ML;;NW;;;ME)') -and
-                $nativeSource.Contains('ambient-construction-jobserver')) `
+                $nativeSource.Contains('ambient-construction-jobserver') -and
+                -not $nativeSource.Contains('CreateConstructionJobserver(') -and
+                -not $nativeSource.Contains('CreateSemaphoreExW')) `
             "Windows construction adapter did not use the bounded alternate-logon process boundary."
         $principalLogonStart = $nativeSource.IndexOf(
             'if (!LogonUser(',
@@ -320,10 +319,6 @@ try {
         )
         $processCreationStart = $nativeSource.IndexOf(
             'created = CreateProcessWithToken(',
-            [System.StringComparison]::Ordinal
-        )
-        $jobserverCreationStart = $nativeSource.IndexOf(
-            'jobserver = CreateConstructionJobserver(',
             [System.StringComparison]::Ordinal
         )
         $principalTokenCloseStart = $nativeSource.IndexOf(
@@ -341,8 +336,7 @@ try {
         Require `
             ($principalLogonStart -ge 0 -and
                 $principalTokenValidationStart -gt $principalLogonStart -and
-                $jobserverCreationStart -gt $principalTokenValidationStart -and
-                $processCreationStart -gt $jobserverCreationStart -and
+                $processCreationStart -gt $principalTokenValidationStart -and
                 $principalTokenCloseStart -gt $processCreationStart -and
                 $processTokenOpenStart -gt $processCreationStart -and
                 $tokenValidationStart -gt $processTokenOpenStart) `
@@ -453,8 +447,6 @@ try {
                 $nativeSource.Contains('construction-command-line-too-long') -and
                 $nativeSource.Contains('LogonTokenHandleOwned') -and
                 $nativeSource.Contains('LogonTokenHandleClosed') -and
-                $nativeSource.Contains('JobserverHandleOwned') -and
-                $nativeSource.Contains('JobserverHandleClosed') -and
                 $nativeSource.Contains('ConstructionTokenHandleOwned') -and
                 $nativeSource.Contains('ConstructionTokenHandleClosed') -and
                 $nativeSource.Contains('AdmissionCleanupWaitMilliseconds = 5000;') -and
@@ -711,8 +703,7 @@ public static class ProjectAtlasConstructionAdmissionFixture
             'RunImpersonated',
             'AccessCheck(',
             'ProjectAtlasCurrentProcessTokenRestrictionProbe',
-            'ProjectAtlasObjectDirectoryProbe',
-            '\BaseNamedObjects'
+            'ProjectAtlasObjectDirectoryProbe'
         )) {
             Require `
                 (-not $wrapperAst.Extent.Text.Contains($removedDiagnosticText)) `
@@ -732,14 +723,12 @@ public static class ProjectAtlasConstructionAdmissionFixture
             ($probeSource.Contains('$ExpectedSessionId') -and
                 $probeSource.Contains('S-1-16-8192') -and
                 $probeSource.Contains('$principal.IsInRole($expectedSecurityIdentifier)') -and
-                $probeSource.Contains(
-                    '[string]$env:CARGO_MAKEFLAGS -cnotmatch $jobserverPattern'
-                ) -and
+                $probeSource.Contains('Test-Path -LiteralPath Env:CARGO_MAKEFLAGS') -and
                 $probeSource.Contains('exit 24') -and
                 $probeSource.Contains('[Environment]::GetEnvironmentVariables().Keys')) `
             "Construction boundary probe did not retain identity, session, integrity, and sanitized-environment checks."
         Require `
-            ($wrapperAst.Extent.Text.Contains('24 { "cargo-job-budget" }') -and
+            ($wrapperAst.Extent.Text.Contains('24 { "unexpected-jobserver-environment" }') -and
                 $wrapperAst.Extent.Text.Contains('37 { "target-sid-membership-query" }') -and
                 $wrapperAst.Extent.Text.Contains('38 { "target-sid-not-effective" }')) `
             "Construction boundary probe did not retain closed identity and environment diagnostics."
@@ -753,7 +742,7 @@ public static class ProjectAtlasConstructionAdmissionFixture
             [System.StringComparison]::Ordinal
         )
         $cargoMakeflagsCheckIndex = $probeSource.IndexOf(
-            '[string]$env:CARGO_MAKEFLAGS -cnotmatch $jobserverPattern',
+            'Test-Path -LiteralPath Env:CARGO_MAKEFLAGS',
             [System.StringComparison]::Ordinal
         )
         Require `
@@ -951,14 +940,21 @@ public static class ProjectAtlasConstructionAdmissionFixture
             'foreach ($path in @($state.acl_paths))',
             [System.StringComparison]::Ordinal
         )
+        $objectDirectoryAclCleanupIndex = $cleanupText.IndexOf(
+            'Remove-ConstructionObjectDirectoryPrincipalAccess',
+            [System.StringComparison]::Ordinal
+        )
         Require `
             ($zeroProcessIndex -ge 0 -and
                 $processAbsenceWriteIndex -gt $zeroProcessIndex -and
                 $checkpointIndex -gt $processAbsenceWriteIndex -and
-                $aclCleanupIndex -gt $checkpointIndex -and
+                $objectDirectoryAclCleanupIndex -gt $checkpointIndex -and
+                $aclCleanupIndex -gt $objectDirectoryAclCleanupIndex -and
                 $accountRemovalIndex -gt $aclCleanupIndex -and
                 $accountCheckpointIndex -gt $accountRemovalIndex -and
-                $firewallCleanupIndex -gt $accountCheckpointIndex) `
+                $firewallCleanupIndex -gt $accountCheckpointIndex -and
+                $cleanupText.Contains('$cleanupErrors.Add("remove-object-directory-acl")') -and
+                $cleanupText.Contains('$cleanupErrors.Add("verify-object-directory-acl")')) `
             "Construction cleanup checkpoint was not after exact-SID process absence and before durable cleanup."
         $dotSourceGuards = @($wrapperAst.FindAll(
             {
@@ -985,6 +981,45 @@ public static class ProjectAtlasConstructionAdmissionFixture
         if (-not ('ProjectAtlasPrincipalProcess' -as [type])) {
             Add-Type -TypeDefinition $principalProcessNativeSource -Language CSharp
         }
+        $objectDirectoryAssignments = @($wrapperAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    $node.Left.Extent.Text -eq '$constructionObjectDirectoryAclSource'
+            },
+            $true
+        ))
+        Require `
+            ($objectDirectoryAssignments.Count -eq 1) `
+            "Expected one construction object-directory ACL adapter source."
+        Invoke-Expression $objectDirectoryAssignments[0].Extent.Text
+        if (-not ('ProjectAtlasConstructionObjectDirectoryAcl' -as [type])) {
+            Add-Type -TypeDefinition $constructionObjectDirectoryAclSource -Language CSharp
+        }
+        $currentObjectDirectory =
+            [ProjectAtlasConstructionObjectDirectoryAcl]::GetCurrentPath()
+        Require `
+            ($currentObjectDirectory -match
+                '\A(?:\\BaseNamedObjects|\\Sessions\\[1-9][0-9]*\\BaseNamedObjects)\z') `
+            "Construction object-directory ACL adapter returned a non-canonical session path."
+        [ProjectAtlasConstructionObjectDirectoryAcl]::AssertExactPrincipalAbsent(
+            $currentObjectDirectory,
+            'S-1-5-21-0-0-0-0'
+        )
+        $invalidObjectDirectoryRejected = $false
+        try {
+            [ProjectAtlasConstructionObjectDirectoryAcl]::AssertExactPrincipalAbsent(
+                '\Sessions\01\BaseNamedObjects',
+                'S-1-5-21-0-0-0-0'
+            )
+        }
+        catch {
+            $invalidObjectDirectoryRejected = $_.Exception.Message -match
+                'invalid construction object directory'
+        }
+        Require `
+            $invalidObjectDirectoryRejected `
+            "Construction object-directory ACL adapter accepted a non-canonical path."
         $currentProcess = [System.Diagnostics.Process]::GetCurrentProcess()
         $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
         $mismatchedSid = if ($currentSid -eq 'S-1-5-18') { 'S-1-5-19' } else { 'S-1-5-18' }
@@ -1170,6 +1205,85 @@ public static class ProjectAtlasConstructionAdmissionFixture
                 -not [System.IO.Directory]::Exists($ordinaryStateDirectory)) `
             "Ordinary construction cleanup invocation did not reach cleanup unchanged."
 
+        $legacyStatePath = [System.IO.Path]::Combine(
+            $testRoot,
+            'legacy-journal',
+            'parser-pack-windows-construction-state',
+            'state.json'
+        )
+        $readCleanupDefinitions = @($wrapperAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -eq 'Read-CleanupState'
+            },
+            $true
+        ))
+        Require ($readCleanupDefinitions.Count -eq 1) "Expected one cleanup-state reader."
+        $legacyJournalProof = & {
+            param(
+                [System.Management.Automation.Language.FunctionDefinitionAst]$Definition,
+                [string]$JournalPath
+            )
+            $stateSchemaVersion = 2
+            $StatePath = $JournalPath
+            $stateDirectory = Split-Path -Parent $StatePath
+            $usernamePattern = '\Apa[0-9a-f]{12}\z'
+            $ruleNamePattern = '\AProjectAtlas-ParserPack-Construction-[0-9a-f]{12}\z'
+            $sidPattern = '\AS-1-5-21-[0-9]+-[0-9]+-[0-9]+-[0-9]+\z'
+            function Assert-StateAcl { param([string]$Path) }
+            Invoke-Expression $Definition.Extent.Text
+            [System.IO.Directory]::CreateDirectory($stateDirectory) | Out-Null
+            $legacy = @{
+                schema_version = 1
+                username = 'pa0123456789ab'
+                sid = 'S-1-5-21-0-0-0-0'
+                firewall_rule = 'ProjectAtlas-ParserPack-Construction-0123456789ab'
+                acl_paths = @()
+                stage = 'identity'
+            }
+            [System.IO.File]::WriteAllText(
+                $StatePath,
+                ($legacy | ConvertTo-Json -Compress),
+                [System.Text.UTF8Encoding]::new($false)
+            )
+            $normalized = Read-CleanupState
+            $invalid = @{
+                schema_version = 2
+                username = [string]$normalized.username
+                sid = [string]$normalized.sid
+                firewall_rule = [string]$normalized.firewall_rule
+                object_directory = '\Sessions\01\BaseNamedObjects'
+                acl_paths = @()
+                stage = 'identity'
+            }
+            [System.IO.File]::WriteAllText(
+                $StatePath,
+                ($invalid | ConvertTo-Json -Compress),
+                [System.Text.UTF8Encoding]::new($false)
+            )
+            $invalidFailure = $null
+            try {
+                Read-CleanupState | Out-Null
+            }
+            catch {
+                $invalidFailure = $_.Exception.Message
+            }
+            [System.IO.Directory]::Delete($stateDirectory, $true)
+            return [pscustomobject]@{
+                SchemaVersion = [int]$normalized.schema_version
+                ObjectDirectory = [string]$normalized.object_directory
+                InvalidFailure = $invalidFailure
+            }
+        } $readCleanupDefinitions[0] $legacyStatePath
+        Require `
+            ($legacyJournalProof.SchemaVersion -eq 2 -and
+                $legacyJournalProof.ObjectDirectory -eq '' -and
+                $legacyJournalProof.InvalidFailure -eq
+                    'Construction cleanup state contains invalid values.' -and
+                -not [System.IO.Directory]::Exists((Split-Path -Parent $legacyStatePath))) `
+            "Construction cleanup journal lost v1 compatibility or exact object-directory validation."
+
         $checkpointProof = & {
             $placeholderSid = 'S-1-5-21-0-0-0-0'
             $checkpointState = [pscustomobject]@{
@@ -1179,10 +1293,11 @@ public static class ProjectAtlasConstructionAdmissionFixture
                 ReturnMissingState = $false
             }
             $fixtureState = [pscustomobject]@{
-                schema_version = 1
+                schema_version = 2
                 sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
                 username = 'projectatlas-cleanup-checkpoint-fixture'
                 firewall_rule = 'ProjectAtlas-cleanup-checkpoint-fixture'
+                object_directory = ''
                 acl_paths = @()
                 stage = 'identity'
             }
@@ -1264,10 +1379,11 @@ public static class ProjectAtlasConstructionAdmissionFixture
                 StateRemoved = $false
             }
             $fixtureState = [pscustomobject]@{
-                schema_version = 1
+                schema_version = 2
                 sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
                 username = 'projectatlas-present-account-fixture'
                 firewall_rule = 'ProjectAtlas-present-account-fixture'
+                object_directory = ''
                 acl_paths = @()
                 stage = 'processes_absent'
             }
@@ -1336,10 +1452,11 @@ public static class ProjectAtlasConstructionAdmissionFixture
                 StateRemoved = $false
             }
             $fixtureState = [pscustomobject]@{
-                schema_version = 1
+                schema_version = 2
                 sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
                 username = 'projectatlas-query-failure-fixture'
                 firewall_rule = 'ProjectAtlas-query-failure-fixture'
+                object_directory = ''
                 acl_paths = @()
                 stage = 'processes_absent'
             }
@@ -1533,25 +1650,113 @@ public static class ProjectAtlasConstructionAdmissionFixture
             $true
         ))
         Require `
-            ($jobserverDefinitions.Count -eq 0) `
-            "Contained construction retained child-owned jobserver creation."
+            ($jobserverDefinitions.Count -eq 1) `
+            "Contained construction lost child-owned jobserver creation."
+        $jobserverCanaryDefinitions = @($ast.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -eq 'Invoke-ContainedCargoJobserverCanary'
+            },
+            $true
+        ))
+        Require `
+            ($jobserverCanaryDefinitions.Count -eq 1 -and
+                $jobserverCanaryDefinitions[0].Extent.Text.Contains('EntryPoint = "OpenSemaphoreW"') -and
+                $jobserverCanaryDefinitions[0].Extent.Text.Contains('SynchronizeAndModify = 0x00100002')) `
+            "Contained Cargo jobserver lost its exact-rights descendant canary."
+        $jobserverDefinitionText = $jobserverDefinitions[0].Extent.Text
+        Require `
+            ($jobserverDefinitionText.Contains('$security.SetAccessRuleProtection($true, $false)') -and
+                $jobserverDefinitionText.Contains('[System.Security.AccessControl.SemaphoreRights]::Synchronize -bor') -and
+                $jobserverDefinitionText.Contains('[System.Security.AccessControl.SemaphoreRights]::Modify') -and
+                $jobserverDefinitionText.Contains('[System.Security.AccessControl.AccessControlType]::Allow') -and
+                $jobserverDefinitionText.Contains('[System.Threading.SemaphoreAcl]::Create(') -and
+                ([regex]::Matches($jobserverDefinitionText, '\.AddAccessRule\(').Count -eq 1)) `
+            "Contained Cargo jobserver did not retain one protected exact-rights DACL."
+        Invoke-Expression $jobserverDefinitionText
+        Invoke-Expression $jobserverCanaryDefinitions[0].Extent.Text
+        $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $jobserverRights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
+            [System.Security.AccessControl.SemaphoreRights]::Modify
+        $jobserverName = "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+        $jobserver = New-ContainedCargoJobserver -Sid $currentSid -Name $jobserverName
+        $openedJobserver = $null
+        try {
+            $openedJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(
+                $jobserverName,
+                $jobserverRights
+            )
+            $Target = 'x86_64-pc-windows-msvc'
+            $commandDiagnosticTailBytes = 24 * 1024
+            $constructionDiagnosticMaxBytes = 64 * 1024
+            $script:constructionFailureRecorded = $false
+            $script:constructionFailureExitCode = 1
+            $script:constructionDiagnosticPath = [System.IO.Path]::Combine(
+                $testRoot,
+                'jobserver-canary-diagnostic.txt'
+            )
+            $jobserverCanaryPath = [System.IO.Path]::Combine(
+                $testRoot,
+                'jobserver-canary.ps1'
+            )
+            Invoke-ContainedCargoJobserverCanary `
+                -Pwsh ([System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) `
+                -Name $jobserverName `
+                -Sid $currentSid `
+                -Path $jobserverCanaryPath
+            Require `
+                (-not [System.IO.File]::Exists($jobserverCanaryPath)) `
+                "Contained Cargo jobserver descendant canary left its script."
+            Require `
+                ($openedJobserver.WaitOne(0) -and $openedJobserver.Release() -eq 0) `
+                "Contained Cargo jobserver did not restore its token."
+            $collisionRejected = $false
+            try {
+                $unexpectedJobserver = New-ContainedCargoJobserver `
+                    -Sid $currentSid `
+                    -Name $jobserverName
+                $unexpectedJobserver.Dispose()
+            }
+            catch {
+                $collisionRejected = $true
+            }
+            Require $collisionRejected "Contained Cargo jobserver accepted a live-name collision."
+            $globalNameRejected = $false
+            try {
+                $unexpectedGlobalJobserver = New-ContainedCargoJobserver `
+                    -Sid $currentSid `
+                    -Name "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+                $unexpectedGlobalJobserver.Dispose()
+            }
+            catch {
+                $globalNameRejected = $true
+            }
+            Require $globalNameRejected "Contained Cargo jobserver accepted a non-local namespace."
+        }
+        finally {
+            if ($null -ne $openedJobserver) {
+                $openedJobserver.Dispose()
+            }
+            $jobserver.Dispose()
+        }
+        $postCleanupJobserver = $null
+        $jobserverNameRemoved = -not [System.Threading.SemaphoreAcl]::TryOpenExisting(
+            $jobserverName,
+            $jobserverRights,
+            [ref]$postCleanupJobserver
+        )
+        if ($null -ne $postCleanupJobserver) {
+            $postCleanupJobserver.Dispose()
+        }
+        Require $jobserverNameRemoved "Contained Cargo jobserver survived its last owned handle."
         $validateConstructionToken = $adapterType.GetMethod(
             'ValidateConstructionToken',
             $nestedTypeFlags
         )
-        $createConstructionJobserver = $adapterType.GetMethod(
-            'CreateConstructionJobserver',
-            $nestedTypeFlags
-        )
-        $addConstructionJobserverEnvironment = $adapterType.GetMethod(
-            'AddConstructionJobserverEnvironment',
-            $nestedTypeFlags
-        )
         Require `
-            ($null -ne $validateConstructionToken -and
-                $null -ne $createConstructionJobserver -and
-                $null -ne $addConstructionJobserverEnvironment) `
-            "Native adapter construction jobserver boundary was missing."
+            ($null -ne $validateConstructionToken) `
+            "Native adapter construction token boundary was missing."
         $currentGroupCsv = @(whoami.exe /groups /fo csv /nh)
         Require ($LASTEXITCODE -eq 0) "Could not inspect the diagnostic token integrity."
         $currentIntegritySids = @(
@@ -1574,53 +1779,9 @@ public static class ProjectAtlasConstructionAdmissionFixture
                     $null,
                     [object[]]@($currentToken, $currentPrincipalSid)
                 )
-                $createArguments = [object[]]@($currentPrincipalSid, $null)
-                $jobserverHandle = $null
-                try {
-                    $jobserverHandle = $createConstructionJobserver.Invoke(
-                        $null,
-                        $createArguments
-                    )
-                    $jobserverName = [string]$createArguments[1]
-                    Require `
-                        ($null -ne $jobserverHandle -and
-                            -not $jobserverHandle.IsInvalid -and
-                            $jobserverName -match
-                                '\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z') `
-                        "Native adapter did not create one owned token-bound jobserver."
-                    $openedJobserver = [System.Threading.Semaphore]::OpenExisting(
-                        $jobserverName
-                    )
-                    $openedJobserver.Dispose()
-                    $jobserverEnvironment = [string]$addConstructionJobserverEnvironment.Invoke(
-                        $null,
-                        [object[]]@("CARGO_BUILD_JOBS=1`0PATH=fixture`0`0", $jobserverName)
-                    )
-                    Require `
-                        ($jobserverEnvironment.Contains(
-                            "CARGO_MAKEFLAGS=-j --jobserver-fds=$jobserverName --jobserver-auth=$jobserverName"
-                        ) -and
-                            $jobserverEnvironment.EndsWith("`0`0")) `
-                        "Native adapter did not publish its exact jobserver environment."
-                }
-                finally {
-                    if ($null -ne $jobserverHandle) {
-                        $jobserverHandle.Dispose()
-                    }
-                }
-                $closedJobserverRejected = $false
-                try {
-                    $unexpectedJobserver = [System.Threading.Semaphore]::OpenExisting(
-                        $jobserverName
-                    )
-                    $unexpectedJobserver.Dispose()
-                }
-                catch [System.Threading.WaitHandleCannotBeOpenedException] {
-                    $closedJobserverRejected = $true
-                }
                 Require `
-                    $closedJobserverRejected `
-                    "Native adapter retained its jobserver after closing the owner handle."
+                    (-not [string]::IsNullOrEmpty($currentLogonSid)) `
+                    "Native adapter did not validate the current medium-integrity token."
             }
             else {
                 $unsupportedIntegrityRejected = $false

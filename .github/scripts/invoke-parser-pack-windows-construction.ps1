@@ -35,7 +35,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$stateSchemaVersion = 1
+$stateSchemaVersion = 2
 $usernamePattern = '\Apa[0-9a-f]{12}\z'
 $ruleNamePattern = '\AProjectAtlas-ParserPack-Construction-[0-9a-f]{12}\z'
 $sidPattern = '\AS-1-5-21-[0-9]+-[0-9]+-[0-9]+-[0-9]+\z'
@@ -217,9 +217,18 @@ function Read-CleanupState {
     Assert-StateAcl -Path $stateDirectory
     Assert-StateAcl -Path $StatePath
     $state = [System.IO.File]::ReadAllText($item.FullName) | ConvertFrom-Json -Depth 6
-    $expectedKeys = @("acl_paths", "firewall_rule", "schema_version", "sid", "stage", "username")
+    $legacyKeys = @("acl_paths", "firewall_rule", "schema_version", "sid", "stage", "username")
+    $expectedKeys = @(
+        "acl_paths", "firewall_rule", "object_directory", "schema_version", "sid", "stage", "username"
+    )
     $actualKeys = @($state.PSObject.Properties.Name | Sort-Object)
-    if (Compare-Object -ReferenceObject $expectedKeys -DifferenceObject $actualKeys) {
+    if ([int]$state.schema_version -eq 1 -and
+        -not (Compare-Object -ReferenceObject $legacyKeys -DifferenceObject $actualKeys)) {
+        $state | Add-Member -NotePropertyName object_directory -NotePropertyValue ""
+        $state.schema_version = $stateSchemaVersion
+    }
+    elseif ([int]$state.schema_version -ne $stateSchemaVersion -or
+        (Compare-Object -ReferenceObject $expectedKeys -DifferenceObject $actualKeys)) {
         throw "Construction cleanup state has an unexpected schema."
     }
     if ($state.schema_version -ne $stateSchemaVersion -or
@@ -229,6 +238,9 @@ function Read-CleanupState {
         [string]$state.stage -notin @(
             "identity", "filesystem", "network", "construction", "processes_absent"
         ) -or
+        ([string]$state.object_directory -ne "" -and
+            [string]$state.object_directory -notmatch
+                '\A(?:\\BaseNamedObjects|\\Sessions\\[1-9][0-9]*\\BaseNamedObjects)\z') -or
         $state.acl_paths -isnot [System.Array] -or
         $state.acl_paths.Count -gt 64) {
         throw "Construction cleanup state contains invalid values."
@@ -535,6 +547,538 @@ function Initialize-PrincipalProcessNative {
     return [ProjectAtlasPrincipalProcess]
 }
 
+$constructionObjectDirectoryAclSource = @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
+using System.Runtime.ExceptionServices;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
+
+public static class ProjectAtlasConstructionObjectDirectoryAcl
+{
+    private const uint DirectoryCreateObject = 0x00000004;
+    private const uint ReadControl = 0x00020000;
+    private const uint WriteDac = 0x00040000;
+    private const uint ObjCaseInsensitive = 0x00000040;
+    private const uint DaclSecurityInformation = 0x00000004;
+    private const int ErrorInsufficientBuffer = 122;
+    private const int MaximumSecurityDescriptorBytes = 64 * 1024;
+    private const int StatusObjectNameNotFound = unchecked((int)0xC0000034);
+    private const int StatusObjectPathNotFound = unchecked((int)0xC000003A);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct UnicodeString
+    {
+        internal ushort Length;
+        internal ushort MaximumLength;
+        internal IntPtr Buffer;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ObjectAttributes
+    {
+        internal int Length;
+        internal IntPtr RootDirectory;
+        internal IntPtr ObjectName;
+        internal uint Attributes;
+        internal IntPtr SecurityDescriptor;
+        internal IntPtr SecurityQualityOfService;
+    }
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtOpenDirectoryObject(
+        out IntPtr directoryHandle,
+        uint desiredAccess,
+        ref ObjectAttributes objectAttributes);
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtClose(IntPtr handle);
+
+    [DllImport("ntdll.dll")]
+    private static extern uint RtlNtStatusToDosError(int status);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetKernelObjectSecurity(
+        IntPtr handle,
+        uint securityInformation,
+        IntPtr securityDescriptor,
+        uint securityDescriptorLength,
+        out uint requiredLength);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetKernelObjectSecurity(
+        IntPtr handle,
+        uint securityInformation,
+        IntPtr securityDescriptor);
+
+    public static string GetCurrentPath()
+    {
+        int sessionId = Process.GetCurrentProcess().SessionId;
+        return sessionId == 0
+            ? "\\BaseNamedObjects"
+            : "\\Sessions\\" + sessionId.ToString(CultureInfo.InvariantCulture) +
+                "\\BaseNamedObjects";
+    }
+
+    public static void GrantExactCreateObject(string path, string principalSid)
+    {
+        ValidatePath(path);
+        if (!String.Equals(path, GetCurrentPath(), StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("construction-object-directory-session-mismatch");
+        }
+        SecurityIdentifier principal = new SecurityIdentifier(principalSid);
+        ExecuteWithDirectory(
+            path,
+            ReadControl | WriteDac,
+            false,
+            "grant-construction-object-directory",
+            delegate(IntPtr handle)
+            {
+                RawSecurityDescriptor descriptor = ReadDescriptor(handle);
+                RawAcl dacl = RequireDacl(descriptor);
+                if (CountPrincipalAces(dacl, principal) != 0)
+                {
+                    throw new InvalidOperationException(
+                        "construction-object-directory-principal-already-present");
+                }
+
+                RawAcl amended = new RawAcl(dacl.Revision, dacl.Count + 1);
+                int insertionIndex = dacl.Count;
+                for (int index = 0; index < dacl.Count; index++)
+                {
+                    if ((dacl[index].AceFlags & AceFlags.Inherited) != 0 &&
+                        insertionIndex == dacl.Count)
+                    {
+                        insertionIndex = index;
+                    }
+                }
+                for (int index = 0; index < insertionIndex; index++)
+                {
+                    amended.InsertAce(amended.Count, dacl[index]);
+                }
+                amended.InsertAce(
+                    amended.Count,
+                    new CommonAce(
+                        AceFlags.None,
+                        AceQualifier.AccessAllowed,
+                        checked((int)DirectoryCreateObject),
+                        principal,
+                        false,
+                        null));
+                for (int index = insertionIndex; index < dacl.Count; index++)
+                {
+                    amended.InsertAce(amended.Count, dacl[index]);
+                }
+                descriptor.DiscretionaryAcl = amended;
+                WriteDescriptor(handle, descriptor);
+                AssertExactGrant(ReadDescriptor(handle), principal);
+            });
+    }
+
+    public static void RemoveExactPrincipal(string path, string principalSid)
+    {
+        ValidatePath(path);
+        SecurityIdentifier principal = new SecurityIdentifier(principalSid);
+        ExecuteWithDirectory(
+            path,
+            ReadControl | WriteDac,
+            true,
+            "remove-construction-object-directory-principal",
+            delegate(IntPtr handle)
+            {
+                RawSecurityDescriptor descriptor = ReadDescriptor(handle);
+                RawAcl dacl = RequireDacl(descriptor);
+                RawAcl retained = new RawAcl(dacl.Revision, dacl.Count);
+                int removed = 0;
+                for (int index = 0; index < dacl.Count; index++)
+                {
+                    KnownAce known = dacl[index] as KnownAce;
+                    if (known != null && principal.Equals(known.SecurityIdentifier))
+                    {
+                        removed++;
+                    }
+                    else
+                    {
+                        retained.InsertAce(retained.Count, dacl[index]);
+                    }
+                }
+                if (removed != 0)
+                {
+                    descriptor.DiscretionaryAcl = retained;
+                    WriteDescriptor(handle, descriptor);
+                }
+                AssertPrincipalAbsent(ReadDescriptor(handle), principal);
+            });
+    }
+
+    public static void AssertExactGrantPresent(string path, string principalSid)
+    {
+        ValidatePath(path);
+        SecurityIdentifier principal = new SecurityIdentifier(principalSid);
+        ExecuteWithDirectory(
+            path,
+            ReadControl,
+            false,
+            "verify-construction-object-directory-grant",
+            delegate(IntPtr handle)
+            {
+                AssertExactGrant(ReadDescriptor(handle), principal);
+            });
+    }
+
+    public static void AssertExactPrincipalAbsent(string path, string principalSid)
+    {
+        ValidatePath(path);
+        SecurityIdentifier principal = new SecurityIdentifier(principalSid);
+        ExecuteWithDirectory(
+            path,
+            ReadControl,
+            true,
+            "verify-construction-object-directory-principal-absent",
+            delegate(IntPtr handle)
+            {
+                AssertPrincipalAbsent(ReadDescriptor(handle), principal);
+            });
+    }
+
+    private static void ValidatePath(string path)
+    {
+        if (String.Equals(path, "\\BaseNamedObjects", StringComparison.Ordinal))
+        {
+            return;
+        }
+        const string prefix = "\\Sessions\\";
+        const string suffix = "\\BaseNamedObjects";
+        if (String.IsNullOrEmpty(path) ||
+            !path.StartsWith(prefix, StringComparison.Ordinal) ||
+            !path.EndsWith(suffix, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("invalid construction object directory", "path");
+        }
+        string sessionText = path.Substring(
+            prefix.Length,
+            path.Length - prefix.Length - suffix.Length);
+        int sessionId;
+        if (!Int32.TryParse(
+                sessionText,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out sessionId) ||
+            sessionId <= 0 ||
+            !String.Equals(
+                sessionText,
+                sessionId.ToString(CultureInfo.InvariantCulture),
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException("invalid construction object directory", "path");
+        }
+    }
+
+    private static void ExecuteWithDirectory(
+        string path,
+        uint desiredAccess,
+        bool allowMissing,
+        string operation,
+        Action<IntPtr> action)
+    {
+        IntPtr handle = OpenDirectory(path, desiredAccess, allowMissing, operation);
+        if (handle == IntPtr.Zero)
+        {
+            return;
+        }
+        Exception operationFailure = null;
+        try
+        {
+            action(handle);
+        }
+        catch (Exception failure)
+        {
+            operationFailure = failure;
+            throw;
+        }
+        finally
+        {
+            int closeStatus = NtClose(handle);
+            if (closeStatus < 0)
+            {
+                Exception closeFailure = NtStatusFailure(
+                    "close-construction-object-directory",
+                    closeStatus);
+                if (operationFailure != null)
+                {
+                    throw new AggregateException(
+                        "Construction object-directory operation and handle cleanup failed.",
+                        operationFailure,
+                        closeFailure);
+                }
+                ExceptionDispatchInfo.Capture(closeFailure).Throw();
+            }
+        }
+    }
+
+    private static IntPtr OpenDirectory(
+        string path,
+        uint desiredAccess,
+        bool allowMissing,
+        string operation)
+    {
+        IntPtr pathBuffer = IntPtr.Zero;
+        IntPtr unicodePointer = IntPtr.Zero;
+        try
+        {
+            pathBuffer = Marshal.StringToHGlobalUni(path);
+            UnicodeString unicode = new UnicodeString();
+            unicode.Length = checked((ushort)(path.Length * sizeof(char)));
+            unicode.MaximumLength = checked((ushort)((path.Length + 1) * sizeof(char)));
+            unicode.Buffer = pathBuffer;
+            unicodePointer = Marshal.AllocHGlobal(Marshal.SizeOf<UnicodeString>());
+            Marshal.StructureToPtr(unicode, unicodePointer, false);
+            ObjectAttributes attributes = new ObjectAttributes();
+            attributes.Length = Marshal.SizeOf<ObjectAttributes>();
+            attributes.RootDirectory = IntPtr.Zero;
+            attributes.ObjectName = unicodePointer;
+            attributes.Attributes = ObjCaseInsensitive;
+            attributes.SecurityDescriptor = IntPtr.Zero;
+            attributes.SecurityQualityOfService = IntPtr.Zero;
+            IntPtr handle;
+            int status = NtOpenDirectoryObject(out handle, desiredAccess, ref attributes);
+            if (status == StatusObjectNameNotFound || status == StatusObjectPathNotFound)
+            {
+                if (allowMissing)
+                {
+                    return IntPtr.Zero;
+                }
+                throw NtStatusFailure(operation, status);
+            }
+            if (status < 0)
+            {
+                throw NtStatusFailure(operation, status);
+            }
+            if (handle == IntPtr.Zero)
+            {
+                throw new InvalidOperationException(operation + "-returned-invalid-handle");
+            }
+            return handle;
+        }
+        finally
+        {
+            if (unicodePointer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(unicodePointer);
+            }
+            if (pathBuffer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(pathBuffer);
+            }
+        }
+    }
+
+    private static RawSecurityDescriptor ReadDescriptor(IntPtr handle)
+    {
+        uint requiredLength;
+        bool measured = GetKernelObjectSecurity(
+            handle,
+            DaclSecurityInformation,
+            IntPtr.Zero,
+            0,
+            out requiredLength);
+        int measureError = Marshal.GetLastWin32Error();
+        if (measured || measureError != ErrorInsufficientBuffer ||
+            requiredLength == 0 || requiredLength > MaximumSecurityDescriptorBytes)
+        {
+            throw new Win32Exception(
+                measureError,
+                "size-construction-object-directory-security");
+        }
+        IntPtr buffer = Marshal.AllocHGlobal(checked((int)requiredLength));
+        try
+        {
+            if (!GetKernelObjectSecurity(
+                    handle,
+                    DaclSecurityInformation,
+                    buffer,
+                    requiredLength,
+                    out requiredLength))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "read-construction-object-directory-security");
+            }
+            byte[] bytes = new byte[requiredLength];
+            Marshal.Copy(buffer, bytes, 0, bytes.Length);
+            return new RawSecurityDescriptor(bytes, 0);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    private static void WriteDescriptor(IntPtr handle, RawSecurityDescriptor descriptor)
+    {
+        byte[] bytes = new byte[descriptor.BinaryLength];
+        descriptor.GetBinaryForm(bytes, 0);
+        IntPtr buffer = Marshal.AllocHGlobal(bytes.Length);
+        try
+        {
+            Marshal.Copy(bytes, 0, buffer, bytes.Length);
+            if (!SetKernelObjectSecurity(handle, DaclSecurityInformation, buffer))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "write-construction-object-directory-security");
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    private static RawAcl RequireDacl(RawSecurityDescriptor descriptor)
+    {
+        RawAcl dacl = descriptor.DiscretionaryAcl;
+        if (dacl == null)
+        {
+            throw new InvalidOperationException("construction-object-directory-null-dacl");
+        }
+        return dacl;
+    }
+
+    private static int CountPrincipalAces(RawAcl dacl, SecurityIdentifier principal)
+    {
+        int count = 0;
+        for (int index = 0; index < dacl.Count; index++)
+        {
+            KnownAce known = dacl[index] as KnownAce;
+            if (known != null && principal.Equals(known.SecurityIdentifier))
+            {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static void AssertExactGrant(
+        RawSecurityDescriptor descriptor,
+        SecurityIdentifier principal)
+    {
+        RawAcl dacl = RequireDacl(descriptor);
+        int matching = 0;
+        bool exact = false;
+        for (int index = 0; index < dacl.Count; index++)
+        {
+            KnownAce known = dacl[index] as KnownAce;
+            if (known == null || !principal.Equals(known.SecurityIdentifier))
+            {
+                continue;
+            }
+            matching++;
+            CommonAce common = known as CommonAce;
+            exact = common != null &&
+                common.AceQualifier == AceQualifier.AccessAllowed &&
+                common.AceFlags == AceFlags.None &&
+                common.AccessMask == checked((int)DirectoryCreateObject) &&
+                !common.IsCallback;
+        }
+        if (matching != 1 || !exact)
+        {
+            throw new InvalidOperationException(
+                "construction-object-directory-exact-grant-verification");
+        }
+    }
+
+    private static void AssertPrincipalAbsent(
+        RawSecurityDescriptor descriptor,
+        SecurityIdentifier principal)
+    {
+        if (CountPrincipalAces(RequireDacl(descriptor), principal) != 0)
+        {
+            throw new InvalidOperationException(
+                "construction-object-directory-principal-present");
+        }
+    }
+
+    private static Exception NtStatusFailure(string operation, int status)
+    {
+        return new Win32Exception(
+            unchecked((int)RtlNtStatusToDosError(status)),
+            operation);
+    }
+}
+'@
+
+function Initialize-ConstructionObjectDirectoryAclNative {
+    if (-not ("ProjectAtlasConstructionObjectDirectoryAcl" -as [type])) {
+        Add-Type -TypeDefinition $constructionObjectDirectoryAclSource -Language CSharp
+    }
+    return [ProjectAtlasConstructionObjectDirectoryAcl]
+}
+
+function Get-ConstructionObjectDirectoryPath {
+    Initialize-ConstructionObjectDirectoryAclNative | Out-Null
+    return [ProjectAtlasConstructionObjectDirectoryAcl]::GetCurrentPath()
+}
+
+function Add-ConstructionObjectDirectoryPrincipalAccess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [System.Security.Principal.SecurityIdentifier]$Sid
+    )
+
+    Initialize-ConstructionObjectDirectoryAclNative | Out-Null
+    [ProjectAtlasConstructionObjectDirectoryAcl]::GrantExactCreateObject($Path, $Sid.Value)
+}
+
+function Assert-ConstructionObjectDirectoryPrincipalAccess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [System.Security.Principal.SecurityIdentifier]$Sid
+    )
+
+    Initialize-ConstructionObjectDirectoryAclNative | Out-Null
+    [ProjectAtlasConstructionObjectDirectoryAcl]::AssertExactGrantPresent($Path, $Sid.Value)
+}
+
+function Remove-ConstructionObjectDirectoryPrincipalAccess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [System.Security.Principal.SecurityIdentifier]$Sid
+    )
+
+    Initialize-ConstructionObjectDirectoryAclNative | Out-Null
+    [ProjectAtlasConstructionObjectDirectoryAcl]::RemoveExactPrincipal($Path, $Sid.Value)
+}
+
+function Assert-ConstructionObjectDirectoryPrincipalAbsent {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [System.Security.Principal.SecurityIdentifier]$Sid
+    )
+
+    Initialize-ConstructionObjectDirectoryAclNative | Out-Null
+    [ProjectAtlasConstructionObjectDirectoryAcl]::AssertExactPrincipalAbsent($Path, $Sid.Value)
+}
+
 function Get-CimOperationTimeoutSeconds {
     param(
         [Parameter(Mandatory = $true)]
@@ -677,6 +1221,7 @@ function Invoke-Cleanup {
                     username = [string]$state.username
                     sid = [string]$state.sid
                     firewall_rule = [string]$state.firewall_rule
+                    object_directory = [string]$state.object_directory
                     acl_paths = @($state.acl_paths)
                     stage = [string]$state.stage
                 }
@@ -775,6 +1320,7 @@ function Invoke-Cleanup {
                 username = [string]$state.username
                 sid = [string]$state.sid
                 firewall_rule = [string]$state.firewall_rule
+                object_directory = [string]$state.object_directory
                 acl_paths = @($state.acl_paths)
                 stage = [string]$state.stage
             }
@@ -788,6 +1334,25 @@ function Invoke-Cleanup {
     if ($zeroProcesses -and $processAbsenceRecorded -and
         $null -ne $AfterProcessTermination) {
         & $AfterProcessTermination
+    }
+
+    if (-not [string]::IsNullOrEmpty([string]$state.object_directory)) {
+        try {
+            Remove-ConstructionObjectDirectoryPrincipalAccess `
+                -Path ([string]$state.object_directory) `
+                -Sid $sid
+        }
+        catch {
+            $cleanupErrors.Add("remove-object-directory-acl")
+        }
+        try {
+            Assert-ConstructionObjectDirectoryPrincipalAbsent `
+                -Path ([string]$state.object_directory) `
+                -Sid $sid
+        }
+        catch {
+            $cleanupErrors.Add("verify-object-directory-acl")
+        }
     }
 
     foreach ($path in @($state.acl_paths)) {
@@ -1022,15 +1587,12 @@ public static class ProjectAtlasConstructionProcess
     private const uint SeGroupEnabled = 0x00000004;
     private const uint SeGroupUseForDenyOnly = 0x00000010;
     private const uint SeGroupLogonId = 0xC0000000;
-    private const uint SemaphoreSynchronizeAndModify = 0x00100002;
     private const int ErrorInsufficientBuffer = 122;
-    private const int ErrorAlreadyExists = 183;
     private const int MaximumTokenInformationBytes = 64 * 1024;
     private const int MaximumTokenGroupCount = 1024;
     private const int MaximumLogonCommandLineCharacters = 1023;
     private const string RequiredIntegritySid = "S-1-16-8192";
     private const string BrokerJobPrefix = "Global\\ProjectAtlasParserPackBroker-";
-    private const string JobserverPrefix = "Local\\ProjectAtlasParserPack-";
 
     private static readonly object BrokerJobSync = new object();
     private static string configuredBrokerJobName;
@@ -1059,8 +1621,6 @@ public static class ProjectAtlasConstructionProcess
         internal bool ThreadHandleClosed { get; set; }
         internal bool LogonTokenHandleOwned { get; set; }
         internal bool LogonTokenHandleClosed { get; set; }
-        internal bool JobserverHandleOwned { get; set; }
-        internal bool JobserverHandleClosed { get; set; }
         internal bool ConstructionTokenHandleOwned { get; set; }
         internal bool ConstructionTokenHandleClosed { get; set; }
     }
@@ -1280,19 +1840,6 @@ public static class ProjectAtlasConstructionProcess
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateJobObject(IntPtr attributes, string name);
 
-    [DllImport(
-        "kernel32.dll",
-        CharSet = CharSet.Unicode,
-        SetLastError = true,
-        EntryPoint = "CreateSemaphoreExW")]
-    private static extern IntPtr CreateSemaphoreEx(
-        ref SecurityAttributes attributes,
-        int initialCount,
-        int maximumCount,
-        string name,
-        uint flags,
-        uint desiredAccess);
-
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr OpenJobObject(
         uint desiredAccess,
@@ -1471,95 +2018,6 @@ public static class ProjectAtlasConstructionProcess
             throw new InvalidOperationException("validate-construction-token-integrity");
         }
         return logonSid;
-    }
-
-    private static SafeWaitHandle CreateConstructionJobserver(
-        string principalSid,
-        out string name)
-    {
-        // CreateProcessWithToken keeps the authenticated child in the caller's session.
-        // The alternate token cannot create named objects in the hosted runner's
-        // session namespace. The parent creates and owns one Local object while the
-        // exact disposable account receives only the two rights Cargo requires.
-        name = JobserverPrefix + Guid.NewGuid().ToString("N");
-        string sddl = "D:P(A;;0x00100002;;;" + principalSid + ")" +
-            "S:(ML;;NW;;;ME)";
-        IntPtr descriptor = IntPtr.Zero;
-        try
-        {
-            if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
-                sddl,
-                SddlRevision1,
-                out descriptor,
-                IntPtr.Zero))
-            {
-                throw Failure("create-construction-jobserver-security");
-            }
-            SecurityAttributes attributes = new SecurityAttributes();
-            attributes.Length = Marshal.SizeOf<SecurityAttributes>();
-            attributes.SecurityDescriptor = descriptor;
-            attributes.InheritHandle = false;
-            IntPtr handle = CreateSemaphoreEx(
-                ref attributes,
-                1,
-                1,
-                name,
-                0,
-                SemaphoreSynchronizeAndModify);
-            if (handle == IntPtr.Zero)
-            {
-                throw Failure("create-construction-jobserver");
-            }
-            int createError = Marshal.GetLastWin32Error();
-            SafeWaitHandle result = new SafeWaitHandle(handle, true);
-            if (createError == ErrorAlreadyExists)
-            {
-                result.Dispose();
-                throw new InvalidOperationException("construction-jobserver-name-collision");
-            }
-            return result;
-        }
-        finally
-        {
-            if (descriptor != IntPtr.Zero)
-            {
-                LocalFree(descriptor);
-            }
-        }
-    }
-
-    private static string AddConstructionJobserverEnvironment(
-        string environmentBlock,
-        string name)
-    {
-        if (string.IsNullOrEmpty(environmentBlock) ||
-            !environmentBlock.EndsWith("\0\0", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException("construction-environment-termination");
-        }
-        List<string> rows = new List<string>();
-        foreach (string row in environmentBlock.Split('\0'))
-        {
-            if (row.Length == 0)
-            {
-                continue;
-            }
-            if (row.StartsWith("CARGO_MAKEFLAGS=", StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidOperationException("ambient-construction-jobserver");
-            }
-            rows.Add(row);
-        }
-        rows.Add(
-            "CARGO_MAKEFLAGS=-j --jobserver-fds=" + name +
-            " --jobserver-auth=" + name);
-        rows.Sort(StringComparer.OrdinalIgnoreCase);
-        string result = string.Join("\0", rows) + "\0\0";
-        if (result.Length > 32767)
-        {
-            throw new InvalidOperationException("construction-environment-too-large");
-        }
-        return result;
     }
 
     private static TokenInformationBuffer GetBoundedTokenInformation(
@@ -1820,6 +2278,19 @@ public static class ProjectAtlasConstructionProcess
         AdmissionScenario admissionScenario,
         AdmissionReceipt admissionReceipt)
     {
+        if (string.IsNullOrEmpty(environmentBlock) ||
+            !environmentBlock.EndsWith("\0\0", StringComparison.Ordinal) ||
+            environmentBlock.Length > 32767)
+        {
+            throw new InvalidOperationException("construction-environment-termination");
+        }
+        foreach (string row in environmentBlock.Split('\0'))
+        {
+            if (row.StartsWith("CARGO_MAKEFLAGS=", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("ambient-construction-jobserver");
+            }
+        }
         LastTotalProcesses = 0;
         IntPtr job = IntPtr.Zero;
         IntPtr environment = IntPtr.Zero;
@@ -1828,7 +2299,6 @@ public static class ProjectAtlasConstructionProcess
         IntPtr desktop = IntPtr.Zero;
         IntPtr originalWindowStation = IntPtr.Zero;
         SafeAccessTokenHandle logonToken = null;
-        SafeWaitHandle jobserver = null;
         SafeAccessTokenHandle constructionToken = null;
         string admittedLogonSid = null;
         ProcessInformation process = new ProcessInformation();
@@ -1948,18 +2418,7 @@ public static class ProjectAtlasConstructionProcess
                 admittedLogonSid = ValidateConstructionToken(
                     logonToken,
                     principalSid);
-                string jobserverName;
-                jobserver = CreateConstructionJobserver(
-                    principalSid,
-                    out jobserverName);
-                if (admissionReceipt != null)
-                {
-                    admissionReceipt.JobserverHandleOwned = true;
-                }
-                string constructionEnvironment = AddConstructionJobserverEnvironment(
-                    environmentBlock,
-                    jobserverName);
-                environment = Marshal.StringToHGlobalUni(constructionEnvironment);
+                environment = Marshal.StringToHGlobalUni(environmentBlock);
                 created = CreateProcessWithToken(
                     logonToken,
                     0,
@@ -2196,15 +2655,6 @@ public static class ProjectAtlasConstructionProcess
                         constructionToken.IsClosed;
                 }
                 constructionToken = null;
-            }
-            if (jobserver != null)
-            {
-                jobserver.Dispose();
-                if (admissionReceipt != null)
-                {
-                    admissionReceipt.JobserverHandleClosed = jobserver.IsClosed;
-                }
-                jobserver = null;
             }
             if (environment != IntPtr.Zero)
             {
@@ -2666,6 +3116,7 @@ function Write-BoundedConstructionFailure {
         "validate-inputs",
         "network-denial-canaries",
         "output-preparation",
+        "cargo-jobserver-bootstrap",
         "optional-parser-worker-build",
         "artifact-assembler-build",
         "release-verifier-build",
@@ -2755,6 +3206,7 @@ $state = @{
     username = $script:constructionUsername
     sid = $placeholderSid
     firewall_rule = $firewallRule
+    object_directory = ""
     acl_paths = @()
     stage = "identity"
 }
@@ -2965,11 +3417,8 @@ foreach ($entry in [Environment]::GetEnvironmentVariables().Keys) {
         exit 23
     }
 }
-$jobserverPattern =
-    '\A-j --jobserver-fds=(Local\\ProjectAtlasParserPack-[0-9a-f]{32}) ' +
-    '--jobserver-auth=\1\z'
 if ([string]$env:CARGO_BUILD_JOBS -cne '1' -or
-    [string]$env:CARGO_MAKEFLAGS -cnotmatch $jobserverPattern) {
+    (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS)) {
     exit 24
 }
 exit 0
@@ -2989,7 +3438,7 @@ exit 0
             21 { "identity" }
             22 { "descendant" }
             23 { "environment" }
-            24 { "cargo-job-budget" }
+            24 { "unexpected-jobserver-environment" }
             30 { "session" }
             31 { "integrity-query" }
             32 { "integrity" }
@@ -3019,6 +3468,14 @@ exit 0
         "-NetworkIsolation", $expectedIsolation,
         "-ResolverAddress", $ResolverAddress
     )
+    $state.object_directory = Get-ConstructionObjectDirectoryPath
+    Write-ProtectedState -State $state
+    Add-ConstructionObjectDirectoryPrincipalAccess `
+        -Path ([string]$state.object_directory) `
+        -Sid $sid
+    Assert-ConstructionObjectDirectoryPrincipalAccess `
+        -Path ([string]$state.object_directory) `
+        -Sid $sid
     $state.stage = "construction"
     Write-ProtectedState -State $state
     $constructionExitCode = Invoke-AsConstructionPrincipal `

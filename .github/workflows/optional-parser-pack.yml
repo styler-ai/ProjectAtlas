@@ -280,6 +280,7 @@ jobs:
           $statePaths = @(
             (Join-Path $env:RUNNER_TEMP "parser-pack-windows-construction-state/state.json"),
             (Join-Path $env:RUNNER_TEMP "parser-pack-windows-recovery/account-journal/parser-pack-windows-construction-state/state.json"),
+            (Join-Path $env:RUNNER_TEMP "parser-pack-windows-recovery/legacy-journal/parser-pack-windows-construction-state/state.json"),
             (Join-Path $env:RUNNER_TEMP "parser-pack-windows-recovery/launcher-admission/parser-pack-windows-construction-state/state.json"),
             (Join-Path $env:RUNNER_TEMP "parser-pack-windows-recovery/cleanup-retry/parser-pack-windows-construction-state/state.json")
           )

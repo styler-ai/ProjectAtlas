@@ -176,10 +176,6 @@ function Assert-ProductionRecoveryContracts {
         'admittedLogonSid = ValidateConstructionToken(',
         [System.StringComparison]::Ordinal
     )
-    $jobserverCreationIndex = $nativeText.IndexOf(
-        'jobserver = CreateConstructionJobserver(',
-        [System.StringComparison]::Ordinal
-    )
     $processCreationIndex = $nativeText.IndexOf(
         'created = CreateProcessWithToken(',
         [System.StringComparison]::Ordinal
@@ -217,8 +213,7 @@ function Assert-ProductionRecoveryContracts {
         ($creationFlagsIndex -ge 0 -and
             $principalLogonIndex -gt $creationFlagsIndex -and
             $principalTokenValidationIndex -gt $principalLogonIndex -and
-            $jobserverCreationIndex -gt $principalTokenValidationIndex -and
-            $processCreationIndex -gt $jobserverCreationIndex -and
+            $processCreationIndex -gt $principalTokenValidationIndex -and
             $processCreatedIndex -gt $processCreationIndex -and
             $processTokenOpenIndex -gt $processCreatedIndex -and
             $tokenValidationIndex -gt $processTokenOpenIndex -and
@@ -228,7 +223,6 @@ function Assert-ProductionRecoveryContracts {
             $nativeText.Contains('return CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;') -and
             $nativeText.Contains('EntryPoint = "LogonUserW"') -and
             $nativeText.Contains('EntryPoint = "CreateProcessWithTokenW"') -and
-            $nativeText.Contains('EntryPoint = "CreateSemaphoreExW"') -and
             -not $nativeText.Contains('EntryPoint = "CreateProcessWithLogonW"') -and
             -not $nativeText.Contains('CreateBreakawayFromJob = 0x01000000;') -and
             $nativeText.Contains('ValidateCurrentBrokerJob(brokerJobName);') -and
@@ -240,16 +234,68 @@ function Assert-ProductionRecoveryContracts {
             $nativeText.Contains('Marshal.ZeroFreeGlobalAllocUnicode(passwordPointer);') -and
             $nativeText.Contains('LogonTokenHandleOwned') -and
             $nativeText.Contains('LogonTokenHandleClosed') -and
-            $nativeText.Contains('JobserverHandleOwned') -and
-            $nativeText.Contains('JobserverHandleClosed') -and
-            $nativeText.Contains(
-                '"D:P(A;;0x00100002;;;" + principalSid + ")"'
-            ) -and
-            $nativeText.Contains('S:(ML;;NW;;;ME)') -and
             $nativeText.Contains('ambient-construction-jobserver') -and
+            -not $nativeText.Contains('CreateConstructionJobserver(') -and
+            -not $nativeText.Contains('CreateSemaphoreExW') -and
             $nativeText.Contains('MaximumLogonCommandLineCharacters = 1023;') -and
             $nativeText.Contains('construction-process-retained-inherited-job')) `
         "Construction admission no longer validates the suspended alternate-logon child before assigning its owned Job."
+
+    $objectDirectorySources = @($Ast.FindAll(
+        {
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -eq '$constructionObjectDirectoryAclSource'
+        },
+        $true
+    ))
+    Require ($objectDirectorySources.Count -eq 1) "Expected one object-directory ACL adapter source."
+    $objectDirectoryText = $objectDirectorySources[0].Right.Extent.Text
+    Require `
+        ($objectDirectoryText.Contains('DirectoryCreateObject = 0x00000004') -and
+            $objectDirectoryText.Contains('ReadControl = 0x00020000') -and
+            $objectDirectoryText.Contains('WriteDac = 0x00040000') -and
+            $objectDirectoryText.Contains('NtOpenDirectoryObject(') -and
+            $objectDirectoryText.Contains('GetKernelObjectSecurity(') -and
+            $objectDirectoryText.Contains('SetKernelObjectSecurity(') -and
+            $objectDirectoryText.Contains('construction-object-directory-principal-already-present') -and
+            $objectDirectoryText.Contains('common.AceFlags == AceFlags.None') -and
+            $objectDirectoryText.Contains('common.AccessMask == checked((int)DirectoryCreateObject)') -and
+            $objectDirectoryText.Contains('matching != 1 || !exact') -and
+            $objectDirectoryText.Contains('StatusObjectNameNotFound') -and
+            $objectDirectoryText.Contains('StatusObjectPathNotFound') -and
+            $objectDirectoryText.Contains('NtClose(handle)') -and
+            $objectDirectoryText.Contains('operation and handle cleanup failed')) `
+        "Construction object-directory ACL adapter lost its exact grant, cleanup, or handle contract."
+    $wrapperText = $Ast.Extent.Text
+    $journalPathIndex = $wrapperText.IndexOf(
+        '$state.object_directory = Get-ConstructionObjectDirectoryPath',
+        [System.StringComparison]::Ordinal
+    )
+    $journalWriteIndex = $wrapperText.IndexOf(
+        'Write-ProtectedState -State $state',
+        $journalPathIndex,
+        [System.StringComparison]::Ordinal
+    )
+    $grantIndex = $wrapperText.IndexOf(
+        'Add-ConstructionObjectDirectoryPrincipalAccess',
+        $journalWriteIndex,
+        [System.StringComparison]::Ordinal
+    )
+    $grantVerificationIndex = $wrapperText.IndexOf(
+        'Assert-ConstructionObjectDirectoryPrincipalAccess',
+        $grantIndex,
+        [System.StringComparison]::Ordinal
+    )
+    Require `
+        ($journalPathIndex -ge 0 -and
+            $journalWriteIndex -gt $journalPathIndex -and
+            $grantIndex -gt $journalWriteIndex -and
+            $grantVerificationIndex -gt $grantIndex -and
+            $wrapperText.Contains('$stateSchemaVersion = 2') -and
+            $wrapperText.Contains('$legacyKeys = @("acl_paths", "firewall_rule", "schema_version", "sid", "stage", "username")') -and
+            $wrapperText.Contains('"object_directory", "schema_version"')) `
+        "Construction object-directory access was not journaled and validated before mutation."
 
     $cleanupDefinitions = @($Ast.FindAll(
         {
@@ -281,11 +327,16 @@ function Assert-ProductionRecoveryContracts {
         'foreach ($path in @($state.acl_paths))',
         [System.StringComparison]::Ordinal
     )
+    $objectDirectoryCleanupIndex = $cleanupText.IndexOf(
+        'Remove-ConstructionObjectDirectoryPrincipalAccess',
+        [System.StringComparison]::Ordinal
+    )
     Require `
         ($zeroProcessIndex -ge 0 -and
             $processAbsenceIndex -gt $zeroProcessIndex -and
             $checkpointIndex -gt $processAbsenceIndex -and
-            $durableCleanupIndex -gt $checkpointIndex -and
+            $objectDirectoryCleanupIndex -gt $checkpointIndex -and
+            $durableCleanupIndex -gt $objectDirectoryCleanupIndex -and
             $accountCheckpointIndex -gt $durableCleanupIndex) `
         "Production cleanup checkpoint moved outside its recovery boundary."
 
@@ -517,6 +568,12 @@ $exactSidAuditSha256 = (Get-FileHash `
     -Algorithm SHA256).Hash
 
 $scenarioStatePaths = [ordered]@{
+    LegacyJournal = [System.IO.Path]::Combine(
+        $RecoveryRoot,
+        'legacy-journal',
+        'parser-pack-windows-construction-state',
+        'state.json'
+    )
     AccountJournal = [System.IO.Path]::Combine(
         $RecoveryRoot,
         'account-journal',
@@ -784,6 +841,34 @@ function Read-ScenarioState {
     }
 }
 
+function Add-ScenarioObjectDirectoryAccess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$StatePath,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$State,
+
+        [Parameter(Mandatory = $true)]
+        [System.Security.Principal.SecurityIdentifier]$Sid
+    )
+
+    $objectDirectory = Invoke-WithCleanupDefinitions -StatePath $StatePath -Operation {
+        Get-ConstructionObjectDirectoryPath
+    }
+    $State.object_directory = [string]$objectDirectory
+    Write-ScenarioState -StatePath $StatePath -State $State
+    Invoke-WithCleanupDefinitions -StatePath $StatePath -Operation {
+        Add-ConstructionObjectDirectoryPrincipalAccess `
+            -Path ([string]$State.object_directory) `
+            -Sid $Sid
+        Assert-ConstructionObjectDirectoryPrincipalAccess `
+            -Path ([string]$State.object_directory) `
+            -Sid $Sid
+    }
+    return [string]$objectDirectory
+}
+
 function Invoke-ScenarioCleanup {
     param(
         [Parameter(Mandatory = $true)]
@@ -888,7 +973,9 @@ function Assert-ScenarioAbsent {
         [Parameter(Mandatory = $true)]
         [string]$StatePath,
 
-        [string[]]$AclPaths = @()
+        [string[]]$AclPaths = @(),
+
+        [string]$ObjectDirectory = ''
     )
 
     $securityIdentifier = [System.Security.Principal.SecurityIdentifier]::new($Sid)
@@ -911,6 +998,13 @@ function Assert-ScenarioAbsent {
             (@(Get-ExactAclRules -Path $aclPath -Sid $securityIdentifier).Count -eq 0) `
             "Recovery cleanup left an exact-SID ACL entry."
     }
+    if (-not [string]::IsNullOrEmpty($ObjectDirectory)) {
+        Invoke-WithCleanupDefinitions -StatePath $StatePath -Operation {
+            Assert-ConstructionObjectDirectoryPrincipalAbsent `
+                -Path $ObjectDirectory `
+                -Sid $securityIdentifier
+        }
+    }
     Require `
         (-not (Test-Path -LiteralPath $StatePath) -and
             -not (Test-Path -LiteralPath (Split-Path -Parent $StatePath))) `
@@ -926,10 +1020,11 @@ function New-ScenarioAccount {
     $identity = New-RecoveryIdentity
     $recoveryPasswords.Add($identity.Password)
     $state = @{
-        schema_version = 1
+        schema_version = 2
         username = $identity.Username
         sid = $placeholderSid
         firewall_rule = $identity.FirewallRule
+        object_directory = ''
         acl_paths = @()
         stage = 'identity'
     }
@@ -1216,11 +1311,13 @@ function global:New-LocalUser {
     }
     $proxyJournal = [System.IO.File]::ReadAllText($stateItem.FullName) |
         ConvertFrom-Json -Depth 6
-    if ([string]$proxyJournal.username -cne $Name -or
+    if ([int]$proxyJournal.schema_version -ne 2 -or
+        [string]$proxyJournal.username -cne $Name -or
         [string]$proxyJournal.sid -ne $proxyPlaceholderSid -or
         [string]$proxyJournal.firewall_rule -notmatch
             '\AProjectAtlas-ParserPack-Construction-[0-9a-f]{12}\z' -or
         [string]$proxyJournal.stage -ne 'identity' -or
+        [string]$proxyJournal.object_directory -ne '' -or
         @($proxyJournal.acl_paths).Count -ne 0 -or
         $Description -ne $proxyExpectedDescription) {
         throw "Durable construction account did not retain its placeholder journal."
@@ -1454,6 +1551,7 @@ throw "Construction wrapper returned after the durable account proxy."
             [string]$placeholderState.sid -eq $placeholderSid -and
             [string]$placeholderState.firewall_rule -match $ruleNamePattern -and
             [string]$placeholderState.stage -eq 'identity' -and
+            [string]$placeholderState.object_directory -eq '' -and
             @($placeholderState.acl_paths).Count -eq 0) `
         "Abrupt account-ready exit did not retain the exact placeholder journal."
     $account = Get-ExactLocalAccount -Username ([string]$placeholderState.username)
@@ -1483,6 +1581,7 @@ throw "Construction wrapper returned after the durable account proxy."
             [string]$boundState.sid -eq $account.Sid.Value -and
             [string]$boundState.firewall_rule -eq [string]$placeholderState.firewall_rule -and
             [string]$boundState.stage -eq 'processes_absent' -and
+            [string]$boundState.object_directory -eq '' -and
             @($boundState.acl_paths).Count -eq 0) `
         "Production cleanup did not bind only the validated account SID."
 
@@ -1501,6 +1600,81 @@ function Initialize-ConstructionAdapter {
     }
     [ProjectAtlasConstructionProcess]::ConfigureBrokerJob($BrokerJobName)
     return [ProjectAtlasConstructionProcess]
+}
+
+function Invoke-LegacyJournalCompatibilityScenario {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$StatePath
+    )
+
+    $identity = New-RecoveryIdentity
+    $legacyState = @{
+        schema_version = 1
+        username = $identity.Username
+        sid = $placeholderSid
+        firewall_rule = $identity.FirewallRule
+        acl_paths = @()
+        stage = 'identity'
+    }
+    $operationFailure = $null
+    $cleanupFailure = $null
+    try {
+        Write-ScenarioState -StatePath $StatePath -State $legacyState
+        $normalized = Read-ScenarioState -StatePath $StatePath
+        Require `
+            ([int]$normalized.schema_version -eq 2 -and
+                [string]$normalized.object_directory -eq '' -and
+                [string]$normalized.username -eq $identity.Username -and
+                [string]$normalized.sid -eq $placeholderSid) `
+            "Legacy cleanup journal did not normalize to the current empty object-directory state."
+
+        $invalidState = @{
+            schema_version = 2
+            username = $identity.Username
+            sid = $placeholderSid
+            firewall_rule = $identity.FirewallRule
+            object_directory = '\Sessions\01\BaseNamedObjects'
+            acl_paths = @()
+            stage = 'identity'
+        }
+        Write-ScenarioState -StatePath $StatePath -State $invalidState
+        $invalidFailure = $null
+        try {
+            Read-ScenarioState -StatePath $StatePath | Out-Null
+        }
+        catch {
+            $invalidFailure = $_.Exception.Message
+        }
+        Require `
+            ($invalidFailure -eq 'Construction cleanup state contains invalid values.') `
+            "Cleanup journal accepted a non-canonical object-directory path."
+    }
+    catch {
+        $operationFailure = $_.Exception
+    }
+    finally {
+        try {
+            Invoke-WithCleanupDefinitions -StatePath $StatePath -Operation {
+                Remove-StateStorage
+            }
+        }
+        catch {
+            $cleanupFailure = $_.Exception
+        }
+    }
+    $identity.Password.Dispose()
+    if ($null -ne $operationFailure -and $null -ne $cleanupFailure) {
+        throw [System.AggregateException]::new(
+            "Legacy journal validation and cleanup both failed.",
+            @($operationFailure, $cleanupFailure)
+        )
+    }
+    if ($null -ne $operationFailure) { throw $operationFailure }
+    if ($null -ne $cleanupFailure) { throw $cleanupFailure }
+    Require `
+        (-not [System.IO.Directory]::Exists((Split-Path -Parent $StatePath))) `
+        "Legacy journal compatibility scenario left protected state."
 }
 
 function Get-ReflectedReceiptValue {
@@ -1575,8 +1749,6 @@ function Assert-AdmissionReceipt {
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ThreadHandleClosed) -and
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name LogonTokenHandleOwned) -and
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name LogonTokenHandleClosed) -and
-            [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name JobserverHandleOwned) -and
-            [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name JobserverHandleClosed) -and
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ConstructionTokenHandleOwned) -and
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ConstructionTokenHandleClosed)) `
         "Construction admission recovery receipt was incomplete."
@@ -1615,6 +1787,23 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
 
     $scenario = New-ScenarioAccount -StatePath $StatePath
     $identity = $scenario.Identity
+    $objectDirectory = Add-ScenarioObjectDirectoryAccess `
+        -StatePath $StatePath `
+        -State $scenario.State `
+        -Sid $scenario.Account.Sid
+    $duplicateGrantRejected = $false
+    try {
+        Invoke-WithCleanupDefinitions -StatePath $StatePath -Operation {
+            Add-ConstructionObjectDirectoryPrincipalAccess `
+                -Path $objectDirectory `
+                -Sid $scenario.Account.Sid
+        }
+    }
+    catch {
+        $duplicateGrantRejected = $_.Exception.Message -match
+            'construction-object-directory-principal-already-present'
+    }
+    Require $duplicateGrantRejected "Object-directory grant accepted a preexisting exact-SID ACE."
     $adapterType = Initialize-ConstructionAdapter
     $scenarioType = $adapterType.GetNestedType(
         'AdmissionScenario',
@@ -1651,13 +1840,21 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
         'Temp',
         "projectatlas-object-namespace-probe-$probeId.json"
     )
+    $probeCanaryPath = [System.IO.Path]::Combine(
+        $env:SystemRoot,
+        'Temp',
+        "projectatlas-object-namespace-canary-$probeId.ps1"
+    )
     $namespaceProbePaths.Add($probeScriptPath)
     $namespaceProbePaths.Add($probeResultPath)
+    $namespaceProbePaths.Add($probeCanaryPath)
     Require `
         (-not [System.IO.File]::Exists($probeScriptPath) -and
             -not [System.IO.Directory]::Exists($probeScriptPath) -and
             -not [System.IO.File]::Exists($probeResultPath) -and
-            -not [System.IO.Directory]::Exists($probeResultPath)) `
+            -not [System.IO.Directory]::Exists($probeResultPath) -and
+            -not [System.IO.File]::Exists($probeCanaryPath) -and
+            -not [System.IO.Directory]::Exists($probeCanaryPath)) `
         "Construction named-object probe paths were not disposable."
     $namespaceProbeSource = @'
 [CmdletBinding()]
@@ -1666,7 +1863,10 @@ param(
     [string]$ExpectedPrincipalSid,
 
     [Parameter(Mandatory = $true)]
-    [string]$ResultPath
+    [string]$ResultPath,
+
+    [Parameter(Mandatory = $true)]
+    [string]$CanaryPath
 )
 
 Set-StrictMode -Version Latest
@@ -1680,268 +1880,118 @@ if (-not [string]::Equals(
     )) {
     exit 101
 }
-$jobserverMatch = [regex]::Match(
-    [string]$env:CARGO_MAKEFLAGS,
-    '\A-j --jobserver-fds=(Local\\ProjectAtlasParserPack-[0-9a-f]{32}) --jobserver-auth=\1\z'
-)
-if (-not $jobserverMatch.Success) {
+if (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS) {
     exit 102
 }
+$security = [System.Security.AccessControl.SemaphoreSecurity]::new()
+$security.SetAccessRuleProtection($true, $false)
+$rights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
+    [System.Security.AccessControl.SemaphoreRights]::Modify
+$security.AddAccessRule([System.Security.AccessControl.SemaphoreAccessRule]::new(
+    [System.Security.Principal.SecurityIdentifier]::new($ExpectedPrincipalSid),
+    $rights,
+    [System.Security.AccessControl.AccessControlType]::Allow
+))
+$name = "Local\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
+$createdNew = $false
+$semaphore = $null
+try {
+    $semaphore = [System.Threading.SemaphoreAcl]::Create(
+        1, 1, $name, [ref]$createdNew, $security
+    )
+    if (-not $createdNew) { exit 103 }
+    $env:CARGO_MAKEFLAGS = "-j --jobserver-fds=$name --jobserver-auth=$name"
+    $start = [System.Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    $start.UseShellExecute = $false
+    foreach ($argument in @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', $CanaryPath,
+        '-Name', $name,
+        '-ExpectedSid', $ExpectedPrincipalSid
+    )) {
+        $start.ArgumentList.Add($argument)
+    }
+    $child = [System.Diagnostics.Process]::Start($start)
+    $child.WaitForExit()
+    $childExitCode = $child.ExitCode
+    $child.Dispose()
+    $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+    $directoryPath = if ($sessionId -eq 0) {
+        '\BaseNamedObjects'
+    }
+    else {
+        "\Sessions\$sessionId\BaseNamedObjects"
+    }
+    $result = [ordered]@{
+        schema_version = 1
+        session_id = $sessionId
+        directory_path = $directoryPath
+        semaphore_name = $name
+        created_new = $createdNew
+        descendant_exit_code = $childExitCode
+    }
+    $json = $result | ConvertTo-Json -Compress -Depth 4
+    if ($json.Length -lt 1 -or $json.Length -gt 4096) { exit 104 }
+    [System.IO.File]::WriteAllText(
+        $ResultPath,
+        $json,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    if ($childExitCode -ne 0) { exit 105 }
+}
+finally {
+    Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS -ErrorAction SilentlyContinue
+    if ($null -ne $semaphore) { $semaphore.Dispose() }
+}
+exit 0
+'@
+    $namespaceCanarySource = @'
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
+    [string]$Name,
 
+    [Parameter(Mandatory = $true)]
+    [string]$ExpectedSid
+)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+if ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne $ExpectedSid) {
+    exit 111
+}
 $nativeSource = @"
 using System;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
-
-public static class ProjectAtlasObjectNamespaceProbe
+public static class ProjectAtlasRecoveryJobserverCanary
 {
-    private const uint SynchronizeAndModify = 0x00100002;
-    private const uint ObjCaseInsensitive = 0x00000040;
-    private const uint SddlRevision1 = 1;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct UnicodeString
-    {
-        internal ushort Length;
-        internal ushort MaximumLength;
-        internal IntPtr Buffer;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct ObjectAttributes
-    {
-        internal int Length;
-        internal IntPtr RootDirectory;
-        internal IntPtr ObjectName;
-        internal uint Attributes;
-        internal IntPtr SecurityDescriptor;
-        internal IntPtr SecurityQualityOfService;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct SecurityAttributes
-    {
-        internal int Length;
-        internal IntPtr SecurityDescriptor;
-        internal int InheritHandle;
-    }
-
-    [DllImport("ntdll.dll")]
-    private static extern int NtOpenDirectoryObject(
-        out IntPtr directoryHandle,
-        uint desiredAccess,
-        ref ObjectAttributes objectAttributes);
-
-    [DllImport("ntdll.dll")]
-    private static extern int NtClose(IntPtr handle);
-
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true,
         EntryPoint = "OpenSemaphoreW")]
     private static extern IntPtr OpenSemaphore(
         uint desiredAccess,
         [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
         string name);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true,
-        EntryPoint = "CreateSemaphoreExW")]
-    private static extern IntPtr CreateDefaultSemaphore(
-        IntPtr securityAttributes,
-        int initialCount,
-        int maximumCount,
-        string name,
-        uint flags,
-        uint desiredAccess);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true,
-        EntryPoint = "CreateSemaphoreExW")]
-    private static extern IntPtr CreateExactSemaphore(
-        ref SecurityAttributes securityAttributes,
-        int initialCount,
-        int maximumCount,
-        string name,
-        uint flags,
-        uint desiredAccess);
-
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr handle);
-
-    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(
-        string securityDescriptor,
-        uint revision,
-        out IntPtr descriptor,
-        out uint descriptorLength);
-
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr LocalFree(IntPtr memory);
-
-    public static int OpenDirectory(string path, uint desiredAccess)
+    public static void OpenAndClose(string name)
     {
-        IntPtr pathBuffer = IntPtr.Zero;
-        IntPtr unicodePointer = IntPtr.Zero;
-        IntPtr directoryHandle = IntPtr.Zero;
-        try
-        {
-            pathBuffer = Marshal.StringToHGlobalUni(path);
-            UnicodeString unicode = new UnicodeString
-            {
-                Length = checked((ushort)(path.Length * sizeof(char))),
-                MaximumLength = checked((ushort)((path.Length + 1) * sizeof(char))),
-                Buffer = pathBuffer
-            };
-            unicodePointer = Marshal.AllocHGlobal(Marshal.SizeOf<UnicodeString>());
-            Marshal.StructureToPtr(unicode, unicodePointer, false);
-            ObjectAttributes attributes = new ObjectAttributes
-            {
-                Length = Marshal.SizeOf<ObjectAttributes>(),
-                RootDirectory = IntPtr.Zero,
-                ObjectName = unicodePointer,
-                Attributes = ObjCaseInsensitive,
-                SecurityDescriptor = IntPtr.Zero,
-                SecurityQualityOfService = IntPtr.Zero
-            };
-            return NtOpenDirectoryObject(
-                out directoryHandle,
-                desiredAccess,
-                ref attributes);
-        }
-        finally
-        {
-            if (directoryHandle != IntPtr.Zero)
-            {
-                NtClose(directoryHandle);
-            }
-            if (unicodePointer != IntPtr.Zero)
-            {
-                Marshal.FreeHGlobal(unicodePointer);
-            }
-            if (pathBuffer != IntPtr.Zero)
-            {
-                Marshal.FreeHGlobal(pathBuffer);
-            }
-        }
-    }
-
-    public static int OpenParentSemaphore(string name)
-    {
-        IntPtr handle = OpenSemaphore(SynchronizeAndModify, false, name);
+        IntPtr handle = OpenSemaphore(0x00100002, false, name);
         if (handle == IntPtr.Zero)
         {
-            return Marshal.GetLastWin32Error();
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "open-recovery-jobserver");
         }
-        return CloseHandle(handle) ? 0 : Marshal.GetLastWin32Error();
-    }
-
-    public static int CreateDefault(string name)
-    {
-        IntPtr handle = CreateDefaultSemaphore(
-            IntPtr.Zero,
-            1,
-            1,
-            name,
-            0,
-            SynchronizeAndModify);
-        if (handle == IntPtr.Zero)
+        if (!CloseHandle(handle))
         {
-            return Marshal.GetLastWin32Error();
-        }
-        return CloseHandle(handle) ? 0 : Marshal.GetLastWin32Error();
-    }
-
-    public static int CreateExactLocal(string name, string principalSid)
-    {
-        IntPtr descriptor = IntPtr.Zero;
-        uint descriptorLength;
-        string sddl = "D:P(A;;0x00100002;;;" + principalSid + ")";
-        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                sddl,
-                SddlRevision1,
-                out descriptor,
-                out descriptorLength))
-        {
-            return Marshal.GetLastWin32Error();
-        }
-        try
-        {
-            SecurityAttributes attributes = new SecurityAttributes
-            {
-                Length = Marshal.SizeOf<SecurityAttributes>(),
-                SecurityDescriptor = descriptor,
-                InheritHandle = 0
-            };
-            IntPtr handle = CreateExactSemaphore(
-                ref attributes,
-                1,
-                1,
-                name,
-                0,
-                SynchronizeAndModify);
-            if (handle == IntPtr.Zero)
-            {
-                return Marshal.GetLastWin32Error();
-            }
-            return CloseHandle(handle) ? 0 : Marshal.GetLastWin32Error();
-        }
-        finally
-        {
-            LocalFree(descriptor);
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "close-recovery-jobserver");
         }
     }
 }
 "@
-
-try {
-    Add-Type -TypeDefinition $nativeSource -Language CSharp -ErrorAction Stop
-}
-catch {
-    exit 103
-}
-
-$sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
-$directoryPath = if ($sessionId -eq 0) {
-    '\BaseNamedObjects'
-}
-else {
-    "\Sessions\$sessionId\BaseNamedObjects"
-}
-$result = [ordered]@{
-    schema_version = 1
-    session_id = $sessionId
-    directory_path = $directoryPath
-    directory_query_ntstatus =
-        [ProjectAtlasObjectNamespaceProbe]::OpenDirectory($directoryPath, 0x00000001)
-    directory_traverse_ntstatus =
-        [ProjectAtlasObjectNamespaceProbe]::OpenDirectory($directoryPath, 0x00000002)
-    directory_create_object_ntstatus =
-        [ProjectAtlasObjectNamespaceProbe]::OpenDirectory($directoryPath, 0x00000004)
-    directory_traverse_create_ntstatus =
-        [ProjectAtlasObjectNamespaceProbe]::OpenDirectory($directoryPath, 0x00000006)
-    parent_open_win32 = [ProjectAtlasObjectNamespaceProbe]::OpenParentSemaphore(
-        $jobserverMatch.Groups[1].Value
-    )
-    default_create_win32 = [ProjectAtlasObjectNamespaceProbe]::CreateDefault(
-        "__projectatlas_namespace_probe_$([Guid]::NewGuid().ToString('N'))"
-    )
-    exact_local_create_win32 = [ProjectAtlasObjectNamespaceProbe]::CreateExactLocal(
-        "Local\ProjectAtlasParserPackProbe-$([Guid]::NewGuid().ToString('N'))",
-        $ExpectedPrincipalSid
-    )
-}
-try {
-    $json = $result | ConvertTo-Json -Compress -Depth 4
-    if ($json.Length -lt 1 -or $json.Length -gt 4096) {
-        exit 104
-    }
-    [System.IO.File]::WriteAllText(
-        $ResultPath,
-        $json,
-        [System.Text.UTF8Encoding]::new($false)
-    )
-}
-catch {
-    exit 105
-}
+Add-Type -TypeDefinition $nativeSource -Language CSharp
+[ProjectAtlasRecoveryJobserverCanary]::OpenAndClose($Name)
 exit 0
 '@
     [System.IO.File]::WriteAllText(
@@ -1949,11 +1999,17 @@ exit 0
         $namespaceProbeSource,
         [System.Text.UTF8Encoding]::new($false)
     )
+    [System.IO.File]::WriteAllText(
+        $probeCanaryPath,
+        $namespaceCanarySource,
+        [System.Text.UTF8Encoding]::new($false)
+    )
     $normalArguments = [string[]]@(
         '-NoLogo', '-NoProfile', '-NonInteractive',
         '-File', $probeScriptPath,
         '-ExpectedPrincipalSid', $identity.Sid,
-        '-ResultPath', $probeResultPath
+        '-ResultPath', $probeResultPath,
+        '-CanaryPath', $probeCanaryPath
     )
     # RunCore validates its command line before authentication. Keep this probe
     # short so invalid credentials reach the intended LogonUser boundary.
@@ -2055,8 +2111,8 @@ exit 0
                 ($normalExitCode -eq 0) `
                 "Construction named-object probe child failed. exit_code=$normalExitCode"
             Require `
-                ([ProjectAtlasConstructionProcess]::LastTotalProcesses -ge 1) `
-                "Construction normal admission did not contain its child."
+                ([ProjectAtlasConstructionProcess]::LastTotalProcesses -ge 2) `
+                "Construction normal admission did not contain its child and descendant canary."
             Assert-AdmissionReceipt `
                 -ReceiptType $receiptType `
                 -Receipt $receipt `
@@ -2087,47 +2143,32 @@ exit 0
             Require `
                 ([int]$probeResult.schema_version -eq 1 -and
                     [int]$probeResult.session_id -ge 0 -and
-                    [string]::Equals(
+                     [string]::Equals(
                         [string]$probeResult.directory_path,
                         $expectedDirectoryPath,
                         [System.StringComparison]::Ordinal
-                    )) `
+                    ) -and
+                    [string]::Equals(
+                        [string]$probeResult.directory_path,
+                        $objectDirectory,
+                        [System.StringComparison]::Ordinal
+                    ) -and
+                    [bool]$probeResult.created_new -and
+                    [int]$probeResult.descendant_exit_code -eq 0 -and
+                    [string]$probeResult.semaphore_name -match
+                        '\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z') `
                 "Construction named-object probe result identity was invalid."
-            $ntStatusNames = @(
-                'directory_query_ntstatus',
-                'directory_traverse_ntstatus',
-                'directory_create_object_ntstatus',
-                'directory_traverse_create_ntstatus'
+            $survivingSemaphore = $null
+            $semaphoreAbsent = -not [System.Threading.SemaphoreAcl]::TryOpenExisting(
+                [string]$probeResult.semaphore_name,
+                [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
+                    [System.Security.AccessControl.SemaphoreRights]::Modify,
+                [ref]$survivingSemaphore
             )
-            $win32Names = @(
-                'parent_open_win32',
-                'default_create_win32',
-                'exact_local_create_win32'
-            )
-            foreach ($name in $ntStatusNames) {
-                Require `
-                    ($null -ne $probeResult.PSObject.Properties[$name] -and
-                        [long]$probeResult.$name -ge [int32]::MinValue -and
-                        [long]$probeResult.$name -le [int32]::MaxValue) `
-                    "Construction named-object probe returned an invalid NTSTATUS."
+            if ($null -ne $survivingSemaphore) {
+                $survivingSemaphore.Dispose()
             }
-            foreach ($name in $win32Names) {
-                Require `
-                    ($null -ne $probeResult.PSObject.Properties[$name] -and
-                        [long]$probeResult.$name -ge 0 -and
-                        [long]$probeResult.$name -le [int32]::MaxValue) `
-                    "Construction named-object probe returned an invalid Win32 status."
-            }
-            $formattedNtStatuses = [ordered]@{}
-            foreach ($name in $ntStatusNames) {
-                $signedStatus = [int32]$probeResult.$name
-                $unsignedStatus = [BitConverter]::ToUInt32(
-                    [BitConverter]::GetBytes($signedStatus),
-                    0
-                )
-                $formattedNtStatuses[$name] = '0x{0:X8}' -f $unsignedStatus
-            }
-            throw "Construction named-object probe classified session_id=$([int]$probeResult.session_id) directory_path=$([string]$probeResult.directory_path) query_ntstatus=$($formattedNtStatuses.directory_query_ntstatus) traverse_ntstatus=$($formattedNtStatuses.directory_traverse_ntstatus) create_object_ntstatus=$($formattedNtStatuses.directory_create_object_ntstatus) traverse_create_ntstatus=$($formattedNtStatuses.directory_traverse_create_ntstatus) parent_open_win32=$([int]$probeResult.parent_open_win32) default_create_win32=$([int]$probeResult.default_create_win32) exact_local_create_win32=$([int]$probeResult.exact_local_create_win32)"
+            Require $semaphoreAbsent "Construction named-object probe left a semaphore handle survivor."
         }
 
         $failure = Get-ReflectedOperationFailure `
@@ -2171,7 +2212,8 @@ exit 0
         -Username $identity.Username `
         -Sid $identity.Sid `
         -FirewallRule $identity.FirewallRule `
-        -StatePath $StatePath
+        -StatePath $StatePath `
+        -ObjectDirectory $objectDirectory
 }
 
 $profileLaunchSource = @'
@@ -2351,6 +2393,10 @@ function Invoke-CleanupRetryRecoveryScenario {
     $identity = $scenario.Identity
     $state = $scenario.State
     $sid = [System.Security.Principal.SecurityIdentifier]::new($identity.Sid)
+    $objectDirectory = Add-ScenarioObjectDirectoryAccess `
+        -StatePath $StatePath `
+        -State $state `
+        -Sid $sid
     $fixtureRoot = Join-Path (Split-Path -Parent (Split-Path -Parent $StatePath)) 'acl-fixture'
     [System.IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
     $state.acl_paths = @($fixtureRoot)
@@ -2455,6 +2501,11 @@ function Invoke-CleanupRetryRecoveryScenario {
     $retainedAccount = Get-ExactLocalAccount `
         -Username $identity.Username `
         -Sid $identity.Sid
+    Invoke-WithCleanupDefinitions -StatePath $StatePath -Operation {
+        Assert-ConstructionObjectDirectoryPrincipalAccess `
+            -Path $objectDirectory `
+            -Sid $sid
+    }
     Require `
         ($null -ne $retainedState -and
             [string]$retainedState.sid -eq $identity.Sid -and
@@ -2496,12 +2547,18 @@ function Invoke-CleanupRetryRecoveryScenario {
             @(Get-ExactAclRules -Path $fixtureRoot -Sid $sid).Count -eq 0) `
         "Post-account-removal crash did not retain only retry-safe durable state."
     Invoke-ExactSidProcessAudit -Sid $identity.Sid -Expectation absent
+    Invoke-WithCleanupDefinitions -StatePath $StatePath -Operation {
+        Assert-ConstructionObjectDirectoryPrincipalAbsent `
+            -Path $objectDirectory `
+            -Sid $sid
+    }
 
     $corruptState = @{
         schema_version = [int]$accountRemovalState.schema_version
         username = [string]$accountRemovalState.username
         sid = [string]$accountRemovalState.sid
         firewall_rule = [string]$accountRemovalState.firewall_rule
+        object_directory = [string]$accountRemovalState.object_directory
         acl_paths = @($accountRemovalState.acl_paths)
         stage = 'corrupt'
     }
@@ -2556,7 +2613,8 @@ function Invoke-CleanupRetryRecoveryScenario {
         -Sid $identity.Sid `
         -FirewallRule $identity.FirewallRule `
         -StatePath $StatePath `
-        -AclPaths @($fixtureRoot)
+        -AclPaths @($fixtureRoot) `
+        -ObjectDirectory $objectDirectory
 
     $noOpTimer = [System.Diagnostics.Stopwatch]::StartNew()
     Invoke-ScenarioCleanup -StatePath $StatePath
@@ -2615,6 +2673,8 @@ try {
             )) `
         "Exact-SID WTS process audit did not enforce its parent deadline."
 
+    Invoke-LegacyJournalCompatibilityScenario `
+        -StatePath $scenarioStatePaths.LegacyJournal
     Invoke-AccountJournalRecoveryScenario `
         -StatePath $scenarioStatePaths.AccountJournal
     Invoke-ConstructionAdmissionRecoveryScenario `
@@ -2663,9 +2723,9 @@ finally {
                     ),
                     $expectedProbeParent,
                     [System.StringComparison]::OrdinalIgnoreCase
-                ) -and
+                    ) -and
                     [System.IO.Path]::GetFileName($resolvedProbePath) -match
-                        '\Aprojectatlas-object-namespace-probe-[0-9a-f]{32}\.(ps1|json)\z') `
+                        '\Aprojectatlas-object-namespace-(?:probe|canary)-[0-9a-f]{32}\.(?:ps1|json)\z') `
                 "Refused to remove an unsafe named-object probe path."
             if ([System.IO.File]::Exists($resolvedProbePath)) {
                 $probeItem = Get-Item -LiteralPath $resolvedProbePath -Force
