@@ -349,6 +349,10 @@ const MCP_PURPOSE_LEVEL_LOW: &str = "low";
 const MCP_PURPOSE_LEVEL_MEDIUM: &str = "medium";
 /// MCP purpose lint level token for strict mode.
 const MCP_PURPOSE_LEVEL_STRICT: &str = "strict";
+/// Default purpose-curation task used by session startup briefs.
+const MCP_PURPOSE_TASK_SESSION_STARTUP: &str = "session-startup";
+/// Default purpose-curation task used by direct queue requests.
+const MCP_PURPOSE_TASK_QUEUE: &str = "purpose-curation";
 /// MCP harness token for standard MCP JSON config.
 const MCP_HARNESS_MCP_JSON: &str = "mcp-json";
 /// MCP alternate harness token for standard MCP JSON config.
@@ -2478,7 +2482,7 @@ impl ProjectAtlasMcpServer {
         let query = Self::query_or_empty(params.query);
         let purpose_task = params
             .purpose_task
-            .unwrap_or_else(|| "session-startup".to_string());
+            .unwrap_or_else(|| MCP_PURPOSE_TASK_SESSION_STARTUP.to_string());
         let folder_limit = Self::brief_limit(params.folder_limit);
         let file_limit = Self::brief_limit(params.file_limit);
         let blocker_limit = Self::brief_limit(params.blocker_limit);
@@ -5159,7 +5163,7 @@ impl ProjectAtlasMcpServer {
             let task = params
                 .task
                 .as_deref()
-                .unwrap_or("purpose-curation")
+                .unwrap_or(MCP_PURPOSE_TASK_QUEUE)
                 .to_string();
             self.with_fresh_string_and_usage_for_request(&state, Some(context), |store, stamp| {
                 let page = purpose_curation_page(store, &query, &task)?;
