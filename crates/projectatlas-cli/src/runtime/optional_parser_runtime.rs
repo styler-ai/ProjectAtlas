@@ -184,11 +184,6 @@ impl OptionalParserRuntime {
         }
         cleanup
     }
-
-    /// Prevent reuse while preserving an uncertain resident's cross-process execution lease.
-    fn retain_execution_after_cleanup_failure(&mut self) {
-        self.state.retain_after_cleanup_failure();
-    }
 }
 
 /// Parse built-in jobs in Rayon and accepted optional jobs in deterministic grammar/path order.
@@ -287,9 +282,7 @@ pub(super) fn parse_symbol_jobs_controlled(
                 }
             };
             if let Err(error) = result {
-                if error.has_mandatory_cleanup_failure() {
-                    runtime.retain_execution_after_cleanup_failure();
-                }
+                retain_runtime_after_parser_failure(&mut runtime.state, &error);
                 return Err(supervisor_error(error));
             }
             let outcome = parse_admitted_symbol_job(
@@ -310,6 +303,16 @@ pub(super) fn parse_symbol_jobs_controlled(
     group_lease.release();
     let cleanup = service_pending_deactivation(&mut runtime);
     combine_optional_operation_and_cleanup(operation, cleanup)
+}
+
+/// Quarantine one concrete execution owner only when the supervisor reports uncertain cleanup.
+fn retain_runtime_after_parser_failure<T>(
+    state: &mut OptionalParserRuntimeState<T>,
+    error: &ParserSupervisorError,
+) {
+    if error.has_mandatory_cleanup_failure() {
+        state.retain_after_cleanup_failure();
+    }
 }
 
 /// Return the canonical optional grammar identity for one registry-owned job.
@@ -583,6 +586,37 @@ mod tests {
             ));
             assert_eq!(drops.load(Ordering::Relaxed), 0);
         }
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn combined_parser_failure_quarantines_and_retains_the_execution_owner() {
+        struct DropProbe<'a>(&'a AtomicUsize);
+
+        impl Drop for DropProbe<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let drops = AtomicUsize::new(0);
+        let mut state = OptionalParserRuntimeState::Resident {
+            verified: DropProbe(&drops),
+        };
+        let error = ParserSupervisorError::OperationAndCleanup {
+            operation: Box::new(ParserSupervisorError::Cancelled { phase: "test" }),
+            cleanup: Box::new(ParserSupervisorError::Cleanup {
+                message: "synthetic cleanup failure".to_owned(),
+            }),
+        };
+
+        retain_runtime_after_parser_failure(&mut state, &error);
+        assert!(matches!(
+            &state,
+            OptionalParserRuntimeState::UnavailableAfterCleanupFailure { retained: Some(_) }
+        ));
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        drop(state);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
 
