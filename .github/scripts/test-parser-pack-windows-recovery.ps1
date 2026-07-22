@@ -537,6 +537,7 @@ $scenarioStatePaths = [ordered]@{
     )
 }
 $recoveryPasswords = [System.Collections.Generic.List[System.Security.SecureString]]::new()
+$namespaceProbePaths = [System.Collections.Generic.List[string]]::new()
 
 function Invoke-BoundedProcess {
     param(
@@ -1639,30 +1640,320 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
         '-NoLogo', '-NoProfile', '-NonInteractive',
         '-Command', 'Start-Sleep -Seconds 30'
     )
-    $jobserverCanary = @'
-$m=[regex]::Match([string]$env:CARGO_MAKEFLAGS,'\A-j --jobserver-fds=(Local\\ProjectAtlasParserPack-[0-9a-f]{32}) --jobserver-auth=\1\z')
-if(!$m.Success){exit 1001}
-try{
-Add-Type -TypeDefinition @"
+    $probeId = [Guid]::NewGuid().ToString('N')
+    $probeScriptPath = [System.IO.Path]::Combine(
+        $env:SystemRoot,
+        'Temp',
+        "projectatlas-object-namespace-probe-$probeId.ps1"
+    )
+    $probeResultPath = [System.IO.Path]::Combine(
+        $env:SystemRoot,
+        'Temp',
+        "projectatlas-object-namespace-probe-$probeId.json"
+    )
+    $namespaceProbePaths.Add($probeScriptPath)
+    $namespaceProbePaths.Add($probeResultPath)
+    Require `
+        (-not [System.IO.File]::Exists($probeScriptPath) -and
+            -not [System.IO.Directory]::Exists($probeScriptPath) -and
+            -not [System.IO.File]::Exists($probeResultPath) -and
+            -not [System.IO.Directory]::Exists($probeResultPath)) `
+        "Construction named-object probe paths were not disposable."
+    $namespaceProbeSource = @'
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$ExpectedPrincipalSid,
+
+    [Parameter(Mandatory = $true)]
+    [string]$ResultPath
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$actualSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+if (-not [string]::Equals(
+        $actualSid,
+        $ExpectedPrincipalSid,
+        [System.StringComparison]::Ordinal
+    )) {
+    exit 101
+}
+$jobserverMatch = [regex]::Match(
+    [string]$env:CARGO_MAKEFLAGS,
+    '\A-j --jobserver-fds=(Local\\ProjectAtlasParserPack-[0-9a-f]{32}) --jobserver-auth=\1\z'
+)
+if (-not $jobserverMatch.Success) {
+    exit 102
+}
+
+$nativeSource = @"
 using System;
 using System.Runtime.InteropServices;
-public static class ProjectAtlasJobserverProbe{
-[DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true,EntryPoint="OpenSemaphoreW")]
-static extern IntPtr OpenSemaphore(uint a,bool i,string n);
-[DllImport("kernel32.dll",SetLastError=true)]
-static extern bool CloseHandle(IntPtr h);
-public static int Open(string n){
-var h=OpenSemaphore(0x00100002,false,n);
-if(h==IntPtr.Zero)return Marshal.GetLastWin32Error();
-return CloseHandle(h)?0:Marshal.GetLastWin32Error();
-}}
-"@ -Language CSharp -ErrorAction Stop
-}catch{exit 1002}
-exit [ProjectAtlasJobserverProbe]::Open($m.Groups[1].Value)
+
+public static class ProjectAtlasObjectNamespaceProbe
+{
+    private const uint SynchronizeAndModify = 0x00100002;
+    private const uint ObjCaseInsensitive = 0x00000040;
+    private const uint SddlRevision1 = 1;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct UnicodeString
+    {
+        internal ushort Length;
+        internal ushort MaximumLength;
+        internal IntPtr Buffer;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ObjectAttributes
+    {
+        internal int Length;
+        internal IntPtr RootDirectory;
+        internal IntPtr ObjectName;
+        internal uint Attributes;
+        internal IntPtr SecurityDescriptor;
+        internal IntPtr SecurityQualityOfService;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SecurityAttributes
+    {
+        internal int Length;
+        internal IntPtr SecurityDescriptor;
+        internal int InheritHandle;
+    }
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtOpenDirectoryObject(
+        out IntPtr directoryHandle,
+        uint desiredAccess,
+        ref ObjectAttributes objectAttributes);
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtClose(IntPtr handle);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true,
+        EntryPoint = "OpenSemaphoreW")]
+    private static extern IntPtr OpenSemaphore(
+        uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        string name);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true,
+        EntryPoint = "CreateSemaphoreExW")]
+    private static extern IntPtr CreateDefaultSemaphore(
+        IntPtr securityAttributes,
+        int initialCount,
+        int maximumCount,
+        string name,
+        uint flags,
+        uint desiredAccess);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true,
+        EntryPoint = "CreateSemaphoreExW")]
+    private static extern IntPtr CreateExactSemaphore(
+        ref SecurityAttributes securityAttributes,
+        int initialCount,
+        int maximumCount,
+        string name,
+        uint flags,
+        uint desiredAccess);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        string securityDescriptor,
+        uint revision,
+        out IntPtr descriptor,
+        out uint descriptorLength);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
+
+    public static int OpenDirectory(string path, uint desiredAccess)
+    {
+        IntPtr pathBuffer = IntPtr.Zero;
+        IntPtr unicodePointer = IntPtr.Zero;
+        IntPtr directoryHandle = IntPtr.Zero;
+        try
+        {
+            pathBuffer = Marshal.StringToHGlobalUni(path);
+            UnicodeString unicode = new UnicodeString
+            {
+                Length = checked((ushort)(path.Length * sizeof(char))),
+                MaximumLength = checked((ushort)((path.Length + 1) * sizeof(char))),
+                Buffer = pathBuffer
+            };
+            unicodePointer = Marshal.AllocHGlobal(Marshal.SizeOf<UnicodeString>());
+            Marshal.StructureToPtr(unicode, unicodePointer, false);
+            ObjectAttributes attributes = new ObjectAttributes
+            {
+                Length = Marshal.SizeOf<ObjectAttributes>(),
+                RootDirectory = IntPtr.Zero,
+                ObjectName = unicodePointer,
+                Attributes = ObjCaseInsensitive,
+                SecurityDescriptor = IntPtr.Zero,
+                SecurityQualityOfService = IntPtr.Zero
+            };
+            return NtOpenDirectoryObject(
+                out directoryHandle,
+                desiredAccess,
+                ref attributes);
+        }
+        finally
+        {
+            if (directoryHandle != IntPtr.Zero)
+            {
+                NtClose(directoryHandle);
+            }
+            if (unicodePointer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(unicodePointer);
+            }
+            if (pathBuffer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(pathBuffer);
+            }
+        }
+    }
+
+    public static int OpenParentSemaphore(string name)
+    {
+        IntPtr handle = OpenSemaphore(SynchronizeAndModify, false, name);
+        if (handle == IntPtr.Zero)
+        {
+            return Marshal.GetLastWin32Error();
+        }
+        return CloseHandle(handle) ? 0 : Marshal.GetLastWin32Error();
+    }
+
+    public static int CreateDefault(string name)
+    {
+        IntPtr handle = CreateDefaultSemaphore(
+            IntPtr.Zero,
+            1,
+            1,
+            name,
+            0,
+            SynchronizeAndModify);
+        if (handle == IntPtr.Zero)
+        {
+            return Marshal.GetLastWin32Error();
+        }
+        return CloseHandle(handle) ? 0 : Marshal.GetLastWin32Error();
+    }
+
+    public static int CreateExactLocal(string name, string principalSid)
+    {
+        IntPtr descriptor = IntPtr.Zero;
+        uint descriptorLength;
+        string sddl = "D:P(A;;0x00100002;;;" + principalSid + ")";
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl,
+                SddlRevision1,
+                out descriptor,
+                out descriptorLength))
+        {
+            return Marshal.GetLastWin32Error();
+        }
+        try
+        {
+            SecurityAttributes attributes = new SecurityAttributes
+            {
+                Length = Marshal.SizeOf<SecurityAttributes>(),
+                SecurityDescriptor = descriptor,
+                InheritHandle = 0
+            };
+            IntPtr handle = CreateExactSemaphore(
+                ref attributes,
+                1,
+                1,
+                name,
+                0,
+                SynchronizeAndModify);
+            if (handle == IntPtr.Zero)
+            {
+                return Marshal.GetLastWin32Error();
+            }
+            return CloseHandle(handle) ? 0 : Marshal.GetLastWin32Error();
+        }
+        finally
+        {
+            LocalFree(descriptor);
+        }
+    }
+}
+"@
+
+try {
+    Add-Type -TypeDefinition $nativeSource -Language CSharp -ErrorAction Stop
+}
+catch {
+    exit 103
+}
+
+$sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+$directoryPath = if ($sessionId -eq 0) {
+    '\BaseNamedObjects'
+}
+else {
+    "\Sessions\$sessionId\BaseNamedObjects"
+}
+$result = [ordered]@{
+    schema_version = 1
+    session_id = $sessionId
+    directory_path = $directoryPath
+    directory_query_ntstatus =
+        [ProjectAtlasObjectNamespaceProbe]::OpenDirectory($directoryPath, 0x00000001)
+    directory_traverse_ntstatus =
+        [ProjectAtlasObjectNamespaceProbe]::OpenDirectory($directoryPath, 0x00000002)
+    directory_create_object_ntstatus =
+        [ProjectAtlasObjectNamespaceProbe]::OpenDirectory($directoryPath, 0x00000004)
+    directory_traverse_create_ntstatus =
+        [ProjectAtlasObjectNamespaceProbe]::OpenDirectory($directoryPath, 0x00000006)
+    parent_open_win32 = [ProjectAtlasObjectNamespaceProbe]::OpenParentSemaphore(
+        $jobserverMatch.Groups[1].Value
+    )
+    default_create_win32 = [ProjectAtlasObjectNamespaceProbe]::CreateDefault(
+        "__projectatlas_namespace_probe_$([Guid]::NewGuid().ToString('N'))"
+    )
+    exact_local_create_win32 = [ProjectAtlasObjectNamespaceProbe]::CreateExactLocal(
+        "Local\ProjectAtlasParserPackProbe-$([Guid]::NewGuid().ToString('N'))",
+        $ExpectedPrincipalSid
+    )
+}
+try {
+    $json = $result | ConvertTo-Json -Compress -Depth 4
+    if ($json.Length -lt 1 -or $json.Length -gt 4096) {
+        exit 104
+    }
+    [System.IO.File]::WriteAllText(
+        $ResultPath,
+        $json,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+}
+catch {
+    exit 105
+}
+exit 0
 '@
+    [System.IO.File]::WriteAllText(
+        $probeScriptPath,
+        $namespaceProbeSource,
+        [System.Text.UTF8Encoding]::new($false)
+    )
     $normalArguments = [string[]]@(
         '-NoLogo', '-NoProfile', '-NonInteractive',
-        '-Command', $jobserverCanary
+        '-File', $probeScriptPath,
+        '-ExpectedPrincipalSid', $identity.Sid,
+        '-ResultPath', $probeResultPath
     )
     # RunCore validates its command line before authentication. Keep this probe
     # short so invalid credentials reach the intended LogonUser boundary.
@@ -1760,22 +2051,9 @@ exit [ProjectAtlasJobserverProbe]::Open($m.Groups[1].Value)
                 }
                 throw "Construction normal admission invocation failed. type=$($normalFailure.GetType().Name) native_error_code=$nativeError message=$normalMessage"
             }
-            if ($normalExitCode -ne 0) {
-                $normalFailureKind = switch ($normalExitCode) {
-                    5 { 'jobserver-open-access-denied' }
-                    2 { 'jobserver-open-not-found' }
-                    1001 { 'jobserver-environment-mismatch' }
-                    1002 { 'jobserver-probe-unavailable' }
-                    default { 'jobserver-open-error' }
-                }
-                $normalNativeErrorCode = if ($normalExitCode -lt 1000) {
-                    $normalExitCode
-                }
-                else {
-                    ''
-                }
-                throw "Construction normal admission child failed. exit_code=$normalExitCode kind=$normalFailureKind native_error_code=$normalNativeErrorCode"
-            }
+            Require `
+                ($normalExitCode -eq 0) `
+                "Construction named-object probe child failed. exit_code=$normalExitCode"
             Require `
                 ([ProjectAtlasConstructionProcess]::LastTotalProcesses -ge 1) `
                 "Construction normal admission did not contain its child."
@@ -1784,7 +2062,72 @@ exit [ProjectAtlasJobserverProbe]::Open($m.Groups[1].Value)
                 -Receipt $receipt `
                 -ExpectTermination $false
             Invoke-ExactSidProcessAudit -Sid $identity.Sid -Expectation absent
-            continue
+            Require `
+                ([System.IO.File]::Exists($probeResultPath) -and
+                    -not [System.IO.Directory]::Exists($probeResultPath)) `
+                "Construction named-object probe did not write a regular result file."
+            $probeResultItem = Get-Item -LiteralPath $probeResultPath -Force
+            Require `
+                (-not $probeResultItem.PSIsContainer -and
+                    (($probeResultItem.Attributes -band
+                        [System.IO.FileAttributes]::ReparsePoint) -eq 0) -and
+                    $probeResultItem.Length -ge 1 -and
+                    $probeResultItem.Length -le 4096) `
+                "Construction named-object probe result was unsafe or unbounded."
+            $probeResult = Get-Content `
+                -LiteralPath $probeResultPath `
+                -Raw `
+                -Encoding UTF8 | ConvertFrom-Json -Depth 8
+            $expectedDirectoryPath = if ([int]$probeResult.session_id -eq 0) {
+                '\BaseNamedObjects'
+            }
+            else {
+                "\Sessions\$([int]$probeResult.session_id)\BaseNamedObjects"
+            }
+            Require `
+                ([int]$probeResult.schema_version -eq 1 -and
+                    [int]$probeResult.session_id -ge 0 -and
+                    [string]::Equals(
+                        [string]$probeResult.directory_path,
+                        $expectedDirectoryPath,
+                        [System.StringComparison]::Ordinal
+                    )) `
+                "Construction named-object probe result identity was invalid."
+            $ntStatusNames = @(
+                'directory_query_ntstatus',
+                'directory_traverse_ntstatus',
+                'directory_create_object_ntstatus',
+                'directory_traverse_create_ntstatus'
+            )
+            $win32Names = @(
+                'parent_open_win32',
+                'default_create_win32',
+                'exact_local_create_win32'
+            )
+            foreach ($name in $ntStatusNames) {
+                Require `
+                    ($null -ne $probeResult.PSObject.Properties[$name] -and
+                        [long]$probeResult.$name -ge [int32]::MinValue -and
+                        [long]$probeResult.$name -le [int32]::MaxValue) `
+                    "Construction named-object probe returned an invalid NTSTATUS."
+            }
+            foreach ($name in $win32Names) {
+                Require `
+                    ($null -ne $probeResult.PSObject.Properties[$name] -and
+                        [long]$probeResult.$name -ge 0 -and
+                        [long]$probeResult.$name -le [int32]::MaxValue) `
+                    "Construction named-object probe returned an invalid Win32 status."
+            }
+            $formattedNtStatuses = [ordered]@{}
+            foreach ($name in $ntStatusNames) {
+                $signedStatus = [int32]$probeResult.$name
+                $unsignedStatus = [BitConverter]::ToUInt32(
+                    [BitConverter]::GetBytes($signedStatus),
+                    0
+                )
+                $formattedNtStatuses[$name] = '0x{0:X8}' -f $unsignedStatus
+            }
+            throw "Construction named-object probe classified session_id=$([int]$probeResult.session_id) directory_path=$([string]$probeResult.directory_path) query_ntstatus=$($formattedNtStatuses.directory_query_ntstatus) traverse_ntstatus=$($formattedNtStatuses.directory_traverse_ntstatus) create_object_ntstatus=$($formattedNtStatuses.directory_create_object_ntstatus) traverse_create_ntstatus=$($formattedNtStatuses.directory_traverse_create_ntstatus) parent_open_win32=$([int]$probeResult.parent_open_win32) default_create_win32=$([int]$probeResult.default_create_win32) exact_local_create_win32=$([int]$probeResult.exact_local_create_win32)"
         }
 
         $failure = Get-ReflectedOperationFailure `
@@ -2295,6 +2638,48 @@ finally {
     foreach ($password in $recoveryPasswords) {
         try {
             $password.Dispose()
+        }
+        catch {
+            $cleanupFailures.Add($_.Exception)
+        }
+    }
+    foreach ($probePath in $namespaceProbePaths) {
+        try {
+            $resolvedProbePath = [System.IO.Path]::GetFullPath($probePath)
+            $resolvedProbeParent = [System.IO.Path]::GetDirectoryName(
+                $resolvedProbePath
+            )
+            $expectedProbeParent = [System.IO.Path]::GetFullPath(
+                [System.IO.Path]::Combine($env:SystemRoot, 'Temp')
+            ).TrimEnd(
+                [System.IO.Path]::DirectorySeparatorChar,
+                [System.IO.Path]::AltDirectorySeparatorChar
+            )
+            Require `
+                ([string]::Equals(
+                    $resolvedProbeParent.TrimEnd(
+                        [System.IO.Path]::DirectorySeparatorChar,
+                        [System.IO.Path]::AltDirectorySeparatorChar
+                    ),
+                    $expectedProbeParent,
+                    [System.StringComparison]::OrdinalIgnoreCase
+                ) -and
+                    [System.IO.Path]::GetFileName($resolvedProbePath) -match
+                        '\Aprojectatlas-object-namespace-probe-[0-9a-f]{32}\.(ps1|json)\z') `
+                "Refused to remove an unsafe named-object probe path."
+            if ([System.IO.File]::Exists($resolvedProbePath)) {
+                $probeItem = Get-Item -LiteralPath $resolvedProbePath -Force
+                Require `
+                    (-not $probeItem.PSIsContainer -and
+                        (($probeItem.Attributes -band
+                            [System.IO.FileAttributes]::ReparsePoint) -eq 0)) `
+                    "Refused to remove an unsafe named-object probe file."
+                Remove-Item -LiteralPath $resolvedProbePath -Force
+            }
+            Require `
+                (-not [System.IO.File]::Exists($resolvedProbePath) -and
+                    -not [System.IO.Directory]::Exists($resolvedProbePath)) `
+                "Named-object probe file survived suite cleanup."
         }
         catch {
             $cleanupFailures.Add($_.Exception)
