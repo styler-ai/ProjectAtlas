@@ -2159,11 +2159,38 @@ public static class ProjectAtlasConstructionAdmissionFixture
             "Contained Cargo jobserver did not retain one protected exact-rights DACL."
         Invoke-Expression $jobserverDefinitionText
         Invoke-Expression $jobserverCanaryDefinitions[0].Extent.Text
-        $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $currentSid = $currentIdentity.User
+        $jobserverSecuritySid = $currentIdentity.Owner
+        Require `
+            ($null -ne $jobserverSecuritySid) `
+            "Diagnostic token did not expose a default owner SID."
+        if (-not [string]::Equals(
+                $currentSid.Value,
+                $jobserverSecuritySid.Value,
+                [System.StringComparison]::Ordinal
+            )) {
+            $ownerMismatchRejected = $false
+            try {
+                $unexpectedOwnerJobserver = New-ContainedCargoJobserver `
+                    -Sid $currentSid `
+                    -Name "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+                $unexpectedOwnerJobserver.Dispose()
+            }
+            catch {
+                $ownerMismatchRejected = $_.Exception.Message -eq
+                    'Contained Cargo jobserver requires the construction SID as the token default owner.'
+            }
+            Require `
+                $ownerMismatchRejected `
+                "Contained Cargo jobserver accepted a non-owner construction SID."
+        }
         $jobserverRights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
             [System.Security.AccessControl.SemaphoreRights]::Modify
         $jobserverName = "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
-        $jobserver = New-ContainedCargoJobserver -Sid $currentSid -Name $jobserverName
+        $jobserver = New-ContainedCargoJobserver `
+            -Sid $jobserverSecuritySid `
+            -Name $jobserverName
         $openedJobserver = $null
         try {
             $openedJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(
@@ -2197,7 +2224,7 @@ public static class ProjectAtlasConstructionAdmissionFixture
             $collisionRejected = $false
             try {
                 $unexpectedJobserver = New-ContainedCargoJobserver `
-                    -Sid $currentSid `
+                    -Sid $jobserverSecuritySid `
                     -Name $jobserverName
                 $unexpectedJobserver.Dispose()
             }
@@ -2208,7 +2235,7 @@ public static class ProjectAtlasConstructionAdmissionFixture
             $globalNameRejected = $false
             try {
                 $unexpectedGlobalJobserver = New-ContainedCargoJobserver `
-                    -Sid $currentSid `
+                    -Sid $jobserverSecuritySid `
                     -Name "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
                 $unexpectedGlobalJobserver.Dispose()
             }
