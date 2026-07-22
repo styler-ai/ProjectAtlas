@@ -226,13 +226,11 @@ function Assert-ProductionRecoveryContracts {
             $retainedJobInjectionIndex -gt $tokenValidationIndex -and
             $inheritedJobCheckIndex -gt $retainedJobInjectionIndex -and
             $ownJobAssignmentIndex -gt $inheritedJobCheckIndex -and
-            $nativeText.Contains('uint flags = CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;') -and
-            $nativeText.Contains('return flags | CreateBreakawayFromJob;') -and
-            $nativeText.Contains('return flags;') -and
+            $nativeText.Contains('return CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;') -and
             $nativeText.Contains('EntryPoint = "LogonUserW"') -and
             $nativeText.Contains('EntryPoint = "CreateProcessWithTokenW"') -and
             -not $nativeText.Contains('EntryPoint = "CreateProcessWithLogonW"') -and
-            $nativeText.Contains('CreateBreakawayFromJob = 0x01000000;') -and
+            -not $nativeText.Contains('CreateBreakawayFromJob = 0x01000000;') -and
             $nativeText.Contains('ValidateCurrentBrokerJob(brokerJobName);') -and
             $nativeText.Contains('limits.BasicLimitInformation.LimitFlags != expectedFlags') -and
             $nativeText.Contains('JobObjectLimitKillOnJobClose | JobObjectLimitBreakawayOk') -and
@@ -251,9 +249,7 @@ function Assert-ProductionRecoveryContracts {
             $nativeText.Contains('EntryPoint = "CreateSemaphoreExW"') -and
             $nativeText.Contains('CapturePreJobNativeSemaphoreProbe(admissionReceipt);') -and
             $nativeText.Contains('MaximumLogonCommandLineCharacters = 1023;') -and
-            $nativeText.Contains('construction-process-retained-inherited-job') -and
-            $nativeText.Contains('construction-process-retained-broker-job') -and
-            $nativeText.Contains('construction-process-retained-foreign-job')) `
+            $nativeText.Contains('construction-process-retained-inherited-job')) `
         "Construction admission no longer validates the suspended alternate-logon child before assigning its owned Job."
 
     $objectDirectorySources = @($Ast.FindAll(
@@ -512,6 +508,10 @@ function Assert-NamedObjectProbeDiagnosticContract {
             "Named-object probe lost one stable diagnostic or cleanup contract."
     }
     Require `
+        (-not $probeText.Contains("'post-job-native-semaphore-create'") -and
+            -not $probeText.Contains("'post-job-native-semaphore-close'")) `
+        "Default-security semaphore diagnostics must not gate the explicit-security access proof."
+    Require `
         ($probeText -notmatch '(?m)^\s*exit\s+1\s*$') `
         "Named-object probe retained an unclassified exit path."
     $canaryAssignments = @($selfAst.FindAll(
@@ -596,6 +596,7 @@ function Assert-NamedObjectProbeDiagnosticContract {
             $selfText.Contains('$Value.GetType() -eq [string]') -and
             $selfText.Contains('$Value.GetType() -eq [bool]') -and
             $selfText.Contains('function Test-BoundedProbeErrorsEqual') -and
+            $selfText.Contains('function Test-DefaultSecuritySemaphoreProbe') -and
             $selfText.Contains('$isCleanupFailure =') -and
             $selfText.Contains('function Format-NamedObjectProbeFailure') -and
             $selfText.Contains('function Format-NamedObjectAccessComparison') -and
@@ -1085,6 +1086,27 @@ function Test-BoundedProbeErrorsEqual {
                 $Left.native_code -eq $Right.native_code))
 }
 
+function Test-DefaultSecuritySemaphoreProbe {
+    param(
+        [Parameter(Mandatory = $true)]
+        [long]$CreateWin32,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$CreatedNew,
+
+        [Parameter(Mandatory = $true)]
+        [long]$CloseWin32
+    )
+
+    if ($CreateWin32 -eq 0L) {
+        return $CreatedNew -and $CloseWin32 -eq 0L
+    }
+    if ($CreateWin32 -eq 183L) {
+        return -not $CreatedNew -and $CloseWin32 -eq 0L
+    }
+    return $CreateWin32 -gt 0L -and -not $CreatedNew -and $CloseWin32 -eq -1L
+}
+
 function Read-NamedObjectProbeRecord {
     param(
         [Parameter(Mandatory = $true)]
@@ -1182,9 +1204,10 @@ function Read-NamedObjectProbeRecord {
         $record.session_id -ge 0L -and
         -not [string]::IsNullOrEmpty($record.directory_path) -and
         -not [string]::IsNullOrEmpty($record.native_semaphore_name) -and
-        $record.post_job_native_create_win32 -eq 0L -and
-        $record.post_job_native_created_new -eq $true -and
-        $record.post_job_native_close_win32 -eq 0L -and
+        (Test-DefaultSecuritySemaphoreProbe `
+            -CreateWin32 $record.post_job_native_create_win32 `
+            -CreatedNew $record.post_job_native_created_new `
+            -CloseWin32 $record.post_job_native_close_win32) -and
         -not [string]::IsNullOrEmpty($record.semaphore_name) -and
         $record.created_new -eq $true -and
         $record.descendant_exit_code -eq 0L
@@ -1280,6 +1303,14 @@ function Assert-NamedObjectProbeRecordFixtures {
         }
         $records = [System.Collections.Generic.List[System.Collections.IDictionary]]::new()
         $records.Add($success)
+        $defaultSecurityDenied = [ordered]@{}
+        foreach ($entry in $success.GetEnumerator()) {
+            $defaultSecurityDenied[$entry.Key] = $entry.Value
+        }
+        $defaultSecurityDenied.post_job_native_create_win32 = 5
+        $defaultSecurityDenied.post_job_native_created_new = $false
+        $defaultSecurityDenied.post_job_native_close_win32 = -1
+        $records.Add($defaultSecurityDenied)
         foreach ($failureRow in @(
             [pscustomobject]@{
                 Stage = 'native-semaphore-create'
@@ -2903,19 +2934,6 @@ try {
             [ref]$postJobNativeCreatedNew,
             [ref]$postJobNativeCloseWin32
         )
-    if ($postJobNativeCreateWin32 -ne 0 -or -not $postJobNativeCreatedNew) {
-        throw [System.ComponentModel.Win32Exception]::new(
-            [int]$postJobNativeCreateWin32,
-            'post-job-native-semaphore-create'
-        )
-    }
-    $probeStage = 'native-semaphore-close'
-    if ($postJobNativeCloseWin32 -ne 0) {
-        throw [System.ComponentModel.Win32Exception]::new(
-            [int]$postJobNativeCloseWin32,
-            'post-job-native-semaphore-close'
-        )
-    }
 
     $probeStage = 'semaphore-acl'
     if ($DiagnosticFault -ceq 'operation-and-cleanup') {
@@ -3448,9 +3466,10 @@ exit 0
                     ) -and
                     $probeResult.native_semaphore_name -match
                         '\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z' -and
-                    $probeResult.post_job_native_create_win32 -eq 0L -and
-                    $probeResult.post_job_native_created_new -eq $true -and
-                    $probeResult.post_job_native_close_win32 -eq 0L -and
+                    (Test-DefaultSecuritySemaphoreProbe `
+                        -CreateWin32 $probeResult.post_job_native_create_win32 `
+                        -CreatedNew $probeResult.post_job_native_created_new `
+                        -CloseWin32 $probeResult.post_job_native_close_win32) -and
                     $probeResult.created_new -eq $true -and
                     $probeResult.descendant_exit_code -eq 0L -and
                     $probeResult.semaphore_name -match

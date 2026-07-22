@@ -1565,7 +1565,6 @@ using System.Text;
 public static class ProjectAtlasConstructionProcess
 {
     private const uint CreateSuspended = 0x00000004;
-    private const uint CreateBreakawayFromJob = 0x01000000;
     private const uint CreateNoWindow = 0x08000000;
     private const uint CreateUnicodeEnvironment = 0x00000400;
     private const uint Logon32LogonInteractive = 2;
@@ -2184,15 +2183,16 @@ public static class ProjectAtlasConstructionProcess
 
     private static uint GetConstructionCreationFlags()
     {
-        uint flags = CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;
         string brokerJobName = GetConfiguredBrokerJobName();
         if (!string.IsNullOrEmpty(brokerJobName))
         {
             ValidateCurrentBrokerJob(brokerJobName);
-            return flags | CreateBreakawayFromJob;
         }
-        RequireCurrentProcessJobFree();
-        return flags;
+        else
+        {
+            RequireCurrentProcessJobFree();
+        }
+        return CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;
     }
 
     private static string GetConfiguredBrokerJobName()
@@ -2575,22 +2575,21 @@ public static class ProjectAtlasConstructionProcess
             {
                 throw new InvalidOperationException("construction-process-retained-inherited-job");
             }
-            // The child is still suspended. It must break away from the authenticated
-            // broker Job before this boundary assigns its sole, stricter construction Job.
             if (inheritedJob)
             {
+                // Brokered construction deliberately retains the authenticated parent Job.
+                // Only that exact broker Job is a valid parent for the empty, stricter
+                // construction Job that AssignProcessToJobObject nests.
                 string brokerJobName = GetConfiguredBrokerJobName();
                 if (string.IsNullOrEmpty(brokerJobName))
                 {
                     throw new InvalidOperationException(
-                        "construction-process-retained-foreign-job");
+                        "construction-process-retained-inherited-job");
                 }
                 ValidateBrokerJobMembership(
                     brokerJobName,
                     process.Process,
-                    "construction-process-retained-foreign-job");
-                throw new InvalidOperationException(
-                    "construction-process-retained-broker-job");
+                    "construction-process-retained-inherited-job");
             }
             if (admissionScenario == AdmissionScenario.FailBeforeJobAssignment ||
                 admissionScenario == AdmissionScenario.FailBeforeJobAssignmentAndCleanupFailure)

@@ -280,6 +280,7 @@ try {
             'Test-ExactJsonBoolean',
             'Test-BoundedProbeError',
             'Test-BoundedProbeErrorsEqual',
+            'Test-DefaultSecuritySemaphoreProbe',
             'Read-NamedObjectProbeRecord',
             'Format-NamedObjectProbeFailure',
             'Remove-NamedObjectProbeTemporaryRecords'
@@ -751,7 +752,7 @@ try {
                 -not $nativeSource.Contains('AdjustTokenPrivileges') -and
                 -not $nativeSource.Contains('EntryPoint = "CreateProcessWithLogonW"') -and
                 -not $nativeSource.Contains('EntryPoint = "CreateProcessAsUserW"') -and
-                $nativeSource.Contains('CreateBreakawayFromJob = 0x01000000;') -and
+                -not $nativeSource.Contains('CreateBreakawayFromJob = 0x01000000;') -and
                 $nativeSource.Contains('JobObjectLimitBreakawayOk = 0x00000800;') -and
                 $nativeSource.Contains('JobObjectLimitSilentBreakawayOk = 0x00001000;') -and
                 $nativeSource.Contains('construction-broker-job-required') -and
@@ -759,8 +760,6 @@ try {
                 $nativeSource.Contains('construction-broker-job-policy') -and
                 $nativeSource.Contains('ValidateBrokerJobMembership(') -and
                 $nativeSource.Contains('construction-process-retained-inherited-job') -and
-                $nativeSource.Contains('construction-process-retained-broker-job') -and
-                $nativeSource.Contains('construction-process-retained-foreign-job') -and
                 $wrapperText.Contains(
                     '[ProjectAtlasConstructionProcess]::ConfigureBrokerJob($BrokerJobName)'
                 ) -and
@@ -911,9 +910,7 @@ try {
                 $jobAssignmentIndex -gt $admissionFailureIndex -and
                 $admissionCleanupIndex -gt $jobAssignmentIndex -and
                 $tokenCloseIndex -gt $admissionCleanupIndex -and
-                $nativeSource.Contains('uint flags = CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;') -and
-                $nativeSource.Contains('return flags | CreateBreakawayFromJob;') -and
-                $nativeSource.Contains('return flags;') -and
+                $nativeSource.Contains('return CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;') -and
                 $nativeSource.Contains('ValidateCurrentBrokerJob(brokerJobName);') -and
                 $nativeSource.Contains('process.Process,') -and
                 $nativeSource.Contains('limits.BasicLimitInformation.LimitFlags != expectedFlags') -and
