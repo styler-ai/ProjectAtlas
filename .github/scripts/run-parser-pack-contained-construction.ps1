@@ -291,7 +291,6 @@ function Write-ConstructionStatus {
             "validate-inputs",
             "network-denial-canaries",
             "output-preparation",
-            "jobserver-bootstrap",
             "optional-parser-worker-build",
             "artifact-assembler-build",
             "release-verifier-build",
@@ -337,6 +336,19 @@ function Write-ConstructionStatus {
     }
 }
 
+function Assert-CargoConstructionEnvironment {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Target
+    )
+
+    if ($Target -eq "x86_64-pc-windows-msvc" -and
+        ([string]$env:CARGO_BUILD_JOBS -cne "1" -or
+            (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS))) {
+        throw "Windows construction requires a one-job Cargo budget and no inherited jobserver."
+    }
+}
+
 if ($targetIsolation[$Target] -ne $NetworkIsolation) {
     throw "NetworkIsolation does not match Target."
 }
@@ -354,6 +366,7 @@ foreach ($forbiddenVariable in @("TSLP_LANGUAGES", "TSLP_ALLOW_FAILED_GRAMMARS")
         throw "Forbidden optional-parser build override is present: $forbiddenVariable"
     }
 }
+Assert-CargoConstructionEnvironment -Target $Target
 
 $source = Get-CanonicalDirectory -Path $SourceRoot -Role "SourceRoot"
 $inputs = Get-CanonicalDirectory -Path $InputDirectory -Role "InputDirectory"
@@ -370,7 +383,6 @@ $script:constructionStage = "validate-inputs"
 $script:constructionFailureRecorded = $false
 $script:constructionFailureExitCode = 1
 trap {
-    Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS -ErrorAction SilentlyContinue
     if (-not $script:constructionFailureRecorded) {
         $failureExitCode = 1
         $lastNativeExit = Get-Variable -Name LASTEXITCODE -ValueOnly -ErrorAction SilentlyContinue
@@ -434,74 +446,8 @@ $env:CARGO_NET_OFFLINE = "true"
 $env:CARGO_TARGET_DIR = $buildDirectory
 $env:TSLP_OFFLINE = "1"
 $env:TSLP_LINK_MODE = "dynamic"
-if ($Target -eq "x86_64-pc-windows-msvc") {
-    $jobserverPattern =
-        '\A-j --jobserver-fds=(Global\\ProjectAtlasParserPack-[0-9a-f]{32}) --jobserver-auth=\1\z'
-    if ([string]$env:CARGO_MAKEFLAGS -notmatch $jobserverPattern) {
-        throw "Contained construction did not inherit its exact Cargo jobserver."
-    }
-    $constructionJobserverName = $Matches[1]
-    $script:constructionStage = "jobserver-bootstrap"
-    Write-ConstructionStatus -Stage $script:constructionStage -State "running"
-    $jobserverRights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
-        [System.Security.AccessControl.SemaphoreRights]::Modify
-    $constructionJobserver = $null
-    $jobserverBootstrapOperation = "open"
-    try {
-        $constructionJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(
-            $constructionJobserverName,
-            $jobserverRights
-        )
-        $jobserverBootstrapOperation = "acquire"
-        if (-not $constructionJobserver.WaitOne(0)) {
-            throw "Contained Cargo jobserver token could not be acquired and restored."
-        }
-        $jobserverBootstrapOperation = "release"
-        if ($constructionJobserver.Release() -ne 0) {
-            throw "Contained Cargo jobserver token could not be acquired and restored."
-        }
-    }
-    catch {
-        $jobserverFailure = $_.Exception
-        while ($null -ne $jobserverFailure.InnerException) {
-            $jobserverFailure = $jobserverFailure.InnerException
-        }
-        $failureCategory = switch ($jobserverBootstrapOperation) {
-            "open" {
-                if ($jobserverFailure -is [System.Threading.WaitHandleCannotBeOpenedException]) {
-                    "jobserver-open-not-found"
-                }
-                elseif ($jobserverFailure -is [System.UnauthorizedAccessException]) {
-                    "jobserver-open-denied"
-                }
-                else {
-                    "jobserver-open-failed"
-                }
-            }
-            "acquire" { "jobserver-acquire-failed" }
-            "release" { "jobserver-release-failed" }
-            default { "jobserver-bootstrap-failed" }
-        }
-        $failureType = $jobserverFailure.GetType().FullName
-        $failureHResult = "0x{0:X8}" -f $jobserverFailure.HResult
-        Write-BoundedConstructionDiagnostic `
-            -Role "jobserver bootstrap" `
-            -StandardOutput "" `
-            -StandardError (
-                "category: $failureCategory`n" +
-                "exception_type: $failureType`n" +
-                "hresult: $failureHResult"
-            )
-        throw
-    }
-    finally {
-        if ($null -ne $constructionJobserver) {
-            $constructionJobserver.Dispose()
-        }
-    }
-}
 
-    $workerBuildArguments = @(
+$workerBuildArguments = @(
         "build",
         "--frozen",
         "--offline",
@@ -820,7 +766,6 @@ $publishedNetworkCheck = [System.IO.Path]::Combine(
 )
 [System.IO.File]::Copy($acceptedManifest, $publishedManifest, $false)
 [System.IO.File]::Copy($networkCheck, $publishedNetworkCheck, $false)
-Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS -ErrorAction SilentlyContinue
 [System.IO.File]::Delete($script:constructionStatusPath)
 
 [pscustomobject]@{

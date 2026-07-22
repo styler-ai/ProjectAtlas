@@ -991,7 +991,6 @@ using System.Runtime.InteropServices;
 using System.Security;
 using System.Security.Principal;
 using System.Text;
-using System.Text.RegularExpressions;
 
 public static class ProjectAtlasConstructionProcess
 {
@@ -1010,31 +1009,18 @@ public static class ProjectAtlasConstructionProcess
     private const uint DesktopAllAccess = 0x000F01FF;
     private const uint SddlRevision1 = 1;
     private const uint TokenQuery = 0x0008;
-    private const uint TokenDuplicate = 0x0002;
     private const int Logon32LogonInteractive = 2;
     private const int Logon32ProviderDefault = 0;
     private const int TokenUserInformation = 1;
     private const int TokenGroupsInformation = 2;
     private const int TokenIntegrityLevelInformation = 25;
-    private const int SecurityImpersonation = 2;
     private const uint SeGroupEnabled = 0x00000004;
     private const uint SeGroupUseForDenyOnly = 0x00000010;
     private const uint SeGroupLogonId = 0xC0000000;
-    private const uint Synchronize = 0x00100000;
-    private const uint SemaphoreModifyState = 0x00000002;
-    private const uint SemaphoreAllAccess = 0x001F0003;
     private const int ErrorInsufficientBuffer = 122;
-    private const int ErrorAlreadyExists = 183;
     private const int MaximumTokenInformationBytes = 64 * 1024;
     private const int MaximumTokenGroupCount = 1024;
     private const string RequiredIntegritySid = "S-1-16-8192";
-    private const string AdmissionProbeLogonSidEnvironment =
-        "PROJECTATLAS_CONSTRUCTION_EXPECTED_LOGON_SID";
-    private const string AdmissionProbeLogonSidPlaceholder =
-        "__PROJECTATLAS_CONSTRUCTION_LOGON_SID__";
-    private static readonly Regex JobserverNamePattern = new Regex(
-        @"\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z",
-        RegexOptions.CultureInvariant);
 
     public static uint LastTotalProcesses { get; private set; }
 
@@ -1042,8 +1028,7 @@ public static class ProjectAtlasConstructionProcess
     {
         Normal,
         FailBeforeJobAssignment,
-        FailBeforeJobAssignmentAndCleanupFailure,
-        FailAfterJobserverAdmissionBeforeJobAssignment
+        FailBeforeJobAssignmentAndCleanupFailure
     }
 
     private sealed class AdmissionReceipt
@@ -1058,8 +1043,6 @@ public static class ProjectAtlasConstructionProcess
         internal bool ProcessHandleClosed { get; set; }
         internal bool ThreadHandleOwned { get; set; }
         internal bool ThreadHandleClosed { get; set; }
-        internal bool JobserverHandleOwned { get; set; }
-        internal bool JobserverHandleClosed { get; set; }
         internal bool ConstructionTokenHandleOwned { get; set; }
         internal bool ConstructionTokenHandleClosed { get; set; }
     }
@@ -1129,15 +1112,6 @@ public static class ProjectAtlasConstructionProcess
     private struct TokenMandatoryLabel
     {
         public SidAndAttributes Label;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct GenericMapping
-    {
-        public uint GenericRead;
-        public uint GenericWrite;
-        public uint GenericExecute;
-        public uint GenericAll;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1222,13 +1196,6 @@ public static class ProjectAtlasConstructionProcess
 
     [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool DuplicateToken(
-        SafeAccessTokenHandle existingToken,
-        int impersonationLevel,
-        out SafeAccessTokenHandle duplicateToken);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetTokenInformation(
         SafeAccessTokenHandle tokenHandle,
         int tokenInformationClass,
@@ -1242,18 +1209,6 @@ public static class ProjectAtlasConstructionProcess
 
     [DllImport("advapi32.dll", SetLastError = true)]
     private static extern uint GetLengthSid(IntPtr sid);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool AccessCheck(
-        IntPtr securityDescriptor,
-        SafeAccessTokenHandle clientToken,
-        uint desiredAccess,
-        ref GenericMapping genericMapping,
-        IntPtr privilegeSet,
-        ref uint privilegeSetLength,
-        out uint grantedAccess,
-        [MarshalAs(UnmanagedType.Bool)] out bool accessStatus);
 
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -1299,39 +1254,6 @@ public static class ProjectAtlasConstructionProcess
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateJobObject(IntPtr attributes, string name);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true,
-        EntryPoint = "CreateSemaphoreExW")]
-    private static extern IntPtr CreateSemaphoreEx(
-        ref SecurityAttributes attributes,
-        int initialCount,
-        int maximumCount,
-        string name,
-        uint flags,
-        uint desiredAccess);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true,
-        EntryPoint = "CreateSemaphoreExW")]
-    private static extern IntPtr CreateSemaphoreExWithoutSecurity(
-        IntPtr attributes,
-        int initialCount,
-        int maximumCount,
-        string name,
-        uint flags,
-        uint desiredAccess);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern IntPtr OpenSemaphore(
-        uint desiredAccess,
-        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
-        string name);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ReleaseSemaphore(
-        IntPtr semaphore,
-        int releaseCount,
-        out int previousCount);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -1380,41 +1302,6 @@ public static class ProjectAtlasConstructionProcess
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr handle);
 
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetSecurityDescriptorSacl(
-        IntPtr securityDescriptor,
-        [MarshalAs(UnmanagedType.Bool)] out bool saclPresent,
-        out IntPtr sacl,
-        [MarshalAs(UnmanagedType.Bool)] out bool saclDefaulted);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    private static extern uint SetSecurityInfo(
-        IntPtr handle,
-        int objectType,
-        uint securityInformation,
-        IntPtr owner,
-        IntPtr group,
-        IntPtr dacl,
-        IntPtr sacl);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    private static extern uint GetSecurityInfo(
-        IntPtr handle,
-        int objectType,
-        uint securityInformation,
-        IntPtr owner,
-        IntPtr group,
-        IntPtr dacl,
-        out IntPtr sacl,
-        out IntPtr securityDescriptor);
-
-    private sealed class ConstructionTokenIdentity
-    {
-        internal string LogonSid { get; set; }
-        internal string IntegritySid { get; set; }
-    }
-
     private sealed class TokenInformationBuffer : IDisposable
     {
         internal TokenInformationBuffer(IntPtr pointer, int length)
@@ -1435,83 +1322,6 @@ public static class ProjectAtlasConstructionProcess
                 Length = 0;
             }
         }
-    }
-
-    public static bool CanCreateFreshJobserverName(string name)
-    {
-        ValidateJobserverName(name);
-        IntPtr handle = CreateSemaphoreExWithoutSecurity(
-            IntPtr.Zero,
-            1,
-            1,
-            name,
-            0,
-            SemaphoreAllAccess);
-        if (handle == IntPtr.Zero)
-        {
-            throw Failure("probe-fresh-jobserver-name");
-        }
-        int createError = Marshal.GetLastWin32Error();
-        using (var ownedHandle = new SafeWaitHandle(handle, true))
-        {
-            return createError != ErrorAlreadyExists;
-        }
-    }
-
-    private static void ValidateJobserverRequest(string name, string environmentBlock)
-    {
-        string expected = null;
-        if (!string.IsNullOrEmpty(name))
-        {
-            ValidateJobserverName(name);
-            expected = "CARGO_MAKEFLAGS=-j --jobserver-fds=" + name +
-                " --jobserver-auth=" + name;
-        }
-
-        int matchingRows = 0;
-        int makeflagsRows = 0;
-        foreach (string row in environmentBlock.Split('\0'))
-        {
-            if (row.StartsWith("CARGO_MAKEFLAGS=", StringComparison.Ordinal))
-            {
-                makeflagsRows++;
-                if (string.Equals(row, expected, StringComparison.Ordinal))
-                {
-                    matchingRows++;
-                }
-            }
-        }
-        if ((expected == null && makeflagsRows != 0) ||
-            (expected != null && (makeflagsRows != 1 || matchingRows != 1)))
-        {
-            throw new InvalidOperationException("validate-construction-jobserver-environment");
-        }
-    }
-
-    private static void ValidateJobserverName(string name)
-    {
-        if (string.IsNullOrEmpty(name) || !JobserverNamePattern.IsMatch(name))
-        {
-            throw new ArgumentException("validate-construction-jobserver-name", nameof(name));
-        }
-    }
-
-    private static string BindAdmissionProbeLogonSid(
-        string environmentBlock,
-        string logonSid)
-    {
-        string placeholderRow = AdmissionProbeLogonSidEnvironment + "=" +
-            AdmissionProbeLogonSidPlaceholder;
-        int first = environmentBlock.IndexOf(placeholderRow, StringComparison.Ordinal);
-        int last = environmentBlock.LastIndexOf(placeholderRow, StringComparison.Ordinal);
-        if (first < 0 || first != last)
-        {
-            throw new InvalidOperationException(
-                "validate-construction-admission-probe-environment");
-        }
-        return environmentBlock.Substring(0, first) +
-            AdmissionProbeLogonSidEnvironment + "=" + logonSid +
-            environmentBlock.Substring(first + placeholderRow.Length);
     }
 
     private static SafeAccessTokenHandle LogonConstructionUser(
@@ -1557,83 +1367,7 @@ public static class ProjectAtlasConstructionProcess
         return token;
     }
 
-    private static SafeWaitHandle CreateAdmittedJobserver(
-        SafeAccessTokenHandle constructionToken,
-        ConstructionTokenIdentity constructionIdentity,
-        string name)
-    {
-        string daclSddl =
-            "D:P(A;;0x00100002;;;" + constructionIdentity.LogonSid + ")";
-        IntPtr securityDescriptor = IntPtr.Zero;
-        SafeWaitHandle semaphore = null;
-        try
-        {
-            if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
-                daclSddl,
-                SddlRevision1,
-                out securityDescriptor,
-                IntPtr.Zero))
-            {
-                throw Failure("create-construction-jobserver-security");
-            }
-            SecurityAttributes attributes = new SecurityAttributes();
-            attributes.Length = Marshal.SizeOf<SecurityAttributes>();
-            attributes.SecurityDescriptor = securityDescriptor;
-            attributes.InheritHandle = false;
-            IntPtr semaphoreHandle = CreateSemaphoreEx(
-                ref attributes,
-                1,
-                1,
-                name,
-                0,
-                SemaphoreAllAccess);
-            if (semaphoreHandle == IntPtr.Zero)
-            {
-                throw Failure("create-construction-jobserver");
-            }
-            int createError = Marshal.GetLastWin32Error();
-            semaphore = new SafeWaitHandle(semaphoreHandle, true);
-            if (createError == ErrorAlreadyExists)
-            {
-                throw new InvalidOperationException("construction-jobserver-name-collision");
-            }
-            ApplyMediumMandatoryLabel(
-                semaphore.DangerousGetHandle(),
-                constructionIdentity.IntegritySid);
-
-            SafeAccessTokenHandle impersonationToken;
-            if (!DuplicateToken(
-                constructionToken,
-                SecurityImpersonation,
-                out impersonationToken))
-            {
-                throw Failure("duplicate-construction-token");
-            }
-            using (impersonationToken)
-            {
-                AssertAccessCheck(semaphore.DangerousGetHandle(), impersonationToken);
-                WindowsIdentity.RunImpersonated(
-                    impersonationToken,
-                    () => AssertImpersonatedJobserverAccess(name));
-            }
-            SafeWaitHandle admitted = semaphore;
-            semaphore = null;
-            return admitted;
-        }
-        finally
-        {
-            if (semaphore != null)
-            {
-                semaphore.Dispose();
-            }
-            if (securityDescriptor != IntPtr.Zero)
-            {
-                LocalFree(securityDescriptor);
-            }
-        }
-    }
-
-    private static ConstructionTokenIdentity ReadAndValidateConstructionToken(
+    private static void ValidateConstructionToken(
         SafeAccessTokenHandle token,
         string principalSid)
     {
@@ -1654,7 +1388,6 @@ public static class ProjectAtlasConstructionProcess
             }
         }
 
-        string logonSid = null;
         int logonSidCount = 0;
         using (TokenInformationBuffer groupsInformation = GetBoundedTokenInformation(
             token,
@@ -1682,7 +1415,7 @@ public static class ProjectAtlasConstructionProcess
                     groupsInformation.Pointer,
                     checked(groupOffset + checked((int)index * groupSize)));
                 SidAndAttributes group = Marshal.PtrToStructure<SidAndAttributes>(groupPointer);
-                SecurityIdentifier groupSid = ReadBoundedSid(
+                ReadBoundedSid(
                     groupsInformation,
                     group.Sid,
                     "validate-construction-token-group-sid");
@@ -1692,11 +1425,10 @@ public static class ProjectAtlasConstructionProcess
                 if (isLogonSid && isEnabled && !isDenyOnly)
                 {
                     logonSidCount++;
-                    logonSid = groupSid.Value;
                 }
             }
         }
-        if (logonSidCount != 1 || string.IsNullOrEmpty(logonSid))
+        if (logonSidCount != 1)
         {
             throw new InvalidOperationException("validate-construction-token-logon-sid");
         }
@@ -1720,11 +1452,6 @@ public static class ProjectAtlasConstructionProcess
         {
             throw new InvalidOperationException("validate-construction-token-integrity");
         }
-        return new ConstructionTokenIdentity
-        {
-            LogonSid = logonSid,
-            IntegritySid = integritySid
-        };
     }
 
     private static TokenInformationBuffer GetBoundedTokenInformation(
@@ -1802,170 +1529,6 @@ public static class ProjectAtlasConstructionProcess
         return new SecurityIdentifier(sid);
     }
 
-    private static void ApplyMediumMandatoryLabel(IntPtr semaphore, string integritySid)
-    {
-        if (!string.Equals(integritySid, RequiredIntegritySid, StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException("validate-construction-jobserver-integrity");
-        }
-        IntPtr labelDescriptor = IntPtr.Zero;
-        try
-        {
-            if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
-                "S:(ML;;NW;;;" + integritySid + ")",
-                SddlRevision1,
-                out labelDescriptor,
-                IntPtr.Zero))
-            {
-                throw Failure("create-construction-jobserver-label");
-            }
-            bool saclPresent;
-            bool saclDefaulted;
-            IntPtr sacl;
-            if (!GetSecurityDescriptorSacl(
-                labelDescriptor,
-                out saclPresent,
-                out sacl,
-                out saclDefaulted) ||
-                !saclPresent || sacl == IntPtr.Zero)
-            {
-                throw Failure("read-construction-jobserver-label");
-            }
-            uint result = SetSecurityInfo(
-                semaphore,
-                6,
-                0x00000010,
-                IntPtr.Zero,
-                IntPtr.Zero,
-                IntPtr.Zero,
-                sacl);
-            if (result != 0)
-            {
-                throw new Win32Exception(
-                    unchecked((int)result),
-                    "apply-construction-jobserver-label");
-            }
-        }
-        finally
-        {
-            if (labelDescriptor != IntPtr.Zero)
-            {
-                LocalFree(labelDescriptor);
-            }
-        }
-    }
-
-    private static void AssertAccessCheck(
-        IntPtr semaphore,
-        SafeAccessTokenHandle impersonationToken)
-    {
-        IntPtr objectSecurity = IntPtr.Zero;
-        IntPtr privilegeSet = IntPtr.Zero;
-        try
-        {
-            IntPtr sacl;
-            uint securityResult = GetSecurityInfo(
-                semaphore,
-                6,
-                0x00000001 | 0x00000002 | 0x00000004 | 0x00000010,
-                IntPtr.Zero,
-                IntPtr.Zero,
-                IntPtr.Zero,
-                out sacl,
-                out objectSecurity);
-            if (securityResult != 0 || objectSecurity == IntPtr.Zero)
-            {
-                throw new Win32Exception(
-                    unchecked((int)securityResult),
-                    "read-construction-jobserver-security");
-            }
-            GenericMapping mapping = new GenericMapping
-            {
-                GenericRead = 0x00020000,
-                GenericWrite = 0x00020002,
-                GenericExecute = 0x00120000,
-                GenericAll = SemaphoreAllAccess
-            };
-            uint privilegeBytes = 0;
-            uint grantedAccess;
-            bool accessStatus;
-            bool measured = AccessCheck(
-                objectSecurity,
-                impersonationToken,
-                Synchronize | SemaphoreModifyState,
-                ref mapping,
-                IntPtr.Zero,
-                ref privilegeBytes,
-                out grantedAccess,
-                out accessStatus);
-            int measurementError = Marshal.GetLastWin32Error();
-            if (measured || measurementError != ErrorInsufficientBuffer ||
-                privilegeBytes == 0 || privilegeBytes > MaximumTokenInformationBytes)
-            {
-                throw new Win32Exception(
-                    measurementError,
-                    "measure-construction-jobserver-access");
-            }
-            privilegeSet = Marshal.AllocHGlobal(checked((int)privilegeBytes));
-            if (!AccessCheck(
-                objectSecurity,
-                impersonationToken,
-                Synchronize | SemaphoreModifyState,
-                ref mapping,
-                privilegeSet,
-                ref privilegeBytes,
-                out grantedAccess,
-                out accessStatus))
-            {
-                throw Failure("check-construction-jobserver-access");
-            }
-            uint expected = Synchronize | SemaphoreModifyState;
-            if (!accessStatus || (grantedAccess & expected) != expected)
-            {
-                throw new UnauthorizedAccessException("check-construction-jobserver-access");
-            }
-        }
-        finally
-        {
-            if (privilegeSet != IntPtr.Zero)
-            {
-                Marshal.FreeHGlobal(privilegeSet);
-            }
-            if (objectSecurity != IntPtr.Zero)
-            {
-                LocalFree(objectSecurity);
-            }
-        }
-    }
-
-    private static void AssertImpersonatedJobserverAccess(string name)
-    {
-        IntPtr childHandleValue = OpenSemaphore(
-            Synchronize | SemaphoreModifyState,
-            false,
-            name);
-        if (childHandleValue == IntPtr.Zero)
-        {
-            throw Failure("open-construction-jobserver-as-child");
-        }
-        using (var childHandle = new SafeWaitHandle(childHandleValue, true))
-        {
-            uint wait = WaitForSingleObject(childHandle.DangerousGetHandle(), 0);
-            if (wait != WaitObject0)
-            {
-                throw new InvalidOperationException("acquire-construction-jobserver-as-child");
-            }
-            int previousCount;
-            if (!ReleaseSemaphore(
-                childHandle.DangerousGetHandle(),
-                1,
-                out previousCount) || previousCount != 0)
-            {
-                throw Failure("release-construction-jobserver-as-child");
-            }
-        }
-    }
-
     public static int Run(
         string username,
         string principalSid,
@@ -1974,7 +1537,6 @@ public static class ProjectAtlasConstructionProcess
         string[] arguments,
         string workingDirectory,
         string environmentBlock,
-        string jobserverName,
         int timeoutSeconds)
     {
         return RunCore(
@@ -1985,7 +1547,6 @@ public static class ProjectAtlasConstructionProcess
             arguments,
             workingDirectory,
             environmentBlock,
-            jobserverName,
             timeoutSeconds,
             AdmissionScenario.Normal,
             null);
@@ -1999,7 +1560,6 @@ public static class ProjectAtlasConstructionProcess
         string[] arguments,
         string workingDirectory,
         string environmentBlock,
-        string jobserverName,
         int timeoutSeconds,
         AdmissionScenario admissionScenario,
         AdmissionReceipt admissionReceipt)
@@ -2011,7 +1571,6 @@ public static class ProjectAtlasConstructionProcess
         IntPtr windowStation = IntPtr.Zero;
         IntPtr desktop = IntPtr.Zero;
         IntPtr originalWindowStation = IntPtr.Zero;
-        SafeWaitHandle jobserver = null;
         SafeAccessTokenHandle constructionToken = null;
         ProcessInformation process = new ProcessInformation();
         bool processCreated = false;
@@ -2021,7 +1580,6 @@ public static class ProjectAtlasConstructionProcess
         Exception cleanupFailure = null;
         try
         {
-            ValidateJobserverRequest(jobserverName, environmentBlock);
             job = CreateJobObject(IntPtr.Zero, null);
             if (job == IntPtr.Zero)
             {
@@ -2108,14 +1666,7 @@ public static class ProjectAtlasConstructionProcess
             {
                 admissionReceipt.ConstructionTokenHandleOwned = true;
             }
-            ConstructionTokenIdentity constructionIdentity =
-                ReadAndValidateConstructionToken(constructionToken, principalSid);
-            if (admissionScenario == AdmissionScenario.Normal && admissionReceipt != null)
-            {
-                environmentBlock = BindAdmissionProbeLogonSid(
-                    environmentBlock,
-                    constructionIdentity.LogonSid);
-            }
+            ValidateConstructionToken(constructionToken, principalSid);
             environment = Marshal.StringToHGlobalUni(environmentBlock);
             bool created = CreateProcessWithToken(
                 constructionToken,
@@ -2142,28 +1693,6 @@ public static class ProjectAtlasConstructionProcess
             {
                 throw new InvalidOperationException(
                     "construction-self-test-before-job-assignment");
-            }
-            if (!string.IsNullOrEmpty(jobserverName))
-            {
-                jobserver = CreateAdmittedJobserver(
-                    constructionToken,
-                    constructionIdentity,
-                    jobserverName);
-                if (admissionReceipt != null)
-                {
-                    admissionReceipt.JobserverHandleOwned = true;
-                }
-            }
-            if (admissionScenario ==
-                AdmissionScenario.FailAfterJobserverAdmissionBeforeJobAssignment)
-            {
-                if (jobserver == null || jobserver.IsInvalid || jobserver.IsClosed)
-                {
-                    throw new InvalidOperationException(
-                        "construction-self-test-jobserver-admission-missing");
-                }
-                throw new InvalidOperationException(
-                    "construction-self-test-after-jobserver-admission");
             }
             if (!AssignProcessToJobObject(job, process.Process))
             {
@@ -2278,15 +1807,6 @@ public static class ProjectAtlasConstructionProcess
                     job = IntPtr.Zero;
                     process = new ProcessInformation();
                 }
-            }
-            if (jobserver != null)
-            {
-                jobserver.Dispose();
-                if (admissionReceipt != null)
-                {
-                    admissionReceipt.JobserverHandleClosed = jobserver.IsClosed;
-                }
-                jobserver = null;
             }
             if (constructionToken != null)
             {
@@ -2665,12 +2185,7 @@ function Invoke-AsConstructionPrincipal {
         [string[]]$Arguments,
 
         [Parameter(Mandatory = $true)]
-        [int]$CommandTimeoutSeconds,
-
-        [string]$EnvironmentBlock = $script:constructionEnvironment,
-
-        [ValidatePattern('\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
-        [string]$JobserverName
+        [int]$CommandTimeoutSeconds
     )
 
     return [ProjectAtlasConstructionProcess]::Run(
@@ -2680,8 +2195,7 @@ function Invoke-AsConstructionPrincipal {
         $pwsh,
         $Arguments,
         $source,
-        $EnvironmentBlock,
-        $JobserverName,
+        $script:constructionEnvironment,
         $CommandTimeoutSeconds
     )
 }
@@ -2758,7 +2272,6 @@ function Write-BoundedConstructionFailure {
         "validate-inputs",
         "network-denial-canaries",
         "output-preparation",
-        "jobserver-bootstrap",
         "optional-parser-worker-build",
         "artifact-assembler-build",
         "release-verifier-build",
@@ -2945,6 +2458,7 @@ try {
         RUSTC = Join-Path $toolchainBin "rustc.exe"
         CARGO_HOME = $cargo
         CARGO_NET_OFFLINE = "true"
+        CARGO_BUILD_JOBS = "1"
         CARGO_INCREMENTAL = "0"
         CARGO_TERM_COLOR = "never"
         TSLP_OFFLINE = "1"
@@ -3057,7 +2571,8 @@ foreach ($entry in [Environment]::GetEnvironmentVariables().Keys) {
         exit 23
     }
 }
-if (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS) {
+if ([string]$env:CARGO_BUILD_JOBS -cne '1' -or
+    (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS)) {
     exit 24
 }
 exit 0
@@ -3077,7 +2592,7 @@ exit 0
             21 { "identity" }
             22 { "descendant" }
             23 { "environment" }
-            24 { "unexpected-jobserver-environment" }
+            24 { "cargo-job-budget" }
             30 { "session" }
             31 { "integrity-query" }
             32 { "integrity" }
@@ -3091,13 +2606,6 @@ exit 0
         throw "Construction principal boundary probe did not contain its descendant process tree."
     }
 
-    $constructionJobserverName =
-        "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
-    $constructionJobserverEnvironmentValues = $environment.Clone()
-    $constructionJobserverEnvironmentValues.CARGO_MAKEFLAGS =
-        "-j --jobserver-fds=$constructionJobserverName --jobserver-auth=$constructionJobserverName"
-    $constructionJobserverEnvironment = New-EnvironmentBlock `
-        -Values $constructionJobserverEnvironmentValues
     $constructionArguments = @(
         "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
         "-File", $constructionScript,
@@ -3118,9 +2626,7 @@ exit 0
     Write-ProtectedState -State $state
     $constructionExitCode = Invoke-AsConstructionPrincipal `
         -Arguments $constructionArguments `
-        -CommandTimeoutSeconds $TimeoutSeconds `
-        -EnvironmentBlock $constructionJobserverEnvironment `
-        -JobserverName $constructionJobserverName
+        -CommandTimeoutSeconds $TimeoutSeconds
     if ($constructionExitCode -ne 0) {
         $failedStage = Write-BoundedConstructionFailure `
             -ObservedExitCode $constructionExitCode `

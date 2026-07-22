@@ -1417,8 +1417,6 @@ function Assert-AdmissionReceipt {
         [Parameter(Mandatory = $true)]
         [object]$Receipt,
 
-        [switch]$ExpectJobserver,
-
         [bool]$ExpectTermination = $true
     )
 
@@ -1437,8 +1435,6 @@ function Assert-AdmissionReceipt {
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ProcessHandleClosed) -and
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ThreadHandleOwned) -and
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ThreadHandleClosed) -and
-            [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name JobserverHandleOwned) -eq [bool]$ExpectJobserver -and
-            [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name JobserverHandleClosed) -eq [bool]$ExpectJobserver -and
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ConstructionTokenHandleOwned) -and
             [bool](Get-ReflectedReceiptValue -ReceiptType $ReceiptType -Receipt $Receipt -Name ConstructionTokenHandleClosed)) `
         "Construction admission recovery receipt was incomplete."
@@ -1448,17 +1444,8 @@ function Assert-AdmissionReceipt {
 }
 
 function New-MinimalUserEnvironmentBlock {
-    param(
-        [string]$JobserverName,
-
-        [switch]$AdmissionProbe,
-
-        [string]$ExpectedPrincipalSid,
-
-        [string]$AdmissionProbeSource
-    )
-
     $values = [ordered]@{
+        CARGO_BUILD_JOBS = '1'
         ComSpec = $env:ComSpec
         OS = 'Windows_NT'
         PATH = "$(Split-Path -Parent ([string]$ConstructionParameters.PwshPath));$env:SystemRoot\System32"
@@ -1468,678 +1455,13 @@ function New-MinimalUserEnvironmentBlock {
         TMP = (Join-Path $env:SystemRoot 'Temp')
         WINDIR = $env:WINDIR
     }
-    if (-not [string]::IsNullOrEmpty($JobserverName)) {
-        $values.CARGO_MAKEFLAGS =
-            "-j --jobserver-fds=$JobserverName --jobserver-auth=$JobserverName"
-    }
-    if ($AdmissionProbe) {
-        Require `
-            (-not [string]::IsNullOrEmpty($JobserverName) -and
-                $ExpectedPrincipalSid -match $sidPattern -and
-                -not [string]::IsNullOrEmpty($AdmissionProbeSource) -and
-                $AdmissionProbeSource.Length -le 24576 -and
-                $AdmissionProbeSource.IndexOf([char]0) -lt 0) `
-            "Construction admission probe requires one exact principal and jobserver."
-        $values.PROJECTATLAS_CONSTRUCTION_EXPECTED_PRINCIPAL_SID = $ExpectedPrincipalSid
-        $values.PROJECTATLAS_CONSTRUCTION_EXPECTED_LOGON_SID =
-            '__PROJECTATLAS_CONSTRUCTION_LOGON_SID__'
-        $values.PROJECTATLAS_CONSTRUCTION_EXPECTED_SESSION_ID =
-            [string][System.Diagnostics.Process]::GetCurrentProcess().SessionId
-        $values.PROJECTATLAS_CONSTRUCTION_JOBSERVER_NAME = $JobserverName
-        $values.PROJECTATLAS_CONSTRUCTION_ADMISSION_PROBE_SOURCE =
-            $AdmissionProbeSource
-    }
     $environmentBlock = (($values.GetEnumerator() | ForEach-Object {
         "$($_.Key)=$($_.Value)"
     }) -join "`0") + "`0`0"
     Require `
         ($environmentBlock.Length -le 32766) `
-        "Construction admission probe environment exceeded the Unicode process limit."
+        "Construction recovery environment exceeded the Unicode process limit."
     return $environmentBlock
-}
-
-function New-JobserverAdmissionProbe {
-    $probeSource = @'
-$ErrorActionPreference = "Stop"
-$principalSid = [string]$env:PROJECTATLAS_CONSTRUCTION_EXPECTED_PRINCIPAL_SID
-$logonSid = [string]$env:PROJECTATLAS_CONSTRUCTION_EXPECTED_LOGON_SID
-$expectedSessionIdText =
-    [string]$env:PROJECTATLAS_CONSTRUCTION_EXPECTED_SESSION_ID
-$jobserverName = [string]$env:PROJECTATLAS_CONSTRUCTION_JOBSERVER_NAME
-if ($principalSid -notmatch '\AS-1-5-21-[0-9]+-[0-9]+-[0-9]+-[0-9]+\z' -or
-    $logonSid -notmatch '\AS-1-5-5-[0-9]+-[0-9]+\z' -or
-    $expectedSessionIdText -notmatch '\A[0-9]{1,10}\z' -or
-    $jobserverName -notmatch '\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z') {
-    exit 40
-}
-try {
-    $expectedSessionId = [Convert]::ToInt32(
-        $expectedSessionIdText,
-        [Globalization.CultureInfo]::InvariantCulture
-    )
-}
-catch {
-    exit 40
-}
-try {
-    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
-    if ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        exit 42
-    }
-}
-catch {
-    exit 45
-}
-$nativeSource = @"
-using System;
-using System.Runtime.InteropServices;
-
-public static class ProjectAtlasJobserverAdmissionProbe
-{
-    private const uint TokenQuery = 0x0008;
-    private const int ErrorAccessDenied = 5;
-    private const int ErrorFileNotFound = 2;
-    private const int ErrorNoToken = 1008;
-    private const int ErrorInsufficientBuffer = 122;
-    private const int TokenUserInformation = 1;
-    private const int TokenGroupsInformation = 2;
-    private const int TokenSessionIdInformation = 12;
-    private const int TokenSandBoxInertInformation = 15;
-    private const int TokenIntegrityLevelInformation = 25;
-    private const int TokenMandatoryPolicyInformation = 27;
-    private const int TokenIsAppContainerInformation = 29;
-    private const int TokenPrivateNameSpaceInformation = 42;
-    private const int TokenBnoIsolationInformationClass = 44;
-    private const int TokenIsSandboxedInformation = 47;
-    private const int TokenIsAppSiloInformation = 48;
-    private const uint SeGroupEnabled = 0x00000004;
-    private const uint SeGroupUseForDenyOnly = 0x00000010;
-    private const uint SeGroupIntegrity = 0x00000020;
-    private const uint SeGroupIntegrityEnabled = 0x00000040;
-    private const uint SeGroupLogonId = 0xC0000000;
-    private const uint TokenMandatoryPolicyNoWriteUp = 0x00000001;
-    private const uint TokenMandatoryPolicyValidMask = 0x00000003;
-    private const uint Synchronize = 0x00100000;
-    private const uint SemaphoreModifyState = 0x00000002;
-    private const uint WaitObject0 = 0;
-    private const int MaximumTokenInformationBytes = 64 * 1024;
-    private const uint MaximumTokenGroupCount = 1024;
-    private const string RequiredIntegritySid = "S-1-16-8192";
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct SidAndAttributes
-    {
-        internal IntPtr Sid;
-        internal uint Attributes;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct TokenUser
-    {
-        internal SidAndAttributes User;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct TokenGroups
-    {
-        internal uint GroupCount;
-        internal SidAndAttributes Groups;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct TokenMandatoryLabel
-    {
-        internal SidAndAttributes Label;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct TokenBnoIsolation
-    {
-        internal IntPtr IsolationPrefix;
-        internal byte IsolationEnabled;
-    }
-
-    private sealed class TokenInformationBuffer : IDisposable
-    {
-        internal TokenInformationBuffer(IntPtr pointer, int length)
-        {
-            Pointer = pointer;
-            Length = length;
-        }
-
-        internal IntPtr Pointer { get; private set; }
-
-        internal int Length { get; private set; }
-
-        public void Dispose()
-        {
-            if (Pointer != IntPtr.Zero)
-            {
-                Marshal.FreeHGlobal(Pointer);
-                Pointer = IntPtr.Zero;
-                Length = 0;
-            }
-        }
-    }
-
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr GetCurrentProcess();
-
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr GetCurrentThread();
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool OpenProcessToken(
-        IntPtr process,
-        uint desiredAccess,
-        out IntPtr token);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool OpenThreadToken(
-        IntPtr thread,
-        uint desiredAccess,
-        [MarshalAs(UnmanagedType.Bool)] bool openAsSelf,
-        out IntPtr token);
-
-    [DllImport("advapi32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool IsTokenRestricted(IntPtr token);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetTokenInformation(
-        IntPtr token,
-        int informationClass,
-        IntPtr information,
-        int informationLength,
-        out int returnLength);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool IsValidSid(IntPtr sid);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    private static extern uint GetLengthSid(IntPtr sid);
-
-    [DllImport(
-        "advapi32.dll",
-        CharSet = CharSet.Unicode,
-        SetLastError = true,
-        EntryPoint = "ConvertSidToStringSidW")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ConvertSidToStringSid(
-        IntPtr sid,
-        out IntPtr stringSid);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr LocalFree(IntPtr memory);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true,
-        EntryPoint = "OpenSemaphoreA")]
-    private static extern IntPtr OpenSemaphore(
-        uint desiredAccess,
-        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
-        string name);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ReleaseSemaphore(
-        IntPtr semaphore,
-        int releaseCount,
-        out int previousCount);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CloseHandle(IntPtr handle);
-
-    private static TokenInformationBuffer GetBoundedTokenInformation(
-        IntPtr token,
-        int informationClass)
-    {
-        int requiredBytes;
-        bool measured = GetTokenInformation(
-            token,
-            informationClass,
-            IntPtr.Zero,
-            0,
-            out requiredBytes);
-        int measurementError = Marshal.GetLastWin32Error();
-        if (measured || measurementError != ErrorInsufficientBuffer ||
-            requiredBytes <= 0 || requiredBytes > MaximumTokenInformationBytes)
-        {
-            return null;
-        }
-
-        IntPtr information = Marshal.AllocHGlobal(requiredBytes);
-        int returnedBytes;
-        if (!GetTokenInformation(
-            token,
-            informationClass,
-            information,
-            requiredBytes,
-            out returnedBytes))
-        {
-            Marshal.FreeHGlobal(information);
-            return null;
-        }
-        if (returnedBytes <= 0 || returnedBytes > requiredBytes)
-        {
-            Marshal.FreeHGlobal(information);
-            return null;
-        }
-        return new TokenInformationBuffer(information, returnedBytes);
-    }
-
-    private static string ReadBoundedSid(
-        TokenInformationBuffer information,
-        IntPtr sid)
-    {
-        const int SidHeaderBytes = 8;
-        if (information == null || information.Pointer == IntPtr.Zero ||
-            sid == IntPtr.Zero || information.Length < SidHeaderBytes)
-        {
-            return null;
-        }
-        long offset = checked(sid.ToInt64() - information.Pointer.ToInt64());
-        if (offset < 0 || offset > information.Length - SidHeaderBytes ||
-            !IsValidSid(sid))
-        {
-            return null;
-        }
-        uint sidBytes = GetLengthSid(sid);
-        if (sidBytes < SidHeaderBytes ||
-            checked(offset + sidBytes) > information.Length)
-        {
-            return null;
-        }
-
-        IntPtr stringSid;
-        if (!ConvertSidToStringSid(sid, out stringSid) ||
-            stringSid == IntPtr.Zero)
-        {
-            return null;
-        }
-        try
-        {
-            return Marshal.PtrToStringUni(stringSid);
-        }
-        finally
-        {
-            LocalFree(stringSid);
-        }
-    }
-
-    private static bool TryReadTokenUInt32(
-        IntPtr token,
-        int informationClass,
-        out uint value)
-    {
-        value = 0;
-        using (TokenInformationBuffer information =
-            GetBoundedTokenInformation(token, informationClass))
-        {
-            if (information == null || information.Length != sizeof(uint))
-            {
-                return false;
-            }
-            value = unchecked((uint)Marshal.ReadInt32(information.Pointer));
-            return true;
-        }
-    }
-
-    private static int InspectNamespaceState(
-        IntPtr token,
-        int expectedSessionId)
-    {
-        uint value;
-        if (!TryReadTokenUInt32(token, TokenSessionIdInformation, out value))
-        {
-            return 64;
-        }
-        if (value != unchecked((uint)expectedSessionId))
-        {
-            return 65;
-        }
-        if (!TryReadTokenUInt32(token, TokenSandBoxInertInformation, out value) ||
-            value > 1)
-        {
-            return 74;
-        }
-        if (!TryReadTokenUInt32(token, TokenMandatoryPolicyInformation, out value) ||
-            (value & TokenMandatoryPolicyNoWriteUp) == 0 ||
-            (value & ~TokenMandatoryPolicyValidMask) != 0)
-        {
-            return 67;
-        }
-        if (!TryReadTokenUInt32(token, TokenIsAppContainerInformation, out value))
-        {
-            return 75;
-        }
-        if (value != 0)
-        {
-            return 68;
-        }
-        if (!TryReadTokenUInt32(token, TokenPrivateNameSpaceInformation, out value))
-        {
-            return 75;
-        }
-        if (value != 0)
-        {
-            return 69;
-        }
-        using (TokenInformationBuffer bnoInformation =
-            GetBoundedTokenInformation(token, TokenBnoIsolationInformationClass))
-        {
-            if (bnoInformation == null ||
-                bnoInformation.Length < Marshal.SizeOf<TokenBnoIsolation>())
-            {
-                return 75;
-            }
-            TokenBnoIsolation bno =
-                Marshal.PtrToStructure<TokenBnoIsolation>(
-                    bnoInformation.Pointer);
-            if (bno.IsolationEnabled > 1)
-            {
-                return 75;
-            }
-            if (bno.IsolationEnabled != 0)
-            {
-                return 70;
-            }
-        }
-        if (!TryReadTokenUInt32(token, TokenIsSandboxedInformation, out value))
-        {
-            return 75;
-        }
-        if (value != 0)
-        {
-            return 72;
-        }
-        if (!TryReadTokenUInt32(token, TokenIsAppSiloInformation, out value))
-        {
-            return 75;
-        }
-        if (value != 0)
-        {
-            return 73;
-        }
-        return 0;
-    }
-
-    private static int InspectProcessToken(
-        IntPtr token,
-        string expectedPrincipalSid,
-        string expectedLogonSid,
-        int expectedSessionId)
-    {
-        if (IsTokenRestricted(token))
-        {
-            return 63;
-        }
-
-        using (TokenInformationBuffer userInformation =
-            GetBoundedTokenInformation(token, TokenUserInformation))
-        {
-            if (userInformation == null ||
-                userInformation.Length < Marshal.SizeOf<TokenUser>())
-            {
-                return 45;
-            }
-            TokenUser user = Marshal.PtrToStructure<TokenUser>(
-                userInformation.Pointer);
-            string principalSid = ReadBoundedSid(
-                userInformation,
-                user.User.Sid);
-            if (principalSid == null)
-            {
-                return 45;
-            }
-            if (!string.Equals(
-                principalSid,
-                expectedPrincipalSid,
-                StringComparison.Ordinal))
-            {
-                return 41;
-            }
-        }
-
-        uint logonSidCount = 0;
-        uint effectiveLogonSidCount = 0;
-        string actualLogonSid = null;
-        using (TokenInformationBuffer groupsInformation =
-            GetBoundedTokenInformation(token, TokenGroupsInformation))
-        {
-            if (groupsInformation == null ||
-                groupsInformation.Length < Marshal.SizeOf<TokenGroups>())
-            {
-                return 45;
-            }
-            TokenGroups groups = Marshal.PtrToStructure<TokenGroups>(
-                groupsInformation.Pointer);
-            if (groups.GroupCount > MaximumTokenGroupCount)
-            {
-                return 45;
-            }
-            int groupOffset = Marshal.OffsetOf<TokenGroups>(
-                nameof(TokenGroups.Groups)).ToInt32();
-            int groupSize = Marshal.SizeOf<SidAndAttributes>();
-            long requiredGroupBytes = checked(
-                (long)groupOffset + checked((long)groups.GroupCount * groupSize));
-            if (groupOffset < sizeof(uint) ||
-                requiredGroupBytes > groupsInformation.Length)
-            {
-                return 45;
-            }
-
-            for (uint index = 0; index < groups.GroupCount; index++)
-            {
-                IntPtr groupPointer = IntPtr.Add(
-                    groupsInformation.Pointer,
-                    checked(groupOffset + checked((int)index * groupSize)));
-                SidAndAttributes group =
-                    Marshal.PtrToStructure<SidAndAttributes>(groupPointer);
-                string groupSid = ReadBoundedSid(
-                    groupsInformation,
-                    group.Sid);
-                if (groupSid == null)
-                {
-                    return 45;
-                }
-                bool isLogonSid =
-                    (group.Attributes & SeGroupLogonId) == SeGroupLogonId;
-                if (!isLogonSid)
-                {
-                    continue;
-                }
-
-                logonSidCount++;
-                bool isEnabled = (group.Attributes & SeGroupEnabled) != 0;
-                bool isDenyOnly =
-                    (group.Attributes & SeGroupUseForDenyOnly) != 0;
-                if (isEnabled && !isDenyOnly)
-                {
-                    effectiveLogonSidCount++;
-                    actualLogonSid = groupSid;
-                }
-            }
-        }
-        if (logonSidCount != 1)
-        {
-            return 46;
-        }
-        if (effectiveLogonSidCount != 1 || actualLogonSid == null)
-        {
-            return 48;
-        }
-        if (!string.Equals(
-            actualLogonSid,
-            expectedLogonSid,
-            StringComparison.Ordinal))
-        {
-            return 47;
-        }
-
-        using (TokenInformationBuffer integrityInformation =
-            GetBoundedTokenInformation(token, TokenIntegrityLevelInformation))
-        {
-            if (integrityInformation == null ||
-                integrityInformation.Length < Marshal.SizeOf<TokenMandatoryLabel>())
-            {
-                return 45;
-            }
-            TokenMandatoryLabel label =
-                Marshal.PtrToStructure<TokenMandatoryLabel>(
-                    integrityInformation.Pointer);
-            string integritySid = ReadBoundedSid(
-                integrityInformation,
-                label.Label.Sid);
-            if (!string.Equals(
-                integritySid,
-                RequiredIntegritySid,
-                StringComparison.Ordinal))
-            {
-                return 49;
-            }
-            uint expectedAttributes = SeGroupIntegrity | SeGroupIntegrityEnabled;
-            if ((label.Label.Attributes & expectedAttributes) != expectedAttributes)
-            {
-                return 66;
-            }
-        }
-        return InspectNamespaceState(token, expectedSessionId);
-    }
-
-    public static int Run(
-        string name,
-        string expectedPrincipalSid,
-        string expectedLogonSid,
-        int expectedSessionId)
-    {
-        try
-        {
-            return RunChecked(
-                name,
-                expectedPrincipalSid,
-                expectedLogonSid,
-                expectedSessionId);
-        }
-        catch
-        {
-            return 45;
-        }
-    }
-
-    private static int RunChecked(
-        string name,
-        string expectedPrincipalSid,
-        string expectedLogonSid,
-        int expectedSessionId)
-    {
-        IntPtr token;
-        if (OpenThreadToken(GetCurrentThread(), TokenQuery, true, out token))
-        {
-            CloseHandle(token);
-            return 60;
-        }
-        if (Marshal.GetLastWin32Error() != ErrorNoToken)
-        {
-            return 61;
-        }
-        if (!OpenProcessToken(GetCurrentProcess(), TokenQuery, out token))
-        {
-            return 62;
-        }
-        int tokenResult = 45;
-        try
-        {
-            tokenResult = InspectProcessToken(
-                token,
-                expectedPrincipalSid,
-                expectedLogonSid,
-                expectedSessionId);
-        }
-        finally
-        {
-            if (!CloseHandle(token) && tokenResult == 0)
-            {
-                tokenResult = 62;
-            }
-        }
-        if (tokenResult != 0)
-        {
-            return tokenResult;
-        }
-
-        IntPtr semaphore = OpenSemaphore(
-            Synchronize | SemaphoreModifyState,
-            false,
-            name);
-        if (semaphore == IntPtr.Zero)
-        {
-            int error = Marshal.GetLastWin32Error();
-            if (error == ErrorAccessDenied)
-            {
-                return 51;
-            }
-            if (error == ErrorFileNotFound)
-            {
-                return 52;
-            }
-            return 53;
-        }
-        int result = 0;
-        try
-        {
-            if (WaitForSingleObject(semaphore, 0) != WaitObject0)
-            {
-                result = 54;
-            }
-            else
-            {
-                int previousCount;
-                if (!ReleaseSemaphore(semaphore, 1, out previousCount) || previousCount != 0)
-                {
-                    result = 55;
-                }
-            }
-        }
-        finally
-        {
-            if (!CloseHandle(semaphore) && result == 0)
-            {
-                result = 56;
-            }
-        }
-        return result;
-    }
-}
-"@
-try {
-    Add-Type -TypeDefinition $nativeSource -Language CSharp
-}
-catch {
-    exit 50
-}
-exit [ProjectAtlasJobserverAdmissionProbe]::Run(
-    $jobserverName,
-    $principalSid,
-    $logonSid,
-    $expectedSessionId)
-'@
-    return [pscustomobject]@{
-        Source = $probeSource
-        Arguments = [string[]]@(
-            '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-            '-Command',
-            '& ([scriptblock]::Create([string]$env:PROJECTATLAS_CONSTRUCTION_ADMISSION_PROBE_SOURCE))'
-        )
-    }
 }
 
 function Invoke-ConstructionAdmissionRecoveryScenario {
@@ -2168,54 +1490,36 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
         "Construction adapter lost its private recovery boundary."
     Require `
         (([enum]::GetNames($scenarioType) -join ',') -eq
-            'Normal,FailBeforeJobAssignment,FailBeforeJobAssignmentAndCleanupFailure,FailAfterJobserverAdmissionBeforeJobAssignment') `
+            'Normal,FailBeforeJobAssignment,FailBeforeJobAssignmentAndCleanupFailure') `
         "Construction adapter recovery scenario domain changed."
 
     $failureArguments = [string[]]@(
         '-NoLogo', '-NoProfile', '-NonInteractive',
         '-Command', 'Start-Sleep -Seconds 30'
     )
-    $normalProbe = New-JobserverAdmissionProbe
+    $normalArguments = [string[]]@(
+        '-NoLogo', '-NoProfile', '-NonInteractive',
+        '-Command', 'exit 0'
+    )
+    $environmentBlock = New-MinimalUserEnvironmentBlock
     foreach ($scenarioRow in @(
         [pscustomobject]@{
             Name = 'Normal'
-            JobserverName = "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
-            Arguments = $normalProbe.Arguments
-            AdmissionProbe = $true
-            AdmissionProbeSource = $normalProbe.Source
+            Arguments = $normalArguments
         },
         [pscustomobject]@{
             Name = 'FailBeforeJobAssignment'
-            JobserverName = $null
             Arguments = $failureArguments
-            AdmissionProbe = $false
-            AdmissionProbeSource = $null
         },
         [pscustomobject]@{
             Name = 'FailBeforeJobAssignmentAndCleanupFailure'
-            JobserverName = $null
             Arguments = $failureArguments
-            AdmissionProbe = $false
-            AdmissionProbeSource = $null
-        },
-        [pscustomobject]@{
-            Name = 'FailAfterJobserverAdmissionBeforeJobAssignment'
-            JobserverName = "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
-            Arguments = $failureArguments
-            AdmissionProbe = $false
-            AdmissionProbeSource = $null
         }
     )) {
         $scenarioName = $scenarioRow.Name
-        $jobserverName = $scenarioRow.JobserverName
-        $environmentBlock = New-MinimalUserEnvironmentBlock `
-            -JobserverName $jobserverName `
-            -AdmissionProbe:([bool]$scenarioRow.AdmissionProbe) `
-            -ExpectedPrincipalSid $identity.Sid `
-            -AdmissionProbeSource ([string]$scenarioRow.AdmissionProbeSource)
         $admissionScenario = [enum]::Parse($scenarioType, $scenarioName)
         $receipt = [Activator]::CreateInstance($receiptType, $true)
-        $invokeArguments = [object[]]::new(11)
+        $invokeArguments = [object[]]::new(10)
         $invokeArguments[0] = $identity.Username
         $invokeArguments[1] = $identity.Sid
         $invokeArguments[2] = $identity.Password
@@ -2223,14 +1527,12 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
         $invokeArguments[4] = [string[]]$scenarioRow.Arguments
         $invokeArguments[5] = $env:SystemRoot
         $invokeArguments[6] = $environmentBlock
-        $invokeArguments[7] = [string]$jobserverName
-        $invokeArguments[8] = 30
-        $invokeArguments[9] = $admissionScenario
-        $invokeArguments[10] = $receipt
+        $invokeArguments[7] = 30
+        $invokeArguments[8] = $admissionScenario
+        $invokeArguments[9] = $receipt
         if ($scenarioName -eq 'Normal') {
-            $normalResult = $null
             try {
-                $normalResult = $runCore.Invoke($null, $invokeArguments)
+                $normalExitCode = [int]$runCore.Invoke($null, $invokeArguments)
             }
             catch {
                 $normalFailure = $_.Exception
@@ -2247,54 +1549,14 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
                 }
                 throw "Construction normal admission invocation failed. type=$($normalFailure.GetType().Name) native_error_code=$nativeError"
             }
-            $normalExitCode = [int]$normalResult
-            if ($normalExitCode -ne 0) {
-                $normalFailureCategory = switch ($normalExitCode) {
-                    40 { 'probe-environment' }
-                    41 { 'principal-identity' }
-                    42 { 'administrator-token' }
-                    45 { 'effective-token-information' }
-                    46 { 'logon-sid-count' }
-                    47 { 'logon-sid-mismatch' }
-                    48 { 'logon-sid-not-effective' }
-                    49 { 'integrity' }
-                    50 { 'native-probe-load' }
-                    51 { 'native-jobserver-open-denied' }
-                    52 { 'native-jobserver-open-not-found' }
-                    53 { 'native-jobserver-open-other' }
-                    54 { 'native-jobserver-acquire' }
-                    55 { 'native-jobserver-release' }
-                    56 { 'native-jobserver-close' }
-                    60 { 'effective-thread-token' }
-                    61 { 'thread-token-query' }
-                    62 { 'process-token-query' }
-                    63 { 'restricted-token' }
-                    64 { 'token-session-query' }
-                    65 { 'token-session-mismatch' }
-                    66 { 'integrity-attributes' }
-                    67 { 'mandatory-policy' }
-                    68 { 'app-container-token' }
-                    69 { 'private-object-namespace' }
-                    70 { 'bno-isolation' }
-                    72 { 'sandboxed-token' }
-                    73 { 'app-silo-token' }
-                    74 { 'sandbox-inert-query' }
-                    75 { 'namespace-token-query' }
-                    default { "unexpected-exit-$normalExitCode" }
-                }
-                throw "Construction normal admission child probe failed at $normalFailureCategory."
-            }
+            Require ($normalExitCode -eq 0) "Construction normal admission child failed."
             Require `
                 ([ProjectAtlasConstructionProcess]::LastTotalProcesses -ge 1) `
-                "Construction normal admission did not contain its probe child."
+                "Construction normal admission did not contain its child."
             Assert-AdmissionReceipt `
                 -ReceiptType $receiptType `
                 -Receipt $receipt `
-                -ExpectJobserver `
                 -ExpectTermination $false
-            Require `
-                ([ProjectAtlasConstructionProcess]::CanCreateFreshJobserverName($jobserverName)) `
-                "Construction normal admission retained its jobserver name."
             continue
         }
 
@@ -2307,7 +1569,7 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
                     $failure.Message -eq 'construction-self-test-before-job-assignment') `
                 "Construction pre-Job failure returned the wrong operation error."
         }
-        elseif ($scenarioName -eq 'FailBeforeJobAssignmentAndCleanupFailure') {
+        else {
             Require `
                 ($failure -is [System.AggregateException] -and
                     $failure.InnerExceptions.Count -eq 2 -and
@@ -2317,85 +1579,8 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
                         'construction-self-test-cleanup') `
                 "Construction adapter did not preserve operation and cleanup failures."
         }
-        else {
-            $postAdmissionFailureMatches =
-                $failure -is [System.InvalidOperationException] -and
-                $failure.Message -eq 'construction-self-test-after-jobserver-admission'
-            if (-not $postAdmissionFailureMatches) {
-                $normalizeFailureMessage = {
-                    param([string]$Message)
-
-                    $normalized = $Message -replace '[\r\n]+', ' '
-                    if ($normalized.Length -gt 512) {
-                        return $normalized.Substring(0, 512)
-                    }
-                    return $normalized
-                }
-                $innerFailures = @()
-                if ($failure -is [System.AggregateException]) {
-                    $innerFailures = @(
-                        $failure.InnerExceptions |
-                            Select-Object -First 4 |
-                            ForEach-Object {
-                                [ordered]@{
-                                    type = $_.GetType().FullName
-                                    message = & $normalizeFailureMessage $_.Message
-                                    native_error_code = $(
-                                        if ($_ -is [System.ComponentModel.Win32Exception]) {
-                                            $_.NativeErrorCode
-                                        }
-                                        else {
-                                            $null
-                                        }
-                                    )
-                                }
-                            }
-                    )
-                }
-                $diagnostic = [ordered]@{
-                    scenario = $scenarioName
-                    failure_type = $failure.GetType().FullName
-                    failure_message = & $normalizeFailureMessage $failure.Message
-                    failure_native_error_code = $(
-                        if ($failure -is [System.ComponentModel.Win32Exception]) {
-                            $failure.NativeErrorCode
-                        }
-                        else {
-                            $null
-                        }
-                    )
-                    failure_inner_exceptions = $innerFailures
-                    receipt = [ordered]@{
-                        process_id = [int](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name ProcessId)
-                        termination_attempted = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name TerminationAttempted)
-                        wait_result = [uint32](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name WaitResult)
-                        reaped = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name Reaped)
-                        job_handle_owned = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name JobHandleOwned)
-                        job_handle_closed = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name JobHandleClosed)
-                        process_handle_owned = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name ProcessHandleOwned)
-                        process_handle_closed = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name ProcessHandleClosed)
-                        thread_handle_owned = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name ThreadHandleOwned)
-                        thread_handle_closed = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name ThreadHandleClosed)
-                        jobserver_handle_owned = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name JobserverHandleOwned)
-                        jobserver_handle_closed = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name JobserverHandleClosed)
-                        construction_token_handle_owned = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name ConstructionTokenHandleOwned)
-                        construction_token_handle_closed = [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name ConstructionTokenHandleClosed)
-                    }
-                } | ConvertTo-Json -Depth 5 -Compress
-                throw "Construction post-jobserver admission fault returned the wrong operation error. diagnostic=$diagnostic"
-            }
-        }
-        Assert-AdmissionReceipt `
-            -ReceiptType $receiptType `
-            -Receipt $receipt `
-            -ExpectJobserver:($null -ne $jobserverName)
-        if ($null -ne $jobserverName) {
-            Require `
-                ([ProjectAtlasConstructionProcess]::CanCreateFreshJobserverName($jobserverName)) `
-                "Construction admission recovery retained its jobserver name."
-        }
+        Assert-AdmissionReceipt -ReceiptType $receiptType -Receipt $receipt
     }
-
     $launcherExit = Invoke-BoundedProcess `
         -FilePath $LauncherPath `
         -Arguments @('self-test') `
