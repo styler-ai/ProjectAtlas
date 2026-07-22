@@ -49,8 +49,8 @@ const TAR_FRAMING_ALLOWANCE_BYTES: u64 = 1024 * 1024;
 const PAYLOAD_MODE: u32 = 0o644;
 /// Canonical parser-worker mode in a completed archive.
 const WORKER_MODE: u32 = 0o755;
-/// Maximum installed slot rows inspected by content-free status.
-const STATUS_SLOT_LIMIT: usize = 1_024;
+/// Maximum lifecycle-owned directory entries inspected by one metadata operation.
+const LIFECYCLE_METADATA_ENTRY_LIMIT: usize = 1_024;
 /// Stable sibling lease retained across logical-pack removal and process crashes.
 const OPTIONAL_PARSER_PACK_LEASE_FILE_NAME: &str = ".projectatlas-broad-parser.lifecycle.lock";
 /// Stable project-local lease serializing selection read-modify-write transitions.
@@ -236,7 +236,7 @@ pub struct OptionalParserPackLifecycleReport {
     pub platform: Option<&'static str>,
     /// Number of installed immutable slots observed within the bounded status scan.
     pub installed_slots: usize,
-    /// Whether more installed slots existed beyond the status scan bound.
+    /// Whether lifecycle metadata traversal reached its directory-entry bound.
     pub installed_slots_truncated: bool,
     /// Current project selection, including missing-slot state.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -645,8 +645,10 @@ impl OptionalParserPackLifecycle {
             .selection_mutation_needed()?
             .then(|| self.acquire_selection_mutation_lease())
             .transpose()?;
+        let pack_root = self.pack_root()?;
+        let slots = installed_slot_paths(&pack_root)?;
         let selection_changed = self.remove_selection_if_present()?;
-        let storage_changed = self.remove_installed_pack()?;
+        let storage_changed = self.remove_installed_pack(&pack_root, slots)?;
         Ok(self.report(
             OptionalParserPackOperation::Remove,
             selection_changed || storage_changed,
@@ -908,9 +910,11 @@ impl OptionalParserPackLifecycle {
     }
 
     /// Attempt exact artifact-scoped cleanup for every installed slot before removing storage.
-    fn remove_installed_pack(&self) -> Result<bool, OptionalParserPackLifecycleError> {
-        let pack_root = self.pack_root()?;
-        let slots = installed_slot_paths(&pack_root)?;
+    fn remove_installed_pack(
+        &self,
+        pack_root: &Path,
+        slots: Vec<InstalledSlotPath>,
+    ) -> Result<bool, OptionalParserPackLifecycleError> {
         let mut changed = false;
         let mut failures = Vec::new();
         for slot in slots {
@@ -929,7 +933,7 @@ impl OptionalParserPackLifecycle {
                 message: failures.join("; "),
             });
         }
-        Ok(remove_tree_if_present(&pack_root)? || changed)
+        Ok(remove_tree_if_present(pack_root)? || changed)
     }
 
     /// Complete one exact slot's platform cleanup and bounded tree deletion.
@@ -1020,7 +1024,12 @@ impl OptionalParserPackLifecycle {
         });
         let selected_missing = selected.as_ref().is_some_and(|slot| !slot.present);
         let rollback_present = rollback.as_ref().is_some_and(|slot| slot.present);
-        let state = if selection_stale || unsafe_storage || selected_missing || cleanup_pending {
+        let state = if selection_stale
+            || unsafe_storage
+            || selected_missing
+            || installed_slots_truncated
+            || cleanup_pending
+        {
             OptionalParserPackState::Stale
         } else if selected.is_some() && rollback_present {
             OptionalParserPackState::RollbackReady
@@ -1965,9 +1974,16 @@ fn installed_slot_paths(
         }
     }
     let mut slots = Vec::new();
+    let mut observed_entries = 0usize;
     for version in fs::read_dir(&versions)
         .map_err(|source| io_error("list parser-pack versions", &versions, source))?
     {
+        if observed_entries == LIFECYCLE_METADATA_ENTRY_LIMIT {
+            return Err(invalid_data(
+                "parser-pack metadata entries exceed the cleanup bound",
+            ));
+        }
+        observed_entries = observed_entries.saturating_add(1);
         let version = version
             .map_err(|source| io_error("read parser-pack version entry", &versions, source))?;
         if !version
@@ -1986,6 +2002,12 @@ fn installed_slot_paths(
         for slot in fs::read_dir(version.path())
             .map_err(|source| io_error("list parser-pack slots", version.path(), source))?
         {
+            if observed_entries == LIFECYCLE_METADATA_ENTRY_LIMIT {
+                return Err(invalid_data(
+                    "parser-pack metadata entries exceed the cleanup bound",
+                ));
+            }
+            observed_entries = observed_entries.saturating_add(1);
             let slot = slot.map_err(|source| {
                 io_error("read parser-pack slot entry", version.path(), source)
             })?;
@@ -1995,11 +2017,6 @@ fn installed_slot_paths(
                 .is_dir()
             {
                 continue;
-            }
-            if slots.len() == STATUS_SLOT_LIMIT {
-                return Err(invalid_data(
-                    "installed parser-pack slots exceed the cleanup bound",
-                ));
             }
             let entry_name = slot
                 .file_name()
@@ -2073,7 +2090,7 @@ fn windows_slot_cleanup_in_progress(
     let entries = fs::read_dir(version_root)
         .map_err(|source| io_error("list parser-pack cleanup tombstones", version_root, source))?;
     for (index, entry) in entries.enumerate() {
-        if index == STATUS_SLOT_LIMIT {
+        if index == LIFECYCLE_METADATA_ENTRY_LIMIT {
             return Err(invalid_data(
                 "parser-pack cleanup tombstones exceed the lifecycle bound",
             ));
@@ -2502,6 +2519,7 @@ fn count_installed_slots(
         }
     }
     let mut count = 0usize;
+    let mut observed_entries = 0usize;
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     let mut cleanup_pending = false;
     #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
@@ -2509,6 +2527,10 @@ fn count_installed_slots(
     let version_entries = fs::read_dir(&versions)
         .map_err(|source| io_error("list parser-pack versions", &versions, source))?;
     for version in version_entries {
+        if observed_entries == LIFECYCLE_METADATA_ENTRY_LIMIT {
+            return Ok((count, true, cleanup_pending));
+        }
+        observed_entries = observed_entries.saturating_add(1);
         let version = version
             .map_err(|source| io_error("read parser-pack version entry", &versions, source))?;
         if !version
@@ -2523,6 +2545,10 @@ fn count_installed_slots(
         let slots = fs::read_dir(version.path())
             .map_err(|source| io_error("list parser-pack slots", version.path(), source))?;
         for slot in slots {
+            if observed_entries == LIFECYCLE_METADATA_ENTRY_LIMIT {
+                return Ok((count, true, cleanup_pending));
+            }
+            observed_entries = observed_entries.saturating_add(1);
             let slot = slot.map_err(|source| {
                 io_error("read parser-pack slot entry", version.path(), source)
             })?;
@@ -2542,9 +2568,6 @@ fn count_installed_slots(
             {
                 cleanup_pending = true;
                 continue;
-            }
-            if count == STATUS_SLOT_LIMIT {
-                return Ok((count, true, cleanup_pending));
             }
             count = count.saturating_add(1);
         }
@@ -3949,6 +3972,70 @@ mod tests {
         require(
             lifecycle.status()?.state == OptionalParserPackState::Stale,
             "missing slot was not stale",
+        )
+    }
+
+    #[test]
+    fn lifecycle_metadata_entry_bound_precedes_remove_mutation() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let project = root.path().join("project");
+        let storage = root.path().join("storage");
+        let lifecycle = OptionalParserPackLifecycle::for_test(
+            project,
+            storage,
+            Some(PackPlatform::LinuxX86_64),
+        );
+        lifecycle.write_selection(&ProjectSelection::new(test_slot('a'), None))?;
+        let selection_before = fs::read(lifecycle.selection_path())?;
+        let versions = lifecycle.pack_root()?.join("versions");
+        fs::create_dir_all(&versions)?;
+        for index in 0..=LIFECYCLE_METADATA_ENTRY_LIMIT {
+            fs::create_dir(versions.join(format!("empty-{index:04}")))?;
+        }
+
+        let status = lifecycle.status()?;
+        require(
+            status.installed_slots == 0
+                && status.installed_slots_truncated
+                && status.state == OptionalParserPackState::Stale,
+            "over-limit empty version metadata was not reported as bounded stale state",
+        )?;
+        let error = require_lifecycle_error(
+            lifecycle.remove(),
+            "over-limit lifecycle metadata unexpectedly allowed removal",
+        )?;
+        require(
+            matches!(
+                error,
+                OptionalParserPackLifecycleError::InvalidData { ref reason }
+                    if reason == "parser-pack metadata entries exceed the cleanup bound"
+            ),
+            "over-limit lifecycle metadata returned the wrong removal failure",
+        )?;
+        require(
+            fs::read(lifecycle.selection_path())? == selection_before
+                && fs::read_dir(&versions)?.count()
+                    == LIFECYCLE_METADATA_ENTRY_LIMIT.saturating_add(1),
+            "bounded removal partially mutated selection or storage",
+        )?;
+
+        let child_root = tempfile::tempdir()?;
+        let child_lifecycle = OptionalParserPackLifecycle::for_test(
+            child_root.path().join("project"),
+            child_root.path().join("storage"),
+            Some(PackPlatform::LinuxX86_64),
+        );
+        let child_version = child_lifecycle.pack_root()?.join("versions").join("0.4.0");
+        fs::create_dir_all(&child_version)?;
+        for index in 0..LIFECYCLE_METADATA_ENTRY_LIMIT {
+            fs::write(child_version.join(format!("stale-{index:04}")), [])?;
+        }
+        let child_status = child_lifecycle.status()?;
+        require(
+            child_status.installed_slots == 0
+                && child_status.installed_slots_truncated
+                && child_status.state == OptionalParserPackState::Stale,
+            "over-limit non-directory slot metadata was not reported as bounded stale state",
         )
     }
 

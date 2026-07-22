@@ -633,6 +633,63 @@ fn optional_parser_pack_real_archive_normal_runtime_lifecycle() -> Result<(), Bo
         ],
     )?;
     require_json_bool(&idempotent_update, &["changed"], false)?;
+
+    let rolled_back = projectatlas_json(
+        &repo,
+        &host_state,
+        &[
+            OsStr::new("parser-pack"),
+            OsStr::new("enable"),
+            OsStr::new("--artifact"),
+            OsStr::new(&artifact),
+        ],
+    )?;
+    require_json_string(&rolled_back, &["operation"], "enable")?;
+    require_json_string(&rolled_back, &["state"], "rollback_ready")?;
+    require_json_string(&rolled_back, &["selected", "artifact"], &artifact)?;
+    require_json_string(
+        &rolled_back,
+        &["rollback", "artifact"],
+        &replacement_artifact,
+    )?;
+    let rollback_source = b"BEGIN { print \"rollback\" }\n";
+    fs::write(&optional_source, rollback_source)?;
+    projectatlas_json(
+        &repo,
+        &host_state,
+        &[OsStr::new("watch"), OsStr::new("--once")],
+    )?;
+    let rollback_store = AtlasStore::open_read_only(&db)?;
+    let rollback_generation = rollback_store
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("rollback watch publication missing"))?
+        .generation;
+    let rollback_node = rollback_store
+        .load_node_by_path("src/main.awk")?
+        .ok_or_else(|| io::Error::other("rollback optional source node missing"))?;
+    if rollback_generation <= replacement_generation
+        || rollback_node.node.language.as_deref() != Some("awk")
+        || rollback_node.node.content_hash.as_deref()
+            != Some(blake3::hash(rollback_source).to_hex().as_str())
+        || rollback_store
+            .load_source_parse_metadata("src/main.awk")?
+            .is_none_or(|metadata| metadata.parser != ParserKind::TreeSitter)
+    {
+        return Err(io::Error::other(
+            "explicit parser-pack rollback did not publish the updated source with Tree-sitter provenance",
+        )
+        .into());
+    }
+    let rollback_graphs =
+        rollback_store.load_symbol_graphs_for_paths(&["src/main.awk".to_string()])?;
+    if rollback_graphs.len() != 1 || rollback_graphs[0].parser != ParserKind::Fallback {
+        return Err(io::Error::other(
+            "explicit parser-pack rollback did not retain independent fallback fact provenance",
+        )
+        .into());
+    }
+    drop(rollback_store);
+
     let disabled = projectatlas_json(
         &repo,
         &host_state,
