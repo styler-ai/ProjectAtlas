@@ -217,7 +217,7 @@ try {
         Require ($null -ne $processInformationType) "Construction process information was missing."
         Require `
             (([enum]::GetNames($admissionScenarioType) -join ',') -eq
-                'Normal,FailBeforeJobAssignment,FailBeforeJobAssignmentAndCleanupFailure,FailAfterJobserverAdmissionBeforeJobAssignment') `
+                'Normal,FailBeforeJobAssignment,FailBeforeJobAssignmentAndCleanupFailure,FailAfterJobserverAdmissionBeforeJobAssignment,CompareJobserverAccessAcrossAssignment') `
             "Construction admission failure domain was not closed."
 
         $publicRunMethods = @($adapterType.GetMethods(
@@ -251,6 +251,10 @@ try {
             'AdmissionScenario.FailAfterJobserverAdmissionBeforeJobAssignment)',
             [System.StringComparison]::Ordinal
         )
+        $jobserverComparisonIndex = $nativeSource.LastIndexOf(
+            'AdmissionScenario.CompareJobserverAccessAcrossAssignment)',
+            [System.StringComparison]::Ordinal
+        )
         $jobAssignmentIndex = $nativeSource.IndexOf(
             'if (!AssignProcessToJobObject(job, process.Process))',
             [System.StringComparison]::Ordinal
@@ -270,9 +274,16 @@ try {
                 $admissionFailureIndex -gt $processCreatedIndex -and
                 $jobserverAdmissionIndex -gt $admissionFailureIndex -and
                 $jobserverFailureIndex -gt $jobserverAdmissionIndex -and
-                $jobAssignmentIndex -gt $jobserverFailureIndex -and
+                $jobserverComparisonIndex -gt $jobserverFailureIndex -and
+                $jobAssignmentIndex -gt $jobserverComparisonIndex -and
                 $admissionCleanupIndex -gt $jobAssignmentIndex -and
                 $tokenCloseIndex -gt $admissionCleanupIndex -and
+                [regex]::Matches(
+                    $nativeSource,
+                    'WaitForSingleObject\(\s*process\.Process,\s*\(uint\)checked\(timeoutSeconds \* 1000\)\s*\)'
+                ).Count -eq 2 -and
+                $nativeSource -match
+                    'comparisonAmbientMembership\s*!=\s*admissionReceipt\.BeforeJobAmbientMembership' -and
                 $nativeSource.Contains(
                     'uint flags = CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;'
                 ) -and

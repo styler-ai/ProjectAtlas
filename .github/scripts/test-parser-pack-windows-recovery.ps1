@@ -2168,7 +2168,7 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
         "Construction adapter lost its private recovery boundary."
     Require `
         (([enum]::GetNames($scenarioType) -join ',') -eq
-            'Normal,FailBeforeJobAssignment,FailBeforeJobAssignmentAndCleanupFailure,FailAfterJobserverAdmissionBeforeJobAssignment') `
+            'Normal,FailBeforeJobAssignment,FailBeforeJobAssignmentAndCleanupFailure,FailAfterJobserverAdmissionBeforeJobAssignment,CompareJobserverAccessAcrossAssignment') `
         "Construction adapter recovery scenario domain changed."
 
     $failureArguments = [string[]]@(
@@ -2176,16 +2176,49 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
         '-Command', 'Start-Sleep -Seconds 30'
     )
     $normalProbe = New-JobserverAdmissionProbe
+    $classifyAdmissionExit = {
+        param([int]$ExitCode)
+
+        switch ($ExitCode) {
+            0 { 'success' }
+            40 { 'probe-environment' }
+            41 { 'principal-identity' }
+            42 { 'administrator-token' }
+            45 { 'effective-token-information' }
+            46 { 'logon-sid-count' }
+            47 { 'logon-sid-mismatch' }
+            48 { 'logon-sid-not-effective' }
+            49 { 'integrity' }
+            50 { 'native-probe-load' }
+            51 { 'native-jobserver-open-denied' }
+            52 { 'native-jobserver-open-not-found' }
+            53 { 'native-jobserver-open-other' }
+            54 { 'native-jobserver-acquire' }
+            55 { 'native-jobserver-release' }
+            56 { 'native-jobserver-close' }
+            60 { 'effective-thread-token' }
+            61 { 'thread-token-query' }
+            62 { 'process-token-query' }
+            63 { 'restricted-token' }
+            64 { 'token-session-query' }
+            65 { 'token-session-mismatch' }
+            66 { 'integrity-attributes' }
+            67 { 'mandatory-policy' }
+            68 { 'app-container-token' }
+            69 { 'private-object-namespace' }
+            70 { 'bno-isolation' }
+            72 { 'sandboxed-token' }
+            73 { 'app-silo-token' }
+            74 { 'sandbox-inert-query' }
+            75 { 'namespace-token-query' }
+            124 { 'timeout' }
+            default { "unexpected-exit-$ExitCode" }
+        }
+    }
     foreach ($scenarioRow in @(
         [pscustomobject]@{
-            Name = 'Normal'
-            JobserverName = "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
-            Arguments = $normalProbe.Arguments
-            AdmissionProbe = $true
-            AdmissionProbeSource = $normalProbe.Source
-        },
-        [pscustomobject]@{
             Name = 'FailBeforeJobAssignment'
+            Executable = [string]$ConstructionParameters.PwshPath
             JobserverName = $null
             Arguments = $failureArguments
             AdmissionProbe = $false
@@ -2193,6 +2226,7 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
         },
         [pscustomobject]@{
             Name = 'FailBeforeJobAssignmentAndCleanupFailure'
+            Executable = [string]$ConstructionParameters.PwshPath
             JobserverName = $null
             Arguments = $failureArguments
             AdmissionProbe = $false
@@ -2200,10 +2234,19 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
         },
         [pscustomobject]@{
             Name = 'FailAfterJobserverAdmissionBeforeJobAssignment'
+            Executable = [string]$ConstructionParameters.PwshPath
             JobserverName = "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
             Arguments = $failureArguments
             AdmissionProbe = $false
             AdmissionProbeSource = $null
+        },
+        [pscustomobject]@{
+            Name = 'CompareJobserverAccessAcrossAssignment'
+            Executable = [string]$ConstructionParameters.PwshPath
+            JobserverName = "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+            Arguments = $normalProbe.Arguments
+            AdmissionProbe = $true
+            AdmissionProbeSource = $normalProbe.Source
         }
     )) {
         $scenarioName = $scenarioRow.Name
@@ -2219,7 +2262,7 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
         $invokeArguments[0] = $identity.Username
         $invokeArguments[1] = $identity.Sid
         $invokeArguments[2] = $identity.Password
-        $invokeArguments[3] = [string]$ConstructionParameters.PwshPath
+        $invokeArguments[3] = [string]$scenarioRow.Executable
         $invokeArguments[4] = [string[]]$scenarioRow.Arguments
         $invokeArguments[5] = $env:SystemRoot
         $invokeArguments[6] = $environmentBlock
@@ -2227,66 +2270,47 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
         $invokeArguments[8] = 30
         $invokeArguments[9] = $admissionScenario
         $invokeArguments[10] = $receipt
-        if ($scenarioName -eq 'Normal') {
-            $normalResult = $null
+        if ($scenarioName -eq 'CompareJobserverAccessAcrossAssignment') {
+            $comparisonResult = $null
             try {
-                $normalResult = $runCore.Invoke($null, $invokeArguments)
+                $comparisonResult = $runCore.Invoke($null, $invokeArguments)
             }
             catch {
-                $normalFailure = $_.Exception
-                while (($normalFailure -is [System.Reflection.TargetInvocationException] -or
-                        $normalFailure -is [System.Management.Automation.MethodInvocationException]) -and
-                    $null -ne $normalFailure.InnerException) {
-                    $normalFailure = $normalFailure.InnerException
+                $comparisonFailure = $_.Exception
+                while (($comparisonFailure -is [System.Reflection.TargetInvocationException] -or
+                        $comparisonFailure -is [System.Management.Automation.MethodInvocationException]) -and
+                    $null -ne $comparisonFailure.InnerException) {
+                    $comparisonFailure = $comparisonFailure.InnerException
                 }
-                $nativeError = if ($normalFailure -is [System.ComponentModel.Win32Exception]) {
-                    $normalFailure.NativeErrorCode
+                $nativeError = if ($comparisonFailure -is [System.ComponentModel.Win32Exception]) {
+                    $comparisonFailure.NativeErrorCode
                 }
                 else {
                     $null
                 }
-                throw "Construction normal admission invocation failed. type=$($normalFailure.GetType().Name) native_error_code=$nativeError"
+                throw "Construction jobserver assignment comparison invocation failed. type=$($comparisonFailure.GetType().Name) native_error_code=$nativeError"
             }
-            $normalExitCode = [int]$normalResult
-            if ($normalExitCode -ne 0) {
-                $normalFailureCategory = switch ($normalExitCode) {
-                    40 { 'probe-environment' }
-                    41 { 'principal-identity' }
-                    42 { 'administrator-token' }
-                    45 { 'effective-token-information' }
-                    46 { 'logon-sid-count' }
-                    47 { 'logon-sid-mismatch' }
-                    48 { 'logon-sid-not-effective' }
-                    49 { 'integrity' }
-                    50 { 'native-probe-load' }
-                    51 { 'native-jobserver-open-denied' }
-                    52 { 'native-jobserver-open-not-found' }
-                    53 { 'native-jobserver-open-other' }
-                    54 { 'native-jobserver-acquire' }
-                    55 { 'native-jobserver-release' }
-                    56 { 'native-jobserver-close' }
-                    60 { 'effective-thread-token' }
-                    61 { 'thread-token-query' }
-                    62 { 'process-token-query' }
-                    63 { 'restricted-token' }
-                    64 { 'token-session-query' }
-                    65 { 'token-session-mismatch' }
-                    66 { 'integrity-attributes' }
-                    67 { 'mandatory-policy' }
-                    68 { 'app-container-token' }
-                    69 { 'private-object-namespace' }
-                    70 { 'bno-isolation' }
-                    72 { 'sandboxed-token' }
-                    73 { 'app-silo-token' }
-                    74 { 'sandbox-inert-query' }
-                    75 { 'namespace-token-query' }
-                    default { "unexpected-exit-$normalExitCode" }
-                }
-                throw "Construction normal admission child probe failed at $normalFailureCategory."
-            }
+            $beforeJobProcessId = [int](Get-ReflectedReceiptValue `
+                -ReceiptType $receiptType `
+                -Receipt $receipt `
+                -Name BeforeJobProcessId)
+            $beforeJobExitCode = [int](Get-ReflectedReceiptValue `
+                -ReceiptType $receiptType `
+                -Receipt $receipt `
+                -Name BeforeJobExitCode)
+            $afterJobExitCode = [int]$comparisonResult
+            Require `
+                ($beforeJobProcessId -gt 0 -and
+                    -not [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name BeforeJobTerminationAttempted) -and
+                    [uint32](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name BeforeJobWaitResult) -eq 0 -and
+                    [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name BeforeJobReaped) -and
+                    [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name BeforeJobProcessHandleClosed) -and
+                    [bool](Get-ReflectedReceiptValue -ReceiptType $receiptType -Receipt $receipt -Name BeforeJobThreadHandleClosed) -and
+                    $null -eq (Get-Process -Id $beforeJobProcessId -ErrorAction SilentlyContinue)) `
+                "Construction jobserver comparison did not reap its pre-Job child."
             Require `
                 ([ProjectAtlasConstructionProcess]::LastTotalProcesses -ge 1) `
-                "Construction normal admission did not contain its probe child."
+                "Construction jobserver comparison did not contain its assigned child."
             Assert-AdmissionReceipt `
                 -ReceiptType $receiptType `
                 -Receipt $receipt `
@@ -2294,8 +2318,35 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
                 -ExpectTermination $false
             Require `
                 ([ProjectAtlasConstructionProcess]::CanCreateFreshJobserverName($jobserverName)) `
-                "Construction normal admission retained its jobserver name."
-            continue
+                "Construction jobserver comparison retained its jobserver name."
+            $beforeCategory = & $classifyAdmissionExit $beforeJobExitCode
+            $afterCategory = & $classifyAdmissionExit $afterJobExitCode
+            $comparisonCategory = if ($beforeJobExitCode -eq 0 -and
+                $afterJobExitCode -eq 51) {
+                'job-assignment-boundary'
+            }
+            elseif ($beforeJobExitCode -eq 51 -and $afterJobExitCode -eq 51) {
+                'primary-process-boundary'
+            }
+            elseif ($beforeJobExitCode -eq 0 -and $afterJobExitCode -eq 0) {
+                'denial-not-reproduced'
+            }
+            elseif ($beforeJobExitCode -eq 51 -and $afterJobExitCode -eq 0) {
+                'assignment-relaxed-boundary'
+            }
+            else {
+                "before-$beforeCategory-after-$afterCategory"
+            }
+            $ambientCategory = if ([bool](Get-ReflectedReceiptValue `
+                -ReceiptType $receiptType `
+                -Receipt $receipt `
+                -Name BeforeJobAmbientMembership)) {
+                'ambient-job'
+            }
+            else {
+                'no-ambient-job'
+            }
+            throw "Construction jobserver assignment comparison classified $comparisonCategory with $ambientCategory."
         }
 
         $failure = Get-ReflectedOperationFailure `
