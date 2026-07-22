@@ -1573,6 +1573,7 @@ function New-MinimalUserEnvironmentBlock {
     $values = [ordered]@{
         CARGO_BUILD_JOBS = '1'
         ComSpec = $env:ComSpec
+        LOCALAPPDATA = (Join-Path $env:SystemRoot 'Temp')
         OS = 'Windows_NT'
         PATH = "$(Split-Path -Parent ([string]$ConstructionParameters.PwshPath));$env:SystemRoot\System32"
         PATHEXT = $env:PATHEXT
