@@ -516,11 +516,11 @@ try {
             directory_create_object_ntstatus = 0
             directory_traverse_create_ntstatus = 0
             native_semaphore_name =
-                "Local\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
+                "Global\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
             post_job_native_create_win32 = 0
             post_job_native_created_new = $true
             post_job_native_close_win32 = 0
-            semaphore_name = "Local\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
+            semaphore_name = "Global\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
             created_new = 'false'
             descendant_exit_code = 0
         }
@@ -1474,9 +1474,8 @@ public static class ProjectAtlasConstructionAdmissionFixture
         $currentObjectDirectory =
             [ProjectAtlasConstructionObjectDirectoryAcl]::GetCurrentPath()
         Require `
-            ($currentObjectDirectory -match
-                '\A(?:\\BaseNamedObjects|\\Sessions\\[1-9][0-9]*\\BaseNamedObjects)\z') `
-            "Construction object-directory ACL adapter returned a non-canonical session path."
+            ($currentObjectDirectory -ceq '\BaseNamedObjects') `
+            "Construction object-directory ACL adapter did not target the global namespace."
         [ProjectAtlasConstructionObjectDirectoryAcl]::AssertExactPrincipalAbsent(
             $currentObjectDirectory,
             'S-1-5-21-0-0-0-0'
@@ -2174,7 +2173,7 @@ public static class ProjectAtlasConstructionAdmissionFixture
             try {
                 $unexpectedOwnerJobserver = New-ContainedCargoJobserver `
                     -Sid $currentSid `
-                    -Name "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+                    -Name "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
                 $unexpectedOwnerJobserver.Dispose()
             }
             catch {
@@ -2187,7 +2186,7 @@ public static class ProjectAtlasConstructionAdmissionFixture
         }
         $jobserverRights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
             [System.Security.AccessControl.SemaphoreRights]::Modify
-        $jobserverName = "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+        $jobserverName = "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
         $jobserver = New-ContainedCargoJobserver `
             -Sid $jobserverSecuritySid `
             -Name $jobserverName
@@ -2232,17 +2231,17 @@ public static class ProjectAtlasConstructionAdmissionFixture
                 $collisionRejected = $true
             }
             Require $collisionRejected "Contained Cargo jobserver accepted a live-name collision."
-            $globalNameRejected = $false
+            $localNameRejected = $false
             try {
-                $unexpectedGlobalJobserver = New-ContainedCargoJobserver `
+                $unexpectedLocalJobserver = New-ContainedCargoJobserver `
                     -Sid $jobserverSecuritySid `
-                    -Name "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
-                $unexpectedGlobalJobserver.Dispose()
+                    -Name "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+                $unexpectedLocalJobserver.Dispose()
             }
             catch {
-                $globalNameRejected = $true
+                $localNameRejected = $true
             }
-            Require $globalNameRejected "Contained Cargo jobserver accepted a non-local namespace."
+            Require $localNameRejected "Contained Cargo jobserver accepted a non-global namespace."
         }
         finally {
             if ($null -ne $openedJobserver) {

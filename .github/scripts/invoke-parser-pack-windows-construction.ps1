@@ -622,11 +622,7 @@ public static class ProjectAtlasConstructionObjectDirectoryAcl
 
     public static string GetCurrentPath()
     {
-        int sessionId = Process.GetCurrentProcess().SessionId;
-        return sessionId == 0
-            ? "\\BaseNamedObjects"
-            : "\\Sessions\\" + sessionId.ToString(CultureInfo.InvariantCulture) +
-                "\\BaseNamedObjects";
+        return "\\BaseNamedObjects";
     }
 
     public static void GrantExactCreateObject(string path, string principalSid)
@@ -634,7 +630,7 @@ public static class ProjectAtlasConstructionObjectDirectoryAcl
         ValidatePath(path);
         if (!String.Equals(path, GetCurrentPath(), StringComparison.Ordinal))
         {
-            throw new InvalidOperationException("construction-object-directory-session-mismatch");
+            throw new InvalidOperationException("construction-object-directory-target-mismatch");
         }
         SecurityIdentifier principal = new SecurityIdentifier(principalSid);
         ExecuteWithDirectory(
@@ -1598,7 +1594,7 @@ public static class ProjectAtlasConstructionProcess
     private const int MaximumLogonCommandLineCharacters = 1023;
     private const string RequiredIntegritySid = "S-1-16-8192";
     private const string BrokerJobPrefix = "Global\\ProjectAtlasParserPackBroker-";
-    private const string DiagnosticSemaphorePrefix = "Local\\ProjectAtlasParserPack-";
+    private const string DiagnosticSemaphorePrefix = "Global\\ProjectAtlasParserPack-";
 
     private static readonly object BrokerJobSync = new object();
     private static string configuredBrokerJobName;

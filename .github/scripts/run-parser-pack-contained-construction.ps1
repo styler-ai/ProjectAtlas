@@ -343,7 +343,7 @@ function New-ContainedCargoJobserver {
         [System.Security.Principal.SecurityIdentifier]$Sid,
 
         [Parameter(Mandatory = $true)]
-        [ValidatePattern('\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
+        [ValidatePattern('\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
         [string]$Name
     )
 
@@ -479,7 +479,7 @@ function Invoke-ContainedCargoJobserverCanary {
         [string]$Pwsh,
 
         [Parameter(Mandatory = $true)]
-        [ValidatePattern('\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
+        [ValidatePattern('\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
         [string]$Name,
 
         [Parameter(Mandatory = $true)]
@@ -493,7 +493,7 @@ function Invoke-ContainedCargoJobserverCanary {
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidatePattern('\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
+    [ValidatePattern('\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
     [string]$Name,
 
     [Parameter(Mandatory = $true)]
@@ -705,7 +705,7 @@ if ($Target -eq "x86_64-pc-windows-msvc") {
     Write-ConstructionStatus -Stage $script:constructionStage -State "running"
     $constructionSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
     $script:constructionJobserverName =
-        "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+        "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
     $script:constructionJobserver = New-ContainedCargoJobserver `
         -Sid $constructionSid `
         -Name $script:constructionJobserverName
