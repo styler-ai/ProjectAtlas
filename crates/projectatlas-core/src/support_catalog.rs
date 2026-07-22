@@ -1494,13 +1494,26 @@ pub fn validate_support_catalog() -> Result<(), SupportCatalogError> {
             )));
         }
         validate_kind_bindings(row.kind, row.host, row.dialect_evidence, row.id)?;
-        if let CatalogAssessment::RuntimeCandidate { registry_id } = row.assessment
-            && language_capability(registry_id).is_none()
-        {
-            return Err(invalid(format!(
-                "candidate {:?} has no runtime registry owner {registry_id:?}",
-                row.id.as_str()
-            )));
+        match row.assessment {
+            CatalogAssessment::RuntimeCandidate { registry_id }
+                if language_capability(registry_id).is_none() =>
+            {
+                return Err(invalid(format!(
+                    "candidate {:?} has no runtime registry owner {registry_id:?}",
+                    row.id.as_str()
+                )));
+            }
+            CatalogAssessment::Planned | CatalogAssessment::Unavailable { .. }
+                if language_capability(row.id.as_str()).is_some() =>
+            {
+                return Err(invalid(format!(
+                    "documentation-only profile {:?} unexpectedly has a runtime registry row",
+                    row.id.as_str()
+                )));
+            }
+            CatalogAssessment::RuntimeCandidate { .. }
+            | CatalogAssessment::Planned
+            | CatalogAssessment::Unavailable { .. } => {}
         }
     }
     for row in ECOSYSTEM_CATALOG {
@@ -1889,7 +1902,11 @@ mod tests {
             "abap",
             "abl",
             "cobol",
+            "cobol-fixed",
+            "cobol-free",
             "fortran",
+            "fortran-fixed",
+            "fortran-free",
             "pli",
             "rpg",
             "ile-rpg",
@@ -1897,6 +1914,7 @@ mod tests {
             "rexx",
             "ibmi-cl",
             "hlasm",
+            "assembler",
             "ada",
             "pascal",
             "object-pascal",
@@ -1948,8 +1966,18 @@ mod tests {
             "cue",
             "dockerfile",
             "compose",
+            "pulumi-typescript",
+            "pulumi-python",
+            "aws-cdk-typescript",
+            "aws-cdk-python",
             "playwright-javascript",
             "playwright-typescript",
+            "jest-javascript",
+            "jest-typescript",
+            "vitest-typescript",
+            "pytest",
+            "junit",
+            "xunit-csharp",
         ] {
             assert!(ids.contains(required), "missing classification {required}");
         }
@@ -1972,6 +2000,11 @@ mod tests {
     fn planned_and_unavailable_rows_create_no_runtime_or_complete_claim() {
         for row in ECOSYSTEM_CATALOG {
             if !matches!(row.assessment, CatalogAssessment::RuntimeCandidate { .. }) {
+                assert!(
+                    language_capability(row.id.as_str()).is_none(),
+                    "documentation-only profile {} entered the runtime registry",
+                    row.id.as_str()
+                );
                 assert!(
                     !candidate_support_profiles()
                         .iter()
