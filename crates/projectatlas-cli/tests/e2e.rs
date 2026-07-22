@@ -7795,7 +7795,11 @@ fn publish_cli_navigation_graph(db: &Path) -> Result<(), Box<dyn Error>> {
         )?;
         publication.complete()?;
     }
-    store.set_purpose("src", "Navigation graph folder", PurposeSource::Agent)?;
+    store.set_purpose(
+        SRC_DIR_NAME,
+        "Navigation graph folder",
+        PurposeSource::Agent,
+    )?;
     store.set_purpose(
         "src/navigation_owner.rs",
         "Navigation graph owner",
