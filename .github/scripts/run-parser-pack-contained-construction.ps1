@@ -315,6 +315,48 @@ function Write-ConstructionStatus {
     }
 }
 
+function New-ContainedCargoJobserver {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Security.Principal.SecurityIdentifier]$Sid,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
+        [string]$Name
+    )
+
+    $security = [System.Security.AccessControl.SemaphoreSecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    $rights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
+        [System.Security.AccessControl.SemaphoreRights]::Modify
+    $security.AddAccessRule(
+        [System.Security.AccessControl.SemaphoreAccessRule]::new(
+            $Sid,
+            $rights,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        )
+    )
+
+    $createdNew = $false
+    try {
+        $semaphore = [System.Threading.SemaphoreAcl]::Create(
+            1,
+            1,
+            $Name,
+            [ref]$createdNew,
+            $security
+        )
+    }
+    catch {
+        throw "Contained Cargo jobserver could not be created."
+    }
+    if (-not $createdNew) {
+        $semaphore.Dispose()
+        throw "Contained Cargo jobserver name was not unique."
+    }
+    return $semaphore
+}
+
 if ($targetIsolation[$Target] -ne $NetworkIsolation) {
     throw "NetworkIsolation does not match Target."
 }
@@ -347,7 +389,19 @@ $script:constructionDiagnosticPath = [System.IO.Path]::Combine(
 $script:constructionStage = "validate-inputs"
 $script:constructionFailureRecorded = $false
 $script:constructionFailureExitCode = 1
+$script:constructionJobserver = $null
+$script:constructionJobserverName = $null
 trap {
+    if ($null -ne $script:constructionJobserver) {
+        try {
+            $script:constructionJobserver.Dispose()
+        }
+        catch {
+            # Process teardown still closes the exact process-owned semaphore handle.
+        }
+        $script:constructionJobserver = $null
+    }
+    Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS -ErrorAction SilentlyContinue
     if (-not $script:constructionFailureRecorded) {
         $failureExitCode = 1
         $lastNativeExit = Get-Variable -Name LASTEXITCODE -ValueOnly -ErrorAction SilentlyContinue
@@ -411,6 +465,19 @@ $env:CARGO_NET_OFFLINE = "true"
 $env:CARGO_TARGET_DIR = $buildDirectory
 $env:TSLP_OFFLINE = "1"
 $env:TSLP_LINK_MODE = "dynamic"
+if ($Target -eq "x86_64-pc-windows-msvc") {
+    if (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS) {
+        throw "Contained construction inherited a Cargo jobserver."
+    }
+    $constructionSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $script:constructionJobserverName =
+        "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+    $script:constructionJobserver = New-ContainedCargoJobserver `
+        -Sid $constructionSid `
+        -Name $script:constructionJobserverName
+    $env:CARGO_MAKEFLAGS =
+        "-j --jobserver-fds=$($script:constructionJobserverName) --jobserver-auth=$($script:constructionJobserverName)"
+}
 
     $workerBuildArguments = @(
         "build",
@@ -731,6 +798,11 @@ $publishedNetworkCheck = [System.IO.Path]::Combine(
 )
 [System.IO.File]::Copy($acceptedManifest, $publishedManifest, $false)
 [System.IO.File]::Copy($networkCheck, $publishedNetworkCheck, $false)
+if ($null -ne $script:constructionJobserver) {
+    $script:constructionJobserver.Dispose()
+    $script:constructionJobserver = $null
+}
+Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS -ErrorAction SilentlyContinue
 [System.IO.File]::Delete($script:constructionStatusPath)
 
 [pscustomobject]@{

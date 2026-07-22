@@ -88,24 +88,31 @@ try {
         )
         Require ($wrapperParseErrors.Count -eq 0) "Windows construction wrapper did not parse."
         $wrapperText = $wrapperAst.Extent.Text
+        $productionText = $ast.Extent.Text
+        $expectedJobserverNameExpression =
+            '"Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString(''N''))"'
         Require `
-            ($wrapperText.Contains(
-                '"Local\ProjectAtlasParserPack-$randomHex"',
+            ($productionText.Contains(
+                $expectedJobserverNameExpression,
                 [System.StringComparison]::Ordinal
-            )) `
-            "Windows construction jobserver did not use the exact session-local prefix."
+            ) -and
+                $productionText.Contains('New-ContainedCargoJobserver') -and
+                $productionText.Contains('$env:CARGO_MAKEFLAGS =') -and
+                $productionText.Contains(
+                    '"-j --jobserver-fds=$($script:constructionJobserverName) --jobserver-auth=$($script:constructionJobserverName)"'
+                )) `
+            "Contained Windows construction did not own its exact session-local Cargo jobserver."
         Require `
-            (-not $wrapperText.Contains(
+            (-not $productionText.Contains(
                 '"Global\ProjectAtlasParserPack-',
                 [System.StringComparison]::Ordinal
             )) `
-            "Windows construction jobserver retained the machine-global prefix."
+            "Contained Windows construction retained a machine-global Cargo jobserver."
         Require `
-            (-not $wrapperText.Contains(
-                '"ProjectAtlasParserPack-$randomHex"',
-                [System.StringComparison]::Ordinal
-            )) `
-            "Windows construction jobserver used an implicit namespace."
+            (-not $wrapperText.Contains('CARGO_MAKEFLAGS =') -and
+                -not $wrapperText.Contains('New-ConstructionJobserver') -and
+                -not $wrapperText.Contains('$script:constructionJobserver')) `
+            "Windows wrapper retained parent-owned Cargo jobserver state."
         $nativeSourceAssignments = @($wrapperAst.FindAll(
             {
                 param($node)
@@ -411,41 +418,36 @@ public static class ProjectAtlasConstructionAdmissionFixture
         Require ($probeSourceAssignments.Count -eq 1) "Expected one boundary probe source assignment."
         Invoke-Expression $probeSourceAssignments[0].Extent.Text
         Require `
-            ($probeSource.Contains('ReadToEndAsync()') -and
-                $probeSource.Contains('$expectedCargoMakeflags') -and
-                -not $probeSource.Contains('StandardOutput.ReadToEnd()')) `
-            "Construction boundary probe did not drain both streams asynchronously or verify jobserver transport."
-        Require `
             ($probeSource.Contains('$ExpectedSessionId') -and
                 $probeSource.Contains('S-1-16-8192') -and
                 $probeSource.Contains('$principal.IsInRole($expectedSecurityIdentifier)') -and
-                $probeSource.Contains('$synchronizeJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(') -and
-                $probeSource.Contains('$modifyJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(')) `
-            "Construction boundary probe did not classify SID membership, session, integrity, and individual jobserver rights."
+                $probeSource.Contains('Test-Path -LiteralPath Env:CARGO_MAKEFLAGS') -and
+                $probeSource.Contains('exit 24') -and
+                $probeSource.Contains('[Environment]::GetEnvironmentVariables().Keys')) `
+            "Construction boundary probe did not retain identity, session, integrity, and sanitized-environment checks."
         Require `
-            ($wrapperAst.Extent.Text.Contains('26 { "jobserver-synchronize-access" }') -and
-                $wrapperAst.Extent.Text.Contains('28 { "jobserver-modify-access" }') -and
-                $wrapperAst.Extent.Text.Contains('33 { "jobserver-combined-access" }') -and
+            ($wrapperAst.Extent.Text.Contains('24 { "unexpected-jobserver-environment" }') -and
                 $wrapperAst.Extent.Text.Contains('37 { "target-sid-membership-query" }') -and
                 $wrapperAst.Extent.Text.Contains('38 { "target-sid-not-effective" }')) `
-            "Construction boundary probe did not retain distinct jobserver access diagnostics."
+            "Construction boundary probe did not retain closed identity and environment diagnostics."
         $wrapperText = $wrapperAst.Extent.Text
         $sessionCheckIndex = $probeSource.IndexOf(
             '[System.Diagnostics.Process]::GetCurrentProcess().SessionId -ne $ExpectedSessionId',
             [System.StringComparison]::Ordinal
         )
-        $firstJobserverOpenIndex = $probeSource.IndexOf(
-            '[System.Threading.SemaphoreAcl]::OpenExisting(',
+        $jobserverEnvironmentCheckIndex = $probeSource.IndexOf(
+            'Test-Path -LiteralPath Env:CARGO_MAKEFLAGS',
             [System.StringComparison]::Ordinal
         )
         Require `
             ($sessionCheckIndex -ge 0 -and
-                $firstJobserverOpenIndex -gt $sessionCheckIndex -and
-                $probeSource.Contains('catch [System.UnauthorizedAccessException] {') -and
-                $probeSource.Contains('exit 26') -and
+                $jobserverEnvironmentCheckIndex -gt $sessionCheckIndex -and
+                -not $probeSource.Contains('[System.Threading.SemaphoreAcl]::OpenExisting(') -and
+                -not $probeSource.Contains('$JobserverName') -and
+                -not $probeSource.Contains('$rustcStart') -and
                 -not $probeSource.Contains('$ObjectDirectoryProbePath') -and
                 -not $probeSource.Contains('$TokenRestrictionProbePath')) `
-            "Session-local jobserver proof did not remain exact and self-contained."
+            "Parent boundary probe retained child-owned jobserver or obsolete diagnostics."
 
         $principalProcessDefinitions = @($wrapperAst.FindAll(
             {
@@ -1204,59 +1206,35 @@ public static class ProjectAtlasConstructionAdmissionFixture
         Assert-PrincipalAclAbsent -Path $aclFixture -Sid $fixtureSid
         Assert-PrincipalAclAbsent -Path $aclChildFixture -Sid $fixtureSid
 
-        foreach ($functionName in @(
-            "New-ConstructionJobserverSecurity",
-            "New-ConstructionJobserver"
-        )) {
-            $jobserverDefinitions = @($wrapperAst.FindAll(
-                {
-                    param($node)
-                    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-                        $node.Name -eq $functionName
-                },
-                $true
-            ))
-            Require ($jobserverDefinitions.Count -eq 1) "Expected one $functionName definition."
-            Invoke-Expression $jobserverDefinitions[0].Extent.Text
-        }
-
+        $jobserverDefinitions = @($ast.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -eq "New-ContainedCargoJobserver"
+            },
+            $true
+        ))
+        Require `
+            ($jobserverDefinitions.Count -eq 1) `
+            "Expected one New-ContainedCargoJobserver definition."
+        $jobserverDefinitionText = $jobserverDefinitions[0].Extent.Text
+        Require `
+            ($jobserverDefinitionText.Contains('$security.SetAccessRuleProtection($true, $false)') -and
+                $jobserverDefinitionText.Contains('[System.Security.AccessControl.SemaphoreRights]::Synchronize -bor') -and
+                $jobserverDefinitionText.Contains('[System.Security.AccessControl.SemaphoreRights]::Modify') -and
+                $jobserverDefinitionText.Contains('$Sid,') -and
+                $jobserverDefinitionText.Contains('[System.Security.AccessControl.AccessControlType]::Allow') -and
+                $jobserverDefinitionText.Contains('[System.Threading.SemaphoreAcl]::Create(') -and
+                ([regex]::Matches($jobserverDefinitionText, '\.AddAccessRule\(').Count -eq 1)) `
+            "Contained Cargo jobserver did not retain one protected exact-rights DACL."
+        Invoke-Expression $jobserverDefinitionText
         $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
         $jobserverRights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
             [System.Security.AccessControl.SemaphoreRights]::Modify
-        $jobserverSecurity = New-ConstructionJobserverSecurity -Sid $currentSid
-        $jobserverRules = @($jobserverSecurity.GetAccessRules(
-            $true,
-            $false,
-            [System.Security.Principal.SecurityIdentifier]
-        ))
-        Require $jobserverSecurity.AreAccessRulesProtected "Construction jobserver DACL was not protected."
-        Require ($jobserverRules.Count -eq 1) "Construction jobserver DACL was not target-only."
-        Require `
-            ($jobserverRules[0].IdentityReference -eq $currentSid -and
-                $jobserverRules[0].SemaphoreRights -eq $jobserverRights -and
-                $jobserverRules[0].AccessControlType -eq
-                    [System.Security.AccessControl.AccessControlType]::Allow) `
-            "Construction jobserver DACL did not grant the exact target rights."
-        $jobserverName = "Local\ProjectAtlasJobserverTest-$([guid]::NewGuid().ToString('N'))"
-        $jobserver = New-ConstructionJobserver -Sid $currentSid -Name $jobserverName
+        $jobserverName = "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+        $jobserver = New-ContainedCargoJobserver -Sid $currentSid -Name $jobserverName
         $openedJobserver = $null
-        $daclReader = $null
         try {
-            Require `
-                ([ProjectAtlasConstructionProcess]::HasMediumMandatoryLabel(
-                    $jobserver.SafeWaitHandle
-                )) `
-                "Construction jobserver did not retain its medium mandatory label."
-            $daclReader = [System.Threading.SemaphoreAcl]::OpenExisting(
-                $jobserverName,
-                [System.Security.AccessControl.SemaphoreRights]::ReadPermissions
-            )
-            Require `
-                ([ProjectAtlasConstructionProcess]::HasExpectedJobserverDacl(
-                    $daclReader.SafeWaitHandle,
-                    $currentSid.Value
-                )) `
-                "Construction jobserver did not retain its target-only DACL."
             $openedJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(
                 $jobserverName,
                 $jobserverRights
@@ -1267,7 +1245,7 @@ public static class ProjectAtlasConstructionAdmissionFixture
                 "Construction jobserver did not restore its token."
             $collisionRejected = $false
             try {
-                $unexpectedJobserver = New-ConstructionJobserver `
+                $unexpectedJobserver = New-ContainedCargoJobserver `
                     -Sid $currentSid `
                     -Name $jobserverName
                 $unexpectedJobserver.Dispose()
@@ -1276,16 +1254,34 @@ public static class ProjectAtlasConstructionAdmissionFixture
                 $collisionRejected = $true
             }
             Require $collisionRejected "Construction jobserver accepted a live-name collision."
+            $globalNameRejected = $false
+            try {
+                $unexpectedGlobalJobserver = New-ContainedCargoJobserver `
+                    -Sid $currentSid `
+                    -Name "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+                $unexpectedGlobalJobserver.Dispose()
+            }
+            catch {
+                $globalNameRejected = $true
+            }
+            Require $globalNameRejected "Contained Cargo jobserver accepted a non-local namespace."
         }
         finally {
-            if ($null -ne $daclReader) {
-                $daclReader.Dispose()
-            }
             if ($null -ne $openedJobserver) {
                 $openedJobserver.Dispose()
             }
             $jobserver.Dispose()
         }
+        $postCleanupJobserver = $null
+        $jobserverNameRemoved = -not [System.Threading.SemaphoreAcl]::TryOpenExisting(
+            $jobserverName,
+            $jobserverRights,
+            [ref]$postCleanupJobserver
+        )
+        if ($null -ne $postCleanupJobserver) {
+            $postCleanupJobserver.Dispose()
+        }
+        Require $jobserverNameRemoved "Contained Cargo jobserver survived its last owned handle."
     }
     $Target = "x86_64-pc-windows-msvc"
     $commandDiagnosticTailBytes = 24 * 1024

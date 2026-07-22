@@ -986,7 +986,6 @@ $nativeSource = @'
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
-using Microsoft.Win32.SafeHandles;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
@@ -1007,9 +1006,6 @@ public static class ProjectAtlasConstructionProcess
     private const uint WindowStationAllAccess = 0x000F037F;
     private const uint DesktopAllAccess = 0x000F01FF;
     private const uint SddlRevision1 = 1;
-    private const int SeKernelObject = 6;
-    private const uint DaclSecurityInformation = 0x00000004;
-    private const uint LabelSecurityInformation = 0x00000010;
 
     public static uint LastTotalProcesses { get; private set; }
 
@@ -1147,55 +1143,6 @@ public static class ProjectAtlasConstructionProcess
         out IntPtr securityDescriptor,
         IntPtr securityDescriptorSize);
 
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetSecurityDescriptorSacl(
-        IntPtr securityDescriptor,
-        [MarshalAs(UnmanagedType.Bool)] out bool saclPresent,
-        out IntPtr sacl,
-        [MarshalAs(UnmanagedType.Bool)] out bool saclDefaulted);
-
-    [DllImport("advapi32.dll")]
-    private static extern uint SetSecurityInfo(
-        SafeWaitHandle handle,
-        int objectType,
-        uint securityInfo,
-        IntPtr owner,
-        IntPtr group,
-        IntPtr dacl,
-        IntPtr sacl);
-
-    [DllImport("advapi32.dll")]
-    private static extern uint GetSecurityInfo(
-        SafeWaitHandle handle,
-        int objectType,
-        uint securityInfo,
-        IntPtr owner,
-        IntPtr group,
-        IntPtr dacl,
-        out IntPtr sacl,
-        out IntPtr securityDescriptor);
-
-    [DllImport("advapi32.dll", EntryPoint = "GetSecurityInfo")]
-    private static extern uint GetSecurityInfoForDacl(
-        SafeWaitHandle handle,
-        int objectType,
-        uint securityInfo,
-        out IntPtr owner,
-        out IntPtr group,
-        out IntPtr dacl,
-        out IntPtr sacl,
-        out IntPtr securityDescriptor);
-
-    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ConvertSecurityDescriptorToStringSecurityDescriptor(
-        IntPtr securityDescriptor,
-        uint stringSecurityDescriptorRevision,
-        uint securityInformation,
-        out IntPtr stringSecurityDescriptor,
-        IntPtr stringSecurityDescriptorLength);
-
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr LocalFree(IntPtr memory);
 
@@ -1279,195 +1226,6 @@ public static class ProjectAtlasConstructionProcess
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr handle);
-
-    public static void SetMediumMandatoryLabel(SafeWaitHandle handle)
-    {
-        // The elevated runner creates this target-only semaphore for one medium-integrity builder.
-        if (handle == null || handle.IsInvalid || handle.IsClosed)
-        {
-            throw new ArgumentException("apply-jobserver-label", nameof(handle));
-        }
-
-        IntPtr securityDescriptor = IntPtr.Zero;
-        try
-        {
-            if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
-                "S:(ML;;NW;;;ME)",
-                SddlRevision1,
-                out securityDescriptor,
-                IntPtr.Zero))
-            {
-                throw Failure("create-jobserver-label");
-            }
-
-            bool saclPresent;
-            bool saclDefaulted;
-            IntPtr sacl;
-            if (!GetSecurityDescriptorSacl(
-                securityDescriptor,
-                out saclPresent,
-                out sacl,
-                out saclDefaulted))
-            {
-                throw Failure("read-jobserver-label");
-            }
-            if (!saclPresent || sacl == IntPtr.Zero)
-            {
-                throw new InvalidOperationException("read-jobserver-label");
-            }
-
-            uint result = SetSecurityInfo(
-                handle,
-                SeKernelObject,
-                LabelSecurityInformation,
-                IntPtr.Zero,
-                IntPtr.Zero,
-                IntPtr.Zero,
-                sacl);
-            if (result != 0)
-            {
-                throw new Win32Exception(unchecked((int)result), "apply-jobserver-label");
-            }
-        }
-        finally
-        {
-            if (securityDescriptor != IntPtr.Zero)
-            {
-                LocalFree(securityDescriptor);
-            }
-        }
-    }
-
-    public static bool HasMediumMandatoryLabel(SafeWaitHandle handle)
-    {
-        if (handle == null || handle.IsInvalid || handle.IsClosed)
-        {
-            throw new ArgumentException("read-jobserver-label", nameof(handle));
-        }
-
-        IntPtr securityDescriptor = IntPtr.Zero;
-        IntPtr stringSecurityDescriptor = IntPtr.Zero;
-        try
-        {
-            IntPtr sacl;
-            uint result = GetSecurityInfo(
-                handle,
-                SeKernelObject,
-                LabelSecurityInformation,
-                IntPtr.Zero,
-                IntPtr.Zero,
-                IntPtr.Zero,
-                out sacl,
-                out securityDescriptor);
-            if (result != 0)
-            {
-                throw new Win32Exception(unchecked((int)result), "read-jobserver-label");
-            }
-            if (sacl == IntPtr.Zero || securityDescriptor == IntPtr.Zero)
-            {
-                return false;
-            }
-            if (!ConvertSecurityDescriptorToStringSecurityDescriptor(
-                securityDescriptor,
-                SddlRevision1,
-                LabelSecurityInformation,
-                out stringSecurityDescriptor,
-                IntPtr.Zero))
-            {
-                throw Failure("format-jobserver-label");
-            }
-            return string.Equals(
-                Marshal.PtrToStringUni(stringSecurityDescriptor),
-                "S:(ML;;NW;;;ME)",
-                StringComparison.Ordinal);
-        }
-        finally
-        {
-            if (stringSecurityDescriptor != IntPtr.Zero)
-            {
-                LocalFree(stringSecurityDescriptor);
-            }
-            if (securityDescriptor != IntPtr.Zero)
-            {
-                LocalFree(securityDescriptor);
-            }
-        }
-    }
-
-    public static bool HasExpectedJobserverDacl(SafeWaitHandle handle, string principalSid)
-    {
-        if (handle == null || handle.IsInvalid || handle.IsClosed)
-        {
-            throw new ArgumentException("read-jobserver-dacl", nameof(handle));
-        }
-
-        IntPtr securityDescriptor = IntPtr.Zero;
-        IntPtr stringSecurityDescriptor = IntPtr.Zero;
-        try
-        {
-            IntPtr owner;
-            IntPtr group;
-            IntPtr dacl;
-            IntPtr sacl;
-            uint result = GetSecurityInfoForDacl(
-                handle,
-                SeKernelObject,
-                DaclSecurityInformation,
-                out owner,
-                out group,
-                out dacl,
-                out sacl,
-                out securityDescriptor);
-            if (result != 0)
-            {
-                throw new Win32Exception(unchecked((int)result), "read-jobserver-dacl");
-            }
-            if (dacl == IntPtr.Zero || securityDescriptor == IntPtr.Zero)
-            {
-                return false;
-            }
-            if (!ConvertSecurityDescriptorToStringSecurityDescriptor(
-                securityDescriptor,
-                SddlRevision1,
-                DaclSecurityInformation,
-                out stringSecurityDescriptor,
-                IntPtr.Zero))
-            {
-                throw Failure("format-jobserver-dacl");
-            }
-            string sddl = Marshal.PtrToStringUni(stringSecurityDescriptor);
-            if (string.IsNullOrEmpty(sddl))
-            {
-                return false;
-            }
-            var descriptor = new System.Security.AccessControl.RawSecurityDescriptor(sddl);
-            var parsedDacl = descriptor.DiscretionaryAcl;
-            if ((descriptor.ControlFlags &
-                    System.Security.AccessControl.ControlFlags.DiscretionaryAclProtected) == 0 ||
-                parsedDacl == null || parsedDacl.Count != 1)
-            {
-                return false;
-            }
-            var ace = parsedDacl[0] as System.Security.AccessControl.CommonAce;
-            var expectedSid = new System.Security.Principal.SecurityIdentifier(principalSid);
-            return ace != null &&
-                ace.AceQualifier == System.Security.AccessControl.AceQualifier.AccessAllowed &&
-                ace.AceFlags == System.Security.AccessControl.AceFlags.None &&
-                ace.AccessMask == 0x00100002 &&
-                expectedSid.Equals(ace.SecurityIdentifier);
-        }
-        finally
-        {
-            if (stringSecurityDescriptor != IntPtr.Zero)
-            {
-                LocalFree(stringSecurityDescriptor);
-            }
-            if (securityDescriptor != IntPtr.Zero)
-            {
-                LocalFree(securityDescriptor);
-            }
-        }
-    }
 
     public static int Run(
         string username,
@@ -2003,92 +1761,6 @@ function New-EnvironmentBlock {
     return $block
 }
 
-function New-ConstructionJobserverSecurity {
-    param(
-        [Parameter(Mandatory = $true)]
-        [System.Security.Principal.SecurityIdentifier]$Sid
-    )
-
-    $security = [System.Security.AccessControl.SemaphoreSecurity]::new()
-    $security.SetAccessRuleProtection($true, $false)
-    $rights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
-        [System.Security.AccessControl.SemaphoreRights]::Modify
-    $security.AddAccessRule(
-        [System.Security.AccessControl.SemaphoreAccessRule]::new(
-            $Sid,
-            $rights,
-            [System.Security.AccessControl.AccessControlType]::Allow
-        )
-    )
-    return $security
-}
-
-function New-ConstructionJobserver {
-    param(
-        [Parameter(Mandatory = $true)]
-        [System.Security.Principal.SecurityIdentifier]$Sid,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Name
-    )
-
-    $security = New-ConstructionJobserverSecurity -Sid $Sid
-    $createdNew = $false
-    try {
-        $semaphore = [System.Threading.SemaphoreAcl]::Create(
-            1,
-            1,
-            $Name,
-            [ref]$createdNew,
-            $security
-        )
-    }
-    catch {
-        throw "Construction jobserver could not be created."
-    }
-    if (-not $createdNew) {
-        $semaphore.Dispose()
-        throw "Construction jobserver name was not unique."
-    }
-    try {
-        [ProjectAtlasConstructionProcess]::SetMediumMandatoryLabel(
-            $semaphore.SafeWaitHandle
-        )
-        if (-not [ProjectAtlasConstructionProcess]::HasMediumMandatoryLabel(
-            $semaphore.SafeWaitHandle
-        )) {
-            throw "Construction jobserver integrity label could not be verified."
-        }
-    }
-    catch {
-        $semaphore.Dispose()
-        throw "Construction jobserver integrity label could not be applied or verified."
-    }
-    $daclReader = $null
-    try {
-        $daclReader = [System.Threading.SemaphoreAcl]::OpenExisting(
-            $name,
-            [System.Security.AccessControl.SemaphoreRights]::ReadPermissions
-        )
-        if (-not [ProjectAtlasConstructionProcess]::HasExpectedJobserverDacl(
-            $daclReader.SafeWaitHandle,
-            $Sid.Value
-        )) {
-            throw "Construction jobserver DACL could not be verified."
-        }
-    }
-    catch {
-        $semaphore.Dispose()
-        throw "Construction jobserver DACL could not be read or verified."
-    }
-    finally {
-        if ($null -ne $daclReader) {
-            $daclReader.Dispose()
-        }
-    }
-    return $semaphore
-}
-
 function Invoke-AsConstructionPrincipal {
     param(
         [Parameter(Mandatory = $true)]
@@ -2224,7 +1896,7 @@ function Write-BoundedConstructionFailure {
         $privateValues = @(
             $source, $inputs, $vendor, $output, $cargo, $temporary, $constructionHome,
             $toolchain, $pwshRoot, $vcTools, $windowsSdk,
-            $Username, $Sid, $FirewallRule, $script:constructionJobserverName
+            $Username, $Sid, $FirewallRule
         ) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
             Sort-Object { ([string]$_).Length } -Descending -Unique
         foreach ($privateValue in $privateValues) {
@@ -2277,8 +1949,6 @@ $state = @{
 Write-ProtectedState -State $state
 
 $operationError = $null
-$script:constructionJobserver = $null
-$script:constructionJobserverName = $null
 try {
     $account = New-LocalUser `
         -Name $script:constructionUsername `
@@ -2352,10 +2022,6 @@ try {
     foreach ($directory in @($appData, $localAppData)) {
         [System.IO.Directory]::CreateDirectory($directory) | Out-Null
     }
-    $script:constructionJobserverName = "Local\ProjectAtlasParserPack-$randomHex"
-    $script:constructionJobserver = New-ConstructionJobserver `
-        -Sid $sid `
-        -Name $script:constructionJobserverName
     $environment = @{
         SystemRoot = $env:SystemRoot
         WINDIR = $env:WINDIR
@@ -2375,7 +2041,6 @@ try {
         CARGO_HOME = $cargo
         CARGO_NET_OFFLINE = "true"
         CARGO_INCREMENTAL = "0"
-        CARGO_MAKEFLAGS = "-j --jobserver-fds=$($script:constructionJobserverName) --jobserver-auth=$($script:constructionJobserverName)"
         CARGO_TERM_COLOR = "never"
         TSLP_OFFLINE = "1"
         HOME = $constructionHome
@@ -2433,8 +2098,7 @@ try {
     $probeSource = @'
 param(
     [Parameter(Mandatory = $true)][string]$ExpectedSid,
-    [Parameter(Mandatory = $true)][int]$ExpectedSessionId,
-    [Parameter(Mandatory = $true)][string]$JobserverName
+    [Parameter(Mandatory = $true)][int]$ExpectedSessionId
 )
 $ErrorActionPreference = "Stop"
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -2493,90 +2157,8 @@ foreach ($entry in [Environment]::GetEnvironmentVariables().Keys) {
         exit 23
     }
 }
-$expectedCargoMakeflags = "-j --jobserver-fds=$JobserverName --jobserver-auth=$JobserverName"
-if ([string]$env:CARGO_MAKEFLAGS -cne $expectedCargoMakeflags) {
+if (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS) {
     exit 24
-}
-$synchronizeJobserver = $null
-try {
-    $synchronizeJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(
-        $JobserverName,
-        [System.Security.AccessControl.SemaphoreRights]::Synchronize
-    )
-}
-catch [System.Threading.WaitHandleCannotBeOpenedException] {
-    exit 25
-}
-catch [System.UnauthorizedAccessException] {
-    exit 26
-}
-catch {
-    exit 27
-}
-$synchronizeJobserver.Dispose()
-$modifyJobserver = $null
-try {
-    $modifyJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(
-        $JobserverName,
-        [System.Security.AccessControl.SemaphoreRights]::Modify
-    )
-}
-catch [System.Threading.WaitHandleCannotBeOpenedException] {
-    exit 25
-}
-catch [System.UnauthorizedAccessException] {
-    exit 28
-}
-catch {
-    exit 29
-}
-$modifyJobserver.Dispose()
-$jobserverRights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
-    [System.Security.AccessControl.SemaphoreRights]::Modify
-$inheritedJobserver = $null
-try {
-    $inheritedJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(
-        $JobserverName,
-        $jobserverRights
-    )
-}
-catch [System.Threading.WaitHandleCannotBeOpenedException] {
-    exit 25
-}
-catch [System.UnauthorizedAccessException] {
-    exit 33
-}
-catch {
-    exit 34
-}
-try {
-    if (-not $inheritedJobserver.WaitOne(0) -or $inheritedJobserver.Release() -ne 0) {
-        exit 35
-    }
-}
-finally {
-    $inheritedJobserver.Dispose()
-}
-$rustcStart = [System.Diagnostics.ProcessStartInfo]::new()
-$rustcStart.FileName = $env:RUSTC
-$rustcStart.UseShellExecute = $false
-$rustcStart.CreateNoWindow = $true
-$rustcStart.RedirectStandardOutput = $true
-$rustcStart.RedirectStandardError = $true
-$rustcStart.ArgumentList.Add("--print")
-$rustcStart.ArgumentList.Add("cfg")
-$rustc = [System.Diagnostics.Process]::Start($rustcStart)
-$rustcOutputTask = $rustc.StandardOutput.ReadToEndAsync()
-$rustcErrorTask = $rustc.StandardError.ReadToEndAsync()
-$rustc.WaitForExit()
-$rustcOutput = $rustcOutputTask.GetAwaiter().GetResult()
-$rustcError = $rustcErrorTask.GetAwaiter().GetResult()
-$rustcExitCode = $rustc.ExitCode
-$rustc.Dispose()
-if ($rustcExitCode -ne 0 -or
-    -not [string]::IsNullOrEmpty($rustcError) -or
-    $rustcOutput -notmatch '(?m)^target_os="windows"\r?$') {
-    exit 36
 }
 exit 0
 '@
@@ -2585,8 +2167,7 @@ exit 0
         "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
         "-File", $probePath,
         "-ExpectedSid", $sid.Value,
-        "-ExpectedSessionId", [System.Diagnostics.Process]::GetCurrentProcess().SessionId,
-        "-JobserverName", $script:constructionJobserverName
+        "-ExpectedSessionId", [System.Diagnostics.Process]::GetCurrentProcess().SessionId
     )
     $probeExitCode = Invoke-AsConstructionPrincipal `
         -Arguments $probeArguments `
@@ -2596,19 +2177,10 @@ exit 0
             21 { "identity" }
             22 { "descendant" }
             23 { "environment" }
-            24 { "environment-jobserver" }
-            25 { "jobserver-missing" }
-            26 { "jobserver-synchronize-access" }
-            27 { "jobserver-synchronize-open" }
-            28 { "jobserver-modify-access" }
-            29 { "jobserver-modify-open" }
+            24 { "unexpected-jobserver-environment" }
             30 { "session" }
             31 { "integrity-query" }
             32 { "integrity" }
-            33 { "jobserver-combined-access" }
-            34 { "jobserver-combined-open" }
-            35 { "jobserver-token" }
-            36 { "rustc-jobserver" }
             37 { "target-sid-membership-query" }
             38 { "target-sid-not-effective" }
             default { "unexpected-exit-$probeExitCode" }
@@ -2668,25 +2240,6 @@ finally {
             $operationError = [System.AggregateException]::new(
                 "Parser-pack construction and mandatory cleanup both failed.",
                 @($operationError.Exception, $_.Exception)
-            )
-        }
-    }
-    try {
-        if ($null -ne $script:constructionJobserver) {
-            $script:constructionJobserver.Dispose()
-        }
-    }
-    catch {
-        $jobserverCleanupError = [System.InvalidOperationException]::new(
-            "Construction jobserver cleanup failed."
-        )
-        if ($null -eq $operationError) {
-            $operationError = $jobserverCleanupError
-        }
-        else {
-            $operationError = [System.AggregateException]::new(
-                "Parser-pack construction cleanup retained more than one failure.",
-                @($operationError.Exception, $jobserverCleanupError)
             )
         }
     }
