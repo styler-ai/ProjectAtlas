@@ -1031,12 +1031,31 @@ struct DiagnosticReader {
 }
 
 /// One observed Linux resident-memory breach.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
 struct LinuxMemoryBreach {
     /// Active accounting path.
     accounting: ParserMemoryAccountingKind,
     /// Last observed resident or cgroup memory bytes.
     observed_bytes: u64,
+}
+
+/// Bounded resolution of a transient Linux process-exit/accounting transition.
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
+enum LinuxMemoryObservation {
+    /// Resident memory became readable again while the worker remained live.
+    Memory(Option<LinuxMemoryBreach>),
+    /// The direct child became waitable before memory accounting recovered.
+    ChildExited {
+        /// Platform exit code, when the process reported one.
+        code: Option<i32>,
+    },
+}
+
+/// One observed direct-child exit stripped to the public diagnostic contract.
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
+struct LinuxChildExit {
+    /// Platform exit code, when the process reported one.
+    code: Option<i32>,
 }
 
 /// Result of one Linux process-group signal attempt.
@@ -1488,6 +1507,43 @@ fn read_process_rss(process_id: u32) -> io::Result<u64> {
         LINUX_MEMORY_RECORD_MAX_BYTES,
     )?;
     parse_process_rss(&status)
+}
+
+/// Resolve the short Linux interval between releasing a process address space and becoming
+/// waitable without treating unreadable accounting as successful containment.
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
+fn resolve_linux_memory_exit_transition(
+    initial_error: io::Error,
+    timeout: Duration,
+    mut observe_memory: impl FnMut() -> io::Result<Option<LinuxMemoryBreach>>,
+    mut observe_exit: impl FnMut() -> io::Result<Option<LinuxChildExit>>,
+) -> io::Result<LinuxMemoryObservation> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now);
+    let mut memory_error = initial_error;
+    loop {
+        match observe_exit() {
+            Ok(Some(exit)) => {
+                return Ok(LinuxMemoryObservation::ChildExited { code: exit.code });
+            }
+            Ok(None) => {}
+            Err(source) => {
+                return Err(io::Error::other(format!(
+                    "memory observation failed: {memory_error}; child-state observation also failed: {source}"
+                )));
+            }
+        }
+        match observe_memory() {
+            Ok(observation) => return Ok(LinuxMemoryObservation::Memory(observation)),
+            Err(source) => memory_error = source,
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(memory_error);
+        }
+        thread::sleep(Duration::from_millis(1).min(deadline.saturating_duration_since(now)));
+    }
 }
 
 /// Parse one exact `VmRSS` value expressed by Linux in kibibytes.
@@ -2133,30 +2189,47 @@ impl ResidentParserSession {
         let observation = match observation {
             Ok(observation) => observation,
             Err(source) => {
-                if let Some(status) = self.child.try_wait().map_err(|wait_source| {
-                    ParserSupervisorError::ResidentMemoryObservationFailed {
-                        phase,
-                        accounting: ParserMemoryAccountingKind::LinuxProcStatus,
-                        message: bounded_message(format!(
-                            "memory observation failed: {source}; child-state observation also failed: {wait_source}"
+                let observer = Arc::clone(&self.memory_observer);
+                let child = &mut self.child;
+                let transition = resolve_linux_memory_exit_transition(
+                    source,
+                    SUPERVISOR_POLL_INTERVAL,
+                    || match observer.try_lock() {
+                        Ok(mut observer) => observer.observe(process_id),
+                        Err(std::sync::TryLockError::WouldBlock) => Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "Linux memory observer is busy",
                         )),
+                        Err(std::sync::TryLockError::Poisoned(_poisoned)) => {
+                            Err(io::Error::other("Linux memory observer lock was poisoned"))
+                        }
+                    },
+                    || {
+                        child.try_wait().map(|status| {
+                            status.map(|status| LinuxChildExit {
+                                code: status.code(),
+                            })
+                        })
+                    },
+                );
+                match transition {
+                    Ok(LinuxMemoryObservation::Memory(observation)) => observation,
+                    Ok(LinuxMemoryObservation::ChildExited { code }) => {
+                        return Err(ParserSupervisorError::ChildExited { phase, code });
                     }
-                })? {
-                    return Err(ParserSupervisorError::ChildExited {
-                        phase,
-                        code: status.code(),
-                    });
+                    Err(source) => {
+                        self.termination_requested = true;
+                        let operation = ParserSupervisorError::ResidentMemoryObservationFailed {
+                            phase,
+                            accounting: ParserMemoryAccountingKind::LinuxProcStatus,
+                            message: bounded_message(source.to_string()),
+                        };
+                        return Err(attach_cleanup(
+                            operation,
+                            kill_direct_child(&mut self.child),
+                        ));
+                    }
                 }
-                self.termination_requested = true;
-                let operation = ParserSupervisorError::ResidentMemoryObservationFailed {
-                    phase,
-                    accounting: ParserMemoryAccountingKind::LinuxProcStatus,
-                    message: bounded_message(source.to_string()),
-                };
-                return Err(attach_cleanup(
-                    operation,
-                    kill_direct_child(&mut self.child),
-                ));
             }
         };
         let Some(breach) = observation else {
@@ -3916,5 +3989,84 @@ mod tests {
             PARSER_LINUX_RSS_OBSERVATION_INTERVAL,
             SUPERVISOR_POLL_INTERVAL
         );
+    }
+
+    /// A worker that releases its address space before becoming waitable is classified as exited,
+    /// not as a mandatory cleanup failure.
+    #[test]
+    fn linux_memory_exit_transition_observes_waitable_child() -> io::Result<()> {
+        let exit_checks = std::cell::Cell::new(0_u8);
+        let observation = resolve_linux_memory_exit_transition(
+            io::Error::new(io::ErrorKind::InvalidData, "VmRSS is absent"),
+            SUPERVISOR_POLL_INTERVAL,
+            || {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "VmRSS is absent",
+                ))
+            },
+            || {
+                let checks = exit_checks.get();
+                exit_checks.set(checks.saturating_add(1));
+                Ok((checks > 0).then_some(LinuxChildExit { code: Some(17) }))
+            },
+        )?;
+        require_test(
+            matches!(
+                observation,
+                LinuxMemoryObservation::ChildExited { code: Some(17) }
+            ),
+            "exit transition did not become waitable",
+        )
+    }
+
+    /// Memory accounting that returns during the short transition remains authoritative.
+    #[test]
+    fn linux_memory_exit_transition_enforces_recovered_observation() -> io::Result<()> {
+        let observation = resolve_linux_memory_exit_transition(
+            io::Error::new(io::ErrorKind::InvalidData, "VmRSS is absent"),
+            SUPERVISOR_POLL_INTERVAL,
+            || {
+                Ok(Some(LinuxMemoryBreach {
+                    accounting: ParserMemoryAccountingKind::LinuxProcStatus,
+                    observed_bytes: 4096,
+                }))
+            },
+            || Ok(None),
+        )?;
+        require_test(
+            matches!(
+                observation,
+                LinuxMemoryObservation::Memory(Some(LinuxMemoryBreach {
+                    accounting: ParserMemoryAccountingKind::LinuxProcStatus,
+                    observed_bytes: 4096,
+                }))
+            ),
+            "recovered memory accounting was not retained",
+        )
+    }
+
+    /// A live non-waitable worker with unreadable accounting still fails closed.
+    #[test]
+    fn linux_memory_exit_transition_retains_unreadable_failure() -> io::Result<()> {
+        let Err(error) = resolve_linux_memory_exit_transition(
+            io::Error::new(io::ErrorKind::InvalidData, "VmRSS is absent"),
+            Duration::ZERO,
+            || {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "VmRSS remains absent",
+                ))
+            },
+            || Ok(None),
+        ) else {
+            return Err(io::Error::other(
+                "unreadable live accounting did not fail closed",
+            ));
+        };
+        require_test(
+            error.to_string() == "VmRSS remains absent",
+            "unreadable memory failure changed",
+        )
     }
 }
