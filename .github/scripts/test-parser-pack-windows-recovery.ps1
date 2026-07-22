@@ -562,8 +562,57 @@ function Invoke-AccountJournalRecoveryScenario {
     $scenarioDirectory = Split-Path -Parent (Split-Path -Parent $StatePath)
     [System.IO.Directory]::CreateDirectory($scenarioDirectory) | Out-Null
     $parameterPath = Join-Path $scenarioDirectory 'construction-parameters.json'
+    $accountCreatorPath = Join-Path $scenarioDirectory 'create-durable-account.ps1'
     $proxyPath = Join-Path $scenarioDirectory 'hold-after-durable-account.ps1'
     $readyMarkerPath = Join-Path $scenarioDirectory 'account-created.ready'
+    $accountCreatorSource = @'
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)][string]$Name,
+    [Parameter(Mandatory = $true)][long]$AccountExpiresUtcTicks,
+    [switch]$PasswordNeverExpires,
+    [switch]$UserMayNotChangePassword,
+    [Parameter(Mandatory = $true)][string]$Description
+)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+$passwordEnvelope = [Console]::In.ReadToEnd()
+if ([string]::IsNullOrWhiteSpace($passwordEnvelope) -or $passwordEnvelope.Length -gt 32768 -or
+    $Name -notmatch '\Apa[0-9a-f]{12}\z' -or
+    $Description -ne "ProjectAtlas optional parser pack construction") {
+    throw "Account creator received invalid bounded input."
+}
+$password = $null
+try {
+    $password = ConvertTo-SecureString -String $passwordEnvelope -ErrorAction Stop
+    $account = Microsoft.PowerShell.LocalAccounts\New-LocalUser `
+        -Name $Name `
+        -Password $password `
+        -AccountExpires ([DateTime]::new($AccountExpiresUtcTicks, [DateTimeKind]::Utc)) `
+        -PasswordNeverExpires:$PasswordNeverExpires `
+        -UserMayNotChangePassword:$UserMayNotChangePassword `
+        -Description $Description `
+        -ErrorAction Stop
+    if ($null -eq $account -or
+        [string]$account.Name -cne $Name -or
+        $null -eq $account.Sid -or
+        $account.Sid.Value -notmatch '\AS-1-5-21-[0-9]+-[0-9]+-[0-9]+-[0-9]+\z' -or
+        [string]$account.Description -ne $Description) {
+        throw "Account creator did not receive one exact local identity."
+    }
+    [Console]::Out.Write($account.Sid.Value)
+}
+finally {
+    if ($null -ne $password) {
+        $password.Dispose()
+    }
+}
+'@
+    [System.IO.File]::WriteAllText(
+        $accountCreatorPath,
+        $accountCreatorSource,
+        [System.Text.UTF8Encoding]::new($false)
+    )
     $scenarioParameters = @{}
     foreach ($entry in $ConstructionParameters.GetEnumerator()) {
         $scenarioParameters[[string]$entry.Key] = $entry.Value
@@ -574,6 +623,7 @@ function Invoke-AccountJournalRecoveryScenario {
         (@{
             wrapper = $ProductionWrapper
             parameters = $scenarioParameters
+            account_creator = $accountCreatorPath
             ready_marker = $readyMarkerPath
             expected_description = $accountDescription
             placeholder_sid = $placeholderSid
@@ -591,13 +641,17 @@ $payload = [System.IO.File]::ReadAllText($ParameterPath) |
     ConvertFrom-Json -AsHashtable -Depth 8
 $parameters = [hashtable]$payload.parameters
 $wrapperPath = (Get-Item -LiteralPath ([string]$payload.wrapper) -Force).FullName
+$proxyAccountCreatorPath = (Get-Item -LiteralPath ([string]$payload.account_creator) -Force).FullName
 $proxyReadyMarkerPath = [System.IO.Path]::GetFullPath([string]$payload.ready_marker)
 $proxyExpectedDescription = [string]$payload.expected_description
 $proxyPlaceholderSid = [string]$payload.placeholder_sid
 $parameterDirectory = [System.IO.Path]::GetFullPath(
     [System.IO.Path]::GetDirectoryName($ParameterPath)
 )
-if ([System.IO.Path]::GetDirectoryName($proxyReadyMarkerPath) -ne $parameterDirectory -or
+if ([System.IO.Path]::GetDirectoryName($proxyAccountCreatorPath) -ne $parameterDirectory -or
+    ((Get-Item -LiteralPath $proxyAccountCreatorPath -Force).Attributes -band
+        [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+    [System.IO.Path]::GetDirectoryName($proxyReadyMarkerPath) -ne $parameterDirectory -or
     [System.IO.File]::Exists($proxyReadyMarkerPath) -or
     $proxyExpectedDescription -ne "ProjectAtlas optional parser pack construction" -or
     $proxyPlaceholderSid -ne "S-1-5-21-0-0-0-0") {
@@ -615,50 +669,138 @@ function global:New-LocalUser {
         [Parameter(Mandatory = $true)][string]$Description
     )
 
-    $creationPowerShell = [System.Management.Automation.PowerShell]::Create()
-    $creationHadErrors = $false
-    $creationErrors = @()
+    $creationStart = [System.Diagnostics.ProcessStartInfo]::new()
+    $creationStart.FileName = [string]$parameters.PwshPath
+    $creationStart.UseShellExecute = $false
+    $creationStart.CreateNoWindow = $true
+    $creationStart.RedirectStandardInput = $true
+    $creationStart.RedirectStandardOutput = $true
+    $creationStart.RedirectStandardError = $true
+    foreach ($argument in @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', $proxyAccountCreatorPath,
+        '-Name', $Name,
+        '-AccountExpiresUtcTicks', $AccountExpires.ToUniversalTime().Ticks,
+        '-Description', $Description
+    )) {
+        $creationStart.ArgumentList.Add([string]$argument)
+    }
+    if ($PasswordNeverExpires) {
+        $creationStart.ArgumentList.Add('-PasswordNeverExpires')
+    }
+    if ($UserMayNotChangePassword) {
+        $creationStart.ArgumentList.Add('-UserMayNotChangePassword')
+    }
+
+    $creationProcess = $null
+    $creationProcessId = 0
+    $creationReaped = $false
+    $creationOutputTask = $null
+    $creationErrorTask = $null
+    $creationExitCode = $null
+    $creationOutput = $null
+    $creationError = $null
+    $creationOperationFailure = $null
+    $creationCleanupFailures = [System.Collections.Generic.List[System.Exception]]::new()
     try {
-        $creationPowerShell.AddCommand(
-            'Microsoft.PowerShell.LocalAccounts\New-LocalUser'
-        ) | Out-Null
-        $creationPowerShell.AddParameter('Name', $Name) | Out-Null
-        $creationPowerShell.AddParameter('Password', $Password) | Out-Null
-        $creationPowerShell.AddParameter('AccountExpires', $AccountExpires) | Out-Null
-        $creationPowerShell.AddParameter('Description', $Description) | Out-Null
-        $creationPowerShell.AddParameter('ErrorAction', 'Stop') | Out-Null
-        if ($PasswordNeverExpires) {
-            $creationPowerShell.AddParameter('PasswordNeverExpires') | Out-Null
+        $creationProcess = [System.Diagnostics.Process]::Start($creationStart)
+        if ($null -eq $creationProcess) {
+            throw "Could not start the durable account creator."
         }
-        if ($UserMayNotChangePassword) {
-            $creationPowerShell.AddParameter('UserMayNotChangePassword') | Out-Null
+        $creationProcessId = $creationProcess.Id
+        $creationOutputTask = $creationProcess.StandardOutput.ReadToEndAsync()
+        $creationErrorTask = $creationProcess.StandardError.ReadToEndAsync()
+        $passwordEnvelope = ConvertFrom-SecureString -SecureString $Password -ErrorAction Stop
+        $creationProcess.StandardInput.Write($passwordEnvelope)
+        $creationProcess.StandardInput.Close()
+        if (-not $creationProcess.WaitForExit(30000)) {
+            $creationProcess.Kill($true)
+            if (-not $creationProcess.WaitForExit(5000)) {
+                throw "Durable account creator could not be reaped after timeout."
+            }
+            $creationReaped = $true
+            throw "Durable account creator exceeded its fixed deadline."
         }
-        $createdAccounts = @($creationPowerShell.Invoke())
-        $creationHadErrors = $creationPowerShell.HadErrors
-        $creationErrors = @($creationPowerShell.Streams.Error)
+        $creationReaped = $true
+        if ($null -ne (Get-Process -Id $creationProcessId -ErrorAction SilentlyContinue)) {
+            throw "Durable account creator PID survived successful completion."
+        }
+        $creationOutput = $creationOutputTask.GetAwaiter().GetResult()
+        $creationError = $creationErrorTask.GetAwaiter().GetResult()
+        if ($creationOutput.Length -gt 128 -or $creationError.Length -gt 4096) {
+            throw "Durable account creator exceeded its bounded receipt sizes."
+        }
+        $creationExitCode = $creationProcess.ExitCode
+    }
+    catch {
+        $creationOperationFailure = $_.Exception
     }
     finally {
-        $creationPowerShell.Dispose()
+        if ($null -ne $creationProcess) {
+            try {
+                if (-not $creationProcess.HasExited) {
+                    $creationProcess.Kill($true)
+                    if (-not $creationProcess.WaitForExit(5000)) {
+                        throw "Fallback durable account creator termination could not be reaped."
+                    }
+                    $creationReaped = $true
+                }
+                else {
+                    $creationReaped = $true
+                }
+            }
+            catch {
+                $creationCleanupFailures.Add($_.Exception)
+            }
+            if ($creationReaped) {
+                try {
+                    if ($null -ne $creationOutputTask -and $null -eq $creationOutput) {
+                        $creationOutput = $creationOutputTask.GetAwaiter().GetResult()
+                    }
+                    if ($null -ne $creationErrorTask -and $null -eq $creationError) {
+                        $creationError = $creationErrorTask.GetAwaiter().GetResult()
+                    }
+                }
+                catch {
+                    $creationCleanupFailures.Add($_.Exception)
+                }
+            }
+            try {
+                $creationProcess.Dispose()
+            }
+            catch {
+                $creationCleanupFailures.Add($_.Exception)
+            }
+        }
     }
-    if ($creationHadErrors -or $creationErrors.Count -ne 0) {
-        $creationMessage = if ($creationErrors.Count -eq 0) {
-            'unknown local-account creation error'
+    if ($null -ne $creationOperationFailure) {
+        if ($creationCleanupFailures.Count -ne 0) {
+            throw [System.AggregateException]::new(
+                "Durable account creation operation and cleanup failed.",
+                @($creationOperationFailure) + @($creationCleanupFailures)
+            )
         }
-        else {
-            [string]$creationErrors[0]
-        }
-        throw "Durable local-account creation failed: $creationMessage"
+        throw $creationOperationFailure
+    }
+    if ($creationCleanupFailures.Count -ne 0) {
+        throw [System.AggregateException]::new(
+            "Durable account creation cleanup failed.",
+            @($creationCleanupFailures)
+        )
+    }
+    if ($creationExitCode -ne 0 -or
+        -not [string]::IsNullOrEmpty($creationError) -or
+        $creationOutput -notmatch '\AS-1-5-21-[0-9]+-[0-9]+-[0-9]+-[0-9]+\z') {
+        throw "Durable account creator did not publish one bounded successful receipt."
     }
 
     $publishedAccounts = @(
         Microsoft.PowerShell.LocalAccounts\Get-LocalUser -ErrorAction Stop |
             Where-Object { $_.Name -ceq $Name }
     )
-    if ($createdAccounts.Count -ne 1 -or
-        $null -eq $createdAccounts[0].Sid -or
-        $publishedAccounts.Count -ne 1 -or
+    if ($publishedAccounts.Count -ne 1 -or
         $null -eq $publishedAccounts[0].Sid -or
-        $createdAccounts[0].Sid.Value -ne $publishedAccounts[0].Sid.Value -or
+        $creationOutput -ne $publishedAccounts[0].Sid.Value -or
         $publishedAccounts[0].Sid.Value -notmatch
             '\AS-1-5-21-[0-9]+-[0-9]+-[0-9]+-[0-9]+\z' -or
         [string]$publishedAccounts[0].Description -ne $Description) {
