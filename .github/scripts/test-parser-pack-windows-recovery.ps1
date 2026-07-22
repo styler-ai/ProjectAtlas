@@ -2532,6 +2532,9 @@ param(
     [string]$ExpectedPrincipalSid,
 
     [Parameter(Mandatory = $true)]
+    [string]$ExpectedOwnerSid,
+
+    [Parameter(Mandatory = $true)]
     [string]$ResultPath,
 
     [Parameter(Mandatory = $true)]
@@ -2577,7 +2580,12 @@ function ConvertTo-BoundedProbeError {
     if ($type.Length -lt 1) { $type = 'Exception' }
     if ($type.Length -gt 96) { $type = $type.Substring(0, 96) }
     $message = [string]$failure.Message
-    foreach ($redaction in @($ExpectedPrincipalSid, $ResultPath, $CanaryPath)) {
+    foreach ($redaction in @(
+        $ExpectedPrincipalSid,
+        $ExpectedOwnerSid,
+        $ResultPath,
+        $CanaryPath
+    )) {
         if (-not [string]::IsNullOrEmpty($redaction)) {
             $message = $message.Replace($redaction, '<redacted>')
         }
@@ -2911,7 +2919,7 @@ try {
     if ($null -eq $actualIdentity.Owner -or
         -not [string]::Equals(
             $actualIdentity.Owner.Value,
-            $ExpectedPrincipalSid,
+            $ExpectedOwnerSid,
             [System.StringComparison]::Ordinal
         )) {
         throw [System.InvalidOperationException]::new('construction-token-owner-sid-mismatch')
@@ -3245,6 +3253,7 @@ exit 0
         '-NoLogo', '-NoProfile', '-NonInteractive',
         '-File', $probeScriptPath,
         '-ExpectedPrincipalSid', $identity.Sid,
+        '-ExpectedOwnerSid', $identity.Sid,
         '-ResultPath', $probeResultPath,
         '-CanaryPath', $probeCanaryPath,
         '-ComparisonSemaphoreName', $comparisonSemaphoreName

@@ -430,6 +430,8 @@ try {
             '-File', $probeScript,
             '-ExpectedPrincipalSid',
             [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
+            '-ExpectedOwnerSid',
+            [System.Security.Principal.WindowsIdentity]::GetCurrent().Owner.Value,
             '-ResultPath', $probeResult,
             '-CanaryPath', $probeCanary
         )) {
@@ -591,6 +593,8 @@ try {
                 '-File', $probeScript,
                 '-ExpectedPrincipalSid',
                 [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
+                '-ExpectedOwnerSid',
+                [System.Security.Principal.WindowsIdentity]::GetCurrent().Owner.Value,
                 '-ResultPath', $faultResult,
                 '-CanaryPath', $probeCanary,
                 '-DiagnosticFault', $faultRow.Fault
