@@ -32,7 +32,7 @@ use crate::token_tui::{
 };
 use crate::{
     AgentErrorKind, CliError, DEFAULT_FILE_SUMMARY_LIMIT, DatabaseFilesystemErrorPayload,
-    HarnessConfig, OutputFormat, RootTransition, RuntimeInfoReport,
+    HarnessConfig, OutputFormat, RootTransition, RuntimeInfoReport, SearchRetrievalModeArg,
     build_harness_mcp_config_report, build_parity_report, build_root_report, build_runtime_info,
     database_filesystem_error_payload, finalize_coverage_output, render_code_slice,
     render_file_summary, render_parity_report, render_root_report, render_runtime_info,
@@ -57,10 +57,11 @@ use projectatlas_db::{
     read_project_root_read_only, verify_project_database,
 };
 use projectatlas_service::{
-    COVERAGE_PAGE_MAX_LIMIT, SymbolSliceSelector, TokenReport, TokenReportRequest,
-    build_file_summary_from_source, load_coverage_discovery, load_token_report,
+    COVERAGE_PAGE_MAX_LIMIT, SearchQuery, ServiceError, SymbolSliceSelector, TokenReport,
+    TokenReportRequest, build_file_summary_from_source, load_coverage_discovery, load_token_report,
     parse_coverage_parser, parse_coverage_relation, parse_coverage_state,
-    read_indexed_code_slice_from_source, read_symbol_slice_from_source, search_indexed_files,
+    read_indexed_code_slice_from_source, read_symbol_slice_from_source,
+    search_indexed_files_with_control,
 };
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
@@ -746,6 +747,8 @@ struct AtlasSearchParams {
     project_path: Option<String>,
     /// Literal, regex, or fuzzy pattern to search for.
     pattern: String,
+    /// Retrieval family; lexical is the default and always-available mode.
+    retrieval_mode: Option<SearchRetrievalModeArg>,
     /// Treat the pattern as a regex.
     regex: Option<bool>,
     /// Treat the pattern as a fuzzy subsequence.
@@ -1304,6 +1307,9 @@ struct McpErrorPayload {
     /// Content-free database placement details for a rejected `SQLite` profile.
     #[serde(skip_serializing_if = "Option::is_none")]
     database_filesystem: Option<DatabaseFilesystemErrorPayload>,
+    /// Optional retrieval capability state and recovery guidance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    search_capability: Option<crate::SearchCapabilityErrorPayload>,
     /// Reusable recovery call when refresh is required.
     #[serde(skip_serializing_if = "Option::is_none")]
     next: Option<McpRefreshNextCall>,
@@ -2023,10 +2029,25 @@ impl ProjectAtlasMcpServer {
         &self,
         state: &McpProjectState,
         context: Option<RequestContext<RoleServer>>,
-        query: F,
+        mut query: F,
     ) -> Result<VerifiedReadOutcome<T>, CliError>
     where
         F: FnMut(&AtlasStore, VerifiedReadStamp) -> Result<T, CliError>,
+    {
+        self.with_fresh_store_controlled_for_request(state, context, |store, stamp, _control| {
+            query(store, stamp)
+        })
+    }
+
+    /// Run one verified query that consumes the request cancellation boundary.
+    fn with_fresh_store_controlled_for_request<T, F>(
+        &self,
+        state: &McpProjectState,
+        context: Option<RequestContext<RoleServer>>,
+        mut query: F,
+    ) -> Result<VerifiedReadOutcome<T>, CliError>
+    where
+        F: FnMut(&AtlasStore, VerifiedReadStamp, &IndexWorkControl) -> Result<T, CliError>,
     {
         if !state.db_path.is_file() {
             return Err(CliError::InvalidInput(format!(
@@ -2045,7 +2066,7 @@ impl ProjectAtlasMcpServer {
             &state.root,
             state.config_path.as_deref(),
             &control,
-            query,
+            |store, stamp| query(store, stamp, &control),
         );
         if bridge
             .as_ref()
@@ -2077,7 +2098,7 @@ impl ProjectAtlasMcpServer {
         &self,
         state: &McpProjectState,
         context: Option<RequestContext<RoleServer>>,
-        query: F,
+        mut query: F,
     ) -> Result<String, CliError>
     where
         F: FnMut(
@@ -2085,7 +2106,28 @@ impl ProjectAtlasMcpServer {
             VerifiedReadStamp,
         ) -> Result<(String, Option<McpUsageIntent>), CliError>,
     {
-        let outcome = self.with_fresh_store_for_request(state, context, query)?;
+        self.with_fresh_string_and_usage_controlled_for_request(
+            state,
+            context,
+            |store, stamp, _control| query(store, stamp),
+        )
+    }
+
+    /// Render one verified MCP query that consumes request cancellation.
+    fn with_fresh_string_and_usage_controlled_for_request<F>(
+        &self,
+        state: &McpProjectState,
+        context: Option<RequestContext<RoleServer>>,
+        query: F,
+    ) -> Result<String, CliError>
+    where
+        F: FnMut(
+            &AtlasStore,
+            VerifiedReadStamp,
+            &IndexWorkControl,
+        ) -> Result<(String, Option<McpUsageIntent>), CliError>,
+    {
+        let outcome = self.with_fresh_store_controlled_for_request(state, context, query)?;
         let stamp = outcome.stamp.clone();
         let (value, usage) = outcome.value;
         let output_bytes = value.len();
@@ -3886,11 +3928,13 @@ impl ProjectAtlasMcpServer {
             verification_incomplete,
             project_mismatch,
             database_filesystem,
+            search_capability,
             next,
         ) = match error {
             CliError::RefreshRequired(report) => (
                 AgentErrorKind::RefreshRequired,
                 Some(report.as_ref().clone()),
+                None,
                 None,
                 None,
                 None,
@@ -3906,6 +3950,7 @@ impl ProjectAtlasMcpServer {
                 None,
                 None,
                 None,
+                None,
             ),
             CliError::ProjectMismatch(report) => (
                 AgentErrorKind::ProjectMismatch,
@@ -3914,11 +3959,37 @@ impl ProjectAtlasMcpServer {
                 Some(report.as_ref().clone()),
                 None,
                 None,
+                None,
+            ),
+            CliError::Service(ServiceError::SearchCapabilityUnavailable {
+                requested_mode,
+                state,
+                guidance,
+            }) => (
+                AgentErrorKind::SearchCapabilityUnavailable,
+                None,
+                None,
+                None,
+                None,
+                Some(crate::SearchCapabilityErrorPayload {
+                    requested_mode: *requested_mode,
+                    state,
+                    recovery: guidance,
+                }),
+                None,
             ),
             _ => database_filesystem_error_payload(error).map_or(
-                (AgentErrorKind::Error, None, None, None, None, None),
+                (AgentErrorKind::Error, None, None, None, None, None, None),
                 |(kind, database_filesystem)| {
-                    (kind, None, None, None, Some(database_filesystem), None)
+                    (
+                        kind,
+                        None,
+                        None,
+                        None,
+                        Some(database_filesystem),
+                        None,
+                        None,
+                    )
                 },
             ),
         };
@@ -3930,6 +4001,7 @@ impl ProjectAtlasMcpServer {
                 verification_incomplete,
                 project_mismatch,
                 database_filesystem,
+                search_capability,
                 next,
             },
         };
@@ -4601,27 +4673,35 @@ impl ProjectAtlasMcpServer {
     ) -> String {
         Self::as_mcp_text((|| {
             let state = self.state_for_project_path(params.project_path.clone())?;
-            self.with_fresh_string_and_usage_for_request(&state, Some(context), |store, _stamp| {
-                let report = search_indexed_files(
-                    store,
-                    &params.pattern,
-                    params.regex.unwrap_or(false),
-                    params.fuzzy.unwrap_or(false),
-                    params.case_sensitive.unwrap_or(false),
-                    params.file_pattern.as_deref(),
-                    params.context_lines.unwrap_or(0),
-                    params.start_index.unwrap_or(0),
-                    params.limit.unwrap_or(20),
-                )?;
-                let toon = render_search_report(&report);
-                let usage = Some(McpUsageIntent::estimate(
-                    MCP_EVENT_ATLAS_SEARCH,
-                    params.file_pattern.clone(),
-                    Some(params.pattern.clone()),
-                    byte_count_to_tokens(report.searched_bytes),
-                ));
-                Ok((toon, usage))
-            })
+            self.with_fresh_string_and_usage_controlled_for_request(
+                &state,
+                Some(context),
+                |store, _stamp, control| {
+                    let report = search_indexed_files_with_control(
+                        store,
+                        &SearchQuery {
+                            pattern: &params.pattern,
+                            regex: params.regex.unwrap_or(false),
+                            fuzzy: params.fuzzy.unwrap_or(false),
+                            case_sensitive: params.case_sensitive.unwrap_or(false),
+                            file_pattern: params.file_pattern.as_deref(),
+                            context_lines: params.context_lines.unwrap_or(0),
+                            start_index: params.start_index.unwrap_or(0),
+                            limit: params.limit.unwrap_or(20),
+                            retrieval_mode: params.retrieval_mode.unwrap_or_default().into(),
+                        },
+                        Some(control),
+                    )?;
+                    let toon = render_search_report(&report);
+                    let usage = Some(McpUsageIntent::estimate(
+                        MCP_EVENT_ATLAS_SEARCH,
+                        params.file_pattern.clone(),
+                        Some(params.pattern.clone()),
+                        byte_count_to_tokens(report.searched_bytes),
+                    ));
+                    Ok((toon, usage))
+                },
+            )
         })())
     }
 
@@ -5939,6 +6019,26 @@ mod tests {
                 && payload.contains("filesystem_type: nfs")
                 && payload.contains("supported local filesystem"),
             "MCP TOON lost typed filesystem details or recovery guidance",
+        )
+    }
+
+    #[test]
+    fn mcp_search_capability_failures_are_typed_and_actionable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let error = CliError::Service(ServiceError::SearchCapabilityUnavailable {
+            requested_mode: projectatlas_service::SearchRetrievalMode::Hybrid,
+            state: "not-installed",
+            guidance: "install and build a compatible semantic generation",
+        });
+        let payload = ProjectAtlasMcpServer::encode_error_payload(&error);
+        require(
+            payload.contains("kind: search_capability_unavailable")
+                && payload.contains("requested_mode")
+                && payload.contains("hybrid")
+                && payload.contains("state")
+                && payload.contains("not-installed")
+                && payload.contains("compatible semantic generation"),
+            "MCP TOON lost typed search-capability state or recovery guidance",
         )
     }
 

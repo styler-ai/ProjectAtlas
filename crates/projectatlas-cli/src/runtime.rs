@@ -3872,7 +3872,7 @@ pub(crate) fn build_settings_report(
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let database = database_settings_report(&absolute_db)?;
-    let (index, telemetry) =
+    let (index, telemetry, file_text_fts) =
         if database.schema.compatibility == DatabaseSchemaCompatibility::Current {
             let store = AtlasStore::open_read_only(&absolute_db)?;
             let snapshot_publication = store.index_publication()?;
@@ -3883,12 +3883,13 @@ pub(crate) fn build_settings_report(
                 (
                     Some(settings_index_stats(&store)?),
                     Some(store.telemetry_retention_state()?),
+                    Some(store.file_text_fts_state()?),
                 )
             } else {
-                (None, None)
+                (None, None, None)
             }
         } else {
-            (None, None)
+            (None, None, None)
         };
     let repo_root = normalize_display_path(&config.root);
     let db_project_root = index
@@ -3921,6 +3922,12 @@ pub(crate) fn build_settings_report(
         (true, Some(_)) => SettingsCapabilityState::Ready,
         _ => SettingsCapabilityState::Unavailable,
     };
+    let fts_state = match (lexical_publication_ready, file_text_fts.as_ref()) {
+        (true, Some(state)) if !state.synchronized => SettingsCapabilityState::Unavailable,
+        (true, Some(state)) if state.source_rows == 0 => SettingsCapabilityState::Empty,
+        (true, Some(_)) => SettingsCapabilityState::Ready,
+        _ => SettingsCapabilityState::Unavailable,
+    };
     let search = SettingsSearchReport {
         default_mode: "lexical",
         lexical: SettingsLexicalSearchReport {
@@ -3928,9 +3935,7 @@ pub(crate) fn build_settings_report(
             source: "persisted_text",
             exact_verification: true,
         },
-        fts: SettingsSearchModeReport {
-            state: SettingsCapabilityState::Unavailable,
-        },
+        fts: SettingsSearchModeReport { state: fts_state },
         semantic: SettingsSearchModeReport {
             state: SettingsCapabilityState::Unavailable,
         },

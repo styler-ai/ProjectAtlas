@@ -7224,7 +7224,7 @@ mod tests {
                 &[IndexedFileText {
                     path: "src/Äuth.rs".to_string(),
                     content_hash: Some("hash-new".to_string()),
-                    byte_count: 24,
+                    byte_count: "fn verifyTokenUpdated()".len(),
                     line_count: 1,
                     content: "fn verifyTokenUpdated()".to_string(),
                 }],
@@ -7278,7 +7278,7 @@ mod tests {
                 &[IndexedFileText {
                     path: "src/Äuth.rs".to_string(),
                     content_hash: Some("hash-new".to_string()),
-                    byte_count: 24,
+                    byte_count: "fn verifyTokenUpdated()".len(),
                     line_count: 1,
                     content: "fn verifyTokenUpdated()".to_string(),
                 }],

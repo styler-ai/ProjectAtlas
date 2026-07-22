@@ -16,7 +16,7 @@ use projectatlas_core::normalize_native_path_display;
 use std::path::PathBuf;
 
 /// Current `SQLite` schema version supported by this crate.
-pub(crate) const SCHEMA_VERSION: i64 = 14;
+pub(crate) const SCHEMA_VERSION: i64 = 15;
 /// Released 0.3.26 schema accepted by the migration inventory.
 pub(crate) const PREVIOUS_SCHEMA_VERSION: i64 = 8;
 /// First internal schema with explicit publication invalidation.
@@ -29,6 +29,8 @@ const TELEMETRY_SCHEMA_VERSION: i64 = 11;
 const RESOLUTION_SCHEMA_VERSION: i64 = 12;
 /// First schema with separate source-parser and fact-provider provenance.
 const PARSER_PROVENANCE_SCHEMA_VERSION: i64 = 13;
+/// First schema with bounded coverage-discovery access paths.
+const COVERAGE_DISCOVERY_SCHEMA_VERSION: i64 = 14;
 /// Metadata key for the durable schema version.
 pub(crate) const SCHEMA_VERSION_KEY: &str = "schema_version";
 /// Metadata key for the owning project root.
@@ -39,6 +41,10 @@ pub(crate) const INDEX_PUBLICATION_STATE_KEY: &str = "index_publication_state";
 pub(crate) const INDEX_PUBLICATION_FINGERPRINT_KEY: &str = "index_publication_fingerprint";
 /// Metadata key for the monotonically increasing complete index generation.
 pub(crate) const INDEX_PUBLICATION_GENERATION_KEY: &str = "index_publication_generation";
+/// Metadata key for the latest authoritative persisted-text revision.
+pub(crate) const FILE_TEXT_FTS_SOURCE_REVISION_KEY: &str = "file_text_fts_source_revision";
+/// Metadata key for the latest transactionally synchronized FTS revision.
+pub(crate) const FILE_TEXT_FTS_PROJECTION_REVISION_KEY: &str = "file_text_fts_projection_revision";
 
 /// Released schema state accepted by the storage owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,8 +107,13 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         from: PARSER_PROVENANCE_SCHEMA_VERSION,
-        to: SCHEMA_VERSION,
+        to: COVERAGE_DISCOVERY_SCHEMA_VERSION,
         apply: migrate_13_to_14,
+    },
+    Migration {
+        from: COVERAGE_DISCOVERY_SCHEMA_VERSION,
+        to: SCHEMA_VERSION,
+        apply: migrate_14_to_15,
     },
 ];
 
@@ -232,6 +243,8 @@ static TELEMETRY_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLoc
 static RESOLUTION_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
 /// Process-local immutable schema-13 contract before coverage-discovery indexes.
 static PARSER_PROVENANCE_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
+/// Process-local immutable schema-14 contract before lexical acceleration.
+static COVERAGE_DISCOVERY_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
 
 /// Immutable physical schema emitted by the released 0.3.26 runtime.
 #[cfg(test)]
@@ -361,6 +374,16 @@ const BASE_SCHEMA_SQL: &str = "
     CREATE INDEX idx_symbol_relations_target ON symbol_relations(target_name);
     CREATE INDEX idx_health_resolutions_category ON health_resolutions(category);
     CREATE INDEX idx_file_texts_hash ON file_texts(content_hash);
+";
+
+/// Trigger-free FTS5 acceleration over authoritative persisted file text.
+const FILE_TEXT_FTS_SCHEMA_SQL: &str = "
+    CREATE VIRTUAL TABLE file_text_fts USING fts5(
+        content,
+        content='file_texts',
+        content_rowid='rowid',
+        tokenize='trigram case_sensitive 0'
+    );
 ";
 
 /// Separate file-level parse provenance from the parser provenance of derived facts.
@@ -1373,7 +1396,8 @@ fn schema_state(connection: &Connection) -> DbResult<SchemaState> {
         | GRAPH_SCHEMA_VERSION
         | TELEMETRY_SCHEMA_VERSION
         | RESOLUTION_SCHEMA_VERSION
-        | PARSER_PROVENANCE_SCHEMA_VERSION => Ok(SchemaState::UpgradeRequired),
+        | PARSER_PROVENANCE_SCHEMA_VERSION
+        | COVERAGE_DISCOVERY_SCHEMA_VERSION => Ok(SchemaState::UpgradeRequired),
         _ => Err(DbError::SchemaVersion {
             found,
             expected: SCHEMA_VERSION,
@@ -1390,6 +1414,9 @@ fn create_fresh(connection: &Connection, expected_root: Option<&str>) -> DbResul
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
+    connection.execute_batch(FILE_TEXT_FTS_SCHEMA_SQL)?;
+    set_metadata(connection, FILE_TEXT_FTS_SOURCE_REVISION_KEY, "0")?;
+    set_metadata(connection, FILE_TEXT_FTS_PROJECTION_REVISION_KEY, "0")?;
     crate::telemetry::initialize_empty_storage(connection)?;
     if let Some(root) = expected_root {
         set_metadata(connection, PROJECT_ROOT_KEY, root)?;
@@ -1464,6 +1491,18 @@ fn migrate_13_to_14(connection: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Add and backfill the rebuildable lexical candidate accelerator.
+fn migrate_14_to_15(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(FILE_TEXT_FTS_SCHEMA_SQL)?;
+    connection.execute(
+        "INSERT INTO file_text_fts(file_text_fts) VALUES('rebuild')",
+        [],
+    )?;
+    set_metadata(connection, FILE_TEXT_FTS_SOURCE_REVISION_KEY, "0")?;
+    set_metadata(connection, FILE_TEXT_FTS_PROJECTION_REVISION_KEY, "0")?;
+    Ok(())
+}
+
 /// Invalidate derived rows without deleting authored local state.
 pub(crate) fn invalidate_derived_publication(connection: &Connection) -> DbResult<()> {
     connection.execute(
@@ -1505,6 +1544,7 @@ fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResul
             TELEMETRY_SCHEMA_VERSION => telemetry_predecessor_schema_contract()?,
             RESOLUTION_SCHEMA_VERSION => resolution_predecessor_schema_contract()?,
             PARSER_PROVENANCE_SCHEMA_VERSION => parser_provenance_predecessor_schema_contract()?,
+            COVERAGE_DISCOVERY_SCHEMA_VERSION => coverage_discovery_predecessor_schema_contract()?,
             found => {
                 return Err(DbError::SchemaVersion {
                     found,
@@ -1592,6 +1632,7 @@ fn schema_contract() -> DbResult<&'static SchemaContract> {
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
+    connection.execute_batch(FILE_TEXT_FTS_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
     Ok(SCHEMA_CONTRACT.get_or_init(|| contract))
 }
@@ -1652,6 +1693,23 @@ fn parser_provenance_predecessor_schema_contract() -> DbResult<&'static SchemaCo
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
     Ok(PARSER_PROVENANCE_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
+}
+
+/// Build the immutable schema-14 contract before lexical acceleration.
+fn coverage_discovery_predecessor_schema_contract() -> DbResult<&'static SchemaContract> {
+    if let Some(contract) = COVERAGE_DISCOVERY_PREDECESSOR_SCHEMA_CONTRACT.get() {
+        return Ok(contract);
+    }
+    let connection = Connection::open_in_memory()?;
+    connection.execute_batch(BASE_SCHEMA_SQL)?;
+    connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
+    connection.execute_batch(GRAPH_SCHEMA_SQL)?;
+    connection.execute_batch(COVERAGE_DISCOVERY_SCHEMA_SQL)?;
+    connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
+    connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
+    connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
+    let contract = read_schema_contract(&connection)?;
+    Ok(COVERAGE_DISCOVERY_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
 }
 
 /// Build the immutable schema-8/9 contract from the unchanged base DDL.

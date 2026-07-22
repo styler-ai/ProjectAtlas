@@ -68,7 +68,13 @@ an index, load parser assets, or record telemetry. It does not inline the comple
 per-language matrix; use the generated matrix when every row is required. Lexical
 readiness requires one complete nonzero publication with a validated contract
 fingerprint; invalid persisted fingerprint text is omitted and reported as invalid
-rather than reproduced through the diagnostic surface.
+rather than reproduced through the diagnostic surface. FTS acceleration additionally
+requires equal transaction-owned source/projection revisions; explicit settings
+diagnostics also compare rebuildable FTS document identities with authoritative
+`file_texts`. A mismatch disables acceleration without disabling lexical fallback.
+Search patterns are capped at 64 KiB and path globs at 4 KiB before matcher
+construction. Semantic and hybrid modes remain explicitly unavailable until a
+compatible semantic generation is installed, built, and ready.
 
 ### Optional broad parser pack
 

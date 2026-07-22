@@ -48,9 +48,9 @@ use projectatlas_core::telemetry::{
 };
 use projectatlas_core::{
     AGENT_REVIEWED_SOURCE_VALUES, HIGH_IMPACT_FILE_NAMES, HIGH_IMPACT_PATH_PREFIXES,
-    HIGH_IMPACT_PATH_SEGMENTS, IndexGeneration, IndexedNode, LEGACY_HUMAN_PURPOSE_SOURCE, Node,
-    NodeKind, Overview, Purpose, PurposeSource, PurposeStatus, normalize_native_path_display,
-    normalize_repo_path_prefix,
+    HIGH_IMPACT_PATH_SEGMENTS, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
+    IndexedNode, LEGACY_HUMAN_PURPOSE_SOURCE, Node, NodeKind, Overview, Purpose, PurposeSource,
+    PurposeStatus, normalize_native_path_display, normalize_repo_path_prefix,
 };
 use rusqlite::types::Value;
 use rusqlite::{
@@ -67,6 +67,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 use schema::{
+    FILE_TEXT_FTS_PROJECTION_REVISION_KEY, FILE_TEXT_FTS_SOURCE_REVISION_KEY,
     INDEX_PUBLICATION_FINGERPRINT_KEY, INDEX_PUBLICATION_GENERATION_KEY,
     INDEX_PUBLICATION_STATE_KEY, PROJECT_ROOT_KEY, SchemaState,
 };
@@ -84,6 +85,23 @@ const SQLITE_PUBLICATION_ACQUIRE_TIMEOUT: Duration = Duration::ZERO;
 const SQLITE_TELEMETRY_BUSY_TIMEOUT: Duration = Duration::from_millis(25);
 /// Maximum paths admitted to one purpose-curation hydration statement.
 pub const MAX_PURPOSE_CURATION_BATCH_ROWS: usize = 200;
+/// Maximum FTS candidates decoded for one exact-verification request.
+pub const MAX_FILE_TEXT_FTS_CANDIDATES: usize = 4_096;
+/// Path-indexed metadata cursor for one exact path-or-descendant fallback scope.
+const FILE_TEXT_FALLBACK_SCOPED_METADATA_SQL: &str = "
+    SELECT path, content_hash, byte_count, line_count
+    FROM file_texts
+    WHERE path = ?1 OR (path >= ?2 AND path < ?3)
+    ORDER BY path
+";
+/// Metadata cursor used when a fallback glob has no safe fixed prefix.
+const FILE_TEXT_FALLBACK_ALL_METADATA_SQL: &str = "
+    SELECT path, content_hash, byte_count, line_count
+    FROM file_texts
+    ORDER BY path
+";
+/// Exact authoritative content hydration after service-owned admission.
+const FILE_TEXT_FALLBACK_CONTENT_SQL: &str = "SELECT content FROM file_texts WHERE path = ?1";
 /// Maximum UTF-8 bytes retained in one host-owned purpose task label.
 const MAX_PURPOSE_CURATION_TASK_BYTES: usize = 256;
 /// Domain separator for deterministic purpose-curation item work keys.
@@ -341,6 +359,47 @@ pub enum DbError {
         /// Invalid value.
         value: String,
     },
+    /// A literal cannot safely use the complete-candidate FTS path.
+    #[error("literal token cannot use FTS acceleration: {reason}")]
+    FileTextFtsTokenUnsafe {
+        /// Stable rejection reason for service fallback selection.
+        reason: &'static str,
+    },
+    /// One FTS request exceeded the storage-owned candidate bound.
+    #[error("FTS candidate request {requested} exceeds the maximum {maximum}")]
+    FileTextFtsCandidateLimit {
+        /// Requested exact-verification candidates.
+        requested: usize,
+        /// Storage-owned hard maximum.
+        maximum: usize,
+    },
+    /// `SQLite` returned a non-finite lexical ranking score.
+    #[error("invalid FTS BM25 score for {path:?}")]
+    FileTextFtsScoreInvalid {
+        /// Candidate path whose score was invalid.
+        path: String,
+    },
+    /// Durable FTS synchronization metadata is absent or contradictory.
+    #[error("invalid FTS synchronization state: {reason}")]
+    FileTextFtsStateInvalid {
+        /// Stable reason that makes the acceleration state untrustworthy.
+        reason: &'static str,
+    },
+    /// Persisted text metadata disagrees with its authoritative UTF-8 content.
+    #[error("file text {path:?} has invalid {field}: recorded {recorded}, actual {actual}")]
+    FileTextMetadataMismatch {
+        /// Repository-relative path owning the invalid text row.
+        path: String,
+        /// Metadata field that disagrees with content.
+        field: &'static str,
+        /// Persisted or caller-supplied value.
+        recorded: usize,
+        /// Value derived from authoritative content.
+        actual: usize,
+    },
+    /// A bounded database read observed cancellation or its deadline.
+    #[error(transparent)]
+    IndexWork(#[from] IndexWorkFailure),
     /// Count value from `SQLite` could not fit its owning unsigned domain type.
     #[error("invalid count for {field}: {value}")]
     InvalidCount {
@@ -777,6 +836,76 @@ pub struct IndexedFileText {
     pub line_count: usize,
     /// Full UTF-8 source text used by indexed search.
     pub content: String,
+}
+
+/// Bounded safe-token request for FTS candidate acceleration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileTextFtsQuery<'query> {
+    /// One ASCII-alphanumeric token that exact lexical matching will verify.
+    pub literal_token: &'query str,
+    /// Optional exact path-or-descendant scope.
+    pub path_prefix: Option<&'query str>,
+    /// Maximum candidates returned before reporting overflow.
+    pub limit: usize,
+}
+
+/// One FTS-ranked candidate carrying only authoritative persisted metadata.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileTextFtsCandidate {
+    /// Repository-relative file path used for budgeted content hydration.
+    pub path: String,
+    /// BLAKE3 content hash from the authoritative persisted text row.
+    pub content_hash: Option<String>,
+    /// Persisted UTF-8 source byte count used for pre-hydration budgets.
+    pub byte_count: usize,
+    /// Persisted line count.
+    pub line_count: usize,
+    /// `SQLite` FTS5 BM25 score; lower values rank first.
+    pub bm25: f64,
+}
+
+/// Bounded FTS candidate page for service-owned exact verification.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileTextFtsPage {
+    /// Candidates ordered by BM25 and repository path.
+    pub candidates: Vec<FileTextFtsCandidate>,
+    /// Whether at least one more candidate matched the bound query.
+    pub overflow: bool,
+}
+
+/// Persisted file metadata available before source-content decoding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileTextMetadata {
+    /// Repository-relative file path using forward slashes.
+    pub path: String,
+    /// BLAKE3 content hash from the scanned file node.
+    pub content_hash: Option<String>,
+    /// Persisted UTF-8 source byte count.
+    pub byte_count: usize,
+    /// Persisted line count.
+    pub line_count: usize,
+}
+
+/// Service decision made before one fallback row decodes source content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileTextAdmission {
+    /// Decode and visit this row's source content.
+    Read,
+    /// Continue without decoding this row's source content.
+    Skip,
+    /// Stop fallback iteration without decoding this row's source content.
+    Stop,
+}
+
+/// Content-free synchronization state for the rebuildable FTS projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileTextFtsState {
+    /// Authoritative persisted-text rows.
+    pub source_rows: usize,
+    /// Document rows currently represented by the FTS projection.
+    pub indexed_rows: usize,
+    /// Whether authoritative and projected document identities agree exactly.
+    pub synchronized: bool,
 }
 
 /// Agent-approved resolution for a deterministic health finding.
@@ -1253,6 +1382,7 @@ impl AtlasStore {
     /// Returns an error if persistence fails.
     pub fn mark_paths_absent(&mut self, paths: &[String]) -> DbResult<()> {
         let savepoint = self.validated_savepoint()?;
+        let fts_revision = begin_file_text_fts_update(&savepoint)?;
         {
             let mut mark_nodes = savepoint.prepare_cached(
                 "UPDATE nodes SET exists_now = 0 WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
@@ -1266,6 +1396,11 @@ impl AtlasStore {
             let mut delete_parse_metadata = savepoint.prepare_cached(
                 "DELETE FROM source_parse_metadata WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
             )?;
+            let mut delete_text_fts = savepoint.prepare_cached(
+                "INSERT INTO file_text_fts(file_text_fts, rowid, content) \
+                 SELECT 'delete', rowid, content FROM file_texts \
+                 WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+            )?;
             let mut delete_text = savepoint.prepare_cached(
                 "DELETE FROM file_texts WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
             )?;
@@ -1278,9 +1413,11 @@ impl AtlasStore {
                 delete_relations.execute(params![path, descendant_pattern])?;
                 delete_symbols.execute(params![path, descendant_pattern])?;
                 delete_parse_metadata.execute(params![path, descendant_pattern])?;
+                delete_text_fts.execute(params![path, descendant_pattern])?;
                 delete_text.execute(params![path, descendant_pattern])?;
             }
         }
+        complete_file_text_fts_update(&savepoint, fts_revision)?;
         savepoint.commit()?;
         Ok(())
     }
@@ -1299,14 +1436,28 @@ impl AtlasStore {
         paths: &[String],
         texts: impl IntoIterator<Item = &'text IndexedFileText>,
     ) -> DbResult<()> {
+        let texts = texts.into_iter().collect::<Vec<_>>();
+        for text in &texts {
+            validate_indexed_file_text(text)?;
+        }
         let savepoint = self.validated_savepoint()?;
+        let fts_revision = begin_file_text_fts_update(&savepoint)?;
         {
+            let mut delete_fts = savepoint.prepare_cached(
+                "INSERT INTO file_text_fts(file_text_fts, rowid, content) \
+                 SELECT 'delete', rowid, content FROM file_texts WHERE path = ?1",
+            )?;
             let mut delete = savepoint.prepare_cached("DELETE FROM file_texts WHERE path = ?1")?;
             for path in paths {
+                delete_fts.execute([path])?;
                 delete.execute([path])?;
             }
         }
         {
+            let mut delete_current_fts = savepoint.prepare_cached(
+                "INSERT INTO file_text_fts(file_text_fts, rowid, content) \
+                 SELECT 'delete', rowid, content FROM file_texts WHERE path = ?1",
+            )?;
             let mut upsert = savepoint.prepare_cached(
                 "
                 INSERT INTO file_texts(path, content_hash, byte_count, line_count, content, updated_at)
@@ -1319,7 +1470,12 @@ impl AtlasStore {
                     updated_at = CURRENT_TIMESTAMP
                 ",
             )?;
+            let mut index = savepoint.prepare_cached(
+                "INSERT INTO file_text_fts(rowid, content) \
+                 SELECT rowid, content FROM file_texts WHERE path = ?1",
+            )?;
             for text in texts {
+                delete_current_fts.execute([&text.path])?;
                 upsert.execute(params![
                     text.path,
                     text.content_hash.as_deref(),
@@ -1327,8 +1483,10 @@ impl AtlasStore {
                     usize_to_i64(text.line_count),
                     text.content
                 ])?;
+                index.execute([&text.path])?;
             }
         }
+        complete_file_text_fts_update(&savepoint, fts_revision)?;
         savepoint.commit()?;
         Ok(())
     }
@@ -1348,6 +1506,197 @@ impl AtlasStore {
         )?;
         let mut rows = statement.query([path])?;
         rows.next()?.map(file_text_from_row).transpose()
+    }
+
+    /// Load a bounded FTS candidate superset for service-owned exact verification.
+    ///
+    /// The request accepts only one safe ASCII-alphanumeric token. The MATCH
+    /// expression is bound as data. Only authoritative metadata is returned;
+    /// callers hydrate selected paths with [`Self::load_file_text`] after
+    /// applying their file, byte, and time budgets.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the token shape or limit is unsafe, bounded work
+    /// is canceled or reaches its deadline, or persisted rows are invalid.
+    pub fn query_file_text_fts_candidates(
+        &self,
+        query: &FileTextFtsQuery<'_>,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<FileTextFtsPage> {
+        validate_file_text_fts_token(query.literal_token)?;
+        if query.limit > MAX_FILE_TEXT_FTS_CANDIDATES {
+            return Err(DbError::FileTextFtsCandidateLimit {
+                requested: query.limit,
+                maximum: MAX_FILE_TEXT_FTS_CANDIDATES,
+            });
+        }
+        let match_expression = format!("\"{}\"", query.literal_token);
+        let row_limit = usize_to_i64(query.limit.saturating_add(1));
+        with_file_text_progress(&self.connection, control, || {
+            let mut candidates = Vec::with_capacity(query.limit.saturating_add(1));
+            if let Some(path_prefix) = normalized_file_text_path_prefix(query.path_prefix) {
+                let descendant_pattern = sqlite_descendant_pattern(path_prefix);
+                let mut statement = self.connection.prepare_cached(
+                    "
+                    SELECT
+                        f.path,
+                        f.content_hash,
+                        f.byte_count,
+                        f.line_count,
+                        bm25(file_text_fts)
+                    FROM file_text_fts
+                    JOIN file_texts AS f ON f.rowid = file_text_fts.rowid
+                    WHERE file_text_fts MATCH ?1
+                      AND (f.path = ?2 OR f.path LIKE ?3 ESCAPE '\\')
+                    ORDER BY bm25(file_text_fts), f.path
+                    LIMIT ?4
+                    ",
+                )?;
+                let mut rows = statement.query(params![
+                    match_expression,
+                    path_prefix,
+                    descendant_pattern,
+                    row_limit,
+                ])?;
+                collect_file_text_fts_candidates(&mut rows, control, &mut candidates)?;
+            } else {
+                let mut statement = self.connection.prepare_cached(
+                    "
+                    SELECT
+                        f.path,
+                        f.content_hash,
+                        f.byte_count,
+                        f.line_count,
+                        bm25(file_text_fts)
+                    FROM file_text_fts
+                    JOIN file_texts AS f ON f.rowid = file_text_fts.rowid
+                    WHERE file_text_fts MATCH ?1
+                    ORDER BY bm25(file_text_fts), f.path
+                    LIMIT ?2
+                    ",
+                )?;
+                let mut rows = statement.query(params![match_expression, row_limit])?;
+                collect_file_text_fts_candidates(&mut rows, control, &mut candidates)?;
+            }
+            let overflow = candidates.len() > query.limit;
+            candidates.truncate(query.limit);
+            Ok(FileTextFtsPage {
+                candidates,
+                overflow,
+            })
+        })
+    }
+
+    /// Visit correctness-authoritative persisted text with predecode admission.
+    ///
+    /// `admit` receives path and byte metadata before the source `String` is
+    /// decoded from `SQLite`. Returning [`FileTextAdmission::Skip`] or
+    /// [`FileTextAdmission::Stop`] therefore avoids allocating excluded source
+    /// content. Returning `false` from `visitor` stops after an admitted row.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when bounded work is canceled or reaches its deadline,
+    /// persisted counts are invalid, or either callback returns an error.
+    pub fn visit_file_texts_for_fallback<A, V>(
+        &self,
+        path_prefix: Option<&str>,
+        control: Option<&IndexWorkControl>,
+        mut admit: A,
+        mut visitor: V,
+    ) -> DbResult<()>
+    where
+        A: FnMut(&FileTextMetadata) -> DbResult<FileTextAdmission>,
+        V: FnMut(IndexedFileText) -> DbResult<bool>,
+    {
+        with_file_text_progress(&self.connection, control, || {
+            let mut content_statement = self
+                .connection
+                .prepare_cached(FILE_TEXT_FALLBACK_CONTENT_SQL)?;
+            if let Some(path_prefix) = normalized_file_text_path_prefix(path_prefix) {
+                let (descendant_start, descendant_end) = file_text_descendant_range(path_prefix);
+                let mut statement = self
+                    .connection
+                    .prepare_cached(FILE_TEXT_FALLBACK_SCOPED_METADATA_SQL)?;
+                let mut rows =
+                    statement.query(params![path_prefix, descendant_start, descendant_end])?;
+                visit_file_text_fallback_rows(
+                    &mut rows,
+                    &mut content_statement,
+                    control,
+                    &mut admit,
+                    &mut visitor,
+                )
+            } else {
+                let mut statement = self
+                    .connection
+                    .prepare_cached(FILE_TEXT_FALLBACK_ALL_METADATA_SQL)?;
+                let mut rows = statement.query([])?;
+                visit_file_text_fallback_rows(
+                    &mut rows,
+                    &mut content_statement,
+                    control,
+                    &mut admit,
+                    &mut visitor,
+                )
+            }
+        })
+    }
+
+    /// Return whether the transactional FTS projection matches authoritative text.
+    ///
+    /// This constant-work readiness check is suitable for the search hot path.
+    /// Explicit settings diagnostics may additionally count projection rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable revision metadata is malformed or partial.
+    pub fn file_text_fts_ready(&self) -> DbResult<bool> {
+        Ok(load_file_text_fts_revisions(&self.connection)?
+            .is_some_and(|(source, projection)| source == projection))
+    }
+
+    /// Report content-free FTS synchronization state for settings/readiness.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when authoritative or projection row state cannot be
+    /// inspected exactly.
+    pub fn file_text_fts_state(&self) -> DbResult<FileTextFtsState> {
+        let revision_synchronized = self.file_text_fts_ready()?;
+        let (source_rows, indexed_rows, synchronized) = self.connection.query_row(
+            "
+            SELECT
+                (SELECT COUNT(*) FROM file_texts),
+                (SELECT COUNT(*) FROM file_text_fts_docsize),
+                NOT EXISTS(
+                    SELECT 1
+                    FROM file_texts AS f
+                    LEFT JOIN file_text_fts_docsize AS d ON d.id = f.rowid
+                    WHERE d.id IS NULL
+                )
+                AND NOT EXISTS(
+                    SELECT 1
+                    FROM file_text_fts_docsize AS d
+                    LEFT JOIN file_texts AS f ON f.rowid = d.id
+                    WHERE f.rowid IS NULL
+                )
+            ",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)? != 0,
+                ))
+            },
+        )?;
+        Ok(FileTextFtsState {
+            source_rows: count_to_usize("file_texts", source_rows)?,
+            indexed_rows: count_to_usize("file_text_fts", indexed_rows)?,
+            synchronized: revision_synchronized && synchronized,
+        })
     }
 
     /// Load indexed text rows for search.
@@ -4973,6 +5322,94 @@ fn set_metadata(connection: &Connection, key: &str, value: &str) -> DbResult<()>
     Ok(())
 }
 
+/// Load the authoritative and projection revisions without scanning text rows.
+fn load_file_text_fts_revisions(connection: &Connection) -> DbResult<Option<(u64, u64)>> {
+    let (source, projection) = connection.query_row(
+        "
+        SELECT
+            (SELECT value FROM metadata WHERE key = ?1),
+            (SELECT value FROM metadata WHERE key = ?2)
+        ",
+        params![
+            FILE_TEXT_FTS_SOURCE_REVISION_KEY,
+            FILE_TEXT_FTS_PROJECTION_REVISION_KEY,
+        ],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        },
+    )?;
+    if source.is_none() && projection.is_none() {
+        return Ok(None);
+    }
+    let (Some(source), Some(projection)) = (source, projection) else {
+        return Err(DbError::FileTextFtsStateInvalid {
+            reason: "only one FTS revision is present",
+        });
+    };
+    let source_revision =
+        source
+            .parse::<u64>()
+            .map_err(|source_error| DbError::InvalidInteger {
+                field: FILE_TEXT_FTS_SOURCE_REVISION_KEY,
+                value: source,
+                source: source_error,
+            })?;
+    let projection_revision =
+        projection
+            .parse::<u64>()
+            .map_err(|source_error| DbError::InvalidInteger {
+                field: FILE_TEXT_FTS_PROJECTION_REVISION_KEY,
+                value: projection,
+                source: source_error,
+            })?;
+    Ok(Some((source_revision, projection_revision)))
+}
+
+/// Mark an authoritative text mutation before changing its FTS projection.
+fn begin_file_text_fts_update(connection: &Connection) -> DbResult<u64> {
+    let (source, projection) =
+        load_file_text_fts_revisions(connection)?.ok_or(DbError::FileTextFtsStateInvalid {
+            reason: "FTS revisions are missing",
+        })?;
+    if source != projection {
+        return Err(DbError::FileTextFtsStateInvalid {
+            reason: "an earlier FTS revision is incomplete",
+        });
+    }
+    let revision = source
+        .checked_add(1)
+        .ok_or(DbError::FileTextFtsStateInvalid {
+            reason: "FTS revision overflowed",
+        })?;
+    set_metadata(
+        connection,
+        FILE_TEXT_FTS_SOURCE_REVISION_KEY,
+        &revision.to_string(),
+    )?;
+    Ok(revision)
+}
+
+/// Publish the matching projection revision after every FTS mutation succeeds.
+fn complete_file_text_fts_update(connection: &Connection, revision: u64) -> DbResult<()> {
+    let (source, projection) =
+        load_file_text_fts_revisions(connection)?.ok_or(DbError::FileTextFtsStateInvalid {
+            reason: "FTS revisions disappeared during an update",
+        })?;
+    if source != revision || projection.checked_add(1) != Some(revision) {
+        return Err(DbError::FileTextFtsStateInvalid {
+            reason: "FTS revisions changed during an update",
+        });
+    }
+    set_metadata(
+        connection,
+        FILE_TEXT_FTS_PROJECTION_REVISION_KEY,
+        &revision.to_string(),
+    )
+}
+
 /// Persist one usage event in the immutable released schema-8 fixture shape.
 #[cfg(test)]
 fn record_released_schema_eight_usage_event(
@@ -5087,6 +5524,7 @@ fn mark_all_scan_nodes_absent(connection: &Connection) -> DbResult<()> {
 
 /// Delete derived rows whose owning scan node remained absent.
 fn delete_absent_scan_projections(connection: &Connection) -> DbResult<()> {
+    let fts_revision = begin_file_text_fts_update(connection)?;
     connection.execute(
         "DELETE FROM symbol_relations WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
         [],
@@ -5100,9 +5538,16 @@ fn delete_absent_scan_projections(connection: &Connection) -> DbResult<()> {
         [],
     )?;
     connection.execute(
+        "INSERT INTO file_text_fts(file_text_fts, rowid, content) \
+         SELECT 'delete', rowid, content FROM file_texts \
+         WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
+        [],
+    )?;
+    connection.execute(
         "DELETE FROM file_texts WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
         [],
     )?;
+    complete_file_text_fts_update(connection, fts_revision)?;
     Ok(())
 }
 
@@ -5184,13 +5629,202 @@ fn upsert_nodes(connection: &Connection, nodes: &[Node]) -> DbResult<()> {
 fn file_text_from_row(row: &rusqlite::Row<'_>) -> DbResult<IndexedFileText> {
     let byte_count = count_to_usize("file_texts.byte_count", row.get::<_, i64>(2)?)?;
     let line_count = count_to_usize("file_texts.line_count", row.get::<_, i64>(3)?)?;
-    Ok(IndexedFileText {
+    let text = IndexedFileText {
         path: row.get(0)?,
         content_hash: row.get(1)?,
         byte_count,
         line_count,
         content: row.get(4)?,
+    };
+    validate_indexed_file_text(&text)?;
+    Ok(text)
+}
+
+/// Verify that persisted byte/line accounting matches authoritative content.
+fn validate_indexed_file_text(text: &IndexedFileText) -> DbResult<()> {
+    let actual_bytes = text.content.len();
+    if text.byte_count != actual_bytes {
+        return Err(DbError::FileTextMetadataMismatch {
+            path: text.path.clone(),
+            field: "byte_count",
+            recorded: text.byte_count,
+            actual: actual_bytes,
+        });
+    }
+    let actual_lines = text.content.lines().count();
+    if text.line_count != actual_lines {
+        return Err(DbError::FileTextMetadataMismatch {
+            path: text.path.clone(),
+            field: "line_count",
+            recorded: text.line_count,
+            actual: actual_lines,
+        });
+    }
+    Ok(())
+}
+
+/// Virtual-machine operations between bounded text-read progress checks.
+const FILE_TEXT_PROGRESS_OPS: i32 = 1_000;
+
+/// Clears a connection-local `SQLite` progress handler on every exit path.
+struct FileTextProgressGuard<'connection> {
+    /// Connection whose temporary progress callback is armed.
+    connection: &'connection Connection,
+    /// Whether this guard installed a callback that must be removed.
+    armed: bool,
+}
+
+impl<'connection> FileTextProgressGuard<'connection> {
+    /// Install one cooperative text-index progress callback when requested.
+    fn new(
+        connection: &'connection Connection,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<Self> {
+        let armed = if let Some(control) = control {
+            control.check(IndexWorkStage::TextIndex)?;
+            let progress_control = control.clone();
+            connection.progress_handler(
+                FILE_TEXT_PROGRESS_OPS,
+                Some(move || progress_control.check(IndexWorkStage::TextIndex).is_err()),
+            );
+            true
+        } else {
+            false
+        };
+        Ok(Self { connection, armed })
+    }
+}
+
+impl Drop for FileTextProgressGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.connection.progress_handler(0, None::<fn() -> bool>);
+        }
+    }
+}
+
+/// Run one read with a temporary cooperative progress handler.
+fn with_file_text_progress<T>(
+    connection: &Connection,
+    control: Option<&IndexWorkControl>,
+    operation: impl FnOnce() -> DbResult<T>,
+) -> DbResult<T> {
+    let guard = FileTextProgressGuard::new(connection, control)?;
+    let result = operation();
+    drop(guard);
+    if result.as_ref().is_err_and(|error| {
+        matches!(
+            error,
+            DbError::Sqlite(sqlite)
+                if sqlite.sqlite_error_code() == Some(ErrorCode::OperationInterrupted)
+        )
+    }) && let Some(control) = control
+    {
+        control.check(IndexWorkStage::TextIndex)?;
+    }
+    result
+}
+
+/// Enforce the single safe-token contract used by FTS candidate lookup.
+fn validate_file_text_fts_token(token: &str) -> DbResult<()> {
+    if token.len() < 3 {
+        return Err(DbError::FileTextFtsTokenUnsafe {
+            reason: "token is shorter than three ASCII bytes",
+        });
+    }
+    if !token.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Err(DbError::FileTextFtsTokenUnsafe {
+            reason: "token is not exclusively ASCII alphanumeric",
+        });
+    }
+    Ok(())
+}
+
+/// Normalize only the root/trailing-separator cases of an already-relative scope.
+fn normalized_file_text_path_prefix(path_prefix: Option<&str>) -> Option<&str> {
+    path_prefix
+        .map(|prefix| prefix.trim_end_matches('/'))
+        .filter(|prefix| !prefix.is_empty() && *prefix != ".")
+}
+
+/// Build one binary-collation range containing exactly a path's descendants.
+fn file_text_descendant_range(path_prefix: &str) -> (String, String) {
+    (format!("{path_prefix}/"), format!("{path_prefix}0"))
+}
+
+/// Decode one bounded page of FTS metadata candidates without source text.
+fn collect_file_text_fts_candidates(
+    rows: &mut rusqlite::Rows<'_>,
+    control: Option<&IndexWorkControl>,
+    candidates: &mut Vec<FileTextFtsCandidate>,
+) -> DbResult<()> {
+    while let Some(row) = rows.next()? {
+        if let Some(control) = control {
+            control.check(IndexWorkStage::TextIndex)?;
+        }
+        let path = row.get::<_, String>(0)?;
+        let bm25 = row.get::<_, f64>(4)?;
+        if !bm25.is_finite() {
+            return Err(DbError::FileTextFtsScoreInvalid { path });
+        }
+        candidates.push(FileTextFtsCandidate {
+            path,
+            content_hash: row.get(1)?,
+            byte_count: count_to_usize("file_texts.byte_count", row.get::<_, i64>(2)?)?,
+            line_count: count_to_usize("file_texts.line_count", row.get::<_, i64>(3)?)?,
+            bm25,
+        });
+    }
+    Ok(())
+}
+
+/// Decode persisted file metadata before the potentially large source column.
+fn file_text_metadata_from_row(row: &rusqlite::Row<'_>) -> DbResult<FileTextMetadata> {
+    Ok(FileTextMetadata {
+        path: row.get(0)?,
+        content_hash: row.get(1)?,
+        byte_count: count_to_usize("file_texts.byte_count", row.get::<_, i64>(2)?)?,
+        line_count: count_to_usize("file_texts.line_count", row.get::<_, i64>(3)?)?,
     })
+}
+
+/// Visit fallback rows with metadata-first admission and cooperative stops.
+fn visit_file_text_fallback_rows<A, V>(
+    rows: &mut rusqlite::Rows<'_>,
+    content_statement: &mut rusqlite::CachedStatement<'_>,
+    control: Option<&IndexWorkControl>,
+    admit: &mut A,
+    visitor: &mut V,
+) -> DbResult<()>
+where
+    A: FnMut(&FileTextMetadata) -> DbResult<FileTextAdmission>,
+    V: FnMut(IndexedFileText) -> DbResult<bool>,
+{
+    while let Some(row) = rows.next()? {
+        if let Some(control) = control {
+            control.check(IndexWorkStage::TextIndex)?;
+        }
+        let metadata = file_text_metadata_from_row(row)?;
+        match admit(&metadata)? {
+            FileTextAdmission::Skip => continue,
+            FileTextAdmission::Stop => return Ok(()),
+            FileTextAdmission::Read => {}
+        }
+        let content =
+            content_statement.query_row([&metadata.path], |content_row| content_row.get(0))?;
+        let text = IndexedFileText {
+            path: metadata.path,
+            content_hash: metadata.content_hash,
+            byte_count: metadata.byte_count,
+            line_count: metadata.line_count,
+            content,
+        };
+        validate_indexed_file_text(&text)?;
+        if !visitor(text)? {
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 /// Build an indexed node from the standard node select column order.
@@ -8983,7 +9617,7 @@ mod tests {
             &[IndexedFileText {
                 path: "src/main.rs".to_string(),
                 content_hash: Some("hash-a".to_string()),
-                byte_count: 12,
+                byte_count: "needle old\n".len(),
                 line_count: 1,
                 content: "needle old\n".to_string(),
             }],
@@ -9011,14 +9645,14 @@ mod tests {
                 IndexedFileText {
                     path: "src/a.rs".to_string(),
                     content_hash: Some("hash-a".to_string()),
-                    byte_count: 14,
+                    byte_count: "needle first\n".len(),
                     line_count: 1,
                     content: "needle first\n".to_string(),
                 },
                 IndexedFileText {
                     path: "src/b.rs".to_string(),
                     content_hash: Some("hash-b".to_string()),
-                    byte_count: 15,
+                    byte_count: "needle second\n".len(),
                     line_count: 1,
                     content: "needle second\n".to_string(),
                 },
@@ -9031,6 +9665,698 @@ mod tests {
             Ok(false)
         })?;
         require_eq(&visited, &vec!["src/a.rs".to_string()], "early stop rows")?;
+        Ok(())
+    }
+
+    #[test]
+    fn file_text_fts_candidates_are_bounded_scoped_safe_and_metadata_only()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("src/b.rs", "hash-b"),
+            test_file_node("tests/c.rs", "hash-c"),
+        ])?;
+        store.replace_file_texts_for_paths(
+            &[
+                "src/a.rs".to_string(),
+                "src/b.rs".to_string(),
+                "tests/c.rs".to_string(),
+            ],
+            &[
+                IndexedFileText {
+                    path: "src/a.rs".to_string(),
+                    content_hash: Some("hash-a".to_string()),
+                    byte_count: 13,
+                    line_count: 1,
+                    content: "needle alpha\n".to_string(),
+                },
+                IndexedFileText {
+                    path: "src/b.rs".to_string(),
+                    content_hash: Some("hash-b".to_string()),
+                    byte_count: 19,
+                    line_count: 1,
+                    content: "prefixneedlesuffix\n".to_string(),
+                },
+                IndexedFileText {
+                    path: "tests/c.rs".to_string(),
+                    content_hash: Some("hash-c".to_string()),
+                    byte_count: 32,
+                    line_count: 1,
+                    content: "needle gamma AND NOT NEAR terms\n".to_string(),
+                },
+            ],
+        )?;
+
+        let bounded = store.query_file_text_fts_candidates(
+            &FileTextFtsQuery {
+                literal_token: "needle",
+                path_prefix: None,
+                limit: 1,
+            },
+            None,
+        )?;
+        require_eq(&bounded.candidates.len(), &1, "bounded FTS row count")?;
+        require_eq(&bounded.overflow, &true, "bounded FTS overflow")?;
+        require(
+            bounded.candidates[0].bm25.is_finite(),
+            "FTS rank was non-finite",
+        )?;
+        let zero_limit = store.query_file_text_fts_candidates(
+            &FileTextFtsQuery {
+                literal_token: "needle",
+                path_prefix: None,
+                limit: 0,
+            },
+            None,
+        )?;
+        require_eq(
+            &zero_limit,
+            &FileTextFtsPage {
+                candidates: Vec::new(),
+                overflow: true,
+            },
+            "zero-limit FTS overflow",
+        )?;
+
+        let scoped = store.query_file_text_fts_candidates(
+            &FileTextFtsQuery {
+                literal_token: "needle",
+                path_prefix: Some("src/"),
+                limit: 10,
+            },
+            None,
+        )?;
+        require_eq(
+            &scoped
+                .candidates
+                .iter()
+                .map(|candidate| candidate.path.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["src/a.rs", "src/b.rs"],
+            "path-scoped FTS rank order",
+        )?;
+        let exact_path = store.query_file_text_fts_candidates(
+            &FileTextFtsQuery {
+                literal_token: "needle",
+                path_prefix: Some("src/a.rs"),
+                limit: 10,
+            },
+            None,
+        )?;
+        require_eq(
+            &exact_path.candidates[0].path,
+            &"src/a.rs".to_string(),
+            "exact-path FTS scope",
+        )?;
+        for reserved_token in ["AND", "NOT", "NEAR"] {
+            let reserved = store.query_file_text_fts_candidates(
+                &FileTextFtsQuery {
+                    literal_token: reserved_token,
+                    path_prefix: Some("tests/c.rs"),
+                    limit: 10,
+                },
+                None,
+            )?;
+            require_eq(
+                &reserved.candidates.len(),
+                &1,
+                "quoted FTS reserved-token candidate",
+            )?;
+        }
+        let mut plan_statement = store.connection.prepare(
+            "EXPLAIN QUERY PLAN
+             SELECT f.path, f.content_hash, f.byte_count, f.line_count, bm25(file_text_fts)
+             FROM file_text_fts
+             JOIN file_texts AS f ON f.rowid = file_text_fts.rowid
+             WHERE file_text_fts MATCH ?1
+             ORDER BY bm25(file_text_fts), f.path
+             LIMIT ?2",
+        )?;
+        let plan_details = plan_statement
+            .query_map(params!["needle", 11], |row| row.get::<_, String>(3))?
+            .collect::<Result<Vec<_>, _>>()?;
+        require(
+            plan_details
+                .iter()
+                .any(|detail| detail.contains("VIRTUAL TABLE INDEX")),
+            "FTS candidate query did not use the virtual-table index",
+        )?;
+        require(
+            plan_details
+                .iter()
+                .any(|detail| detail.contains("INTEGER PRIMARY KEY")),
+            "FTS candidate query did not hydrate metadata by file_texts rowid",
+        )?;
+
+        for unsafe_token in ["ab", "foo_bar", "needle\" OR content:*", "néedle"] {
+            let result = store.query_file_text_fts_candidates(
+                &FileTextFtsQuery {
+                    literal_token: unsafe_token,
+                    path_prefix: None,
+                    limit: 10,
+                },
+                None,
+            );
+            require(
+                matches!(result, Err(DbError::FileTextFtsTokenUnsafe { .. })),
+                "unsafe FTS token was accepted",
+            )?;
+        }
+        let over_cap = store.query_file_text_fts_candidates(
+            &FileTextFtsQuery {
+                literal_token: "needle",
+                path_prefix: None,
+                limit: MAX_FILE_TEXT_FTS_CANDIDATES + 1,
+            },
+            None,
+        );
+        require(
+            matches!(over_cap, Err(DbError::FileTextFtsCandidateLimit { .. })),
+            "over-cap FTS request was accepted",
+        )?;
+
+        store.connection.execute(
+            "UPDATE file_texts SET content = x'80' WHERE path = 'src/a.rs'",
+            [],
+        )?;
+        let metadata_only = store.query_file_text_fts_candidates(
+            &FileTextFtsQuery {
+                literal_token: "needle",
+                path_prefix: Some("src/a.rs"),
+                limit: 1,
+            },
+            None,
+        )?;
+        require_eq(
+            &metadata_only.candidates[0].byte_count,
+            &13,
+            "metadata-only candidate byte count",
+        )?;
+        require(
+            store.load_file_text("src/a.rs").is_err(),
+            "content corruption fixture did not prove candidate pre-hydration",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn file_text_fts_mutations_are_atomic_and_state_reports_identity_drift()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[test_file_node("src/main.rs", "hash-a")])?;
+        let invalid_metadata = IndexedFileText {
+            path: "src/main.rs".to_string(),
+            content_hash: Some("hash-invalid".to_string()),
+            byte_count: 0,
+            line_count: 1,
+            content: "not empty\n".to_string(),
+        };
+        require(
+            matches!(
+                store.replace_file_texts_for_paths(
+                    std::slice::from_ref(&invalid_metadata.path),
+                    std::slice::from_ref(&invalid_metadata),
+                ),
+                Err(DbError::FileTextMetadataMismatch {
+                    field: "byte_count",
+                    ..
+                })
+            ),
+            "invalid file-text byte metadata was accepted",
+        )?;
+        require_eq(
+            &store.load_file_text(&invalid_metadata.path)?,
+            &None,
+            "invalid metadata write rollback",
+        )?;
+        let invalid_line_count = IndexedFileText {
+            byte_count: invalid_metadata.content.len(),
+            line_count: 0,
+            ..invalid_metadata.clone()
+        };
+        require(
+            matches!(
+                store.replace_file_texts_for_paths(
+                    std::slice::from_ref(&invalid_line_count.path),
+                    std::slice::from_ref(&invalid_line_count),
+                ),
+                Err(DbError::FileTextMetadataMismatch {
+                    field: "line_count",
+                    ..
+                })
+            ),
+            "invalid file-text line metadata was accepted",
+        )?;
+        let original = IndexedFileText {
+            path: "src/main.rs".to_string(),
+            content_hash: Some("hash-a".to_string()),
+            byte_count: "needle old\n".len(),
+            line_count: 1,
+            content: "needle old\n".to_string(),
+        };
+        store.replace_file_texts_for_paths(
+            std::slice::from_ref(&original.path),
+            std::slice::from_ref(&original),
+        )?;
+        require_eq(
+            &store.file_text_fts_state()?,
+            &FileTextFtsState {
+                source_rows: 1,
+                indexed_rows: 1,
+                synchronized: true,
+            },
+            "initial FTS synchronization state",
+        )?;
+
+        store.connection.execute_batch(
+            "CREATE TRIGGER fail_file_text_insert
+             BEFORE INSERT ON file_texts
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected file-text failure');
+             END;",
+        )?;
+        let replacement = IndexedFileText {
+            path: original.path.clone(),
+            content_hash: Some("hash-b".to_string()),
+            byte_count: 11,
+            line_count: 1,
+            content: "beacon new\n".to_string(),
+        };
+        require(
+            store
+                .replace_file_texts_for_paths(
+                    std::slice::from_ref(&replacement.path),
+                    std::slice::from_ref(&replacement),
+                )
+                .is_err(),
+            "fault-injected replacement unexpectedly committed",
+        )?;
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_file_text_insert")?;
+        require_eq(
+            &store.load_file_text(&original.path)?,
+            &Some(original.clone()),
+            "rolled-back authoritative text",
+        )?;
+        require_eq(
+            &store
+                .query_file_text_fts_candidates(
+                    &FileTextFtsQuery {
+                        literal_token: "needle",
+                        path_prefix: None,
+                        limit: 10,
+                    },
+                    None,
+                )?
+                .candidates
+                .len(),
+            &1,
+            "rolled-back FTS document",
+        )?;
+        require_eq(
+            &store.file_text_fts_state()?.synchronized,
+            &true,
+            "rollback FTS synchronization",
+        )?;
+
+        store.replace_file_texts_for_paths(
+            std::slice::from_ref(&replacement.path),
+            std::slice::from_ref(&replacement),
+        )?;
+        require_eq(
+            &store
+                .query_file_text_fts_candidates(
+                    &FileTextFtsQuery {
+                        literal_token: "needle",
+                        path_prefix: None,
+                        limit: 10,
+                    },
+                    None,
+                )?
+                .candidates
+                .len(),
+            &0,
+            "replaced token removed from FTS",
+        )?;
+        require_eq(
+            &store
+                .query_file_text_fts_candidates(
+                    &FileTextFtsQuery {
+                        literal_token: "beacon",
+                        path_prefix: None,
+                        limit: 10,
+                    },
+                    None,
+                )?
+                .candidates
+                .len(),
+            &1,
+            "replacement token added to FTS",
+        )?;
+
+        store.connection.execute(
+            "INSERT INTO file_text_fts(file_text_fts, rowid, content)
+             SELECT 'delete', rowid, content FROM file_texts WHERE path = ?1",
+            [&replacement.path],
+        )?;
+        require_eq(
+            &store.file_text_fts_state()?,
+            &FileTextFtsState {
+                source_rows: 1,
+                indexed_rows: 0,
+                synchronized: false,
+            },
+            "desynchronized FTS identity state",
+        )?;
+        store.connection.execute(
+            "INSERT INTO file_text_fts(file_text_fts) VALUES('rebuild')",
+            [],
+        )?;
+        let (source_revision, projection_revision) =
+            load_file_text_fts_revisions(&store.connection)?.ok_or_else(|| {
+                io::Error::other("FTS revisions disappeared after synchronized writes")
+            })?;
+        require_eq(
+            &source_revision,
+            &projection_revision,
+            "synchronized FTS revisions",
+        )?;
+        set_metadata(
+            &store.connection,
+            FILE_TEXT_FTS_PROJECTION_REVISION_KEY,
+            &projection_revision.saturating_sub(1).to_string(),
+        )?;
+        require_eq(
+            &store.file_text_fts_ready()?,
+            &false,
+            "incomplete FTS revision readiness",
+        )?;
+        set_metadata(
+            &store.connection,
+            FILE_TEXT_FTS_PROJECTION_REVISION_KEY,
+            &source_revision.to_string(),
+        )?;
+        require_eq(
+            &store.file_text_fts_ready()?,
+            &true,
+            "restored FTS revision readiness",
+        )?;
+        store.mark_paths_absent(&["src".to_string()])?;
+        require_eq(
+            &store.file_text_fts_state()?,
+            &FileTextFtsState {
+                source_rows: 0,
+                indexed_rows: 0,
+                synchronized: true,
+            },
+            "absent-path FTS synchronization",
+        )?;
+
+        store.replace_scan(&[test_file_node("src/main.rs", "hash-c")])?;
+        let rescanned = IndexedFileText {
+            path: "src/main.rs".to_string(),
+            content_hash: Some("hash-c".to_string()),
+            byte_count: 13,
+            line_count: 1,
+            content: "rescan token\n".to_string(),
+        };
+        store.replace_file_texts_for_paths(
+            std::slice::from_ref(&rescanned.path),
+            std::slice::from_ref(&rescanned),
+        )?;
+        store.replace_scan(&[])?;
+        require_eq(
+            &store.file_text_fts_state()?,
+            &FileTextFtsState {
+                source_rows: 0,
+                indexed_rows: 0,
+                synchronized: true,
+            },
+            "full-scan deletion FTS synchronization",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn file_text_fts_migration_backfills_existing_text_and_survives_reopen()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("project");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("atlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        store.replace_scan(&[test_file_node("src/main.rs", "hash-a")])?;
+        store.replace_file_texts_for_paths(
+            &["src/main.rs".to_string()],
+            &[IndexedFileText {
+                path: "src/main.rs".to_string(),
+                content_hash: Some("hash-a".to_string()),
+                byte_count: 17,
+                line_count: 1,
+                content: "migration needle\n".to_string(),
+            }],
+        )?;
+        store.connection.execute_batch("DROP TABLE file_text_fts")?;
+        store.connection.execute(
+            "DELETE FROM metadata WHERE key IN (?1, ?2)",
+            params![
+                FILE_TEXT_FTS_SOURCE_REVISION_KEY,
+                FILE_TEXT_FTS_PROJECTION_REVISION_KEY,
+            ],
+        )?;
+        set_metadata(
+            &store.connection,
+            SCHEMA_VERSION_KEY,
+            &(SCHEMA_VERSION - 1).to_string(),
+        )?;
+        drop(store);
+
+        let migrated = AtlasStore::open_for_project(&database, &root)?;
+        require_eq(
+            &migrated.file_text_fts_state()?,
+            &FileTextFtsState {
+                source_rows: 1,
+                indexed_rows: 1,
+                synchronized: true,
+            },
+            "migrated FTS synchronization state",
+        )?;
+        require_eq(
+            &migrated
+                .query_file_text_fts_candidates(
+                    &FileTextFtsQuery {
+                        literal_token: "needle",
+                        path_prefix: None,
+                        limit: 10,
+                    },
+                    None,
+                )?
+                .candidates[0]
+                .path,
+            &"src/main.rs".to_string(),
+            "migrated FTS backfill candidate",
+        )?;
+        drop(migrated);
+
+        let reopened = AtlasStore::open_read_only_for_project(&database, &root)?;
+        require_eq(
+            &reopened.file_text_fts_state()?.synchronized,
+            &true,
+            "reopened FTS synchronization",
+        )?;
+        require_eq(
+            &reopened
+                .query_file_text_fts_candidates(
+                    &FileTextFtsQuery {
+                        literal_token: "migration",
+                        path_prefix: Some("src"),
+                        limit: 1,
+                    },
+                    None,
+                )?
+                .candidates
+                .len(),
+            &1,
+            "reopened FTS candidate count",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn fallback_admission_precedes_content_decode_and_clears_progress_handlers()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[test_file_node("src/good.rs", "hash-good")])?;
+        store.replace_file_texts_for_paths(
+            &["src/good.rs".to_string()],
+            &[IndexedFileText {
+                path: "src/good.rs".to_string(),
+                content_hash: Some("hash-good".to_string()),
+                byte_count: 12,
+                line_count: 1,
+                content: "needle good\n".to_string(),
+            }],
+        )?;
+        store.connection.execute(
+            "INSERT INTO file_texts(path, content_hash, byte_count, line_count, content)
+             VALUES('src/bad.rs', 'hash-bad', 1, 1, x'80')",
+            [],
+        )?;
+
+        let mut admitted = Vec::new();
+        let mut visited = Vec::new();
+        store.visit_file_texts_for_fallback(
+            Some("src"),
+            None,
+            |metadata| {
+                admitted.push(metadata.path.clone());
+                Ok(if metadata.path == "src/bad.rs" {
+                    FileTextAdmission::Skip
+                } else {
+                    FileTextAdmission::Read
+                })
+            },
+            |text| {
+                visited.push(text.path);
+                Ok(true)
+            },
+        )?;
+        require_eq(
+            &admitted,
+            &vec!["src/bad.rs".to_string(), "src/good.rs".to_string()],
+            "fallback metadata admission rows",
+        )?;
+        require_eq(
+            &visited,
+            &vec!["src/good.rs".to_string()],
+            "fallback decoded rows",
+        )?;
+        let mut scoped_plan = store.connection.prepare(&format!(
+            "EXPLAIN QUERY PLAN {FILE_TEXT_FALLBACK_SCOPED_METADATA_SQL}"
+        ))?;
+        let scoped_plan_details = scoped_plan
+            .query_map(params!["src", "src/", "src0"], |row| {
+                row.get::<_, String>(3)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        require(
+            scoped_plan_details
+                .iter()
+                .any(|detail| detail.contains("SEARCH file_texts USING INDEX"))
+                && scoped_plan_details
+                    .iter()
+                    .all(|detail| !detail.contains("SCAN file_texts")),
+            "path-scoped fallback did not use bounded binary index ranges",
+        )?;
+        let mut scoped_opcodes = store
+            .connection
+            .prepare(&format!("EXPLAIN {FILE_TEXT_FALLBACK_SCOPED_METADATA_SQL}"))?;
+        let scoped_opcode_rows = scoped_opcodes
+            .query_map(params!["src", "src/", "src0"], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        require(
+            scoped_opcode_rows
+                .iter()
+                .all(|(opcode, column)| opcode != "Column" || *column != 4),
+            "fallback metadata cursor read source content before admission",
+        )?;
+        require(
+            store
+                .visit_file_texts_for_fallback(
+                    Some("src/bad.rs"),
+                    None,
+                    |_| Ok(FileTextAdmission::Read),
+                    |_| Ok(true),
+                )
+                .is_err(),
+            "invalid source content decoded without error",
+        )?;
+
+        let success_cancellation = projectatlas_core::IndexCancellation::new();
+        let success_control = IndexWorkControl::new(success_cancellation.clone(), None);
+        store.query_file_text_fts_candidates(
+            &FileTextFtsQuery {
+                literal_token: "needle",
+                path_prefix: None,
+                limit: 10,
+            },
+            Some(&success_control),
+        )?;
+        success_cancellation.cancel();
+        let recursive_sum = store.connection.query_row(
+            "WITH RECURSIVE numbers(value) AS (
+                 VALUES(1) UNION ALL SELECT value + 1 FROM numbers WHERE value < 5000
+             ) SELECT SUM(value) FROM numbers",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &recursive_sum,
+            &12_502_500,
+            "cleared success progress handler",
+        )?;
+
+        let cancellation = projectatlas_core::IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), None);
+        let mut rows_seen = 0;
+        let cancelled = store.visit_file_texts_for_fallback(
+            Some("src"),
+            Some(&control),
+            |_| {
+                rows_seen += 1;
+                cancellation.cancel();
+                Ok(FileTextAdmission::Skip)
+            },
+            |_| Ok(true),
+        );
+        require_eq(&rows_seen, &1, "rows before fallback cancellation")?;
+        require(
+            matches!(
+                cancelled,
+                Err(DbError::IndexWork(IndexWorkFailure::Cancelled {
+                    stage: IndexWorkStage::TextIndex
+                }))
+            ),
+            "fallback cancellation was not typed",
+        )?;
+        let post_error_sum = store.connection.query_row(
+            "WITH RECURSIVE numbers(value) AS (
+                 VALUES(1) UNION ALL SELECT value + 1 FROM numbers WHERE value < 5000
+             ) SELECT SUM(value) FROM numbers",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &post_error_sum,
+            &12_502_500,
+            "cleared error progress handler",
+        )?;
+
+        let expired = IndexWorkControl::with_deadline(
+            projectatlas_core::IndexCancellation::new(),
+            Instant::now(),
+        );
+        let deadline = store.query_file_text_fts_candidates(
+            &FileTextFtsQuery {
+                literal_token: "needle",
+                path_prefix: None,
+                limit: 10,
+            },
+            Some(&expired),
+        );
+        require(
+            matches!(
+                deadline,
+                Err(DbError::IndexWork(IndexWorkFailure::DeadlineExceeded {
+                    stage: IndexWorkStage::TextIndex
+                }))
+            ),
+            "FTS deadline was not typed",
+        )?;
         Ok(())
     }
 
@@ -10502,6 +11828,15 @@ mod tests {
             .iter()
             .map(|finding| finding.path.as_str())
             .collect()
+    }
+
+    /// Require a test condition without panicking.
+    fn require(condition: bool, message: &str) -> Result<(), Box<dyn Error>> {
+        if condition {
+            Ok(())
+        } else {
+            Err(io::Error::other(message).into())
+        }
     }
 
     /// Require two test values to be equal without panicking.

@@ -14,13 +14,15 @@ use projectatlas_core::symbols::{
 };
 use projectatlas_core::telemetry::{TokenOverview, TokenTrendReport, TokenTrendWindow};
 use projectatlas_core::{
-    IndexGeneration, IndexedNode, NavigationNextCall, NavigationNextCapability, NodeKind,
-    RankedConnectionKind, RankedConnectionTarget, RankedNode, RankedReasonCode,
-    repo_path_to_native, validated_repo_file_key,
+    IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
+    IndexedNode, NavigationNextCall, NavigationNextCapability, NodeKind, RankedConnectionKind,
+    RankedConnectionTarget, RankedNode, RankedReasonCode, repo_path_to_native,
+    validated_repo_file_key,
 };
 use projectatlas_db::{
-    AtlasStore, CapturedProjectBinding, DbError, IndexedFileText, RepositoryCoverageQuery,
-    RepositoryCoverageRow, RepositoryNavigationConnections, RepositoryNavigationNode,
+    AtlasStore, CapturedProjectBinding, DbError, FileTextAdmission, FileTextFtsQuery,
+    IndexedFileText, MAX_FILE_TEXT_FTS_CANDIDATES, RepositoryCoverageQuery, RepositoryCoverageRow,
+    RepositoryNavigationConnections, RepositoryNavigationNode,
 };
 use projectatlas_symbols::module_aliases_for_path;
 use regex::RegexBuilder;
@@ -28,6 +30,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
 
 /// Maximum caller references retained for one summarized symbol.
@@ -56,6 +59,48 @@ const COVERAGE_DIGEST_ROW_LIMIT: u32 = 16;
 const SOURCE_STATUS_LIVE: &str = "live-source";
 /// Status emitted when indexed metadata had to stand in for live source.
 const SOURCE_STATUS_INDEXED: &str = "indexed-metadata";
+/// Maximum selected persisted-text files inspected by one lexical search.
+const SEARCH_MAX_SELECTED_FILES: usize = 50_000;
+/// Maximum selected persisted-text bytes inspected by one lexical search.
+const SEARCH_MAX_SELECTED_BYTES: usize = 128 * 1024 * 1024;
+/// Maximum wall time available to one lexical search.
+const SEARCH_MAX_ELAPSED: Duration = Duration::from_secs(10);
+/// Maximum context lines retained on either side of one match.
+const SEARCH_MAX_CONTEXT_LINES: usize = 20;
+/// Maximum result rows retained by one lexical search.
+const SEARCH_MAX_RESULT_ROWS: usize = 1_000;
+/// Maximum approximate payload bytes retained before adapter serialization.
+const SEARCH_MAX_RETAINED_BYTES: usize = 2 * 1024 * 1024;
+/// Maximum UTF-8 bytes accepted in one literal, regex, or fuzzy pattern.
+const SEARCH_MAX_PATTERN_BYTES: usize = 64 * 1024;
+/// Maximum UTF-8 bytes accepted in one repository path glob.
+const SEARCH_MAX_FILE_PATTERN_BYTES: usize = 4 * 1024;
+/// Stable state reported until the optional semantic lifecycle lands in task 6.3.
+const SEARCH_SEMANTIC_UNAVAILABLE_STATE: &str = "not-installed";
+/// Stable recovery guidance for an explicitly unavailable retrieval mode.
+const SEARCH_SEMANTIC_RECOVERY: &str =
+    "install and enable a compatible semantic retrieval pack, then build a ready generation";
+
+/// Internal resource ceilings for one lexical search execution.
+#[derive(Clone, Copy, Debug)]
+struct SearchBounds {
+    /// Maximum persisted-text rows admitted for decoding.
+    selected_files: usize,
+    /// Maximum persisted-text bytes admitted for decoding.
+    selected_bytes: usize,
+    /// Maximum elapsed search duration.
+    elapsed: Duration,
+    /// Maximum approximate bytes retained before serialization.
+    retained_bytes: usize,
+}
+
+/// Product search ceilings applied identically to CLI and MCP calls.
+const DEFAULT_SEARCH_BOUNDS: SearchBounds = SearchBounds {
+    selected_files: SEARCH_MAX_SELECTED_FILES,
+    selected_bytes: SEARCH_MAX_SELECTED_BYTES,
+    elapsed: SEARCH_MAX_ELAPSED,
+    retained_bytes: SEARCH_MAX_RETAINED_BYTES,
+};
 /// Service-layer failures.
 #[derive(Debug, Error)]
 pub enum ServiceError {
@@ -82,6 +127,16 @@ pub enum ServiceError {
     /// The selected project binding changed while the report was being read.
     #[error("selected project binding changed while loading the token report")]
     SelectedProjectChanged,
+    /// An explicitly requested optional search capability has no ready generation.
+    #[error("search retrieval mode {requested_mode:?} is unavailable ({state}); {guidance}")]
+    SearchCapabilityUnavailable {
+        /// Caller-selected retrieval mode.
+        requested_mode: SearchRetrievalMode,
+        /// Stable optional-capability lifecycle state.
+        state: &'static str,
+        /// Actionable recovery guidance.
+        guidance: &'static str,
+    },
 }
 
 /// Convenient result alias for service operations.
@@ -706,6 +761,54 @@ pub struct SearchMatch {
     pub context_after: Vec<String>,
 }
 
+/// Caller-selected retrieval family for repository search.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchRetrievalMode {
+    /// Correctness-authoritative persisted lexical search.
+    #[default]
+    Lexical,
+    /// Optional semantic retrieval generation.
+    Semantic,
+    /// Lexical-complete ranking with optional semantic enrichment.
+    Hybrid,
+}
+
+impl SearchRetrievalMode {
+    /// Return the stable adapter-facing mode name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lexical => "lexical",
+            Self::Semantic => "semantic",
+            Self::Hybrid => "hybrid",
+        }
+    }
+}
+
+/// Complete typed request for one bounded indexed-text search.
+#[derive(Clone, Copy, Debug)]
+pub struct SearchQuery<'query> {
+    /// Literal, regex, or fuzzy source pattern.
+    pub pattern: &'query str,
+    /// Whether the source pattern is a regular expression.
+    pub regex: bool,
+    /// Whether the source pattern is a fuzzy subsequence.
+    pub fuzzy: bool,
+    /// Whether exact matching preserves source case.
+    pub case_sensitive: bool,
+    /// Optional repository-relative glob.
+    pub file_pattern: Option<&'query str>,
+    /// Context lines retained before and after each match.
+    pub context_lines: usize,
+    /// Number of exact matches skipped before result retention.
+    pub start_index: usize,
+    /// Maximum exact matches returned.
+    pub limit: usize,
+    /// Explicit retrieval family; omitted adapters use lexical.
+    pub retrieval_mode: SearchRetrievalMode,
+}
+
 /// Search report returned by CLI and MCP adapters.
 #[derive(Debug, Serialize)]
 pub struct SearchReport {
@@ -713,8 +816,12 @@ pub struct SearchReport {
     pub query: String,
     /// Search mode: `literal`, `regex`, or `fuzzy`.
     pub mode: String,
+    /// Retrieval family selected by the caller.
+    pub retrieval_mode: String,
     /// Source used for broad repository search.
     pub source: String,
+    /// Candidate strategy used while preserving exact lexical semantics.
+    pub strategy: String,
     /// Pagination start index.
     pub start_index: usize,
     /// Matches observed before pagination and bounded early stop.
@@ -729,8 +836,14 @@ pub struct SearchReport {
     pub searched_files: usize,
     /// Source bytes read while serving the query.
     pub searched_bytes: usize,
+    /// Metadata-only FTS candidates considered before exact verification.
+    pub candidate_files: usize,
+    /// Approximate retained result bytes before adapter serialization.
+    pub retained_bytes: usize,
     /// Whether the search stopped after satisfying the requested page.
     pub truncated: bool,
+    /// Stable first bound that stopped exhaustive search, when applicable.
+    pub truncation_reason: Option<String>,
     /// Search matches.
     pub results: Vec<SearchMatch>,
 }
@@ -1137,73 +1250,296 @@ pub fn search_indexed_files(
     start_index: usize,
     limit: usize,
 ) -> ServiceResult<SearchReport> {
-    if regex && fuzzy {
+    search_indexed_files_with_control(
+        store,
+        &SearchQuery {
+            pattern,
+            regex,
+            fuzzy,
+            case_sensitive,
+            file_pattern,
+            context_lines,
+            start_index,
+            limit,
+            retrieval_mode: SearchRetrievalMode::Lexical,
+        },
+        None,
+    )
+}
+
+/// Search indexed project files through one bounded, cancellable retrieval request.
+///
+/// Safe ASCII literal tokens may use the rebuildable FTS5 projection only as a
+/// complete metadata candidate superset. Persisted `file_texts` remains the
+/// authority and every candidate is exact-verified in deterministic path order.
+/// All other shapes use the persisted-text fallback with path admission before
+/// content decoding.
+///
+/// # Errors
+///
+/// Returns a typed capability error for unavailable semantic/hybrid requests,
+/// or an error when input, storage, cancellation, or persisted text is invalid.
+pub fn search_indexed_files_with_control(
+    store: &AtlasStore,
+    query: &SearchQuery<'_>,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<SearchReport> {
+    search_indexed_files_with_bounds(store, query, control, DEFAULT_SEARCH_BOUNDS)
+}
+
+/// Execute one search under an explicit internal resource envelope.
+fn search_indexed_files_with_bounds(
+    store: &AtlasStore,
+    query: &SearchQuery<'_>,
+    control: Option<&IndexWorkControl>,
+    bounds: SearchBounds,
+) -> ServiceResult<SearchReport> {
+    if query.retrieval_mode != SearchRetrievalMode::Lexical {
+        return Err(ServiceError::SearchCapabilityUnavailable {
+            requested_mode: query.retrieval_mode,
+            state: SEARCH_SEMANTIC_UNAVAILABLE_STATE,
+            guidance: SEARCH_SEMANTIC_RECOVERY,
+        });
+    }
+    if query.regex && query.fuzzy {
         return Err(ServiceError::InvalidInput(
             "search cannot combine regex and fuzzy modes".to_string(),
         ));
     }
-    let path_matcher = build_path_matcher(file_pattern)?;
-    let matcher = if regex {
+    if query.pattern.len() > SEARCH_MAX_PATTERN_BYTES {
+        return Err(ServiceError::InvalidInput(format!(
+            "search pattern cannot exceed {SEARCH_MAX_PATTERN_BYTES} UTF-8 bytes"
+        )));
+    }
+    if query
+        .file_pattern
+        .is_some_and(|pattern| pattern.len() > SEARCH_MAX_FILE_PATTERN_BYTES)
+    {
+        return Err(ServiceError::InvalidInput(format!(
+            "search file pattern cannot exceed {SEARCH_MAX_FILE_PATTERN_BYTES} UTF-8 bytes"
+        )));
+    }
+    if query.context_lines > SEARCH_MAX_CONTEXT_LINES {
+        return Err(ServiceError::InvalidInput(format!(
+            "search context lines cannot exceed {SEARCH_MAX_CONTEXT_LINES}"
+        )));
+    }
+    if query.limit > SEARCH_MAX_RESULT_ROWS {
+        return Err(ServiceError::InvalidInput(format!(
+            "search result limit cannot exceed {SEARCH_MAX_RESULT_ROWS}"
+        )));
+    }
+    let path_matcher = build_path_matcher(query.file_pattern)?;
+    let matcher = if query.regex {
         LineMatcher::Regex(
-            RegexBuilder::new(pattern)
-                .case_insensitive(!case_sensitive)
+            RegexBuilder::new(query.pattern)
+                .case_insensitive(!query.case_sensitive)
                 .build()
                 .map_err(|source| ServiceError::InvalidInput(source.to_string()))?,
         )
-    } else if fuzzy {
+    } else if query.fuzzy {
         LineMatcher::Fuzzy {
-            needle: normalized_search_text(pattern, case_sensitive),
-            case_sensitive,
+            needle: normalized_search_text(query.pattern, query.case_sensitive),
+            case_sensitive: query.case_sensitive,
         }
     } else {
         LineMatcher::Literal {
-            needle: normalized_search_text(pattern, case_sensitive),
-            case_sensitive,
+            needle: normalized_search_text(query.pattern, query.case_sensitive),
+            case_sensitive: query.case_sensitive,
         }
     };
     let mut report = SearchReport {
-        query: pattern.to_string(),
+        query: query.pattern.to_string(),
         mode: matcher.mode().to_string(),
+        retrieval_mode: query.retrieval_mode.as_str().to_string(),
         source: "sqlite-file-text".to_string(),
-        start_index,
+        strategy: "persisted-text-fallback".to_string(),
+        start_index: query.start_index,
         total: 0,
         observed_total: 0,
         total_is_complete: true,
         returned: 0,
         searched_files: 0,
         searched_bytes: 0,
+        candidate_files: 0,
+        retained_bytes: 0,
         truncated: false,
+        truncation_reason: None,
         results: Vec::new(),
     };
-    if limit == 0 {
+    let bounded_control = control.map_or_else(
+        || IndexWorkControl::new(IndexCancellation::new(), Some(bounds.elapsed)),
+        |control| control.with_timeout_ceiling(bounds.elapsed),
+    );
+    if let Err(failure) = bounded_control.check(IndexWorkStage::TextIndex) {
+        if matches!(failure, IndexWorkFailure::DeadlineExceeded { .. }) {
+            mark_search_truncated(&mut report, "elapsed-time-limit");
+            return Ok(finalize_search_report(report));
+        }
+        return Err(DbError::from(failure).into());
+    }
+    if query.limit == 0 {
         return Ok(report);
     }
-    let needed = start_index.saturating_add(limit);
-    store.visit_file_texts_for_search(matcher.literal_prefilter(), case_sensitive, |text| {
-        if !path_matches(&text.path, path_matcher.as_ref()) {
-            return Ok(true);
+    let needed = query.start_index.saturating_add(query.limit);
+    let path_prefix = search_path_prefix(query.file_pattern);
+    let mut used_fts = false;
+    if let Some(literal_token) = matcher.fts_literal_token()
+        && store.file_text_fts_ready()?
+    {
+        let mut page = match store.query_file_text_fts_candidates(
+            &FileTextFtsQuery {
+                literal_token,
+                path_prefix: path_prefix.as_deref(),
+                limit: MAX_FILE_TEXT_FTS_CANDIDATES,
+            },
+            Some(&bounded_control),
+        ) {
+            Ok(page) => page,
+            Err(error) if is_search_deadline(&error) => {
+                mark_search_truncated(&mut report, "elapsed-time-limit");
+                return Ok(finalize_search_report(report));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        report.candidate_files = page.candidates.len();
+        if !page.overflow {
+            page.candidates
+                .sort_by(|left, right| left.path.cmp(&right.path));
+            report.strategy = "fts5-bm25-candidates-exact-verified".to_string();
+            used_fts = true;
+            for candidate in page.candidates {
+                if !path_matches(&candidate.path, path_matcher.as_ref()) {
+                    continue;
+                }
+                if let Err(failure) = bounded_control.check(IndexWorkStage::RepositoryTraversal) {
+                    if matches!(failure, IndexWorkFailure::DeadlineExceeded { .. }) {
+                        mark_search_truncated(&mut report, "elapsed-time-limit");
+                        break;
+                    }
+                    return Err(DbError::from(failure).into());
+                }
+                if !search_metadata_within_bounds(
+                    &mut report,
+                    candidate.byte_count,
+                    bounds.selected_files,
+                    bounds.selected_bytes,
+                ) {
+                    break;
+                }
+                let text = store.load_file_text(&candidate.path)?.ok_or_else(|| {
+                    ServiceError::InvalidInput(format!(
+                        "FTS candidate {:?} has no authoritative persisted text",
+                        candidate.path
+                    ))
+                })?;
+                if text.byte_count != candidate.byte_count
+                    || text.line_count != candidate.line_count
+                    || text.content_hash != candidate.content_hash
+                {
+                    return Err(ServiceError::InvalidInput(format!(
+                        "FTS candidate metadata changed for {:?}",
+                        candidate.path
+                    )));
+                }
+                report.searched_files += 1;
+                report.searched_bytes += candidate.byte_count;
+                if let Err(failure) = inspect_search_text(
+                    &mut report,
+                    &text,
+                    &matcher,
+                    query.context_lines,
+                    needed,
+                    bounds.retained_bytes,
+                    &bounded_control,
+                ) {
+                    if matches!(failure, IndexWorkFailure::DeadlineExceeded { .. }) {
+                        mark_search_truncated(&mut report, "elapsed-time-limit");
+                        break;
+                    }
+                    return Err(DbError::from(failure).into());
+                }
+                if report.truncated {
+                    break;
+                }
+            }
         }
-        report.searched_files += 1;
-        report.searched_bytes = report.searched_bytes.saturating_add(text.byte_count);
-        let lines = indexed_text_lines(&text);
-        append_line_matches(
-            &mut report,
-            &text.path,
-            &lines,
-            &matcher,
-            context_lines,
-            needed,
+    }
+    if !used_fts {
+        let mut selected_files = 0usize;
+        let mut selected_bytes = 0usize;
+        let mut searched_files = 0usize;
+        let mut searched_bytes = 0usize;
+        let mut admission_truncation = None;
+        let fallback_result = store.visit_file_texts_for_fallback(
+            path_prefix.as_deref(),
+            Some(&bounded_control),
+            |metadata| {
+                if !path_matches(&metadata.path, path_matcher.as_ref()) {
+                    return Ok(FileTextAdmission::Skip);
+                }
+                if selected_files >= bounds.selected_files {
+                    admission_truncation = Some("selected-file-limit");
+                    return Ok(FileTextAdmission::Stop);
+                }
+                let Some(next_bytes) = selected_bytes.checked_add(metadata.byte_count) else {
+                    admission_truncation = Some("selected-byte-limit");
+                    return Ok(FileTextAdmission::Stop);
+                };
+                if next_bytes > bounds.selected_bytes {
+                    admission_truncation = Some("selected-byte-limit");
+                    return Ok(FileTextAdmission::Stop);
+                }
+                selected_files += 1;
+                selected_bytes = next_bytes;
+                Ok(FileTextAdmission::Read)
+            },
+            |text| {
+                searched_files += 1;
+                searched_bytes += text.byte_count;
+                inspect_search_text(
+                    &mut report,
+                    &text,
+                    &matcher,
+                    query.context_lines,
+                    needed,
+                    bounds.retained_bytes,
+                    &bounded_control,
+                )
+                .map_err(DbError::from)?;
+                Ok(!report.truncated)
+            },
         );
-        if report.results.len() >= limit {
-            report.truncated = true;
-            return Ok(false);
+        report.searched_files = searched_files;
+        report.searched_bytes = searched_bytes;
+        match fallback_result {
+            Ok(()) => {}
+            Err(error) if is_search_deadline(&error) => {
+                mark_search_truncated(&mut report, "elapsed-time-limit");
+            }
+            Err(error) => return Err(error.into()),
         }
-        Ok(true)
-    })?;
+        if let Some(reason) = admission_truncation {
+            mark_search_truncated(&mut report, reason);
+        }
+    }
+    Ok(finalize_search_report(report))
+}
+
+/// Finalize counters that describe the bounded work observed by one search.
+fn finalize_search_report(mut report: SearchReport) -> SearchReport {
     report.returned = report.results.len();
     report.observed_total = report.total;
     report.total_is_complete = !report.truncated;
-    Ok(report)
+    report
+}
+
+/// Return whether a database read stopped only because its deadline elapsed.
+fn is_search_deadline(error: &DbError) -> bool {
+    matches!(
+        error,
+        DbError::IndexWork(IndexWorkFailure::DeadlineExceeded { .. })
+    )
 }
 
 /// Filter file nodes through a repository-relative glob.
@@ -2136,6 +2472,77 @@ fn build_path_matcher(pattern: Option<&str>) -> ServiceResult<Option<GlobSet>> {
         .map_err(|source| ServiceError::InvalidInput(source.to_string()))
 }
 
+/// Return an exact path-or-descendant prefix that safely narrows a glob.
+fn search_path_prefix(pattern: Option<&str>) -> Option<String> {
+    let normalized = pattern?.trim().replace('\\', "/");
+    if normalized.is_empty() || normalized == "*" {
+        return None;
+    }
+    let wildcard = normalized
+        .char_indices()
+        .find_map(|(index, character)| "*?[{".contains(character).then_some(index));
+    let prefix = wildcard.map_or(normalized.as_str(), |index| &normalized[..index]);
+    let prefix = if wildcard.is_some() {
+        prefix.rsplit_once('/').map_or("", |(parent, _)| parent)
+    } else {
+        prefix.trim_end_matches('/')
+    };
+    (!prefix.is_empty()).then(|| prefix.to_string())
+}
+
+/// Check whether one more hydrated source row fits file and byte ceilings.
+fn search_metadata_within_bounds(
+    report: &mut SearchReport,
+    byte_count: usize,
+    max_files: usize,
+    max_bytes: usize,
+) -> bool {
+    if report.searched_files >= max_files {
+        mark_search_truncated(report, "selected-file-limit");
+        return false;
+    }
+    let Some(next_bytes) = report.searched_bytes.checked_add(byte_count) else {
+        mark_search_truncated(report, "selected-byte-limit");
+        return false;
+    };
+    if next_bytes > max_bytes {
+        mark_search_truncated(report, "selected-byte-limit");
+        return false;
+    }
+    true
+}
+
+/// Preserve the first stable reason that made exhaustive search impossible.
+fn mark_search_truncated(report: &mut SearchReport, reason: &'static str) {
+    report.truncated = true;
+    if report.truncation_reason.is_none() {
+        report.truncation_reason = Some(reason.to_string());
+    }
+}
+
+/// Exact-verify one admitted authoritative text row.
+fn inspect_search_text(
+    report: &mut SearchReport,
+    text: &IndexedFileText,
+    matcher: &LineMatcher,
+    context_lines: usize,
+    needed: usize,
+    max_retained_bytes: usize,
+    control: &IndexWorkControl,
+) -> Result<(), IndexWorkFailure> {
+    let lines = indexed_text_lines(text);
+    append_line_matches(
+        report,
+        &text.path,
+        &lines,
+        matcher,
+        context_lines,
+        needed,
+        max_retained_bytes,
+        control,
+    )
+}
+
 /// Add one normalized glob to a builder.
 fn add_glob(builder: &mut GlobSetBuilder, pattern: &str) -> ServiceResult<()> {
     let glob = GlobBuilder::new(pattern)
@@ -2181,11 +2588,18 @@ impl LineMatcher {
         }
     }
 
-    /// Return a literal substring prefilter when SQL can safely narrow files.
-    fn literal_prefilter(&self) -> Option<&str> {
+    /// Return one FTS-safe token whose candidates remain a complete superset.
+    fn fts_literal_token(&self) -> Option<&str> {
         match self {
-            Self::Literal { needle, .. } => Some(needle.as_str()),
-            Self::Regex(_) | Self::Fuzzy { .. } => None,
+            Self::Literal { needle, .. }
+                if needle.len() >= 3
+                    && needle
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric()) =>
+            {
+                Some(needle.as_str())
+            }
+            Self::Regex(_) | Self::Fuzzy { .. } | Self::Literal { .. } => None,
         }
     }
 
@@ -2213,8 +2627,12 @@ fn append_line_matches(
     matcher: &LineMatcher,
     context_lines: usize,
     needed: usize,
-) {
+    max_retained_bytes: usize,
+    control: &IndexWorkControl,
+) -> Result<(), IndexWorkFailure> {
+    let result_limit = needed.saturating_sub(report.start_index);
     for (index, line) in lines.iter().enumerate() {
+        control.check(IndexWorkStage::TextIndex)?;
         if !matcher.is_match(line) {
             continue;
         }
@@ -2222,18 +2640,48 @@ fn append_line_matches(
         if report.total <= report.start_index {
             continue;
         }
-        if report.results.len() >= needed.saturating_sub(report.start_index) {
-            report.truncated = true;
-            return;
+        if report.results.len() >= result_limit {
+            mark_search_truncated(report, "result-limit");
+            control.check(IndexWorkStage::TextIndex)?;
+            return Ok(());
         }
-        report.results.push(SearchMatch {
+        let row = SearchMatch {
             path: path.to_string(),
             line: index + 1,
             context_before: context_before(lines, index, context_lines),
             text: (*line).to_string(),
             context_after: context_after(lines, index, context_lines),
-        });
+        };
+        let retained_bytes = row
+            .path
+            .len()
+            .saturating_add(row.text.len())
+            .saturating_add(
+                row.context_before
+                    .iter()
+                    .chain(&row.context_after)
+                    .map(String::len)
+                    .sum::<usize>(),
+            );
+        let Some(next_retained_bytes) = report.retained_bytes.checked_add(retained_bytes) else {
+            mark_search_truncated(report, "retained-byte-limit");
+            control.check(IndexWorkStage::TextIndex)?;
+            return Ok(());
+        };
+        if next_retained_bytes > max_retained_bytes {
+            mark_search_truncated(report, "retained-byte-limit");
+            control.check(IndexWorkStage::TextIndex)?;
+            return Ok(());
+        }
+        report.retained_bytes = next_retained_bytes;
+        report.results.push(row);
+        if report.results.len() >= result_limit {
+            mark_search_truncated(report, "result-limit");
+            control.check(IndexWorkStage::TextIndex)?;
+            return Ok(());
+        }
     }
+    control.check(IndexWorkStage::TextIndex)
 }
 
 /// Normalize search text for case-sensitive or insensitive matching.
@@ -3974,6 +4422,492 @@ mod tests {
             .any(|row| row.path == "docs/readme.md")
         {
             return Err(io::Error::other("globset filter included docs/readme.md").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn search_fts_candidates_preserve_fallback_results_and_unsafe_shapes_fall_back()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src"))?;
+        fs::create_dir_all(root.join("docs"))?;
+        fs::write(
+            root.join("src/a.rs"),
+            "Needle alpha\nneedle-beta\nnëedle unicode\n",
+        )?;
+        fs::write(root.join("src/b.rs"), "prefixneedlesuffix gamma\n")?;
+        fs::write(root.join("docs/readme.md"), "needle docs\n")?;
+        let nodes = [
+            test_node("src/a.rs", "hash-a"),
+            test_node("src/b.rs", "hash-b"),
+            test_node("docs/readme.md", "hash-docs"),
+        ];
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        store.replace_scan(&nodes)?;
+        index_test_file_texts(&mut store, root, &nodes)?;
+
+        let lexical = search_indexed_files_with_control(
+            &store,
+            &SearchQuery {
+                pattern: "needle",
+                regex: false,
+                fuzzy: false,
+                case_sensitive: false,
+                file_pattern: Some("src/*.rs"),
+                context_lines: 0,
+                start_index: 0,
+                limit: 20,
+                retrieval_mode: SearchRetrievalMode::Lexical,
+            },
+            None,
+        )?;
+        require_eq(
+            &lexical.strategy,
+            &"fts5-bm25-candidates-exact-verified".to_string(),
+            "safe literal strategy",
+        )?;
+        require_eq(&lexical.candidate_files, &2, "safe literal candidates")?;
+
+        let fallback = search_indexed_files_with_control(
+            &store,
+            &SearchQuery {
+                pattern: "needle",
+                regex: true,
+                fuzzy: false,
+                case_sensitive: false,
+                file_pattern: Some("src/*.rs"),
+                context_lines: 0,
+                start_index: 0,
+                limit: 20,
+                retrieval_mode: SearchRetrievalMode::Lexical,
+            },
+            None,
+        )?;
+        let lexical_rows = lexical
+            .results
+            .iter()
+            .map(|row| (&row.path, row.line, &row.text))
+            .collect::<Vec<_>>();
+        let fallback_rows = fallback
+            .results
+            .iter()
+            .map(|row| (&row.path, row.line, &row.text))
+            .collect::<Vec<_>>();
+        require_eq(
+            &lexical_rows,
+            &fallback_rows,
+            "FTS and fallback exact results",
+        )?;
+        require_eq(
+            &fallback.strategy,
+            &"persisted-text-fallback".to_string(),
+            "regex fallback strategy",
+        )?;
+
+        for (pattern, regex, fuzzy, expected_rows) in [
+            (
+                "ne",
+                false,
+                false,
+                vec!["src/a.rs:1", "src/a.rs:2", "src/b.rs:1"],
+            ),
+            ("needle-", false, false, vec!["src/a.rs:2"]),
+            ("nëedle", false, false, vec!["src/a.rs:3"]),
+            (
+                "needle",
+                false,
+                true,
+                vec!["src/a.rs:1", "src/a.rs:2", "src/b.rs:1"],
+            ),
+        ] {
+            let report = search_indexed_files_with_control(
+                &store,
+                &SearchQuery {
+                    pattern,
+                    regex,
+                    fuzzy,
+                    case_sensitive: false,
+                    file_pattern: Some("src/*.rs"),
+                    context_lines: 0,
+                    start_index: 0,
+                    limit: 20,
+                    retrieval_mode: SearchRetrievalMode::Lexical,
+                },
+                None,
+            )?;
+            require_eq(
+                &report.strategy,
+                &"persisted-text-fallback".to_string(),
+                "unsafe shape fallback strategy",
+            )?;
+            require_eq(&report.candidate_files, &0, "unsafe shape candidates")?;
+            let rows = report
+                .results
+                .iter()
+                .map(|row| format!("{}:{}", row.path, row.line))
+                .collect::<Vec<_>>();
+            require_eq(
+                &rows,
+                &expected_rows
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>(),
+                "unsafe fallback exact rows",
+            )?;
+        }
+
+        for (pattern, expected_rows) in [("Needle", 1), ("needle", 2)] {
+            let exact = search_indexed_files_with_control(
+                &store,
+                &SearchQuery {
+                    pattern,
+                    regex: false,
+                    fuzzy: false,
+                    case_sensitive: true,
+                    file_pattern: Some("src/*.rs"),
+                    context_lines: 0,
+                    start_index: 0,
+                    limit: 20,
+                    retrieval_mode: SearchRetrievalMode::Lexical,
+                },
+                None,
+            )?;
+            let regex = search_indexed_files_with_control(
+                &store,
+                &SearchQuery {
+                    pattern,
+                    regex: true,
+                    fuzzy: false,
+                    case_sensitive: true,
+                    file_pattern: Some("src/*.rs"),
+                    context_lines: 0,
+                    start_index: 0,
+                    limit: 20,
+                    retrieval_mode: SearchRetrievalMode::Lexical,
+                },
+                None,
+            )?;
+            let exact_rows = exact
+                .results
+                .iter()
+                .map(|row| (&row.path, row.line, &row.text))
+                .collect::<Vec<_>>();
+            let regex_rows = regex
+                .results
+                .iter()
+                .map(|row| (&row.path, row.line, &row.text))
+                .collect::<Vec<_>>();
+            require_eq(&exact_rows, &regex_rows, "case-sensitive equivalence")?;
+            require_eq(&exact.returned, &expected_rows, "case-sensitive exact rows")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn search_fts_candidate_overflow_uses_complete_persisted_text_fallback()
+    -> Result<(), Box<dyn Error>> {
+        const MATCHING_FILES: usize = MAX_FILE_TEXT_FTS_CANDIDATES + 1;
+        const CONTENT: &str = "needle\n";
+        let mut store = AtlasStore::in_memory()?;
+        let paths = (0..MATCHING_FILES)
+            .map(|index| format!("overflow/{index:04}.rs"))
+            .collect::<Vec<_>>();
+        let nodes = paths
+            .iter()
+            .map(|path| test_node(path, "hash"))
+            .collect::<Vec<_>>();
+        let texts = paths
+            .iter()
+            .map(|path| IndexedFileText {
+                path: path.clone(),
+                content_hash: Some("hash".to_string()),
+                byte_count: CONTENT.len(),
+                line_count: 1,
+                content: CONTENT.to_string(),
+            })
+            .collect::<Vec<_>>();
+        store.replace_scan(&nodes)?;
+        store.replace_file_texts_for_paths(&paths, &texts)?;
+
+        let request = SearchQuery {
+            pattern: "needle",
+            regex: false,
+            fuzzy: false,
+            case_sensitive: false,
+            file_pattern: Some("overflow/*.rs"),
+            context_lines: 0,
+            start_index: MATCHING_FILES - 1,
+            limit: 1,
+            retrieval_mode: SearchRetrievalMode::Lexical,
+        };
+        let overflow = search_indexed_files_with_control(&store, &request, None)?;
+        require_eq(
+            &overflow.strategy,
+            &"persisted-text-fallback".to_string(),
+            "overflow fallback strategy",
+        )?;
+        require_eq(
+            &overflow.candidate_files,
+            &MAX_FILE_TEXT_FTS_CANDIDATES,
+            "overflow retained candidates",
+        )?;
+        require_eq(
+            &overflow.searched_files,
+            &MATCHING_FILES,
+            "overflow fallback searched files",
+        )?;
+        require_eq(
+            &overflow.searched_bytes,
+            &(MATCHING_FILES * CONTENT.len()),
+            "overflow fallback searched bytes",
+        )?;
+        require_eq(
+            &overflow.results[0].path,
+            &format!("overflow/{:04}.rs", MATCHING_FILES - 1),
+            "overflow fallback exact path order",
+        )?;
+
+        let authoritative = search_indexed_files_with_control(
+            &store,
+            &SearchQuery {
+                regex: true,
+                ..request
+            },
+            None,
+        )?;
+        let overflow_rows = overflow
+            .results
+            .iter()
+            .map(|row| (&row.path, row.line, &row.text))
+            .collect::<Vec<_>>();
+        let authoritative_rows = authoritative
+            .results
+            .iter()
+            .map(|row| (&row.path, row.line, &row.text))
+            .collect::<Vec<_>>();
+        require_eq(
+            &overflow_rows,
+            &authoritative_rows,
+            "overflow and authoritative fallback rows",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn search_reports_resource_bounds_cancellation_and_optional_capability_state()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(root.join("src/a.rs"), "needle one\n")?;
+        fs::write(root.join("src/b.rs"), "needle two\n")?;
+        let nodes = [
+            test_node("src/a.rs", "hash-a"),
+            test_node("src/b.rs", "hash-b"),
+        ];
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        store.replace_scan(&nodes)?;
+        index_test_file_texts(&mut store, root, &nodes)?;
+        let query = SearchQuery {
+            pattern: "needle",
+            regex: true,
+            fuzzy: false,
+            case_sensitive: false,
+            file_pattern: Some("src/*.rs"),
+            context_lines: 0,
+            start_index: 0,
+            limit: 20,
+            retrieval_mode: SearchRetrievalMode::Lexical,
+        };
+
+        let file_bounded = search_indexed_files_with_bounds(
+            &store,
+            &query,
+            None,
+            SearchBounds {
+                selected_files: 1,
+                selected_bytes: usize::MAX,
+                elapsed: Duration::from_secs(1),
+                retained_bytes: usize::MAX,
+            },
+        )?;
+        require_eq(
+            &file_bounded.searched_files,
+            &1,
+            "file bound searched files",
+        )?;
+        require_eq(&file_bounded.truncated, &true, "file bound truncation")?;
+        require_eq(
+            &file_bounded.truncation_reason,
+            &Some("selected-file-limit".to_string()),
+            "file bound reason",
+        )?;
+
+        let byte_bounded = search_indexed_files_with_bounds(
+            &store,
+            &query,
+            None,
+            SearchBounds {
+                selected_files: usize::MAX,
+                selected_bytes: 1,
+                elapsed: Duration::from_secs(1),
+                retained_bytes: usize::MAX,
+            },
+        )?;
+        require_eq(
+            &byte_bounded.searched_files,
+            &0,
+            "byte bound searched files",
+        )?;
+        require_eq(
+            &byte_bounded.truncation_reason,
+            &Some("selected-byte-limit".to_string()),
+            "byte bound reason",
+        )?;
+
+        let output_bounded = search_indexed_files_with_bounds(
+            &store,
+            &query,
+            None,
+            SearchBounds {
+                selected_files: usize::MAX,
+                selected_bytes: usize::MAX,
+                elapsed: Duration::from_secs(1),
+                retained_bytes: 1,
+            },
+        )?;
+        require_eq(&output_bounded.returned, &0, "output bound returned rows")?;
+        require_eq(
+            &output_bounded.truncation_reason,
+            &Some("retained-byte-limit".to_string()),
+            "output bound reason",
+        )?;
+
+        let cancellation = IndexCancellation::new();
+        cancellation.cancel();
+        let control = IndexWorkControl::new(cancellation, None);
+        let cancelled = search_indexed_files_with_control(&store, &query, Some(&control));
+        if !matches!(cancelled, Err(ServiceError::Db(DbError::IndexWork(_)))) {
+            return Err(io::Error::other("search cancellation was not typed").into());
+        }
+        let expired = IndexWorkControl::new(IndexCancellation::new(), Some(Duration::ZERO));
+        let deadline = search_indexed_files_with_control(&store, &query, Some(&expired))?;
+        require_eq(&deadline.truncated, &true, "deadline truncation")?;
+        require_eq(
+            &deadline.truncation_reason,
+            &Some("elapsed-time-limit".to_string()),
+            "deadline truncation reason",
+        )?;
+        require_eq(
+            &deadline.total_is_complete,
+            &false,
+            "deadline total completeness",
+        )?;
+
+        let line_cancellation = IndexCancellation::new();
+        let line_control = IndexWorkControl::new(line_cancellation.clone(), None);
+        line_cancellation.cancel();
+        let mut line_report = file_bounded;
+        let line_match = append_line_matches(
+            &mut line_report,
+            "src/a.rs",
+            &["needle"],
+            &LineMatcher::Literal {
+                needle: "needle".to_string(),
+                case_sensitive: true,
+            },
+            0,
+            1,
+            usize::MAX,
+            &line_control,
+        );
+        if !matches!(
+            line_match,
+            Err(IndexWorkFailure::Cancelled {
+                stage: IndexWorkStage::TextIndex
+            })
+        ) {
+            return Err(io::Error::other("in-memory line matching ignored cancellation").into());
+        }
+
+        let maximum_pattern = "a".repeat(SEARCH_MAX_PATTERN_BYTES);
+        search_indexed_files_with_control(
+            &store,
+            &SearchQuery {
+                pattern: &maximum_pattern,
+                regex: false,
+                limit: 0,
+                ..query
+            },
+            None,
+        )?;
+        let oversized_pattern = "a".repeat(SEARCH_MAX_PATTERN_BYTES + 1);
+        if !matches!(
+            search_indexed_files_with_control(
+                &store,
+                &SearchQuery {
+                    pattern: &oversized_pattern,
+                    regex: false,
+                    limit: 0,
+                    ..query
+                },
+                None,
+            ),
+            Err(ServiceError::InvalidInput(_))
+        ) {
+            return Err(io::Error::other("oversized search pattern was accepted").into());
+        }
+        let maximum_file_pattern = "a".repeat(SEARCH_MAX_FILE_PATTERN_BYTES);
+        search_indexed_files_with_control(
+            &store,
+            &SearchQuery {
+                pattern: "needle",
+                regex: false,
+                file_pattern: Some(&maximum_file_pattern),
+                limit: 0,
+                ..query
+            },
+            None,
+        )?;
+        let oversized_file_pattern = "a".repeat(SEARCH_MAX_FILE_PATTERN_BYTES + 1);
+        if !matches!(
+            search_indexed_files_with_control(
+                &store,
+                &SearchQuery {
+                    pattern: "needle",
+                    regex: false,
+                    file_pattern: Some(&oversized_file_pattern),
+                    limit: 0,
+                    ..query
+                },
+                None,
+            ),
+            Err(ServiceError::InvalidInput(_))
+        ) {
+            return Err(io::Error::other("oversized search file pattern was accepted").into());
+        }
+
+        let unavailable = search_indexed_files_with_control(
+            &store,
+            &SearchQuery {
+                retrieval_mode: SearchRetrievalMode::Semantic,
+                ..query
+            },
+            None,
+        );
+        if !matches!(
+            unavailable,
+            Err(ServiceError::SearchCapabilityUnavailable {
+                requested_mode: SearchRetrievalMode::Semantic,
+                state: SEARCH_SEMANTIC_UNAVAILABLE_STATE,
+                guidance: SEARCH_SEMANTIC_RECOVERY,
+            })
+        ) {
+            return Err(io::Error::other("semantic unavailable state was not typed").into());
         }
         Ok(())
     }

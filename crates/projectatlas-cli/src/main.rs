@@ -35,11 +35,12 @@ use projectatlas_db::{
     ProjectRootTransitionResult, RepositoryCoverageQuery, verify_project_database,
 };
 use projectatlas_service::{
-    COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CoverageDiscoveryReport, FileSummaryReport, SearchReport,
-    SymbolSliceSelector, TokenReport, TokenReportRequest, build_file_summary_from_source,
-    load_coverage_discovery, load_token_report, parse_coverage_parser, parse_coverage_relation,
-    parse_coverage_state, read_indexed_code_slice_from_source, read_symbol_slice_from_source,
-    search_indexed_files,
+    COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CoverageDiscoveryReport, FileSummaryReport, SearchQuery,
+    SearchReport, SearchRetrievalMode, ServiceError, SymbolSliceSelector, TokenReport,
+    TokenReportRequest, build_file_summary_from_source, load_coverage_discovery, load_token_report,
+    parse_coverage_parser, parse_coverage_relation, parse_coverage_state,
+    read_indexed_code_slice_from_source, read_symbol_slice_from_source,
+    search_indexed_files_with_control,
 };
 use rmcp::schemars;
 use runtime::{
@@ -235,6 +236,9 @@ struct CliErrorPayload<'a> {
     /// Content-free database placement details for a rejected `SQLite` profile.
     #[serde(skip_serializing_if = "Option::is_none")]
     database_filesystem: Option<DatabaseFilesystemErrorPayload>,
+    /// Optional retrieval capability state and recovery guidance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    search_capability: Option<SearchCapabilityErrorPayload>,
     /// Direct CLI recovery selector for a confirmed mismatch.
     #[serde(skip_serializing_if = "Option::is_none")]
     next: Option<CliRefreshNextCall<'a>>,
@@ -259,6 +263,8 @@ enum AgentErrorKind {
     /// The host has no accepted optional parser containment adapter.
     #[cfg(feature = "optional-parser-supervisor")]
     UnsupportedContainment,
+    /// The requested optional search mode has no ready generation.
+    SearchCapabilityUnavailable,
 }
 
 /// Content-free database placement details with direct recovery guidance.
@@ -276,6 +282,17 @@ struct DatabaseFilesystemErrorPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
     /// Safe recovery action.
+    recovery: &'static str,
+}
+
+/// Typed optional search-capability failure shared by CLI and MCP adapters.
+#[derive(Clone, Debug, Serialize)]
+struct SearchCapabilityErrorPayload {
+    /// Explicit retrieval mode requested by the caller.
+    requested_mode: SearchRetrievalMode,
+    /// Stable optional-capability lifecycle state.
+    state: &'static str,
+    /// Actionable recovery guidance.
     recovery: &'static str,
 }
 
@@ -380,6 +397,40 @@ enum PurposeLintLevelArg {
     Medium,
     /// Require agent review for every indexed file and folder.
     Strict,
+}
+
+/// Retrieval family accepted by CLI and MCP search adapters.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Deserialize,
+    Eq,
+    PartialEq,
+    Serialize,
+    ValueEnum,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+enum SearchRetrievalModeArg {
+    /// Correctness-authoritative lexical search.
+    #[default]
+    Lexical,
+    /// Optional semantic retrieval generation.
+    Semantic,
+    /// Lexical-complete search with optional semantic ranking.
+    Hybrid,
+}
+
+impl From<SearchRetrievalModeArg> for SearchRetrievalMode {
+    fn from(value: SearchRetrievalModeArg) -> Self {
+        match value {
+            SearchRetrievalModeArg::Lexical => Self::Lexical,
+            SearchRetrievalModeArg::Semantic => Self::Semantic,
+            SearchRetrievalModeArg::Hybrid => Self::Hybrid,
+        }
+    }
 }
 
 impl From<PurposeLintLevelArg> for PurposeLintLevel {
@@ -576,6 +627,9 @@ enum Command {
     Search {
         /// Literal, regex, or fuzzy pattern to search for.
         pattern: String,
+        /// Retrieval family; lexical remains the default and always-available mode.
+        #[arg(long, value_enum, default_value_t)]
+        retrieval_mode: SearchRetrievalModeArg,
         /// Treat the pattern as a regex.
         #[arg(long, conflicts_with = "fuzzy")]
         regex: bool,
@@ -1299,6 +1353,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         }
         Command::Search {
             pattern,
+            retrieval_mode,
             regex,
             fuzzy,
             case_sensitive,
@@ -1308,16 +1363,20 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             limit,
         } => {
             let store = open_index_for_read(cli)?;
-            let report = search_indexed_files(
+            let report = search_indexed_files_with_control(
                 &store,
-                pattern,
-                *regex,
-                *fuzzy,
-                *case_sensitive,
-                file_pattern.as_deref(),
-                *context_lines,
-                *start_index,
-                *limit,
+                &SearchQuery {
+                    pattern,
+                    regex: *regex,
+                    fuzzy: *fuzzy,
+                    case_sensitive: *case_sensitive,
+                    file_pattern: file_pattern.as_deref(),
+                    context_lines: *context_lines,
+                    start_index: *start_index,
+                    limit: *limit,
+                    retrieval_mode: (*retrieval_mode).into(),
+                },
+                None,
             )?;
             let toon = render_search_report(&report);
             print_tracked_output_estimate(
@@ -2002,6 +2061,7 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
                 verification_incomplete: None,
                 project_mismatch: None,
                 database_filesystem: None,
+                search_capability: None,
                 next: None,
             })
         }
@@ -2012,6 +2072,7 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
             verification_incomplete: None,
             project_mismatch: None,
             database_filesystem: None,
+            search_capability: None,
             next: Some(CliRefreshNextCall {
                 command: CLI_REFRESH_COMMAND,
                 project_path: &report.project_root,
@@ -2025,6 +2086,7 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
             verification_incomplete: Some(report.as_ref()),
             project_mismatch: None,
             database_filesystem: None,
+            search_capability: None,
             next: None,
         }),
         CliError::ProjectMismatch(report) => Some(CliErrorPayload {
@@ -2034,6 +2096,25 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
             verification_incomplete: None,
             project_mismatch: Some(report.as_ref()),
             database_filesystem: None,
+            search_capability: None,
+            next: None,
+        }),
+        CliError::Service(ServiceError::SearchCapabilityUnavailable {
+            requested_mode,
+            state,
+            guidance,
+        }) => Some(CliErrorPayload {
+            kind: AgentErrorKind::SearchCapabilityUnavailable,
+            message: error.to_string(),
+            refresh_required: None,
+            verification_incomplete: None,
+            project_mismatch: None,
+            database_filesystem: None,
+            search_capability: Some(SearchCapabilityErrorPayload {
+                requested_mode: *requested_mode,
+                state,
+                recovery: guidance,
+            }),
             next: None,
         }),
         _ => database_filesystem_error_payload(error).map(|(kind, database_filesystem)| {
@@ -2044,6 +2125,7 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
                 verification_incomplete: None,
                 project_mismatch: None,
                 database_filesystem: Some(database_filesystem),
+                search_capability: None,
                 next: None,
             }
         }),
@@ -2992,6 +3074,7 @@ impl RequiredCliCommand {
             },
             Self::Search => Command::Search {
                 pattern: String::new(),
+                retrieval_mode: SearchRetrievalModeArg::Lexical,
                 regex: false,
                 fuzzy: false,
                 case_sensitive: false,
@@ -3513,13 +3596,13 @@ mod tests {
         suggest_file_purpose, summarize_symbol_graph, watch_path_affects_index,
         watch_path_requires_full_scan, watcher_status_report,
     };
-    #[cfg(feature = "optional-parser-supervisor")]
-    use super::{Cli, Command, OptionalParserPackLifecycleError, ParserPackCommand};
     use super::{
-        CliError, OutputFormat, build_runtime_info, render_cli_error, render_token_dashboard,
+        Cli, CliError, Command, OutputFormat, SearchRetrievalMode, SearchRetrievalModeArg,
+        ServiceError, build_runtime_info, render_cli_error, render_token_dashboard,
         serialized_output, truthy_env,
     };
     #[cfg(feature = "optional-parser-supervisor")]
+    use super::{OptionalParserPackLifecycleError, ParserPackCommand};
     use clap::Parser as _;
     use notify::EventKind;
     use projectatlas_core::symbols::{
@@ -3911,6 +3994,63 @@ mod tests {
                 && toon.contains("unknown-local")
                 && toon.contains("supported local filesystem"),
             "CLI TOON lost typed filesystem details",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn cli_search_modes_parse_and_unavailable_state_is_typed() -> Result<(), Box<dyn Error>> {
+        let cli = Cli::try_parse_from([
+            "projectatlas",
+            "search",
+            "needle",
+            "--retrieval-mode",
+            "semantic",
+        ])?;
+        require_condition(
+            matches!(
+                cli.command,
+                Command::Search {
+                    retrieval_mode: SearchRetrievalModeArg::Semantic,
+                    ..
+                }
+            ),
+            "CLI did not parse explicit semantic retrieval",
+        )?;
+
+        let error = CliError::Service(ServiceError::SearchCapabilityUnavailable {
+            requested_mode: SearchRetrievalMode::Semantic,
+            state: "not-installed",
+            guidance: "install a compatible semantic generation",
+        });
+        let json_text = render_cli_error(OutputFormat::Json, &error)?;
+        let json: Value = serde_json::from_str(&json_text)?;
+        require_condition(
+            json.pointer("/error/kind").and_then(Value::as_str)
+                == Some("search_capability_unavailable")
+                && json
+                    .pointer("/error/search_capability/requested_mode")
+                    .and_then(Value::as_str)
+                    == Some("semantic")
+                && json
+                    .pointer("/error/search_capability/state")
+                    .and_then(Value::as_str)
+                    == Some("not-installed")
+                && json
+                    .pointer("/error/search_capability/recovery")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.contains("compatible semantic")),
+            "CLI JSON lost typed semantic capability state",
+        )?;
+        let toon = render_cli_error(OutputFormat::Toon, &error)?;
+        require_condition(
+            toon.contains("search_capability_unavailable")
+                && toon.contains("requested_mode")
+                && toon.contains("semantic")
+                && toon.contains("state")
+                && toon.contains("not-installed")
+                && toon.contains("compatible semantic"),
+            "CLI TOON lost typed semantic capability state",
         )?;
         Ok(())
     }

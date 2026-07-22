@@ -757,7 +757,7 @@ mod tests {
         )?;
         require_eq(
             &predecessor.schema.migration_steps_remaining,
-            &Some(6),
+            &Some(7),
             "predecessor migration steps",
         )?;
         require_eq(
@@ -785,7 +785,8 @@ mod tests {
                FROM source_parse_metadata_current;
              DROP TABLE source_parse_metadata_current;
              CREATE INDEX idx_source_parse_metadata_parser
-                 ON source_parse_metadata(parser);",
+                 ON source_parse_metadata(parser);
+             DROP TABLE file_text_fts;",
         )?;
         set_metadata(&resolution_store.connection, SCHEMA_VERSION_KEY, "12")?;
         drop(resolution_store);
@@ -798,7 +799,7 @@ mod tests {
         )?;
         require_eq(
             &resolution.schema.migration_steps_remaining,
-            &Some(2),
+            &Some(3),
             "schema-12 migration steps",
         )?;
         require_eq(

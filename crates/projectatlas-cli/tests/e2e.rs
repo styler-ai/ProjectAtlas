@@ -1001,7 +1001,15 @@ fn settings_reports_content_free_telemetry_without_recording() -> Result<(), Box
     {
         return Err(io::Error::other("settings misstated lexical search readiness").into());
     }
-    for mode in ["fts", "semantic", "hybrid"] {
+    if search
+        .get("fts")
+        .and_then(|value| value.get("state"))
+        .and_then(Value::as_str)
+        != Some("ready")
+    {
+        return Err(io::Error::other("settings omitted ready FTS acceleration").into());
+    }
+    for mode in ["semantic", "hybrid"] {
         if search
             .get(mode)
             .and_then(|value| value.get("state"))
@@ -1408,6 +1416,7 @@ fn settings_rejects_untrusted_publication_with_retained_text() -> Result<(), Box
         || !invalid["database"]["publication"]["contract_fingerprint"].is_null()
         || !invalid["database"]["coverage"].is_null()
         || invalid["search"]["lexical"]["state"] != "unavailable"
+        || invalid["search"]["fts"]["state"] != "unavailable"
         || !invalid["index"].is_null()
         || !invalid["telemetry"].is_null()
     {
@@ -1447,6 +1456,7 @@ fn settings_rejects_untrusted_publication_with_retained_text() -> Result<(), Box
     let missing: Value = serde_json::from_slice(&missing_output.stdout)?;
     if !missing["database"]["publication"].is_null()
         || missing["search"]["lexical"]["state"] != "unavailable"
+        || missing["search"]["fts"]["state"] != "unavailable"
         || missing["index"]["indexed_text_files"].as_i64() != Some(retained_text_rows)
     {
         return Err(io::Error::other(
@@ -13032,9 +13042,114 @@ fn search_and_symbol_slice_are_bounded_and_identity_safe() -> Result<(), Box<dyn
         return Err(io::Error::other("bounded search command failed").into());
     }
     let search_json: Value = serde_json::from_slice(&raw_search.stdout)?;
+    require_json_string(&search_json, &["retrieval_mode"], "lexical")?;
+    require_json_string(
+        &search_json,
+        &["strategy"],
+        "fts5-bm25-candidates-exact-verified",
+    )?;
     require_json_usize(&search_json, &["returned"], 1)?;
     require_json_usize(&search_json, &["searched_files"], 1)?;
+    require_json_usize(&search_json, &["candidate_files"], 2)?;
     require_json_bool(&search_json, &["truncated"], true)?;
+
+    let raw_fallback = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "search",
+            "needle",
+            "--regex",
+            "--file-pattern",
+            "*.rs",
+            "--limit",
+            "1",
+        ])
+        .output()?;
+    if !raw_fallback.status.success() {
+        return Err(io::Error::other("regex fallback search command failed").into());
+    }
+    let fallback_json: Value = serde_json::from_slice(&raw_fallback.stdout)?;
+    require_json_string(&fallback_json, &["retrieval_mode"], "lexical")?;
+    require_json_string(&fallback_json, &["strategy"], "persisted-text-fallback")?;
+    require_json_usize(&fallback_json, &["candidate_files"], 0)?;
+    if search_json["results"] != fallback_json["results"] {
+        return Err(io::Error::other("FTS and fallback CLI results diverged").into());
+    }
+
+    let semantic = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["search", "needle", "--retrieval-mode", "semantic"])
+        .output()?;
+    if semantic.status.success() {
+        return Err(io::Error::other("unavailable semantic search unexpectedly succeeded").into());
+    }
+    let semantic_error: Value = serde_json::from_slice(&semantic.stderr)?;
+    require_json_string(
+        &semantic_error,
+        &["error", "kind"],
+        "search_capability_unavailable",
+    )?;
+    require_json_string(
+        &semantic_error,
+        &["error", "search_capability", "requested_mode"],
+        "semantic",
+    )?;
+    require_json_string(
+        &semantic_error,
+        &["error", "search_capability", "state"],
+        "not-installed",
+    )?;
+
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let mcp_messages = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"projectatlas-search-e2e","version":"0.1.0"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_search","arguments":{"pattern":"needle","file_pattern":"*.rs","limit":1}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_search","arguments":{"pattern":"needle","retrieval_mode":"semantic"}}}"#,
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"atlas_search","arguments":{"pattern":"needle","retrieval_mode":"hybrid"}}}"#,
+    ];
+    let mcp_stdout = run_mcp_stdio(
+        &executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            db.display().to_string(),
+            "mcp".to_string(),
+        ],
+        &mcp_messages,
+    )?;
+    let lexical_mcp = mcp_tool_text(&mcp_stdout, 2)?;
+    if !lexical_mcp.contains("retrieval_mode: lexical")
+        || !lexical_mcp.contains("fts5-bm25-candidates-exact-verified")
+        || !lexical_mcp.contains("needle")
+    {
+        return Err(io::Error::other(format!(
+            "MCP lexical search did not use the bounded exact-verified path: {lexical_mcp}"
+        ))
+        .into());
+    }
+    for (id, mode) in [(3, "semantic"), (4, "hybrid")] {
+        let unavailable = mcp_tool_text(&mcp_stdout, id)?;
+        if !unavailable.contains("search_capability_unavailable")
+            || !unavailable.contains("requested_mode")
+            || !unavailable.contains(mode)
+            || !unavailable.contains("not-installed")
+            || !unavailable.contains("recovery")
+        {
+            return Err(io::Error::other(format!(
+                "MCP {mode} search lost typed unavailable state: {unavailable}"
+            ))
+            .into());
+        }
+    }
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)

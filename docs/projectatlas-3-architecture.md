@@ -513,7 +513,7 @@ erDiagram
     RESOLUTION_KEY ||--o{ RELATION_DEPENDENCY : identifies
 ```
 
-The diagram shows the current schema-14 normalized hot relationship model, not
+The diagram shows the current schema-15 normalized hot relationship model, not
 every compatibility or telemetry table. Task 3.2 added one
 `graph_resolution_keys` authority plus `graph_entity_exports` and
 `graph_relation_dependencies` owner bindings. The registry permits only one
@@ -632,9 +632,12 @@ WAL/checkpoint writes, cache pressure, migration time, and persistent bytes.
 ProjectAtlas does not retain bi-temporal history for rebuildable source graph
 rows: current local bytes plus one complete generation are the authority, and
 optional snapshots are explicit artifacts. Deterministic lexical search remains
-the default. FTS, semantic embeddings, rank fusion, or ANN may be separately
-gated accelerators, but an unbounded embedding scan or trigger-maintained search
-copy is not allowed to become hidden default-core cost.
+the default. A trigger-free FTS5 projection now narrows only safe ASCII token
+queries to a bounded complete candidate set; service-owned exact verification
+still reads authoritative `file_texts`, and unsafe or overflowing shapes fall
+back to bounded path-ordered persisted text. Semantic embeddings, rank fusion,
+or ANN remain separately gated, and neither an unbounded embedding scan nor a
+trigger-maintained search copy may become hidden default-core cost.
 
 ### MCP Call To Database Access Contract
 
@@ -662,14 +665,53 @@ future requirement from being mistaken for already-live behavior.
 | `outline`; `summary` | `atlas_outline`; `atlas_file_summary` | Resolve one exact indexed file, read node/purpose/summary/parse/symbol/relation facts plus an exact-path `graph_coverage` digest, then read the current saved source bytes for the selected file. | The freshness gate and complete-generation snapshot validate the selection. Summary now exposes bounded parse/fact-provider coverage state, counts, active generation, trust, and a typed health next call without project-wide discovery; purpose-hydrated related identities remain owned by task 5.5. | Section row limits are caller supplied and the coverage digest is capped at 16 current rows. The source read/render does not yet share the final uniform decoded/output-byte contract. Successful tracked calls may append telemetry to the same database after the read snapshot. Task 5.5 owns further bounded graph context and current purpose projection; task 5.7 owns uniform byte bounds. |
 | `symbols list`; `symbols relations`; `symbols slice`; `slice --symbol` | `atlas_symbols`; `atlas_symbol_relations`; symbol selection through `atlas_slice` | Read exact node/path and legacy symbol or relation rows; symbol slices then read current saved source bytes. | Normal reads use the freshness gate and complete-generation snapshot. Existing relation rows preserve legacy ordering and names, but do not yet provide normalized direction, generation-bound cursors, retained occurrences, reusable target selectors, authoritative target-purpose projection, resolution confidence, or coverage. | Current result counts are limited by the request, while uniform product ceilings and endpoint/intermediate-byte budgets are not yet applied. Tracked calls may append telemetry to the same database. Task 5.5 owns the additive typed relation contract and task 5.7 owns cursor and byte-budget enforcement. |
 | `slice` with exact lines | `atlas_slice` | Validate one indexed file in SQLite and read the exact current filesystem source before returning the requested line range. Persisted `file_texts` never override newer saved bytes. | The freshness gate and complete-generation snapshot protect selection; the repository-relative file path is the reusable selector. Purpose, graph trust, and coverage are not duplicated into verbatim slice output. | The current range is line bounded by the request, but there is not yet one shared rendered-output-byte ceiling. Successful tracked calls may append telemetry to the same database. Task 5.7 owns the uniform output contract. |
-| `search` | `atlas_search` | Read persisted UTF-8 file text, apply optional path narrowing, and perform deterministic literal, regex, or fuzzy matching. Literal prefiltering may reduce decoded rows; regex and fuzzy fallback may visit the selected text scope. | Normal search uses the freshness gate and one complete-generation snapshot. Search proves lexical occurrence, not graph relevance, purpose, trust, or coverage. | Result rows stop at the requested limit, but fallback searched bytes/time, context size, decoded intermediates, and final output do not yet share the target hard budgets. Successful tracked calls may append telemetry to the same database. Task 5.4 owns FTS candidate acceleration plus correctness-authoritative byte/time-bounded fallback; task 5.7 owns uniform output/cursor bounds. |
-| `health-check`; `purpose queue`; database portion of `lint`; `parity`; `parity report` | `atlas_health`; `atlas_purpose_queue`; `atlas_lint`; `atlas_parity_report` | By default read nodes, purposes, summaries, parser/index state, structural findings, and authored health resolutions. Explicit `health-check --coverage` or `atlas_health { coverage: true }` instead reads current `graph_coverage` joined to authoritative source/fact parser provenance. Filesystem/config lint remains outside SQLite. | Health, queue, lint, parity, and opt-in coverage use the freshness gate and complete-generation snapshot. Coverage discovery supports indexed path, parser/provider, relation, state, and exact-reason filters and never starts a scan. Purpose findings distinguish generated suggestions from accepted authored intent. | Default health behavior remains unchanged. Coverage pages clamp to 200 rows, fetch `LIMIT + 1`, expose continuation, exact/at-least/unknown total state, active generation, trust, next calls, and format-specific output bytes. Filter-owned schema-14 indexes prevent accidental coverage-table scans; parser/provider joins project provenance from its single authority. Tracked health/queue calls may append telemetry to the same database; lint and parity do not. Task 5.7 owns the remaining uniform database/result bounds. |
+| `search` | `atlas_search` | Read authoritative persisted UTF-8 `file_texts` and apply optional path narrowing. Safe ASCII-alphanumeric literals of at least three bytes may first read at most 4,096 metadata-only FTS5/BM25 candidates; a complete candidate page is path-sorted and exact-verified one file at a time. Regex, fuzzy, short, punctuation-sensitive, Unicode-unsafe, desynchronized, or candidate-overflow queries use path-indexed metadata-first persisted-text fallback and hydrate only admitted content by exact path. | Normal search uses the freshness gate and one complete-generation snapshot. Omitted retrieval mode is lexical. Explicit semantic or hybrid mode returns typed lifecycle state and recovery guidance until a compatible generation is ready. Search proves lexical occurrence, not graph relevance, purpose, trust, or coverage. | Patterns are capped at 64 KiB and path globs at 4 KiB before matcher construction. Selected work is capped at 50,000 files, 128 MiB, ten seconds, 20 context lines per side, 1,000 result rows, and approximately 2 MiB of retained pre-serialization payload. Reports expose candidate files, searched files/bytes, retained bytes, completeness, truncation, and its first stable reason. MCP cancellation reaches SQLite progress hooks, content hydration, and exact line matching. Successful tracked calls may append telemetry after acceptance. Task 5.7 still owns uniform cursor contracts shared with other navigation families. |
+| `health-check`; `purpose queue`; database portion of `lint`; `parity`; `parity report` | `atlas_health`; `atlas_purpose_queue`; `atlas_lint`; `atlas_parity_report` | By default read nodes, purposes, summaries, parser/index state, structural findings, and authored health resolutions. Explicit `health-check --coverage` or `atlas_health { coverage: true }` instead reads current `graph_coverage` joined to authoritative source/fact parser provenance. Filesystem/config lint remains outside SQLite. | Health, queue, lint, parity, and opt-in coverage use the freshness gate and complete-generation snapshot. Coverage discovery supports indexed path, parser/provider, relation, state, and exact-reason filters and never starts a scan. Purpose findings distinguish generated suggestions from accepted authored intent. | Default health behavior remains unchanged. Coverage pages clamp to 200 rows, fetch `LIMIT + 1`, expose continuation, exact/at-least/unknown total state, active generation, trust, next calls, and format-specific output bytes. Filter-owned schema-15 indexes prevent accidental coverage-table scans; parser/provider joins project provenance from its single authority. Tracked health/queue calls may append telemetry to the same database; lint and parity do not. Task 5.7 owns the remaining uniform database/result bounds. |
+
+#### Bounded Lexical Search And FTS Publication
+
+Transactional publication keeps the authoritative text, rebuildable search
+projection, and their revision witness atomic:
+
+```mermaid
+flowchart LR
+    Batch[Validated text batch] --> Tx[One SQLite savepoint or publication transaction]
+    Tx --> Texts[(Authoritative file_texts)]
+    Tx --> FTS[(Rebuildable file_text_fts trigram projection)]
+    Tx --> Revisions[(Equal source and projection revisions)]
+```
+
+Retrieval uses the projection only for bounded metadata narrowing and returns
+results only after exact verification against authoritative persisted text:
+
+```mermaid
+flowchart TB
+    Query[Lexical search request] --> Shape{Safe ASCII literal of at least 3 bytes?}
+    Shape -- No --> Fallback[Path-indexed file_texts metadata fallback]
+    Shape -- Yes --> Ready{Source and projection revisions equal?}
+    Ready -- No --> Fallback
+    Ready -- Yes --> Candidates[Bounded metadata-only FTS candidates]
+    Candidates --> Complete{Candidate page complete?}
+    Complete -- No --> Fallback
+    Complete -- Yes --> Exact[Authoritative file_texts exact line verification in path order]
+    Fallback --> Exact
+    Exact --> Report[Bounded deterministic report]
+    Control[File, byte, time, cancellation, context, row, and retained-byte limits] -. Enforced across retrieval .-> Query
+```
+
+`file_texts` remains the only lexical authority. The transaction advances its
+source revision before mutation and publishes the matching projection revision
+only after every FTS delete/insert succeeds; rollback therefore exposes neither
+half. Reads compare those revisions without scanning repository text. Unsafe,
+overflowing, or unavailable acceleration routes to the same exact matcher over
+admitted persisted text, while cancellation and deadline checks continue through
+SQLite execution, exact hydration, and in-memory line verification.
 
 #### Source-wide indexing and explicit maintenance
 
 | CLI route | MCP route | Physical database and source access | Freshness and generation contract | Transaction, bounds, telemetry, and target owner |
 | --- | --- | --- | --- | --- |
-| `init` | `atlas_init` | Create/validate project-local config and the one project database; unless `no_scan`, scan current local source, import controlled purpose inputs, and derive text, summaries, symbols, and graph projections. | The selected source tree and effective ignore/config policy are authoritative. Initialization binds project identity and publishes one active complete generation when scanning runs. | Discovery/extraction is admitted under existing entry, byte, parser-output, worker, deadline, and cancellation limits; prepared mutations publish in one short parent-owned transaction. It writes no separate product database. Introduced in schema 11 and preserved by schema 14, bounded telemetry, passive checkpoint state, reusable-page state, and the explicit no-spill lifecycle remain part of the current contract. |
+| `init` | `atlas_init` | Create/validate project-local config and the one project database; unless `no_scan`, scan current local source, import controlled purpose inputs, and derive text, summaries, symbols, and graph projections. | The selected source tree and effective ignore/config policy are authoritative. Initialization binds project identity and publishes one active complete generation when scanning runs. | Discovery/extraction is admitted under existing entry, byte, parser-output, worker, deadline, and cancellation limits; prepared mutations publish in one short parent-owned transaction. It writes no separate product database. Introduced in schema 11 and preserved by schema 15, bounded telemetry, passive checkpoint state, reusable-page state, and the explicit no-spill lifecycle remain part of the current contract. |
 | `scan` | `atlas_scan` | Read/hash/parse current included source off-writer, stage bounded typed batches, and replace the complete derived projection in the same database. | Revalidate source, configuration, purpose inputs, and base generation before publication. Readers keep the last complete generation until commit. | One short `BEGIN IMMEDIATE` publication owns all prepared mutations and one generation advance; failure/cancellation rolls back. Background MCP execution changes task delivery, not database ownership. No navigation telemetry is appended. |
 | `symbols build` | `atlas_symbols_build` | Read selected indexed source off-writer and rebuild compatible symbol plus normalized graph projections in the same database. | Revalidate the source and publication contract; preserve the last complete generation on failure. | Bounded parser workers, source bytes, retained parser output, deadline, and cancellation feed one publication transaction. No navigation telemetry is appended. |
 | `watch` and `watch --once` | `atlas_watch_once` | Observe or poll current local source, derive one changed-path batch off-writer, and publish affected text/symbol/graph rows in the same database; a correctness-required event may request a full scan. | Each successful batch revalidates source/policy/base generation and advances exactly once. Failed batches remain eligible for retry and expose no partial generation. | Each batch has bounded path/source/parser/worker/deadline/cancellation controls and one short publication transaction. Task 3.5 owns the long-lived verified observation epoch. Database maintenance is bounded, content-free, and never introduces an abandoned spill authority. |
@@ -703,7 +745,6 @@ future requirement from being mistaken for already-live behavior.
 | `folders`, `files`, `next`, `atlas_session_brief` | Batch graph roles and only the crisp relevant connections for returned candidates, while projecting current accepted purpose plus approval/provenance state from `purposes`; never rank graph popularity above exact path/name and strong purpose evidence. | 5.2, with repeated-read freshness cost from 3.5 and byte/cursor bounds from 5.7. |
 | `summary`, `outline`, `symbols` | Hydrate one bounded related-identity/coverage digest for the selected file/symbol without per-symbol or whole-graph query loops. | 5.2 and 5.5; 5.7 owns uniform decoded/intermediate/output bounds. |
 | `symbol relations` extended with direction/depth and bounded path/impact/static-trace modes | Resolve stable selectors, use separately indexed source/target adjacency and dependency keys, page retained occurrences, batch endpoint plus nearest owning-purpose projection, and return generation, trust, resolution, coverage, exact spans, reusable next calls, and explicit truncation. No generic graph query language or separate jump tool is introduced. | 5.5 for relation/path retrieval, 5.7 for generation-bound cursors and all budgets, and 5.6 only for the optional closed architecture/analysis views that prove necessary. |
-| `search` | Use FTS only as a complete candidate accelerator for safe lexical shapes, then exact-verify; keep deterministic path/byte/time-bounded persisted-text fallback authoritative for regex, fuzzy, short, punctuation-sensitive, and tokenizer/Unicode-unsafe shapes. | 5.4 and 5.7. |
 | Explicit federated relation/analysis request | Validate the complete ordered root list, open each root's independent existing project database read-only/query-only under aggregate root/connection/database/row/edge/intermediate/time/output/cancellation budgets, bind results to every captured generation, close every handle, and retain nothing. | 6.2. Federation is call-only composition, never product sharding or a shared database. |
 
 Task 2.7 verifies the implemented portions of these mappings through production
@@ -912,7 +953,7 @@ distributed filesystems remain typed `unsupported`; ProjectAtlas never falls
 back to a weaker journal or synchronous mode.
 
 SQLite auto-checkpoint remains the engine baseline for structural publication.
-Introduced in schema 11 and preserved by schema 14, the telemetry lifecycle
+Introduced in schema 11 and preserved by schema 15, the telemetry lifecycle
 additionally counts committed telemetry writes and, after 1,024
 writes by default, attempts one `PASSIVE` checkpoint only after the event
 transaction has committed. Busy or failed checkpoint state is recorded for
@@ -1117,7 +1158,7 @@ flowchart TB
     Lookalike[Arbitrary lookalike files] --> Untouched[Left untouched]
 ```
 
-The current schema 14 implements this bounded lifecycle in the one authoritative database.
+The current schema 15 implements this bounded lifecycle in the one authoritative database.
 The normal read path never performs an unbounded purge, blocking truncate
 checkpoint, blind `VACUUM`, or destructive rebuild. Telemetry compaction
 preserves supported all-time totals and declared trend windows; retained,
@@ -1228,13 +1269,13 @@ The durable responsibilities and access paths are:
 
 | Responsibility | Principal physical state | Authority and primary access | Current/target state |
 | --- | --- | --- | --- |
-| Compatibility and publication | `metadata`, `project_identity` | Durable schema/root/contract identity; read-only preflight, migration, root transition, and active-generation lookup. | Schema 14 is current and retains one append-only migration owner. |
-| Local structure | `nodes`, `summaries`, `file_texts`, `source_parse_metadata` | Rebuildable exact path/parent/kind, persisted text, summary, hash, source-parse provenance, and independently persisted fact-graph parser provenance. | Parser-provenance separation introduced in schema 13 remains authoritative in schema 14; parser/provider discovery uses `(source_parser, path)` and `(fact_parser, path)` indexes without duplicating provenance into coverage rows. Task 5.4 may add exact-verified FTS acceleration without replacing fallback semantics. |
-| Purpose | `purposes` joined to `nodes` plus an authored-purpose revision | Generated/suggested versus agent/approved lifecycle; accepted path-owned responsibility remains authored across derived changes and is projected by exact owning path or nearest applicable folder. | Schema 14 preserves accepted purposes without hash-driven invalidation and normalizes legacy stale rows; tasks 5.5 and 5.7 add further bounded projection and cursor revision binding. |
+| Compatibility and publication | `metadata`, `project_identity` | Durable schema/root/contract identity; read-only preflight, migration, root transition, and active-generation lookup. | Schema 15 is current and retains one append-only migration owner. |
+| Local structure | `nodes`, `summaries`, `file_texts`, `file_text_fts`, `source_parse_metadata` | Rebuildable exact path/parent/kind, authoritative persisted text, a trigger-free rebuildable FTS5 trigram candidate projection keyed by `file_texts.rowid`, summary, hash, source-parse provenance, and independently persisted fact-graph parser provenance. | Parser-provenance separation introduced in schema 13 remains authoritative in schema 15; parser/provider discovery uses `(source_parser, path)` and `(fact_parser, path)` indexes without duplicating provenance into coverage rows. FTS mutation, revision publication, and backfill share the authoritative text transaction; revision drift disables acceleration and never replaces exact fallback semantics. |
+| Purpose | `purposes` joined to `nodes` plus an authored-purpose revision | Generated/suggested versus agent/approved lifecycle; accepted path-owned responsibility remains authored across derived changes and is projected by exact owning path or nearest applicable folder. | Schema 15 preserves accepted purposes without hash-driven invalidation and normalizes legacy stale rows; tasks 5.5 and 5.7 add further bounded projection and cursor revision binding. |
 | Compatible code facts | `symbols`, `symbol_relations` | Rebuildable file-level symbol and relation calls. | Current; co-published from the same typed extraction result as normalized graph facts. |
 | Normalized graph | `graph_entities`, `graph_relations`, `graph_relation_occurrences`, `graph_coverage`, `graph_resolution_keys`, `graph_entity_exports`, `graph_relation_dependencies` | Rebuildable stable identity, source/target adjacency, occurrences, coverage, and dependency-key closure. | Schema 14 adds state/reason coverage-discovery indexes to the existing scope/path/relation indexes; one-hop persistence, dependency-aware invalidation, conservative fact provenance, clean-scan convergence, and bounded coverage discovery are current. Tasks 5.5 and 5.7 add richer hydration, traversal, cursors, and aggregate budgets. |
 | Health resolution | `health_resolutions` | Authored exact finding disposition. | Current and preserved across derived publication. |
-| Usage measurement | `usage_instances`, `usage_bucket_dimensions`, `usage_instance_baselines`, `usage_labels`, exact global/instance/day aggregate tables, bounded `usage_events`, retention state, and label/instance tombstones | Internal runtime lifecycle, active modeled-baseline witnesses, exact durable totals/trends, recent optional detail, and content-free maintenance truth. Source rows are project-scoped; indexes own label/state/age and raw instance/time access. | Introduced by schema 11 and preserved by schema 14; every detail dimension is bounded independently, supported totals remain exact after pruning, and retained/partial/expired/unavailable detail is reported without a second database. |
+| Usage measurement | `usage_instances`, `usage_bucket_dimensions`, `usage_instance_baselines`, `usage_labels`, exact global/instance/day aggregate tables, bounded `usage_events`, retention state, and label/instance tombstones | Internal runtime lifecycle, active modeled-baseline witnesses, exact durable totals/trends, recent optional detail, and content-free maintenance truth. Source rows are project-scoped; indexes own label/state/age and raw instance/time access. | Introduced by schema 11 and preserved by schema 15; every detail dimension is bounded independently, supported totals remain exact after pruning, and retained/partial/expired/unavailable detail is reported without a second database. |
 | Future Memory Atlas | #314-owned tables | Separately capped authored context and independent context revision. | Conceptual boundary only; #308 does not prebuild its schema. |
 
 Legacy symbol rows and normalized graph rows are compatible co-published

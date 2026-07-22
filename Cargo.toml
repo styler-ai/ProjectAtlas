@@ -97,7 +97,7 @@ regex = "1.11"
 rayon = "1.10"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 rmcp = { version = "1.8.0", default-features = false, features = ["server", "transport-io", "macros"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
 scraper = "0.27"
 seccompiler = { version = "=0.5.0", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
