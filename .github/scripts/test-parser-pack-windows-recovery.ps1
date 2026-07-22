@@ -1637,59 +1637,35 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
         '-Command', 'Start-Sleep -Seconds 30'
     )
     $jobserverCanary = @'
-$match = [regex]::Match(
-    [string]$env:CARGO_MAKEFLAGS,
-    '\A-j --jobserver-fds=(Local\\ProjectAtlasParserPack-[0-9a-f]{32}) --jobserver-auth=\1\z'
-)
-if (-not $match.Success) { exit 1001 }
-try {
-    Add-Type -TypeDefinition @"
+$m=[regex]::Match([string]$env:CARGO_MAKEFLAGS,'\A-j --jobserver-fds=(Local\\ProjectAtlasParserPack-[0-9a-f]{32}) --jobserver-auth=\1\z')
+if(!$m.Success){exit 1001}
+try{
+Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
-
-public static class ProjectAtlasRecoveryJobserverProbe
-{
-    private const uint SynchronizeAndModify = 0x00100002;
-
-    [DllImport(
-        "kernel32.dll",
-        CharSet = CharSet.Unicode,
-        SetLastError = true,
-        EntryPoint = "OpenSemaphoreW")]
-    private static extern IntPtr OpenSemaphore(
-        uint desiredAccess,
-        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
-        string name);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CloseHandle(IntPtr handle);
-
-    public static int OpenAndClose(string name)
-    {
-        IntPtr handle = OpenSemaphore(SynchronizeAndModify, false, name);
-        if (handle == IntPtr.Zero)
-        {
-            return Marshal.GetLastWin32Error();
-        }
-        if (!CloseHandle(handle))
-        {
-            return Marshal.GetLastWin32Error();
-        }
-        return 0;
-    }
-}
+public static class ProjectAtlasJobserverProbe{
+[DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true,EntryPoint="OpenSemaphoreW")]
+static extern IntPtr OpenSemaphore(uint a,bool i,string n);
+[DllImport("kernel32.dll",SetLastError=true)]
+static extern bool CloseHandle(IntPtr h);
+public static int Open(string n){
+var h=OpenSemaphore(0x00100002,false,n);
+if(h==IntPtr.Zero)return Marshal.GetLastWin32Error();
+return CloseHandle(h)?0:Marshal.GetLastWin32Error();
+}}
 "@ -Language CSharp -ErrorAction Stop
-}
-catch { exit 1002 }
-$openError = [ProjectAtlasRecoveryJobserverProbe]::OpenAndClose(
-    $match.Groups[1].Value
-)
-exit $openError
+}catch{exit 1002}
+exit [ProjectAtlasJobserverProbe]::Open($m.Groups[1].Value)
 '@
     $normalArguments = [string[]]@(
         '-NoLogo', '-NoProfile', '-NonInteractive',
         '-Command', $jobserverCanary
+    )
+    # RunCore validates its command line before authentication. Keep this probe
+    # short so invalid credentials reach the intended LogonUser boundary.
+    $authenticationProbeArguments = [string[]]@(
+        '-NoLogo', '-NoProfile', '-NonInteractive',
+        '-Command', 'exit 0'
     )
     $environmentBlock = New-MinimalUserEnvironmentBlock
     $invalidPassword = [System.Security.SecureString]::new()
@@ -1702,7 +1678,7 @@ exit $openError
         $invalidArguments[1] = $identity.Sid
         $invalidArguments[2] = $invalidPassword
         $invalidArguments[3] = [string]$ConstructionParameters.PwshPath
-        $invalidArguments[4] = $normalArguments
+        $invalidArguments[4] = $authenticationProbeArguments
         $invalidArguments[5] = $env:SystemRoot
         $invalidArguments[6] = $environmentBlock
         $invalidArguments[7] = 30
