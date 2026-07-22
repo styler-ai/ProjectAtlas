@@ -1043,8 +1043,7 @@ public static class ProjectAtlasConstructionProcess
         Normal,
         FailBeforeJobAssignment,
         FailBeforeJobAssignmentAndCleanupFailure,
-        FailAfterJobserverAdmissionBeforeJobAssignment,
-        CompareJobserverAccessAcrossAssignment
+        FailAfterJobserverAdmissionBeforeJobAssignment
     }
 
     private sealed class AdmissionReceipt
@@ -1063,14 +1062,6 @@ public static class ProjectAtlasConstructionProcess
         internal bool JobserverHandleClosed { get; set; }
         internal bool ConstructionTokenHandleOwned { get; set; }
         internal bool ConstructionTokenHandleClosed { get; set; }
-        internal int BeforeJobProcessId { get; set; }
-        internal int BeforeJobExitCode { get; set; }
-        internal bool BeforeJobAmbientMembership { get; set; }
-        internal bool BeforeJobTerminationAttempted { get; set; }
-        internal uint BeforeJobWaitResult { get; set; }
-        internal bool BeforeJobReaped { get; set; }
-        internal bool BeforeJobProcessHandleClosed { get; set; }
-        internal bool BeforeJobThreadHandleClosed { get; set; }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -2119,10 +2110,7 @@ public static class ProjectAtlasConstructionProcess
             }
             ConstructionTokenIdentity constructionIdentity =
                 ReadAndValidateConstructionToken(constructionToken, principalSid);
-            if ((admissionScenario == AdmissionScenario.Normal ||
-                    admissionScenario ==
-                        AdmissionScenario.CompareJobserverAccessAcrossAssignment) &&
-                admissionReceipt != null)
+            if (admissionScenario == AdmissionScenario.Normal && admissionReceipt != null)
             {
                 environmentBlock = BindAdmissionProbeLogonSid(
                     environmentBlock,
@@ -2176,130 +2164,6 @@ public static class ProjectAtlasConstructionProcess
                 }
                 throw new InvalidOperationException(
                     "construction-self-test-after-jobserver-admission");
-            }
-            if (admissionScenario ==
-                AdmissionScenario.CompareJobserverAccessAcrossAssignment)
-            {
-                if (admissionReceipt == null)
-                {
-                    throw new InvalidOperationException(
-                        "construction-self-test-comparison-receipt-missing");
-                }
-                bool ambientMembership;
-                if (!IsProcessInJob(process.Process, IntPtr.Zero, out ambientMembership))
-                {
-                    int ambientMembershipError = Marshal.GetLastWin32Error();
-                    throw new Win32Exception(
-                        ambientMembershipError,
-                        "inspect-ambient-job-membership");
-                }
-                admissionReceipt.BeforeJobProcessId = checked((int)process.ProcessId);
-                admissionReceipt.BeforeJobAmbientMembership = ambientMembership;
-                if (ResumeThread(process.Thread) == UInt32.MaxValue)
-                {
-                    int beforeJobResumeError = Marshal.GetLastWin32Error();
-                    throw new Win32Exception(
-                        beforeJobResumeError,
-                        "resume-before-job-comparison");
-                }
-                uint beforeJobWait = WaitForSingleObject(
-                    process.Process,
-                    (uint)checked(timeoutSeconds * 1000));
-                admissionReceipt.BeforeJobWaitResult = beforeJobWait;
-                if (beforeJobWait == WaitTimeout)
-                {
-                    admissionReceipt.BeforeJobTerminationAttempted = true;
-                    TerminateAndWaitProcess(
-                        process.Process,
-                        124,
-                        "before-job-comparison-timeout",
-                        null);
-                    admissionReceipt.BeforeJobWaitResult =
-                        WaitForSingleObject(process.Process, 0);
-                    admissionReceipt.BeforeJobReaped =
-                        admissionReceipt.BeforeJobWaitResult == WaitObject0;
-                    throw new InvalidOperationException(
-                        "construction-self-test-before-job-comparison-timeout");
-                }
-                if (beforeJobWait != WaitObject0)
-                {
-                    throw Failure("wait-before-job-comparison");
-                }
-                admissionReceipt.BeforeJobReaped = true;
-                uint beforeJobExitCode;
-                if (!GetExitCodeProcess(process.Process, out beforeJobExitCode))
-                {
-                    throw Failure("read-before-job-comparison-exit-code");
-                }
-                admissionReceipt.BeforeJobExitCode = unchecked((int)beforeJobExitCode);
-
-                Exception beforeJobThreadCloseFailure = CloseHandleFailure(
-                    process.Thread,
-                    "close-before-job-comparison-thread");
-                admissionReceipt.BeforeJobThreadHandleClosed =
-                    process.Thread != IntPtr.Zero &&
-                    beforeJobThreadCloseFailure == null;
-                Exception beforeJobProcessCloseFailure = CloseHandleFailure(
-                    process.Process,
-                    "close-before-job-comparison-process");
-                admissionReceipt.BeforeJobProcessHandleClosed =
-                    process.Process != IntPtr.Zero &&
-                    beforeJobProcessCloseFailure == null;
-                Exception beforeJobCloseFailure = AppendCleanupFailure(
-                    beforeJobThreadCloseFailure,
-                    beforeJobProcessCloseFailure);
-                if (beforeJobCloseFailure != null)
-                {
-                    if (beforeJobThreadCloseFailure == null)
-                    {
-                        process.Thread = IntPtr.Zero;
-                    }
-                    if (beforeJobProcessCloseFailure == null)
-                    {
-                        process.Process = IntPtr.Zero;
-                    }
-                    throw beforeJobCloseFailure;
-                }
-                process = new ProcessInformation();
-                processCreated = false;
-
-                commandLine = new StringBuilder(BuildCommandLine(executable, arguments));
-                created = CreateProcessWithToken(
-                    constructionToken,
-                    0,
-                    executable,
-                    commandLine,
-                    flags,
-                    environment,
-                    workingDirectory,
-                    ref startup,
-                    out process);
-                if (!created)
-                {
-                    int comparisonCreateError = Marshal.GetLastWin32Error();
-                    throw new Win32Exception(
-                        comparisonCreateError,
-                        "create-after-job-comparison-process");
-                }
-                processCreated = true;
-                admissionReceipt.ProcessId = checked((int)process.ProcessId);
-                bool comparisonAmbientMembership;
-                if (!IsProcessInJob(
-                    process.Process,
-                    IntPtr.Zero,
-                    out comparisonAmbientMembership))
-                {
-                    int comparisonAmbientMembershipError = Marshal.GetLastWin32Error();
-                    throw new Win32Exception(
-                        comparisonAmbientMembershipError,
-                        "inspect-comparison-ambient-job-membership");
-                }
-                if (comparisonAmbientMembership !=
-                    admissionReceipt.BeforeJobAmbientMembership)
-                {
-                    throw new InvalidOperationException(
-                        "construction-self-test-ambient-job-membership-changed");
-                }
             }
             if (!AssignProcessToJobObject(job, process.Process))
             {
