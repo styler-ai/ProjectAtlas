@@ -163,6 +163,29 @@ function Assert-ProductionRecoveryContracts {
         $true
     ))
     Require ($nativeSources.Count -eq 1) "Expected one construction native adapter source."
+    $nativeText = $nativeSources[0].Right.Extent.Text
+    $breakawayFlagIndex = $nativeText.IndexOf(
+        'CreateBreakawayFromJob = 0x01000000',
+        [System.StringComparison]::Ordinal
+    )
+    $breakawayUseIndex = $nativeText.IndexOf(
+        'CreateSuspended | CreateBreakawayFromJob',
+        [System.StringComparison]::Ordinal
+    )
+    $inheritedJobCheckIndex = $nativeText.IndexOf(
+        'IsProcessInJob(process.Process, IntPtr.Zero, out inheritedJob)',
+        [System.StringComparison]::Ordinal
+    )
+    $ownJobAssignmentIndex = $nativeText.IndexOf(
+        'AssignProcessToJobObject(job, process.Process)',
+        [System.StringComparison]::Ordinal
+    )
+    Require `
+        ($breakawayFlagIndex -ge 0 -and
+            $breakawayUseIndex -gt $breakawayFlagIndex -and
+            $inheritedJobCheckIndex -gt $breakawayUseIndex -and
+            $ownJobAssignmentIndex -gt $inheritedJobCheckIndex) `
+        "Construction admission no longer breaks away while suspended before assigning its owned Job."
 
     $cleanupDefinitions = @($Ast.FindAll(
         {

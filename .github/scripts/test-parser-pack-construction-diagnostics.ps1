@@ -253,6 +253,10 @@ try {
             'processCreated = true;',
             [System.StringComparison]::Ordinal
         )
+        $inheritedJobCheckIndex = $nativeSource.IndexOf(
+            'IsProcessInJob(process.Process, IntPtr.Zero, out inheritedJob)',
+            [System.StringComparison]::Ordinal
+        )
         $admissionFailureIndex = $nativeSource.IndexOf(
             'if (admissionScenario == AdmissionScenario.FailBeforeJobAssignment ||',
             [System.StringComparison]::Ordinal
@@ -273,12 +277,13 @@ try {
             ($tokenValidationIndex -ge 0 -and
                 $processCreationIndex -gt $tokenValidationIndex -and
                 $processCreatedIndex -gt $processCreationIndex -and
-                $admissionFailureIndex -gt $processCreatedIndex -and
+                $inheritedJobCheckIndex -gt $processCreatedIndex -and
+                $admissionFailureIndex -gt $inheritedJobCheckIndex -and
                 $jobAssignmentIndex -gt $admissionFailureIndex -and
                 $admissionCleanupIndex -gt $jobAssignmentIndex -and
                 $tokenCloseIndex -gt $admissionCleanupIndex -and
                 $nativeSource.Contains(
-                    'uint flags = CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;'
+                    'uint flags = CreateSuspended | CreateBreakawayFromJob |'
                 ) -and
                 $nativeSource.Contains('ConstructionTokenHandleOwned') -and
                 $nativeSource.Contains('ConstructionTokenHandleClosed') -and

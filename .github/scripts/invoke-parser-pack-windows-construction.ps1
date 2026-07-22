@@ -995,6 +995,7 @@ using System.Text;
 public static class ProjectAtlasConstructionProcess
 {
     private const uint CreateSuspended = 0x00000004;
+    private const uint CreateBreakawayFromJob = 0x01000000;
     private const uint CreateNoWindow = 0x08000000;
     private const uint CreateUnicodeEnvironment = 0x00000400;
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
@@ -1658,7 +1659,8 @@ public static class ProjectAtlasConstructionProcess
             startup.Size = Marshal.SizeOf<StartupInfo>();
             startup.Desktop = windowStationName + "\\" + desktopName;
             StringBuilder commandLine = new StringBuilder(BuildCommandLine(executable, arguments));
-            uint flags = CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;
+            uint flags = CreateSuspended | CreateBreakawayFromJob |
+                CreateNoWindow | CreateUnicodeEnvironment;
             constructionToken = LogonConstructionUser(
                 username,
                 password);
@@ -1687,6 +1689,16 @@ public static class ProjectAtlasConstructionProcess
             if (admissionReceipt != null)
             {
                 admissionReceipt.ProcessId = checked((int)process.ProcessId);
+            }
+            bool inheritedJob;
+            if (!IsProcessInJob(process.Process, IntPtr.Zero, out inheritedJob))
+            {
+                int inheritedJobError = Marshal.GetLastWin32Error();
+                throw new Win32Exception(inheritedJobError, "inspect-inherited-job");
+            }
+            if (inheritedJob)
+            {
+                throw new InvalidOperationException("construction-process-retained-inherited-job");
             }
             if (admissionScenario == AdmissionScenario.FailBeforeJobAssignment ||
                 admissionScenario == AdmissionScenario.FailBeforeJobAssignmentAndCleanupFailure)
