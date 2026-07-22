@@ -252,7 +252,10 @@ function Assert-ProductionRecoveryContracts {
     Require ($objectDirectorySources.Count -eq 1) "Expected one object-directory ACL adapter source."
     $objectDirectoryText = $objectDirectorySources[0].Right.Extent.Text
     Require `
-        ($objectDirectoryText.Contains('DirectoryCreateObject = 0x00000004') -and
+        ($objectDirectoryText.Contains('DirectoryTraverse = 0x00000002') -and
+            $objectDirectoryText.Contains('DirectoryCreateObject = 0x00000004') -and
+            $objectDirectoryText.Contains('NamedObjectCreationAccess =') -and
+            $objectDirectoryText.Contains('DirectoryTraverse | DirectoryCreateObject') -and
             $objectDirectoryText.Contains('ReadControl = 0x00020000') -and
             $objectDirectoryText.Contains('WriteDac = 0x00040000') -and
             $objectDirectoryText.Contains('NtOpenDirectoryObject(') -and
@@ -260,7 +263,7 @@ function Assert-ProductionRecoveryContracts {
             $objectDirectoryText.Contains('SetKernelObjectSecurity(') -and
             $objectDirectoryText.Contains('construction-object-directory-principal-already-present') -and
             $objectDirectoryText.Contains('common.AceFlags == AceFlags.None') -and
-            $objectDirectoryText.Contains('common.AccessMask == checked((int)DirectoryCreateObject)') -and
+            $objectDirectoryText.Contains('common.AccessMask == checked((int)NamedObjectCreationAccess)') -and
             $objectDirectoryText.Contains('matching != 1 || !exact') -and
             $objectDirectoryText.Contains('StatusObjectNameNotFound') -and
             $objectDirectoryText.Contains('StatusObjectPathNotFound') -and

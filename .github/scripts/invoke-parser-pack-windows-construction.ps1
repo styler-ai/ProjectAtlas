@@ -560,7 +560,10 @@ using System.Security.Principal;
 
 public static class ProjectAtlasConstructionObjectDirectoryAcl
 {
+    private const uint DirectoryTraverse = 0x00000002;
     private const uint DirectoryCreateObject = 0x00000004;
+    private const uint NamedObjectCreationAccess =
+        DirectoryTraverse | DirectoryCreateObject;
     private const uint ReadControl = 0x00020000;
     private const uint WriteDac = 0x00040000;
     private const uint ObjCaseInsensitive = 0x00000040;
@@ -668,7 +671,7 @@ public static class ProjectAtlasConstructionObjectDirectoryAcl
                     new CommonAce(
                         AceFlags.None,
                         AceQualifier.AccessAllowed,
-                        checked((int)DirectoryCreateObject),
+                        checked((int)NamedObjectCreationAccess),
                         principal,
                         false,
                         null));
@@ -985,7 +988,7 @@ public static class ProjectAtlasConstructionObjectDirectoryAcl
             exact = common != null &&
                 common.AceQualifier == AceQualifier.AccessAllowed &&
                 common.AceFlags == AceFlags.None &&
-                common.AccessMask == checked((int)DirectoryCreateObject) &&
+                common.AccessMask == checked((int)NamedObjectCreationAccess) &&
                 !common.IsCallback;
         }
         if (matching != 1 || !exact)
