@@ -505,7 +505,8 @@ function Invoke-AccountJournalRecoveryScenario {
     $scenarioDirectory = Split-Path -Parent (Split-Path -Parent $StatePath)
     [System.IO.Directory]::CreateDirectory($scenarioDirectory) | Out-Null
     $parameterPath = Join-Path $scenarioDirectory 'construction-parameters.json'
-    $proxyPath = Join-Path $scenarioDirectory 'fail-after-account.ps1'
+    $proxyPath = Join-Path $scenarioDirectory 'hold-after-account.ps1'
+    $readyMarkerPath = Join-Path $scenarioDirectory 'account-created.ready'
     $scenarioParameters = @{}
     foreach ($entry in $ConstructionParameters.GetEnumerator()) {
         $scenarioParameters[[string]$entry.Key] = $entry.Value
@@ -516,6 +517,7 @@ function Invoke-AccountJournalRecoveryScenario {
         (@{
             wrapper = $ProductionWrapper
             parameters = $scenarioParameters
+            ready_marker = $readyMarkerPath
         } | ConvertTo-Json -Depth 8 -Compress),
         [System.Text.UTF8Encoding]::new($false)
     )
@@ -529,6 +531,14 @@ $ErrorActionPreference = "Stop"
 $payload = [System.IO.File]::ReadAllText($ParameterPath) |
     ConvertFrom-Json -AsHashtable -Depth 8
 $parameters = [hashtable]$payload.parameters
+$readyMarkerPath = [System.IO.Path]::GetFullPath([string]$payload.ready_marker)
+$parameterDirectory = [System.IO.Path]::GetFullPath(
+    [System.IO.Path]::GetDirectoryName($ParameterPath)
+)
+if ([System.IO.Path]::GetDirectoryName($readyMarkerPath) -ne $parameterDirectory -or
+    [System.IO.File]::Exists($readyMarkerPath)) {
+    throw "Account-ready marker path is unsafe."
+}
 function New-LocalUser {
     [CmdletBinding()]
     param(
@@ -540,11 +550,50 @@ function New-LocalUser {
         [Parameter(Mandatory = $true)][string]$Description
     )
     $account = Microsoft.PowerShell.LocalAccounts\New-LocalUser @PSBoundParameters
-    [Environment]::FailFast("ProjectAtlas recovery proof after exact account creation")
-    return $account
+    if ($null -eq $account -or
+        [string]$account.Name -cne $Name -or
+        $null -eq $account.Sid -or
+        $account.Sid.Value -notmatch '\AS-1-5-21-[0-9]+-[0-9]+-[0-9]+-[0-9]+\z' -or
+        [string]$account.Description -ne $Description) {
+        throw "Created account did not match the retained recovery identity."
+    }
+
+    $statePath = [System.IO.Path]::GetFullPath([string]$parameters.StatePath)
+    $stateItem = Get-Item -LiteralPath $statePath -Force
+    if (($stateItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $stateItem.Length -le 0) {
+        throw "Protected construction journal was not ready for the account marker."
+    }
+    $markerTemporaryPath = "$readyMarkerPath.$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [System.IO.File]::WriteAllText(
+            $markerTemporaryPath,
+            "projectatlas-account-created-ready-v1`n",
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        Set-Acl -LiteralPath $markerTemporaryPath -AclObject (Get-Acl -LiteralPath $statePath)
+        if (-not (Get-Acl -LiteralPath $markerTemporaryPath).AreAccessRulesProtected) {
+            throw "Account-ready marker ACL was not protected."
+        }
+        [System.IO.File]::Move($markerTemporaryPath, $readyMarkerPath)
+    }
+    finally {
+        if ([System.IO.File]::Exists($markerTemporaryPath)) {
+            Remove-Item -LiteralPath $markerTemporaryPath -Force
+        }
+    }
+
+    $accountCreatedGate = [System.Threading.ManualResetEventSlim]::new($false)
+    try {
+        $accountCreatedGate.Wait()
+    }
+    finally {
+        $accountCreatedGate.Dispose()
+    }
+    throw "Account-ready proxy returned unexpectedly."
 }
 & ([string]$payload.wrapper) @parameters
-throw "Construction wrapper returned after the fail-fast proxy."
+throw "Construction wrapper returned after the account-ready proxy."
 '@
     [System.IO.File]::WriteAllText(
         $proxyPath,
@@ -552,43 +601,149 @@ throw "Construction wrapper returned after the fail-fast proxy."
         [System.Text.UTF8Encoding]::new($false)
     )
 
-    $exitCode = Invoke-BoundedProcess `
-        -FilePath ([string]$ConstructionParameters.PwshPath) `
-        -Arguments @(
-            '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-            '-File', $proxyPath,
-            '-ParameterPath', $parameterPath
-        ) `
-        -TimeoutSeconds $processTimeoutSeconds
-    Require ($exitCode -ne 0) "Fail-fast account proxy unexpectedly succeeded."
+    $proxyStart = [System.Diagnostics.ProcessStartInfo]::new()
+    $proxyStart.FileName = [string]$ConstructionParameters.PwshPath
+    $proxyStart.UseShellExecute = $false
+    $proxyStart.CreateNoWindow = $true
+    foreach ($argument in @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', $proxyPath,
+        '-ParameterPath', $parameterPath
+    )) {
+        $proxyStart.ArgumentList.Add($argument)
+    }
+
+    $proxyProcess = $null
+    $proxyProcessId = 0
+    $proxyOperationFailure = $null
+    $proxyCleanupFailures = [System.Collections.Generic.List[System.Exception]]::new()
+    $observedAccount = $null
+    $observedPlaceholderState = $null
+    $markerValidated = $false
+    try {
+        $proxyProcess = [System.Diagnostics.Process]::Start($proxyStart)
+        if ($null -eq $proxyProcess) {
+            throw "Could not start the account-ready construction wrapper."
+        }
+        $proxyProcessId = $proxyProcess.Id
+        $readyDeadline = [DateTime]::UtcNow.AddSeconds($processTimeoutSeconds)
+        do {
+            if ($proxyProcess.HasExited) {
+                throw "Account-ready construction wrapper exited before the recovery handshake."
+            }
+            if (-not $markerValidated -and [System.IO.File]::Exists($readyMarkerPath)) {
+                $readyItem = Get-Item -LiteralPath $readyMarkerPath -Force
+                if (($readyItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                    $readyItem.Length -le 0 -or
+                    $readyItem.Length -gt 128 -or
+                    [System.IO.File]::ReadAllText($readyItem.FullName) -ne
+                        "projectatlas-account-created-ready-v1`n") {
+                    throw "Account-ready marker was not one bounded regular marker."
+                }
+                $observedPlaceholderState = Invoke-WithCleanupDefinitions `
+                    -StatePath $StatePath `
+                    -Operation {
+                        Assert-StateAcl -Path $readyMarkerPath
+                        return Read-CleanupState
+                    }
+                Require `
+                    ($null -ne $observedPlaceholderState) `
+                    "Account-ready marker appeared without its protected journal."
+                $markerValidated = $true
+            }
+            if ($markerValidated) {
+                $candidateAccount = Get-ExactLocalAccount `
+                    -Username ([string]$observedPlaceholderState.username)
+                if ($null -ne $candidateAccount -and
+                    $null -ne $candidateAccount.Sid -and
+                    $candidateAccount.Sid.Value -match $sidPattern -and
+                    [string]$candidateAccount.Description -eq $accountDescription) {
+                    $observedAccount = $candidateAccount
+                    break
+                }
+            }
+            Start-Sleep -Milliseconds 250
+        } while ([DateTime]::UtcNow -lt $readyDeadline)
+        Require `
+            ($null -ne $observedAccount -and
+                $null -ne $observedPlaceholderState -and
+                -not $proxyProcess.HasExited -and
+                $null -ne (Get-Process -Id $proxyProcessId -ErrorAction SilentlyContinue)) `
+            "Account-ready marker and durable account were not observed under the fixed deadline."
+
+        $proxyProcess.Kill($true)
+        if (-not $proxyProcess.WaitForExit(5000)) {
+            throw "Account-ready construction wrapper could not be reaped."
+        }
+        Require `
+            ($null -eq (Get-Process -Id $proxyProcessId -ErrorAction SilentlyContinue)) `
+            "Account-ready construction wrapper PID survived abrupt termination."
+    }
+    catch {
+        $proxyOperationFailure = $_.Exception
+    }
+    finally {
+        if ($null -ne $proxyProcess) {
+            try {
+                if (-not $proxyProcess.HasExited) {
+                    $proxyProcess.Kill($true)
+                    if (-not $proxyProcess.WaitForExit(5000)) {
+                        throw "Fallback account-ready wrapper termination could not be reaped."
+                    }
+                }
+            }
+            catch {
+                $proxyCleanupFailures.Add($_.Exception)
+            }
+            try {
+                $proxyProcess.Dispose()
+            }
+            catch {
+                $proxyCleanupFailures.Add($_.Exception)
+            }
+        }
+        try {
+            if ([System.IO.File]::Exists($readyMarkerPath)) {
+                Remove-Item -LiteralPath $readyMarkerPath -Force
+            }
+        }
+        catch {
+            $proxyCleanupFailures.Add($_.Exception)
+        }
+    }
+    if ($null -ne $proxyOperationFailure) {
+        if ($proxyCleanupFailures.Count -ne 0) {
+            throw [System.AggregateException]::new(
+                "Account-ready recovery operation and cleanup failed.",
+                @($proxyOperationFailure) + @($proxyCleanupFailures)
+            )
+        }
+        throw $proxyOperationFailure
+    }
+    if ($proxyCleanupFailures.Count -ne 0) {
+        throw [System.AggregateException]::new(
+            "Account-ready recovery cleanup failed.",
+            @($proxyCleanupFailures)
+        )
+    }
 
     $placeholderState = Read-ScenarioState -StatePath $StatePath
     Require `
         ($null -ne $placeholderState -and
+            [string]$placeholderState.username -eq [string]$observedPlaceholderState.username -and
             [string]$placeholderState.username -match $usernamePattern -and
             [string]$placeholderState.sid -eq $placeholderSid -and
             [string]$placeholderState.firewall_rule -match $ruleNamePattern -and
             [string]$placeholderState.stage -eq 'identity' -and
             @($placeholderState.acl_paths).Count -eq 0) `
-        "Fail-fast account journal did not retain the exact placeholder state."
-    Wait-ForRecoveryCondition `
-        -TimeoutSeconds 10 `
-        -FailureMessage "Fail-fast account did not become durably observable." `
-        -Condition {
-            $candidateAccount = Get-ExactLocalAccount `
-                -Username ([string]$placeholderState.username)
-            $null -ne $candidateAccount -and
-                $null -ne $candidateAccount.Sid -and
-                $candidateAccount.Sid.Value -match $sidPattern -and
-                [string]$candidateAccount.Description -eq $accountDescription
-        }
+        "Abrupt account-ready exit did not retain the exact placeholder journal."
     $account = Get-ExactLocalAccount -Username ([string]$placeholderState.username)
     Require `
         ($null -ne $account -and
             $null -ne $account.Sid -and
             $account.Sid.Value -match $sidPattern -and
             [string]$account.Description -eq $accountDescription) `
-        "Fail-fast account did not retain the validated generated identity."
+        "Abrupt account-ready exit did not retain the validated generated identity."
 
     $checkpointFailure = $null
     try {
