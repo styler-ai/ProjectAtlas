@@ -1028,6 +1028,10 @@ public static class ProjectAtlasConstructionProcess
     private const int MaximumTokenInformationBytes = 64 * 1024;
     private const int MaximumTokenGroupCount = 1024;
     private const string RequiredIntegritySid = "S-1-16-8192";
+    private const string AdmissionProbeLogonSidEnvironment =
+        "PROJECTATLAS_CONSTRUCTION_EXPECTED_LOGON_SID";
+    private const string AdmissionProbeLogonSidPlaceholder =
+        "__PROJECTATLAS_CONSTRUCTION_LOGON_SID__";
     private static readonly Regex JobserverNamePattern = new Regex(
         @"\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z",
         RegexOptions.CultureInvariant);
@@ -1490,6 +1494,24 @@ public static class ProjectAtlasConstructionProcess
         {
             throw new ArgumentException("validate-construction-jobserver-name", nameof(name));
         }
+    }
+
+    private static string BindAdmissionProbeLogonSid(
+        string environmentBlock,
+        string logonSid)
+    {
+        string placeholderRow = AdmissionProbeLogonSidEnvironment + "=" +
+            AdmissionProbeLogonSidPlaceholder;
+        int first = environmentBlock.IndexOf(placeholderRow, StringComparison.Ordinal);
+        int last = environmentBlock.LastIndexOf(placeholderRow, StringComparison.Ordinal);
+        if (first < 0 || first != last)
+        {
+            throw new InvalidOperationException(
+                "validate-construction-admission-probe-environment");
+        }
+        return environmentBlock.Substring(0, first) +
+            AdmissionProbeLogonSidEnvironment + "=" + logonSid +
+            environmentBlock.Substring(first + placeholderRow.Length);
     }
 
     private static SafeAccessTokenHandle LogonConstructionUser(
@@ -2074,7 +2096,6 @@ public static class ProjectAtlasConstructionProcess
                 throw new Win32Exception(desktopError, "create-desktop");
             }
 
-            environment = Marshal.StringToHGlobalUni(environmentBlock);
             StartupInfo startup = new StartupInfo();
             startup.Size = Marshal.SizeOf<StartupInfo>();
             startup.Desktop = windowStationName + "\\" + desktopName;
@@ -2089,6 +2110,13 @@ public static class ProjectAtlasConstructionProcess
             }
             ConstructionTokenIdentity constructionIdentity =
                 ReadAndValidateConstructionToken(constructionToken, principalSid);
+            if (admissionScenario == AdmissionScenario.Normal && admissionReceipt != null)
+            {
+                environmentBlock = BindAdmissionProbeLogonSid(
+                    environmentBlock,
+                    constructionIdentity.LogonSid);
+            }
+            environment = Marshal.StringToHGlobalUni(environmentBlock);
             bool created = CreateProcessWithToken(
                 constructionToken,
                 0,
@@ -2232,7 +2260,7 @@ public static class ProjectAtlasConstructionProcess
                 {
                     cleanupFailure = AppendCleanupFailure(
                         cleanupFailure,
-                        RecoverAssignedProcessTree(job, process));
+                        RecoverAssignedProcessTree(job, process, admissionReceipt));
                     job = IntPtr.Zero;
                     process = new ProcessInformation();
                 }
@@ -2363,9 +2391,16 @@ public static class ProjectAtlasConstructionProcess
 
     private static Exception RecoverAssignedProcessTree(
         IntPtr job,
-        ProcessInformation process)
+        ProcessInformation process,
+        AdmissionReceipt receipt)
     {
         Exception cleanupFailure = null;
+        if (receipt != null)
+        {
+            receipt.JobHandleOwned = job != IntPtr.Zero;
+            receipt.ProcessHandleOwned = process.Process != IntPtr.Zero;
+            receipt.ThreadHandleOwned = process.Thread != IntPtr.Zero;
+        }
         try
         {
             BasicAccountingInformation accounting;
@@ -2382,6 +2417,10 @@ public static class ProjectAtlasConstructionProcess
                 !TerminateJobObject(job, FailureExitCode))
             {
                 throw Failure("terminate-construction-job-cleanup");
+            }
+            if (receipt != null && accounting.ActiveProcesses != 0)
+            {
+                receipt.TerminationAttempted = true;
             }
             Stopwatch timer = Stopwatch.StartNew();
             while (accounting.ActiveProcesses != 0)
@@ -2406,15 +2445,39 @@ public static class ProjectAtlasConstructionProcess
         {
             cleanupFailure = failure;
         }
-        cleanupFailure = AppendCleanupFailure(
-            cleanupFailure,
-            CloseHandleFailure(process.Thread, "close-construction-thread"));
-        cleanupFailure = AppendCleanupFailure(
-            cleanupFailure,
-            CloseHandleFailure(process.Process, "close-construction-process"));
-        cleanupFailure = AppendCleanupFailure(
-            cleanupFailure,
-            CloseHandleFailure(job, "close-construction-job"));
+        if (receipt != null && process.Process != IntPtr.Zero)
+        {
+            uint wait = WaitForSingleObject(process.Process, 0);
+            receipt.WaitResult = wait;
+            receipt.Reaped = wait == WaitObject0;
+            if (wait != WaitObject0)
+            {
+                cleanupFailure = AppendCleanupFailure(
+                    cleanupFailure,
+                    new InvalidOperationException("reap-construction-job-cleanup"));
+            }
+        }
+        Exception closeFailure =
+            CloseHandleFailure(process.Thread, "close-construction-thread");
+        if (receipt != null)
+        {
+            receipt.ThreadHandleClosed =
+                process.Thread != IntPtr.Zero && closeFailure == null;
+        }
+        cleanupFailure = AppendCleanupFailure(cleanupFailure, closeFailure);
+        closeFailure = CloseHandleFailure(process.Process, "close-construction-process");
+        if (receipt != null)
+        {
+            receipt.ProcessHandleClosed =
+                process.Process != IntPtr.Zero && closeFailure == null;
+        }
+        cleanupFailure = AppendCleanupFailure(cleanupFailure, closeFailure);
+        closeFailure = CloseHandleFailure(job, "close-construction-job");
+        if (receipt != null)
+        {
+            receipt.JobHandleClosed = job != IntPtr.Zero && closeFailure == null;
+        }
+        cleanupFailure = AppendCleanupFailure(cleanupFailure, closeFailure);
         return cleanupFailure;
     }
 
