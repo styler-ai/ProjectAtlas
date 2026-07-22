@@ -2,6 +2,7 @@
 
 use super::{
     AtlasStore, DbError, DbResult, IndexPublicationGuard, IndexPublicationState, count_to_usize,
+    with_sqlite_read_progress,
 };
 use crate::project_identity::{
     load_graph_generation, load_project_identity, require_bound_project_identity,
@@ -17,8 +18,8 @@ use projectatlas_core::graph::{
 };
 use projectatlas_core::symbols::{ParserKind, RelationKind, SymbolKind};
 use projectatlas_core::{
-    IndexGeneration, NodeKind, RankedConnection, RankedConnectionCount, RankedConnectionDirection,
-    RankedConnectionKind, RankedConnectionTarget,
+    IndexGeneration, IndexWorkControl, IndexWorkStage, NodeKind, RankedConnection,
+    RankedConnectionCount, RankedConnectionDirection, RankedConnectionKind, RankedConnectionTarget,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
@@ -157,6 +158,71 @@ pub enum RepositoryGraphRelationQuery {
     },
 }
 
+/// Direction of one batched normalized-graph adjacency read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepositoryGraphDirection {
+    /// Relations whose source is in the selected frontier.
+    Outbound,
+    /// Relations whose retained target is in the selected frontier.
+    Inbound,
+}
+
+/// Opaque keyset used only to continue one bounded adjacency request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryGraphAdjacencyContinuation {
+    /// Project whose read snapshot produced this keyset.
+    project: ProjectInstanceId,
+    /// Complete graph generation whose read snapshot produced this keyset.
+    generation: IndexGeneration,
+    /// Direction whose stable order produced this keyset.
+    direction: RepositoryGraphDirection,
+    /// Ordered frontier identity whose result order produced this keyset.
+    frontier: Vec<[u8; 32]>,
+    /// Zero-based frontier position of the last returned relation.
+    frontier_index: u32,
+    /// Persisted relation family scope of the last returned relation.
+    relation_scope: String,
+    /// Persisted relation family value of the last returned relation.
+    relation_kind: String,
+    /// Canonical identity of the last returned relation.
+    canonical_identity: String,
+    /// Stable compact key of the last returned relation.
+    relation_key: [u8; 32],
+}
+
+/// One logical relation paired with the frontier entity that selected it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryGraphAdjacencyRow {
+    /// Zero-based position of the selecting entity in the request frontier.
+    pub frontier_index: u32,
+    /// Exact project-qualified entity that selected this relation.
+    pub frontier: GraphEntityKey,
+    /// Direction relative to the selecting frontier entity.
+    pub direction: RepositoryGraphDirection,
+    /// Fully reconstructed normalized relation.
+    pub relation: LogicalRelation,
+}
+
+/// One bounded direction-specific adjacency page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryGraphAdjacencyPage {
+    /// Fully validated rows in deterministic frontier and relation order.
+    pub rows: Vec<RepositoryGraphAdjacencyRow>,
+    /// Whether at least one additional validated relation exists.
+    pub truncated: bool,
+    /// Opaque continuation for the same frontier and direction when truncated.
+    pub continuation: Option<RepositoryGraphAdjacencyContinuation>,
+}
+
+/// Maximum unique entities admitted to one batched adjacency statement.
+pub const MAX_REPOSITORY_GRAPH_FRONTIER: usize = 256;
+
+/// Maximum relation rows admitted across all per-frontier query branches.
+const MAX_REPOSITORY_GRAPH_ADJACENCY_WORK_ROWS: usize = GraphLimits::MAX_ROWS as usize + 1;
+
+/// Maximum stable entity keys hydrated through one prepared `VALUES` join.
+const GRAPH_ENTITY_HYDRATION_CHUNK: usize = 128;
+
 /// Raw normalized entity row collected before domain reconstruction.
 struct EntityRow {
     /// Compact stable entity key.
@@ -215,6 +281,14 @@ struct RelationRow {
     confidence: String,
     /// Producer completeness.
     completeness: String,
+}
+
+/// One raw relation paired with its selecting frontier position.
+struct AdjacencyRelationRow {
+    /// Zero-based position inside the request frontier.
+    frontier_index: u32,
+    /// Raw normalized relation selected by the indexed adjacency branch.
+    relation: RelationRow,
 }
 
 /// Raw normalized relation occurrence row.
@@ -1212,9 +1286,201 @@ impl AtlasStore {
                 (project, raw)
             }
         };
-        let mut entities = HashMap::new();
+        let entities = load_relation_entities(self, &raw, project, generation, None)?;
         page_from_raw(raw, limit, |row| {
-            relation_from_row(self, &mut entities, row, project, generation)
+            relation_from_row(&entities, row, project, generation)
+        })
+    }
+
+    /// Load one bounded direction-specific adjacency page for a unique frontier.
+    ///
+    /// The complete frontier is bound through one statement whose indexed
+    /// per-frontier branches each cap their candidate rows before the stable
+    /// compound order. Endpoint entities are hydrated in bounded set-oriented
+    /// batches. The opaque continuation is valid only with the same project,
+    /// generation, frontier, and direction inside the same request snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid or mixed-project frontiers, invalid limits
+    /// or continuation state, cancellation, `SQLite` failures, or any corrupt
+    /// relation or endpoint row. No partial page is returned.
+    pub fn repository_graph_adjacency_page(
+        &self,
+        frontier: &[GraphEntityKey],
+        direction: RepositoryGraphDirection,
+        continuation: Option<&RepositoryGraphAdjacencyContinuation>,
+        limit: u32,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphAdjacencyPage> {
+        let limit_plus_one = validated_limit_plus_one(
+            limit,
+            GraphLimits::MAX_ROWS,
+            "graph adjacency rows must be nonzero and within the product ceiling",
+        )?;
+        if frontier.len() > MAX_REPOSITORY_GRAPH_FRONTIER {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph adjacency frontier exceeds the product ceiling",
+            }
+            .into());
+        }
+        if frontier.is_empty() {
+            if continuation.is_some() {
+                return Err(GraphContractError::InvalidLimits {
+                    reason: "graph adjacency continuation requires a nonempty frontier",
+                }
+                .into());
+            }
+            return Ok(empty_adjacency_page());
+        }
+        let limit_plus_one_usize = usize::try_from(limit_plus_one).map_err(|_source| {
+            GraphContractError::InvalidLimits {
+                reason: "graph adjacency page limit overflowed",
+            }
+        })?;
+        let project = frontier[0].project();
+        let mut unique = BTreeSet::new();
+        let mut frontier_digests = Vec::with_capacity(frontier.len());
+        for key in frontier {
+            require_project(project, key.project())?;
+            let digest = key.digest_bytes()?;
+            if !unique.insert(digest) {
+                return Err(GraphContractError::InvalidLimits {
+                    reason: "graph adjacency frontier must contain unique entities",
+                }
+                .into());
+            }
+            frontier_digests.push(digest);
+        }
+
+        let Some(generation) = self.repository_graph_generation()? else {
+            if continuation.is_some() {
+                return Err(GraphContractError::InvalidLimits {
+                    reason: "graph adjacency continuation has no active generation",
+                }
+                .into());
+            }
+            return Ok(empty_adjacency_page());
+        };
+        if !verify_project_identity(&self.connection, project)? {
+            if continuation.is_some() {
+                return Err(GraphContractError::InvalidLimits {
+                    reason: "graph adjacency continuation does not match the bound project",
+                }
+                .into());
+            }
+            return Ok(empty_adjacency_page());
+        }
+
+        if let Some(continuation) = continuation
+            && (continuation.project != project
+                || continuation.generation != generation
+                || continuation.direction != direction
+                || continuation.frontier != frontier_digests
+                || continuation.frontier_index as usize >= frontier.len())
+        {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph adjacency continuation does not match the request",
+            }
+            .into());
+        }
+
+        let continuation_index = continuation.map_or(0, |value| value.frontier_index as usize);
+        let active_frontier = frontier.len() - continuation_index;
+        let work_rows = active_frontier.checked_mul(limit_plus_one_usize).ok_or(
+            GraphContractError::InvalidLimits {
+                reason: "graph adjacency intermediate row ceiling overflowed",
+            },
+        )?;
+        if work_rows > MAX_REPOSITORY_GRAPH_ADJACENCY_WORK_ROWS {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph adjacency frontier and page exceed the intermediate row ceiling",
+            }
+            .into());
+        }
+
+        let mut bindings = Vec::with_capacity(active_frontier * 2 + continuation.map_or(2, |_| 6));
+        bindings.push(Value::Blob(project.as_bytes().to_vec()));
+        for (index, digest) in frontier_digests.iter().enumerate().skip(continuation_index) {
+            bindings.push(Value::Blob(digest.to_vec()));
+            if index == continuation_index
+                && let Some(continuation) = continuation
+            {
+                bindings.push(Value::Text(continuation.relation_scope.clone()));
+                bindings.push(Value::Text(continuation.relation_kind.clone()));
+                bindings.push(Value::Text(continuation.canonical_identity.clone()));
+                bindings.push(Value::Blob(continuation.relation_key.to_vec()));
+            }
+            bindings.push(Value::Integer(limit_plus_one));
+        }
+        bindings.push(Value::Integer(limit_plus_one));
+
+        let sql = adjacency_relation_sql(
+            frontier.len(),
+            direction,
+            continuation.map(|value| value.frontier_index as usize),
+        );
+        let raw = with_sqlite_read_progress(
+            &self.connection,
+            control,
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                let mut statement = self.connection.prepare(&sql)?;
+                collect_adjacency_relation_rows(statement.query(params_from_iter(bindings.iter()))?)
+            },
+        )?;
+        let truncated = raw.len() > limit as usize;
+        let next = if truncated {
+            let last = raw.get(limit as usize - 1).ok_or(DbError::GraphRowShape {
+                table: "graph_relations",
+                reason: "adjacency truncation row is missing",
+            })?;
+            Some(RepositoryGraphAdjacencyContinuation {
+                project,
+                generation,
+                direction,
+                frontier: frontier_digests,
+                frontier_index: last.frontier_index,
+                relation_scope: last.relation.relation_scope.clone(),
+                relation_kind: last.relation.relation_kind.clone(),
+                canonical_identity: last.relation.canonical.clone(),
+                relation_key: fixed_bytes::<32>(
+                    "graph_relations.relation_key",
+                    last.relation.key.clone(),
+                )?,
+            })
+        } else {
+            None
+        };
+        let relation_rows = raw.iter().map(|row| &row.relation).collect::<Vec<_>>();
+        let entities =
+            load_relation_entity_references(self, &relation_rows, project, generation, control)?;
+        let mut rows = Vec::with_capacity(raw.len());
+        for row in raw {
+            if let Some(control) = control {
+                control.check(IndexWorkStage::RepositoryTraversal)?;
+            }
+            let frontier_key = frontier
+                .get(row.frontier_index as usize)
+                .ok_or(DbError::GraphRowShape {
+                    table: "graph_relations",
+                    reason: "adjacency row has an invalid frontier position",
+                })?
+                .clone();
+            rows.push(RepositoryGraphAdjacencyRow {
+                frontier_index: row.frontier_index,
+                frontier: frontier_key,
+                direction,
+                relation: relation_from_row(&entities, row.relation, project, generation)?,
+            });
+        }
+        if truncated {
+            rows.pop();
+        }
+        Ok(RepositoryGraphAdjacencyPage {
+            rows,
+            truncated,
+            continuation: next,
         })
     }
 
@@ -3166,10 +3432,173 @@ fn validate_entity_row_shape(row: &EntityRow) -> DbResult<()> {
     Ok(())
 }
 
+/// Build one direction-owned batched adjacency statement.
+fn adjacency_relation_sql(
+    frontier_count: usize,
+    direction: RepositoryGraphDirection,
+    continuation_index: Option<usize>,
+) -> String {
+    let (key_column, index_name) = match direction {
+        RepositoryGraphDirection::Outbound => {
+            ("source_entity_key", "idx_graph_relations_source_kind")
+        }
+        RepositoryGraphDirection::Inbound => {
+            ("target_entity_key", "idx_graph_relations_target_kind")
+        }
+    };
+    let request = "request(project_instance_id) AS (VALUES (?))";
+    let branches = (continuation_index.unwrap_or(0)..frontier_count)
+        .map(|frontier_index| {
+            let continuation = if continuation_index == Some(frontier_index) {
+                "AND (relation.relation_scope, relation.relation_kind,
+                      relation.canonical_identity, relation.relation_key) >
+                     (?, ?, ?, ?)"
+                    .to_string()
+            } else {
+                String::new()
+            };
+            format!(
+                "SELECT * FROM (
+                     SELECT {frontier_index} AS frontier_index,
+                            relation.relation_key, relation.project_instance_id,
+                            relation.canonical_identity, relation.source_entity_key,
+                            relation.relation_scope, relation.relation_kind,
+                            relation.resolution_status, relation.target_entity_key,
+                            relation.reference_text, relation.candidate_count,
+                            relation.confidence, relation.completeness
+                       FROM graph_relations AS relation INDEXED BY {index_name}
+                       CROSS JOIN request
+                      WHERE relation.{key_column} = ?
+                        AND relation.project_instance_id = request.project_instance_id
+                        {continuation}
+                      ORDER BY relation.relation_scope, relation.relation_kind,
+                               relation.canonical_identity, relation.relation_key
+                      LIMIT ?
+                 )"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
+    format!(
+        "WITH {request}
+         {branches}
+         ORDER BY frontier_index, relation_scope, relation_kind,
+                  canonical_identity, relation_key
+         LIMIT ?"
+    )
+}
+
+/// Build one anonymous fixed-column `VALUES` clause.
+fn graph_values_clause(rows: usize, columns: usize) -> String {
+    let row = format!("({})", vec!["?"; columns].join(", "));
+    vec![row; rows].join(", ")
+}
+
+/// Load every unique relation endpoint through bounded set-oriented joins.
+fn load_relation_entities(
+    store: &AtlasStore,
+    rows: &[RelationRow],
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    control: Option<&IndexWorkControl>,
+) -> DbResult<HashMap<[u8; 32], GraphEntity>> {
+    let references = rows.iter().collect::<Vec<_>>();
+    load_relation_entity_references(store, &references, project, generation, control)
+}
+
+/// Load relation endpoint references shared by ordinary and adjacency pages.
+fn load_relation_entity_references(
+    store: &AtlasStore,
+    rows: &[&RelationRow],
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    control: Option<&IndexWorkControl>,
+) -> DbResult<HashMap<[u8; 32], GraphEntity>> {
+    let mut digests = BTreeSet::new();
+    for row in rows {
+        let row_project =
+            project_from_blob("graph_relations.project_instance_id", row.project.clone())?;
+        require_project(project, row_project)?;
+        digests.insert(fixed_bytes::<32>(
+            "graph_relations.source_entity_key",
+            row.source.clone(),
+        )?);
+        if let Some(target) = &row.target {
+            digests.insert(fixed_bytes::<32>(
+                "graph_relations.target_entity_key",
+                target.clone(),
+            )?);
+        }
+    }
+    load_graph_entities_by_digest(
+        store,
+        &digests.into_iter().collect::<Vec<_>>(),
+        project,
+        generation,
+        control,
+    )
+}
+
+/// Hydrate one unique stable-key set without issuing one query per entity.
+fn load_graph_entities_by_digest(
+    store: &AtlasStore,
+    digests: &[[u8; 32]],
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    control: Option<&IndexWorkControl>,
+) -> DbResult<HashMap<[u8; 32], GraphEntity>> {
+    let mut entities = HashMap::with_capacity(digests.len());
+    for chunk in digests.chunks(GRAPH_ENTITY_HYDRATION_CHUNK) {
+        if let Some(control) = control {
+            control.check(IndexWorkStage::RepositoryTraversal)?;
+        }
+        let sql = format!(
+            "WITH requested(entity_key) AS (VALUES {})
+             SELECT entity.entity_key, entity.project_instance_id,
+                    entity.canonical_identity, entity.entity_kind,
+                    entity.repository_path, entity.package_manager,
+                    entity.package_name, entity.manifest_path,
+                    entity.symbol_name, entity.symbol_kind,
+                    entity.symbol_parent, entity.symbol_signature,
+                    entity.external_system, entity.external_identity
+               FROM requested
+               JOIN graph_entities AS entity
+                 ON entity.entity_key = requested.entity_key
+              WHERE entity.project_instance_id = ?
+              ORDER BY entity.entity_key",
+            graph_values_clause(chunk.len(), 1),
+        );
+        let mut bindings = chunk
+            .iter()
+            .map(|digest| Value::Blob(digest.to_vec()))
+            .collect::<Vec<_>>();
+        bindings.push(Value::Blob(project.as_bytes().to_vec()));
+        let raw = with_sqlite_read_progress(
+            &store.connection,
+            control,
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                let mut statement = store.connection.prepare(&sql)?;
+                collect_entity_rows(statement.query(params_from_iter(bindings.iter()))?)
+            },
+        )?;
+        for row in raw {
+            let entity = entity_from_row(row, project, generation)?;
+            let digest = entity.key().digest_bytes()?;
+            if entities.insert(digest, entity).is_some() {
+                return Err(DbError::GraphRowShape {
+                    table: "graph_entities",
+                    reason: "batched entity hydration returned a duplicate key",
+                });
+            }
+        }
+    }
+    Ok(entities)
+}
+
 /// Reconstruct one typed logical relation through existing domain constructors.
 fn relation_from_row(
-    store: &AtlasStore,
-    entities: &mut HashMap<[u8; 32], GraphEntity>,
+    entities: &HashMap<[u8; 32], GraphEntity>,
     row: RelationRow,
     expected_project: ProjectInstanceId,
     generation: IndexGeneration,
@@ -3177,12 +3606,13 @@ fn relation_from_row(
     let project = project_from_blob("graph_relations.project_instance_id", row.project.clone())?;
     require_project(expected_project, project)?;
     let source_key = fixed_bytes::<32>("graph_relations.source_entity_key", row.source.clone())?;
-    let source = load_entity_cached(store, entities, project, source_key, generation)?.ok_or(
-        DbError::GraphRowShape {
+    let source = entities
+        .get(&source_key)
+        .cloned()
+        .ok_or(DbError::GraphRowShape {
             table: "graph_relations",
             reason: "source entity is missing",
-        },
-    )?;
+        })?;
     let kind = parse_relation_kind(&row.relation_scope, &row.relation_kind)?;
     let resolution = match row.resolution_status.as_str() {
         "resolved" => {
@@ -3194,7 +3624,9 @@ fn relation_from_row(
                     reason: "resolved target is missing",
                 })?,
             )?;
-            let target = load_entity_cached(store, entities, project, target_key, generation)?
+            let target = entities
+                .get(&target_key)
+                .cloned()
                 .ok_or(DbError::GraphRowShape {
                     table: "graph_relations",
                     reason: "resolved target entity is missing",
@@ -3210,7 +3642,9 @@ fn relation_from_row(
                     reason: "external target is missing",
                 })?,
             )?;
-            let target = load_entity_cached(store, entities, project, target_key, generation)?
+            let target = entities
+                .get(&target_key)
+                .cloned()
                 .ok_or(DbError::GraphRowShape {
                     table: "graph_relations",
                     reason: "external target entity is missing",
@@ -3419,24 +3853,6 @@ fn load_entity_by_digest(
         .transpose()
 }
 
-/// Load an entity once per relation page and reuse its validated domain value.
-fn load_entity_cached(
-    store: &AtlasStore,
-    entities: &mut HashMap<[u8; 32], GraphEntity>,
-    project: ProjectInstanceId,
-    digest: [u8; 32],
-    generation: IndexGeneration,
-) -> DbResult<Option<GraphEntity>> {
-    if let Some(entity) = entities.get(&digest) {
-        return Ok(Some(entity.clone()));
-    }
-    let entity = load_entity_by_digest(store, project, &digest, generation)?;
-    if let Some(entity) = &entity {
-        entities.insert(digest, entity.clone());
-    }
-    Ok(entity)
-}
-
 /// Fail with both project identities when normalized ownership differs.
 fn require_project(expected: ProjectInstanceId, found: ProjectInstanceId) -> DbResult<()> {
     if expected != found {
@@ -3528,21 +3944,40 @@ fn collect_relation_rows(mut rows: rusqlite::Rows<'_>) -> DbResult<Vec<RelationR
     Ok(collected)
 }
 
+/// Collect every raw adjacency row, including the truncation sentinel row.
+fn collect_adjacency_relation_rows(
+    mut rows: rusqlite::Rows<'_>,
+) -> DbResult<Vec<AdjacencyRelationRow>> {
+    let mut collected = Vec::new();
+    while let Some(row) = rows.next()? {
+        collected.push(AdjacencyRelationRow {
+            frontier_index: row.get(0)?,
+            relation: relation_row_at(row, 1)?,
+        });
+    }
+    Ok(collected)
+}
+
 /// Read one raw relation row without interpreting enum or resolution values.
 fn relation_row(row: &Row<'_>) -> rusqlite::Result<RelationRow> {
+    relation_row_at(row, 0)
+}
+
+/// Read one raw relation row beginning at the selected column offset.
+fn relation_row_at(row: &Row<'_>, offset: usize) -> rusqlite::Result<RelationRow> {
     Ok(RelationRow {
-        key: row.get(0)?,
-        project: row.get(1)?,
-        canonical: row.get(2)?,
-        source: row.get(3)?,
-        relation_scope: row.get(4)?,
-        relation_kind: row.get(5)?,
-        resolution_status: row.get(6)?,
-        target: row.get(7)?,
-        reference: row.get(8)?,
-        candidate_count: row.get(9)?,
-        confidence: row.get(10)?,
-        completeness: row.get(11)?,
+        key: row.get(offset)?,
+        project: row.get(offset + 1)?,
+        canonical: row.get(offset + 2)?,
+        source: row.get(offset + 3)?,
+        relation_scope: row.get(offset + 4)?,
+        relation_kind: row.get(offset + 5)?,
+        resolution_status: row.get(offset + 6)?,
+        target: row.get(offset + 7)?,
+        reference: row.get(offset + 8)?,
+        candidate_count: row.get(offset + 9)?,
+        confidence: row.get(offset + 10)?,
+        completeness: row.get(offset + 11)?,
     })
 }
 
@@ -3599,6 +4034,15 @@ fn empty_page<T>() -> RepositoryGraphPage<T> {
     RepositoryGraphPage {
         rows: Vec::new(),
         truncated: false,
+    }
+}
+
+/// Return an empty adjacency page when no selected graph/frontier is available.
+fn empty_adjacency_page() -> RepositoryGraphAdjacencyPage {
+    RepositoryGraphAdjacencyPage {
+        rows: Vec::new(),
+        truncated: false,
+        continuation: None,
     }
 }
 
@@ -6356,6 +6800,521 @@ mod tests {
     }
 
     #[test]
+    fn batched_adjacency_uses_direction_owned_indexes_and_stable_keysets()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("batched-adjacency");
+        let atlas_dir = project_root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let db_path = atlas_dir.join("projectatlas.db");
+        let mut writer = AtlasStore::open_for_project(&db_path, &project_root)?;
+        let fixture = publish_fixture(&mut writer, "batched-adjacency")?;
+        drop(writer);
+        let store = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+
+        let source = fixture
+            .entities
+            .iter()
+            .find(|entity| matches!(entity.selector(), EntitySelector::File { .. }))
+            .ok_or_else(|| io::Error::other("source file fixture missing"))?;
+        let symbol = fixture
+            .entities
+            .iter()
+            .find(|entity| matches!(entity.selector(), EntitySelector::Symbol { .. }))
+            .ok_or_else(|| io::Error::other("symbol fixture missing"))?;
+        let external = fixture
+            .entities
+            .iter()
+            .find(|entity| matches!(entity.selector(), EntitySelector::External { .. }))
+            .ok_or_else(|| io::Error::other("external fixture missing"))?;
+        let outbound_frontier = vec![source.key().clone()];
+
+        let first = store.repository_graph_adjacency_page(
+            &outbound_frontier,
+            RepositoryGraphDirection::Outbound,
+            None,
+            2,
+            None,
+        )?;
+        require(
+            first.truncated && first.rows.len() == 2 && first.continuation.is_some(),
+            "outbound adjacency did not retain its LIMIT + 1 keyset",
+        )?;
+        require(
+            first.rows.iter().all(|row| {
+                row.frontier_index == 0
+                    && row.frontier == source.key().clone()
+                    && row.direction == RepositoryGraphDirection::Outbound
+            }),
+            "outbound adjacency lost its selecting frontier",
+        )?;
+        let continuation = first
+            .continuation
+            .clone()
+            .ok_or_else(|| io::Error::other("outbound continuation missing"))?;
+        let second = store.repository_graph_adjacency_page(
+            &outbound_frontier,
+            RepositoryGraphDirection::Outbound,
+            Some(&continuation),
+            10,
+            None,
+        )?;
+        require(
+            !second.truncated && second.rows.len() == 2 && second.continuation.is_none(),
+            "outbound continuation did not finish the stable relation order",
+        )?;
+        let ordinary = store.repository_graph_relations(
+            RepositoryGraphRelationQuery::Outbound {
+                source: source.key().clone(),
+            },
+            10,
+        )?;
+        let combined = first
+            .rows
+            .into_iter()
+            .chain(second.rows)
+            .map(|row| row.relation)
+            .collect::<Vec<_>>();
+        require_eq(
+            &combined,
+            &ordinary.rows,
+            "adjacency keyset order versus ordinary relation order",
+        )?;
+
+        let inbound_frontier = vec![symbol.key().clone(), external.key().clone()];
+        let inbound = store.repository_graph_adjacency_page(
+            &inbound_frontier,
+            RepositoryGraphDirection::Inbound,
+            None,
+            10,
+            None,
+        )?;
+        require(
+            !inbound.truncated
+                && inbound.rows.len() == 2
+                && inbound.rows[0].frontier_index == 0
+                && inbound.rows[0].frontier == symbol.key().clone()
+                && inbound.rows[1].frontier_index == 1
+                && inbound.rows[1].frontier == external.key().clone()
+                && inbound
+                    .rows
+                    .iter()
+                    .all(|row| row.direction == RepositoryGraphDirection::Inbound),
+            "inbound adjacency did not preserve bounded frontier order",
+        )?;
+
+        for (direction, expected_index) in [
+            (
+                RepositoryGraphDirection::Outbound,
+                "idx_graph_relations_source_kind",
+            ),
+            (
+                RepositoryGraphDirection::Inbound,
+                "idx_graph_relations_target_kind",
+            ),
+        ] {
+            for continuation_index in [None, Some(0)] {
+                let sql = format!(
+                    "EXPLAIN QUERY PLAN {}",
+                    adjacency_relation_sql(2, direction, continuation_index)
+                );
+                let mut statement = store.connection.prepare(&sql)?;
+                let mut bindings = vec![Value::Blob(fixture.project.as_bytes().to_vec())];
+                bindings.push(Value::Blob(source.key().digest_bytes()?.to_vec()));
+                if continuation_index.is_some() {
+                    bindings.extend([
+                        Value::Text(String::new()),
+                        Value::Text(String::new()),
+                        Value::Text(String::new()),
+                        Value::Blob(vec![0; 32]),
+                    ]);
+                }
+                bindings.extend([
+                    Value::Integer(11),
+                    Value::Blob(symbol.key().digest_bytes()?.to_vec()),
+                    Value::Integer(11),
+                    Value::Integer(11),
+                ]);
+                let details = statement
+                    .query_map(params_from_iter(bindings.iter()), |row| {
+                        row.get::<_, String>(3)
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                require(
+                    details.iter().any(|detail| detail.contains(expected_index))
+                        && details
+                            .iter()
+                            .all(|detail| !detail.contains("SCAN relation")),
+                    &format!(
+                        "{direction:?} adjacency plan (continuation_index={continuation_index:?}) did not own its index: {details:?}"
+                    ),
+                )?;
+            }
+        }
+
+        let duplicate_error = require_db_error(
+            store.repository_graph_adjacency_page(
+                &[source.key().clone(), source.key().clone()],
+                RepositoryGraphDirection::Outbound,
+                None,
+                1,
+                None,
+            ),
+            "duplicate adjacency frontier was accepted",
+        )?;
+        require(
+            matches!(duplicate_error, DbError::GraphContract(_)),
+            &format!("unexpected duplicate-frontier error: {duplicate_error}"),
+        )?;
+        let oversized = vec![source.key().clone(); MAX_REPOSITORY_GRAPH_FRONTIER + 1];
+        let oversized_error = require_db_error(
+            store.repository_graph_adjacency_page(
+                &oversized,
+                RepositoryGraphDirection::Outbound,
+                None,
+                1,
+                None,
+            ),
+            "oversized adjacency frontier was accepted",
+        )?;
+        require(
+            matches!(oversized_error, DbError::GraphContract(_)),
+            &format!("unexpected oversized-frontier error: {oversized_error}"),
+        )?;
+        let foreign = GraphEntity::new(
+            ProjectInstanceId::from_bytes([0x7f; 16])?,
+            EntitySelector::Project,
+            IndexGeneration::new(1),
+        )?;
+        let project_error = require_db_error(
+            store.repository_graph_adjacency_page(
+                &[source.key().clone(), foreign.key().clone()],
+                RepositoryGraphDirection::Outbound,
+                None,
+                1,
+                None,
+            ),
+            "mixed-project adjacency frontier was accepted",
+        )?;
+        require(
+            matches!(project_error, DbError::GraphProjectIdentityMismatch { .. }),
+            &format!("unexpected mixed-project error: {project_error}"),
+        )?;
+        let direction_error = require_db_error(
+            store.repository_graph_adjacency_page(
+                &outbound_frontier,
+                RepositoryGraphDirection::Inbound,
+                Some(&continuation),
+                1,
+                None,
+            ),
+            "cross-direction adjacency continuation was accepted",
+        )?;
+        require(
+            matches!(direction_error, DbError::GraphContract(_)),
+            &format!("unexpected continuation-direction error: {direction_error}"),
+        )?;
+        let frontier_error = require_db_error(
+            store.repository_graph_adjacency_page(
+                &[external.key().clone()],
+                RepositoryGraphDirection::Outbound,
+                Some(&continuation),
+                1,
+                None,
+            ),
+            "cross-frontier adjacency continuation was accepted",
+        )?;
+        require(
+            matches!(frontier_error, DbError::GraphContract(_)),
+            &format!("unexpected continuation-frontier error: {frontier_error}"),
+        )?;
+
+        let inbound_first = store.repository_graph_adjacency_page(
+            &inbound_frontier,
+            RepositoryGraphDirection::Inbound,
+            None,
+            1,
+            None,
+        )?;
+        let inbound_continuation = inbound_first
+            .continuation
+            .ok_or_else(|| io::Error::other("inbound continuation missing"))?;
+        let reordered_frontier = vec![external.key().clone(), symbol.key().clone()];
+        let reordered_error = require_db_error(
+            store.repository_graph_adjacency_page(
+                &reordered_frontier,
+                RepositoryGraphDirection::Inbound,
+                Some(&inbound_continuation),
+                1,
+                None,
+            ),
+            "reordered adjacency continuation frontier was accepted",
+        )?;
+        require(
+            matches!(reordered_error, DbError::GraphContract(_)),
+            &format!("unexpected reordered-frontier error: {reordered_error}"),
+        )?;
+        let empty_frontier_error = require_db_error(
+            store.repository_graph_adjacency_page(
+                &[],
+                RepositoryGraphDirection::Inbound,
+                Some(&inbound_continuation),
+                1,
+                None,
+            ),
+            "adjacency continuation without a frontier was accepted",
+        )?;
+        require(
+            matches!(empty_frontier_error, DbError::GraphContract(_)),
+            &format!("unexpected empty-frontier error: {empty_frontier_error}"),
+        )?;
+
+        let mut foreign_project_continuation = continuation.clone();
+        foreign_project_continuation.project = foreign.key().project();
+        let continuation_project_error = require_db_error(
+            store.repository_graph_adjacency_page(
+                &outbound_frontier,
+                RepositoryGraphDirection::Outbound,
+                Some(&foreign_project_continuation),
+                1,
+                None,
+            ),
+            "cross-project adjacency continuation was accepted",
+        )?;
+        require(
+            matches!(continuation_project_error, DbError::GraphContract(_)),
+            &format!("unexpected continuation-project error: {continuation_project_error}"),
+        )?;
+        let mut stale_generation_continuation = continuation.clone();
+        stale_generation_continuation.generation = stale_generation_continuation
+            .generation
+            .checked_next()
+            .ok_or_else(|| io::Error::other("fixture generation overflowed"))?;
+        let continuation_generation_error = require_db_error(
+            store.repository_graph_adjacency_page(
+                &outbound_frontier,
+                RepositoryGraphDirection::Outbound,
+                Some(&stale_generation_continuation),
+                1,
+                None,
+            ),
+            "cross-generation adjacency continuation was accepted",
+        )?;
+        require(
+            matches!(continuation_generation_error, DbError::GraphContract(_)),
+            &format!("unexpected continuation-generation error: {continuation_generation_error}"),
+        )?;
+
+        let mut maximum_frontier = Vec::with_capacity(MAX_REPOSITORY_GRAPH_FRONTIER);
+        for index in 0..MAX_REPOSITORY_GRAPH_FRONTIER {
+            let entity = GraphEntity::new(
+                fixture.project,
+                EntitySelector::External {
+                    external: ExternalSelector {
+                        system: GraphIdentityText::new("work-envelope")?,
+                        identity: GraphIdentityText::new(format!("candidate-{index}"))?,
+                    },
+                },
+                continuation.generation,
+            )?;
+            maximum_frontier.push(entity.key().clone());
+        }
+        let bounded_work = store.repository_graph_adjacency_page(
+            &maximum_frontier,
+            RepositoryGraphDirection::Outbound,
+            None,
+            38,
+            None,
+        )?;
+        require(
+            bounded_work.rows.is_empty() && !bounded_work.truncated,
+            "maximum adjacency frontier rejected work below the intermediate ceiling",
+        )?;
+        let excessive_work_error = require_db_error(
+            store.repository_graph_adjacency_page(
+                &maximum_frontier,
+                RepositoryGraphDirection::Outbound,
+                None,
+                39,
+                None,
+            ),
+            "adjacency intermediate work above the ceiling was accepted",
+        )?;
+        require(
+            matches!(excessive_work_error, DbError::GraphContract(_)),
+            &format!("unexpected intermediate-work error: {excessive_work_error}"),
+        )?;
+
+        let successful_cancellation = projectatlas_core::IndexCancellation::new();
+        let successful_control = IndexWorkControl::new(successful_cancellation.clone(), None);
+        store.repository_graph_adjacency_page(
+            &outbound_frontier,
+            RepositoryGraphDirection::Outbound,
+            None,
+            10,
+            Some(&successful_control),
+        )?;
+        successful_cancellation.cancel();
+        require_eq(
+            &store
+                .connection
+                .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?,
+            &1,
+            "cleared adjacency progress handler",
+        )?;
+
+        let cancellation = projectatlas_core::IndexCancellation::new();
+        cancellation.cancel();
+        let control = IndexWorkControl::new(cancellation, None);
+        let cancelled = store.repository_graph_adjacency_page(
+            &outbound_frontier,
+            RepositoryGraphDirection::Outbound,
+            None,
+            10,
+            Some(&control),
+        );
+        require(
+            matches!(
+                cancelled,
+                Err(DbError::IndexWork(
+                    projectatlas_core::IndexWorkFailure::Cancelled {
+                        stage: IndexWorkStage::RepositoryTraversal
+                    }
+                ))
+            ),
+            "adjacency cancellation was not typed",
+        )?;
+        store.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn continued_adjacency_seeks_past_high_degree_prefixes() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("continued-adjacency-work");
+        let atlas_dir = project_root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let db_path = atlas_dir.join("projectatlas.db");
+        let mut writer = AtlasStore::open_for_project(&db_path, &project_root)?;
+        let fixture = publish_fixture(&mut writer, "continued-adjacency-work")?;
+        let source = fixture
+            .entities
+            .iter()
+            .find(|entity| matches!(entity.selector(), EntitySelector::File { .. }))
+            .ok_or_else(|| io::Error::other("source file fixture missing"))?;
+        let external = fixture
+            .entities
+            .iter()
+            .find(|entity| matches!(entity.selector(), EntitySelector::External { .. }))
+            .ok_or_else(|| io::Error::other("external fixture missing"))?;
+        writer.connection.execute(
+            "WITH RECURSIVE sequence(value) AS (
+                 VALUES(1)
+                 UNION ALL
+                 SELECT value + 1 FROM sequence WHERE value < 100000
+             )
+             INSERT INTO graph_relations(
+                 relation_key, project_instance_id, canonical_identity,
+                 source_entity_key, relation_scope, relation_kind,
+                 resolution_status, target_entity_key, reference_text,
+                 candidate_count, confidence, completeness
+             )
+             SELECT CAST(printf('%032d', 1000000 + value) AS BLOB),
+                    ?1, printf('perf-%06d', value), ?2,
+                    'legacy', 'calls', 'resolved', ?3, NULL, NULL,
+                    'exact', 'complete'
+               FROM sequence",
+            params![
+                fixture.project.as_bytes().as_slice(),
+                source.key().digest_bytes()?.as_slice(),
+                external.key().digest_bytes()?.as_slice(),
+            ],
+        )?;
+        drop(writer);
+
+        let store = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+        let generation = store
+            .repository_graph_generation()?
+            .ok_or_else(|| io::Error::other("graph generation missing"))?;
+        let source_digest = source.key().digest_bytes()?;
+        let external_digest = external.key().digest_bytes()?;
+        let skipped_frontier = vec![source.key().clone(), external.key().clone()];
+        let skipped_continuation = RepositoryGraphAdjacencyContinuation {
+            project: fixture.project,
+            generation,
+            direction: RepositoryGraphDirection::Outbound,
+            frontier: vec![source_digest, external_digest],
+            frontier_index: 1,
+            relation_scope: String::new(),
+            relation_kind: String::new(),
+            canonical_identity: String::new(),
+            relation_key: [0; 32],
+        };
+        let skipped_steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let skipped_counter = std::sync::Arc::clone(&skipped_steps);
+        store.connection.progress_handler(
+            1_000,
+            Some(move || {
+                skipped_counter.fetch_add(1_000, std::sync::atomic::Ordering::Relaxed);
+                false
+            }),
+        );
+        let skipped_result = store.repository_graph_adjacency_page(
+            &skipped_frontier,
+            RepositoryGraphDirection::Outbound,
+            Some(&skipped_continuation),
+            2,
+            None,
+        );
+        store.connection.progress_handler(0, None::<fn() -> bool>);
+        skipped_result?;
+        require(
+            skipped_steps.load(std::sync::atomic::Ordering::Relaxed) < 100_000,
+            "continued adjacency scanned a completed high-degree frontier branch",
+        )?;
+
+        let last_key: [u8; 32] = format!("{:032}", 1_100_000)
+            .into_bytes()
+            .try_into()
+            .map_err(|_source| io::Error::other("high-degree cursor key width changed"))?;
+        let deep_continuation = RepositoryGraphAdjacencyContinuation {
+            project: fixture.project,
+            generation,
+            direction: RepositoryGraphDirection::Outbound,
+            frontier: vec![source_digest],
+            frontier_index: 0,
+            relation_scope: "legacy".to_string(),
+            relation_kind: "calls".to_string(),
+            canonical_identity: "perf-100000".to_string(),
+            relation_key: last_key,
+        };
+        let deep_steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let deep_counter = std::sync::Arc::clone(&deep_steps);
+        store.connection.progress_handler(
+            1_000,
+            Some(move || {
+                deep_counter.fetch_add(1_000, std::sync::atomic::Ordering::Relaxed);
+                false
+            }),
+        );
+        let deep_result = store.repository_graph_adjacency_page(
+            &[source.key().clone()],
+            RepositoryGraphDirection::Outbound,
+            Some(&deep_continuation),
+            2,
+            None,
+        );
+        store.connection.progress_handler(0, None::<fn() -> bool>);
+        deep_result?;
+        require(
+            deep_steps.load(std::sync::atomic::Ordering::Relaxed) < 100_000,
+            "continued adjacency rescanned a high-degree keyset prefix",
+        )?;
+        store.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
     fn coverage_discovery_filters_provenance_and_fails_closed_after_reopen()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -7013,6 +7972,20 @@ mod tests {
             require(
                 matches!(error, DbError::GraphRowShape { .. }),
                 &format!("unexpected candidate-count error: {error}"),
+            )?;
+            let adjacency_error = require_db_error(
+                reader.repository_graph_adjacency_page(
+                    &[source.key().clone()],
+                    RepositoryGraphDirection::Outbound,
+                    None,
+                    10,
+                    None,
+                ),
+                "corrupt adjacency relation returned a partial page",
+            )?;
+            require(
+                matches!(adjacency_error, DbError::GraphRowShape { .. }),
+                &format!("unexpected adjacency row-shape error: {adjacency_error}"),
             )?;
             reader.finish_index_read_snapshot()?;
         }

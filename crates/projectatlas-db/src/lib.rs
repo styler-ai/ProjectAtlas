@@ -16,9 +16,11 @@ pub use diagnostics::{
 };
 pub use project_identity::{ProjectRootTransition, ProjectRootTransitionResult};
 pub use repository_graph::{
-    RepositoryAffectedSourceFootprint, RepositoryCoverageQuery, RepositoryCoverageRow,
-    RepositoryGraphPage, RepositoryGraphRelationQuery, RepositoryNavigationConnections,
-    RepositoryNavigationNode, RepositoryResolutionCandidate,
+    MAX_REPOSITORY_GRAPH_FRONTIER, RepositoryAffectedSourceFootprint, RepositoryCoverageQuery,
+    RepositoryCoverageRow, RepositoryGraphAdjacencyContinuation, RepositoryGraphAdjacencyPage,
+    RepositoryGraphAdjacencyRow, RepositoryGraphDirection, RepositoryGraphPage,
+    RepositoryGraphRelationQuery, RepositoryNavigationConnections, RepositoryNavigationNode,
+    RepositoryResolutionCandidate,
 };
 pub use sqlite_profile::validate_database_location;
 pub use telemetry::{
@@ -5663,29 +5665,30 @@ fn validate_indexed_file_text(text: &IndexedFileText) -> DbResult<()> {
     Ok(())
 }
 
-/// Virtual-machine operations between bounded text-read progress checks.
-const FILE_TEXT_PROGRESS_OPS: i32 = 1_000;
+/// Virtual-machine operations between bounded database-read progress checks.
+const SQLITE_READ_PROGRESS_OPS: i32 = 1_000;
 
 /// Clears a connection-local `SQLite` progress handler on every exit path.
-struct FileTextProgressGuard<'connection> {
+pub(crate) struct SqliteReadProgressGuard<'connection> {
     /// Connection whose temporary progress callback is armed.
     connection: &'connection Connection,
     /// Whether this guard installed a callback that must be removed.
     armed: bool,
 }
 
-impl<'connection> FileTextProgressGuard<'connection> {
-    /// Install one cooperative text-index progress callback when requested.
-    fn new(
+impl<'connection> SqliteReadProgressGuard<'connection> {
+    /// Install one cooperative progress callback for the owning work stage.
+    pub(crate) fn new(
         connection: &'connection Connection,
         control: Option<&IndexWorkControl>,
+        stage: IndexWorkStage,
     ) -> DbResult<Self> {
         let armed = if let Some(control) = control {
-            control.check(IndexWorkStage::TextIndex)?;
+            control.check(stage)?;
             let progress_control = control.clone();
             connection.progress_handler(
-                FILE_TEXT_PROGRESS_OPS,
-                Some(move || progress_control.check(IndexWorkStage::TextIndex).is_err()),
+                SQLITE_READ_PROGRESS_OPS,
+                Some(move || progress_control.check(stage).is_err()),
             );
             true
         } else {
@@ -5695,7 +5698,7 @@ impl<'connection> FileTextProgressGuard<'connection> {
     }
 }
 
-impl Drop for FileTextProgressGuard<'_> {
+impl Drop for SqliteReadProgressGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
             self.connection.progress_handler(0, None::<fn() -> bool>);
@@ -5704,12 +5707,13 @@ impl Drop for FileTextProgressGuard<'_> {
 }
 
 /// Run one read with a temporary cooperative progress handler.
-fn with_file_text_progress<T>(
+pub(crate) fn with_sqlite_read_progress<T>(
     connection: &Connection,
     control: Option<&IndexWorkControl>,
+    stage: IndexWorkStage,
     operation: impl FnOnce() -> DbResult<T>,
 ) -> DbResult<T> {
-    let guard = FileTextProgressGuard::new(connection, control)?;
+    let guard = SqliteReadProgressGuard::new(connection, control, stage)?;
     let result = operation();
     drop(guard);
     if result.as_ref().is_err_and(|error| {
@@ -5720,9 +5724,18 @@ fn with_file_text_progress<T>(
         )
     }) && let Some(control) = control
     {
-        control.check(IndexWorkStage::TextIndex)?;
+        control.check(stage)?;
     }
     result
+}
+
+/// Run one text-index read through the shared bounded database-read guard.
+fn with_file_text_progress<T>(
+    connection: &Connection,
+    control: Option<&IndexWorkControl>,
+    operation: impl FnOnce() -> DbResult<T>,
+) -> DbResult<T> {
+    with_sqlite_read_progress(connection, control, IndexWorkStage::TextIndex, operation)
 }
 
 /// Enforce the single safe-token contract used by FTS candidate lookup.
@@ -10180,6 +10193,53 @@ mod tests {
                 .len(),
             &1,
             "reopened FTS candidate count",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_read_progress_interrupts_active_repository_traversal_and_clears_handler()
+    -> Result<(), Box<dyn Error>> {
+        let store = AtlasStore::in_memory()?;
+        let control = IndexWorkControl::with_deadline(
+            projectatlas_core::IndexCancellation::new(),
+            Instant::now() + std::time::Duration::from_millis(50),
+        );
+        let interrupted = with_sqlite_read_progress(
+            &store.connection,
+            Some(&control),
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                store
+                    .connection
+                    .query_row(
+                        "WITH RECURSIVE numbers(value) AS (
+                             VALUES(1)
+                             UNION ALL
+                             SELECT value + 1 FROM numbers WHERE value < 100000000
+                         )
+                         SELECT SUM(value) FROM numbers",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(DbError::from)
+            },
+        );
+        require(
+            matches!(
+                interrupted,
+                Err(DbError::IndexWork(IndexWorkFailure::DeadlineExceeded {
+                    stage: IndexWorkStage::RepositoryTraversal
+                }))
+            ),
+            "active SQLite traversal was not interrupted with its typed deadline",
+        )?;
+        require_eq(
+            &store
+                .connection
+                .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?,
+            &1,
+            "cleared repository traversal progress handler",
         )?;
         Ok(())
     }
