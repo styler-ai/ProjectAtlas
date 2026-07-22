@@ -167,6 +167,17 @@ pub enum RepositoryGraphDirection {
     Inbound,
 }
 
+/// One normalized relation with the endpoint entities already hydrated.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryGraphRelationRow {
+    /// Fully reconstructed normalized relation.
+    pub relation: LogicalRelation,
+    /// Exact source entity named by the relation.
+    pub source: GraphEntity,
+    /// Retained resolved or external target, when the relation has one.
+    pub target: Option<GraphEntity>,
+}
+
 /// Opaque keyset used only to continue one bounded adjacency request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryGraphAdjacencyContinuation {
@@ -176,6 +187,8 @@ pub struct RepositoryGraphAdjacencyContinuation {
     generation: IndexGeneration,
     /// Direction whose stable order produced this keyset.
     direction: RepositoryGraphDirection,
+    /// Optional exact relation family whose stable order produced this keyset.
+    relation: Option<GraphRelationKind>,
     /// Ordered frontier identity whose result order produced this keyset.
     frontier: Vec<[u8; 32]>,
     /// Zero-based frontier position of the last returned relation.
@@ -199,8 +212,8 @@ pub struct RepositoryGraphAdjacencyRow {
     pub frontier: GraphEntityKey,
     /// Direction relative to the selecting frontier entity.
     pub direction: RepositoryGraphDirection,
-    /// Fully reconstructed normalized relation.
-    pub relation: LogicalRelation,
+    /// Normalized relation and its already-hydrated endpoints.
+    pub detail: RepositoryGraphRelationRow,
 }
 
 /// One bounded direction-specific adjacency page.
@@ -1227,6 +1240,26 @@ impl AtlasStore {
         query: RepositoryGraphRelationQuery,
         limit: u32,
     ) -> DbResult<RepositoryGraphPage<LogicalRelation>> {
+        let page = self.repository_graph_relation_rows(query, limit, None)?;
+        Ok(RepositoryGraphPage {
+            rows: page.rows.into_iter().map(|row| row.relation).collect(),
+            truncated: page.truncated,
+        })
+    }
+
+    /// Load a bounded relation page with unique endpoint hydration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid limits, mismatched project identities,
+    /// cancellation, `SQLite` failure, or any corrupt entity/relation row in
+    /// the complete page.
+    pub fn repository_graph_relation_rows(
+        &self,
+        query: RepositoryGraphRelationQuery,
+        limit: u32,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphPage<RepositoryGraphRelationRow>> {
         let limit_plus_one = validated_limit_plus_one(
             limit,
             GraphLimits::MAX_ROWS,
@@ -1241,10 +1274,17 @@ impl AtlasStore {
                 if !verify_project_identity(&self.connection, project)? {
                     return Ok(empty_page());
                 }
-                let raw = self.collect_relation_rows_by_key(
-                    "source_entity_key",
-                    &source.digest_bytes()?,
-                    limit_plus_one,
+                let raw = with_sqlite_read_progress(
+                    &self.connection,
+                    control,
+                    IndexWorkStage::RepositoryTraversal,
+                    || {
+                        self.collect_relation_rows_by_key(
+                            "source_entity_key",
+                            &source.digest_bytes()?,
+                            limit_plus_one,
+                        )
+                    },
                 )?;
                 (project, raw)
             }
@@ -1253,10 +1293,17 @@ impl AtlasStore {
                 if !verify_project_identity(&self.connection, project)? {
                     return Ok(empty_page());
                 }
-                let raw = self.collect_relation_rows_by_key(
-                    "target_entity_key",
-                    &target.digest_bytes()?,
-                    limit_plus_one,
+                let raw = with_sqlite_read_progress(
+                    &self.connection,
+                    control,
+                    IndexWorkStage::RepositoryTraversal,
+                    || {
+                        self.collect_relation_rows_by_key(
+                            "target_entity_key",
+                            &target.digest_bytes()?,
+                            limit_plus_one,
+                        )
+                    },
                 )?;
                 (project, raw)
             }
@@ -1264,9 +1311,13 @@ impl AtlasStore {
                 let project = load_project_identity(&self.connection)?
                     .ok_or(DbError::GraphPublicationUnavailable)?;
                 let (scope, kind) = relation_parts(relation);
-                let raw = {
-                    let mut statement = self.connection.prepare_cached(
-                        "SELECT relation_key, project_instance_id, canonical_identity,
+                let raw = with_sqlite_read_progress(
+                    &self.connection,
+                    control,
+                    IndexWorkStage::RepositoryTraversal,
+                    || {
+                        let mut statement = self.connection.prepare_cached(
+                            "SELECT relation_key, project_instance_id, canonical_identity,
                                 source_entity_key, relation_scope, relation_kind,
                                 resolution_status, target_entity_key, reference_text,
                                 candidate_count, confidence, completeness
@@ -1275,20 +1326,21 @@ impl AtlasStore {
                             AND relation_scope = ?2 AND relation_kind = ?3
                           ORDER BY canonical_identity, relation_key
                           LIMIT ?4",
-                    )?;
-                    collect_relation_rows(statement.query(params![
-                        &project.as_bytes()[..],
-                        scope,
-                        kind,
-                        limit_plus_one
-                    ])?)?
-                };
+                        )?;
+                        collect_relation_rows(statement.query(params![
+                            &project.as_bytes()[..],
+                            scope,
+                            kind,
+                            limit_plus_one
+                        ])?)
+                    },
+                )?;
                 (project, raw)
             }
         };
-        let entities = load_relation_entities(self, &raw, project, generation, None)?;
+        let entities = load_relation_entities(self, &raw, project, generation, control)?;
         page_from_raw(raw, limit, |row| {
-            relation_from_row(&entities, row, project, generation)
+            relation_detail_from_row(&entities, row, project, generation)
         })
     }
 
@@ -1309,6 +1361,32 @@ impl AtlasStore {
         &self,
         frontier: &[GraphEntityKey],
         direction: RepositoryGraphDirection,
+        continuation: Option<&RepositoryGraphAdjacencyContinuation>,
+        limit: u32,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphAdjacencyPage> {
+        self.repository_graph_adjacency_page_filtered(
+            frontier,
+            direction,
+            None,
+            continuation,
+            limit,
+            control,
+        )
+    }
+
+    /// Load one bounded direction-specific adjacency page for an optional exact family.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same fail-closed errors as
+    /// [`Self::repository_graph_adjacency_page`] and binds the optional family
+    /// to continuation state.
+    pub fn repository_graph_adjacency_page_filtered(
+        &self,
+        frontier: &[GraphEntityKey],
+        direction: RepositoryGraphDirection,
+        relation: Option<GraphRelationKind>,
         continuation: Option<&RepositoryGraphAdjacencyContinuation>,
         limit: u32,
         control: Option<&IndexWorkControl>,
@@ -1376,6 +1454,7 @@ impl AtlasStore {
             && (continuation.project != project
                 || continuation.generation != generation
                 || continuation.direction != direction
+                || continuation.relation != relation
                 || continuation.frontier != frontier_digests
                 || continuation.frontier_index as usize >= frontier.len())
         {
@@ -1399,10 +1478,18 @@ impl AtlasStore {
             .into());
         }
 
-        let mut bindings = Vec::with_capacity(active_frontier * 2 + continuation.map_or(2, |_| 6));
+        let bindings_per_frontier = if relation.is_some() { 4 } else { 2 };
+        let mut bindings = Vec::with_capacity(
+            active_frontier * bindings_per_frontier + continuation.map_or(2, |_| 6),
+        );
         bindings.push(Value::Blob(project.as_bytes().to_vec()));
         for (index, digest) in frontier_digests.iter().enumerate().skip(continuation_index) {
             bindings.push(Value::Blob(digest.to_vec()));
+            if let Some(relation) = relation {
+                let (scope, kind) = relation_parts(relation);
+                bindings.push(Value::Text(scope.to_string()));
+                bindings.push(Value::Text(kind.to_string()));
+            }
             if index == continuation_index
                 && let Some(continuation) = continuation
             {
@@ -1419,6 +1506,7 @@ impl AtlasStore {
             frontier.len(),
             direction,
             continuation.map(|value| value.frontier_index as usize),
+            relation.is_some(),
         );
         let raw = with_sqlite_read_progress(
             &self.connection,
@@ -1439,6 +1527,7 @@ impl AtlasStore {
                 project,
                 generation,
                 direction,
+                relation,
                 frontier: frontier_digests,
                 frontier_index: last.frontier_index,
                 relation_scope: last.relation.relation_scope.clone(),
@@ -1471,7 +1560,7 @@ impl AtlasStore {
                 frontier_index: row.frontier_index,
                 frontier: frontier_key,
                 direction,
-                relation: relation_from_row(&entities, row.relation, project, generation)?,
+                detail: relation_detail_from_row(&entities, row.relation, project, generation)?,
             });
         }
         if truncated {
@@ -1536,6 +1625,99 @@ impl AtlasStore {
         })
     }
 
+    /// Load per-relation occurrence pages through one bounded set-oriented statement.
+    ///
+    /// Result pages retain input order. Every generated branch uses the
+    /// relation-leading unique index and admits only `limit + 1` rows before
+    /// the final stable merge.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for mixed projects or generations, oversized input or
+    /// intermediate work, cancellation, unavailable publication state,
+    /// `SQLite` failure, or any invalid span or key.
+    pub fn repository_graph_occurrence_pages(
+        &self,
+        relations: &[LogicalRelation],
+        limit: u32,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<Vec<RepositoryGraphPage<RelationOccurrence>>> {
+        let limit_plus_one = validated_limit_plus_one(
+            limit,
+            GraphLimits::MAX_OCCURRENCES,
+            "graph occurrences must be nonzero and within the product ceiling",
+        )?;
+        if relations.is_empty() {
+            return Ok(Vec::new());
+        }
+        if relations.len() > MAX_REPOSITORY_GRAPH_FRONTIER {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph occurrence batch exceeds the product ceiling",
+            }
+            .into());
+        }
+        let work_rows = relations.len().checked_mul(limit_plus_one as usize).ok_or(
+            GraphContractError::InvalidLimits {
+                reason: "graph occurrence batch work overflowed",
+            },
+        )?;
+        if work_rows > MAX_REPOSITORY_GRAPH_ADJACENCY_WORK_ROWS {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph occurrence batch exceeds the intermediate row ceiling",
+            }
+            .into());
+        }
+        let Some(generation) = self.repository_graph_generation()? else {
+            return Ok((0..relations.len()).map(|_| empty_page()).collect());
+        };
+        let project = relations[0].key().project();
+        if !verify_project_identity(&self.connection, project)? {
+            return Ok((0..relations.len()).map(|_| empty_page()).collect());
+        }
+        let mut bindings = Vec::with_capacity(relations.len() * 2);
+        for relation in relations {
+            require_project(project, relation.key().project())?;
+            if relation.generation() != generation {
+                return Err(GraphContractError::GenerationMismatch {
+                    context: "relation occurrence batch query",
+                }
+                .into());
+            }
+            bindings.push(Value::Blob(relation.key().digest_bytes()?.to_vec()));
+            bindings.push(Value::Integer(limit_plus_one));
+        }
+        let sql = occurrence_pages_sql(relations.len());
+        let raw = with_sqlite_read_progress(
+            &self.connection,
+            control,
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                let mut statement = self.connection.prepare(&sql)?;
+                let mut queried = statement.query(params_from_iter(bindings.iter()))?;
+                let mut grouped = (0..relations.len())
+                    .map(|_| Vec::new())
+                    .collect::<Vec<Vec<OccurrenceRow>>>();
+                while let Some(row) = queried.next()? {
+                    let index = row.get::<_, usize>(0)?;
+                    let group = grouped.get_mut(index).ok_or(DbError::GraphRowShape {
+                        table: "graph_relation_occurrences",
+                        reason: "occurrence batch returned an invalid relation position",
+                    })?;
+                    group.push(occurrence_row_at(row, 1)?);
+                }
+                Ok(grouped)
+            },
+        )?;
+        raw.into_iter()
+            .zip(relations)
+            .map(|(rows, relation)| {
+                page_from_raw(rows, limit, |row| {
+                    occurrence_from_row(row, relation, generation)
+                })
+            })
+            .collect()
+    }
+
     /// Load bounded coverage rows for one exact project or path scope.
     ///
     /// # Errors
@@ -1584,6 +1766,87 @@ impl AtlasStore {
             collected
         };
         page_from_raw(raw, limit, |row| {
+            coverage_from_row(row, project, generation)
+        })
+    }
+
+    /// Load current coverage for a bounded unique set of exact repository paths.
+    ///
+    /// The complete path set is bound to one prepared statement so service
+    /// traversal never performs one coverage query per returned node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for duplicate or oversized path sets, cancellation,
+    /// unavailable publication state, project mismatch, `SQLite` failure, or
+    /// invalid persisted coverage.
+    pub fn repository_graph_path_coverage(
+        &self,
+        project: ProjectInstanceId,
+        paths: &[RepositoryNodePath],
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphPage<CoverageRecord>> {
+        if paths.len() > MAX_REPOSITORY_GRAPH_FRONTIER {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph coverage path set exceeds the product ceiling",
+            }
+            .into());
+        }
+        if paths.is_empty() {
+            return Ok(empty_page());
+        }
+        let mut unique = BTreeSet::new();
+        for path in paths {
+            if !unique.insert(path.as_str()) {
+                return Err(GraphContractError::InvalidLimits {
+                    reason: "graph coverage paths must be unique",
+                }
+                .into());
+            }
+        }
+        let Some(generation) = self.repository_graph_generation()? else {
+            return Ok(empty_page());
+        };
+        if !verify_project_identity(&self.connection, project)? {
+            return Ok(empty_page());
+        }
+
+        let path_bindings = vec!["?"; paths.len()].join(", ");
+        let sql = format!(
+            "SELECT project_instance_id, scope_kind, scope_path, relation_scope,
+                    relation_kind, state, total, covered, omitted, reason, reached_limit,
+                    NULL, NULL
+               FROM graph_coverage
+              WHERE project_instance_id = ?
+                AND scope_kind = ?
+                AND scope_path IN ({path_bindings})
+              ORDER BY scope_path, relation_scope, relation_kind, state, id
+              LIMIT ?"
+        );
+        let mut bindings = Vec::with_capacity(paths.len() + 3);
+        bindings.push(Value::Blob(project.as_bytes().to_vec()));
+        bindings.push(Value::Text("path".to_string()));
+        bindings.extend(
+            paths
+                .iter()
+                .map(|path| Value::Text(path.as_str().to_string())),
+        );
+        bindings.push(Value::Integer(i64::from(GraphLimits::MAX_ROWS) + 1));
+        let raw = with_sqlite_read_progress(
+            &self.connection,
+            control,
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                let mut statement = self.connection.prepare(&sql)?;
+                let mut rows = statement.query(params_from_iter(bindings.iter()))?;
+                let mut collected = Vec::new();
+                while let Some(row) = rows.next()? {
+                    collected.push(coverage_row(row)?);
+                }
+                Ok(collected)
+            },
+        )?;
+        page_from_raw(raw, GraphLimits::MAX_ROWS, |row| {
             coverage_from_row(row, project, generation)
         })
     }
@@ -3437,6 +3700,7 @@ fn adjacency_relation_sql(
     frontier_count: usize,
     direction: RepositoryGraphDirection,
     continuation_index: Option<usize>,
+    relation_filter: bool,
 ) -> String {
     let (key_column, index_name) = match direction {
         RepositoryGraphDirection::Outbound => {
@@ -3447,6 +3711,11 @@ fn adjacency_relation_sql(
         }
     };
     let request = "request(project_instance_id) AS (VALUES (?))";
+    let relation_filter = if relation_filter {
+        "AND relation.relation_scope = ? AND relation.relation_kind = ?"
+    } else {
+        ""
+    };
     let branches = (continuation_index.unwrap_or(0)..frontier_count)
         .map(|frontier_index| {
             let continuation = if continuation_index == Some(frontier_index) {
@@ -3470,6 +3739,7 @@ fn adjacency_relation_sql(
                        CROSS JOIN request
                       WHERE relation.{key_column} = ?
                         AND relation.project_instance_id = request.project_instance_id
+                        {relation_filter}
                         {continuation}
                       ORDER BY relation.relation_scope, relation.relation_kind,
                                relation.canonical_identity, relation.relation_key
@@ -3492,6 +3762,33 @@ fn adjacency_relation_sql(
 fn graph_values_clause(rows: usize, columns: usize) -> String {
     let row = format!("({})", vec!["?"; columns].join(", "));
     vec![row; rows].join(", ")
+}
+
+/// Build direction-independent per-relation occurrence branches.
+fn occurrence_pages_sql(relation_count: usize) -> String {
+    let branches = (0..relation_count)
+        .map(|index| {
+            format!(
+                "SELECT {index} AS relation_index, relation_key, file_path,
+                        start_line, start_column, end_line, end_column
+                   FROM (
+                        SELECT relation_key, file_path, start_line, start_column,
+                               end_line, end_column
+                          FROM graph_relation_occurrences
+                         WHERE relation_key = ?
+                         ORDER BY file_path, start_line, start_column,
+                                  end_line, end_column
+                         LIMIT ?
+                   ) AS occurrence_page_{index}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
+    format!(
+        "{branches}
+         ORDER BY relation_index, file_path, start_line, start_column,
+                  end_line, end_column"
+    )
 }
 
 /// Load every unique relation endpoint through bounded set-oriented joins.
@@ -3594,6 +3891,42 @@ fn load_graph_entities_by_digest(
         }
     }
     Ok(entities)
+}
+
+/// Reconstruct one relation and retain its already-hydrated endpoint entities.
+fn relation_detail_from_row(
+    entities: &HashMap<[u8; 32], GraphEntity>,
+    row: RelationRow,
+    expected_project: ProjectInstanceId,
+    generation: IndexGeneration,
+) -> DbResult<RepositoryGraphRelationRow> {
+    let source_key = fixed_bytes::<32>("graph_relations.source_entity_key", row.source.clone())?;
+    let target_key = row
+        .target
+        .as_ref()
+        .map(|target| fixed_bytes::<32>("graph_relations.target_entity_key", target.clone()))
+        .transpose()?;
+    let relation = relation_from_row(entities, row, expected_project, generation)?;
+    let source = entities
+        .get(&source_key)
+        .cloned()
+        .ok_or(DbError::GraphRowShape {
+            table: "graph_relations",
+            reason: "source entity is missing",
+        })?;
+    let target = target_key
+        .map(|key| {
+            entities.get(&key).cloned().ok_or(DbError::GraphRowShape {
+                table: "graph_relations",
+                reason: "retained target entity is missing",
+            })
+        })
+        .transpose()?;
+    Ok(RepositoryGraphRelationRow {
+        relation,
+        source,
+        target,
+    })
 }
 
 /// Reconstruct one typed logical relation through existing domain constructors.
@@ -3983,13 +4316,18 @@ fn relation_row_at(row: &Row<'_>, offset: usize) -> rusqlite::Result<RelationRow
 
 /// Read one raw relation occurrence row.
 fn occurrence_row(row: &Row<'_>) -> rusqlite::Result<OccurrenceRow> {
+    occurrence_row_at(row, 0)
+}
+
+/// Read one raw relation occurrence row at a stable column offset.
+fn occurrence_row_at(row: &Row<'_>, offset: usize) -> rusqlite::Result<OccurrenceRow> {
     Ok(OccurrenceRow {
-        relation: row.get(0)?,
-        file_path: row.get(1)?,
-        start_line: row.get(2)?,
-        start_column: row.get(3)?,
-        end_line: row.get(4)?,
-        end_column: row.get(5)?,
+        relation: row.get(offset)?,
+        file_path: row.get(offset + 1)?,
+        start_line: row.get(offset + 2)?,
+        start_column: row.get(offset + 3)?,
+        end_line: row.get(offset + 4)?,
+        end_column: row.get(offset + 5)?,
     })
 }
 
@@ -6505,6 +6843,21 @@ mod tests {
                 .all(|occurrence| occurrence.generation() == generation),
             "graph occurrence generation mismatch",
         )?;
+        let occurrence_pages = store.repository_graph_occurrence_pages(&relations.rows, 1, None)?;
+        require_eq(
+            &occurrence_pages.len(),
+            &relations.rows.len(),
+            "batched occurrence page count",
+        )?;
+        for (relation, page) in relations.rows.iter().zip(&occurrence_pages) {
+            let is_calls = relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls);
+            require_eq(
+                &page.rows.len(),
+                &usize::from(is_calls),
+                "batched occurrence rows",
+            )?;
+            require_eq(&page.truncated, &is_calls, "batched occurrence truncation")?;
+        }
         let coverage =
             store.repository_graph_coverage(fixture.project, &CoverageScope::Project, 10)?;
         require_eq(&coverage.rows.len(), &6, "graph coverage count")?;
@@ -6873,12 +7226,40 @@ mod tests {
             .rows
             .into_iter()
             .chain(second.rows)
-            .map(|row| row.relation)
+            .map(|row| row.detail.relation)
             .collect::<Vec<_>>();
         require_eq(
             &combined,
             &ordinary.rows,
             "adjacency keyset order versus ordinary relation order",
+        )?;
+        let calls = GraphRelationKind::Legacy(RelationKind::Calls);
+        let filtered = store.repository_graph_adjacency_page_filtered(
+            &outbound_frontier,
+            RepositoryGraphDirection::Outbound,
+            Some(calls),
+            None,
+            10,
+            None,
+        )?;
+        let expected_calls = ordinary
+            .rows
+            .iter()
+            .filter(|relation| relation.kind() == calls)
+            .cloned()
+            .collect::<Vec<_>>();
+        require_eq(
+            &filtered
+                .rows
+                .iter()
+                .map(|row| row.detail.relation.clone())
+                .collect::<Vec<_>>(),
+            &expected_calls,
+            "filtered adjacency versus ordinary family selection",
+        )?;
+        require(
+            !filtered.truncated && filtered.continuation.is_none(),
+            "filtered adjacency unexpectedly truncated its complete family",
         )?;
 
         let inbound_frontier = vec![symbol.key().clone(), external.key().clone()];
@@ -6916,7 +7297,7 @@ mod tests {
             for continuation_index in [None, Some(0)] {
                 let sql = format!(
                     "EXPLAIN QUERY PLAN {}",
-                    adjacency_relation_sql(2, direction, continuation_index)
+                    adjacency_relation_sql(2, direction, continuation_index, false)
                 );
                 let mut statement = store.connection.prepare(&sql)?;
                 let mut bindings = vec![Value::Blob(fixture.project.as_bytes().to_vec())];
@@ -6950,6 +7331,41 @@ mod tests {
                     ),
                 )?;
             }
+
+            let (scope, kind) = relation_parts(calls);
+            let filtered_sql = format!(
+                "EXPLAIN QUERY PLAN {}",
+                adjacency_relation_sql(2, direction, None, true)
+            );
+            let mut filtered_statement = store.connection.prepare(&filtered_sql)?;
+            let filtered_bindings = [
+                Value::Blob(fixture.project.as_bytes().to_vec()),
+                Value::Blob(source.key().digest_bytes()?.to_vec()),
+                Value::Text(scope.to_string()),
+                Value::Text(kind.to_string()),
+                Value::Integer(11),
+                Value::Blob(symbol.key().digest_bytes()?.to_vec()),
+                Value::Text(scope.to_string()),
+                Value::Text(kind.to_string()),
+                Value::Integer(11),
+                Value::Integer(11),
+            ];
+            let filtered_details = filtered_statement
+                .query_map(params_from_iter(filtered_bindings.iter()), |row| {
+                    row.get::<_, String>(3)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            require(
+                filtered_details
+                    .iter()
+                    .any(|detail| detail.contains(expected_index))
+                    && filtered_details
+                        .iter()
+                        .all(|detail| !detail.contains("SCAN relation")),
+                &format!(
+                    "filtered {direction:?} adjacency plan did not own its index: {filtered_details:?}"
+                ),
+            )?;
         }
 
         let duplicate_error = require_db_error(
@@ -7013,6 +7429,25 @@ mod tests {
         require(
             matches!(direction_error, DbError::GraphContract(_)),
             &format!("unexpected continuation-direction error: {direction_error}"),
+        )?;
+        let mut filtered_continuation = continuation.clone();
+        filtered_continuation.relation = Some(calls);
+        let family_error = require_db_error(
+            store.repository_graph_adjacency_page_filtered(
+                &outbound_frontier,
+                RepositoryGraphDirection::Outbound,
+                Some(GraphRelationKind::Extended(
+                    ExtendedRelationKind::Configures,
+                )),
+                Some(&filtered_continuation),
+                1,
+                None,
+            ),
+            "cross-family adjacency continuation was accepted",
+        )?;
+        require(
+            matches!(family_error, DbError::GraphContract(_)),
+            &format!("unexpected continuation-family error: {family_error}"),
         )?;
         let frontier_error = require_db_error(
             store.repository_graph_adjacency_page(
@@ -7243,6 +7678,7 @@ mod tests {
             project: fixture.project,
             generation,
             direction: RepositoryGraphDirection::Outbound,
+            relation: None,
             frontier: vec![source_digest, external_digest],
             frontier_index: 1,
             relation_scope: String::new(),
@@ -7281,6 +7717,7 @@ mod tests {
             project: fixture.project,
             generation,
             direction: RepositoryGraphDirection::Outbound,
+            relation: None,
             frontier: vec![source_digest],
             frontier_index: 0,
             relation_scope: "legacy".to_string(),

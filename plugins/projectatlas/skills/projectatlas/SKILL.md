@@ -124,6 +124,18 @@ This skill is part of the ProjectAtlas plugin on purpose. Installing the plugin 
 
 Use the MCP tools when the harness exposes them. Normal ProjectAtlas command families should be MCP-first because they keep the agent in the atlas-first path and return TOON text payloads directly. Use the CLI for plugin install/update/release/CI workflows, MCP server startup/debugging, continuous `watch`, terminal TUI views, or when an MCP tool is unavailable.
 
+Use this routing table after binding the intended project. Follow a returned typed `next_call` directly instead of repeating overview, folder, or file discovery.
+
+| Agent task | Primary MCP route | Result shape | Next call |
+| --- | --- | --- | --- |
+| Startup state and ranked candidates | `atlas_session_brief`, then `atlas_overview` when broader repository state is needed | Selected project, freshness, blockers, ranked folders/files, and typed recommendations | Call the returned folder/file recommendation; refresh first only when the response says the index is stale |
+| Choose a work area or source candidate | `atlas_folders`, then `atlas_files` | Ranked folder or file rows with reviewed purpose and crisp connections | `atlas_files` for a folder row; `atlas_file_summary` for a file row |
+| Understand one selected file | `atlas_file_summary` | Purpose, parser/summary state, declarations, calls, imports, coverage, and typed next calls | `atlas_outline` for compressed structure, `atlas_symbols` for declarations, `atlas_symbol_relations` for connections, or `atlas_slice` for exact evidence |
+| Find a declaration in a known file | `atlas_symbols` | Bounded exact declaration selectors | `atlas_slice` with the returned file/name plus parent, kind, signature, or line disambiguators |
+| Traverse inbound/outbound relations from a known file or symbol | `atlas_symbol_relations` with the detailed relation view and exact anchor | Ranked bounded graph rows with purpose, coverage, occurrences, exact selectors, and typed `next_call` | Folder target: `atlas_files`; file/package target: `atlas_file_summary`; symbol target: `atlas_slice`; unavailable coverage: `atlas_health` or refresh only when the response identifies stale/incomplete state |
+| Discover indexed text | `atlas_search` with a bounded `file_pattern` | Matches with searched-file, searched-byte, total, and truncation state | `atlas_slice` for the returned exact line range, or narrow the pattern before paging when truncated |
+| Read exact source evidence | `atlas_slice` | Verbatim line or exact-symbol source | Stop when the evidence answers the task; otherwise follow the selected file's summary/relation route rather than broad-reading adjacent files |
+
 0. `atlas_set_project_path` or per-call `project_path` when one MCP server may serve multiple repositories; prefer per-call `project_path` for shared or concurrent hosts.
 1. `atlas_scan` when the index may be stale or after file/folder changes.
 2. `atlas_overview` at startup to understand repository size and purpose coverage.

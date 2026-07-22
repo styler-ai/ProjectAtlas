@@ -12,11 +12,12 @@ use atlas_map::{
     remove_ignore_entry, write_map,
 };
 use clap::parser::ValueSource;
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 #[cfg(feature = "optional-parser-supervisor")]
 use projectatlas_cli::optional_parser_lifecycle::{
     OptionalParserPackLifecycle, OptionalParserPackLifecycleError,
 };
+use projectatlas_core::graph::{ConfidenceClass, GraphLimits, RepositoryFilePath};
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
 use projectatlas_core::telemetry::{
@@ -35,12 +36,13 @@ use projectatlas_db::{
     ProjectRootTransitionResult, RepositoryCoverageQuery, verify_project_database,
 };
 use projectatlas_service::{
-    COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CoverageDiscoveryReport, FileSummaryReport, SearchQuery,
+    COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CoverageDiscoveryReport, DetailedRelationQuery,
+    FileSummaryReport, RelationAnchor, RelationDirection, RelationResolutionFilter, SearchQuery,
     SearchReport, SearchRetrievalMode, ServiceError, SymbolSliceSelector, TokenReport,
-    TokenReportRequest, build_file_summary_from_source, load_coverage_discovery, load_token_report,
-    parse_coverage_parser, parse_coverage_relation, parse_coverage_state,
-    read_indexed_code_slice_from_source, read_symbol_slice_from_source,
-    search_indexed_files_with_control,
+    TokenReportRequest, build_file_summary_from_source, load_coverage_discovery,
+    load_detailed_relations, load_token_report, parse_coverage_parser, parse_coverage_relation,
+    parse_coverage_state, parse_symbol_kind, read_indexed_code_slice_from_source,
+    read_symbol_slice_from_source, search_indexed_files_with_control,
 };
 use rmcp::schemars;
 use runtime::{
@@ -314,6 +316,188 @@ enum OutputFormat {
     Toon,
     /// Pretty JSON for scripts and external machine consumers.
     Json,
+}
+
+/// Symbol-relation response contract selected by the caller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum RelationViewArg {
+    /// Preserve the v0.3 relation rows and ordering exactly.
+    Legacy,
+    /// Use bounded normalized-graph navigation.
+    Detailed,
+}
+
+/// Detailed relation traversal direction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum RelationDirectionArg {
+    /// Follow relations from each source frontier.
+    Outbound,
+    /// Follow relations into each target frontier.
+    Inbound,
+}
+
+impl From<RelationDirectionArg> for RelationDirection {
+    fn from(value: RelationDirectionArg) -> Self {
+        match value {
+            RelationDirectionArg::Outbound => Self::Outbound,
+            RelationDirectionArg::Inbound => Self::Inbound,
+        }
+    }
+}
+
+/// Lowest confidence retained by detailed relation navigation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum RelationConfidenceArg {
+    /// Parser-proven exact relation.
+    Exact,
+    /// High-confidence inferred relation.
+    High,
+    /// Medium-confidence structural relation.
+    Medium,
+    /// Low-confidence fallback relation.
+    Low,
+}
+
+impl From<RelationConfidenceArg> for ConfidenceClass {
+    fn from(value: RelationConfidenceArg) -> Self {
+        match value {
+            RelationConfidenceArg::Exact => Self::Exact,
+            RelationConfidenceArg::High => Self::High,
+            RelationConfidenceArg::Medium => Self::Medium,
+            RelationConfidenceArg::Low => Self::Low,
+        }
+    }
+}
+
+/// Resolution state retained by detailed relation navigation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum RelationResolutionArg {
+    /// Retain every resolution state.
+    Any,
+    /// Retain exact local targets.
+    Resolved,
+    /// Retain ambiguous references.
+    Ambiguous,
+    /// Retain unresolved references.
+    Unresolved,
+    /// Retain external targets.
+    External,
+}
+
+impl From<RelationResolutionArg> for RelationResolutionFilter {
+    fn from(value: RelationResolutionArg) -> Self {
+        match value {
+            RelationResolutionArg::Any => Self::Any,
+            RelationResolutionArg::Resolved => Self::Resolved,
+            RelationResolutionArg::Ambiguous => Self::Ambiguous,
+            RelationResolutionArg::Unresolved => Self::Unresolved,
+            RelationResolutionArg::External => Self::External,
+        }
+    }
+}
+
+/// Additive options used only by the detailed relation view.
+#[derive(Args, Debug)]
+struct DetailedRelationArgs {
+    /// Exact local anchor controls.
+    #[command(flatten)]
+    anchor: DetailedRelationAnchorArgs,
+    /// Relation direction and trust filters.
+    #[command(flatten)]
+    filters: DetailedRelationFilterArgs,
+    /// Traversal and output ceilings.
+    #[command(flatten)]
+    limits: DetailedRelationLimitArgs,
+}
+
+/// Exact local anchor controls for detailed relation navigation.
+#[derive(Args, Debug)]
+struct DetailedRelationAnchorArgs {
+    /// Exact symbol name used as the detailed anchor; omit for a file anchor.
+    #[arg(long)]
+    symbol: Option<String>,
+    /// Optional exact parent used to disambiguate the detailed symbol anchor.
+    #[arg(long)]
+    symbol_parent: Option<String>,
+    /// Optional exact kind used to disambiguate the detailed symbol anchor.
+    #[arg(long)]
+    symbol_kind: Option<String>,
+    /// Optional exact signature used to disambiguate the detailed symbol anchor.
+    #[arg(long)]
+    symbol_signature: Option<String>,
+}
+
+/// Direction and trust filters for detailed relation navigation.
+#[derive(Args, Debug)]
+struct DetailedRelationFilterArgs {
+    /// Direction followed from every detailed frontier.
+    #[arg(long, value_enum, default_value_t = RelationDirectionArg::Outbound)]
+    direction: RelationDirectionArg,
+    /// Optional exact legacy or extended relation family.
+    #[arg(long)]
+    relation: Option<String>,
+    /// Lowest confidence retained by detailed navigation.
+    #[arg(long, value_enum, default_value_t = RelationConfidenceArg::Low)]
+    minimum_confidence: RelationConfidenceArg,
+    /// Resolution state retained by detailed navigation.
+    #[arg(long, value_enum, default_value_t = RelationResolutionArg::Any)]
+    resolution: RelationResolutionArg,
+}
+
+/// Traversal and output ceilings for detailed relation navigation.
+#[derive(Args, Debug)]
+struct DetailedRelationLimitArgs {
+    /// Maximum detailed traversal depth.
+    #[arg(long, default_value_t = 1)]
+    depth: u32,
+    /// Retain bounded exact source occurrences in detailed rows.
+    #[arg(long)]
+    include_occurrences: bool,
+    /// Maximum exact occurrences retained per detailed relation.
+    #[arg(long, default_value_t = 25)]
+    occurrence_limit: u32,
+    /// Maximum encoded bytes admitted to the detailed response.
+    #[arg(long, default_value_t = 256 * 1024)]
+    output_bytes: u32,
+}
+
+/// Optional exact symbol selector shared by the top-level slice command.
+#[derive(Args, Debug)]
+struct OptionalSymbolSelectorArgs {
+    /// Slice a symbol by name instead of passing line numbers.
+    #[arg(long)]
+    symbol: Option<String>,
+    /// Optional parent symbol for disambiguating `--symbol`.
+    #[arg(long)]
+    symbol_parent: Option<String>,
+    /// Optional symbol kind for disambiguating `--symbol`.
+    #[arg(long)]
+    symbol_kind: Option<String>,
+    /// Optional exact symbol signature for disambiguating `--symbol`.
+    #[arg(long)]
+    symbol_signature: Option<String>,
+    /// Optional source line for disambiguating `--symbol`.
+    #[arg(long)]
+    symbol_line: Option<usize>,
+}
+
+/// Required exact symbol selector shared by the symbol slice command.
+#[derive(Args, Debug)]
+struct RequiredSymbolSelectorArgs {
+    /// Symbol name to locate.
+    symbol: String,
+    /// Optional parent symbol for disambiguation.
+    #[arg(long)]
+    symbol_parent: Option<String>,
+    /// Optional symbol kind for disambiguation.
+    #[arg(long)]
+    symbol_kind: Option<String>,
+    /// Optional exact symbol signature for disambiguation.
+    #[arg(long)]
+    symbol_signature: Option<String>,
+    /// Optional source line for disambiguation.
+    #[arg(long)]
+    symbol_line: Option<usize>,
 }
 
 /// Token report presentation mode.
@@ -662,18 +846,9 @@ enum Command {
         /// Optional one-based end line.
         #[arg(long)]
         end_line: Option<usize>,
-        /// Slice a symbol by name instead of passing line numbers.
-        #[arg(long)]
-        symbol: Option<String>,
-        /// Optional parent symbol for disambiguating `--symbol`.
-        #[arg(long)]
-        symbol_parent: Option<String>,
-        /// Optional symbol kind for disambiguating `--symbol`.
-        #[arg(long)]
-        symbol_kind: Option<String>,
-        /// Optional source line for disambiguating `--symbol`.
-        #[arg(long)]
-        symbol_line: Option<usize>,
+        /// Optional exact declaration selector.
+        #[command(flatten)]
+        selector: OptionalSymbolSelectorArgs,
     },
     /// Inspect and rebuild the `ProjectAtlas` symbol graph.
     Symbols {
@@ -1079,12 +1254,18 @@ enum SymbolsCommand {
     },
     /// List symbol relations by optional file and query.
     Relations {
+        /// Preserve legacy rows or opt in to detailed normalized-graph navigation.
+        #[arg(long, value_enum, default_value_t = RelationViewArg::Legacy)]
+        view: RelationViewArg,
         /// Optional repository-relative file path.
         #[arg(long)]
         file: Option<String>,
         /// Optional source, target, or context query.
         #[arg(long)]
         query: Option<String>,
+        /// Additive normalized-graph traversal controls.
+        #[command(flatten)]
+        detailed: DetailedRelationArgs,
         /// Maximum relations to return.
         #[arg(long, default_value_t = 50)]
         limit: usize,
@@ -1093,17 +1274,9 @@ enum SymbolsCommand {
     Slice {
         /// Repository-relative file path.
         file: PathBuf,
-        /// Symbol name to locate.
-        symbol: String,
-        /// Optional parent symbol for disambiguation.
-        #[arg(long)]
-        symbol_parent: Option<String>,
-        /// Optional symbol kind for disambiguation.
-        #[arg(long)]
-        symbol_kind: Option<String>,
-        /// Optional source line for disambiguation.
-        #[arg(long)]
-        symbol_line: Option<usize>,
+        /// Exact declaration selector.
+        #[command(flatten)]
+        selector: RequiredSymbolSelectorArgs,
     },
 }
 
@@ -1396,10 +1569,14 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             file,
             start_line,
             end_line,
-            symbol,
-            symbol_parent,
-            symbol_kind,
-            symbol_line,
+            selector:
+                OptionalSymbolSelectorArgs {
+                    symbol,
+                    symbol_parent,
+                    symbol_kind,
+                    symbol_signature,
+                    symbol_line,
+                },
         } => {
             let store = open_index_for_read(cli)?;
             let file_key = validated_indexed_file_key(&store, file)?;
@@ -1412,12 +1589,17 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         name: symbol,
                         parent: symbol_parent.as_deref(),
                         kind: symbol_kind.as_deref(),
+                        signature: symbol_signature.as_deref(),
                         line: *symbol_line,
                     },
                     &content,
                 )?
             } else {
-                if symbol_parent.is_some() || symbol_kind.is_some() || symbol_line.is_some() {
+                if symbol_parent.is_some()
+                    || symbol_kind.is_some()
+                    || symbol_signature.is_some()
+                    || symbol_line.is_some()
+                {
                     return Err(CliError::InvalidInput(
                         "symbol disambiguators require --symbol".to_string(),
                     ));
@@ -1497,35 +1679,141 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     &symbols,
                 )?;
             }
-            SymbolsCommand::Relations { file, query, limit } => {
-                let store = open_index_for_read(cli)?;
-                let relations =
-                    store.load_symbol_relations(file.as_deref(), query.as_deref(), *limit)?;
-                let toon = render_symbol_relations(&relations);
-                print_tracked_output_estimate(
-                    cli.format,
-                    &store,
-                    usage_instance,
-                    &cli.session,
-                    "symbol-relations",
-                    file.clone(),
-                    query.clone(),
-                    || {
-                        estimated_source_tokens_for_paths(
-                            &store,
-                            relations.iter().map(|relation| relation.path.as_str()),
-                        )
+            SymbolsCommand::Relations {
+                view,
+                file,
+                query,
+                detailed:
+                    DetailedRelationArgs {
+                        anchor:
+                            DetailedRelationAnchorArgs {
+                                symbol,
+                                symbol_parent,
+                                symbol_kind,
+                                symbol_signature,
+                            },
+                        filters:
+                            DetailedRelationFilterArgs {
+                                direction,
+                                relation,
+                                minimum_confidence,
+                                resolution,
+                            },
+                        limits:
+                            DetailedRelationLimitArgs {
+                                depth,
+                                include_occurrences,
+                                occurrence_limit,
+                                output_bytes,
+                            },
                     },
-                    &toon,
-                    &relations,
-                )?;
+                limit,
+            } => {
+                let store = open_index_for_read(cli)?;
+                if *view == RelationViewArg::Legacy {
+                    let relations =
+                        store.load_symbol_relations(file.as_deref(), query.as_deref(), *limit)?;
+                    let toon = render_symbol_relations(&relations);
+                    print_tracked_output_estimate(
+                        cli.format,
+                        &store,
+                        usage_instance,
+                        &cli.session,
+                        "symbol-relations",
+                        file.clone(),
+                        query.clone(),
+                        || {
+                            estimated_source_tokens_for_paths(
+                                &store,
+                                relations.iter().map(|relation| relation.path.as_str()),
+                            )
+                        },
+                        &toon,
+                        &relations,
+                    )?;
+                } else {
+                    if query.is_some() {
+                        return Err(CliError::Service(ServiceError::InvalidInput(
+                            "detailed symbol relations use exact --symbol selectors, not --query"
+                                .to_string(),
+                        )));
+                    }
+                    let file = file.as_deref().ok_or_else(|| {
+                        CliError::Service(ServiceError::InvalidInput(
+                            "detailed symbol relations require --file".to_string(),
+                        ))
+                    })?;
+                    let file = validated_indexed_file_key(&store, Path::new(file))?;
+                    let file = RepositoryFilePath::new(Path::new(&file)).map_err(|error| {
+                        CliError::Service(ServiceError::InvalidInput(error.to_string()))
+                    })?;
+                    let anchor = if let Some(symbol) = symbol {
+                        if symbol.is_empty() {
+                            return Err(CliError::Service(ServiceError::InvalidInput(
+                                "detailed relation symbol must not be empty".to_string(),
+                            )));
+                        }
+                        RelationAnchor::Symbol {
+                            file,
+                            name: symbol.clone(),
+                            symbol_kind: symbol_kind
+                                .as_deref()
+                                .map(parse_symbol_kind)
+                                .transpose()?,
+                            parent: symbol_parent.clone(),
+                            signature: symbol_signature.clone(),
+                        }
+                    } else {
+                        if symbol_parent.is_some()
+                            || symbol_kind.is_some()
+                            || symbol_signature.is_some()
+                        {
+                            return Err(CliError::Service(ServiceError::InvalidInput(
+                                "symbol disambiguators require --symbol".to_string(),
+                            )));
+                        }
+                        RelationAnchor::File { file }
+                    };
+                    let rows = u32::try_from(*limit).map_err(|_overflow| {
+                        CliError::Service(ServiceError::InvalidInput(
+                            "detailed relation limit exceeds the u32 range".to_string(),
+                        ))
+                    })?;
+                    let limits = GraphLimits::new(rows, *occurrence_limit, *depth, *output_bytes)
+                        .map_err(|error| {
+                        CliError::Service(ServiceError::InvalidInput(error.to_string()))
+                    })?;
+                    let report = load_detailed_relations(
+                        &store,
+                        &DetailedRelationQuery {
+                            anchor,
+                            direction: (*direction).into(),
+                            relation: relation
+                                .as_deref()
+                                .map(parse_coverage_relation)
+                                .transpose()?,
+                            minimum_confidence: (*minimum_confidence).into(),
+                            resolution: (*resolution).into(),
+                            include_occurrences: *include_occurrences,
+                            limits,
+                        },
+                        None,
+                    )?;
+                    let payload = json!({ "symbol_relations": report });
+                    let toon = encode_agent_payload(&payload);
+                    print_output(cli.format, &toon, &payload)?;
+                }
             }
             SymbolsCommand::Slice {
                 file,
-                symbol,
-                symbol_parent,
-                symbol_kind,
-                symbol_line,
+                selector:
+                    RequiredSymbolSelectorArgs {
+                        symbol,
+                        symbol_parent,
+                        symbol_kind,
+                        symbol_signature,
+                        symbol_line,
+                    },
             } => {
                 let store = open_index_for_read(cli)?;
                 let file_key = validated_indexed_file_key(&store, file)?;
@@ -1537,6 +1825,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         name: symbol,
                         parent: symbol_parent.as_deref(),
                         kind: symbol_kind.as_deref(),
+                        signature: symbol_signature.as_deref(),
                         line: *symbol_line,
                     },
                     &content,
@@ -3087,10 +3376,13 @@ impl RequiredCliCommand {
                 file: PathBuf::from("src/lib.rs"),
                 start_line: Some(1),
                 end_line: None,
-                symbol: None,
-                symbol_parent: None,
-                symbol_kind: None,
-                symbol_line: None,
+                selector: OptionalSymbolSelectorArgs {
+                    symbol: None,
+                    symbol_parent: None,
+                    symbol_kind: None,
+                    symbol_signature: None,
+                    symbol_line: None,
+                },
             },
             Self::Symbols => Command::Symbols {
                 command: SymbolsCommand::List {

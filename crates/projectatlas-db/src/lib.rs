@@ -19,8 +19,8 @@ pub use repository_graph::{
     MAX_REPOSITORY_GRAPH_FRONTIER, RepositoryAffectedSourceFootprint, RepositoryCoverageQuery,
     RepositoryCoverageRow, RepositoryGraphAdjacencyContinuation, RepositoryGraphAdjacencyPage,
     RepositoryGraphAdjacencyRow, RepositoryGraphDirection, RepositoryGraphPage,
-    RepositoryGraphRelationQuery, RepositoryNavigationConnections, RepositoryNavigationNode,
-    RepositoryResolutionCandidate,
+    RepositoryGraphRelationQuery, RepositoryGraphRelationRow, RepositoryNavigationConnections,
+    RepositoryNavigationNode, RepositoryResolutionCandidate,
 };
 pub use sqlite_profile::validate_database_location;
 pub use telemetry::{
@@ -2690,36 +2690,61 @@ impl AtlasStore {
     ///
     /// Returns an error if reading or enum conversion fails.
     pub fn load_nodes_by_paths(&self, paths: &[String]) -> DbResult<Vec<IndexedNode>> {
+        self.load_nodes_by_paths_controlled(paths, None)
+    }
+
+    /// Load existing nodes for exact repository paths in bounded cancellable batches.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if cancellation fires or reading or enum conversion fails.
+    pub fn load_nodes_by_paths_controlled(
+        &self,
+        paths: &[String],
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<Vec<IndexedNode>> {
         let mut unique_paths = paths.to_vec();
         unique_paths.sort();
         unique_paths.dedup();
         if unique_paths.is_empty() {
             return Ok(Vec::new());
         }
-        let sql = load_nodes_by_paths_sql(unique_paths.len());
-        let mut statement = self.connection.prepare(&sql)?;
-        let rows = statement.query_map(params_from_iter(unique_paths), |row| {
-            let kind_value: String = row.get(1)?;
-            let source_value: String = row.get(9)?;
-            let status_value: String = row.get(10)?;
-            Ok((
-                row.get::<_, String>(0)?,
-                kind_value,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<u64>>(5)?,
-                row.get::<_, Option<i64>>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                source_value,
-                status_value,
-                row.get::<_, Option<String>>(11)?,
-            ))
-        })?;
         let mut nodes = Vec::new();
-        for row in rows {
-            nodes.push(indexed_node_from_parts(row?)?);
+        for chunk in unique_paths.chunks(MAX_PURPOSE_CURATION_BATCH_ROWS) {
+            let hydrated = with_sqlite_read_progress(
+                &self.connection,
+                control,
+                IndexWorkStage::RepositoryTraversal,
+                || {
+                    let sql = load_nodes_by_paths_sql(chunk.len());
+                    let mut statement = self.connection.prepare(&sql)?;
+                    let rows = statement.query_map(params_from_iter(chunk), |row| {
+                        let kind_value: String = row.get(1)?;
+                        let source_value: String = row.get(9)?;
+                        let status_value: String = row.get(10)?;
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            kind_value,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<u64>>(5)?,
+                            row.get::<_, Option<i64>>(6)?,
+                            row.get::<_, Option<String>>(7)?,
+                            row.get::<_, Option<String>>(8)?,
+                            source_value,
+                            status_value,
+                            row.get::<_, Option<String>>(11)?,
+                        ))
+                    })?;
+                    let mut selected = Vec::new();
+                    for row in rows {
+                        selected.push(indexed_node_from_parts(row?)?);
+                    }
+                    Ok(selected)
+                },
+            )?;
+            nodes.extend(hydrated);
         }
         Ok(nodes)
     }

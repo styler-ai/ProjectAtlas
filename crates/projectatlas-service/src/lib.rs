@@ -1,6 +1,14 @@
 //! Purpose: Provide shared `ProjectAtlas` query services for CLI and MCP adapters.
 
 mod import_aliases;
+mod relations;
+
+pub use relations::{
+    DetailedRelationNode, DetailedRelationQuery, DetailedRelationReport, DetailedRelationRow,
+    RelationAnchor, RelationDirection, RelationNextCall, RelationPurpose, RelationResolutionFilter,
+    load_detailed_relations, parse_relation_confidence, parse_relation_direction,
+    parse_relation_resolution,
+};
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use import_aliases::{ImportAliasMap, load_import_alias_map};
@@ -887,6 +895,8 @@ pub struct SymbolSliceSelector<'a> {
     pub parent: Option<&'a str>,
     /// Optional symbol kind, such as `function`, `method`, or `struct`.
     pub kind: Option<&'a str>,
+    /// Optional exact normalized declaration signature.
+    pub signature: Option<&'a str>,
     /// Optional line that must fall inside the selected symbol range.
     pub line: Option<usize>,
 }
@@ -2388,6 +2398,9 @@ pub fn read_symbol_slice_from_source(
     if let Some(kind) = requested_kind {
         symbols.retain(|symbol| symbol.kind == kind);
     }
+    if let Some(signature) = selector.signature {
+        symbols.retain(|symbol| symbol.signature == signature);
+    }
     if let Some(line) = selector.line {
         symbols.retain(|symbol| symbol.line_start <= line && line <= symbol.line_end);
     }
@@ -2401,7 +2414,7 @@ pub fn read_symbol_slice_from_source(
         }
         _ => {
             return Err(ServiceError::InvalidInput(format!(
-                "symbol {:?} is ambiguous in {file_key}; pass symbol_parent, symbol_kind, or symbol_line. candidates: {}",
+                "symbol {:?} is ambiguous in {file_key}; pass symbol_parent, symbol_kind, symbol_signature, or symbol_line. candidates: {}",
                 selector.name,
                 describe_symbol_candidates(&symbols)
             )));
@@ -2770,7 +2783,11 @@ fn read_code_slice(
 }
 
 /// Parse a user-facing symbol kind selector.
-fn parse_symbol_kind(kind: &str) -> ServiceResult<SymbolKind> {
+///
+/// # Errors
+///
+/// Returns an error when the value is not one of the supported persisted kinds.
+pub fn parse_symbol_kind(kind: &str) -> ServiceResult<SymbolKind> {
     let normalized = kind.trim().to_ascii_lowercase();
     let parsed = SymbolKind::from_db(&normalized);
     if parsed == SymbolKind::Unknown && normalized != "unknown" {
@@ -5295,10 +5312,12 @@ mod tests {
         store.replace_scan(&[test_node("src/lib.rs", "hash-lib")])?;
         let mut a_run = test_symbol("src/lib.rs", SymbolKind::Method, "run");
         a_run.parent = Some("A".to_string());
+        a_run.signature = "fn run(&self) for A".to_string();
         a_run.line_start = 3;
         a_run.line_end = 5;
         let mut b_run = test_symbol("src/lib.rs", SymbolKind::Method, "run");
         b_run.parent = Some("B".to_string());
+        b_run.signature = "fn run(&self) for B".to_string();
         b_run.line_start = 9;
         b_run.line_end = 11;
         store.replace_symbol_graph(&SymbolGraph {
@@ -5335,6 +5354,18 @@ mod tests {
         )?;
         if !slice.content.contains("b();") || slice.content.contains("a();") {
             return Err(io::Error::other("parent selector returned wrong symbol slice").into());
+        }
+        let signature_slice = read_symbol_slice(
+            &store,
+            Path::new("src/lib.rs"),
+            &SymbolSliceSelector {
+                name: "run",
+                signature: Some("fn run(&self) for A"),
+                ..SymbolSliceSelector::default()
+            },
+        )?;
+        if !signature_slice.content.contains("a();") || signature_slice.content.contains("b();") {
+            return Err(io::Error::other("signature selector returned wrong symbol slice").into());
         }
         Ok(())
     }

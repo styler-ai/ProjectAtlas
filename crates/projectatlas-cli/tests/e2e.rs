@@ -6996,14 +6996,78 @@ fn symbols_watch_and_legacy_cleanup_flow() -> Result<(), Box<dyn Error>> {
         .stdout(predicate::str::contains("Atlas"))
         .stdout(predicate::str::contains("helper"));
 
-    Command::cargo_bin("projectatlas")?
+    let legacy_default = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
         .args(["symbols", "relations", "--file", "src/lib.rs"])
+        .output()?;
+    if !legacy_default.status.success()
+        || !String::from_utf8_lossy(&legacy_default.stdout).contains("helper")
+    {
+        return Err(io::Error::other("default legacy relation command failed").into());
+    }
+    let legacy_explicit = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "symbols",
+            "relations",
+            "--view",
+            "legacy",
+            "--file",
+            "src/lib.rs",
+        ])
+        .output()?;
+    if !legacy_explicit.status.success() || legacy_default.stdout != legacy_explicit.stdout {
+        return Err(io::Error::other(
+            "explicit legacy relation view changed default output bytes or ordering",
+        )
+        .into());
+    }
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "symbols",
+            "relations",
+            "--file",
+            "src/lib.rs",
+            "--limit",
+            "0",
+        ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("helper"));
+        .stdout(predicate::str::contains("relations[1]"));
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "symbols",
+            "relations",
+            "--view",
+            "detailed",
+            "--file",
+            "src/lib.rs",
+            "--symbol",
+            "sail",
+            "--relation",
+            "calls",
+            "--include-occurrences",
+            "--depth",
+            "2",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"symbol_relations\""))
+        .stdout(predicate::str::contains("helper"))
+        .stdout(predicate::str::contains("symbol_slice"));
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)

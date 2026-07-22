@@ -38,7 +38,7 @@ use crate::{
     render_file_summary, render_parity_report, render_root_report, render_runtime_info,
     render_search_report, render_watch_status,
 };
-use projectatlas_core::graph::ProjectInstanceId;
+use projectatlas_core::graph::{GraphLimits, ProjectInstanceId, RepositoryFilePath};
 use projectatlas_core::health::Severity;
 use projectatlas_core::outline::build_outline;
 use projectatlas_core::telemetry::{TokenTrendWindow, UsageInstanceOwner};
@@ -57,9 +57,11 @@ use projectatlas_db::{
     read_project_root_read_only, verify_project_database,
 };
 use projectatlas_service::{
-    COVERAGE_PAGE_MAX_LIMIT, SearchQuery, ServiceError, SymbolSliceSelector, TokenReport,
-    TokenReportRequest, build_file_summary_from_source, load_coverage_discovery, load_token_report,
-    parse_coverage_parser, parse_coverage_relation, parse_coverage_state,
+    COVERAGE_PAGE_MAX_LIMIT, DetailedRelationQuery, RelationAnchor, SearchQuery, ServiceError,
+    SymbolSliceSelector, TokenReport, TokenReportRequest, build_file_summary_from_source,
+    load_coverage_discovery, load_detailed_relations, load_token_report, parse_coverage_parser,
+    parse_coverage_relation, parse_coverage_state, parse_relation_confidence,
+    parse_relation_direction, parse_relation_resolution, parse_symbol_kind,
     read_indexed_code_slice_from_source, read_symbol_slice_from_source,
     search_indexed_files_with_control,
 };
@@ -784,6 +786,8 @@ struct AtlasSliceParams {
     symbol_parent: Option<String>,
     /// Optional symbol kind for disambiguating `symbol`.
     symbol_kind: Option<String>,
+    /// Optional exact signature for disambiguating `symbol`.
+    symbol_signature: Option<String>,
     /// Optional source line for disambiguating `symbol`.
     symbol_line: Option<usize>,
 }
@@ -800,6 +804,47 @@ struct AtlasSymbolsParams {
     /// Optional symbol, signature, relation, or path query.
     query: Option<String>,
     /// Maximum rows to return.
+    limit: Option<usize>,
+}
+
+/// MCP parameters for legacy or detailed symbol-relation navigation.
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+struct AtlasSymbolRelationsParams {
+    /// Optional project root for this call. Defaults to the active MCP project.
+    project_path: Option<String>,
+    /// Optional repository-relative file path; required for detailed navigation.
+    file: Option<String>,
+    /// Opt in to nearest indexed project discovery for absolute file paths.
+    nearest_project: Option<bool>,
+    /// Optional legacy source, target, context, or path query.
+    query: Option<String>,
+    /// Preserve `legacy` rows or opt in to `detailed` normalized-graph navigation.
+    view: Option<String>,
+    /// Exact symbol name used as the detailed anchor; omit for a file anchor.
+    symbol: Option<String>,
+    /// Optional exact parent used to disambiguate the detailed symbol anchor.
+    symbol_parent: Option<String>,
+    /// Optional exact kind used to disambiguate the detailed symbol anchor.
+    symbol_kind: Option<String>,
+    /// Optional exact signature used to disambiguate the detailed symbol anchor.
+    symbol_signature: Option<String>,
+    /// Detailed traversal direction: `outbound` or `inbound`.
+    direction: Option<String>,
+    /// Optional exact legacy or extended relation family.
+    relation: Option<String>,
+    /// Detailed confidence floor: `exact`, `high`, `medium`, or `low`.
+    minimum_confidence: Option<String>,
+    /// Detailed resolution filter.
+    resolution: Option<String>,
+    /// Maximum detailed traversal depth.
+    depth: Option<u32>,
+    /// Retain bounded exact source occurrences in detailed rows.
+    include_occurrences: Option<bool>,
+    /// Maximum exact occurrences retained per detailed relation.
+    occurrence_limit: Option<u32>,
+    /// Maximum encoded bytes admitted to the detailed response.
+    output_bytes: Option<u32>,
+    /// Maximum legacy or detailed relation rows to return.
     limit: Option<usize>,
 }
 
@@ -4735,6 +4780,7 @@ impl ProjectAtlasMcpServer {
                             name: symbol,
                             parent: params.symbol_parent.as_deref(),
                             kind: params.symbol_kind.as_deref(),
+                            signature: params.symbol_signature.as_deref(),
                             line: params.symbol_line,
                         },
                         &content,
@@ -4742,6 +4788,7 @@ impl ProjectAtlasMcpServer {
                 } else {
                     if params.symbol_parent.is_some()
                         || params.symbol_kind.is_some()
+                        || params.symbol_signature.is_some()
                         || params.symbol_line.is_some()
                     {
                         return Err(CliError::InvalidInput(
@@ -4895,63 +4942,179 @@ impl ProjectAtlasMcpServer {
         self.atlas_symbols_response(&params, Some(context))
     }
 
-    /// Render one verified legacy symbol-relation response.
+    /// Render one verified legacy or detailed symbol-relation response.
     fn atlas_symbol_relations_response(
         &self,
-        params: &AtlasSymbolsParams,
+        params: &AtlasSymbolRelationsParams,
         context: Option<RequestContext<RoleServer>>,
     ) -> String {
         Self::as_mcp_text((|| {
+            let detailed = match params.view.as_deref().unwrap_or("legacy") {
+                "legacy" => false,
+                "detailed" => true,
+                value => {
+                    return Err(CliError::Service(ServiceError::InvalidInput(format!(
+                        "unsupported symbol relation view {value:?}"
+                    ))));
+                }
+            };
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
             let (state, file, routed_project) = self.state_and_optional_file_key(
                 params.project_path.as_deref(),
                 params.file.as_deref(),
                 nearest_project,
             )?;
-            self.with_fresh_string_and_usage_for_request(&state, context, |store, _stamp| {
-                let file = file
-                    .as_deref()
-                    .map(|path| validated_indexed_file_key(store, Path::new(path)))
-                    .transpose()?;
-                let relations = store.load_symbol_relations(
-                    file.as_deref(),
-                    params.query.as_deref(),
-                    params.limit.unwrap_or(50),
-                )?;
-                let toon = Self::with_selected_project_audit(
-                    &state,
-                    routed_project,
-                    render_symbol_relations(&relations),
-                )?;
-                let usage = Self::telemetry_enabled()
-                    .then(|| {
-                        estimated_source_tokens_for_paths(
+            self.with_fresh_string_and_usage_controlled_for_request(
+                &state,
+                context,
+                |store, _stamp, control| {
+                    let file = file
+                        .as_deref()
+                        .map(|path| validated_indexed_file_key(store, Path::new(path)))
+                        .transpose()?;
+                    if detailed {
+                        if params.query.is_some() {
+                            return Err(CliError::Service(ServiceError::InvalidInput(
+                                "detailed symbol relations use exact symbol selectors, not query"
+                                    .to_string(),
+                            )));
+                        }
+                        let file = file.as_deref().ok_or_else(|| {
+                            CliError::Service(ServiceError::InvalidInput(
+                                "detailed symbol relations require file".to_string(),
+                            ))
+                        })?;
+                        let graph_file =
+                            RepositoryFilePath::new(Path::new(file)).map_err(|error| {
+                                CliError::Service(ServiceError::InvalidInput(error.to_string()))
+                            })?;
+                        let anchor = if let Some(symbol) = params.symbol.as_ref() {
+                            if symbol.is_empty() {
+                                return Err(CliError::Service(ServiceError::InvalidInput(
+                                    "detailed relation symbol must not be empty".to_string(),
+                                )));
+                            }
+                            RelationAnchor::Symbol {
+                                file: graph_file,
+                                name: symbol.clone(),
+                                symbol_kind: params
+                                    .symbol_kind
+                                    .as_deref()
+                                    .map(parse_symbol_kind)
+                                    .transpose()?,
+                                parent: params.symbol_parent.clone(),
+                                signature: params.symbol_signature.clone(),
+                            }
+                        } else {
+                            if params.symbol_parent.is_some()
+                                || params.symbol_kind.is_some()
+                                || params.symbol_signature.is_some()
+                            {
+                                return Err(CliError::Service(ServiceError::InvalidInput(
+                                    "symbol disambiguators require symbol".to_string(),
+                                )));
+                            }
+                            RelationAnchor::File { file: graph_file }
+                        };
+                        let rows =
+                            u32::try_from(params.limit.unwrap_or(50)).map_err(|_overflow| {
+                                CliError::Service(ServiceError::InvalidInput(
+                                    "detailed relation limit exceeds the u32 range".to_string(),
+                                ))
+                            })?;
+                        let limits = GraphLimits::new(
+                            rows,
+                            params.occurrence_limit.unwrap_or(25),
+                            params.depth.unwrap_or(1),
+                            params.output_bytes.unwrap_or(256 * 1024),
+                        )
+                        .map_err(|error| {
+                            CliError::Service(ServiceError::InvalidInput(error.to_string()))
+                        })?;
+                        let report = load_detailed_relations(
                             store,
-                            relations.iter().map(|relation| relation.path.as_str()),
-                        )
-                    })
-                    .and_then(Result::ok)
-                    .map(|baseline_tokens| {
-                        McpUsageIntent::estimate(
-                            MCP_EVENT_ATLAS_SYMBOL_RELATIONS,
-                            file.clone(),
-                            params.query.clone(),
-                            baseline_tokens,
-                        )
-                    });
-                Ok((toon, usage))
-            })
+                            &DetailedRelationQuery {
+                                anchor,
+                                direction: parse_relation_direction(
+                                    params.direction.as_deref().unwrap_or("outbound"),
+                                )?,
+                                relation: params
+                                    .relation
+                                    .as_deref()
+                                    .map(parse_coverage_relation)
+                                    .transpose()?,
+                                minimum_confidence: parse_relation_confidence(
+                                    params.minimum_confidence.as_deref().unwrap_or("low"),
+                                )?,
+                                resolution: parse_relation_resolution(
+                                    params.resolution.as_deref().unwrap_or("any"),
+                                )?,
+                                include_occurrences: params.include_occurrences.unwrap_or(false),
+                                limits,
+                            },
+                            Some(control),
+                        )?;
+                        let toon = Self::with_selected_project_audit(
+                            &state,
+                            routed_project,
+                            Self::encode_named_payload("symbol_relations", &report)?,
+                        )?;
+                        let usage = Self::telemetry_enabled()
+                            .then(|| {
+                                estimated_source_tokens_for_paths(store, std::iter::once(file))
+                            })
+                            .and_then(Result::ok)
+                            .map(|baseline_tokens| {
+                                McpUsageIntent::estimate(
+                                    MCP_EVENT_ATLAS_SYMBOL_RELATIONS,
+                                    Some(file.to_string()),
+                                    params.symbol.clone(),
+                                    baseline_tokens,
+                                )
+                            });
+                        return Ok((toon, usage));
+                    }
+
+                    let relations = store.load_symbol_relations(
+                        file.as_deref(),
+                        params.query.as_deref(),
+                        params.limit.unwrap_or(50),
+                    )?;
+                    let toon = Self::with_selected_project_audit(
+                        &state,
+                        routed_project,
+                        render_symbol_relations(&relations),
+                    )?;
+                    let usage = Self::telemetry_enabled()
+                        .then(|| {
+                            estimated_source_tokens_for_paths(
+                                store,
+                                relations.iter().map(|relation| relation.path.as_str()),
+                            )
+                        })
+                        .and_then(Result::ok)
+                        .map(|baseline_tokens| {
+                            McpUsageIntent::estimate(
+                                MCP_EVENT_ATLAS_SYMBOL_RELATIONS,
+                                file.clone(),
+                                params.query.clone(),
+                                baseline_tokens,
+                            )
+                        });
+                    Ok((toon, usage))
+                },
+            )
         })())
     }
 
     /// List indexed symbol relations.
     #[tool(
         name = "atlas_symbol_relations",
-        description = "List imports, calls, dependencies, and containment edges as compact TOON."
+        description = "List legacy symbol relations unchanged, or opt in to bounded detailed inbound/outbound normalized-graph navigation with exact anchors, relation, confidence, resolution, occurrence, depth, and output limits."
     )]
     fn atlas_symbol_relations(
         &self,
-        Parameters(params): Parameters<AtlasSymbolsParams>,
+        Parameters(params): Parameters<AtlasSymbolRelationsParams>,
         context: RequestContext<RoleServer>,
     ) -> String {
         self.atlas_symbol_relations_response(&params, Some(context))
@@ -6225,18 +6388,65 @@ mod tests {
         )?;
 
         let relations = server.atlas_symbol_relations_response(
-            &AtlasSymbolsParams {
+            &AtlasSymbolRelationsParams {
                 project_path: Some(project_path.to_string()),
                 file: Some("src/lib.rs".to_string()),
                 nearest_project: Some(false),
                 query: None,
                 limit: Some(50),
+                ..AtlasSymbolRelationsParams::default()
             },
             None,
         );
         require(
             relations.contains("relations[") && relations.contains(expected_symbol),
             "agent relation read omitted published graph output",
+        )?;
+        let explicit_legacy = server.atlas_symbol_relations_response(
+            &AtlasSymbolRelationsParams {
+                project_path: Some(project_path.to_string()),
+                file: Some("src/lib.rs".to_string()),
+                nearest_project: Some(false),
+                view: Some("legacy".to_string()),
+                query: None,
+                limit: Some(50),
+                ..AtlasSymbolRelationsParams::default()
+            },
+            None,
+        );
+        require(
+            relations == explicit_legacy,
+            "explicit MCP legacy relation view changed default response bytes or ordering",
+        )?;
+        let zero_limit_legacy = server.atlas_symbol_relations_response(
+            &AtlasSymbolRelationsParams {
+                project_path: Some(project_path.to_string()),
+                file: Some("src/lib.rs".to_string()),
+                nearest_project: Some(false),
+                limit: Some(0),
+                ..AtlasSymbolRelationsParams::default()
+            },
+            None,
+        );
+        require(
+            zero_limit_legacy.contains("relations[1]"),
+            "MCP legacy zero limit no longer preserves its one-row compatibility behavior",
+        )?;
+        let detailed = server.atlas_symbol_relations_response(
+            &AtlasSymbolRelationsParams {
+                project_path: Some(project_path.to_string()),
+                file: Some("src/lib.rs".to_string()),
+                nearest_project: Some(false),
+                view: Some("detailed".to_string()),
+                direction: Some("outbound".to_string()),
+                limit: Some(50),
+                ..AtlasSymbolRelationsParams::default()
+            },
+            None,
+        );
+        require(
+            detailed.contains("symbol_relations:") && detailed.contains("anchor:"),
+            "detailed MCP relation route did not return the bounded graph envelope",
         )
     }
 
