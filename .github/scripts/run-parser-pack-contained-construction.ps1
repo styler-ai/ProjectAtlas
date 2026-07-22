@@ -270,6 +270,7 @@ function Write-ConstructionStatus {
             "validate-inputs",
             "network-denial-canaries",
             "output-preparation",
+            "jobserver-bootstrap",
             "optional-parser-worker-build",
             "artifact-assembler-build",
             "release-verifier-build",
@@ -321,7 +322,7 @@ function New-ContainedCargoJobserver {
         [System.Security.Principal.SecurityIdentifier]$Sid,
 
         [Parameter(Mandatory = $true)]
-        [ValidatePattern('\ALocal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
+        [ValidatePattern('\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z')]
         [string]$Name
     )
 
@@ -348,6 +349,47 @@ function New-ContainedCargoJobserver {
         )
     }
     catch {
+        $customFailure = $_.Exception
+        $defaultSemaphore = $null
+        $defaultCreatedNew = $false
+        $defaultResult = "not-attempted"
+        try {
+            $defaultName =
+                "Global\ProjectAtlasParserPackProbe-$([guid]::NewGuid().ToString('N'))"
+            $defaultSemaphore = [System.Threading.Semaphore]::new(
+                1,
+                1,
+                $defaultName,
+                [ref]$defaultCreatedNew
+            )
+            $defaultResult = if ($defaultCreatedNew) { "succeeded" } else { "collision" }
+        }
+        catch {
+            $defaultResult = "failed:$($_.Exception.HResult)"
+        }
+        finally {
+            if ($null -ne $defaultSemaphore) {
+                $defaultSemaphore.Dispose()
+            }
+        }
+        $customClass = switch ($customFailure.GetType().Name) {
+            "UnauthorizedAccessException" { "unauthorized-access" }
+            "WaitHandleCannotBeOpenedException" { "cannot-open" }
+            "PlatformNotSupportedException" { "unsupported" }
+            default { "other" }
+        }
+        $diagnostic =
+            "namespace=global`ncustom_create=${customClass}:$($customFailure.HResult)`ndefault_create=$defaultResult`n"
+        try {
+            [System.IO.File]::WriteAllText(
+                $script:constructionDiagnosticPath,
+                $diagnostic,
+                [System.Text.UTF8Encoding]::new($false)
+            )
+        }
+        catch {
+            # The parent still fails closed from the bounded status record.
+        }
         throw "Contained Cargo jobserver could not be created."
     }
     if (-not $createdNew) {
@@ -469,9 +511,15 @@ if ($Target -eq "x86_64-pc-windows-msvc") {
     if (Test-Path -LiteralPath Env:CARGO_MAKEFLAGS) {
         throw "Contained construction inherited a Cargo jobserver."
     }
+    $script:constructionStage = "jobserver-bootstrap"
+    Write-ConstructionStatus -Stage $script:constructionStage -State "running"
     $constructionSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    # The disposable non-interactive logon cannot create synchronization
+    # objects in the runner's client-session namespace. Its exact-SID DACL
+    # limits the global object to the disposable identity; the wrapper bounds
+    # that identity and its process tree for the construction lifetime.
     $script:constructionJobserverName =
-        "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+        "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
     $script:constructionJobserver = New-ContainedCargoJobserver `
         -Sid $constructionSid `
         -Name $script:constructionJobserverName

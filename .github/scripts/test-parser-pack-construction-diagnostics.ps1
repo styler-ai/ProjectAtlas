@@ -90,7 +90,7 @@ try {
         $wrapperText = $wrapperAst.Extent.Text
         $productionText = $ast.Extent.Text
         $expectedJobserverNameExpression =
-            '"Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString(''N''))"'
+            '"Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString(''N''))"'
         Require `
             ($productionText.Contains(
                 $expectedJobserverNameExpression,
@@ -101,13 +101,13 @@ try {
                 $productionText.Contains(
                     '"-j --jobserver-fds=$($script:constructionJobserverName) --jobserver-auth=$($script:constructionJobserverName)"'
                 )) `
-            "Contained Windows construction did not own its exact session-local Cargo jobserver."
+            "Contained Windows construction did not own its exact global Cargo jobserver."
         Require `
             (-not $productionText.Contains(
-                '"Global\ProjectAtlasParserPack-',
+                '"Local\ProjectAtlasParserPack-',
                 [System.StringComparison]::Ordinal
             )) `
-            "Contained Windows construction retained a machine-global Cargo jobserver."
+            "Contained Windows construction retained the inaccessible client-session jobserver."
         Require `
             (-not $wrapperText.Contains('CARGO_MAKEFLAGS =') -and
                 -not $wrapperText.Contains('New-ConstructionJobserver') -and
@@ -1225,13 +1225,16 @@ public static class ProjectAtlasConstructionAdmissionFixture
                 $jobserverDefinitionText.Contains('$Sid,') -and
                 $jobserverDefinitionText.Contains('[System.Security.AccessControl.AccessControlType]::Allow') -and
                 $jobserverDefinitionText.Contains('[System.Threading.SemaphoreAcl]::Create(') -and
+                $jobserverDefinitionText.Contains('"namespace=global`ncustom_create=${customClass}:$($customFailure.HResult)`ndefault_create=$defaultResult`n"') -and
+                $jobserverDefinitionText.Contains('[System.Threading.Semaphore]::new(') -and
+                -not $jobserverDefinitionText.Contains('$customFailure.Message') -and
                 ([regex]::Matches($jobserverDefinitionText, '\.AddAccessRule\(').Count -eq 1)) `
-            "Contained Cargo jobserver did not retain one protected exact-rights DACL."
+            "Contained Cargo jobserver did not retain its exact DACL and bounded fallback diagnostic."
         Invoke-Expression $jobserverDefinitionText
         $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
         $jobserverRights = [System.Security.AccessControl.SemaphoreRights]::Synchronize -bor
             [System.Security.AccessControl.SemaphoreRights]::Modify
-        $jobserverName = "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+        $jobserverName = "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
         $jobserver = New-ContainedCargoJobserver -Sid $currentSid -Name $jobserverName
         $openedJobserver = $null
         try {
@@ -1254,17 +1257,17 @@ public static class ProjectAtlasConstructionAdmissionFixture
                 $collisionRejected = $true
             }
             Require $collisionRejected "Construction jobserver accepted a live-name collision."
-            $globalNameRejected = $false
+            $localNameRejected = $false
             try {
-                $unexpectedGlobalJobserver = New-ContainedCargoJobserver `
+                $unexpectedLocalJobserver = New-ContainedCargoJobserver `
                     -Sid $currentSid `
-                    -Name "Global\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
-                $unexpectedGlobalJobserver.Dispose()
+                    -Name "Local\ProjectAtlasParserPack-$([guid]::NewGuid().ToString('N'))"
+                $unexpectedLocalJobserver.Dispose()
             }
             catch {
-                $globalNameRejected = $true
+                $localNameRejected = $true
             }
-            Require $globalNameRejected "Contained Cargo jobserver accepted a non-local namespace."
+            Require $localNameRejected "Contained Cargo jobserver accepted a client-session namespace."
         }
         finally {
             if ($null -ne $openedJobserver) {

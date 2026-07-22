@@ -1854,6 +1854,7 @@ function Write-BoundedConstructionFailure {
         "validate-inputs",
         "network-denial-canaries",
         "output-preparation",
+        "jobserver-bootstrap",
         "optional-parser-worker-build",
         "artifact-assembler-build",
         "release-verifier-build",
