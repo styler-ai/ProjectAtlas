@@ -285,3 +285,166 @@ Broad candidate rows are admitted only when the pinned catalog supplies a stable
 | `wit` | — | `.wit` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
 | `yuck` | — | `.yuck` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
 | `ziggy` | — | `.ziggy` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | broad-parser | `tree-sitter-language-pack@1.13.2` | `MIT` |
+
+## Language & Ecosystem Support
+
+Complete-support schema version: `1`. Ecosystem catalog version: `1`. Catalog digest: `db48ea50e2c770edeb94865bdd2f22887c110001558974b2aaf828214210b6ab`.
+
+`Complete` means conformance to the fixed ProjectAtlas navigation contract, not compiler, build-system, runtime, or whole-language completeness. The initial accepted complete-support inventory is empty; candidates remain at their achieved detected/parsed/symbol/semantic/benchmarked tiers until the final MCP navigation surface and independent review pass in task 7.3.
+
+Catalog profile counts stay separate: **29** languages, **22** dialects, **11** domain formats, and **21** framework projections. Current assessment: **23** lower-tier runtime candidates, **12** planned documentation rows, **48** unavailable documentation rows, and **0** accepted complete profiles.
+
+### Detection-to-navigation pipeline
+
+ProjectAtlas first applies deterministic registry-owned detection. Built-in or explicitly enabled contained optional parsing then produces honest parse coverage; fact providers retain their own provenance; typed resolution preserves resolved, ambiguous, unresolved, and external outcomes; one atomic SQLite generation publishes exact occurrences and relations; freshness-aware MCP navigation returns bounded source selectors and exact evidence. We reuse maintained license-compatible Tree-sitter grammars, generated parser/node metadata, and trustworthy standard queries before adding bounded ProjectAtlas queries or concrete Rust semantic logic. ProjectAtlas never executes repository code, and an absent optional pack leaves default-core startup and navigation independent.
+
+The `legacy-modernization` tag identifies source where trustworthy dependency and exact-evidence navigation is valuable. It does **not** claim automatic conversion or select a target language. Planned and unavailable rows below are documentation classifications only: they create no runtime registry row and contribute to no capability or complete-support total.
+
+### Architecture paths
+
+- [Canonical Mermaid architecture views](projectatlas-3-architecture.md#architecture-views)
+- [System and component ownership](projectatlas-3-architecture.md#system-and-component-architecture)
+- [Crate dependency and ownership](projectatlas-3-architecture.md#crate-dependency-and-ownership)
+- [Database authority](projectatlas-3-architecture.md#database-authority-and-responsibility)
+- [Graph physical model](projectatlas-3-architecture.md#normalized-graph-physical-model)
+- [Bounded graph read](projectatlas-3-architecture.md#bounded-graph-read-with-purpose-projection)
+- [MCP read communication](projectatlas-3-architecture.md#mcp-read-communication-sequence)
+- [Transactional publication](projectatlas-3-architecture.md#index-and-transactional-publication-flow)
+
+### Backend
+
+| Profile | Kind | Host | Assessment | Dialect evidence | Tags |
+| --- | --- | --- | --- | --- | --- |
+| Perl | `language` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | legacy-modernization |
+| ColdFusion / CFML | `language` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | legacy-modernization |
+
+### Frontend and web
+
+| Profile | Kind | Host | Assessment | Dialect evidence | Tags |
+| --- | --- | --- | --- | --- | --- |
+| ActionScript | `language` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | legacy-modernization |
+| Apache Flex | `framework_projection` | actionscript | unavailable: missing-framework-projection | — | legacy-modernization |
+
+### Systems
+
+| Profile | Kind | Host | Assessment | Dialect evidence | Tags |
+| --- | --- | --- | --- | --- | --- |
+| Other assembler families | `language` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | legacy-modernization |
+| Ada | `language` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | legacy-modernization |
+
+### Mobile
+
+| Profile | Kind | Host | Assessment | Dialect evidence | Tags |
+| --- | --- | --- | --- | --- | --- |
+| Swift | `language` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | — |
+| Kotlin | `language` | — | candidate: detected supported, parsed supported, symbols supported, semantic unavailable, benchmarked unavailable | — | — |
+| Dart | `language` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | — |
+
+### Data and scientific
+
+| Profile | Kind | Host | Assessment | Dialect evidence | Tags |
+| --- | --- | --- | --- | --- | --- |
+| Fortran | `language` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | legacy-modernization |
+| Fortran fixed form | `dialect` | fortran | unavailable: missing-independent-dialect-evidence | content-signature | legacy-modernization |
+| Fortran free form | `dialect` | fortran | unavailable: missing-independent-dialect-evidence | content-signature | legacy-modernization |
+| SAS | `language` | — | unavailable: no-runtime-capability | — | legacy-modernization |
+
+### Enterprise and legacy modernization
+
+| Profile | Kind | Host | Assessment | Dialect evidence | Tags |
+| --- | --- | --- | --- | --- | --- |
+| ABAP | `language` | — | unavailable: no-runtime-capability | — | legacy-modernization |
+| OpenEdge ABL | `language` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | legacy-modernization |
+| COBOL | `language` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | legacy-modernization |
+| COBOL fixed form | `dialect` | cobol | unavailable: missing-independent-dialect-evidence | content-signature | legacy-modernization |
+| COBOL free form | `dialect` | cobol | unavailable: missing-independent-dialect-evidence | content-signature | legacy-modernization |
+| PL/I | `language` | — | unavailable: no-runtime-capability | — | legacy-modernization |
+| RPG | `language` | — | unavailable: no-runtime-capability | — | legacy-modernization |
+| ILE RPG | `dialect` | rpg | unavailable: missing-independent-dialect-evidence | project-manifest | legacy-modernization |
+| JCL | `domain_format` | — | unavailable: no-runtime-capability | — | legacy-modernization |
+| REXX | `language` | — | unavailable: no-runtime-capability | — | legacy-modernization |
+| IBM i CL | `language` | — | unavailable: no-runtime-capability | — | legacy-modernization |
+| HLASM | `language` | — | unavailable: no-runtime-capability | — | legacy-modernization |
+| Pascal | `language` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | legacy-modernization |
+| Object Pascal | `dialect` | pascal | unavailable: missing-independent-dialect-evidence | content-signature | legacy-modernization |
+| Delphi | `dialect` | pascal | unavailable: missing-independent-dialect-evidence | project-manifest | legacy-modernization |
+| Visual Basic source (unqualified) | `language` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | legacy-modernization |
+| Visual Basic 6 | `dialect` | visual-basic | unavailable: missing-independent-dialect-evidence | project-manifest | legacy-modernization |
+| VB.NET | `dialect` | visual-basic | unavailable: missing-independent-dialect-evidence | project-manifest | legacy-modernization |
+| VBA | `dialect` | visual-basic | unavailable: missing-independent-dialect-evidence | project-manifest | legacy-modernization |
+| VBScript | `language` | — | unavailable: no-runtime-capability | — | legacy-modernization |
+| Classic ASP | `framework_projection` | vbscript | unavailable: missing-framework-projection | — | legacy-modernization |
+| Natural | `language` | — | unavailable: no-runtime-capability | — | legacy-modernization |
+| MUMPS / M | `language` | — | unavailable: no-runtime-capability | — | legacy-modernization |
+| PowerBuilder | `framework_projection` | powerscript | unavailable: missing-framework-projection | — | legacy-modernization |
+| PowerScript | `language` | — | unavailable: no-runtime-capability | — | legacy-modernization |
+| xBase | `language` | — | unavailable: no-runtime-capability | — | legacy-modernization |
+| Clipper | `dialect` | xbase | unavailable: missing-independent-dialect-evidence | project-manifest | legacy-modernization |
+| FoxPro | `dialect` | xbase | unavailable: missing-independent-dialect-evidence | project-manifest | legacy-modernization |
+
+### Database and query
+
+| Profile | Kind | Host | Assessment | Dialect evidence | Tags |
+| --- | --- | --- | --- | --- | --- |
+| SQL (unqualified) | `language` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | — |
+| Oracle PL/SQL | `dialect` | sql | unavailable: missing-independent-dialect-evidence | content-signature | — |
+| PostgreSQL PL/pgSQL | `dialect` | sql | unavailable: missing-independent-dialect-evidence | content-signature | — |
+| T-SQL | `dialect` | sql | unavailable: missing-independent-dialect-evidence | content-signature | — |
+| MySQL SQL | `dialect` | sql | unavailable: missing-independent-dialect-evidence | configuration | — |
+| MariaDB SQL | `dialect` | sql | unavailable: missing-independent-dialect-evidence | configuration | — |
+| SQLite SQL | `dialect` | sql | unavailable: missing-independent-dialect-evidence | configuration | — |
+| BigQuery SQL | `dialect` | sql | unavailable: missing-independent-dialect-evidence | configuration | — |
+| Snowflake SQL | `dialect` | sql | unavailable: missing-independent-dialect-evidence | configuration | — |
+| Redshift SQL | `dialect` | sql | unavailable: missing-independent-dialect-evidence | configuration | — |
+| dbt / Jinja SQL | `framework_projection` | sql | unavailable: missing-framework-projection | — | — |
+
+### Infrastructure and cloud
+
+| Profile | Kind | Host | Assessment | Dialect evidence | Tags |
+| --- | --- | --- | --- | --- | --- |
+| Terraform | `domain_format` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | — |
+| OpenTofu | `dialect` | terraform | unavailable: missing-independent-dialect-evidence | project-manifest | — |
+| HCL | `domain_format` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | — |
+| Bicep | `domain_format` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | — |
+| Azure ARM template | `domain_format` | — | unavailable: no-runtime-capability | — | — |
+| AWS CloudFormation | `domain_format` | — | unavailable: no-runtime-capability | — | — |
+| AWS SAM | `domain_format` | — | unavailable: no-runtime-capability | — | — |
+| Pulumi TypeScript constructs | `framework_projection` | typescript | planned (documentation only) | — | — |
+| Pulumi Python constructs | `framework_projection` | python | planned (documentation only) | — | — |
+| Kubernetes manifests | `domain_format` | — | unavailable: no-runtime-capability | — | — |
+| Helm charts | `framework_projection` | yaml | unavailable: missing-framework-projection | — | — |
+| Kustomize | `framework_projection` | yaml | unavailable: missing-framework-projection | — | — |
+| Crossplane | `framework_projection` | yaml | unavailable: missing-framework-projection | — | — |
+| Ansible | `framework_projection` | yaml | unavailable: missing-framework-projection | — | — |
+| Nix | `domain_format` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | — |
+| CUE | `domain_format` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | — |
+| Docker Compose | `framework_projection` | yaml | unavailable: missing-framework-projection | — | — |
+| AWS CDK TypeScript constructs | `framework_projection` | typescript | planned (documentation only) | — | — |
+| AWS CDK Python constructs | `framework_projection` | python | planned (documentation only) | — | — |
+
+### Build, configuration, and template
+
+| Profile | Kind | Host | Assessment | Dialect evidence | Tags |
+| --- | --- | --- | --- | --- | --- |
+| Dockerfile | `domain_format` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | — |
+
+### Testing frameworks
+
+| Profile | Kind | Host | Assessment | Dialect evidence | Tags |
+| --- | --- | --- | --- | --- | --- |
+| Playwright for JavaScript | `framework_projection` | javascript | planned (documentation only) | — | — |
+| Playwright for TypeScript | `framework_projection` | typescript | planned (documentation only) | — | — |
+| Jest for JavaScript | `framework_projection` | javascript | planned (documentation only) | — | — |
+| Jest for TypeScript | `framework_projection` | typescript | planned (documentation only) | — | — |
+| Vitest for TypeScript | `framework_projection` | typescript | planned (documentation only) | — | — |
+| pytest | `framework_projection` | python | planned (documentation only) | — | — |
+| JUnit | `framework_projection` | java | planned (documentation only) | — | — |
+| xUnit.net | `framework_projection` | csharp | planned (documentation only) | — | — |
+
+### Hardware design
+
+| Profile | Kind | Host | Assessment | Dialect evidence | Tags |
+| --- | --- | --- | --- | --- | --- |
+| VHDL | `language` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | — |
+| Verilog | `language` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | — |
+| SystemVerilog | `language` | — | candidate: detected supported, parsed fallback, symbols fallback, semantic unavailable, benchmarked unavailable | — | — |

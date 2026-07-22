@@ -33,6 +33,11 @@ jobs:
       - name: Build rustdoc
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 
+      - name: Build language and ecosystem page
+        run: |
+          mkdir -p target/doc/language-support
+          cargo run -p projectatlas-core --example render_language_support --all-features --locked -- --html target/doc/language-support/index.html
+
       - name: Build Pages landing page
         run: |
           cat > target/doc/index.html <<'HTML'
@@ -94,6 +99,7 @@ jobs:
                 <h1>ProjectAtlas Documentation</h1>
                 <p class="lead">Generated Rust API documentation for the ProjectAtlas workspace.</p>
                 <div class="grid">
+                  <a class="card" href="language-support/">Language &amp; Ecosystem Support<span class="label">honest capability tiers, candidates, and classified ecosystem coverage</span></a>
                   <a class="card" href="projectatlas/">projectatlas<span class="label">CLI, MCP server, and release-facing runtime logic</span></a>
                   <a class="card" href="projectatlas_core/">projectatlas_core<span class="label">shared models, TOON rendering, and telemetry</span></a>
                   <a class="card" href="projectatlas_db/">projectatlas_db<span class="label">SQLite storage layer</span></a>

@@ -334,11 +334,12 @@ skills/                   standalone agent skill snippets
 ## Docs
 
 - Published rustdoc and Pages landing page: https://styler-ai.github.io/ProjectAtlas/
+- Language & Ecosystem Support: https://styler-ai.github.io/ProjectAtlas/language-support/
 - CLI/MCP runtime crate docs: https://styler-ai.github.io/ProjectAtlas/projectatlas/
 - Core model crate docs: https://styler-ai.github.io/ProjectAtlas/projectatlas_core/
 - `docs/agent-integration.md`
 - `docs/configuration.md`
-- `docs/language-support.md`
+- [`docs/language-support.md`](docs/language-support.md) — generated capability and ecosystem authority
 - `docs/workflow.md`
 - `docs/structural-summaries.md`
 - `docs/benchmarks/large-application-token-savings.md`

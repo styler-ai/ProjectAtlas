@@ -7,6 +7,7 @@ pub mod language;
 pub mod optional_parser_pack;
 pub mod optional_parser_protocol;
 pub mod outline;
+pub mod support_catalog;
 pub mod symbols;
 pub mod telemetry;
 pub mod toon;

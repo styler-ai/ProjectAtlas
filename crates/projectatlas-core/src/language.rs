@@ -1615,6 +1615,7 @@ catalog entries remain unadvertised until a separate deterministic rule and evid
             row.provenance_license
         )?;
     }
+    crate::support_catalog::append_support_catalog_markdown(&mut output)?;
     Ok(output)
 }
 

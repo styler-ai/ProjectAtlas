@@ -1405,7 +1405,8 @@ versions and digests, derived per-axis counts, and pinned optional-catalog ident
 They deliberately do not inline the complete per-language matrix into routine agent
 context; the generated document remains the complete bounded-by-artifact view.
 
-One versioned complete-support schema defines fixed ProjectAtlas navigation
+The `projectatlas-core` support catalog module owns one versioned complete-support
+schema with fixed ProjectAtlas navigation
 contracts for `language`, `dialect`, `domain_format`, and
 `framework_projection` rows. Presentation categories and tags remain separate.
 `Complete` means that the row satisfies the applicable ProjectAtlas navigation
@@ -1426,15 +1427,15 @@ become runtime registry or accepted-capability ghost rows and contribute to no
 capability total. Candidate profiles remain at their achieved runtime tiers until
 the final MCP relation/navigation surface and representative agent workflow pass.
 
-The generated public language-and-ecosystem page extends the existing
+The generated public language-and-ecosystem sections extend the existing
 `language-support.md` authority and groups its rows into stable
 user-facing sections such as backend, frontend/web, systems, mobile,
 data/scientific, enterprise/legacy modernization, database/query, infrastructure/cloud,
 build/config/template, and testing frameworks. It keeps language, dialect,
 domain-format, and framework-aware counts distinct, explains the
 detection-to-navigation pipeline and ProjectAtlas's architectural advantages.
-GitHub Pages publishes an HTML projection derived from the same catalog identity
-and tests its landing-page link. Canonical Mermaid source remains in
+The Pages workflow builds an HTML projection derived from the same catalog identity
+and the core tests verify its landing-page link. Canonical Mermaid source remains in
 GitHub-rendered Markdown; Pages embeds a reviewed SVG or links directly to that
 source and the full system/component, crate-ownership, database-authority,
 graph-physical-model, bounded-read, MCP-read, and publication views. No
