@@ -263,6 +263,8 @@ const MCP_PAYLOAD_GITIGNORE: &str = "gitignore";
 const MCP_PAYLOAD_LINT: &str = "lint";
 /// MCP payload key for symbol-build reports.
 const MCP_PAYLOAD_SYMBOLS_BUILD: &str = "symbols_build";
+/// MCP payload key for detailed symbol-relation reports.
+const MCP_PAYLOAD_SYMBOL_RELATIONS: &str = "symbol_relations";
 /// MCP payload key for health-resolution reports.
 const MCP_PAYLOAD_HEALTH_RESOLUTION: &str = "health_resolution";
 /// MCP payload key for token trend reports.
@@ -336,6 +338,29 @@ const MCP_EVENT_ATLAS_SLICE: &str = "mcp.atlas_slice";
 const MCP_EVENT_ATLAS_SYMBOLS: &str = "mcp.atlas_symbols";
 /// MCP telemetry event for symbol-relation calls.
 const MCP_EVENT_ATLAS_SYMBOL_RELATIONS: &str = "mcp.atlas_symbol_relations";
+/// Compatible MCP symbol-relation view name.
+const MCP_SYMBOL_RELATION_VIEW_LEGACY: &str = "legacy";
+/// Additive detailed MCP symbol-relation view name.
+const MCP_SYMBOL_RELATION_VIEW_DETAILED: &str = "detailed";
+/// Default direction for detailed MCP symbol-relation requests.
+const MCP_SYMBOL_RELATION_DIRECTION_DEFAULT: &str = "outbound";
+/// Default minimum confidence for detailed MCP symbol-relation requests.
+const MCP_SYMBOL_RELATION_CONFIDENCE_DEFAULT: &str = "low";
+/// Default resolution filter for detailed MCP symbol-relation requests.
+const MCP_SYMBOL_RELATION_RESOLUTION_DEFAULT: &str = "any";
+/// MCP validation error for an unsupported relation view.
+const MCP_ERROR_SYMBOL_RELATION_VIEW: &str = "unsupported symbol relation view";
+/// MCP validation error for legacy query fields in detailed requests.
+const MCP_ERROR_DETAILED_RELATION_QUERY: &str =
+    "detailed symbol relations use exact symbol selectors, not query";
+/// MCP validation error for a detailed request without a file anchor.
+const MCP_ERROR_DETAILED_RELATION_FILE: &str = "detailed symbol relations require file";
+/// MCP validation error for an empty detailed symbol anchor.
+const MCP_ERROR_DETAILED_RELATION_SYMBOL: &str = "detailed relation symbol must not be empty";
+/// MCP validation error for symbol disambiguators without a symbol.
+const MCP_ERROR_DETAILED_RELATION_DISAMBIGUATOR: &str = "symbol disambiguators require symbol";
+/// MCP validation error for a relation limit outside the service range.
+const MCP_ERROR_DETAILED_RELATION_LIMIT: &str = "detailed relation limit exceeds the u32 range";
 /// MCP telemetry event for health calls.
 const MCP_EVENT_ATLAS_HEALTH: &str = "mcp.atlas_health";
 /// MCP telemetry event for purpose-queue calls.
@@ -4949,13 +4974,17 @@ impl ProjectAtlasMcpServer {
         context: Option<RequestContext<RoleServer>>,
     ) -> String {
         Self::as_mcp_text((|| {
-            let detailed = match params.view.as_deref().unwrap_or("legacy") {
-                "legacy" => false,
-                "detailed" => true,
-                value => {
-                    return Err(CliError::Service(ServiceError::InvalidInput(format!(
-                        "unsupported symbol relation view {value:?}"
-                    ))));
+            let detailed = match params
+                .view
+                .as_deref()
+                .unwrap_or(MCP_SYMBOL_RELATION_VIEW_LEGACY)
+            {
+                MCP_SYMBOL_RELATION_VIEW_LEGACY => false,
+                MCP_SYMBOL_RELATION_VIEW_DETAILED => true,
+                _unsupported => {
+                    return Err(CliError::Service(ServiceError::InvalidInput(
+                        MCP_ERROR_SYMBOL_RELATION_VIEW.to_string(),
+                    )));
                 }
             };
             let nearest_project = self.nearest_project_enabled(params.nearest_project);
@@ -4975,13 +5004,12 @@ impl ProjectAtlasMcpServer {
                     if detailed {
                         if params.query.is_some() {
                             return Err(CliError::Service(ServiceError::InvalidInput(
-                                "detailed symbol relations use exact symbol selectors, not query"
-                                    .to_string(),
+                                MCP_ERROR_DETAILED_RELATION_QUERY.to_string(),
                             )));
                         }
                         let file = file.as_deref().ok_or_else(|| {
                             CliError::Service(ServiceError::InvalidInput(
-                                "detailed symbol relations require file".to_string(),
+                                MCP_ERROR_DETAILED_RELATION_FILE.to_string(),
                             ))
                         })?;
                         let graph_file =
@@ -4991,7 +5019,7 @@ impl ProjectAtlasMcpServer {
                         let anchor = if let Some(symbol) = params.symbol.as_ref() {
                             if symbol.is_empty() {
                                 return Err(CliError::Service(ServiceError::InvalidInput(
-                                    "detailed relation symbol must not be empty".to_string(),
+                                    MCP_ERROR_DETAILED_RELATION_SYMBOL.to_string(),
                                 )));
                             }
                             RelationAnchor::Symbol {
@@ -5011,7 +5039,7 @@ impl ProjectAtlasMcpServer {
                                 || params.symbol_signature.is_some()
                             {
                                 return Err(CliError::Service(ServiceError::InvalidInput(
-                                    "symbol disambiguators require symbol".to_string(),
+                                    MCP_ERROR_DETAILED_RELATION_DISAMBIGUATOR.to_string(),
                                 )));
                             }
                             RelationAnchor::File { file: graph_file }
@@ -5019,7 +5047,7 @@ impl ProjectAtlasMcpServer {
                         let rows =
                             u32::try_from(params.limit.unwrap_or(50)).map_err(|_overflow| {
                                 CliError::Service(ServiceError::InvalidInput(
-                                    "detailed relation limit exceeds the u32 range".to_string(),
+                                    MCP_ERROR_DETAILED_RELATION_LIMIT.to_string(),
                                 ))
                             })?;
                         let limits = GraphLimits::new(
@@ -5036,7 +5064,10 @@ impl ProjectAtlasMcpServer {
                             &DetailedRelationQuery {
                                 anchor,
                                 direction: parse_relation_direction(
-                                    params.direction.as_deref().unwrap_or("outbound"),
+                                    params
+                                        .direction
+                                        .as_deref()
+                                        .unwrap_or(MCP_SYMBOL_RELATION_DIRECTION_DEFAULT),
                                 )?,
                                 relation: params
                                     .relation
@@ -5044,10 +5075,16 @@ impl ProjectAtlasMcpServer {
                                     .map(parse_coverage_relation)
                                     .transpose()?,
                                 minimum_confidence: parse_relation_confidence(
-                                    params.minimum_confidence.as_deref().unwrap_or("low"),
+                                    params
+                                        .minimum_confidence
+                                        .as_deref()
+                                        .unwrap_or(MCP_SYMBOL_RELATION_CONFIDENCE_DEFAULT),
                                 )?,
                                 resolution: parse_relation_resolution(
-                                    params.resolution.as_deref().unwrap_or("any"),
+                                    params
+                                        .resolution
+                                        .as_deref()
+                                        .unwrap_or(MCP_SYMBOL_RELATION_RESOLUTION_DEFAULT),
                                 )?,
                                 include_occurrences: params.include_occurrences.unwrap_or(false),
                                 limits,
@@ -5057,7 +5094,7 @@ impl ProjectAtlasMcpServer {
                         let toon = Self::with_selected_project_audit(
                             &state,
                             routed_project,
-                            Self::encode_named_payload("symbol_relations", &report)?,
+                            Self::encode_named_payload(MCP_PAYLOAD_SYMBOL_RELATIONS, &report)?,
                         )?;
                         let usage = Self::telemetry_enabled()
                             .then(|| {
