@@ -120,8 +120,45 @@ function Assert-ProductionRecoveryContracts {
     return $nativeSources[0]
 }
 
+function Get-AccountSidAssignment {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Language.ScriptBlockAst]$Ast
+    )
+
+    $assignments = @($Ast.FindAll(
+        {
+            param($node)
+            if ($node -isnot [System.Management.Automation.Language.AssignmentStatementAst] -or
+                $node.Left -isnot [System.Management.Automation.Language.VariableExpressionAst] -or
+                $node.Left.VariablePath.UserPath -ne 'sid' -or
+                $node.Right -isnot [System.Management.Automation.Language.CommandExpressionAst] -or
+                $node.Right.Expression -isnot
+                    [System.Management.Automation.Language.MemberExpressionAst]) {
+                return $false
+            }
+            $member = $node.Right.Expression
+            return `
+                (-not $member.Static -and
+                    $member.Expression -is
+                        [System.Management.Automation.Language.VariableExpressionAst] -and
+                    $member.Expression.VariablePath.UserPath -eq 'account' -and
+                    $member.Member -is
+                        [System.Management.Automation.Language.StringConstantExpressionAst] -and
+                    $member.Member.Value -eq 'Sid')
+        },
+        $true
+    ))
+    Require `
+        ($assignments.Count -eq 1 -and
+            $assignments[0].Extent.StartLineNumber -gt 0) `
+        "Expected one post-account construction SID assignment."
+    return $assignments[0]
+}
+
 $productionAst = Get-ProductionWrapperAst
 $nativeSourceAssignment = Assert-ProductionRecoveryContracts -Ast $productionAst
+$accountSidAssignment = Get-AccountSidAssignment -Ast $productionAst
 if ($StaticOnly) {
     Write-Output "Windows parser-pack recovery static validation passed."
     return
@@ -505,7 +542,7 @@ function Invoke-AccountJournalRecoveryScenario {
     $scenarioDirectory = Split-Path -Parent (Split-Path -Parent $StatePath)
     [System.IO.Directory]::CreateDirectory($scenarioDirectory) | Out-Null
     $parameterPath = Join-Path $scenarioDirectory 'construction-parameters.json'
-    $proxyPath = Join-Path $scenarioDirectory 'hold-after-account.ps1'
+    $breakpointHarnessPath = Join-Path $scenarioDirectory 'hold-before-sid-assignment.ps1'
     $readyMarkerPath = Join-Path $scenarioDirectory 'account-created.ready'
     $scenarioParameters = @{}
     foreach ($entry in $ConstructionParameters.GetEnumerator()) {
@@ -518,10 +555,11 @@ function Invoke-AccountJournalRecoveryScenario {
             wrapper = $ProductionWrapper
             parameters = $scenarioParameters
             ready_marker = $readyMarkerPath
+            breakpoint_line = $accountSidAssignment.Extent.StartLineNumber
         } | ConvertTo-Json -Depth 8 -Compress),
         [System.Text.UTF8Encoding]::new($false)
     )
-    $proxySource = @'
+    $breakpointHarnessSource = @'
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
@@ -531,6 +569,8 @@ $ErrorActionPreference = "Stop"
 $payload = [System.IO.File]::ReadAllText($ParameterPath) |
     ConvertFrom-Json -AsHashtable -Depth 8
 $parameters = [hashtable]$payload.parameters
+$wrapperPath = (Get-Item -LiteralPath ([string]$payload.wrapper) -Force).FullName
+$breakpointLine = [int]$payload.breakpoint_line
 $readyMarkerPath = [System.IO.Path]::GetFullPath([string]$payload.ready_marker)
 $parameterDirectory = [System.IO.Path]::GetFullPath(
     [System.IO.Path]::GetDirectoryName($ParameterPath)
@@ -539,26 +579,8 @@ if ([System.IO.Path]::GetDirectoryName($readyMarkerPath) -ne $parameterDirectory
     [System.IO.File]::Exists($readyMarkerPath)) {
     throw "Account-ready marker path is unsafe."
 }
-function New-LocalUser {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)][string]$Name,
-        [Parameter(Mandatory = $true)][System.Security.SecureString]$Password,
-        [Parameter(Mandatory = $true)][DateTime]$AccountExpires,
-        [switch]$PasswordNeverExpires,
-        [switch]$UserMayNotChangePassword,
-        [Parameter(Mandatory = $true)][string]$Description
-    )
-    $account = Microsoft.PowerShell.LocalAccounts\New-LocalUser @PSBoundParameters
-    if ($null -eq $account -or
-        [string]$account.Name -cne $Name -or
-        $null -eq $account.Sid -or
-        $account.Sid.Value -notmatch '\AS-1-5-21-[0-9]+-[0-9]+-[0-9]+-[0-9]+\z' -or
-        [string]$account.Description -ne $Description) {
-        throw "Created account did not match the retained recovery identity."
-    }
-
-    $statePath = [System.IO.Path]::GetFullPath([string]$parameters.StatePath)
+$statePath = [System.IO.Path]::GetFullPath([string]$parameters.StatePath)
+$breakpointAction = {
     $stateItem = Get-Item -LiteralPath $statePath -Force
     if (($stateItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
         $stateItem.Length -le 0) {
@@ -583,40 +605,51 @@ function New-LocalUser {
         }
     }
 
-    $accountCreatedGate = [System.Threading.ManualResetEventSlim]::new($false)
+    $sidAssignmentGate = [System.Threading.ManualResetEventSlim]::new($false)
     try {
-        $accountCreatedGate.Wait()
+        $sidAssignmentGate.Wait()
     }
     finally {
-        $accountCreatedGate.Dispose()
+        $sidAssignmentGate.Dispose()
     }
-    throw "Account-ready proxy returned unexpectedly."
+    throw "Construction SID-assignment breakpoint returned unexpectedly."
+}.GetNewClosure()
+$breakpoint = Set-PSBreakpoint `
+    -Script $wrapperPath `
+    -Line $breakpointLine `
+    -Action $breakpointAction
+if ($null -eq $breakpoint -or
+    -not $breakpoint.Enabled -or
+    [System.IO.Path]::GetFullPath([string]$breakpoint.Script) -ne $wrapperPath -or
+    $breakpoint.Line -ne $breakpointLine -or
+    @(Get-PSBreakpoint | Where-Object { $_.Id -eq $breakpoint.Id }).Count -ne 1) {
+    throw "Construction SID-assignment breakpoint was not installed exactly once."
 }
-. ([string]$payload.wrapper) @parameters
-throw "Construction wrapper returned after the account-ready proxy."
+& $wrapperPath @parameters
+throw "Construction wrapper returned after the SID-assignment breakpoint."
 '@
     [System.IO.File]::WriteAllText(
-        $proxyPath,
-        $proxySource,
+        $breakpointHarnessPath,
+        $breakpointHarnessSource,
         [System.Text.UTF8Encoding]::new($false)
     )
 
-    $proxyStart = [System.Diagnostics.ProcessStartInfo]::new()
-    $proxyStart.FileName = [string]$ConstructionParameters.PwshPath
-    $proxyStart.UseShellExecute = $false
-    $proxyStart.CreateNoWindow = $true
+    $wrapperStart = [System.Diagnostics.ProcessStartInfo]::new()
+    $wrapperStart.FileName = [string]$ConstructionParameters.PwshPath
+    $wrapperStart.UseShellExecute = $false
+    $wrapperStart.CreateNoWindow = $true
     foreach ($argument in @(
         '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-        '-File', $proxyPath,
+        '-File', $breakpointHarnessPath,
         '-ParameterPath', $parameterPath
     )) {
-        $proxyStart.ArgumentList.Add($argument)
+        $wrapperStart.ArgumentList.Add($argument)
     }
 
-    $proxyProcess = $null
-    $proxyProcessId = 0
-    $proxyOperationFailure = $null
-    $proxyCleanupFailures = [System.Collections.Generic.List[System.Exception]]::new()
+    $wrapperProcess = $null
+    $wrapperProcessId = 0
+    $wrapperOperationFailure = $null
+    $wrapperCleanupFailures = [System.Collections.Generic.List[System.Exception]]::new()
     $observedAccount = $null
     $observedPlaceholderState = $null
     $markerObserved = $false
@@ -625,14 +658,14 @@ throw "Construction wrapper returned after the account-ready proxy."
     $accountSidValidated = $false
     $accountDescriptionValidated = $false
     try {
-        $proxyProcess = [System.Diagnostics.Process]::Start($proxyStart)
-        if ($null -eq $proxyProcess) {
+        $wrapperProcess = [System.Diagnostics.Process]::Start($wrapperStart)
+        if ($null -eq $wrapperProcess) {
             throw "Could not start the account-ready construction wrapper."
         }
-        $proxyProcessId = $proxyProcess.Id
+        $wrapperProcessId = $wrapperProcess.Id
         $readyDeadline = [DateTime]::UtcNow.AddSeconds($processTimeoutSeconds)
         do {
-            if ($proxyProcess.HasExited) {
+            if ($wrapperProcess.HasExited) {
                 throw "Account-ready construction wrapper exited before the recovery handshake."
             }
             if (-not $markerValidated -and [System.IO.File]::Exists($readyMarkerPath)) {
@@ -681,44 +714,44 @@ throw "Construction wrapper returned after the account-ready proxy."
             "account=$accountObserved"
             "account_sid=$accountSidValidated"
             "account_description=$accountDescriptionValidated"
-            "process_alive=$(-not $proxyProcess.HasExited)"
+            "process_alive=$(-not $wrapperProcess.HasExited)"
         ) -join ','
         Require `
             ($null -ne $observedAccount -and
                 $null -ne $observedPlaceholderState -and
-                -not $proxyProcess.HasExited -and
-                $null -ne (Get-Process -Id $proxyProcessId -ErrorAction SilentlyContinue)) `
+                -not $wrapperProcess.HasExited -and
+                $null -ne (Get-Process -Id $wrapperProcessId -ErrorAction SilentlyContinue)) `
             "Account-ready handshake did not complete under the fixed deadline ($handshakeObservation)."
 
-        $proxyProcess.Kill($true)
-        if (-not $proxyProcess.WaitForExit(5000)) {
+        $wrapperProcess.Kill($true)
+        if (-not $wrapperProcess.WaitForExit(5000)) {
             throw "Account-ready construction wrapper could not be reaped."
         }
         Require `
-            ($null -eq (Get-Process -Id $proxyProcessId -ErrorAction SilentlyContinue)) `
+            ($null -eq (Get-Process -Id $wrapperProcessId -ErrorAction SilentlyContinue)) `
             "Account-ready construction wrapper PID survived abrupt termination."
     }
     catch {
-        $proxyOperationFailure = $_.Exception
+        $wrapperOperationFailure = $_.Exception
     }
     finally {
-        if ($null -ne $proxyProcess) {
+        if ($null -ne $wrapperProcess) {
             try {
-                if (-not $proxyProcess.HasExited) {
-                    $proxyProcess.Kill($true)
-                    if (-not $proxyProcess.WaitForExit(5000)) {
+                if (-not $wrapperProcess.HasExited) {
+                    $wrapperProcess.Kill($true)
+                    if (-not $wrapperProcess.WaitForExit(5000)) {
                         throw "Fallback account-ready wrapper termination could not be reaped."
                     }
                 }
             }
             catch {
-                $proxyCleanupFailures.Add($_.Exception)
+                $wrapperCleanupFailures.Add($_.Exception)
             }
             try {
-                $proxyProcess.Dispose()
+                $wrapperProcess.Dispose()
             }
             catch {
-                $proxyCleanupFailures.Add($_.Exception)
+                $wrapperCleanupFailures.Add($_.Exception)
             }
         }
         try {
@@ -727,22 +760,22 @@ throw "Construction wrapper returned after the account-ready proxy."
             }
         }
         catch {
-            $proxyCleanupFailures.Add($_.Exception)
+            $wrapperCleanupFailures.Add($_.Exception)
         }
     }
-    if ($null -ne $proxyOperationFailure) {
-        if ($proxyCleanupFailures.Count -ne 0) {
+    if ($null -ne $wrapperOperationFailure) {
+        if ($wrapperCleanupFailures.Count -ne 0) {
             throw [System.AggregateException]::new(
                 "Account-ready recovery operation and cleanup failed.",
-                @($proxyOperationFailure) + @($proxyCleanupFailures)
+                @($wrapperOperationFailure) + @($wrapperCleanupFailures)
             )
         }
-        throw $proxyOperationFailure
+        throw $wrapperOperationFailure
     }
-    if ($proxyCleanupFailures.Count -ne 0) {
+    if ($wrapperCleanupFailures.Count -ne 0) {
         throw [System.AggregateException]::new(
             "Account-ready recovery cleanup failed.",
-            @($proxyCleanupFailures)
+            @($wrapperCleanupFailures)
         )
     }
 
