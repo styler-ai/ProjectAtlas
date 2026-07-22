@@ -456,7 +456,7 @@ try {
             "Named-object diagnostic fault did not atomically publish one bounded record."
         $probeRecord = Read-NamedObjectProbeRecord -Path $probeResultItem.FullName
         Require `
-            ($probeRecord.schema_version -eq 2L -and
+            ($probeRecord.schema_version -eq 3L -and
                 $probeRecord.status -ceq 'failure' -and
                 $probeRecord.stage -ceq 'ambient-environment' -and
                 $probeRecord.exit_code -eq 122L -and
@@ -477,7 +477,7 @@ try {
         )
         $stringSchemaPayload = [System.IO.File]::ReadAllText($probeResult) |
             ConvertFrom-Json -Depth 8
-        $stringSchemaPayload.schema_version = '2'
+        $stringSchemaPayload.schema_version = '3'
         [System.IO.File]::WriteAllText(
             $stringSchemaRecord,
             ($stringSchemaPayload | ConvertTo-Json -Depth 8 -Compress)
@@ -499,7 +499,7 @@ try {
             "projectatlas-object-namespace-probe-$([Guid]::NewGuid().ToString('N')).json"
         )
         $stringBooleanPayload = [ordered]@{
-            schema_version = 2
+            schema_version = 3
             status = 'success'
             stage = 'complete'
             exit_code = 0
@@ -509,6 +509,14 @@ try {
             cleanup_error = $null
             session_id = 1
             directory_path = '\BaseNamedObjects'
+            directory_traverse_ntstatus = 0
+            directory_create_object_ntstatus = 0
+            directory_traverse_create_ntstatus = 0
+            native_semaphore_name =
+                "Local\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
+            post_job_native_create_win32 = 0
+            post_job_native_created_new = $true
+            post_job_native_close_win32 = 0
             semaphore_name = "Local\ProjectAtlasParserPack-$([Guid]::NewGuid().ToString('N'))"
             created_new = 'false'
             descendant_exit_code = 0
@@ -711,7 +719,8 @@ try {
                 $productionText.Contains('Remove-Item -LiteralPath Env:CARGO_MAKEFLAGS') -and
                 -not $wrapperText.Contains('CreateConstructionJobserver(') -and
                 -not $wrapperText.Contains('AddConstructionJobserverEnvironment(') -and
-                -not $wrapperText.Contains('EntryPoint = "CreateSemaphoreExW"') -and
+                $wrapperText.Contains('CapturePreJobNativeSemaphoreProbe') -and
+                $wrapperText.Contains('PreJobNativeSemaphoreName') -and
                 $wrapperText.Contains('Add-ConstructionObjectDirectoryPrincipalAccess') -and
                 $wrapperText.Contains('Assert-ConstructionObjectDirectoryPrincipalAbsent')) `
             "Windows construction did not use its child-owned one-worker jobserver and exact namespace grant."
@@ -764,7 +773,9 @@ try {
                 $nativeSource.Contains('create-process-with-construction-token') -and
                 $nativeSource.Contains('ambient-construction-jobserver') -and
                 -not $nativeSource.Contains('CreateConstructionJobserver(') -and
-                -not $nativeSource.Contains('CreateSemaphoreExW')) `
+                $nativeSource.Contains(
+                    'CapturePreJobNativeSemaphoreProbe(admissionReceipt);'
+                )) `
             "Windows construction adapter did not use the bounded alternate-logon process boundary."
         $principalLogonStart = $nativeSource.IndexOf(
             'if (!LogonUser(',
@@ -1157,7 +1168,6 @@ public static class ProjectAtlasConstructionAdmissionFixture
             'LastJobserverSynchronizeAccessCheck',
             'CreateAdmittedJobserver',
             'CanCreateFreshJobserverName',
-            'RunImpersonated',
             'AccessCheck(',
             'ProjectAtlasCurrentProcessTokenRestrictionProbe',
             'ProjectAtlasObjectDirectoryProbe'

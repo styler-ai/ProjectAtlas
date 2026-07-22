@@ -1580,6 +1580,8 @@ public static class ProjectAtlasConstructionProcess
     private const uint WaitFailed = UInt32.MaxValue;
     private const uint AdmissionCleanupWaitMilliseconds = 5000;
     private const uint FailureExitCode = 125;
+    private const uint SemaphoreAllAccess = 0x001F0003;
+    private const int ErrorAlreadyExists = 183;
     private const uint WindowStationAllAccess = 0x000F037F;
     private const uint DesktopAllAccess = 0x000F01FF;
     private const uint SddlRevision1 = 1;
@@ -1596,6 +1598,7 @@ public static class ProjectAtlasConstructionProcess
     private const int MaximumLogonCommandLineCharacters = 1023;
     private const string RequiredIntegritySid = "S-1-16-8192";
     private const string BrokerJobPrefix = "Global\\ProjectAtlasParserPackBroker-";
+    private const string DiagnosticSemaphorePrefix = "Local\\ProjectAtlasParserPack-";
 
     private static readonly object BrokerJobSync = new object();
     private static string configuredBrokerJobName;
@@ -1626,6 +1629,11 @@ public static class ProjectAtlasConstructionProcess
         internal bool LogonTokenHandleClosed { get; set; }
         internal bool ConstructionTokenHandleOwned { get; set; }
         internal bool ConstructionTokenHandleClosed { get; set; }
+        internal bool NamedObjectProbeRan { get; set; }
+        internal string PreJobNativeSemaphoreName { get; set; }
+        internal int PreJobNativeCreateWin32 { get; set; }
+        internal bool PreJobNativeCreatedNew { get; set; }
+        internal int PreJobNativeCloseWin32 { get; set; }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1842,6 +1850,19 @@ public static class ProjectAtlasConstructionProcess
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+
+    [DllImport(
+        "kernel32.dll",
+        CharSet = CharSet.Unicode,
+        SetLastError = true,
+        EntryPoint = "CreateSemaphoreExW")]
+    private static extern IntPtr CreateSemaphoreEx(
+        IntPtr securityAttributes,
+        int initialCount,
+        int maximumCount,
+        string name,
+        uint flags,
+        uint desiredAccess);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr OpenJobObject(
@@ -2096,6 +2117,37 @@ public static class ProjectAtlasConstructionProcess
             throw new InvalidOperationException(operation);
         }
         return new SecurityIdentifier(sid);
+    }
+
+    private static void CapturePreJobNativeSemaphoreProbe(AdmissionReceipt receipt)
+    {
+        receipt.NamedObjectProbeRan = true;
+        if (string.IsNullOrEmpty(receipt.PreJobNativeSemaphoreName))
+        {
+            receipt.PreJobNativeSemaphoreName =
+                DiagnosticSemaphorePrefix + Guid.NewGuid().ToString("N");
+        }
+        receipt.PreJobNativeCloseWin32 = -1;
+        IntPtr handle = CreateSemaphoreEx(
+            IntPtr.Zero,
+            1,
+            1,
+            receipt.PreJobNativeSemaphoreName,
+            0,
+            SemaphoreAllAccess);
+        int createError = Marshal.GetLastWin32Error();
+        if (handle == IntPtr.Zero)
+        {
+            receipt.PreJobNativeCreateWin32 = createError;
+            return;
+        }
+        receipt.PreJobNativeCreatedNew = createError != ErrorAlreadyExists;
+        receipt.PreJobNativeCreateWin32 = receipt.PreJobNativeCreatedNew
+            ? 0
+            : createError;
+        receipt.PreJobNativeCloseWin32 = CloseHandle(handle)
+            ? 0
+            : Marshal.GetLastWin32Error();
     }
 
     public static void ConfigureBrokerJob(string brokerJobName)
@@ -2421,6 +2473,16 @@ public static class ProjectAtlasConstructionProcess
                 admittedLogonSid = ValidateConstructionToken(
                     logonToken,
                     principalSid);
+                if (admissionScenario == AdmissionScenario.Normal &&
+                    admissionReceipt != null)
+                {
+                    WindowsIdentity.RunImpersonated(
+                        logonToken,
+                        delegate
+                        {
+                            CapturePreJobNativeSemaphoreProbe(admissionReceipt);
+                        });
+                }
                 environment = Marshal.StringToHGlobalUni(environmentBlock);
                 created = CreateProcessWithToken(
                     logonToken,
