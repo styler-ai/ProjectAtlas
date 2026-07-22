@@ -3292,7 +3292,11 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        command.process_group(0);
+        {
+            use std::os::unix::process::CommandExt;
+
+            command.process_group(0);
+        }
         #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
         {
             use std::os::windows::process::CommandExt;
