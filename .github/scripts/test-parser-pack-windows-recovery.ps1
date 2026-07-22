@@ -1483,6 +1483,8 @@ function New-MinimalUserEnvironmentBlock {
         $values.PROJECTATLAS_CONSTRUCTION_EXPECTED_PRINCIPAL_SID = $ExpectedPrincipalSid
         $values.PROJECTATLAS_CONSTRUCTION_EXPECTED_LOGON_SID =
             '__PROJECTATLAS_CONSTRUCTION_LOGON_SID__'
+        $values.PROJECTATLAS_CONSTRUCTION_EXPECTED_SESSION_ID =
+            [string][System.Diagnostics.Process]::GetCurrentProcess().SessionId
         $values.PROJECTATLAS_CONSTRUCTION_JOBSERVER_NAME = $JobserverName
         $values.PROJECTATLAS_CONSTRUCTION_ADMISSION_PROBE_SOURCE =
             $AdmissionProbeSource
@@ -1501,10 +1503,22 @@ function New-JobserverAdmissionProbe {
 $ErrorActionPreference = "Stop"
 $principalSid = [string]$env:PROJECTATLAS_CONSTRUCTION_EXPECTED_PRINCIPAL_SID
 $logonSid = [string]$env:PROJECTATLAS_CONSTRUCTION_EXPECTED_LOGON_SID
+$expectedSessionIdText =
+    [string]$env:PROJECTATLAS_CONSTRUCTION_EXPECTED_SESSION_ID
 $jobserverName = [string]$env:PROJECTATLAS_CONSTRUCTION_JOBSERVER_NAME
 if ($principalSid -notmatch '\AS-1-5-21-[0-9]+-[0-9]+-[0-9]+-[0-9]+\z' -or
     $logonSid -notmatch '\AS-1-5-5-[0-9]+-[0-9]+\z' -or
+    $expectedSessionIdText -notmatch '\A[0-9]{1,10}\z' -or
     $jobserverName -notmatch '\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z') {
+    exit 40
+}
+try {
+    $expectedSessionId = [Convert]::ToInt32(
+        $expectedSessionIdText,
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+}
+catch {
     exit 40
 }
 try {
@@ -1530,10 +1544,22 @@ public static class ProjectAtlasJobserverAdmissionProbe
     private const int ErrorInsufficientBuffer = 122;
     private const int TokenUserInformation = 1;
     private const int TokenGroupsInformation = 2;
+    private const int TokenSessionIdInformation = 12;
+    private const int TokenSandBoxInertInformation = 15;
     private const int TokenIntegrityLevelInformation = 25;
+    private const int TokenMandatoryPolicyInformation = 27;
+    private const int TokenIsAppContainerInformation = 29;
+    private const int TokenPrivateNameSpaceInformation = 42;
+    private const int TokenBnoIsolationInformationClass = 44;
+    private const int TokenIsSandboxedInformation = 47;
+    private const int TokenIsAppSiloInformation = 48;
     private const uint SeGroupEnabled = 0x00000004;
     private const uint SeGroupUseForDenyOnly = 0x00000010;
+    private const uint SeGroupIntegrity = 0x00000020;
+    private const uint SeGroupIntegrityEnabled = 0x00000040;
     private const uint SeGroupLogonId = 0xC0000000;
+    private const uint TokenMandatoryPolicyNoWriteUp = 0x00000001;
+    private const uint TokenMandatoryPolicyValidMask = 0x00000003;
     private const uint Synchronize = 0x00100000;
     private const uint SemaphoreModifyState = 0x00000002;
     private const uint WaitObject0 = 0;
@@ -1565,6 +1591,13 @@ public static class ProjectAtlasJobserverAdmissionProbe
     private struct TokenMandatoryLabel
     {
         internal SidAndAttributes Label;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TokenBnoIsolation
+    {
+        internal IntPtr IsolationPrefix;
+        internal byte IsolationEnabled;
     }
 
     private sealed class TokenInformationBuffer : IDisposable
@@ -1742,10 +1775,108 @@ public static class ProjectAtlasJobserverAdmissionProbe
         }
     }
 
+    private static bool TryReadTokenUInt32(
+        IntPtr token,
+        int informationClass,
+        out uint value)
+    {
+        value = 0;
+        using (TokenInformationBuffer information =
+            GetBoundedTokenInformation(token, informationClass))
+        {
+            if (information == null || information.Length != sizeof(uint))
+            {
+                return false;
+            }
+            value = unchecked((uint)Marshal.ReadInt32(information.Pointer));
+            return true;
+        }
+    }
+
+    private static int InspectNamespaceState(
+        IntPtr token,
+        int expectedSessionId)
+    {
+        uint value;
+        if (!TryReadTokenUInt32(token, TokenSessionIdInformation, out value))
+        {
+            return 64;
+        }
+        if (value != unchecked((uint)expectedSessionId))
+        {
+            return 65;
+        }
+        if (!TryReadTokenUInt32(token, TokenSandBoxInertInformation, out value) ||
+            value > 1)
+        {
+            return 74;
+        }
+        if (!TryReadTokenUInt32(token, TokenMandatoryPolicyInformation, out value) ||
+            (value & TokenMandatoryPolicyNoWriteUp) == 0 ||
+            (value & ~TokenMandatoryPolicyValidMask) != 0)
+        {
+            return 67;
+        }
+        if (!TryReadTokenUInt32(token, TokenIsAppContainerInformation, out value))
+        {
+            return 75;
+        }
+        if (value != 0)
+        {
+            return 68;
+        }
+        if (!TryReadTokenUInt32(token, TokenPrivateNameSpaceInformation, out value))
+        {
+            return 75;
+        }
+        if (value != 0)
+        {
+            return 69;
+        }
+        using (TokenInformationBuffer bnoInformation =
+            GetBoundedTokenInformation(token, TokenBnoIsolationInformationClass))
+        {
+            if (bnoInformation == null ||
+                bnoInformation.Length < Marshal.SizeOf<TokenBnoIsolation>())
+            {
+                return 75;
+            }
+            TokenBnoIsolation bno =
+                Marshal.PtrToStructure<TokenBnoIsolation>(
+                    bnoInformation.Pointer);
+            if (bno.IsolationEnabled > 1)
+            {
+                return 75;
+            }
+            if (bno.IsolationEnabled != 0)
+            {
+                return 70;
+            }
+        }
+        if (!TryReadTokenUInt32(token, TokenIsSandboxedInformation, out value))
+        {
+            return 75;
+        }
+        if (value != 0)
+        {
+            return 72;
+        }
+        if (!TryReadTokenUInt32(token, TokenIsAppSiloInformation, out value))
+        {
+            return 75;
+        }
+        if (value != 0)
+        {
+            return 73;
+        }
+        return 0;
+    }
+
     private static int InspectProcessToken(
         IntPtr token,
         string expectedPrincipalSid,
-        string expectedLogonSid)
+        string expectedLogonSid,
+        int expectedSessionId)
     {
         if (IsTokenRestricted(token))
         {
@@ -1875,18 +2006,28 @@ public static class ProjectAtlasJobserverAdmissionProbe
             {
                 return 49;
             }
+            uint expectedAttributes = SeGroupIntegrity | SeGroupIntegrityEnabled;
+            if ((label.Label.Attributes & expectedAttributes) != expectedAttributes)
+            {
+                return 66;
+            }
         }
-        return 0;
+        return InspectNamespaceState(token, expectedSessionId);
     }
 
     public static int Run(
         string name,
         string expectedPrincipalSid,
-        string expectedLogonSid)
+        string expectedLogonSid,
+        int expectedSessionId)
     {
         try
         {
-            return RunChecked(name, expectedPrincipalSid, expectedLogonSid);
+            return RunChecked(
+                name,
+                expectedPrincipalSid,
+                expectedLogonSid,
+                expectedSessionId);
         }
         catch
         {
@@ -1897,7 +2038,8 @@ public static class ProjectAtlasJobserverAdmissionProbe
     private static int RunChecked(
         string name,
         string expectedPrincipalSid,
-        string expectedLogonSid)
+        string expectedLogonSid,
+        int expectedSessionId)
     {
         IntPtr token;
         if (OpenThreadToken(GetCurrentThread(), TokenQuery, true, out token))
@@ -1919,7 +2061,8 @@ public static class ProjectAtlasJobserverAdmissionProbe
             tokenResult = InspectProcessToken(
                 token,
                 expectedPrincipalSid,
-                expectedLogonSid);
+                expectedLogonSid,
+                expectedSessionId);
         }
         finally
         {
@@ -1986,7 +2129,8 @@ catch {
 exit [ProjectAtlasJobserverAdmissionProbe]::Run(
     $jobserverName,
     $principalSid,
-    $logonSid)
+    $logonSid,
+    $expectedSessionId)
 '@
     return [pscustomobject]@{
         Source = $probeSource
@@ -2125,6 +2269,17 @@ function Invoke-ConstructionAdmissionRecoveryScenario {
                     61 { 'thread-token-query' }
                     62 { 'process-token-query' }
                     63 { 'restricted-token' }
+                    64 { 'token-session-query' }
+                    65 { 'token-session-mismatch' }
+                    66 { 'integrity-attributes' }
+                    67 { 'mandatory-policy' }
+                    68 { 'app-container-token' }
+                    69 { 'private-object-namespace' }
+                    70 { 'bno-isolation' }
+                    72 { 'sandboxed-token' }
+                    73 { 'app-silo-token' }
+                    74 { 'sandbox-inert-query' }
+                    75 { 'namespace-token-query' }
                     default { "unexpected-exit-$normalExitCode" }
                 }
                 throw "Construction normal admission child probe failed at $normalFailureCategory."
