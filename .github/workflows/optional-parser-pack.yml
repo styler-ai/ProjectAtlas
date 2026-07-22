@@ -222,29 +222,36 @@ jobs:
 
           $wrapper = Join-Path $env:GITHUB_WORKSPACE ".github/scripts/invoke-parser-pack-windows-construction.ps1"
           $state = Join-Path $env:RUNNER_TEMP "parser-pack-windows-construction-state/state.json"
-          & $wrapper `
-            -Mode construct `
-            -StatePath $state `
-            -SourceRoot $env:GITHUB_WORKSPACE `
-            -InputDirectory (Join-Path $env:RUNNER_TEMP "parser-pack-inputs") `
-            -VendorDirectory (Join-Path $env:RUNNER_TEMP "parser-pack-vendor") `
-            -OutputDirectory (Join-Path $env:RUNNER_TEMP "parser-pack-output") `
-            -CargoHome (Join-Path $env:RUNNER_TEMP "parser-pack-cargo-home") `
-            -TemporaryDirectory (Join-Path $env:RUNNER_TEMP "parser-pack-contained-temp") `
-            -HomeDirectory (Join-Path $env:RUNNER_TEMP "parser-pack-contained-home") `
-            -ToolchainRoot '${{ steps.identity.outputs.toolchain_root }}' `
-            -PwshPath '${{ steps.identity.outputs.pwsh_path }}' `
-            -VcToolsRoot $env:VCToolsInstallDir.TrimEnd('\') `
-            -WindowsSdkRoot $env:WindowsSdkDir.TrimEnd('\') `
-            -ProjectAtlasRevision '${{ steps.identity.outputs.revision }}' `
-            -CargoPackageVersion '${{ steps.identity.outputs.cargo_package_version }}' `
-            -IntendedReleaseVersion '${{ steps.identity.outputs.intended_release_version }}' `
-            -CargoLockSha256 '${{ steps.identity.outputs.cargo_lock_sha256 }}' `
-            -RustcRelease '${{ steps.identity.outputs.rustc_release }}' `
-            -RustcCommitHash '${{ steps.identity.outputs.rustc_commit_hash }}' `
-            -ResolverAddress '${{ steps.network.outputs.resolver_address }}'
-
           $launcher = Join-Path $env:RUNNER_TEMP "parser-pack-appcontainer/launcher.exe"
+          $constructionParameters = @{
+            Mode = "construct"
+            StatePath = $state
+            SourceRoot = $env:GITHUB_WORKSPACE
+            InputDirectory = Join-Path $env:RUNNER_TEMP "parser-pack-inputs"
+            VendorDirectory = Join-Path $env:RUNNER_TEMP "parser-pack-vendor"
+            OutputDirectory = Join-Path $env:RUNNER_TEMP "parser-pack-output"
+            CargoHome = Join-Path $env:RUNNER_TEMP "parser-pack-cargo-home"
+            TemporaryDirectory = Join-Path $env:RUNNER_TEMP "parser-pack-contained-temp"
+            HomeDirectory = Join-Path $env:RUNNER_TEMP "parser-pack-contained-home"
+            ToolchainRoot = '${{ steps.identity.outputs.toolchain_root }}'
+            PwshPath = '${{ steps.identity.outputs.pwsh_path }}'
+            VcToolsRoot = $env:VCToolsInstallDir.TrimEnd('\')
+            WindowsSdkRoot = $env:WindowsSdkDir.TrimEnd('\')
+            ProjectAtlasRevision = '${{ steps.identity.outputs.revision }}'
+            CargoPackageVersion = '${{ steps.identity.outputs.cargo_package_version }}'
+            IntendedReleaseVersion = '${{ steps.identity.outputs.intended_release_version }}'
+            CargoLockSha256 = '${{ steps.identity.outputs.cargo_lock_sha256 }}'
+            RustcRelease = '${{ steps.identity.outputs.rustc_release }}'
+            RustcCommitHash = '${{ steps.identity.outputs.rustc_commit_hash }}'
+            ResolverAddress = '${{ steps.network.outputs.resolver_address }}'
+          }
+          & (Join-Path $env:GITHUB_WORKSPACE ".github/scripts/test-parser-pack-windows-recovery.ps1") `
+            -ProductionWrapper $wrapper `
+            -LauncherPath $launcher `
+            -ConstructionParameters $constructionParameters `
+            -RecoveryRoot (Join-Path $env:RUNNER_TEMP "parser-pack-windows-recovery")
+          & $wrapper @constructionParameters
+
           $publish = Join-Path $env:RUNNER_TEMP "parser-pack-output/publish"
           $publishedLauncher = Join-Path $publish "parser-pack-appcontainer-launcher.exe"
           [System.IO.File]::Copy($launcher, $publishedLauncher, $false)
@@ -260,9 +267,32 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          & (Join-Path $env:GITHUB_WORKSPACE ".github/scripts/invoke-parser-pack-windows-construction.ps1") `
-            -Mode cleanup `
-            -StatePath (Join-Path $env:RUNNER_TEMP "parser-pack-windows-construction-state/state.json")
+          $wrapper = Join-Path $env:GITHUB_WORKSPACE ".github/scripts/invoke-parser-pack-windows-construction.ps1"
+          $statePaths = @(
+            (Join-Path $env:RUNNER_TEMP "parser-pack-windows-construction-state/state.json"),
+            (Join-Path $env:RUNNER_TEMP "parser-pack-windows-recovery/account-journal/parser-pack-windows-construction-state/state.json"),
+            (Join-Path $env:RUNNER_TEMP "parser-pack-windows-recovery/launcher-admission/parser-pack-windows-construction-state/state.json"),
+            (Join-Path $env:RUNNER_TEMP "parser-pack-windows-recovery/cleanup-retry/parser-pack-windows-construction-state/state.json")
+          )
+          $cleanupFailures = [System.Collections.Generic.List[System.Exception]]::new()
+          foreach ($statePath in $statePaths) {
+            try {
+              & {
+                param([string]$CleanupWrapper, [string]$CleanupStatePath)
+                . $CleanupWrapper -Mode cleanup -StatePath $CleanupStatePath
+                Invoke-Cleanup
+              } $wrapper $statePath
+            }
+            catch {
+              $cleanupFailures.Add($_.Exception)
+            }
+          }
+          if ($cleanupFailures.Count -ne 0) {
+            throw [System.AggregateException]::new(
+              "One or more Windows construction recovery cleanups failed.",
+              @($cleanupFailures)
+            )
+          }
 
       - name: Revalidate exact candidate after construction
         shell: pwsh
