@@ -906,6 +906,7 @@ function Set-BrokerEnvironment {
         CommonProgramFiles = $commonProgramFiles
         'CommonProgramFiles(x86)' = $commonProgramFilesX86
         PSModulePath = $moduleRoots -join ';'
+        LOCALAPPDATA = $temporaryRoot
         TEMP = $temporaryRoot
         TMP = $temporaryRoot
         WindowsSDKVersion = [string]$Captured.WindowsSDKVersion
