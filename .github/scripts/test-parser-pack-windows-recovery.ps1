@@ -121,6 +121,165 @@ if (($Expectation -eq "present" -and $matches -lt 1) -or
     throw "Exact-SID WTS process audit did not satisfy its expected state."
 }
 '@
+$privilegeAuditSource = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class ProjectAtlasConstructionPrivilegeAudit
+{
+    private const uint TokenQuery = 0x0008;
+    private const int TokenPrivilegesInformation = 3;
+    private const int ErrorInsufficientBuffer = 122;
+    private const int MaximumTokenInformationBytes = 64 * 1024;
+    private const string SeDebugPrivilege = "SeDebugPrivilege";
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Luid
+    {
+        internal uint LowPart;
+        internal int HighPart;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LuidAndAttributes
+    {
+        internal Luid Luid;
+        internal uint Attributes;
+    }
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool OpenProcessToken(
+        IntPtr processHandle,
+        uint desiredAccess,
+        out IntPtr tokenHandle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetTokenInformation(
+        IntPtr tokenHandle,
+        int tokenInformationClass,
+        IntPtr tokenInformation,
+        int tokenInformationLength,
+        out int returnLength);
+
+    [DllImport(
+        "advapi32.dll",
+        CharSet = CharSet.Unicode,
+        SetLastError = true,
+        EntryPoint = "LookupPrivilegeValueW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool LookupPrivilegeValue(
+        string systemName,
+        string privilegeName,
+        out Luid luid);
+
+    public static uint ReadDebugPrivilegeAttributes()
+    {
+        IntPtr token = IntPtr.Zero;
+        if (!OpenProcessToken(GetCurrentProcess(), TokenQuery, out token))
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "audit-open-construction-privilege-token");
+        }
+        try
+        {
+            Luid debugPrivilege;
+            if (!LookupPrivilegeValue(null, SeDebugPrivilege, out debugPrivilege))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "audit-lookup-construction-privilege");
+            }
+
+            int requiredBytes;
+            bool probe = GetTokenInformation(
+                token,
+                TokenPrivilegesInformation,
+                IntPtr.Zero,
+                0,
+                out requiredBytes);
+            int probeError = Marshal.GetLastWin32Error();
+            if (probe || probeError != ErrorInsufficientBuffer ||
+                requiredBytes < sizeof(uint) ||
+                requiredBytes > MaximumTokenInformationBytes)
+            {
+                throw new Win32Exception(
+                    probeError,
+                    "audit-size-construction-token-privileges");
+            }
+
+            IntPtr information = Marshal.AllocHGlobal(requiredBytes);
+            try
+            {
+                int returnedBytes;
+                if (!GetTokenInformation(
+                    token,
+                    TokenPrivilegesInformation,
+                    information,
+                    requiredBytes,
+                    out returnedBytes))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "audit-read-construction-token-privileges");
+                }
+                if (returnedBytes < sizeof(uint) || returnedBytes > requiredBytes)
+                {
+                    throw new InvalidOperationException(
+                        "audit-bound-construction-token-privileges");
+                }
+
+                uint count = unchecked((uint)Marshal.ReadInt32(information));
+                int rowSize = Marshal.SizeOf<LuidAndAttributes>();
+                int maximumRows = (returnedBytes - sizeof(uint)) / rowSize;
+                if (count > maximumRows)
+                {
+                    throw new InvalidOperationException(
+                        "audit-count-construction-token-privileges");
+                }
+                for (uint index = 0; index < count; index++)
+                {
+                    IntPtr rowAddress = IntPtr.Add(
+                        information,
+                        checked(sizeof(uint) + checked((int)index * rowSize)));
+                    LuidAndAttributes row =
+                        Marshal.PtrToStructure<LuidAndAttributes>(rowAddress);
+                    if (row.Luid.LowPart == debugPrivilege.LowPart &&
+                        row.Luid.HighPart == debugPrivilege.HighPart)
+                    {
+                        return row.Attributes;
+                    }
+                }
+                throw new InvalidOperationException(
+                    "audit-missing-construction-token-debug-privilege");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(information);
+            }
+        }
+        finally
+        {
+            if (token != IntPtr.Zero && !CloseHandle(token))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "audit-close-construction-privilege-token");
+            }
+        }
+    }
+}
+'@
 
 function Require {
     param(
@@ -298,6 +457,15 @@ $auditParseErrors = $null
 Require `
     ($auditParseErrors.Count -eq 0) `
     "Exact-SID WTS audit helper did not parse."
+Require `
+    ($privilegeAuditSource.Contains('SeDebugPrivilege') -and
+        $privilegeAuditSource.Contains('ReadDebugPrivilegeAttributes') -and
+        $privilegeAuditSource.Contains('TokenPrivilegesInformation = 3') -and
+        $privilegeAuditSource.Contains('GetTokenInformation(')) `
+    "Construction privilege audit helper lost its exact token contract."
+if (-not ('ProjectAtlasConstructionPrivilegeAudit' -as [type])) {
+    Add-Type -TypeDefinition $privilegeAuditSource -Language CSharp
+}
 if ($StaticOnly) {
     Write-Output "Windows parser-pack recovery static validation passed."
     return
@@ -2074,8 +2242,44 @@ try {
 
     Invoke-AccountJournalRecoveryScenario `
         -StatePath $scenarioStatePaths.AccountJournal
-    Invoke-ConstructionAdmissionRecoveryScenario `
-        -StatePath $scenarioStatePaths.LauncherAdmission
+    $debugPrivilegeBefore =
+        [ProjectAtlasConstructionPrivilegeAudit]::ReadDebugPrivilegeAttributes()
+    Require `
+        (($debugPrivilegeBefore -band 0x00000002) -eq 0) `
+        "Elevated recovery runner started with SeDebugPrivilege enabled."
+    $admissionRecoveryFailure = $null
+    $privilegeAuditFailure = $null
+    try {
+        Invoke-ConstructionAdmissionRecoveryScenario `
+            -StatePath $scenarioStatePaths.LauncherAdmission
+    }
+    catch {
+        $admissionRecoveryFailure = $_.Exception
+    }
+    finally {
+        try {
+            $debugPrivilegeAfter =
+                [ProjectAtlasConstructionPrivilegeAudit]::ReadDebugPrivilegeAttributes()
+            Require `
+                ($debugPrivilegeAfter -eq $debugPrivilegeBefore) `
+                "Construction admission did not restore the exact SeDebugPrivilege attributes."
+        }
+        catch {
+            $privilegeAuditFailure = $_.Exception
+        }
+    }
+    if ($null -ne $admissionRecoveryFailure -and $null -ne $privilegeAuditFailure) {
+        throw [System.AggregateException]::new(
+            "Construction admission and privilege restoration audit failed.",
+            @($admissionRecoveryFailure, $privilegeAuditFailure)
+        )
+    }
+    if ($null -ne $admissionRecoveryFailure) {
+        throw $admissionRecoveryFailure
+    }
+    if ($null -ne $privilegeAuditFailure) {
+        throw $privilegeAuditFailure
+    }
     Invoke-CleanupRetryRecoveryScenario `
         -StatePath $scenarioStatePaths.CleanupRetry
     $suiteSucceeded = $true

@@ -1011,6 +1011,8 @@ public static class ProjectAtlasConstructionProcess
     private const uint SddlRevision1 = 1;
     private const uint TokenQuery = 0x0008;
     private const uint TokenDuplicate = 0x0002;
+    private const uint TokenAdjustPrivileges = 0x0020;
+    private const uint SePrivilegeEnabled = 0x00000002;
     private const int TokenUserInformation = 1;
     private const int TokenGroupsInformation = 2;
     private const int TokenIntegrityLevelInformation = 25;
@@ -1021,10 +1023,14 @@ public static class ProjectAtlasConstructionProcess
     private const uint Synchronize = 0x00100000;
     private const uint SemaphoreModifyState = 0x00000002;
     private const uint SemaphoreAllAccess = 0x001F0003;
+    private const int ErrorSuccess = 0;
+    private const int ErrorAccessDenied = 5;
     private const int ErrorInsufficientBuffer = 122;
     private const int ErrorAlreadyExists = 183;
+    private const int ErrorNotAllAssigned = 1300;
     private const int MaximumTokenInformationBytes = 64 * 1024;
     private const int MaximumTokenGroupCount = 1024;
+    private const string SeDebugPrivilege = "SeDebugPrivilege";
     private const string RequiredIntegritySid = "S-1-16-8192";
     private static readonly Regex JobserverNamePattern = new Regex(
         @"\AGlobal\\ProjectAtlasParserPack-[0-9a-f]{32}\z",
@@ -1124,6 +1130,27 @@ public static class ProjectAtlasConstructionProcess
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    private struct Luid
+    {
+        public uint LowPart;
+        public int HighPart;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LuidAndAttributes
+    {
+        public Luid Luid;
+        public uint Attributes;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TokenPrivileges
+    {
+        public uint PrivilegeCount;
+        public LuidAndAttributes Privileges;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     private struct GenericMapping
     {
         public uint GenericRead;
@@ -1202,6 +1229,46 @@ public static class ProjectAtlasConstructionProcess
         IntPtr processHandle,
         uint desiredAccess,
         out SafeAccessTokenHandle tokenHandle);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport(
+        "advapi32.dll",
+        CharSet = CharSet.Unicode,
+        SetLastError = true,
+        EntryPoint = "LookupPrivilegeValueW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool LookupPrivilegeValue(
+        string systemName,
+        string privilegeName,
+        out Luid luid);
+
+    [DllImport(
+        "advapi32.dll",
+        SetLastError = true,
+        EntryPoint = "AdjustTokenPrivileges")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AdjustTokenPrivilegesWithPreviousState(
+        SafeAccessTokenHandle tokenHandle,
+        [MarshalAs(UnmanagedType.Bool)] bool disableAllPrivileges,
+        ref TokenPrivileges newState,
+        int bufferLength,
+        out TokenPrivileges previousState,
+        out int returnLength);
+
+    [DllImport(
+        "advapi32.dll",
+        SetLastError = true,
+        EntryPoint = "AdjustTokenPrivileges")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AdjustTokenPrivilegesWithoutPreviousState(
+        SafeAccessTokenHandle tokenHandle,
+        [MarshalAs(UnmanagedType.Bool)] bool disableAllPrivileges,
+        ref TokenPrivileges newState,
+        int bufferLength,
+        IntPtr previousState,
+        IntPtr returnLength);
 
     [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -1484,15 +1551,7 @@ public static class ProjectAtlasConstructionProcess
         string principalSid,
         string name)
     {
-        SafeAccessTokenHandle processToken;
-        if (!OpenProcessToken(
-            processHandle,
-            TokenQuery | TokenDuplicate,
-            out processToken))
-        {
-            throw Failure("open-construction-token");
-        }
-
+        SafeAccessTokenHandle processToken = OpenConstructionToken(processHandle);
         using (processToken)
         {
             ChildTokenIdentity childIdentity = ReadAndValidateChildToken(
@@ -1566,6 +1625,152 @@ public static class ProjectAtlasConstructionProcess
                     LocalFree(securityDescriptor);
                 }
             }
+        }
+    }
+
+    private static SafeAccessTokenHandle OpenConstructionToken(IntPtr processHandle)
+    {
+        SafeAccessTokenHandle processToken;
+        if (OpenProcessToken(
+            processHandle,
+            TokenQuery | TokenDuplicate,
+            out processToken))
+        {
+            return processToken;
+        }
+
+        int openError = Marshal.GetLastWin32Error();
+        if (processToken != null)
+        {
+            processToken.Dispose();
+        }
+        if (openError != ErrorAccessDenied)
+        {
+            throw new Win32Exception(openError, "open-construction-token");
+        }
+        return OpenConstructionTokenWithDebugPrivilege(processHandle);
+    }
+
+    private static SafeAccessTokenHandle OpenConstructionTokenWithDebugPrivilege(
+        IntPtr processHandle)
+    {
+        SafeAccessTokenHandle runnerToken;
+        if (!OpenProcessToken(
+            GetCurrentProcess(),
+            TokenAdjustPrivileges | TokenQuery,
+            out runnerToken))
+        {
+            throw Failure("open-construction-privilege-token");
+        }
+
+        using (runnerToken)
+        {
+            Luid debugPrivilege;
+            if (!LookupPrivilegeValue(null, SeDebugPrivilege, out debugPrivilege))
+            {
+                throw Failure("lookup-construction-token-privilege");
+            }
+
+            TokenPrivileges requestedState = new TokenPrivileges();
+            requestedState.PrivilegeCount = 1;
+            requestedState.Privileges.Luid = debugPrivilege;
+            requestedState.Privileges.Attributes = SePrivilegeEnabled;
+            TokenPrivileges previousState;
+            int returnLength;
+            bool adjusted = AdjustTokenPrivilegesWithPreviousState(
+                runnerToken,
+                false,
+                ref requestedState,
+                Marshal.SizeOf<TokenPrivileges>(),
+                out previousState,
+                out returnLength);
+            int adjustError = Marshal.GetLastWin32Error();
+            bool restoreRequired = adjusted && previousState.PrivilegeCount == 1;
+            Exception operationFailure = null;
+            Exception restoreFailure = null;
+            SafeAccessTokenHandle processToken = null;
+
+            if (!adjusted || adjustError == ErrorNotAllAssigned)
+            {
+                operationFailure = new Win32Exception(
+                    adjustError,
+                    "enable-construction-token-privilege");
+            }
+            else if (adjustError != ErrorSuccess)
+            {
+                operationFailure = new Win32Exception(
+                    adjustError,
+                    "enable-construction-token-privilege");
+            }
+            else if (previousState.PrivilegeCount > 1 ||
+                (previousState.PrivilegeCount == 1 &&
+                    (previousState.Privileges.Luid.LowPart != debugPrivilege.LowPart ||
+                        previousState.Privileges.Luid.HighPart != debugPrivilege.HighPart)))
+            {
+                operationFailure = new InvalidOperationException(
+                    "validate-construction-token-privilege-previous-state");
+            }
+
+            try
+            {
+                if (operationFailure == null && !OpenProcessToken(
+                    processHandle,
+                    TokenQuery | TokenDuplicate,
+                    out processToken))
+                {
+                    operationFailure = Failure("open-construction-token");
+                }
+            }
+            finally
+            {
+                if (restoreRequired)
+                {
+                    bool restored = AdjustTokenPrivilegesWithoutPreviousState(
+                        runnerToken,
+                        false,
+                        ref previousState,
+                        0,
+                        IntPtr.Zero,
+                        IntPtr.Zero);
+                    int restoreError = Marshal.GetLastWin32Error();
+                    if (!restored || restoreError != ErrorSuccess)
+                    {
+                        restoreFailure = new Win32Exception(
+                            restoreError,
+                            "restore-construction-token-privilege");
+                    }
+                }
+            }
+
+            if (restoreFailure != null)
+            {
+                if (processToken != null)
+                {
+                    processToken.Dispose();
+                }
+                if (operationFailure != null)
+                {
+                    throw ComposeRunFailures(operationFailure, restoreFailure);
+                }
+                throw restoreFailure;
+            }
+            if (operationFailure != null)
+            {
+                if (processToken != null)
+                {
+                    processToken.Dispose();
+                }
+                throw operationFailure;
+            }
+            if (processToken == null || processToken.IsInvalid)
+            {
+                if (processToken != null)
+                {
+                    processToken.Dispose();
+                }
+                throw new InvalidOperationException("open-construction-token-returned-invalid-handle");
+            }
+            return processToken;
         }
     }
 

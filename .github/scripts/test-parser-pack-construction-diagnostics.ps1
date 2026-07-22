@@ -141,6 +141,73 @@ try {
             (-not $nativeSource.Contains('LogonWithProfile') -and
                 $nativeSource -match 'passwordPointer,\s*0,\s*executable,') `
             "Windows construction adapter did not retain zero process logon flags."
+        $directTokenOpenStart = $nativeSource.IndexOf(
+            'private static SafeAccessTokenHandle OpenConstructionToken(IntPtr processHandle)',
+            [System.StringComparison]::Ordinal
+        )
+        $privilegedTokenOpenStart = $nativeSource.IndexOf(
+            'private static SafeAccessTokenHandle OpenConstructionTokenWithDebugPrivilege(',
+            [System.StringComparison]::Ordinal
+        )
+        $tokenValidationStart = $nativeSource.IndexOf(
+            'private static ChildTokenIdentity ReadAndValidateChildToken(',
+            [System.StringComparison]::Ordinal
+        )
+        Require `
+            ($directTokenOpenStart -ge 0 -and
+                $privilegedTokenOpenStart -gt $directTokenOpenStart -and
+                $tokenValidationStart -gt $privilegedTokenOpenStart) `
+            "Construction token-open ownership boundaries were missing."
+        $directTokenOpenSource = $nativeSource.Substring(
+            $directTokenOpenStart,
+            $privilegedTokenOpenStart - $directTokenOpenStart
+        )
+        $privilegedTokenOpenSource = $nativeSource.Substring(
+            $privilegedTokenOpenStart,
+            $tokenValidationStart - $privilegedTokenOpenStart
+        )
+        $enablePrivilegeIndex = $privilegedTokenOpenSource.IndexOf(
+            'AdjustTokenPrivilegesWithPreviousState(',
+            [System.StringComparison]::Ordinal
+        )
+        $privilegedRetryIndex = $privilegedTokenOpenSource.IndexOf(
+            'if (operationFailure == null && !OpenProcessToken(',
+            [System.StringComparison]::Ordinal
+        )
+        $restorePrivilegeIndex = $privilegedTokenOpenSource.IndexOf(
+            'AdjustTokenPrivilegesWithoutPreviousState(',
+            [System.StringComparison]::Ordinal
+        )
+        $returnTokenIndex = $privilegedTokenOpenSource.LastIndexOf(
+            'return processToken;',
+            [System.StringComparison]::Ordinal
+        )
+        Require `
+            ($directTokenOpenSource.Contains('if (OpenProcessToken(') -and
+                $directTokenOpenSource.Contains('if (openError != ErrorAccessDenied)') -and
+                $directTokenOpenSource.Contains(
+                    'return OpenConstructionTokenWithDebugPrivilege(processHandle);'
+                ) -and
+                $privilegedTokenOpenSource.Contains('TokenAdjustPrivileges | TokenQuery') -and
+                $privilegedTokenOpenSource.Contains(
+                    'LookupPrivilegeValue(null, SeDebugPrivilege, out debugPrivilege)'
+                ) -and
+                $privilegedTokenOpenSource.Contains(
+                    'adjustError == ErrorNotAllAssigned'
+                ) -and
+                $privilegedTokenOpenSource.Contains(
+                    'bool restoreRequired = adjusted && previousState.PrivilegeCount == 1;'
+                ) -and
+                $privilegedTokenOpenSource.Contains('ref previousState,') -and
+                $privilegedTokenOpenSource.Contains(
+                    '"restore-construction-token-privilege"'
+                ) -and
+                -not $privilegedTokenOpenSource.Contains('OpenProcess(') -and
+                $enablePrivilegeIndex -ge 0 -and
+                $privilegedRetryIndex -gt $enablePrivilegeIndex -and
+                $restorePrivilegeIndex -gt $privilegedRetryIndex -and
+                $returnTokenIndex -gt $restorePrivilegeIndex) `
+            "Cross-account token access did not retain the exact scoped privilege contract."
         if (-not ('ProjectAtlasConstructionProcess' -as [type])) {
             Add-Type -TypeDefinition $nativeSource -Language CSharp
         }
@@ -233,6 +300,44 @@ try {
                 $composedRunFailure.InnerExceptions[0].Message -eq 'operation-failure' -and
                 $composedRunFailure.InnerExceptions[1].Message -eq 'cleanup-failure') `
             "Construction adapter did not preserve operation and cleanup failures together."
+
+        $privilegedTokenOpen = $adapterType.GetMethod(
+            'OpenConstructionTokenWithDebugPrivilege',
+            $nestedTypeFlags
+        )
+        Require `
+            ($null -ne $privilegedTokenOpen) `
+            "Construction privilege fallback was missing."
+        $privilegedTokenOpenFailure = $null
+        try {
+            $unexpectedToken = $privilegedTokenOpen.Invoke(
+                $null,
+                [object[]]@([System.IntPtr]::Zero)
+            )
+            if ($null -ne $unexpectedToken) {
+                $unexpectedToken.Dispose()
+            }
+        }
+        catch {
+            $privilegedTokenOpenFailure = $_.Exception
+            while (($privilegedTokenOpenFailure -is
+                    [System.Management.Automation.MethodInvocationException] -or
+                    $privilegedTokenOpenFailure -is
+                    [System.Reflection.TargetInvocationException]) -and
+                $null -ne $privilegedTokenOpenFailure.InnerException) {
+                $privilegedTokenOpenFailure = $privilegedTokenOpenFailure.InnerException
+            }
+        }
+        $privilegedTokenOpenFailureDescription = if ($null -eq $privilegedTokenOpenFailure) {
+            'no failure'
+        }
+        else {
+            "$($privilegedTokenOpenFailure.GetType().FullName) $($privilegedTokenOpenFailure.Message)"
+        }
+        Require `
+            ($privilegedTokenOpenFailure -is [System.ComponentModel.Win32Exception] -and
+                $privilegedTokenOpenFailure.NativeErrorCode -in @(6, 1300)) `
+            "Construction privilege fallback did not fail closed for an invalid exact handle: $privilegedTokenOpenFailureDescription"
 
         $admissionFixtureSource = @'
 using System;
