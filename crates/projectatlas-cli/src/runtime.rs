@@ -57,8 +57,8 @@ use projectatlas_db::{
     AtlasStore, DatabasePublicationContractState, DatabasePublicationReport,
     DatabaseSchemaCompatibility, DatabaseSettingsReport, HealthFindingsPage, HealthQuery,
     HealthScope, IndexPublication, IndexPublicationGuard, IndexPublicationState, IndexedFileText,
-    TelemetryRetentionState, database_settings_report, read_project_root_read_only,
-    validate_database_location,
+    PurposeConditionalApplyRequest, PurposeConditionalApplyState, TelemetryRetentionState,
+    database_settings_report, read_project_root_read_only, validate_database_location,
 };
 use projectatlas_fs::{
     FsError, ScanLimits, ScanOptions, gitignore_excludes_path, scan_path_controlled, scan_repo,
@@ -1498,7 +1498,7 @@ pub(crate) struct InitSetupReport {
     /// Scan/index phase result.
     pub(crate) scan: InitScanPhase,
     /// Agent harness purpose curation handoff.
-    pub(crate) purpose_handoff: InitPurposeHandoff,
+    pub(crate) purpose_handoff: PurposeCuratorHandoff,
     /// Human/agent next steps.
     pub(crate) next_steps: Vec<String>,
 }
@@ -1544,11 +1544,23 @@ pub(crate) struct InitScanPhase {
 
 /// Purpose curation handoff for agent/plugin harnesses.
 #[derive(Debug, Serialize)]
-pub(crate) struct InitPurposeHandoff {
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "serialized host policy exposes independent capabilities and guarantees"
+)]
+pub(crate) struct PurposeCuratorHandoff {
     /// Whether this report is intended for an agent harness.
     pub(crate) agent_harness_expected: bool,
-    /// Recommended subagent reasoning level.
+    /// Curator execution is owned by the agent host, never the Rust server.
+    pub(crate) execution_owner: &'static str,
+    /// Recommended subagent reasoning selection.
     pub(crate) recommended_subagent_reasoning: &'static str,
+    /// Whether the current main agent may process the same bounded batch.
+    pub(crate) main_agent_fallback: bool,
+    /// Explicitly records that `ProjectAtlas` did not spawn a host agent.
+    pub(crate) server_started_curator: bool,
+    /// Successful maintenance should not add ordinary conversation output.
+    pub(crate) silent_on_success: bool,
     /// Purpose queue page for initial curation.
     pub(crate) queue: PurposeCurationPage,
     /// Handoff instructions for plugin/agent harnesses.
@@ -1696,7 +1708,7 @@ pub(crate) fn run_init_bootstrap(
         summary_only: false,
         scope: HealthScope::purpose_default(),
     };
-    let purpose_queue = purpose_curation_page(&store, &purpose_query)?;
+    let purpose_queue = purpose_curation_page(&store, &purpose_query, "project-init")?;
     let next_steps = init_next_steps(options.no_scan, scan_error.is_some(), purpose_queue.total);
 
     Ok(InitSetupReport {
@@ -1726,12 +1738,7 @@ pub(crate) fn run_init_bootstrap(
             report: scan_report,
             error: scan_error,
         },
-        purpose_handoff: InitPurposeHandoff {
-            agent_harness_expected: true,
-            recommended_subagent_reasoning: "low",
-            queue: purpose_queue,
-            instructions: init_purpose_handoff_instructions(),
-        },
+        purpose_handoff: purpose_curator_handoff(purpose_queue),
         next_steps,
     })
 }
@@ -1746,15 +1753,27 @@ pub(crate) fn init_path_status(existed: bool) -> InitPhaseStatus {
 }
 
 /// Return stable purpose handoff instructions for agent harnesses.
-fn init_purpose_handoff_instructions() -> Vec<String> {
+fn purpose_handoff_instructions() -> Vec<String> {
     vec![
-        "Spawn a subagent with low reasoning to create and correct folder and file purposes."
-            .to_string(),
-        "Apply reviewed purposes through atlas_purpose_review or projectatlas purpose review --apply; do not edit SQLite directly."
-            .to_string(),
-        "Purposes written by an agent or subagent through the ProjectAtlas purpose API are considered agent-reviewed."
-            .to_string(),
+        "If the host supports isolated subagents, delegate this actionable low-scope batch at the lowest reasoning tier the host can enforce; otherwise let the main agent process the same bounded rows without blocking navigation.".to_string(),
+        "Inspect only bounded current summary, graph, outline, or exact-slice context, then copy task, work_key, and state_token into atlas_purpose_review or projectatlas purpose review --apply; never edit SQLite directly.".to_string(),
+        "Skip accepted purposes unless an agent or user explicitly assigns a correction; use atlas_purpose_set or projectatlas purpose set for that deliberate correction path.".to_string(),
+        "Keep successful curator maintenance out of normal conversation; ProjectAtlas reports a handoff and never claims that the Rust server spawned an agent.".to_string(),
     ]
+}
+
+/// Build one host-owned purpose-curator handoff shared by init and session brief.
+pub(crate) fn purpose_curator_handoff(queue: PurposeCurationPage) -> PurposeCuratorHandoff {
+    PurposeCuratorHandoff {
+        agent_harness_expected: true,
+        execution_owner: "agent_host",
+        recommended_subagent_reasoning: "lowest_host_enforced",
+        main_agent_fallback: true,
+        server_started_curator: false,
+        silent_on_success: true,
+        queue,
+        instructions: purpose_handoff_instructions(),
+    }
 }
 
 /// Return concise next steps for humans and agents.
@@ -1774,7 +1793,7 @@ fn init_next_steps(
     }
     if purpose_queue_total > 0 {
         steps.push(
-            "Use the purpose_handoff queue to delegate purpose creation/correction to a low-reasoning subagent."
+            "Use the purpose_handoff queue to delegate purpose creation/correction at the lowest reasoning tier the host can enforce."
                 .to_string(),
         );
     } else {
@@ -2615,7 +2634,23 @@ pub(crate) fn next_step_report_payload(report: &NextStepReport) -> Value {
 
 /// Agent-facing purpose curation queue with bounded health metadata.
 #[derive(Debug, Serialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "serialized queue paging and scope fields are independent wire facts"
+)]
 pub(crate) struct PurposeCurationPage {
+    /// Selected project identity bound into every work key.
+    pub(crate) project_instance_id: String,
+    /// Active generation bound into every work key and state token.
+    pub(crate) active_generation: u64,
+    /// Host-owned task label for this bounded batch.
+    pub(crate) task: String,
+    /// Deterministic identity for the complete returned batch.
+    pub(crate) work_key: String,
+    /// Whether this page contains work a host or main agent can process.
+    pub(crate) actionable: bool,
+    /// Purpose policy scope; automatic handoffs are always low scope.
+    pub(crate) curation_scope: &'static str,
     /// Findings after filters are applied.
     pub(crate) total: usize,
     /// Findings before filters are applied, after resolved findings are removed.
@@ -2653,6 +2688,10 @@ pub(crate) struct PurposeCurationPage {
 /// One path that needs purpose curation.
 #[derive(Debug, Serialize)]
 pub(crate) struct PurposeCurationItem {
+    /// Deterministic project/generation/task/path identity for duplicate coalescing.
+    pub(crate) work_key: String,
+    /// Opaque current-row token required for stale-safe conditional review.
+    pub(crate) state_token: String,
     /// Finding severity.
     pub(crate) severity: String,
     /// Stable health finding id.
@@ -2696,6 +2735,15 @@ pub(crate) struct PurposeReviewRequest {
     /// Confirm the currently stored non-generated purpose after inspection.
     #[serde(default)]
     pub(crate) confirm_existing: bool,
+    /// Queue task copied from the selected purpose-curation batch.
+    #[serde(default)]
+    pub(crate) task: Option<String>,
+    /// Queue item work key copied without modification.
+    #[serde(default)]
+    pub(crate) work_key: Option<String>,
+    /// Queue item state token copied without modification.
+    #[serde(default)]
+    pub(crate) state_token: Option<String>,
 }
 
 /// Batch purpose review result.
@@ -2709,6 +2757,8 @@ pub(crate) struct PurposeReviewReport {
     pub(crate) changed: usize,
     /// Number of rows skipped because they were already agent-reviewed with the same purpose.
     pub(crate) skipped: usize,
+    /// Number of accepted, stale, or unavailable rows left unchanged.
+    pub(crate) conflicts: usize,
     /// Number of rows that could not be reviewed.
     pub(crate) failed: usize,
     /// Per-path review details.
@@ -2744,6 +2794,12 @@ pub(crate) enum PurposeReviewAction {
     Review,
     /// The reviewed purpose would be applied in preview mode.
     WouldReview,
+    /// Project, generation, task, path, or row state changed after queue selection.
+    Stale,
+    /// The path now carries accepted authored intent and was not overwritten.
+    Accepted,
+    /// The selected path is no longer active in the index.
+    Unavailable,
 }
 
 /// Validate and optionally apply a batch of agent-reviewed purpose records.
@@ -2752,27 +2808,171 @@ pub(crate) fn review_purposes(
     requests: &[PurposeReviewRequest],
     apply: bool,
 ) -> Result<PurposeReviewReport, CliError> {
+    if apply && requests.iter().any(has_conditional_purpose_review_field) {
+        if requests.iter().all(is_complete_conditional_purpose_review) {
+            return apply_conditional_purpose_reviews(store, requests);
+        }
+        return Err(CliError::InvalidInput(
+            "an applied purpose review batch must be entirely conditional or entirely explicit correction; conditional rows require task, work_key, state_token, and a reviewed purpose"
+                .to_string(),
+        ));
+    }
     let mut items = Vec::with_capacity(requests.len());
     for request in requests {
         items.push(review_purpose_request(store, request, apply)?);
     }
+    Ok(summarize_purpose_review(requests.len(), apply, items))
+}
+
+/// Apply one host-selected conditional batch with one database writer transaction.
+fn apply_conditional_purpose_reviews(
+    store: &AtlasStore,
+    requests: &[PurposeReviewRequest],
+) -> Result<PurposeReviewReport, CliError> {
+    let prepared = requests
+        .iter()
+        .map(|request| {
+            let path = validated_repo_node_key(Path::new(&request.path)).map_err(|source| {
+                CliError::InvalidInput(format!(
+                    "invalid purpose review path {:?}: {source}",
+                    request.path
+                ))
+            })?;
+            let purpose = request
+                .purpose
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    CliError::InvalidInput(
+                        "conditional purpose review requires an explicit reviewed purpose"
+                            .to_string(),
+                    )
+                })?
+                .to_string();
+            let task = request.task.clone().ok_or_else(|| {
+                CliError::InvalidInput(
+                    "conditional purpose review requires task, work_key, and state_token together"
+                        .to_string(),
+                )
+            })?;
+            let work_key = request.work_key.clone().ok_or_else(|| {
+                CliError::InvalidInput(
+                    "conditional purpose review requires task, work_key, and state_token together"
+                        .to_string(),
+                )
+            })?;
+            let state_token = request.state_token.clone().ok_or_else(|| {
+                CliError::InvalidInput(
+                    "conditional purpose review requires task, work_key, and state_token together"
+                        .to_string(),
+                )
+            })?;
+            Ok((
+                path.clone(),
+                purpose.clone(),
+                PurposeConditionalApplyRequest {
+                    task,
+                    path,
+                    work_key,
+                    state_token,
+                    purpose,
+                },
+            ))
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    let database_requests = prepared
+        .iter()
+        .map(|(_, _, request)| request.clone())
+        .collect::<Vec<_>>();
+    let results = store.conditionally_set_purposes(&database_requests)?;
+    let items = prepared
+        .into_iter()
+        .zip(results)
+        .map(|((path, purpose, _), result)| {
+            debug_assert_eq!(path, result.path);
+            PurposeReviewItem {
+                path,
+                action: conditional_purpose_review_action(result.state, true),
+                current_status: result
+                    .current_purpose
+                    .as_ref()
+                    .map(|purpose| purpose.status.to_string())
+                    .unwrap_or_default(),
+                current_source: result
+                    .current_purpose
+                    .as_ref()
+                    .map(|purpose| purpose.source.to_string())
+                    .unwrap_or_default(),
+                purpose,
+                error: String::new(),
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(summarize_purpose_review(requests.len(), true, items))
+}
+
+/// Return whether a row carries one complete queue-bound conditional review.
+fn is_complete_conditional_purpose_review(request: &PurposeReviewRequest) -> bool {
+    request.task.is_some()
+        && request.work_key.is_some()
+        && request.state_token.is_some()
+        && request
+            .purpose
+            .as_deref()
+            .is_some_and(|purpose| !purpose.trim().is_empty())
+}
+
+/// Return whether a row attempts to use queue-bound conditional review.
+fn has_conditional_purpose_review_field(request: &PurposeReviewRequest) -> bool {
+    request.task.is_some() || request.work_key.is_some() || request.state_token.is_some()
+}
+
+/// Aggregate stable batch counters from per-path review outcomes.
+fn summarize_purpose_review(
+    total: usize,
+    applied: bool,
+    items: Vec<PurposeReviewItem>,
+) -> PurposeReviewReport {
     let changed = items
         .iter()
-        .filter(|item| item.error.is_empty() && item.action != PurposeReviewAction::Skip)
+        .filter(|item| {
+            matches!(
+                item.action,
+                PurposeReviewAction::Review | PurposeReviewAction::WouldReview
+            )
+        })
         .count();
     let skipped = items
         .iter()
-        .filter(|item| item.action == PurposeReviewAction::Skip)
+        .filter(|item| {
+            matches!(
+                item.action,
+                PurposeReviewAction::Skip | PurposeReviewAction::Accepted
+            )
+        })
+        .count();
+    let conflicts = items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.action,
+                PurposeReviewAction::Stale
+                    | PurposeReviewAction::Accepted
+                    | PurposeReviewAction::Unavailable
+            )
+        })
         .count();
     let failed = items.iter().filter(|item| !item.error.is_empty()).count();
-    Ok(PurposeReviewReport {
-        applied: apply,
-        total: requests.len(),
+    PurposeReviewReport {
+        applied,
+        total,
         changed,
         skipped,
+        conflicts,
         failed,
         items,
-    })
+    }
 }
 
 /// Validate and optionally apply one agent-reviewed purpose record.
@@ -2787,6 +2987,64 @@ fn review_purpose_request(
             request.path
         ))
     })?;
+    let conditional = match (
+        request.task.as_deref(),
+        request.work_key.as_deref(),
+        request.state_token.as_deref(),
+    ) {
+        (Some(task), Some(work_key), Some(state_token)) => Some((task, work_key, state_token)),
+        (None, None, None) => None,
+        _ => {
+            return Ok(PurposeReviewItem {
+                path,
+                action: PurposeReviewAction::Error,
+                current_status: String::new(),
+                current_source: String::new(),
+                purpose: request.purpose.clone().unwrap_or_default(),
+                error:
+                    "conditional purpose review requires task, work_key, and state_token together"
+                        .to_string(),
+            });
+        }
+    };
+    if let Some((task, work_key, state_token)) = conditional {
+        let reviewed_purpose = request
+            .purpose
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let Some(reviewed_purpose) = reviewed_purpose else {
+            return Ok(PurposeReviewItem {
+                path,
+                action: PurposeReviewAction::Error,
+                current_status: String::new(),
+                current_source: String::new(),
+                purpose: String::new(),
+                error: "conditional purpose review requires an explicit reviewed purpose"
+                    .to_string(),
+            });
+        };
+        let state = if apply {
+            store.conditionally_set_purpose(task, &path, work_key, state_token, reviewed_purpose)?
+        } else {
+            preview_conditional_purpose_review(store, task, &path, work_key, state_token)?
+        };
+        let current = store.load_node_by_path(&path)?;
+        return Ok(PurposeReviewItem {
+            path,
+            action: conditional_purpose_review_action(state, apply),
+            current_status: current
+                .as_ref()
+                .map(|node| node.purpose.status.to_string())
+                .unwrap_or_default(),
+            current_source: current
+                .as_ref()
+                .map(|node| node.purpose.source.to_string())
+                .unwrap_or_default(),
+            purpose: reviewed_purpose.to_string(),
+            error: String::new(),
+        });
+    }
     let Some(indexed) = store.load_node_by_path(&path)? else {
         return Ok(PurposeReviewItem {
             path,
@@ -2855,69 +3113,107 @@ fn review_purpose_request(
     })
 }
 
+/// Preview one conditional review against the current queue state without writing.
+fn preview_conditional_purpose_review(
+    store: &AtlasStore,
+    task: &str,
+    path: &str,
+    work_key: &str,
+    state_token: &str,
+) -> Result<PurposeConditionalApplyState, CliError> {
+    let batch = store.load_purpose_curation_batch(task, &[path.to_string()])?;
+    if let Some(candidate) = batch.items.first() {
+        return Ok(
+            if candidate.work_key == work_key && candidate.state_token == state_token {
+                PurposeConditionalApplyState::Applied
+            } else {
+                PurposeConditionalApplyState::Stale
+            },
+        );
+    }
+    Ok(store
+        .load_node_by_path(path)?
+        .map_or(PurposeConditionalApplyState::PathUnavailable, |_node| {
+            PurposeConditionalApplyState::Accepted
+        }))
+}
+
+/// Map database conditional-apply state into the stable review action contract.
+const fn conditional_purpose_review_action(
+    state: PurposeConditionalApplyState,
+    apply: bool,
+) -> PurposeReviewAction {
+    match state {
+        PurposeConditionalApplyState::Applied if apply => PurposeReviewAction::Review,
+        PurposeConditionalApplyState::Applied => PurposeReviewAction::WouldReview,
+        PurposeConditionalApplyState::Stale => PurposeReviewAction::Stale,
+        PurposeConditionalApplyState::Accepted => PurposeReviewAction::Accepted,
+        PurposeConditionalApplyState::PathUnavailable => PurposeReviewAction::Unavailable,
+    }
+}
+
 /// Build a purpose curation queue from the bounded health page.
 pub(crate) fn purpose_curation_page(
     store: &AtlasStore,
     query: &HealthQuery,
+    task: &str,
 ) -> Result<PurposeCurationPage, CliError> {
-    let page = store.unresolved_health_findings_page_current(query)?;
+    let page = store.purpose_curation_findings_page_current(query)?;
     let paths = page
         .findings
         .iter()
         .map(|finding| finding.path.clone())
         .collect::<Vec<_>>();
-    let nodes = store
-        .load_nodes_by_paths(&paths)?
+    let batch = store.load_purpose_curation_batch(task, &paths)?;
+    let project_instance_id = batch.project_instance_id.to_string();
+    let active_generation = batch.active_generation.get();
+    let task = batch.task.clone();
+    let work_key = batch.work_key.clone();
+    let candidates = batch
+        .items
         .into_iter()
-        .map(|node| (node.node.path.clone(), node))
+        .map(|candidate| (candidate.node.node.path.clone(), candidate))
         .collect::<HashMap<_, _>>();
     let items = page
         .findings
         .iter()
-        .map(|finding| {
-            let node = nodes.get(&finding.path);
-            let review_signal =
-                node.map(|indexed| purpose_review_signal(&indexed.node, &indexed.purpose));
-            PurposeCurationItem {
+        .filter_map(|finding| {
+            let candidate = candidates.get(&finding.path)?;
+            let node = &candidate.node;
+            let review_signal = purpose_review_signal(&node.node, &node.purpose);
+            Some(PurposeCurationItem {
+                work_key: candidate.work_key.clone(),
+                state_token: candidate.state_token.clone(),
                 severity: health_severity_name(finding.severity).to_string(),
                 id: finding.id.clone(),
                 category: finding.category.clone(),
                 path: finding.path.clone(),
                 related_path: finding.related_path.clone().unwrap_or_default(),
-                kind: node
-                    .map(|indexed| indexed.node.kind.to_string())
-                    .unwrap_or_default(),
-                language: node
-                    .and_then(|indexed| indexed.node.language.clone())
-                    .unwrap_or_default(),
-                purpose: node
-                    .and_then(|indexed| indexed.purpose.purpose.clone())
-                    .unwrap_or_default(),
-                purpose_status: node
-                    .map(|indexed| indexed.purpose.status.to_string())
-                    .unwrap_or_default(),
-                purpose_source: node
-                    .map(|indexed| indexed.purpose.source.to_string())
-                    .unwrap_or_default(),
-                purpose_agent_reviewed: node
-                    .is_some_and(|indexed| indexed.purpose.agent_reviewed()),
-                review_priority: review_signal
-                    .map(|signal| signal.priority.to_string())
-                    .unwrap_or_default(),
-                review_reason: review_signal
-                    .map(|signal| signal.reason.to_string())
-                    .unwrap_or_default(),
-                content_summary: node
-                    .and_then(|indexed| indexed.summary.clone())
-                    .unwrap_or_default(),
-                recommendation: finding.recommendation.clone(),
-            }
+                kind: node.node.kind.to_string(),
+                language: node.node.language.clone().unwrap_or_default(),
+                purpose: node.purpose.purpose.clone().unwrap_or_default(),
+                purpose_status: node.purpose.status.to_string(),
+                purpose_source: node.purpose.source.to_string(),
+                purpose_agent_reviewed: node.purpose.agent_reviewed(),
+                review_priority: review_signal.priority.to_string(),
+                review_reason: review_signal.reason.to_string(),
+                content_summary: node.summary.clone().unwrap_or_default(),
+                recommendation: "Inspect bounded context, then use conditional purpose review with this task, work_key, and state_token."
+                    .to_string(),
+            })
         })
         .collect::<Vec<_>>();
+    let returned = items.len();
     Ok(PurposeCurationPage {
+        project_instance_id,
+        active_generation,
+        task,
+        work_key,
+        actionable: returned > 0,
+        curation_scope: purpose_queue_curation_scope(query),
         total: page.total,
         unfiltered_total: page.unfiltered_total,
-        returned: page.returned,
+        returned,
         start_index: page.start_index,
         limit: page.limit,
         max_limit: MAX_HEALTH_LIMIT,
@@ -2975,6 +3271,12 @@ pub(crate) fn render_health_page(page: &HealthFindingsPage, query: &HealthQuery)
 pub(crate) fn render_purpose_curation_page(page: &PurposeCurationPage) -> String {
     encode_agent_payload(&json!({
         "purpose_curation": {
+            "project_instance_id": page.project_instance_id,
+            "active_generation": page.active_generation,
+            "task": page.task,
+            "work_key": page.work_key,
+            "actionable": page.actionable,
+            "curation_scope": page.curation_scope,
             "total": page.total,
             "unfiltered_total": page.unfiltered_total,
             "returned": page.returned,
@@ -3003,6 +3305,7 @@ pub(crate) fn render_purpose_review_report(report: &PurposeReviewReport) -> Stri
             "total": report.total,
             "changed": report.changed,
             "skipped": report.skipped,
+            "conflicts": report.conflicts,
             "failed": report.failed,
         },
         "purpose_review_items": report.items,
@@ -3024,6 +3327,16 @@ fn purpose_queue_file_scope(query: &HealthQuery) -> &'static str {
         HealthScope::PurposeWithAssets => "high_impact_and_assets",
         HealthScope::SourceOnly | HealthScope::PurposeWithSourceFiles => "all_source",
         HealthScope::All | HealthScope::PurposeStrict => "all",
+    }
+}
+
+/// Return the truthful curation tier selected by explicit queue scope flags.
+fn purpose_queue_curation_scope(query: &HealthQuery) -> &'static str {
+    match query.scope {
+        HealthScope::PurposeDefault => "low",
+        HealthScope::PurposeWithAssets => "low_with_assets",
+        HealthScope::SourceOnly | HealthScope::PurposeWithSourceFiles => "medium",
+        HealthScope::All | HealthScope::PurposeStrict => "strict",
     }
 }
 
@@ -8632,6 +8945,194 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             ))
             .into());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn purpose_curator_handoff_applies_one_stale_safe_batch() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        store.replace_scan(&[
+            Node {
+                path: "src/main.rs".to_string(),
+                kind: NodeKind::File,
+                parent_path: Some("src".to_string()),
+                extension: Some(".rs".to_string()),
+                language: Some("rust".to_string()),
+                size_bytes: Some(12),
+                mtime_ns: Some(10),
+                content_hash: Some("hash-main".to_string()),
+            },
+            Node {
+                path: "src/detail.rs".to_string(),
+                kind: NodeKind::File,
+                parent_path: Some("src".to_string()),
+                extension: Some(".rs".to_string()),
+                language: Some("rust".to_string()),
+                size_bytes: Some(12),
+                mtime_ns: Some(10),
+                content_hash: Some("hash-detail".to_string()),
+            },
+        ])?;
+        store.set_suggested_purpose("src/detail.rs", "Generated detail suggestion")?;
+        let task = "runtime-purpose-curator";
+        let page = purpose_curation_page(
+            &store,
+            &HealthQuery {
+                start_index: 0,
+                limit: 20,
+                category: None,
+                severity: Some(Severity::Warning),
+                path_prefix: None,
+                summary_only: false,
+                scope: HealthScope::all(),
+            },
+            task,
+        )?;
+        require_eq(&page.actionable, &true, "actionable queue")?;
+        require_eq(&page.items.len(), &2, "queue item count")?;
+        require_eq(&page.task, &task.to_string(), "queue task")?;
+        let requests = page
+            .items
+            .iter()
+            .map(|item| PurposeReviewRequest {
+                path: item.path.clone(),
+                purpose: Some(format!("Reviewed purpose for {}", item.path)),
+                confirm_existing: false,
+                task: Some(page.task.clone()),
+                work_key: Some(item.work_key.clone()),
+                state_token: Some(item.state_token.clone()),
+            })
+            .collect::<Vec<_>>();
+        let handoff = purpose_curator_handoff(page);
+        require_eq(
+            &handoff.execution_owner,
+            &"agent_host",
+            "host-owned execution",
+        )?;
+        require_eq(
+            &handoff.server_started_curator,
+            &false,
+            "no server-started curator",
+        )?;
+        require_eq(
+            &handoff.recommended_subagent_reasoning,
+            &"lowest_host_enforced",
+            "lowest host-enforced reasoning",
+        )?;
+        require_eq(&handoff.main_agent_fallback, &true, "main-agent fallback")?;
+
+        let mixed = vec![
+            requests[0].clone(),
+            PurposeReviewRequest {
+                path: requests[1].path.clone(),
+                purpose: Some("Explicit correction must stay separate".to_string()),
+                confirm_existing: false,
+                task: None,
+                work_key: None,
+                state_token: None,
+            },
+        ];
+        match review_purposes(&store, &mixed, true) {
+            Err(CliError::InvalidInput(_)) => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "mixed purpose batch returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(_) => return Err(io::Error::other("mixed purpose batch was accepted").into()),
+        }
+        let mut partial = requests[1].clone();
+        partial.state_token = None;
+        match review_purposes(&store, &[requests[0].clone(), partial], true) {
+            Err(CliError::InvalidInput(_)) => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "partial conditional batch returned the wrong error: {error}"
+                ))
+                .into());
+            }
+            Ok(_) => {
+                return Err(io::Error::other("partial conditional batch was accepted").into());
+            }
+        }
+        drop(store);
+        store = AtlasStore::open_for_project(&database, &root)?;
+        let unchanged =
+            store.load_nodes_by_paths(&["src/main.rs".to_string(), "src/detail.rs".to_string()])?;
+        require_eq(
+            &unchanged.iter().all(|node| !node.purpose.agent_reviewed()),
+            &true,
+            "rejected batch left every purpose unapproved after reopen",
+        )?;
+
+        let applied = review_purposes(&store, &requests, true)?;
+        require_eq(&applied.changed, &2, "conditional batch changed count")?;
+        require_eq(&applied.conflicts, &0, "conditional batch conflicts")?;
+        require_eq(
+            &applied
+                .items
+                .iter()
+                .all(|item| item.action == PurposeReviewAction::Review),
+            &true,
+            "conditional batch actions",
+        )?;
+
+        let repeated = review_purposes(&store, &requests, true)?;
+        require_eq(&repeated.changed, &0, "accepted repeat changed count")?;
+        require_eq(&repeated.conflicts, &2, "accepted repeat conflicts")?;
+        require_eq(
+            &repeated
+                .items
+                .iter()
+                .all(|item| item.action == PurposeReviewAction::Accepted),
+            &true,
+            "accepted repeat actions",
+        )?;
+        let empty = purpose_curation_page(
+            &store,
+            &HealthQuery {
+                start_index: 0,
+                limit: 20,
+                category: None,
+                severity: Some(Severity::Warning),
+                path_prefix: None,
+                summary_only: false,
+                scope: HealthScope::all(),
+            },
+            task,
+        )?;
+        require_eq(&empty.actionable, &false, "accepted queue is quiet")?;
+
+        let correction = review_purposes(
+            &store,
+            &[PurposeReviewRequest {
+                path: "src/main.rs".to_string(),
+                purpose: Some("Explicit corrected purpose".to_string()),
+                confirm_existing: false,
+                task: None,
+                work_key: None,
+                state_token: None,
+            }],
+            true,
+        )?;
+        require_eq(
+            &correction.items[0].action,
+            &PurposeReviewAction::Review,
+            "explicit correction action",
+        )?;
+        let corrected = store
+            .load_node_by_path("src/main.rs")?
+            .ok_or_else(|| io::Error::other("corrected runtime path disappeared"))?;
+        require_eq(
+            &corrected.purpose.purpose.as_deref(),
+            &Some("Explicit corrected purpose"),
+            "explicit correction value",
+        )?;
         Ok(())
     }
 

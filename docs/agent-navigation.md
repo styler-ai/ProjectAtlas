@@ -115,28 +115,28 @@ unavailable instead of inheriting or fabricating local responsibility.
 
 ### Background Purpose Curator
 
-Purpose maintenance can run as a bounded low-reasoning “speedboat” beside the
+Purpose maintenance can run as a bounded low-scope “speedboat” beside the
 main task:
 
 ```mermaid
 sequenceDiagram
     participant Host as Agent host
     participant Main as Main agent
-    participant Curator as Low-reasoning curator
+    participant Curator as Lowest-tier curator
     participant Atlas as ProjectAtlas purpose APIs
 
     Host->>Main: continue source task immediately
     Host->>Curator: spawn bounded low-scope lane
-    Curator->>Atlas: claim coalesced task/generation/path rows
-    Atlas-->>Curator: rows plus bounded current context
-    Curator->>Atlas: approved purpose set/review writes only
+    Curator->>Atlas: read coalesced task/generation/path rows
+    Atlas-->>Curator: rows plus work keys and current-row tokens
+    Curator->>Atlas: conditional purpose review through the public API
     Main->>Atlas: later normal navigation request
     Atlas-->>Main: response uses approved purposes
     Curator-->>Host: minimal machine-facing terminal state
     Note over Curator,Host: no ordinary conversation or per-path status
 ```
 
-At startup and relevant task/source transitions, a supported agent host launches the packaged purpose-curator lane without blocking the main task. The curator claims a coalesced task/generation/path-scoped queue directly; ordinary session/folder/file responses do not carry a purpose-maintenance handoff or status section. ProjectAtlas itself does not pretend an MCP server can spawn a host agent.
+At startup and relevant task/source transitions, a supported agent host launches the packaged purpose-curator lane without blocking the main task. Init, explicit session brief, and purpose queue expose one bounded task/generation/path-scoped handoff; ordinary folder/file/summary responses carry no maintenance status. Deterministic work keys coalesce duplicate host work, and current-row state tokens make stale review writes no-ops. ProjectAtlas itself does not pretend an MCP server can spawn a host agent. If the host cannot enforce isolated subagents or reasoning selection, the main agent may process the same `low`-scope batch; `medium` and `strict` remain explicit.
 
 Successful curation is silent in the main conversation: no per-file progress, approval, or completion messages. Later navigation simply benefits from the improved purposes. If a host requires a terminal result, it should be a minimal machine-facing state. Task-relevant conflicts that would make ranking unsafe and repeated degraded/failure state remain available through compact blockers or explicit health/settings diagnostics.
 

@@ -25,6 +25,7 @@ pub use telemetry::{
     TelemetryRetentionPolicy, TelemetryRetentionState,
 };
 
+use blake3::Hasher;
 use projectatlas_core::graph::{GraphContractError, ProjectInstanceId};
 use projectatlas_core::health::{
     CATEGORY_DUPLICATE_PURPOSE, CATEGORY_MISSING_PURPOSE, CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
@@ -80,6 +81,16 @@ const MAX_SYMBOL_SEARCH_SUMMARY_CHARS: usize = 16_000;
 const SQLITE_PUBLICATION_ACQUIRE_TIMEOUT: Duration = Duration::ZERO;
 /// Ancillary telemetry must not delay a valid navigation result under contention.
 const SQLITE_TELEMETRY_BUSY_TIMEOUT: Duration = Duration::from_millis(25);
+/// Maximum paths admitted to one purpose-curation hydration statement.
+pub const MAX_PURPOSE_CURATION_BATCH_ROWS: usize = 200;
+/// Maximum UTF-8 bytes retained in one host-owned purpose task label.
+const MAX_PURPOSE_CURATION_TASK_BYTES: usize = 256;
+/// Domain separator for deterministic purpose-curation item work keys.
+const PURPOSE_CURATION_ITEM_KEY_DOMAIN: &str = "projectatlas:purpose-curation:item:v1";
+/// Domain separator for deterministic purpose-curation row-state tokens.
+const PURPOSE_CURATION_STATE_TOKEN_DOMAIN: &str = "projectatlas:purpose-curation:state:v1";
+/// Domain separator for deterministic purpose-curation batch work keys.
+const PURPOSE_CURATION_BATCH_KEY_DOMAIN: &str = "projectatlas:purpose-curation:batch:v1";
 /// Select create capability only for a path proven absent by preflight.
 fn writable_open_flags(state: SchemaState, database_exists: bool) -> OpenFlags {
     match (state, database_exists) {
@@ -355,6 +366,20 @@ pub enum DbError {
         /// Repository-relative path.
         path: String,
     },
+    /// A purpose-curation task label is blank, unsafe, or too large.
+    #[error("invalid purpose-curation task label: {reason}")]
+    PurposeCurationTaskInvalid {
+        /// Stable validation reason.
+        reason: &'static str,
+    },
+    /// A purpose-curation hydration request exceeds the bounded statement size.
+    #[error("purpose-curation batch requested {requested} paths; maximum is {maximum}")]
+    PurposeCurationBatchTooLarge {
+        /// Number of unique paths requested.
+        requested: usize,
+        /// Maximum paths admitted to one prepared set query.
+        maximum: usize,
+    },
     /// A caller attempted to resolve a health finding that is not currently active.
     #[error(
         "health finding {finding_id:?} with category {category:?} and path {path:?} is not active; run health-check and use an exact finding id/path/category"
@@ -544,6 +569,72 @@ pub struct CapturedProjectBinding {
     pub project_instance_id: ProjectInstanceId,
     /// Normalized local source root captured with the project identity.
     pub project_root: String,
+}
+
+/// One unapproved purpose row bound to deterministic curator work.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PurposeCurationCandidate {
+    /// Current indexed node, purpose, and summary state.
+    pub node: IndexedNode,
+    /// Project/generation/task/path work identity used to coalesce duplicate work.
+    pub work_key: String,
+    /// Opaque token binding conditional apply to this exact unapproved purpose row.
+    pub state_token: String,
+}
+
+/// Bounded purpose-curation work selected from one project generation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PurposeCurationBatch {
+    /// Stable selected-project identity.
+    pub project_instance_id: ProjectInstanceId,
+    /// Active graph/index generation observed with the queue rows.
+    pub active_generation: IndexGeneration,
+    /// Host-supplied task label used to coalesce task-local work.
+    pub task: String,
+    /// Deterministic identity of the complete returned batch.
+    pub work_key: String,
+    /// Current missing or suggested purpose rows, ordered by path.
+    pub items: Vec<PurposeCurationCandidate>,
+}
+
+/// Result of applying a purpose through the stale-safe curator path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PurposeConditionalApplyState {
+    /// The current unapproved row matched and was approved atomically.
+    Applied,
+    /// Project, generation, task, path, or purpose row state changed after selection.
+    Stale,
+    /// The path now has accepted authored intent and was not overwritten.
+    Accepted,
+    /// The selected path is no longer active in the current index.
+    PathUnavailable,
+}
+
+/// One stale-safe purpose approval copied from a queue item.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PurposeConditionalApplyRequest {
+    /// Queue task label.
+    pub task: String,
+    /// Exact repository-relative path.
+    pub path: String,
+    /// Queue item work key.
+    pub work_key: String,
+    /// Queue item current-row state token.
+    pub state_token: String,
+    /// Agent-reviewed purpose to approve on an exact state match.
+    pub purpose: String,
+}
+
+/// Per-item outcome from one atomic conditional purpose-review batch.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PurposeConditionalApplyResult {
+    /// Exact requested path.
+    pub path: String,
+    /// Applied or non-mutating stale/accepted/unavailable outcome.
+    pub state: PurposeConditionalApplyState,
+    /// Current purpose state observed or written inside the owning transaction.
+    pub current_purpose: Option<Purpose>,
 }
 
 /// Identity depth required while opening one current project binding.
@@ -1488,6 +1579,27 @@ impl AtlasStore {
         )
     }
 
+    /// Read the selected project identity and current purpose-work generation.
+    fn purpose_curation_context(
+        &self,
+        connection: &Connection,
+    ) -> DbResult<(ProjectInstanceId, IndexGeneration)> {
+        let selected = self
+            .validated_project_instance_id
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let current = project_identity::load_project_identity(connection)?
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        if current != selected {
+            return Err(DbError::GraphProjectIdentityMismatch {
+                expected: selected.to_string(),
+                found: current.to_string(),
+            });
+        }
+        let generation =
+            project_identity::load_graph_generation(connection)?.unwrap_or(IndexGeneration::ZERO);
+        Ok((current, generation))
+    }
+
     /// Begin one exclusive full derived-index publication.
     ///
     /// Every nested projection write remains inside the returned guard's
@@ -2229,13 +2341,85 @@ impl AtlasStore {
         let mut unique_paths = paths.to_vec();
         unique_paths.sort();
         unique_paths.dedup();
+        if unique_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql = load_nodes_by_paths_sql(unique_paths.len());
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(unique_paths), |row| {
+            let kind_value: String = row.get(1)?;
+            let source_value: String = row.get(9)?;
+            let status_value: String = row.get(10)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                kind_value,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<u64>>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                source_value,
+                status_value,
+                row.get::<_, Option<String>>(11)?,
+            ))
+        })?;
         let mut nodes = Vec::new();
-        for path in unique_paths {
-            if let Some(node) = self.load_node_by_path(&path)? {
-                nodes.push(node);
-            }
+        for row in rows {
+            nodes.push(indexed_node_from_parts(row?)?);
         }
         Ok(nodes)
+    }
+
+    /// Load one bounded stale-safe purpose-curation batch for exact paths.
+    ///
+    /// The node hydration is one prepared set query regardless of row count.
+    /// Accepted purposes are intentionally omitted from curator work.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid task, oversized batch, changed project
+    /// binding, invalid persisted state, or failed `SQLite` read.
+    pub fn load_purpose_curation_batch(
+        &self,
+        task: &str,
+        paths: &[String],
+    ) -> DbResult<PurposeCurationBatch> {
+        let task = normalize_purpose_curation_task(task)?;
+        let mut unique_paths = paths.to_vec();
+        unique_paths.sort();
+        unique_paths.dedup();
+        if unique_paths.len() > MAX_PURPOSE_CURATION_BATCH_ROWS {
+            return Err(DbError::PurposeCurationBatchTooLarge {
+                requested: unique_paths.len(),
+                maximum: MAX_PURPOSE_CURATION_BATCH_ROWS,
+            });
+        }
+        let (project_instance_id, active_generation) =
+            self.purpose_curation_context(&self.connection)?;
+        let items = self
+            .load_nodes_by_paths(&unique_paths)?
+            .into_iter()
+            .filter(|node| {
+                matches!(
+                    node.purpose.status,
+                    PurposeStatus::Missing | PurposeStatus::Suggested
+                )
+            })
+            .map(|node| {
+                purpose_curation_candidate(project_instance_id, active_generation, &task, node)
+            })
+            .collect::<Vec<_>>();
+        let work_key =
+            purpose_curation_batch_work_key(project_instance_id, active_generation, &task, &items);
+        Ok(PurposeCurationBatch {
+            project_instance_id,
+            active_generation,
+            task,
+            work_key,
+            items,
+        })
     }
 
     /// Load symbol relations filtered by optional file path and query.
@@ -2841,6 +3025,94 @@ impl AtlasStore {
         })
     }
 
+    /// Approve one purpose only while its curator work and unapproved row are current.
+    ///
+    /// This path never changes an accepted purpose. Call [`Self::set_purpose`]
+    /// for a deliberate correction after an agent or user identifies one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid task input, binding/schema failure, or a
+    /// failed atomic `SQLite` transaction. Stale and accepted rows are returned
+    /// as typed non-error states.
+    pub fn conditionally_set_purpose(
+        &self,
+        task: &str,
+        path: &str,
+        work_key: &str,
+        state_token: &str,
+        purpose: &str,
+    ) -> DbResult<PurposeConditionalApplyState> {
+        let request = PurposeConditionalApplyRequest {
+            task: task.to_string(),
+            path: path.to_string(),
+            work_key: work_key.to_string(),
+            state_token: state_token.to_string(),
+            purpose: purpose.to_string(),
+        };
+        let mut results = self.conditionally_set_purposes(&[request])?;
+        Ok(results
+            .pop()
+            .map_or(PurposeConditionalApplyState::PathUnavailable, |result| {
+                result.state
+            }))
+    }
+
+    /// Apply a bounded stale-safe purpose-review batch in one writer transaction.
+    ///
+    /// Current-row lookup and conditional-update statements are cached and
+    /// reused for every item. A stale item leaves independent matching rows
+    /// eligible within the same host-owned batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid task input, oversized input, binding/schema
+    /// failure, or any failed statement/commit. A database error rolls back the
+    /// complete batch.
+    pub fn conditionally_set_purposes(
+        &self,
+        requests: &[PurposeConditionalApplyRequest],
+    ) -> DbResult<Vec<PurposeConditionalApplyResult>> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        if requests.len() > MAX_PURPOSE_CURATION_BATCH_ROWS {
+            return Err(DbError::PurposeCurationBatchTooLarge {
+                requested: requests.len(),
+                maximum: MAX_PURPOSE_CURATION_BATCH_ROWS,
+            });
+        }
+        let normalized = requests
+            .iter()
+            .map(|request| {
+                normalize_purpose_curation_task(&request.task).map(|task| {
+                    PurposeConditionalApplyRequest {
+                        task,
+                        path: request.path.clone(),
+                        work_key: request.work_key.clone(),
+                        state_token: request.state_token.clone(),
+                        purpose: request.purpose.clone(),
+                    }
+                })
+            })
+            .collect::<DbResult<Vec<_>>>()?;
+        self.with_validated_write(|connection| {
+            let (project_instance_id, active_generation) =
+                self.purpose_curation_context(connection)?;
+            normalized
+                .iter()
+                .map(|request| {
+                    apply_conditional_purpose(
+                        connection,
+                        project_instance_id,
+                        active_generation,
+                        request,
+                    )
+                })
+                .collect()
+        })
+    }
+
     /// Persist a non-approved purpose suggestion for a path.
     ///
     /// # Errors
@@ -3180,6 +3452,76 @@ impl AtlasStore {
         self.unresolved_health_findings_page_with_filter(HealthResolutionFilter::Stored, query)
     }
 
+    /// Build the actionable missing/suggested purpose queue for one low-scope request.
+    ///
+    /// Accepted and legacy-stale purposes are excluded; deliberate accepted-purpose
+    /// correction remains owned by the explicit purpose-set/review path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if counting, paging, or stored-state conversion fails.
+    pub fn purpose_curation_findings_page_current(
+        &self,
+        query: &HealthQuery,
+    ) -> DbResult<HealthFindingsPage> {
+        let specs = &PURPOSE_HEALTH_SPECS[..2];
+        let unfiltered_total = specs.iter().try_fold(0_usize, |total, spec| {
+            self.count_purpose_status_findings(
+                *spec,
+                None,
+                HealthResolutionFilter::Stored,
+                HealthScope::all(),
+            )
+            .map(|count| total + count)
+        })?;
+        if query
+            .severity
+            .is_some_and(|severity| severity != Severity::Warning)
+        {
+            return Ok(HealthFindingsPage {
+                total: 0,
+                unfiltered_total,
+                returned: 0,
+                start_index: query.start_index,
+                limit: query.limit,
+                findings: Vec::new(),
+            });
+        }
+
+        let matching_specs = query.category.as_deref().map_or(specs, |category| {
+            specs
+                .iter()
+                .find(|spec| spec.category == category)
+                .map_or(&[][..], std::slice::from_ref)
+        });
+        let total = self.count_purpose_lifecycle_findings(
+            matching_specs,
+            query.path_prefix.as_deref(),
+            HealthResolutionFilter::Stored,
+            query.scope,
+        )?;
+        let findings = if query.summary_only {
+            Vec::new()
+        } else {
+            self.load_purpose_lifecycle_findings_page(
+                matching_specs,
+                query.path_prefix.as_deref(),
+                HealthResolutionFilter::Stored,
+                query.scope,
+                query.start_index,
+                query.limit,
+            )?
+        };
+        Ok(HealthFindingsPage {
+            total,
+            unfiltered_total,
+            returned: findings.len(),
+            start_index: query.start_index,
+            limit: query.limit,
+            findings,
+        })
+    }
+
     /// Count all unresolved findings without materializing finding rows or resolution ids.
     ///
     /// # Errors
@@ -3224,6 +3566,7 @@ impl AtlasStore {
                 .is_none_or(|severity| severity == Severity::Warning)
             {
                 self.count_purpose_lifecycle_findings(
+                    &PURPOSE_HEALTH_SPECS,
                     query.path_prefix.as_deref(),
                     resolution_filter,
                     scope,
@@ -3238,6 +3581,7 @@ impl AtlasStore {
                 let local_start = query.start_index.saturating_sub(total);
                 let local_limit = query.limit - findings.len();
                 findings.extend(self.load_purpose_lifecycle_findings_page(
+                    &PURPOSE_HEALTH_SPECS,
                     query.path_prefix.as_deref(),
                     resolution_filter,
                     scope,
@@ -3411,12 +3755,16 @@ impl AtlasStore {
     /// Count unresolved purpose lifecycle findings directly in `SQLite`.
     fn count_purpose_lifecycle_findings(
         &self,
+        specs: &[PurposeHealthSpec],
         path_prefix: Option<&str>,
         resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
     ) -> DbResult<usize> {
+        if specs.is_empty() {
+            return Ok(0);
+        }
         let (where_clause, values) =
-            purpose_lifecycle_where_clause(path_prefix, resolution_filter, scope);
+            purpose_lifecycle_where_clause(specs, path_prefix, resolution_filter, scope);
         let sql = format!(
             "
             SELECT COUNT(*)
@@ -3434,17 +3782,18 @@ impl AtlasStore {
     /// Load one globally ordered purpose lifecycle page directly from `SQLite`.
     fn load_purpose_lifecycle_findings_page(
         &self,
+        specs: &[PurposeHealthSpec],
         path_prefix: Option<&str>,
         resolution_filter: HealthResolutionFilter<'_>,
         scope: HealthScope,
         start_index: usize,
         limit: usize,
     ) -> DbResult<Vec<HealthFinding>> {
-        if limit == 0 {
+        if limit == 0 || specs.is_empty() {
             return Ok(Vec::new());
         }
         let (where_clause, mut values) =
-            purpose_lifecycle_where_clause(path_prefix, resolution_filter, scope);
+            purpose_lifecycle_where_clause(specs, path_prefix, resolution_filter, scope);
         let limit_placeholder = values.len() + 1;
         let offset_placeholder = values.len() + 2;
         values.push(Value::from(usize_to_i64(limit)));
@@ -5035,6 +5384,250 @@ fn parse_source(value: &str) -> DbResult<PurposeSource> {
     Ok(source)
 }
 
+/// Normalize a bounded host-owned task label used only for curator work identity.
+fn normalize_purpose_curation_task(task: &str) -> DbResult<String> {
+    let normalized = task.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return Err(DbError::PurposeCurationTaskInvalid {
+            reason: "task must not be blank",
+        });
+    }
+    if normalized.len() > MAX_PURPOSE_CURATION_TASK_BYTES {
+        return Err(DbError::PurposeCurationTaskInvalid {
+            reason: "task exceeds the UTF-8 byte limit",
+        });
+    }
+    if normalized.chars().any(char::is_control) {
+        return Err(DbError::PurposeCurationTaskInvalid {
+            reason: "task contains control characters",
+        });
+    }
+    Ok(normalized)
+}
+
+/// Load one current purpose row inside the caller's read or write snapshot.
+fn load_current_purpose_state(
+    connection: &Connection,
+    path: &str,
+) -> DbResult<Option<(i64, Purpose)>> {
+    let row = connection
+        .prepare_cached(
+            "
+            SELECT n.id, p.purpose, p.source, p.status
+            FROM nodes n
+            JOIN purposes p ON p.node_id = n.id
+            WHERE n.exists_now = 1 AND n.path = ?1
+            ",
+        )?
+        .query_row([path], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .optional()?;
+    row.map(|(node_id, purpose, source, status)| {
+        let source = parse_source(&source)?;
+        let status = PurposeStatus::from_db(&status).ok_or_else(|| DbError::InvalidEnum {
+            field: "purpose_status",
+            value: status,
+        })?;
+        Ok((
+            node_id,
+            Purpose {
+                path: path.to_string(),
+                purpose,
+                source,
+                status,
+            },
+        ))
+    })
+    .transpose()
+}
+
+/// Apply one queue item inside the caller's validated writer transaction.
+fn apply_conditional_purpose(
+    connection: &Connection,
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    request: &PurposeConditionalApplyRequest,
+) -> DbResult<PurposeConditionalApplyResult> {
+    let current = load_current_purpose_state(connection, &request.path)?;
+    let Some((node_id, current_purpose)) = current else {
+        return Ok(PurposeConditionalApplyResult {
+            path: request.path.clone(),
+            state: PurposeConditionalApplyState::PathUnavailable,
+            current_purpose: None,
+        });
+    };
+    if !matches!(
+        current_purpose.status,
+        PurposeStatus::Missing | PurposeStatus::Suggested
+    ) {
+        return Ok(PurposeConditionalApplyResult {
+            path: request.path.clone(),
+            state: PurposeConditionalApplyState::Accepted,
+            current_purpose: Some(current_purpose),
+        });
+    }
+    let current_work_key =
+        purpose_curation_item_work_key(project, generation, &request.task, &request.path);
+    let current_state_token = purpose_curation_state_token(&current_work_key, &current_purpose);
+    if current_work_key != request.work_key || current_state_token != request.state_token {
+        return Ok(PurposeConditionalApplyResult {
+            path: request.path.clone(),
+            state: PurposeConditionalApplyState::Stale,
+            current_purpose: Some(current_purpose),
+        });
+    }
+    let generation_sql =
+        i64::try_from(generation.get()).map_err(|_source| DbError::GraphCountOverflow {
+            field: "project_identity.active_generation",
+            value: generation.get(),
+        })?;
+    let changed = connection
+        .prepare_cached(
+            "
+            UPDATE purposes
+            SET purpose = ?2,
+                source = ?3,
+                status = ?4,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE node_id = ?1
+              AND status = ?5
+              AND source = ?6
+              AND purpose IS ?7
+              AND EXISTS (
+                  SELECT 1
+                  FROM nodes n
+                  JOIN project_identity pi ON pi.singleton = 1
+                  WHERE n.id = ?1
+                    AND n.exists_now = 1
+                    AND n.path = ?8
+                    AND pi.project_instance_id = ?9
+                    AND pi.active_generation = ?10
+              )
+            ",
+        )?
+        .execute(params![
+            node_id,
+            request.purpose,
+            PurposeSource::Agent.as_str(),
+            PurposeStatus::Approved.as_str(),
+            current_purpose.status.as_str(),
+            current_purpose.source.as_str(),
+            current_purpose.purpose,
+            request.path,
+            &project.as_bytes()[..],
+            generation_sql,
+        ])?;
+    if changed == 1 {
+        Ok(PurposeConditionalApplyResult {
+            path: request.path.clone(),
+            state: PurposeConditionalApplyState::Applied,
+            current_purpose: Some(Purpose {
+                path: request.path.clone(),
+                purpose: Some(request.purpose.clone()),
+                source: PurposeSource::Agent,
+                status: PurposeStatus::Approved,
+            }),
+        })
+    } else {
+        Ok(PurposeConditionalApplyResult {
+            path: request.path.clone(),
+            state: PurposeConditionalApplyState::Stale,
+            current_purpose: Some(current_purpose),
+        })
+    }
+}
+
+/// Construct one candidate with deterministic work and stale-state identities.
+fn purpose_curation_candidate(
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    task: &str,
+    node: IndexedNode,
+) -> PurposeCurationCandidate {
+    let work_key = purpose_curation_item_work_key(project, generation, task, &node.node.path);
+    let state_token = purpose_curation_state_token(&work_key, &node.purpose);
+    PurposeCurationCandidate {
+        node,
+        work_key,
+        state_token,
+    }
+}
+
+/// Derive one stable project/generation/task/path work identity.
+fn purpose_curation_item_work_key(
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    task: &str,
+    path: &str,
+) -> String {
+    digest_fields(
+        PURPOSE_CURATION_ITEM_KEY_DOMAIN,
+        &[
+            &project.as_bytes(),
+            &generation.get().to_le_bytes(),
+            task.as_bytes(),
+            path.as_bytes(),
+        ],
+    )
+}
+
+/// Bind conditional apply to the exact unapproved purpose row selected by the queue.
+fn purpose_curation_state_token(work_key: &str, purpose: &Purpose) -> String {
+    let purpose_presence = [u8::from(purpose.purpose.is_some())];
+    digest_fields(
+        PURPOSE_CURATION_STATE_TOKEN_DOMAIN,
+        &[
+            work_key.as_bytes(),
+            &purpose_presence,
+            purpose.purpose.as_deref().unwrap_or_default().as_bytes(),
+            purpose.source.as_str().as_bytes(),
+            purpose.status.as_str().as_bytes(),
+        ],
+    )
+}
+
+/// Derive a deterministic identity for one complete returned candidate set.
+fn purpose_curation_batch_work_key(
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    task: &str,
+    items: &[PurposeCurationCandidate],
+) -> String {
+    let mut hasher = Hasher::new();
+    digest_field(&mut hasher, PURPOSE_CURATION_BATCH_KEY_DOMAIN.as_bytes());
+    digest_field(&mut hasher, &project.as_bytes());
+    digest_field(&mut hasher, &generation.get().to_le_bytes());
+    digest_field(&mut hasher, task.as_bytes());
+    for item in items {
+        digest_field(&mut hasher, item.work_key.as_bytes());
+        digest_field(&mut hasher, item.state_token.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Hash length-delimited fields under one stable domain separator.
+fn digest_fields(domain: &str, fields: &[&[u8]]) -> String {
+    let mut hasher = Hasher::new();
+    digest_field(&mut hasher, domain.as_bytes());
+    for field in fields {
+        digest_field(&mut hasher, field);
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Append one unambiguous field to a deterministic digest.
+fn digest_field(hasher: &mut Hasher, value: &[u8]) {
+    let length = u64::try_from(value.len()).unwrap_or(u64::MAX);
+    hasher.update(&length.to_le_bytes());
+    hasher.update(value);
+}
+
 /// Convert an aggregate database count into a platform `usize`.
 fn count_to_usize(field: &'static str, value: i64) -> DbResult<usize> {
     usize::try_from(value).map_err(|source| DbError::InvalidCount {
@@ -5057,6 +5650,35 @@ fn i64_to_usize(value: i64) -> usize {
 /// Wrap a query string for a SQL LIKE expression.
 fn like_query(query: &str) -> String {
     format!("%{query}%")
+}
+
+/// Build the single set-oriented query used to hydrate exact purpose-work paths.
+fn load_nodes_by_paths_sql(path_count: usize) -> String {
+    let placeholders = numbered_placeholders(1, path_count);
+    format!(
+        "
+        SELECT
+            n.path,
+            n.kind,
+            n.parent_path,
+            n.extension,
+            n.language,
+            n.size_bytes,
+            n.mtime_ns,
+            n.content_hash,
+            p.purpose,
+            p.source,
+            p.status,
+            s.summary
+        FROM nodes n
+        JOIN purposes p ON p.node_id = n.id
+        LEFT JOIN summaries s ON s.node_id = n.id
+            AND s.summary_level = 'node'
+            AND s.subject = ''
+        WHERE n.exists_now = 1 AND n.path IN ({placeholders})
+        ORDER BY n.path
+        "
+    )
 }
 
 /// Build numbered SQL placeholders starting at a caller-selected index.
@@ -5157,11 +5779,12 @@ fn agent_review_required_finding(path: String) -> HealthFinding {
 
 /// Build the shared SQL filter for globally ordered purpose lifecycle findings.
 fn purpose_lifecycle_where_clause(
+    specs: &[PurposeHealthSpec],
     path_prefix: Option<&str>,
     resolution_filter: HealthResolutionFilter<'_>,
     scope: HealthScope,
 ) -> (String, Vec<Value>) {
-    let statuses = PURPOSE_HEALTH_SPECS
+    let statuses = specs
         .iter()
         .map(|spec| format!("'{}'", spec.status))
         .collect::<Vec<_>>()
@@ -5194,7 +5817,7 @@ fn purpose_lifecycle_where_clause(
 
     match resolution_filter {
         HealthResolutionFilter::Explicit(resolved_ids) => {
-            for spec in PURPOSE_HEALTH_SPECS {
+            for spec in specs {
                 let resolved_paths = resolved_purpose_paths(resolved_ids, spec.category);
                 if !resolved_paths.is_empty() {
                     clauses.push(format!(
@@ -5207,7 +5830,7 @@ fn purpose_lifecycle_where_clause(
             }
         }
         HealthResolutionFilter::Stored => clauses.push(stored_resolution_filter_clause(
-            &purpose_lifecycle_finding_id_expression("n", "p"),
+            &purpose_lifecycle_finding_id_expression(specs, "n", "p"),
         )),
     }
 
@@ -5326,8 +5949,12 @@ fn structural_finding_where_clause(
 }
 
 /// Build the exact stored finding-id expression for mixed purpose lifecycle rows.
-fn purpose_lifecycle_finding_id_expression(node_alias: &str, purpose_alias: &str) -> String {
-    let category_cases = PURPOSE_HEALTH_SPECS
+fn purpose_lifecycle_finding_id_expression(
+    specs: &[PurposeHealthSpec],
+    node_alias: &str,
+    purpose_alias: &str,
+) -> String {
+    let category_cases = specs
         .iter()
         .map(|spec| format!("WHEN '{}' THEN '{}:'", spec.status, spec.category))
         .collect::<Vec<_>>()
@@ -8482,6 +9109,461 @@ mod tests {
     }
 
     #[test]
+    fn purpose_curation_batch_coalesces_current_unapproved_rows() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("project");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        store.replace_scan(&[
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("src/b.rs", "hash-b"),
+            test_file_node("src/accepted.rs", "hash-accepted"),
+        ])?;
+        store.set_suggested_purpose("src/b.rs", "Generated B suggestion")?;
+        store.set_purpose("src/accepted.rs", "Accepted purpose", PurposeSource::Agent)?;
+
+        let selected = vec![
+            "src/b.rs".to_string(),
+            "src/a.rs".to_string(),
+            "src/a.rs".to_string(),
+            "src/accepted.rs".to_string(),
+        ];
+        let first = store.load_purpose_curation_batch(" issue   308 ", &selected)?;
+        let second = store.load_purpose_curation_batch(
+            "issue 308",
+            &selected.iter().rev().cloned().collect::<Vec<_>>(),
+        )?;
+        require_eq(&first.task, &"issue 308".to_string(), "normalized task")?;
+        require_eq(&first.work_key, &second.work_key, "deterministic batch key")?;
+        require_eq(&first.items, &second.items, "deterministic candidate rows")?;
+        require_eq(&first.items.len(), &2, "coalesced unapproved row count")?;
+        require_eq(
+            &first
+                .items
+                .iter()
+                .map(|item| item.node.node.path.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["src/a.rs", "src/b.rs"],
+            "sorted actionable paths",
+        )?;
+        require_eq(
+            &first
+                .items
+                .iter()
+                .all(|item| item.work_key.len() == 64 && item.state_token.len() == 64),
+            &true,
+            "bounded opaque item identities",
+        )?;
+
+        let page = store.purpose_curation_findings_page_current(&HealthQuery {
+            start_index: 0,
+            limit: 20,
+            category: None,
+            severity: Some(Severity::Warning),
+            path_prefix: None,
+            summary_only: false,
+            scope: HealthScope::all(),
+        })?;
+        require_eq(&page.total, &2, "actionable queue count")?;
+        require_eq(
+            &page
+                .findings
+                .iter()
+                .any(|finding| finding.path == "src/accepted.rs"),
+            &false,
+            "accepted purpose omitted from automatic curation",
+        )?;
+
+        store.set_purpose(
+            "src/accepted.rs",
+            "Deliberately corrected purpose",
+            PurposeSource::Agent,
+        )?;
+        let corrected = store
+            .load_node_by_path("src/accepted.rs")?
+            .ok_or_else(|| io::Error::other("corrected purpose path disappeared"))?;
+        require_eq(
+            &corrected.purpose.purpose,
+            &Some("Deliberately corrected purpose".to_string()),
+            "explicit accepted-purpose correction",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn conditional_purpose_batch_is_atomic_and_rejects_changed_work() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("project");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let nodes = vec![
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("src/b.rs", "hash-b"),
+            test_file_node("src/changed.rs", "hash-changed"),
+            test_file_node("src/accepted.rs", "hash-accepted"),
+            test_file_node("src/generation.rs", "hash-generation"),
+            test_file_node("src/rollback-a.rs", "hash-rollback-a"),
+            test_file_node("src/rollback-b.rs", "hash-rollback-b"),
+        ];
+        store.replace_scan(&nodes)?;
+        store.set_suggested_purpose("src/b.rs", "Generated B suggestion")?;
+        store.set_suggested_purpose("src/changed.rs", "Original suggestion")?;
+        let task = "issue-308-purpose-curation";
+
+        let apply_batch = store
+            .load_purpose_curation_batch(task, &["src/a.rs".to_string(), "src/b.rs".to_string()])?;
+        let requests = apply_batch
+            .items
+            .iter()
+            .map(|candidate| {
+                conditional_purpose_request(
+                    task,
+                    candidate,
+                    &format!("Reviewed {}", candidate.node.node.path),
+                )
+            })
+            .collect::<Vec<_>>();
+        let applied = store.conditionally_set_purposes(&requests)?;
+        require_eq(
+            &applied
+                .iter()
+                .map(|result| result.state)
+                .collect::<Vec<_>>(),
+            &vec![
+                PurposeConditionalApplyState::Applied,
+                PurposeConditionalApplyState::Applied,
+            ],
+            "one-transaction batch outcomes",
+        )?;
+        require_eq(
+            &applied.iter().all(|result| {
+                result.current_purpose.as_ref().is_some_and(|purpose| {
+                    purpose.status == PurposeStatus::Approved
+                        && purpose.source == PurposeSource::Agent
+                })
+            }),
+            &true,
+            "applied transaction-owned purpose metadata",
+        )?;
+
+        let changed = store
+            .load_purpose_curation_batch(task, &["src/changed.rs".to_string()])?
+            .items
+            .into_iter()
+            .next()
+            .ok_or_else(|| io::Error::other("changed candidate missing"))?;
+        store.set_suggested_purpose("src/changed.rs", "Concurrent suggestion")?;
+        let changed_result = store
+            .conditionally_set_purposes(&[conditional_purpose_request(
+                task,
+                &changed,
+                "Stale curator answer",
+            )])?
+            .pop()
+            .ok_or_else(|| io::Error::other("changed conditional result missing"))?;
+        require_eq(
+            &changed_result.state,
+            &PurposeConditionalApplyState::Stale,
+            "changed suggestion state",
+        )?;
+        require_eq(
+            &changed_result
+                .current_purpose
+                .as_ref()
+                .map(|purpose| (purpose.status, purpose.source, purpose.purpose.as_deref())),
+            &Some((
+                PurposeStatus::Suggested,
+                PurposeSource::Generated,
+                Some("Concurrent suggestion"),
+            )),
+            "stale transaction-owned purpose metadata",
+        )?;
+
+        let accepted = store
+            .load_purpose_curation_batch(task, &["src/accepted.rs".to_string()])?
+            .items
+            .into_iter()
+            .next()
+            .ok_or_else(|| io::Error::other("accepted candidate missing"))?;
+        store.set_purpose(
+            "src/accepted.rs",
+            "Concurrent accepted purpose",
+            PurposeSource::Agent,
+        )?;
+        let accepted_result = store
+            .conditionally_set_purposes(&[conditional_purpose_request(
+                task,
+                &accepted,
+                "Stale curator overwrite",
+            )])?
+            .pop()
+            .ok_or_else(|| io::Error::other("accepted conditional result missing"))?;
+        require_eq(
+            &accepted_result.state,
+            &PurposeConditionalApplyState::Accepted,
+            "accepted concurrent state",
+        )?;
+        require_eq(
+            &accepted_result
+                .current_purpose
+                .as_ref()
+                .map(|purpose| (purpose.status, purpose.source, purpose.purpose.as_deref())),
+            &Some((
+                PurposeStatus::Approved,
+                PurposeSource::Agent,
+                Some("Concurrent accepted purpose"),
+            )),
+            "accepted transaction-owned purpose metadata",
+        )?;
+
+        let unavailable_result = store
+            .conditionally_set_purposes(&[PurposeConditionalApplyRequest {
+                task: task.to_string(),
+                path: "src/unavailable.rs".to_string(),
+                work_key: "unavailable-work".to_string(),
+                state_token: "unavailable-state".to_string(),
+                purpose: "Unavailable purpose".to_string(),
+            }])?
+            .pop()
+            .ok_or_else(|| io::Error::other("unavailable conditional result missing"))?;
+        require_eq(
+            &unavailable_result.state,
+            &PurposeConditionalApplyState::PathUnavailable,
+            "unavailable path state",
+        )?;
+        require_eq(
+            &unavailable_result.current_purpose,
+            &None,
+            "unavailable transaction-owned purpose metadata",
+        )?;
+
+        let generation = store
+            .load_purpose_curation_batch(task, &["src/generation.rs".to_string()])?
+            .items
+            .into_iter()
+            .next()
+            .ok_or_else(|| io::Error::other("generation candidate missing"))?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("project identity missing"))?;
+        {
+            let mut publication = store.begin_index_publication("purpose-curation-test")?;
+            publication.begin_scan_replacement()?;
+            publication.upsert_scan_node_batch(&nodes)?;
+            publication.finish_scan_replacement()?;
+            publication.replace_repository_graph(project, &[], &[], &[], &[])?;
+            publication.complete()?;
+        }
+        let generation_state = store.conditionally_set_purpose(
+            task,
+            "src/generation.rs",
+            &generation.work_key,
+            &generation.state_token,
+            "Prior-generation answer",
+        )?;
+        require_eq(
+            &generation_state,
+            &PurposeConditionalApplyState::Stale,
+            "generation-bound state",
+        )?;
+
+        let current = store.load_nodes_by_paths(&[
+            "src/changed.rs".to_string(),
+            "src/accepted.rs".to_string(),
+            "src/generation.rs".to_string(),
+        ])?;
+        let purposes = current
+            .iter()
+            .map(|node| {
+                (
+                    node.node.path.as_str(),
+                    node.purpose.purpose.as_deref(),
+                    node.purpose.status,
+                )
+            })
+            .collect::<Vec<_>>();
+        require_eq(
+            &purposes,
+            &vec![
+                (
+                    "src/accepted.rs",
+                    Some("Concurrent accepted purpose"),
+                    PurposeStatus::Approved,
+                ),
+                (
+                    "src/changed.rs",
+                    Some("Concurrent suggestion"),
+                    PurposeStatus::Suggested,
+                ),
+                ("src/generation.rs", None, PurposeStatus::Missing),
+            ],
+            "conflicting rows remain untouched",
+        )?;
+
+        let rollback_batch = store.load_purpose_curation_batch(
+            task,
+            &[
+                "src/rollback-a.rs".to_string(),
+                "src/rollback-b.rs".to_string(),
+            ],
+        )?;
+        let rollback_requests = rollback_batch
+            .items
+            .iter()
+            .map(|candidate| {
+                conditional_purpose_request(
+                    task,
+                    candidate,
+                    &format!("Reviewed {}", candidate.node.node.path),
+                )
+            })
+            .collect::<Vec<_>>();
+        store.connection.execute_batch(
+            "
+            CREATE TEMP TRIGGER abort_second_conditional_purpose_update
+            BEFORE UPDATE ON purposes
+            WHEN OLD.node_id = (
+                SELECT id FROM nodes WHERE path = 'src/rollback-b.rs'
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'forced conditional purpose rollback');
+            END;
+            ",
+        )?;
+        if store.conditionally_set_purposes(&rollback_requests).is_ok() {
+            return Err(io::Error::other("injected conditional batch failure succeeded").into());
+        }
+        drop(store);
+        let reopened = AtlasStore::open_for_project(&database, &root)?;
+        let rolled_back = reopened.load_nodes_by_paths(&[
+            "src/rollback-a.rs".to_string(),
+            "src/rollback-b.rs".to_string(),
+        ])?;
+        require_eq(
+            &rolled_back
+                .iter()
+                .map(|node| node.purpose.status)
+                .collect::<Vec<_>>(),
+            &vec![PurposeStatus::Missing, PurposeStatus::Missing],
+            "failed conditional batch rolled back after reopen",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_purpose_curators_cannot_overwrite_the_winner() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("project");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        store.replace_scan(&[test_file_node("src/main.rs", "hash-main")])?;
+        let candidate = store
+            .load_purpose_curation_batch("concurrent-curators", &["src/main.rs".to_string()])?
+            .items
+            .into_iter()
+            .next()
+            .ok_or_else(|| io::Error::other("concurrent candidate missing"))?;
+        drop(store);
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for purpose in ["First reviewed purpose", "Second reviewed purpose"] {
+            let database = database.clone();
+            let root = root.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            let candidate = candidate.clone();
+            handles.push(std::thread::spawn(move || {
+                let store = AtlasStore::open_for_project(&database, &root)?;
+                barrier.wait();
+                store.conditionally_set_purpose(
+                    "concurrent-curators",
+                    "src/main.rs",
+                    &candidate.work_key,
+                    &candidate.state_token,
+                    purpose,
+                )
+            }));
+        }
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_panic| io::Error::other("curator thread panicked"))?
+                    .map_err(io::Error::other)
+            })
+            .collect::<Result<Vec<_>, io::Error>>()?;
+        require_eq(
+            &outcomes
+                .iter()
+                .filter(|state| **state == PurposeConditionalApplyState::Applied)
+                .count(),
+            &1,
+            "single concurrent winner",
+        )?;
+        require_eq(
+            &outcomes
+                .iter()
+                .filter(|state| **state == PurposeConditionalApplyState::Accepted)
+                .count(),
+            &1,
+            "accepted concurrent loser",
+        )?;
+
+        let reopened = AtlasStore::open_for_project(&database, &root)?;
+        let node = reopened
+            .load_node_by_path("src/main.rs")?
+            .ok_or_else(|| io::Error::other("concurrent path disappeared"))?;
+        require_eq(
+            &node.purpose.status,
+            &PurposeStatus::Approved,
+            "persisted concurrent winner status",
+        )?;
+        require_eq(
+            &matches!(
+                node.purpose.purpose.as_deref(),
+                Some("First reviewed purpose" | "Second reviewed purpose")
+            ),
+            &true,
+            "persisted concurrent winner value",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn purpose_curation_hydration_uses_existing_unique_indexes() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("src/b.rs", "hash-b"),
+        ])?;
+        let sql = format!("EXPLAIN QUERY PLAN {}", load_nodes_by_paths_sql(2));
+        let mut statement = store.connection.prepare(&sql)?;
+        let details = statement
+            .query_map(params!["src/a.rs", "src/b.rs"], |row| {
+                row.get::<_, String>(3)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let plan = details.join("\n");
+        require_eq(
+            &plan.contains("SEARCH n USING INDEX sqlite_autoindex_nodes_"),
+            &true,
+            "unique path index query plan",
+        )?;
+        require_eq(
+            &plan.contains("SEARCH p USING INTEGER PRIMARY KEY"),
+            &true,
+            "purpose primary-key query plan",
+        )?;
+        require_eq(&plan.contains("SCAN n"), &false, "no node-table scan")?;
+        Ok(())
+    }
+
+    #[test]
     fn updates_content_summary_without_approving_purpose() -> Result<(), Box<dyn Error>> {
         let mut store = AtlasStore::in_memory()?;
         let node = Node {
@@ -9144,6 +10226,21 @@ mod tests {
             size_bytes: Some(12),
             mtime_ns: Some(10),
             content_hash: Some(hash.to_string()),
+        }
+    }
+
+    /// Copy one selected queue candidate into the public conditional-write contract.
+    fn conditional_purpose_request(
+        task: &str,
+        candidate: &PurposeCurationCandidate,
+        purpose: &str,
+    ) -> PurposeConditionalApplyRequest {
+        PurposeConditionalApplyRequest {
+            task: task.to_string(),
+            path: candidate.node.node.path.clone(),
+            work_key: candidate.work_key.clone(),
+            state_token: candidate.state_token.clone(),
+            purpose: purpose.to_string(),
         }
     }
 

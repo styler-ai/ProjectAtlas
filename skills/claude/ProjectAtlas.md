@@ -30,17 +30,18 @@ repository overview to folder, file, compressed outline, and exact source only w
 0. If ProjectAtlas MCP tools are available, use `atlas_*` tools for normal scan, overview, folder, file, summary, search, slice, health, and purpose calls. Use the CLI for bootstrap/install/update/release/CI, MCP config generation, MCP startup debugging, human terminal workflows, or when MCP tools are unavailable.
 1. Run ProjectAtlas from the established project root.
 2. Run `projectatlas scan` when the SQLite index may be stale.
-3. Run `projectatlas overview`.
-4. Run `projectatlas folders <query>` to choose where to work.
-5. Run `projectatlas files <query> --folder <path>` to select targets; use `projectatlas files --file-pattern <glob>` when the file/path pattern is already known.
-6. Run `projectatlas summary <file> --limit 25` for structured file facts and purpose state.
-7. Run `projectatlas outline <file>` if the structured summary is not enough.
-8. Run `projectatlas search <pattern> --file-pattern <glob>` for filtered text matches.
-9. Run `projectatlas slice <file> --start-line <n> --end-line <m>` for exact source.
-10. Run `projectatlas health-check` before cleanup/refactor decisions.
-11. Open full source only for selected files or exact slices.
-12. Run `projectatlas token` when token-savings reporting is requested; use `projectatlas token --view tui` only for a human terminal dashboard.
-13. Correct a wrong, vague, generic, inconsistent, or genuinely repurposed accepted purpose explicitly with `atlas_purpose_set` or `projectatlas purpose set` after inspecting enough context. Purpose entries live in SQLite and remain approved across source/hash/summary/symbol/graph changes. Absent paths leave their purposes dormant, exact-path reappearance restores them, and renames do not transfer approval automatically.
+3. Run `atlas_session_brief` when available. If its purpose handoff is actionable and the host supports bounded subagents, delegate the exact `low`-scope batch to an isolated purpose curator at the lowest reasoning tier the host can enforce while the main task continues. Otherwise process the same batch in the main agent. Copy `task`, `work_key`, and `state_token` into purpose review; never edit SQLite, claim the Rust server spawned an agent, emit successful maintenance chatter, or start `medium`/`strict` implicitly.
+4. Run `projectatlas overview`.
+5. Run `projectatlas folders <query>` to choose where to work.
+6. Run `projectatlas files <query> --folder <path>` to select targets; use `projectatlas files --file-pattern <glob>` when the file/path pattern is already known.
+7. Run `projectatlas summary <file> --limit 25` for structured file facts and purpose state.
+8. Run `projectatlas outline <file>` if the structured summary is not enough.
+9. Run `projectatlas search <pattern> --file-pattern <glob>` for filtered text matches.
+10. Run `projectatlas slice <file> --start-line <n> --end-line <m>` for exact source.
+11. Run `projectatlas health-check` before cleanup/refactor decisions.
+12. Open full source only for selected files or exact slices.
+13. Run `projectatlas token` when token-savings reporting is requested; use `projectatlas token --view tui` only for a human terminal dashboard.
+14. Correct a wrong, vague, generic, inconsistent, or genuinely repurposed accepted purpose explicitly with `atlas_purpose_set` or `projectatlas purpose set` after inspecting enough context. Purpose entries live in SQLite and remain approved across source/hash/summary/symbol/graph changes. Absent paths leave their purposes dormant, exact-path reappearance restores them, and renames do not transfer approval automatically.
 
 Token savings estimate avoided wrong-folder exploration, wrong-file opens, and unnecessary full-code reads caused by the atlas-first workflow. Agent and MCP surfaces should stay structured by default; the TUI dashboard is explicit terminal UI with "Without PA", "With PA", and "Saved" comparison bars.
 

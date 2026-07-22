@@ -1625,6 +1625,22 @@ fn init_bootstrap_creates_db_scan_report_and_host_configs() -> Result<(), Box<dy
     require_json_string(
         &report,
         &["purpose_handoff", "recommended_subagent_reasoning"],
+        "lowest_host_enforced",
+    )?;
+    require_json_string(
+        &report,
+        &["purpose_handoff", "execution_owner"],
+        "agent_host",
+    )?;
+    require_json_bool(&report, &["purpose_handoff", "main_agent_fallback"], true)?;
+    require_json_bool(
+        &report,
+        &["purpose_handoff", "server_started_curator"],
+        false,
+    )?;
+    require_json_string(
+        &report,
+        &["purpose_handoff", "queue", "curation_scope"],
         "low",
     )?;
     require_json_array_len(&report, &["host_configs"], 3)?;
@@ -11593,11 +11609,23 @@ fn generated_file_purpose_suggestions_require_agent_approval() -> Result<(), Box
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
-        .args(["purpose", "queue", "--limit", "5"])
+        .args([
+            "purpose",
+            "queue",
+            "--task",
+            "e2e-purpose-queue",
+            "--limit",
+            "5",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("purpose_curation:"))
+        .stdout(predicate::str::contains("task: \"e2e-purpose-queue\""))
+        .stdout(predicate::str::contains("active_generation:"))
+        .stdout(predicate::str::contains("actionable: true"))
+        .stdout(predicate::str::contains("curation_scope: low"))
         .stdout(predicate::str::contains("source_only: true"))
+        .stdout(predicate::str::contains("work_key,state_token"))
         .stdout(predicate::str::contains(
             "purpose_agent_reviewed,review_priority,review_reason",
         ))
@@ -11884,6 +11912,133 @@ fn purpose_review_batch_applies_agent_review_without_raw_sql() -> Result<(), Box
     require_json_usize(&repeat_report, &["changed"], 0)?;
     require_json_usize(&repeat_report, &["skipped"], 2)?;
 
+    Ok(())
+}
+
+#[test]
+fn conditional_purpose_review_cli_rejects_replayed_queue_work() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("main.rs"),
+        "fn main() { run(); }\nfn run() {}\n",
+    )?;
+    let db = temp.path().join("projectatlas.db");
+
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    let queue_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json"])
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "purpose",
+            "queue",
+            "--task",
+            "conditional-cli-e2e",
+            "--limit",
+            "20",
+        ])
+        .output()?;
+    if !queue_output.status.success() {
+        return Err(io::Error::other(format!(
+            "conditional purpose queue failed: {}",
+            String::from_utf8_lossy(&queue_output.stderr)
+        ))
+        .into());
+    }
+    let queue: Value = serde_json::from_slice(&queue_output.stdout)?;
+    require_json_string(&queue, &["task"], "conditional-cli-e2e")?;
+    require_json_string(&queue, &["curation_scope"], "low")?;
+    require_json_bool(&queue, &["actionable"], true)?;
+    let selected = queue
+        .get("items")
+        .and_then(Value::as_array)
+        .and_then(|items| items.iter().find(|item| item["path"] == "src/main.rs"))
+        .ok_or_else(|| io::Error::other("conditional queue item missing"))?;
+    let work_key = selected
+        .get("work_key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::other("conditional work key missing"))?;
+    let state_token = selected
+        .get("state_token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::other("conditional state token missing"))?;
+    if work_key.len() != 64 || state_token.len() != 64 {
+        return Err(
+            io::Error::other("conditional queue identities were not opaque digests").into(),
+        );
+    }
+
+    let review = temp.path().join("conditional-review.json");
+    fs::write(
+        &review,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "items": [{
+                "path": "src/main.rs",
+                "purpose": "Application entry point coordinating run.",
+                "task": "conditional-cli-e2e",
+                "work_key": work_key,
+                "state_token": state_token
+            }]
+        }))?,
+    )?;
+
+    let apply_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json"])
+        .arg("--db")
+        .arg(&db)
+        .args(["purpose", "review", "--from-file"])
+        .arg(&review)
+        .arg("--apply")
+        .output()?;
+    if !apply_output.status.success() {
+        return Err(io::Error::other(format!(
+            "conditional purpose review failed: {}",
+            String::from_utf8_lossy(&apply_output.stderr)
+        ))
+        .into());
+    }
+    let applied: Value = serde_json::from_slice(&apply_output.stdout)?;
+    require_json_usize(&applied, &["changed"], 1)?;
+    require_json_usize(&applied, &["conflicts"], 0)?;
+    require_json_string(&applied, &["items", "0", "action"], "review")?;
+
+    let repeat_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["--format", "json"])
+        .arg("--db")
+        .arg(&db)
+        .args(["purpose", "review", "--from-file"])
+        .arg(&review)
+        .arg("--apply")
+        .output()?;
+    if !repeat_output.status.success() {
+        return Err(io::Error::other("replayed conditional purpose review failed").into());
+    }
+    let repeated: Value = serde_json::from_slice(&repeat_output.stdout)?;
+    require_json_usize(&repeated, &["changed"], 0)?;
+    require_json_usize(&repeated, &["skipped"], 1)?;
+    require_json_usize(&repeated, &["conflicts"], 1)?;
+    require_json_string(&repeated, &["items", "0", "action"], "accepted")?;
+
+    let summary = json_summary_command(&repo, &db, "src/main.rs")?;
+    require_json_string(&summary, &["file_purpose_source"], "agent")?;
+    require_json_string(
+        &summary,
+        &["file_purpose"],
+        "Application entry point coordinating run.",
+    )?;
     Ok(())
 }
 

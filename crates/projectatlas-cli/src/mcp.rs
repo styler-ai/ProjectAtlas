@@ -11,15 +11,15 @@ use crate::runtime::run_scan_pipeline;
 use crate::runtime::{
     DEFAULT_HEALTH_LIMIT, INDEX_WORKER_SAFE_CEILING, IndexProjectMismatch, IndexRefreshRequired,
     IndexVerificationIncomplete, InitBootstrapOptions, MAX_HEALTH_LIMIT, MAX_SYMBOL_FILE_BYTES,
-    PurposeLintLevel, PurposeReviewRequest, ScanRuntimePlan, SourceObservationRegistry,
-    SymbolBuildOptions, UsageRuntimeInstance, VerifiedReadOutcome, VerifiedReadStamp,
-    build_settings_report, byte_count_to_tokens, canonical_project_root,
+    PurposeCuratorHandoff, PurposeLintLevel, PurposeReviewRequest, ScanRuntimePlan,
+    SourceObservationRegistry, SymbolBuildOptions, UsageRuntimeInstance, VerifiedReadOutcome,
+    VerifiedReadStamp, build_settings_report, byte_count_to_tokens, canonical_project_root,
     config_root_mismatch_error, default_mcp_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     index_work_control, init_config_path, lint_database_if_present, next_step_report,
     next_step_report_payload, normalized_folder_filter, open_atlas_store_for_project,
-    open_atlas_store_read_only_for_project, purpose_curation_page, ranked_file_nodes_with_reasons,
-    ranked_folder_nodes_with_reasons, read_indexed_file_content,
+    open_atlas_store_read_only_for_project, purpose_curation_page, purpose_curator_handoff,
+    ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
     record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
     render_health_page, render_purpose_curation_page, render_purpose_review_report,
     reset_index_files, review_purposes, run_init_bootstrap, run_scan_pipeline_controlled,
@@ -484,12 +484,16 @@ struct AtlasSessionBriefParams {
     project_path: Option<String>,
     /// Optional task query used for folder and file ranking.
     query: Option<String>,
+    /// Optional host-owned task label for the purpose-curator handoff.
+    purpose_task: Option<String>,
     /// Maximum folder candidates to return.
     folder_limit: Option<usize>,
     /// Maximum file candidates to return.
     file_limit: Option<usize>,
     /// Maximum health blockers to return.
     blocker_limit: Option<usize>,
+    /// Maximum actionable low-scope purpose rows in the startup handoff.
+    purpose_limit: Option<usize>,
 }
 
 /// MCP parameter payload for task-progress tools.
@@ -824,6 +828,16 @@ struct AtlasHealthParams {
     include_low_priority_files: Option<bool>,
 }
 
+/// MCP parameter payload for bounded task-scoped purpose curation.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AtlasPurposeQueueParams {
+    /// Shared health paging and purpose-scope filters.
+    #[serde(flatten)]
+    health: AtlasHealthParams,
+    /// Host-owned task label for deterministic purpose-curator work identity.
+    task: Option<String>,
+}
+
 /// MCP parameter payload for parity reports.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct AtlasParityParams {
@@ -883,6 +897,12 @@ struct AtlasPurposeReviewItem {
     purpose: Option<String>,
     /// Confirm the existing non-generated purpose after inspection.
     confirm_existing: Option<bool>,
+    /// Queue task copied from the purpose-curation item.
+    task: Option<String>,
+    /// Queue work key copied from the purpose-curation item.
+    work_key: Option<String>,
+    /// Queue state token copied from the purpose-curation item.
+    state_token: Option<String>,
 }
 
 /// MCP parameter payload for batch purpose review.
@@ -1433,6 +1453,8 @@ struct McpSessionBrief {
     files: Vec<McpBriefCandidate>,
     /// Bounded health blockers.
     blockers: McpBriefBlockers,
+    /// Actionable bounded purpose-curator handoff for the selected project.
+    purpose_handoff: Option<PurposeCuratorHandoff>,
     /// Recommended next calls.
     recommendations: Vec<McpBriefRecommendation>,
     /// Effective limits and truncation metadata.
@@ -1537,10 +1559,14 @@ struct McpBriefLimits {
     file_limit: usize,
     /// Effective blocker row limit.
     blocker_limit: usize,
+    /// Effective actionable purpose row limit.
+    purpose_limit: usize,
     /// Whether folder candidates were truncated.
     folders_truncated: bool,
     /// Whether file candidates were truncated.
     files_truncated: bool,
+    /// Whether more actionable low-scope purpose rows exist.
+    purposes_truncated: bool,
 }
 
 /// Bounded in-memory registry for MCP task-progress records.
@@ -2450,9 +2476,13 @@ impl ProjectAtlasMcpServer {
         let selected_project_path = params.project_path.clone();
         let state = self.state_for_project_path(selected_project_path.clone())?;
         let query = Self::query_or_empty(params.query);
+        let purpose_task = params
+            .purpose_task
+            .unwrap_or_else(|| "session-startup".to_string());
         let folder_limit = Self::brief_limit(params.folder_limit);
         let file_limit = Self::brief_limit(params.file_limit);
         let blocker_limit = Self::brief_limit(params.blocker_limit);
+        let purpose_limit = Self::brief_limit(params.purpose_limit);
         let project = Self::selected_project_capability(&state);
         if !state.db_path.exists() {
             return Ok(McpSessionBrief {
@@ -2467,13 +2497,16 @@ impl ProjectAtlasMcpServer {
                     truncated: false,
                     items: Vec::new(),
                 },
+                purpose_handoff: None,
                 recommendations: Self::missing_index_recommendations(params.project_path),
                 limits: McpBriefLimits {
                     folder_limit,
                     file_limit,
                     blocker_limit,
+                    purpose_limit,
                     folders_truncated: false,
                     files_truncated: false,
+                    purposes_truncated: false,
                 },
             });
         }
@@ -2490,6 +2523,17 @@ impl ProjectAtlasMcpServer {
                 false,
             )?;
             let blockers = Self::brief_blockers(store, blocker_limit)?;
+            let purpose_query = HealthQuery {
+                start_index: 0,
+                limit: purpose_limit,
+                category: None,
+                severity: None,
+                path_prefix: None,
+                summary_only: false,
+                scope: HealthScope::purpose_default(),
+            };
+            let purpose_queue = purpose_curation_page(store, &purpose_query, &purpose_task)?;
+            let purposes_truncated = purpose_queue.truncated;
             let folders_truncated = folder_rows.len() > folder_limit;
             let files_truncated = file_rows.len() > file_limit;
             Ok(McpSessionBrief {
@@ -2513,12 +2557,17 @@ impl ProjectAtlasMcpServer {
                     selected_project_path.clone(),
                 ),
                 blockers,
+                purpose_handoff: purpose_queue
+                    .actionable
+                    .then(|| purpose_curator_handoff(purpose_queue)),
                 limits: McpBriefLimits {
                     folder_limit,
                     file_limit,
                     blocker_limit,
+                    purpose_limit,
                     folders_truncated,
                     files_truncated,
+                    purposes_truncated,
                 },
             })
         })?;
@@ -5100,14 +5149,20 @@ impl ProjectAtlasMcpServer {
     )]
     fn atlas_purpose_queue(
         &self,
-        Parameters(params): Parameters<AtlasHealthParams>,
+        Parameters(params): Parameters<AtlasPurposeQueueParams>,
         context: RequestContext<RoleServer>,
     ) -> String {
         Self::as_mcp_text((|| {
-            let state = self.state_for_project_path(params.project_path.clone())?;
-            let query = health_query_from_params(&params, purpose_queue_scope(&params))?;
+            let state = self.state_for_project_path(params.health.project_path.clone())?;
+            let query =
+                health_query_from_params(&params.health, purpose_queue_scope(&params.health))?;
+            let task = params
+                .task
+                .as_deref()
+                .unwrap_or("purpose-curation")
+                .to_string();
             self.with_fresh_string_and_usage_for_request(&state, Some(context), |store, stamp| {
-                let page = purpose_curation_page(store, &query)?;
+                let page = purpose_curation_page(store, &query, &task)?;
                 let toon = render_purpose_curation_page(&page);
                 let usage = Self::telemetry_enabled()
                     .then(|| self.estimated_source_tokens_cached(&state, store, &stamp, None, None))
@@ -5167,6 +5222,9 @@ impl ProjectAtlasMcpServer {
                     path: item.path,
                     purpose: item.purpose,
                     confirm_existing: item.confirm_existing.unwrap_or(false),
+                    task: item.task,
+                    work_key: item.work_key,
+                    state_token: item.state_token,
                 })
                 .collect::<Vec<_>>();
             if apply {
@@ -6073,6 +6131,16 @@ mod tests {
             "atlas_init --no-scan did not report skipped scan",
         )?;
         require(
+            text.contains("purpose_handoff:")
+                && text.contains("execution_owner: agent_host")
+                && text.contains("recommended_subagent_reasoning: lowest_host_enforced")
+                && text.contains("main_agent_fallback: true")
+                && text.contains("server_started_curator: false")
+                && text.contains("silent_on_success: true")
+                && text.contains("curation_scope: low"),
+            "atlas_init did not expose the host-owned low-scope curator handoff",
+        )?;
+        require(
             repo_b
                 .join(".projectatlas")
                 .join("projectatlas.db")
@@ -6120,9 +6188,11 @@ mod tests {
             AtlasSessionBriefParams {
                 project_path: None,
                 query: Some("startup".to_string()),
+                purpose_task: None,
                 folder_limit: None,
                 file_limit: None,
                 blocker_limit: None,
+                purpose_limit: None,
             },
             None,
         )?;
@@ -6209,9 +6279,11 @@ mod tests {
             AtlasSessionBriefParams {
                 project_path: None,
                 query: Some("hiddenNeedle".to_string()),
+                purpose_task: None,
                 folder_limit: Some(5),
                 file_limit: Some(5),
                 blocker_limit: Some(5),
+                purpose_limit: Some(5),
             },
             None,
         )?;
@@ -6221,6 +6293,76 @@ mod tests {
             "session brief returned a content-only indexed-text hit",
         )?;
 
+        Ok(())
+    }
+
+    #[test]
+    fn session_brief_exposes_host_owned_purpose_curator_handoff()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo-a");
+        fs::create_dir_all(repo.join("src"))?;
+        fs::write(repo.join("src").join("main.rs"), "fn main() {}\n")?;
+        let db_path = repo.join(".projectatlas").join("projectatlas.db");
+        let plan = ScanRuntimePlan::for_path(None, &repo, None)?;
+        let mut store = open_atlas_store_for_project(&db_path, &plan.root)?;
+        let symbol_options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, Some(1), Some(30));
+        run_scan_pipeline(&mut store, &plan, &symbol_options)?;
+        drop(store);
+
+        let server = ProjectAtlasMcpServer::new(db_path, None, "mcp-test".to_string(), false);
+        let brief = server.build_session_brief(
+            AtlasSessionBriefParams {
+                project_path: None,
+                query: Some("startup".to_string()),
+                purpose_task: Some("startup-task".to_string()),
+                folder_limit: Some(5),
+                file_limit: Some(5),
+                blocker_limit: Some(5),
+                purpose_limit: Some(1),
+            },
+            None,
+        )?;
+        let handoff = brief
+            .purpose_handoff
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("actionable purpose handoff missing"))?;
+        require(
+            handoff.execution_owner == "agent_host",
+            "session handoff was not host-owned",
+        )?;
+        require(
+            handoff.recommended_subagent_reasoning == "lowest_host_enforced",
+            "session handoff did not request the lowest host-enforced reasoning",
+        )?;
+        require(
+            handoff.main_agent_fallback && !handoff.server_started_curator,
+            "session handoff misrepresented curator execution ownership",
+        )?;
+        require(
+            handoff.silent_on_success,
+            "session handoff was not quiet on successful maintenance",
+        )?;
+        require(
+            handoff.queue.task == "startup-task"
+                && handoff.queue.curation_scope == "low"
+                && handoff.queue.actionable
+                && handoff.queue.returned == 1
+                && handoff.queue.truncated,
+            "session handoff lost task, low-scope, or bound metadata",
+        )?;
+        require(
+            handoff.queue.items.iter().all(|item| {
+                item.work_key.len() == 64
+                    && item.state_token.len() == 64
+                    && !item.purpose_agent_reviewed
+            }),
+            "session handoff item tokens or lifecycle state were incomplete",
+        )?;
+        require(
+            brief.limits.purpose_limit == 1 && brief.limits.purposes_truncated,
+            "session brief purpose limits were not reported",
+        )?;
         Ok(())
     }
 

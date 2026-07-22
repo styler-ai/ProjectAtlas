@@ -912,6 +912,9 @@ enum PurposeCommand {
     },
     /// Return a bounded queue of paths that need purpose curation.
     Queue {
+        /// Host-owned task label for deterministic curator work identity.
+        #[arg(long)]
+        task: Option<String>,
         /// Pagination start index after filters are applied.
         #[arg(long, default_value_t = 0)]
         start_index: usize,
@@ -1873,6 +1876,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 }
             }
             PurposeCommand::Queue {
+                task,
                 start_index,
                 limit,
                 category,
@@ -1892,7 +1896,11 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     *summary_only,
                     purpose_queue_scope(*include_assets, *include_low_priority_files),
                 );
-                let page = purpose_curation_page(&store, &query)?;
+                let page = purpose_curation_page(
+                    &store,
+                    &query,
+                    task.as_deref().unwrap_or("purpose-curation"),
+                )?;
                 let toon = render_purpose_curation_page(&page);
                 store.finish_index_read_snapshot()?;
                 print_output(cli.format, &toon, &page)?;
@@ -2959,6 +2967,7 @@ impl RequiredCliCommand {
             Self::RuntimeInfo => Command::RuntimeInfo,
             Self::Purpose => Command::Purpose {
                 command: PurposeCommand::Queue {
+                    task: None,
                     start_index: 0,
                     limit: 1,
                     category: None,
@@ -4232,6 +4241,17 @@ mod tests {
         if !schema_has_property("atlas_root_set", "transition")? {
             return Err("atlas_root_set did not advertise the transition selector".into());
         }
+        if schema_has_property("atlas_health", "task")? {
+            return Err("atlas_health advertised the purpose-queue task parameter".into());
+        }
+        if !schema_has_property("atlas_purpose_queue", "task")? {
+            return Err("atlas_purpose_queue did not advertise the curator task parameter".into());
+        }
+        if !schema_has_property("atlas_session_brief", "purpose_task")?
+            || !schema_has_property("atlas_session_brief", "purpose_limit")?
+        {
+            return Err("atlas_session_brief did not advertise purpose handoff controls".into());
+        }
 
         let scan = client
             .peer()
@@ -4427,9 +4447,14 @@ mod tests {
             .into());
         }
 
+        let mut purpose_queue_args = Map::new();
+        purpose_queue_args.insert("task".to_string(), json!("mcp-smoke-purpose"));
         let purpose_queue = client
             .peer()
-            .call_tool(CallToolRequestParams::new("atlas_purpose_queue").with_arguments(Map::new()))
+            .call_tool(
+                CallToolRequestParams::new("atlas_purpose_queue")
+                    .with_arguments(purpose_queue_args),
+            )
             .await?;
         let purpose_queue_text = purpose_queue
             .content
@@ -4438,10 +4463,17 @@ mod tests {
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("purpose queue result did not contain text"))?;
         if !purpose_queue_text.contains("purpose_curation:")
+            || !purpose_queue_text.contains("project_instance_id:")
+            || !purpose_queue_text.contains("active_generation:")
+            || !purpose_queue_text.contains("task: \"mcp-smoke-purpose\"")
+            || !purpose_queue_text.contains("work_key:")
+            || !purpose_queue_text.contains("actionable: true")
+            || !purpose_queue_text.contains("curation_scope: low")
             || !purpose_queue_text.contains("source_only: true")
             || !purpose_queue_text.contains("folder_scope: all")
             || !purpose_queue_text.contains("file_scope: high_impact")
             || !purpose_queue_text.contains("purpose_curation_items[")
+            || !purpose_queue_text.contains("work_key,state_token")
             || !purpose_queue_text.contains("purpose_agent_reviewed,review_priority,review_reason")
             || !purpose_queue_text.contains("false,high,high_impact_file")
             || !purpose_queue_text.contains("suggested-purpose-review:src/main.rs:")
