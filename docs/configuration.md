@@ -98,10 +98,15 @@ attempt before its extraction is discarded. If that attempt fails, the operation
 fails, publishes no slot or proof, and makes one best-effort retry during unwind
 while the exact broker and extraction still exist. `enable` writes the exact
 selected slot to `.projectatlas/optional-parser-pack.json` for the current
-project. `update` first verifies the currently selected slot, stages and verifies
-the replacement, then atomically changes the project selection while retaining
-the previous exact slot as rollback metadata. `disable` removes only the
-project-local selection. `remove` disables the current project and removes every
+project; enabling the artifact reported by `status.rollback` is the explicit
+rollback operation and retains the displaced selection as the next rollback.
+`update` first verifies the currently selected slot, stages and verifies the
+replacement, then atomically changes the project selection while retaining the
+previous exact slot as rollback metadata. Selection publication is the commit
+point: if it fails after installing a new candidate, the prior selection bytes and
+rollback identity stay unchanged, while the immutable candidate remains installed
+for deterministic verification and reuse by the next identical update. `disable`
+removes only the project-local selection. `remove` disables the current project and removes every
 slot owned by this parser-pack ID from the current user's parser-pack store; it is
 idempotent and retains any slot whose platform-profile cleanup or filesystem
 removal fails so the operation can be retried safely.

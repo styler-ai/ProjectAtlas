@@ -825,6 +825,8 @@ enum ParserPackCommand {
         archive: PathBuf,
     },
     /// Enable one explicitly named installed artifact for this project.
+    ///
+    /// Selecting the artifact reported by `status.rollback` performs an explicit rollback.
     Enable {
         /// BLAKE3 identity of the installed artifact manifest.
         #[arg(long)]

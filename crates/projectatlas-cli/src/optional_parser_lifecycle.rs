@@ -334,6 +334,9 @@ pub struct OptionalParserPackLifecycle {
     /// Test-only failure seam proving admission precedes lifecycle mutation.
     #[cfg(test)]
     admission_failure: Option<fn(&Path) -> ParserSupervisorError>,
+    /// Deterministically fail selection publication after update staging in focused tests.
+    #[cfg(test)]
+    selection_publication_failure: bool,
 }
 
 /// Validated content-free identity of one selected immutable parser-pack slot.
@@ -486,6 +489,8 @@ impl OptionalParserPackLifecycle {
             platform: host_pack_platform(),
             #[cfg(test)]
             admission_failure: None,
+            #[cfg(test)]
+            selection_publication_failure: false,
         })
     }
 
@@ -534,6 +539,9 @@ impl OptionalParserPackLifecycle {
 
     /// Enable an explicitly named already installed slot for the current project.
     ///
+    /// Passing the artifact reported in `status.rollback` is the canonical explicit rollback:
+    /// the retained slot becomes selected and the displaced selection becomes rollback-ready.
+    ///
     /// # Errors
     ///
     /// Returns unsupported containment before state inspection or mutation, or a slot,
@@ -562,8 +570,10 @@ impl OptionalParserPackLifecycle {
 
     /// Install and atomically select a replacement, retaining the previous exact slot.
     ///
-    /// A failed install, verification, or selection publication leaves the prior project
-    /// selection and immutable slot untouched.
+    /// Selection publication is the update commit point. A failed install or verification
+    /// publishes no candidate. If selection publication fails after a new immutable candidate
+    /// was installed, the prior selection bytes, selected slot, and rollback slot stay exact;
+    /// the verified candidate remains installed so an identical retry can reuse it deterministically.
     ///
     /// # Errors
     ///
@@ -581,18 +591,28 @@ impl OptionalParserPackLifecycle {
         })?;
         self.open_verified_installed_slot(&previous.selected)?;
         let (slot, installed) = self.install_archive(archive, platform)?;
-        let selection_changed = slot != previous.selected;
-        if selection_changed {
-            self.write_selection(&ProjectSelection::new(
-                slot.clone(),
-                Some(previous.selected),
-            ))?;
-        }
+        let selection_changed = self.publish_installed_update(&previous, &slot)?;
         Ok(self.report(
             OptionalParserPackOperation::Update,
             installed || selection_changed,
             Some(slot.report(true)),
         ))
+    }
+
+    /// Atomically commit one already-installed update candidate to project selection.
+    fn publish_installed_update(
+        &self,
+        previous: &ProjectSelection,
+        slot: &PackSlotIdentity,
+    ) -> Result<bool, OptionalParserPackLifecycleError> {
+        if slot == &previous.selected {
+            return Ok(false);
+        }
+        self.write_selection(&ProjectSelection::new(
+            slot.clone(),
+            Some(previous.selected.clone()),
+        ))?;
+        Ok(true)
     }
 
     /// Disable the optional parser pack for the current project.
@@ -1143,6 +1163,12 @@ impl OptionalParserPackLifecycle {
             .as_file()
             .sync_all()
             .map_err(|source| io_error("sync temporary project selection", path.clone(), source))?;
+        #[cfg(test)]
+        if self.selection_publication_failure {
+            return Err(invalid_data(
+                "injected project selection publication failure",
+            ));
+        }
         temporary.persist(&path).map_err(|error| {
             io_error("publish project parser-pack selection", path, error.error)
         })?;
@@ -1311,6 +1337,7 @@ impl OptionalParserPackLifecycle {
             storage_root: OnceLock::from(Some(storage_root)),
             platform,
             admission_failure: None,
+            selection_publication_failure: false,
         }
     }
 
@@ -1318,6 +1345,13 @@ impl OptionalParserPackLifecycle {
     #[cfg(test)]
     fn with_admission_failure(mut self, failure: fn(&Path) -> ParserSupervisorError) -> Self {
         self.admission_failure = Some(failure);
+        self
+    }
+
+    /// Inject one deterministic selection-publication failure without a production seam.
+    #[cfg(test)]
+    fn with_selection_publication_failure(mut self) -> Self {
+        self.selection_publication_failure = true;
         self
     }
 
@@ -4190,6 +4224,80 @@ mod tests {
         )?;
         let after = fs::read(lifecycle.selection_path())?;
         require(before == after, "failed update changed the prior selection")
+    }
+
+    #[test]
+    fn failed_selection_publication_keeps_candidate_for_deterministic_retry() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let project = root.path().join("project");
+        let storage = root.path().join("storage");
+        let lifecycle = OptionalParserPackLifecycle::for_test(
+            project.clone(),
+            storage.clone(),
+            Some(PackPlatform::LinuxX86_64),
+        );
+        let selected = test_slot('a');
+        let candidate = test_slot('b');
+        let prior_rollback = test_slot('c');
+        for slot in [&selected, &candidate, &prior_rollback] {
+            fs::create_dir_all(lifecycle.slot_path(slot)?)?;
+        }
+        let previous = ProjectSelection::new(selected.clone(), Some(prior_rollback.clone()));
+        lifecycle.write_selection(&previous)?;
+        let selection_before = fs::read(lifecycle.selection_path())?;
+
+        let failing = OptionalParserPackLifecycle::for_test(
+            project.clone(),
+            storage.clone(),
+            Some(PackPlatform::LinuxX86_64),
+        )
+        .with_selection_publication_failure();
+        let error = require_lifecycle_error(
+            failing.publish_installed_update(&previous, &candidate),
+            "injected selection publication unexpectedly succeeded",
+        )?;
+        require(
+            matches!(
+                error,
+                OptionalParserPackLifecycleError::InvalidData { ref reason }
+                    if reason == "injected project selection publication failure"
+            ),
+            "selection publication failure lost its typed source",
+        )?;
+        require(
+            fs::read(failing.selection_path())? == selection_before
+                && failing.read_selection()?.as_ref() == Some(&previous),
+            "failed selection publication changed selected or rollback state",
+        )?;
+        require(
+            failing.slot_path(&selected)?.is_dir()
+                && failing.slot_path(&prior_rollback)?.is_dir()
+                && failing.slot_path(&candidate)?.is_dir(),
+            "failed selection publication removed an immutable lifecycle slot",
+        )?;
+
+        let retry = OptionalParserPackLifecycle::for_test(
+            project,
+            storage,
+            Some(PackPlatform::LinuxX86_64),
+        );
+        require(
+            retry.publish_installed_update(&previous, &candidate)?,
+            "retry did not publish the retained candidate",
+        )?;
+        let selected_candidate = retry
+            .read_selection()?
+            .ok_or_else(|| invalid_data("retried selection is absent"))?;
+        require(
+            selected_candidate == ProjectSelection::new(candidate.clone(), Some(selected)),
+            "retry did not select the candidate with the immediate prior slot as rollback",
+        )?;
+        let selection_after_retry = fs::read(retry.selection_path())?;
+        require(
+            !retry.publish_installed_update(&selected_candidate, &candidate)?
+                && fs::read(retry.selection_path())? == selection_after_retry,
+            "identical retry rewrote or changed the selected candidate",
+        )
     }
 
     #[test]
