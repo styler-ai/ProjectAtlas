@@ -87,6 +87,25 @@ try {
             [ref]$wrapperParseErrors
         )
         Require ($wrapperParseErrors.Count -eq 0) "Windows construction wrapper did not parse."
+        $wrapperText = $wrapperAst.Extent.Text
+        Require `
+            ($wrapperText.Contains(
+                '"Local\ProjectAtlasParserPack-$randomHex"',
+                [System.StringComparison]::Ordinal
+            )) `
+            "Windows construction jobserver did not use the exact session-local prefix."
+        Require `
+            (-not $wrapperText.Contains(
+                '"Global\ProjectAtlasParserPack-',
+                [System.StringComparison]::Ordinal
+            )) `
+            "Windows construction jobserver retained the machine-global prefix."
+        Require `
+            (-not $wrapperText.Contains(
+                '"ProjectAtlasParserPack-$randomHex"',
+                [System.StringComparison]::Ordinal
+            )) `
+            "Windows construction jobserver used an implicit namespace."
         $nativeSourceAssignments = @($wrapperAst.FindAll(
             {
                 param($node)
@@ -105,225 +124,282 @@ try {
             Add-Type -TypeDefinition $nativeSource -Language CSharp
         }
 
-        $tokenRestrictionSourceAssignments = @($wrapperAst.FindAll(
-            {
-                param($node)
-                $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-                    $node.Left.Extent.Text -eq '$tokenRestrictionProbeSource'
-            },
-            $true
-        ))
+        $adapterType = [ProjectAtlasConstructionProcess]
+        $nestedTypeFlags = [System.Reflection.BindingFlags]'NonPublic,Static'
+        $instanceMemberFlags = [System.Reflection.BindingFlags]'NonPublic,Instance'
+        $publicInstanceMemberFlags = [System.Reflection.BindingFlags]'Public,Instance'
+        $admissionScenarioType = $adapterType.GetNestedType(
+            'AdmissionScenario',
+            [System.Reflection.BindingFlags]::NonPublic
+        )
+        $admissionReceiptType = $adapterType.GetNestedType(
+            'AdmissionReceipt',
+            [System.Reflection.BindingFlags]::NonPublic
+        )
+        $processInformationType = $adapterType.GetNestedType(
+            'ProcessInformation',
+            [System.Reflection.BindingFlags]::NonPublic
+        )
+        Require ($null -ne $admissionScenarioType) "Construction admission scenario was missing."
+        Require ($null -ne $admissionReceiptType) "Construction admission receipt was missing."
+        Require ($null -ne $processInformationType) "Construction process information was missing."
         Require `
-            ($tokenRestrictionSourceAssignments.Count -eq 1) `
-            "Expected one current-process token restriction probe source assignment."
-        Invoke-Expression $tokenRestrictionSourceAssignments[0].Extent.Text
+            (([enum]::GetNames($admissionScenarioType) -join ',') -eq
+                'Normal,FailBeforeJobAssignment,FailBeforeJobAssignmentAndCleanupFailure') `
+            "Construction admission failure domain was not closed."
+
+        $publicRunMethods = @($adapterType.GetMethods(
+            [System.Reflection.BindingFlags]'Public,Static'
+        ) | Where-Object Name -eq 'Run')
         Require `
-            ($tokenRestrictionProbeSource.Contains('GetCurrentProcess()') -and
-                $tokenRestrictionProbeSource.Contains('private const uint TokenQuery = 0x00000008;') -and
-                $tokenRestrictionProbeSource.Contains('OpenProcessToken(GetCurrentProcess(), TokenQuery') -and
-                $tokenRestrictionProbeSource.Contains('IsTokenRestricted(tokenHandle)') -and
-                $tokenRestrictionProbeSource.Contains('using (tokenHandle)') -and
-                $tokenRestrictionProbeSource.Contains('SetLastError(ErrorSuccess)')) `
-            "Current-process token restriction probe did not retain query-only evaluation and cleanup."
-        foreach ($forbiddenTokenProbeText in @(
-            'TokenDuplicate',
-            'TOKEN_DUPLICATE',
-            'DuplicateToken',
-            'AdjustTokenPrivileges',
-            'SeDebugPrivilege',
-            'ImpersonateLoggedOnUser',
-            'AccessCheck',
-            'OpenSemaphore',
-            'MaximumAllowed',
-            'MAXIMUM_ALLOWED',
-            'TOKEN_ALL_ACCESS',
-            'TokenAllAccess'
-        )) {
-            Require `
-                (-not $tokenRestrictionProbeSource.Contains($forbiddenTokenProbeText)) `
-                "Current-process token restriction probe retained forbidden capability text."
+            ($publicRunMethods.Count -eq 1 -and
+                $publicRunMethods[0].GetParameters().Count -eq 8) `
+            "Construction adapter exposed an admission fault through its public launch API."
+        $processCreatedIndex = $nativeSource.IndexOf(
+            'processCreated = true;',
+            [System.StringComparison]::Ordinal
+        )
+        $admissionFailureIndex = $nativeSource.IndexOf(
+            'if (admissionScenario != AdmissionScenario.Normal)',
+            [System.StringComparison]::Ordinal
+        )
+        $jobAssignmentIndex = $nativeSource.IndexOf(
+            'if (!AssignProcessToJobObject(job, process.Process))',
+            [System.StringComparison]::Ordinal
+        )
+        Require `
+            ($processCreatedIndex -ge 0 -and
+                $admissionFailureIndex -gt $processCreatedIndex -and
+                $jobAssignmentIndex -gt $admissionFailureIndex -and
+                $nativeSource.Contains(
+                    'uint flags = CreateSuspended | CreateNoWindow | CreateUnicodeEnvironment;'
+                ) -and
+                $nativeSource.Contains('AdmissionCleanupWaitMilliseconds = 5000;') -and
+                $nativeSource.Contains(
+                    'int waitError = wait == WaitFailed ? Marshal.GetLastWin32Error() : 0;'
+                ) -and
+                $nativeSource.Contains(
+                    'admissionScenario == AdmissionScenario.FailBeforeJobAssignmentAndCleanupFailure &&'
+                ) -and
+                $nativeSource.Contains('cleanupFailure == null')) `
+            "Construction admission fault did not remain private, suspended, pre-Job, and bounded."
+
+        $composeRunFailures = $adapterType.GetMethod(
+            'ComposeRunFailures',
+            $nestedTypeFlags
+        )
+        Require ($null -ne $composeRunFailures) "Construction failure composition was missing."
+        $composedRunFailure = $composeRunFailures.Invoke(
+            $null,
+            [object[]]@(
+                [System.InvalidOperationException]::new('operation-failure'),
+                [System.InvalidOperationException]::new('cleanup-failure')
+            )
+        )
+        Require `
+            ($composedRunFailure -is [System.AggregateException] -and
+                $composedRunFailure.InnerExceptions.Count -eq 2 -and
+                $composedRunFailure.InnerExceptions[0].Message -eq 'operation-failure' -and
+                $composedRunFailure.InnerExceptions[1].Message -eq 'cleanup-failure') `
+            "Construction adapter did not preserve operation and cleanup failures together."
+
+        $admissionFixtureSource = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class ProjectAtlasConstructionAdmissionFixture
+{
+    private const uint Synchronize = 0x00100000;
+    private const uint DuplicateSameAccess = 0x00000002;
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DuplicateHandle(
+        IntPtr sourceProcess,
+        IntPtr sourceHandle,
+        IntPtr targetProcess,
+        out IntPtr targetHandle,
+        uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        uint options);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenThread(
+        uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        uint threadId);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    public static IntPtr DuplicateProcessHandle(IntPtr process)
+    {
+        IntPtr duplicate;
+        IntPtr current = GetCurrentProcess();
+        if (!DuplicateHandle(
+            current,
+            process,
+            current,
+            out duplicate,
+            0,
+            false,
+            DuplicateSameAccess))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "duplicate-process-handle");
         }
-        foreach ($removedParentAccessCheckText in @(
+        return duplicate;
+    }
+
+    public static IntPtr OpenThreadForWait(uint threadId)
+    {
+        IntPtr thread = OpenThread(Synchronize, false, threadId);
+        if (thread == IntPtr.Zero)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "open-thread-for-wait");
+        }
+        return thread;
+    }
+
+    public static IntPtr CreateUnassignedJob()
+    {
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "create-unassigned-job");
+        }
+        return job;
+    }
+
+    public static void Close(IntPtr handle)
+    {
+        if (handle != IntPtr.Zero)
+        {
+            CloseHandle(handle);
+        }
+    }
+}
+'@
+        if (-not ('ProjectAtlasConstructionAdmissionFixture' -as [type])) {
+            Add-Type -TypeDefinition $admissionFixtureSource -Language CSharp
+        }
+        $recoverUnassignedProcess = $adapterType.GetMethod(
+            'RecoverUnassignedProcess',
+            $nestedTypeFlags
+        )
+        Require ($null -ne $recoverUnassignedProcess) "Construction admission recovery was missing."
+        $selfTestProcess = $null
+        $duplicateProcessHandle = [IntPtr]::Zero
+        $threadHandle = [IntPtr]::Zero
+        $jobHandle = [IntPtr]::Zero
+        try {
+            $selfTestStart = [System.Diagnostics.ProcessStartInfo]::new()
+            $selfTestStart.FileName =
+                [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+            $selfTestStart.UseShellExecute = $false
+            $selfTestStart.CreateNoWindow = $true
+            $selfTestStart.ArgumentList.Add('-NoProfile')
+            $selfTestStart.ArgumentList.Add('-Command')
+            $selfTestStart.ArgumentList.Add('Start-Sleep -Seconds 30')
+            $selfTestProcess = [System.Diagnostics.Process]::Start($selfTestStart)
+            Require ($null -ne $selfTestProcess) "Could not start admission recovery canary."
+            $selfTestProcess.Refresh()
+            Require `
+                ($selfTestProcess.Threads.Count -gt 0) `
+                "Admission recovery canary exposed no primary thread."
+            $duplicateProcessHandle =
+                [ProjectAtlasConstructionAdmissionFixture]::DuplicateProcessHandle(
+                    $selfTestProcess.Handle
+                )
+            $threadHandle = [ProjectAtlasConstructionAdmissionFixture]::OpenThreadForWait(
+                [uint32]$selfTestProcess.Threads[0].Id
+            )
+            $jobHandle = [ProjectAtlasConstructionAdmissionFixture]::CreateUnassignedJob()
+
+            $processInformation = [Activator]::CreateInstance($processInformationType, $true)
+            $processInformationType.GetField(
+                'Process',
+                $publicInstanceMemberFlags
+            ).SetValue($processInformation, $duplicateProcessHandle)
+            $processInformationType.GetField(
+                'Thread',
+                $publicInstanceMemberFlags
+            ).SetValue($processInformation, $threadHandle)
+            $processInformationType.GetField(
+                'ProcessId',
+                $publicInstanceMemberFlags
+            ).SetValue($processInformation, [uint32]$selfTestProcess.Id)
+            $admissionReceipt = [Activator]::CreateInstance($admissionReceiptType, $true)
+            $admissionCleanupFailure = $recoverUnassignedProcess.Invoke(
+                $null,
+                [object[]]@($jobHandle, $processInformation, $admissionReceipt)
+            )
+            $duplicateProcessHandle = [IntPtr]::Zero
+            $threadHandle = [IntPtr]::Zero
+            $jobHandle = [IntPtr]::Zero
+            Require `
+                ($null -eq $admissionCleanupFailure) `
+                "Construction admission recovery reported a cleanup failure."
+            $receiptValue = {
+                param([string]$Name)
+                return $admissionReceiptType.GetProperty(
+                    $Name,
+                    $instanceMemberFlags
+                ).GetValue($admissionReceipt)
+            }
+            Require `
+                ((& $receiptValue 'ProcessId') -eq $selfTestProcess.Id -and
+                    (& $receiptValue 'TerminationAttempted') -and
+                    (& $receiptValue 'WaitResult') -eq 0 -and
+                    (& $receiptValue 'Reaped') -and
+                    (& $receiptValue 'JobHandleOwned') -and
+                    (& $receiptValue 'JobHandleClosed') -and
+                    (& $receiptValue 'ProcessHandleOwned') -and
+                    (& $receiptValue 'ProcessHandleClosed') -and
+                    (& $receiptValue 'ThreadHandleOwned') -and
+                    (& $receiptValue 'ThreadHandleClosed')) `
+                "Construction admission recovery receipt was incomplete."
+            Require `
+                $selfTestProcess.WaitForExit(5000) `
+                "Construction admission recovery did not reap the exact canary PID."
+            $selfTestPid = $selfTestProcess.Id
+            $selfTestProcess.Dispose()
+            $selfTestProcess = $null
+            $survivor = Get-Process -Id $selfTestPid -ErrorAction SilentlyContinue
+            Require ($null -eq $survivor) "Construction admission recovery left its canary alive."
+        }
+        finally {
+            [ProjectAtlasConstructionAdmissionFixture]::Close($jobHandle)
+            [ProjectAtlasConstructionAdmissionFixture]::Close($threadHandle)
+            [ProjectAtlasConstructionAdmissionFixture]::Close($duplicateProcessHandle)
+            if ($null -ne $selfTestProcess) {
+                if (-not $selfTestProcess.HasExited) {
+                    $selfTestProcess.Kill($true)
+                    $selfTestProcess.WaitForExit(5000) | Out-Null
+                }
+                $selfTestProcess.Dispose()
+            }
+        }
+
+        foreach ($removedDiagnosticText in @(
             'ProjectAtlasJobserverSynchronizeAccessCheckResult',
             'EvaluateJobserverSynchronizeAccess',
             'LastJobserverSynchronizeAccessCheck',
-            'DuplicateToken',
-            'AccessCheck'
+            'ProjectAtlasCurrentProcessTokenRestrictionProbe',
+            'ProjectAtlasObjectDirectoryProbe',
+            '\BaseNamedObjects'
         )) {
             Require `
-                (-not $nativeSource.Contains($removedParentAccessCheckText)) `
-                "Windows construction adapter retained dead parent-side authorization machinery."
+                (-not $wrapperAst.Extent.Text.Contains($removedDiagnosticText)) `
+                "Windows construction wrapper retained obsolete jobserver diagnostic machinery."
         }
-        if (-not ('ProjectAtlasCurrentProcessTokenRestrictionProbe' -as [type])) {
-            Add-Type -TypeDefinition $tokenRestrictionProbeSource -Language CSharp
-        }
-        Require `
-            (([enum]::GetNames([ProjectAtlasCurrentProcessTokenRestrictionResult]) -join ',') -eq
-                'Unrestricted,Restricted,TokenUnavailable,EvaluationUnavailable') `
-            "Current-process token restriction result domain was not closed."
-        $restrictionResult =
-            [ProjectAtlasCurrentProcessTokenRestrictionProbe]::ProbeCurrentProcessTokenRestriction()
-        Require `
-            ($restrictionResult -in @(
-                [ProjectAtlasCurrentProcessTokenRestrictionResult]::Unrestricted,
-                [ProjectAtlasCurrentProcessTokenRestrictionResult]::Restricted
-            )) `
-            "Current process token restriction could not be evaluated."
-        $restrictionProcess = [System.Diagnostics.Process]::GetCurrentProcess()
-        try {
-            [ProjectAtlasCurrentProcessTokenRestrictionProbe]::ProbeCurrentProcessTokenRestriction() |
-                Out-Null
-            $restrictionHandleCountBefore = $restrictionProcess.HandleCount
-            foreach ($restrictionIteration in 1..32) {
-                Require `
-                    ([ProjectAtlasCurrentProcessTokenRestrictionProbe]::ProbeCurrentProcessTokenRestriction() -eq
-                        $restrictionResult) `
-                    "Repeated current-process token restriction result changed."
-            }
-            $restrictionHandleCountAfter = $restrictionProcess.HandleCount
-            Require `
-                ($restrictionHandleCountAfter -eq $restrictionHandleCountBefore) `
-                "Current-process token restriction probe leaked a native handle."
-        }
-        finally {
-            $restrictionProcess.Dispose()
-        }
-        $restrictionClassifier =
-            [ProjectAtlasCurrentProcessTokenRestrictionProbe].GetMethod(
-                'ClassifyResult',
-                [System.Reflection.BindingFlags]'NonPublic,Static'
-            )
-        Require ($null -ne $restrictionClassifier) "Token restriction classifier was missing."
-        foreach ($restrictionCase in @(
-            @{ opened = $true; restricted = $true; error = 5; expected = 'Restricted' },
-            @{ opened = $true; restricted = $false; error = 0; expected = 'Unrestricted' },
-            @{ opened = $true; restricted = $false; error = 5; expected = 'EvaluationUnavailable' },
-            @{ opened = $false; restricted = $false; error = 0; expected = 'TokenUnavailable' }
-        )) {
-            $classifiedRestriction = $restrictionClassifier.Invoke(
-                $null,
-                [object[]]@(
-                    [bool]$restrictionCase.opened,
-                    [bool]$restrictionCase.restricted,
-                    [int]$restrictionCase.error
-                )
-            )
-            Require `
-                ([string]$classifiedRestriction -eq $restrictionCase.expected) `
-                "Token restriction classifier returned the wrong closed result."
-        }
-
-        $objectDirectorySourceAssignments = @($wrapperAst.FindAll(
-            {
-                param($node)
-                $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-                    $node.Left.Extent.Text -eq '$objectDirectoryProbeSource'
-            },
-            $true
-        ))
-        Require `
-            ($objectDirectorySourceAssignments.Count -eq 1) `
-            "Expected one object directory probe source assignment."
-        Invoke-Expression $objectDirectorySourceAssignments[0].Extent.Text
-        Require `
-            ($objectDirectoryProbeSource.Contains(
-                'private const string BaseNamedObjectsPath = @"\BaseNamedObjects";'
-            ) -and
-                [regex]::Matches(
-                    $objectDirectoryProbeSource,
-                    [regex]::Escape('\BaseNamedObjects')
-                ).Count -eq 1 -and
-                $objectDirectoryProbeSource.Contains(
-                    'private const uint DirectoryTraverse = 0x00000002;'
-                )) `
-            "Object directory probe did not retain its exact path and traverse-only access."
-        Require `
-            ($objectDirectoryProbeSource.Contains('NativeLibrary.TryLoad(') -and
-                $objectDirectoryProbeSource.Contains('NativeLibrary.TryGetExport(') -and
-                $objectDirectoryProbeSource.Contains('NativeLibrary.Free(') -and
-                $objectDirectoryProbeSource.Contains('CloseHandle(directoryHandle)') -and
-                [regex]::Matches(
-                    $objectDirectoryProbeSource,
-                    'Marshal\.FreeHGlobal\('
-                ).Count -eq 2) `
-            "Object directory probe did not retain dynamic loading and bounded cleanup."
-        foreach ($forbiddenProbeText in @(
-            'NtQueryDirectoryObject',
-            'DirectoryQuery',
-            'DirectoryCreateObject',
-            'DirectoryCreateSubdirectory',
-            'DirectoryAllAccess',
-            'GetTokenInformation',
-            'NtQueryInformationToken',
-            'OpenSemaphore',
-            'SemaphoreAcl',
-            '\Sessions\',
-            'Console.Write',
-            'status.ToString',
-            'String.Format'
-        )) {
-            Require `
-                (-not $objectDirectoryProbeSource.Contains($forbiddenProbeText)) `
-                "Object directory probe retained forbidden capability text."
-        }
-        if (-not ('ProjectAtlasObjectDirectoryProbe' -as [type])) {
-            Add-Type -TypeDefinition $objectDirectoryProbeSource -Language CSharp
-        }
-        Require `
-            (([enum]::GetNames([ProjectAtlasObjectDirectoryProbeResult]) -join ',') -eq
-                'Accessible,AccessDenied,NotFound,Unavailable,Unexpected') `
-            "Object directory probe result domain was not closed."
-        Require `
-            ([ProjectAtlasObjectDirectoryProbe]::ProbeGlobalBaseNamedObjects() -eq
-                [ProjectAtlasObjectDirectoryProbeResult]::Accessible) `
-            "Current Windows principal could not traverse the global object directory."
-        $probeProcess = [System.Diagnostics.Process]::GetCurrentProcess()
-        [ProjectAtlasObjectDirectoryProbe]::ProbeGlobalBaseNamedObjects() | Out-Null
-        $handleCountBefore = $probeProcess.HandleCount
-        foreach ($probeIteration in 1..32) {
-            Require `
-                ([ProjectAtlasObjectDirectoryProbe]::ProbeGlobalBaseNamedObjects() -eq
-                    [ProjectAtlasObjectDirectoryProbeResult]::Accessible) `
-                "Repeated object directory probe did not remain accessible."
-        }
-        $handleCountAfter = $probeProcess.HandleCount
-        Require `
-            ($handleCountAfter -eq $handleCountBefore) `
-            "Object directory probe leaked a process handle."
-        $classifier = [ProjectAtlasObjectDirectoryProbe].GetMethod(
-            'ClassifyStatus',
-            [System.Reflection.BindingFlags]'NonPublic,Static'
-        )
-        Require ($null -ne $classifier) "Object directory probe classifier was missing."
-        $statusAccessDenied = [System.BitConverter]::ToInt32(
-            [System.BitConverter]::GetBytes([Convert]::ToUInt32('C0000022', 16)),
-            0
-        )
-        $statusObjectNameNotFound = [System.BitConverter]::ToInt32(
-            [System.BitConverter]::GetBytes([Convert]::ToUInt32('C0000034', 16)),
-            0
-        )
-        $statusObjectPathNotFound = [System.BitConverter]::ToInt32(
-            [System.BitConverter]::GetBytes([Convert]::ToUInt32('C000003A', 16)),
-            0
-        )
-        foreach ($classifierCase in @(
-            @{ status = 0; handle = [IntPtr]::new(1); expected = 'Accessible' },
-            @{ status = $statusAccessDenied; handle = [IntPtr]::Zero; expected = 'AccessDenied' },
-            @{ status = $statusObjectNameNotFound; handle = [IntPtr]::Zero; expected = 'NotFound' },
-            @{ status = $statusObjectPathNotFound; handle = [IntPtr]::Zero; expected = 'NotFound' },
-            @{ status = 0; handle = [IntPtr]::Zero; expected = 'Unexpected' },
-            @{ status = 1; handle = [IntPtr]::Zero; expected = 'Unexpected' }
-        )) {
-            $classified = $classifier.Invoke(
-                $null,
-                [object[]]@([int]$classifierCase.status, [IntPtr]$classifierCase.handle)
-            )
-            Require `
-                ([string]$classified -eq $classifierCase.expected) `
-                "Object directory probe classifier returned the wrong closed result."
-        }
-
         $probeSourceAssignments = @($wrapperAst.FindAll(
             {
                 param($node)
@@ -347,60 +423,209 @@ try {
                 $probeSource.Contains('$modifyJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(')) `
             "Construction boundary probe did not classify SID membership, session, integrity, and individual jobserver rights."
         Require `
-            ($wrapperAst.Extent.Text.Contains('43 { "jobserver-synchronize-open-denied-restricted-token" }') -and
-                $wrapperAst.Extent.Text.Contains('44 { "jobserver-synchronize-open-denied-unrestricted-token" }') -and
-                $wrapperAst.Extent.Text.Contains('45 { "target-token-query-unavailable" }') -and
-                $wrapperAst.Extent.Text.Contains('46 { "target-token-restriction-evaluation-unavailable" }') -and
+            ($wrapperAst.Extent.Text.Contains('26 { "jobserver-synchronize-access" }') -and
                 $wrapperAst.Extent.Text.Contains('28 { "jobserver-modify-access" }') -and
                 $wrapperAst.Extent.Text.Contains('33 { "jobserver-combined-access" }') -and
                 $wrapperAst.Extent.Text.Contains('37 { "target-sid-membership-query" }') -and
-                $wrapperAst.Extent.Text.Contains('38 { "target-sid-not-effective" }') -and
-                $wrapperAst.Extent.Text.Contains('39 { "global-object-directory-traverse-access" }') -and
-                $wrapperAst.Extent.Text.Contains('40 { "global-object-directory-traverse-missing" }') -and
-                $wrapperAst.Extent.Text.Contains('41 { "global-object-directory-probe-unavailable" }') -and
-                $wrapperAst.Extent.Text.Contains('42 { "global-object-directory-traverse-open" }')) `
+                $wrapperAst.Extent.Text.Contains('38 { "target-sid-not-effective" }')) `
             "Construction boundary probe did not retain distinct jobserver access diagnostics."
         $wrapperText = $wrapperAst.Extent.Text
-        $parentProbeIndex = $wrapperText.IndexOf(
-            '[ProjectAtlasObjectDirectoryProbe]::ProbeGlobalBaseNamedObjects()',
-            [System.StringComparison]::Ordinal
-        )
-        $accountCreationIndex = $wrapperText.IndexOf(
-            '$account = New-LocalUser',
-            [System.StringComparison]::Ordinal
-        )
-        Require `
-            ($parentProbeIndex -ge 0 -and
-                $accountCreationIndex -gt $parentProbeIndex -and
-                $wrapperText.Contains('"parent-global-object-directory-traverse-access"') -and
-                $wrapperText.Contains('"parent-global-object-directory-traverse-missing"') -and
-                $wrapperText.Contains('"parent-global-object-directory-probe-unavailable"') -and
-                $wrapperText.Contains('"parent-global-object-directory-traverse-open"') -and
-                $wrapperText.Contains('-Role "object directory boundary probe"')) `
-            "Parent object directory probe was not fail-closed before account creation."
-        $childProbeIndex = $probeSource.IndexOf(
-            '[ProjectAtlasObjectDirectoryProbe]::ProbeGlobalBaseNamedObjects()',
+        $sessionCheckIndex = $probeSource.IndexOf(
+            '[System.Diagnostics.Process]::GetCurrentProcess().SessionId -ne $ExpectedSessionId',
             [System.StringComparison]::Ordinal
         )
         $firstJobserverOpenIndex = $probeSource.IndexOf(
             '[System.Threading.SemaphoreAcl]::OpenExisting(',
             [System.StringComparison]::Ordinal
         )
-        $childTokenRestrictionProbeIndex = $probeSource.IndexOf(
-            '[ProjectAtlasCurrentProcessTokenRestrictionProbe]::ProbeCurrentProcessTokenRestriction()',
+        Require `
+            ($sessionCheckIndex -ge 0 -and
+                $firstJobserverOpenIndex -gt $sessionCheckIndex -and
+                $probeSource.Contains('catch [System.UnauthorizedAccessException] {') -and
+                $probeSource.Contains('exit 26') -and
+                -not $probeSource.Contains('$ObjectDirectoryProbePath') -and
+                -not $probeSource.Contains('$TokenRestrictionProbePath')) `
+            "Session-local jobserver proof did not remain exact and self-contained."
+
+        $cleanupDefinitions = @($wrapperAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -eq 'Invoke-Cleanup'
+            },
+            $true
+        ))
+        Require ($cleanupDefinitions.Count -eq 1) "Expected one Invoke-Cleanup definition."
+        $cleanupDefinition = $cleanupDefinitions[0]
+        $cleanupParameters = @($cleanupDefinition.Body.ParamBlock.Parameters)
+        Require `
+            ($cleanupParameters.Count -eq 1 -and
+                $cleanupParameters[0].Name.VariablePath.UserPath -eq
+                    'AfterProcessTermination') `
+            "Construction cleanup checkpoint was not one internal optional function parameter."
+        $topLevelParameters = @($wrapperAst.ParamBlock.Parameters |
+            ForEach-Object { $_.Name.VariablePath.UserPath })
+        Require `
+            ('AfterProcessTermination' -notin $topLevelParameters) `
+            "Construction cleanup checkpoint leaked into the production command line."
+        $ordinaryCleanupCalls = @($wrapperAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.CommandAst] -and
+                    $node.GetCommandName() -eq 'Invoke-Cleanup'
+            },
+            $true
+        ))
+        Require `
+            ($ordinaryCleanupCalls.Count -eq 2 -and
+                @($ordinaryCleanupCalls | Where-Object {
+                    $_.CommandElements.Count -ne 1
+                }).Count -eq 0) `
+            "Normal construction cleanup calls unexpectedly selected the recovery checkpoint."
+        $cleanupText = $cleanupDefinition.Extent.Text
+        $zeroProcessIndex = $cleanupText.IndexOf(
+            '$zeroProcesses = @(Get-PrincipalProcesses -Sid $sid.Value).Count -eq 0',
+            [System.StringComparison]::Ordinal
+        )
+        $checkpointIndex = $cleanupText.IndexOf(
+            'if ($zeroProcesses -and $null -ne $AfterProcessTermination)',
+            [System.StringComparison]::Ordinal
+        )
+        $aclCleanupIndex = $cleanupText.IndexOf(
+            'foreach ($path in @($state.acl_paths))',
             [System.StringComparison]::Ordinal
         )
         Require `
-            ($probeSource.Contains('Add-Type -Path $objectDirectoryProbe.FullName') -and
-                $probeSource.Contains('Add-Type -Path $tokenRestrictionProbe.FullName') -and
-                $childProbeIndex -ge 0 -and
-                $childTokenRestrictionProbeIndex -gt $childProbeIndex -and
-                $firstJobserverOpenIndex -gt $childTokenRestrictionProbeIndex -and
-                $probeSource.Contains('catch [System.UnauthorizedAccessException] {') -and
-                $probeSource.Contains('"Restricted" { exit 43 }') -and
-                $probeSource.Contains('"Unrestricted" { exit 44 }') -and
-                $probeSource.Contains('"TokenUnavailable" { exit 45 }')) `
-            "Child object-directory and token-restriction probes did not precede or exclusively classify denied jobserver access."
+            ($zeroProcessIndex -ge 0 -and
+                $checkpointIndex -gt $zeroProcessIndex -and
+                $aclCleanupIndex -gt $checkpointIndex) `
+            "Construction cleanup checkpoint was not after exact-SID process absence and before durable cleanup."
+        $dotSourceGuards = @($wrapperAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.IfStatementAst] -and
+                    $node.Clauses.Count -eq 1 -and
+                    $node.Clauses[0].Item1.Extent.Text -eq
+                        "`$MyInvocation.InvocationName -eq '.'" -and
+                    @($node.Clauses[0].Item2.FindAll(
+                        {
+                            param($child)
+                            $child -is [System.Management.Automation.Language.ReturnStatementAst]
+                        },
+                        $true
+                    )).Count -eq 1
+            },
+            $true
+        ))
+        Require `
+            ($dotSourceGuards.Count -eq 1) `
+            "Construction wrapper did not retain its exact dot-source-only load guard."
+
+        $dotSourceStateDirectory = [System.IO.Directory]::CreateDirectory(
+            [System.IO.Path]::Combine(
+                $testRoot,
+                'dot-source-load',
+                'parser-pack-windows-construction-state'
+            )
+        ).FullName
+        $dotSourceStatePath = [System.IO.Path]::Combine(
+            $dotSourceStateDirectory,
+            'state.json'
+        )
+        $dotSourceLoaded = & {
+            param([string]$ScriptPath, [string]$CleanupStatePath)
+            . $ScriptPath -Mode cleanup -StatePath $CleanupStatePath
+            return $null -ne (Get-Command Invoke-Cleanup -ErrorAction SilentlyContinue)
+        } $WindowsWrapper $dotSourceStatePath
+        Require `
+            ($dotSourceLoaded -and
+                [System.IO.Directory]::Exists($dotSourceStateDirectory)) `
+            "Dot-sourcing construction cleanup did not load definitions without cleanup or exit."
+
+        $ordinaryStateDirectory = [System.IO.Directory]::CreateDirectory(
+            [System.IO.Path]::Combine(
+                $testRoot,
+                'ordinary-cleanup',
+                'parser-pack-windows-construction-state'
+            )
+        ).FullName
+        $ordinaryStatePath = [System.IO.Path]::Combine(
+            $ordinaryStateDirectory,
+            'state.json'
+        )
+        $currentPwsh = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        & $currentPwsh -NoProfile -File $WindowsWrapper `
+            -Mode cleanup `
+            -StatePath $ordinaryStatePath
+        Require `
+            ($LASTEXITCODE -eq 0 -and
+                -not [System.IO.Directory]::Exists($ordinaryStateDirectory)) `
+            "Ordinary construction cleanup invocation did not reach cleanup unchanged."
+
+        $checkpointProof = & {
+            $placeholderSid = 'S-1-5-21-0-0-0-0'
+            $checkpointState = [pscustomobject]@{
+                InvokeCheckpoint = $false
+                RemoveState = $false
+                DurableCleanup = $false
+                ReturnMissingState = $false
+            }
+            $fixtureState = [pscustomobject]@{
+                sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                username = 'projectatlas-cleanup-checkpoint-fixture'
+                firewall_rule = 'ProjectAtlas-cleanup-checkpoint-fixture'
+                acl_paths = @()
+            }
+            function Read-CleanupState {
+                if ($checkpointState.ReturnMissingState) {
+                    return $null
+                }
+                return $fixtureState
+            }
+            function Remove-StateStorage {
+                $checkpointState.RemoveState = $true
+            }
+            function Find-LocalUserBySid { param([string]$Sid) return $null }
+            function Find-LocalUserByName { param([string]$Name) return $null }
+            function Get-PrincipalProcesses { param([string]$Sid) return @() }
+            function Get-CimInstance {
+                $checkpointState.DurableCleanup = $true
+                throw 'durable-cleanup-started'
+            }
+            Invoke-Expression $cleanupDefinition.Extent.Text
+
+            $checkpointFailure = $null
+            try {
+                Invoke-Cleanup -AfterProcessTermination {
+                    $checkpointState.InvokeCheckpoint = $true
+                    throw 'cleanup-checkpoint-injected'
+                }
+            }
+            catch {
+                $checkpointFailure = $_.Exception.Message
+            }
+            $injectedResult = [pscustomobject]@{
+                Invoked = $checkpointState.InvokeCheckpoint
+                Failure = $checkpointFailure
+                StateRemoved = $checkpointState.RemoveState
+                DurableCleanup = $checkpointState.DurableCleanup
+            }
+
+            $checkpointState.ReturnMissingState = $true
+            $checkpointState.RemoveState = $false
+            Invoke-Cleanup
+            return [pscustomobject]@{
+                Injected = $injectedResult
+                NormalMissingStateRemoved = $checkpointState.RemoveState
+            }
+        }
+        Require `
+            ($checkpointProof.Injected.Invoked -and
+                $checkpointProof.Injected.Failure -eq 'cleanup-checkpoint-injected' -and
+                -not $checkpointProof.Injected.StateRemoved -and
+                -not $checkpointProof.Injected.DurableCleanup -and
+                $checkpointProof.NormalMissingStateRemoved) `
+            "Construction cleanup checkpoint did not retain state or preserve normal cleanup behavior."
 
         $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
         $currentPrincipal = [System.Security.Principal.WindowsPrincipal]::new($currentIdentity)
@@ -564,7 +789,7 @@ try {
                 $jobserverRules[0].AccessControlType -eq
                     [System.Security.AccessControl.AccessControlType]::Allow) `
             "Construction jobserver DACL did not grant the exact target rights."
-        $jobserverName = "Global\ProjectAtlasJobserverTest-$([guid]::NewGuid().ToString('N'))"
+        $jobserverName = "Local\ProjectAtlasJobserverTest-$([guid]::NewGuid().ToString('N'))"
         $jobserver = New-ConstructionJobserver -Sid $currentSid -Name $jobserverName
         $openedJobserver = $null
         $daclReader = $null

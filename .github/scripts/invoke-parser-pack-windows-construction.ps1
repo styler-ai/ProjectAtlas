@@ -362,6 +362,10 @@ function Assert-PrincipalAclAbsent {
 }
 
 function Invoke-Cleanup {
+    param(
+        [scriptblock]$AfterProcessTermination
+    )
+
     $state = Read-CleanupState
     if ($null -eq $state) {
         Remove-StateStorage
@@ -445,6 +449,10 @@ function Invoke-Cleanup {
     }
     catch {
         $cleanupErrors.Add("query-principal-processes")
+    }
+
+    if ($zeroProcesses -and $null -ne $AfterProcessTermination) {
+        & $AfterProcessTermination
     }
 
     foreach ($path in @($state.acl_paths)) {
@@ -537,6 +545,9 @@ function Invoke-Cleanup {
 }
 
 if ($Mode -eq "cleanup") {
+    if ($MyInvocation.InvocationName -eq '.') {
+        return
+    }
     Invoke-Cleanup
     exit 0
 }
@@ -628,225 +639,6 @@ foreach ($requiredEnvironment in @("INCLUDE", "LIB", "LIBPATH")) {
     }
 }
 
-$objectDirectoryProbeSource = @'
-using System;
-using System.Runtime.InteropServices;
-
-public enum ProjectAtlasObjectDirectoryProbeResult
-{
-    Accessible,
-    AccessDenied,
-    NotFound,
-    Unavailable,
-    Unexpected
-}
-
-public static class ProjectAtlasObjectDirectoryProbe
-{
-    private const string BaseNamedObjectsPath = @"\BaseNamedObjects";
-    private const uint DirectoryTraverse = 0x00000002;
-    private const int StatusSuccess = 0;
-    private const int StatusAccessDenied = unchecked((int)0xC0000022);
-    private const int StatusObjectNameNotFound = unchecked((int)0xC0000034);
-    private const int StatusObjectPathNotFound = unchecked((int)0xC000003A);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct UnicodeString
-    {
-        public ushort Length;
-        public ushort MaximumLength;
-        public IntPtr Buffer;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct ObjectAttributes
-    {
-        public uint Length;
-        public IntPtr RootDirectory;
-        public IntPtr ObjectName;
-        public uint Attributes;
-        public IntPtr SecurityDescriptor;
-        public IntPtr SecurityQualityOfService;
-    }
-
-    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
-    private delegate int NtOpenDirectoryObjectDelegate(
-        out IntPtr directoryHandle,
-        uint desiredAccess,
-        ref ObjectAttributes objectAttributes);
-
-    [DllImport("kernel32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CloseHandle(IntPtr handle);
-
-    public static ProjectAtlasObjectDirectoryProbeResult ProbeGlobalBaseNamedObjects()
-    {
-        IntPtr module = IntPtr.Zero;
-        IntPtr pathBuffer = IntPtr.Zero;
-        IntPtr unicodeStringPointer = IntPtr.Zero;
-        IntPtr directoryHandle = IntPtr.Zero;
-        try
-        {
-            IntPtr export;
-            if (!NativeLibrary.TryLoad("ntdll.dll", out module) ||
-                !NativeLibrary.TryGetExport(module, "NtOpenDirectoryObject", out export))
-            {
-                return ProjectAtlasObjectDirectoryProbeResult.Unavailable;
-            }
-
-            pathBuffer = Marshal.StringToHGlobalUni(BaseNamedObjectsPath);
-            var objectName = new UnicodeString
-            {
-                Length = checked((ushort)(BaseNamedObjectsPath.Length * sizeof(char))),
-                MaximumLength = checked((ushort)((BaseNamedObjectsPath.Length + 1) * sizeof(char))),
-                Buffer = pathBuffer
-            };
-            unicodeStringPointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeString)));
-            Marshal.StructureToPtr(objectName, unicodeStringPointer, false);
-            var objectAttributes = new ObjectAttributes
-            {
-                Length = checked((uint)Marshal.SizeOf(typeof(ObjectAttributes))),
-                RootDirectory = IntPtr.Zero,
-                ObjectName = unicodeStringPointer,
-                Attributes = 0,
-                SecurityDescriptor = IntPtr.Zero,
-                SecurityQualityOfService = IntPtr.Zero
-            };
-            var openDirectory = (NtOpenDirectoryObjectDelegate)Marshal.GetDelegateForFunctionPointer(
-                export,
-                typeof(NtOpenDirectoryObjectDelegate));
-            int status = openDirectory(
-                out directoryHandle,
-                DirectoryTraverse,
-                ref objectAttributes);
-            return ClassifyStatus(status, directoryHandle);
-        }
-        catch
-        {
-            return ProjectAtlasObjectDirectoryProbeResult.Unexpected;
-        }
-        finally
-        {
-            if (directoryHandle != IntPtr.Zero)
-            {
-                CloseHandle(directoryHandle);
-            }
-            if (unicodeStringPointer != IntPtr.Zero)
-            {
-                Marshal.FreeHGlobal(unicodeStringPointer);
-            }
-            if (pathBuffer != IntPtr.Zero)
-            {
-                Marshal.FreeHGlobal(pathBuffer);
-            }
-            if (module != IntPtr.Zero)
-            {
-                NativeLibrary.Free(module);
-            }
-        }
-    }
-
-    private static ProjectAtlasObjectDirectoryProbeResult ClassifyStatus(
-        int status,
-        IntPtr directoryHandle)
-    {
-        if (status == StatusSuccess)
-        {
-            return directoryHandle != IntPtr.Zero
-                ? ProjectAtlasObjectDirectoryProbeResult.Accessible
-                : ProjectAtlasObjectDirectoryProbeResult.Unexpected;
-        }
-        if (status == StatusAccessDenied)
-        {
-            return ProjectAtlasObjectDirectoryProbeResult.AccessDenied;
-        }
-        if (status == StatusObjectNameNotFound || status == StatusObjectPathNotFound)
-        {
-            return ProjectAtlasObjectDirectoryProbeResult.NotFound;
-        }
-        return ProjectAtlasObjectDirectoryProbeResult.Unexpected;
-    }
-}
-'@
-
-$tokenRestrictionProbeSource = @'
-using System;
-using Microsoft.Win32.SafeHandles;
-using System.Runtime.InteropServices;
-
-public enum ProjectAtlasCurrentProcessTokenRestrictionResult
-{
-    Unrestricted,
-    Restricted,
-    TokenUnavailable,
-    EvaluationUnavailable
-}
-
-public static class ProjectAtlasCurrentProcessTokenRestrictionProbe
-{
-    private const uint TokenQuery = 0x00000008;
-    private const int ErrorSuccess = 0;
-
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr GetCurrentProcess();
-
-    [DllImport("kernel32.dll")]
-    private static extern void SetLastError(uint errorCode);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool OpenProcessToken(
-        IntPtr processHandle,
-        uint desiredAccess,
-        out SafeAccessTokenHandle tokenHandle);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool IsTokenRestricted(SafeAccessTokenHandle tokenHandle);
-
-    public static ProjectAtlasCurrentProcessTokenRestrictionResult
-        ProbeCurrentProcessTokenRestriction()
-    {
-        SafeAccessTokenHandle tokenHandle;
-        if (!OpenProcessToken(GetCurrentProcess(), TokenQuery, out tokenHandle) ||
-            tokenHandle == null || tokenHandle.IsInvalid)
-        {
-            if (tokenHandle != null)
-            {
-                tokenHandle.Dispose();
-            }
-            return ClassifyResult(false, false, ErrorSuccess);
-        }
-
-        using (tokenHandle)
-        {
-            SetLastError(ErrorSuccess);
-            bool restricted = IsTokenRestricted(tokenHandle);
-            int error = Marshal.GetLastWin32Error();
-            return ClassifyResult(true, restricted, error);
-        }
-    }
-
-    private static ProjectAtlasCurrentProcessTokenRestrictionResult ClassifyResult(
-        bool tokenOpened,
-        bool restricted,
-        int error)
-    {
-        if (!tokenOpened)
-        {
-            return ProjectAtlasCurrentProcessTokenRestrictionResult.TokenUnavailable;
-        }
-        if (restricted)
-        {
-            return ProjectAtlasCurrentProcessTokenRestrictionResult.Restricted;
-        }
-        return error == ErrorSuccess
-            ? ProjectAtlasCurrentProcessTokenRestrictionResult.Unrestricted
-            : ProjectAtlasCurrentProcessTokenRestrictionResult.EvaluationUnavailable;
-    }
-}
-'@
-
 $nativeSource = @'
 using System;
 using System.ComponentModel;
@@ -866,6 +658,9 @@ public static class ProjectAtlasConstructionProcess
     private const int JobObjectBasicAccountingInformation = 1;
     private const uint WaitObject0 = 0;
     private const uint WaitTimeout = 258;
+    private const uint WaitFailed = UInt32.MaxValue;
+    private const uint AdmissionCleanupWaitMilliseconds = 5000;
+    private const uint FailureExitCode = 125;
     private const uint WindowStationAllAccess = 0x000F037F;
     private const uint DesktopAllAccess = 0x000F01FF;
     private const uint SddlRevision1 = 1;
@@ -874,6 +669,27 @@ public static class ProjectAtlasConstructionProcess
     private const uint LabelSecurityInformation = 0x00000010;
 
     public static uint LastTotalProcesses { get; private set; }
+
+    private enum AdmissionScenario
+    {
+        Normal,
+        FailBeforeJobAssignment,
+        FailBeforeJobAssignmentAndCleanupFailure
+    }
+
+    private sealed class AdmissionReceipt
+    {
+        internal int ProcessId { get; set; }
+        internal bool TerminationAttempted { get; set; }
+        internal uint WaitResult { get; set; }
+        internal bool Reaped { get; set; }
+        internal bool JobHandleOwned { get; set; }
+        internal bool JobHandleClosed { get; set; }
+        internal bool ProcessHandleOwned { get; set; }
+        internal bool ProcessHandleClosed { get; set; }
+        internal bool ThreadHandleOwned { get; set; }
+        internal bool ThreadHandleClosed { get; set; }
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct SecurityAttributes
@@ -1320,6 +1136,31 @@ public static class ProjectAtlasConstructionProcess
         string environmentBlock,
         int timeoutSeconds)
     {
+        return RunCore(
+            username,
+            principalSid,
+            password,
+            executable,
+            arguments,
+            workingDirectory,
+            environmentBlock,
+            timeoutSeconds,
+            AdmissionScenario.Normal,
+            null);
+    }
+
+    private static int RunCore(
+        string username,
+        string principalSid,
+        SecureString password,
+        string executable,
+        string[] arguments,
+        string workingDirectory,
+        string environmentBlock,
+        int timeoutSeconds,
+        AdmissionScenario admissionScenario,
+        AdmissionReceipt admissionReceipt)
+    {
         LastTotalProcesses = 0;
         IntPtr job = IntPtr.Zero;
         IntPtr environment = IntPtr.Zero;
@@ -1331,6 +1172,8 @@ public static class ProjectAtlasConstructionProcess
         bool processCreated = false;
         bool assignedToJob = false;
         bool parentStationChanged = false;
+        Exception operationFailure = null;
+        Exception cleanupFailure = null;
         try
         {
             job = CreateJobObject(IntPtr.Zero, null);
@@ -1448,19 +1291,34 @@ public static class ProjectAtlasConstructionProcess
                 throw new Win32Exception(createError, "create-process");
             }
             processCreated = true;
+            if (admissionReceipt != null)
+            {
+                admissionReceipt.ProcessId = checked((int)process.ProcessId);
+            }
+            if (admissionScenario != AdmissionScenario.Normal)
+            {
+                throw new InvalidOperationException("construction-self-test-before-job-assignment");
+            }
             if (!AssignProcessToJobObject(job, process.Process))
             {
-                throw Failure("assign-job");
+                int assignmentError = Marshal.GetLastWin32Error();
+                throw new Win32Exception(assignmentError, "assign-job");
             }
             assignedToJob = true;
             bool inJob;
-            if (!IsProcessInJob(process.Process, job, out inJob) || !inJob)
+            if (!IsProcessInJob(process.Process, job, out inJob))
             {
-                throw Failure("verify-job");
+                int verificationError = Marshal.GetLastWin32Error();
+                throw new Win32Exception(verificationError, "verify-job");
+            }
+            if (!inJob)
+            {
+                throw new InvalidOperationException("verify-job-membership");
             }
             if (ResumeThread(process.Thread) == UInt32.MaxValue)
             {
-                throw Failure("resume-process");
+                int resumeError = Marshal.GetLastWin32Error();
+                throw new Win32Exception(resumeError, "resume-process");
             }
 
             Stopwatch timer = Stopwatch.StartNew();
@@ -1506,32 +1364,48 @@ public static class ProjectAtlasConstructionProcess
             }
             return unchecked((int)exitCode);
         }
+        catch (Exception failure)
+        {
+            operationFailure = failure;
+            throw;
+        }
         finally
         {
             if (parentStationChanged && originalWindowStation != IntPtr.Zero)
             {
                 SetProcessWindowStation(originalWindowStation);
             }
-            if (processCreated && assignedToJob && job != IntPtr.Zero)
+            if (processCreated && !assignedToJob)
             {
-                TerminateJobObject(job, 125);
+                Exception admissionCleanupFailure = RecoverUnassignedProcess(
+                    job,
+                    process,
+                    admissionReceipt);
+                if (cleanupFailure == null)
+                {
+                    cleanupFailure = admissionCleanupFailure;
+                }
+                job = IntPtr.Zero;
+                process = new ProcessInformation();
             }
-            else if (processCreated && process.Process != IntPtr.Zero)
+            else
             {
-                TerminateProcess(process.Process, 125);
-                WaitForSingleObject(process.Process, 30000);
-            }
-            if (process.Thread != IntPtr.Zero)
-            {
-                CloseHandle(process.Thread);
-            }
-            if (process.Process != IntPtr.Zero)
-            {
-                CloseHandle(process.Process);
-            }
-            if (job != IntPtr.Zero)
-            {
-                CloseHandle(job);
+                if (processCreated && assignedToJob && job != IntPtr.Zero)
+                {
+                    TerminateJobObject(job, FailureExitCode);
+                }
+                if (process.Thread != IntPtr.Zero)
+                {
+                    CloseHandle(process.Thread);
+                }
+                if (process.Process != IntPtr.Zero)
+                {
+                    CloseHandle(process.Process);
+                }
+                if (job != IntPtr.Zero)
+                {
+                    CloseHandle(job);
+                }
             }
             if (environment != IntPtr.Zero)
             {
@@ -1549,7 +1423,135 @@ public static class ProjectAtlasConstructionProcess
             {
                 LocalFree(securityDescriptor);
             }
+            if (admissionScenario == AdmissionScenario.FailBeforeJobAssignmentAndCleanupFailure &&
+                cleanupFailure == null)
+            {
+                cleanupFailure = new InvalidOperationException("construction-self-test-cleanup");
+            }
+            if (cleanupFailure != null)
+            {
+                if (operationFailure != null)
+                {
+                    throw ComposeRunFailures(operationFailure, cleanupFailure);
+                }
+                throw cleanupFailure;
+            }
         }
+    }
+
+    private static Exception RecoverUnassignedProcess(
+        IntPtr job,
+        ProcessInformation process,
+        AdmissionReceipt receipt)
+    {
+        Exception cleanupFailure = null;
+        if (receipt != null && receipt.ProcessId == 0)
+        {
+            receipt.ProcessId = checked((int)process.ProcessId);
+        }
+        if (process.Process != IntPtr.Zero)
+        {
+            try
+            {
+                TerminateAndWaitProcess(
+                    process.Process,
+                    FailureExitCode,
+                    "unassigned-process-cleanup",
+                    receipt);
+            }
+            catch (Exception failure)
+            {
+                cleanupFailure = failure;
+            }
+        }
+
+        Exception closeFailure = CloseHandleFailure(job, "close-construction-job");
+        if (receipt != null)
+        {
+            receipt.JobHandleOwned = job != IntPtr.Zero;
+            receipt.JobHandleClosed = job != IntPtr.Zero && closeFailure == null;
+        }
+        if (cleanupFailure == null)
+        {
+            cleanupFailure = closeFailure;
+        }
+        closeFailure = CloseHandleFailure(process.Thread, "close-construction-thread");
+        if (receipt != null)
+        {
+            receipt.ThreadHandleOwned = process.Thread != IntPtr.Zero;
+            receipt.ThreadHandleClosed = process.Thread != IntPtr.Zero && closeFailure == null;
+        }
+        if (cleanupFailure == null)
+        {
+            cleanupFailure = closeFailure;
+        }
+        closeFailure = CloseHandleFailure(process.Process, "close-construction-process");
+        if (receipt != null)
+        {
+            receipt.ProcessHandleOwned = process.Process != IntPtr.Zero;
+            receipt.ProcessHandleClosed = process.Process != IntPtr.Zero && closeFailure == null;
+        }
+        if (cleanupFailure == null)
+        {
+            cleanupFailure = closeFailure;
+        }
+        return cleanupFailure;
+    }
+
+    private static void TerminateAndWaitProcess(
+        IntPtr process,
+        uint exitCode,
+        string operation,
+        AdmissionReceipt receipt)
+    {
+        if (receipt != null)
+        {
+            receipt.TerminationAttempted = true;
+        }
+        if (!TerminateProcess(process, exitCode))
+        {
+            int terminationError = Marshal.GetLastWin32Error();
+            uint completed = WaitForSingleObject(process, 0);
+            if (completed != WaitObject0)
+            {
+                throw new Win32Exception(terminationError, "terminate-" + operation);
+            }
+        }
+        uint wait = WaitForSingleObject(process, AdmissionCleanupWaitMilliseconds);
+        int waitError = wait == WaitFailed ? Marshal.GetLastWin32Error() : 0;
+        if (receipt != null)
+        {
+            receipt.WaitResult = wait;
+            receipt.Reaped = wait == WaitObject0;
+        }
+        if (wait != WaitObject0)
+        {
+            if (wait == WaitFailed)
+            {
+                throw new Win32Exception(waitError, "reap-" + operation);
+            }
+            throw new InvalidOperationException("reap-" + operation);
+        }
+    }
+
+    private static Exception CloseHandleFailure(IntPtr handle, string operation)
+    {
+        if (handle == IntPtr.Zero || CloseHandle(handle))
+        {
+            return null;
+        }
+        int closeError = Marshal.GetLastWin32Error();
+        return new Win32Exception(closeError, operation);
+    }
+
+    private static AggregateException ComposeRunFailures(
+        Exception operationFailure,
+        Exception cleanupFailure)
+    {
+        return new AggregateException(
+            "Construction process operation and cleanup both failed.",
+            operationFailure,
+            cleanupFailure);
     }
 
     private static Win32Exception Failure(string operation)
@@ -1596,48 +1598,7 @@ public static class ProjectAtlasConstructionProcess
     }
 }
 '@
-Add-Type -TypeDefinition $objectDirectoryProbeSource -Language CSharp
-Add-Type -TypeDefinition $tokenRestrictionProbeSource -Language CSharp
 Add-Type -TypeDefinition $nativeSource -Language CSharp
-
-$parentObjectDirectoryProbe =
-    [ProjectAtlasObjectDirectoryProbe]::ProbeGlobalBaseNamedObjects()
-if ($parentObjectDirectoryProbe -ne
-    [ProjectAtlasObjectDirectoryProbeResult]::Accessible) {
-    $parentProbeFailure = switch ($parentObjectDirectoryProbe) {
-        ([ProjectAtlasObjectDirectoryProbeResult]::AccessDenied) {
-            "parent-global-object-directory-traverse-access"
-        }
-        ([ProjectAtlasObjectDirectoryProbeResult]::NotFound) {
-            "parent-global-object-directory-traverse-missing"
-        }
-        ([ProjectAtlasObjectDirectoryProbeResult]::Unavailable) {
-            "parent-global-object-directory-probe-unavailable"
-        }
-        default {
-            "parent-global-object-directory-traverse-open"
-        }
-    }
-    throw "Windows construction preflight failed at $parentProbeFailure."
-}
-$objectDirectoryProbePath = Join-Path $temporary "object-directory-probe.cs"
-[System.IO.File]::WriteAllText(
-    $objectDirectoryProbePath,
-    $objectDirectoryProbeSource,
-    [System.Text.UTF8Encoding]::new($false)
-)
-$objectDirectoryProbePath = Get-RegularFile `
-    -Path $objectDirectoryProbePath `
-    -Role "object directory boundary probe"
-$tokenRestrictionProbePath = Join-Path $temporary "token-restriction-probe.cs"
-[System.IO.File]::WriteAllText(
-    $tokenRestrictionProbePath,
-    $tokenRestrictionProbeSource,
-    [System.Text.UTF8Encoding]::new($false)
-)
-$tokenRestrictionProbePath = Get-RegularFile `
-    -Path $tokenRestrictionProbePath `
-    -Role "token restriction boundary probe"
 
 function Add-PrincipalAcl {
     param(
@@ -2048,7 +2009,7 @@ try {
     foreach ($directory in @($appData, $localAppData)) {
         [System.IO.Directory]::CreateDirectory($directory) | Out-Null
     }
-    $script:constructionJobserverName = "Global\ProjectAtlasParserPack-$randomHex"
+    $script:constructionJobserverName = "Local\ProjectAtlasParserPack-$randomHex"
     $script:constructionJobserver = New-ConstructionJobserver `
         -Sid $sid `
         -Name $script:constructionJobserverName
@@ -2130,9 +2091,7 @@ try {
 param(
     [Parameter(Mandatory = $true)][string]$ExpectedSid,
     [Parameter(Mandatory = $true)][int]$ExpectedSessionId,
-    [Parameter(Mandatory = $true)][string]$JobserverName,
-    [Parameter(Mandatory = $true)][string]$ObjectDirectoryProbePath,
-    [Parameter(Mandatory = $true)][string]$TokenRestrictionProbePath
+    [Parameter(Mandatory = $true)][string]$JobserverName
 )
 $ErrorActionPreference = "Stop"
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -2195,42 +2154,6 @@ $expectedCargoMakeflags = "-j --jobserver-fds=$JobserverName --jobserver-auth=$J
 if ([string]$env:CARGO_MAKEFLAGS -cne $expectedCargoMakeflags) {
     exit 24
 }
-try {
-    $objectDirectoryProbe = Get-Item -LiteralPath $ObjectDirectoryProbePath -Force
-    if ($objectDirectoryProbe.PSIsContainer -or
-        (($objectDirectoryProbe.Attributes -band
-            [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
-        exit 41
-    }
-    Add-Type -Path $objectDirectoryProbe.FullName -ErrorAction Stop
-    $objectDirectoryProbeResult =
-        [ProjectAtlasObjectDirectoryProbe]::ProbeGlobalBaseNamedObjects()
-}
-catch {
-    exit 41
-}
-switch ($objectDirectoryProbeResult) {
-    ([ProjectAtlasObjectDirectoryProbeResult]::Accessible) { break }
-    ([ProjectAtlasObjectDirectoryProbeResult]::AccessDenied) { exit 39 }
-    ([ProjectAtlasObjectDirectoryProbeResult]::NotFound) { exit 40 }
-    ([ProjectAtlasObjectDirectoryProbeResult]::Unavailable) { exit 41 }
-    default { exit 42 }
-}
-try {
-    $tokenRestrictionProbe = Get-Item -LiteralPath $TokenRestrictionProbePath -Force
-    if ($tokenRestrictionProbe.PSIsContainer -or
-        (($tokenRestrictionProbe.Attributes -band
-            [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
-        throw "invalid-token-restriction-probe"
-    }
-    Add-Type -Path $tokenRestrictionProbe.FullName -ErrorAction Stop
-    $tokenRestrictionResult = [string](
-        [ProjectAtlasCurrentProcessTokenRestrictionProbe]::ProbeCurrentProcessTokenRestriction()
-    )
-}
-catch {
-    $tokenRestrictionResult = "EvaluationUnavailable"
-}
 $synchronizeJobserver = $null
 try {
     $synchronizeJobserver = [System.Threading.SemaphoreAcl]::OpenExisting(
@@ -2242,12 +2165,7 @@ catch [System.Threading.WaitHandleCannotBeOpenedException] {
     exit 25
 }
 catch [System.UnauthorizedAccessException] {
-    switch ($tokenRestrictionResult) {
-        "Restricted" { exit 43 }
-        "Unrestricted" { exit 44 }
-        "TokenUnavailable" { exit 45 }
-        default { exit 46 }
-    }
+    exit 26
 }
 catch {
     exit 27
@@ -2325,9 +2243,7 @@ exit 0
         "-File", $probePath,
         "-ExpectedSid", $sid.Value,
         "-ExpectedSessionId", [System.Diagnostics.Process]::GetCurrentProcess().SessionId,
-        "-JobserverName", $script:constructionJobserverName,
-        "-ObjectDirectoryProbePath", $objectDirectoryProbePath,
-        "-TokenRestrictionProbePath", $tokenRestrictionProbePath
+        "-JobserverName", $script:constructionJobserverName
     )
     $probeExitCode = Invoke-AsConstructionPrincipal `
         -Arguments $probeArguments `
@@ -2339,6 +2255,7 @@ exit 0
             23 { "environment" }
             24 { "environment-jobserver" }
             25 { "jobserver-missing" }
+            26 { "jobserver-synchronize-access" }
             27 { "jobserver-synchronize-open" }
             28 { "jobserver-modify-access" }
             29 { "jobserver-modify-open" }
@@ -2351,14 +2268,6 @@ exit 0
             36 { "rustc-jobserver" }
             37 { "target-sid-membership-query" }
             38 { "target-sid-not-effective" }
-            39 { "global-object-directory-traverse-access" }
-            40 { "global-object-directory-traverse-missing" }
-            41 { "global-object-directory-probe-unavailable" }
-            42 { "global-object-directory-traverse-open" }
-            43 { "jobserver-synchronize-open-denied-restricted-token" }
-            44 { "jobserver-synchronize-open-denied-unrestricted-token" }
-            45 { "target-token-query-unavailable" }
-            46 { "target-token-restriction-evaluation-unavailable" }
             default { "unexpected-exit-$probeExitCode" }
         }
         throw "Construction principal boundary probe failed at $probeFailure."
