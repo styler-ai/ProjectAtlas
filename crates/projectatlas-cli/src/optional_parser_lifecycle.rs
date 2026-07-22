@@ -4025,6 +4025,8 @@ mod tests {
             child_root.path().join("storage"),
             Some(PackPlatform::LinuxX86_64),
         );
+        child_lifecycle.write_selection(&ProjectSelection::new(test_slot('b'), None))?;
+        let child_selection_before = fs::read(child_lifecycle.selection_path())?;
         let child_version = child_lifecycle.pack_root()?.join("versions").join("0.4.0");
         fs::create_dir_all(&child_version)?;
         for index in 0..LIFECYCLE_METADATA_ENTRY_LIMIT {
@@ -4036,6 +4038,49 @@ mod tests {
                 && child_status.installed_slots_truncated
                 && child_status.state == OptionalParserPackState::Stale,
             "over-limit non-directory slot metadata was not reported as bounded stale state",
+        )?;
+        let child_error = require_lifecycle_error(
+            child_lifecycle.remove(),
+            "over-limit child metadata unexpectedly allowed removal",
+        )?;
+        require(
+            matches!(
+                child_error,
+                OptionalParserPackLifecycleError::InvalidData { ref reason }
+                    if reason == "parser-pack metadata entries exceed the cleanup bound"
+            ),
+            "over-limit child metadata returned the wrong removal failure",
+        )?;
+        require(
+            fs::read(child_lifecycle.selection_path())? == child_selection_before
+                && fs::read_dir(&child_version)?.count() == LIFECYCLE_METADATA_ENTRY_LIMIT,
+            "child metadata overflow partially mutated selection or storage",
+        )?;
+
+        let exact_root = tempfile::tempdir()?;
+        let exact_lifecycle = OptionalParserPackLifecycle::for_test(
+            exact_root.path().join("project"),
+            exact_root.path().join("storage"),
+            Some(PackPlatform::LinuxX86_64),
+        );
+        exact_lifecycle.write_selection(&ProjectSelection::new(test_slot('c'), None))?;
+        let exact_pack_root = exact_lifecycle.pack_root()?;
+        let exact_version = exact_pack_root.join("versions").join("0.4.0");
+        fs::create_dir_all(&exact_version)?;
+        for index in 0..LIFECYCLE_METADATA_ENTRY_LIMIT.saturating_sub(1) {
+            fs::write(exact_version.join(format!("stale-{index:04}")), [])?;
+        }
+        require(
+            !exact_lifecycle.status()?.installed_slots_truncated,
+            "exact lifecycle metadata bound was reported as truncated",
+        )?;
+        let removed = exact_lifecycle.remove()?;
+        require(
+            removed.changed
+                && removed.state == OptionalParserPackState::Absent
+                && !exact_lifecycle.selection_path().exists()
+                && !exact_pack_root.exists(),
+            "exact lifecycle metadata bound did not permit complete removal",
         )
     }
 
