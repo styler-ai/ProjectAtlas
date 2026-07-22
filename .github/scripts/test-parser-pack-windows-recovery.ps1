@@ -1641,13 +1641,51 @@ $match = [regex]::Match(
     [string]$env:CARGO_MAKEFLAGS,
     '\A-j --jobserver-fds=(Local\\ProjectAtlasParserPack-[0-9a-f]{32}) --jobserver-auth=\1\z'
 )
-if (-not $match.Success) { exit 41 }
+if (-not $match.Success) { exit 1001 }
 try {
-    $semaphore = [System.Threading.Semaphore]::OpenExisting($match.Groups[1].Value)
-    $semaphore.Dispose()
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class ProjectAtlasRecoveryJobserverProbe
+{
+    private const uint SynchronizeAndModify = 0x00100002;
+
+    [DllImport(
+        "kernel32.dll",
+        CharSet = CharSet.Unicode,
+        SetLastError = true,
+        EntryPoint = "OpenSemaphoreW")]
+    private static extern IntPtr OpenSemaphore(
+        uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    public static int OpenAndClose(string name)
+    {
+        IntPtr handle = OpenSemaphore(SynchronizeAndModify, false, name);
+        if (handle == IntPtr.Zero)
+        {
+            return Marshal.GetLastWin32Error();
+        }
+        if (!CloseHandle(handle))
+        {
+            return Marshal.GetLastWin32Error();
+        }
+        return 0;
+    }
 }
-catch { exit 42 }
-exit 0
+"@ -Language CSharp -ErrorAction Stop
+}
+catch { exit 1002 }
+$openError = [ProjectAtlasRecoveryJobserverProbe]::OpenAndClose(
+    $match.Groups[1].Value
+)
+exit $openError
 '@
     $normalArguments = [string[]]@(
         '-NoLogo', '-NoProfile', '-NonInteractive',
@@ -1743,7 +1781,22 @@ exit 0
                 }
                 throw "Construction normal admission invocation failed. type=$($normalFailure.GetType().Name) native_error_code=$nativeError message=$normalMessage"
             }
-            Require ($normalExitCode -eq 0) "Construction normal admission child failed."
+            if ($normalExitCode -ne 0) {
+                $normalFailureKind = switch ($normalExitCode) {
+                    5 { 'jobserver-open-access-denied' }
+                    2 { 'jobserver-open-not-found' }
+                    1001 { 'jobserver-environment-mismatch' }
+                    1002 { 'jobserver-probe-unavailable' }
+                    default { 'jobserver-open-error' }
+                }
+                $normalNativeErrorCode = if ($normalExitCode -lt 1000) {
+                    $normalExitCode
+                }
+                else {
+                    ''
+                }
+                throw "Construction normal admission child failed. exit_code=$normalExitCode kind=$normalFailureKind native_error_code=$normalNativeErrorCode"
+            }
             Require `
                 ([ProjectAtlasConstructionProcess]::LastTotalProcesses -ge 1) `
                 "Construction normal admission did not contain its child."
