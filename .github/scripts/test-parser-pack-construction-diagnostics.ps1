@@ -759,6 +759,8 @@ try {
                 $nativeSource.Contains('construction-broker-job-policy') -and
                 $nativeSource.Contains('ValidateBrokerJobMembership(') -and
                 $nativeSource.Contains('construction-process-retained-inherited-job') -and
+                $nativeSource.Contains('construction-process-retained-broker-job') -and
+                $nativeSource.Contains('construction-process-retained-foreign-job') -and
                 $wrapperText.Contains(
                     '[ProjectAtlasConstructionProcess]::ConfigureBrokerJob($BrokerJobName)'
                 ) -and

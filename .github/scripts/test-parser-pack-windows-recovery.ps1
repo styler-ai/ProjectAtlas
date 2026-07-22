@@ -251,7 +251,9 @@ function Assert-ProductionRecoveryContracts {
             $nativeText.Contains('EntryPoint = "CreateSemaphoreExW"') -and
             $nativeText.Contains('CapturePreJobNativeSemaphoreProbe(admissionReceipt);') -and
             $nativeText.Contains('MaximumLogonCommandLineCharacters = 1023;') -and
-            $nativeText.Contains('construction-process-retained-inherited-job')) `
+            $nativeText.Contains('construction-process-retained-inherited-job') -and
+            $nativeText.Contains('construction-process-retained-broker-job') -and
+            $nativeText.Contains('construction-process-retained-foreign-job')) `
         "Construction admission no longer validates the suspended alternate-logon child before assigning its owned Job."
 
     $objectDirectorySources = @($Ast.FindAll(

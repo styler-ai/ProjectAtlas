@@ -2579,8 +2579,18 @@ public static class ProjectAtlasConstructionProcess
             // broker Job before this boundary assigns its sole, stricter construction Job.
             if (inheritedJob)
             {
+                string brokerJobName = GetConfiguredBrokerJobName();
+                if (string.IsNullOrEmpty(brokerJobName))
+                {
+                    throw new InvalidOperationException(
+                        "construction-process-retained-foreign-job");
+                }
+                ValidateBrokerJobMembership(
+                    brokerJobName,
+                    process.Process,
+                    "construction-process-retained-foreign-job");
                 throw new InvalidOperationException(
-                    "construction-process-retained-inherited-job");
+                    "construction-process-retained-broker-job");
             }
             if (admissionScenario == AdmissionScenario.FailBeforeJobAssignment ||
                 admissionScenario == AdmissionScenario.FailBeforeJobAssignmentAndCleanupFailure)
